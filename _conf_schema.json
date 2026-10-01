@@ -1,0 +1,806 @@
+{
+  "staging": {
+    "description": "兼容设置（高级）",
+    "hint": "日常账号、人格和窗口关系请在「陪伴小屋 → 账号与会话」配置。此处仅保留旧单目标运行档的兼容开关。",
+    "invisible": true,
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "允许 V2 运行实例启动（单目标）",
+        "hint": "由「开始使用」选择单账号/人格模式时写入。已有运行档会在 AstrBot 加载插件后自动接管入站消息。",
+        "type": "bool",
+        "default": false
+      },
+      "profile_id": {
+        "description": "独立 Profile ID",
+        "hint": "仅可使用小写字母、数字、下划线和连字符。每个 ID 对应独立的 V2 数据；账号、私聊对象与人格由核心管理员窗口绑定。",
+        "type": "string",
+        "default": "main"
+      },
+      "delivery_mode": {
+        "description": "投递形态（旧字段）",
+        "hint": "仅保留旧配置兼容：正式宿主固定使用 OneBot 原生私聊发送，该字段不再影响行为。",
+        "type": "string",
+        "options": [
+          "onebot_private",
+          "preview"
+        ],
+        "default": "onebot_private"
+      }
+    }
+  },
+  "target": {
+    "description": "旧版绑定（高级）",
+    "hint": "新安装不必填这里：在私聊里发送 companion_bind 即可绑定会话对象，身份由 Bot 登录号与所选人格自动派生。这一段只为兼容已填过的安装保留——填了就按填的走，留空则由引导派生。",
+    "type": "object",
+    "invisible": true,
+    "items": {
+      "platform_id": {
+        "description": "OneBot 平台实例 ID",
+        "type": "string",
+        "default": "default"
+      },
+      "account_id": {
+        "description": "Bot QQ 账号",
+        "type": "string",
+        "default": ""
+      },
+      "participant_id": {
+        "description": "测试参与者 QQ",
+        "hint": "留空则由引导绑定；只有这个账号发给所选 Bot 的私聊纯文本会被接管。",
+        "type": "string",
+        "default": ""
+      },
+      "bot_id": {
+        "description": "V2 Bot ID",
+        "type": "string",
+        "default": "staging-bot",
+        "hint": "留空时由 Bot 登录号派生（bot-<账号>）。"
+      },
+      "role_id": {
+        "description": "V2 角色 ID",
+        "type": "string",
+        "default": "staging-role",
+        "hint": "留空时由账号与人格派生；相同账号+人格共享记忆，不同则各自独立。"
+      },
+      "persona_id": {
+        "description": "AstrBot 人格 ID",
+        "hint": "留空表示随目标会话当前实际选择的人格。",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "multi_host": {
+    "description": "账号与会话（由小屋管理）",
+    "hint": "账号、原生人格、私聊／群聊窗口及其绑定关系请在「陪伴小屋 → 账号与会话」管理。此处配置自动隐藏但仍由插件读取。",
+    "type": "object",
+    "invisible": true,
+    "items": {
+      "enabled": {
+        "description": "启用多目标运行实例",
+        "type": "bool",
+        "default": false
+      },
+      "installation_id": {
+        "description": "共享安装 ID",
+        "hint": "安装 ID 一旦初始化就作为记忆、身份和恢复记录的稳定命名空间。",
+        "type": "string",
+        "default": "main"
+      },
+      "targets": {
+        "description": "私聊目标列表",
+        "hint": "每个目标由平台、Bot 登录账号和私聊参与者组成；target_id 只能用于管理定位。",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "private_target": {
+            "name": "私聊目标",
+            "items": {
+              "target_id": {
+                "description": "目标 ID",
+                "type": "string",
+                "default": "target-1"
+              },
+              "platform_id": {
+                "description": "OneBot 平台实例 ID",
+                "type": "string",
+                "default": "default"
+              },
+              "account_id": {
+                "description": "Bot QQ 账号",
+                "type": "string",
+                "default": ""
+              },
+              "bot_id": {
+                "description": "逻辑 Bot ID",
+                "type": "string",
+                "default": "bot-1"
+              },
+              "participant_id": {
+                "description": "私聊参与者 QQ",
+                "type": "string",
+                "default": ""
+              }
+            }
+          }
+        }
+      },
+      "personas": {
+        "description": "原生人格映射列表",
+        "hint": "persona_id 是 AstrBot 当前人格标识，role_id 是 V2 记忆归属。相同 role_id 会共享记忆。",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "persona_mapping": {
+            "name": "人格映射",
+            "items": {
+              "bot_id": {
+                "description": "逻辑 Bot ID",
+                "type": "string",
+                "default": "bot-1"
+              },
+              "persona_id": {
+                "description": "AstrBot 人格 ID",
+                "type": "string",
+                "default": "default"
+              },
+              "role_id": {
+                "description": "V2 角色 ID",
+                "hint": "要隔离记忆请使用不同值。",
+                "type": "string",
+                "default": "role-1"
+              }
+            }
+          }
+        }
+      },
+      "group_targets": {
+        "description": "群聊目标列表",
+        "hint": "仅接管明确配置的群号中的文本和账号提及。按实际群消息认证发言者，支持 AstrBot 群会话及成员独立会话；群聊与私聊使用各自配置的目标及按人权限。",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "group_target": {
+            "name": "群聊目标",
+            "items": {
+              "target_id": {
+                "description": "目标 ID",
+                "type": "string",
+                "default": "group-1"
+              },
+              "platform_id": {
+                "description": "OneBot 平台实例 ID",
+                "type": "string",
+                "default": "default"
+              },
+              "account_id": {
+                "description": "Bot QQ 账号",
+                "type": "string",
+                "default": ""
+              },
+              "bot_id": {
+                "description": "逻辑 Bot ID",
+                "type": "string",
+                "default": "bot-1"
+              },
+              "group_id": {
+                "description": "群号",
+                "type": "string",
+                "default": ""
+              }
+            }
+          }
+        }
+      },
+      "capabilities": {
+        "description": "目标公共能力",
+        "hint": "memory.read/propose/reflect/subscribe 用于记忆公共链；relationship.memory.read/propose 允许角色提交待审阅的关系与情绪提案，不授予自动采用权限。已有明确能力清单不会自动扩权。",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "configuration.read",
+          "conversation.reply",
+          "memory.propose",
+          "memory.read",
+          "memory.reflect",
+          "memory.subscribe",
+          "text"
+        ]
+      },
+      "delivery_mode": {
+        "description": "私聊投递形态（旧字段）",
+        "hint": "仅保留旧配置兼容：正式宿主固定使用 OneBot 原生私聊发送，该字段不再影响行为。",
+        "type": "string",
+        "options": [
+          "onebot_private",
+          "preview"
+        ],
+        "default": "onebot_private"
+      },
+      "group_delivery_mode": {
+        "description": "群投递形态",
+        "hint": "onebot_group 由 OneBot 原生渠道发送群消息；preview 仅生成草稿不发送。",
+        "type": "string",
+        "options": [
+          "onebot_group",
+          "preview"
+        ],
+        "default": "onebot_group"
+      }
+    }
+  },
+  "model": {
+    "description": "模型｜提供方、任务与费率",
+    "hint": "单目标和多目标共用本组。模型调用由所选 AstrBot Provider 执行；初始化只保存 provider 指纹，不保存 API Key、Endpoint 或完整 provider 配置。",
+    "type": "object",
+    "items": {
+      "provider_id": {
+        "description": "模型 Provider",
+        "_special": "select_provider",
+        "type": "string",
+        "default": ""
+      },
+      "task_prompt": {
+        "description": "任务提示",
+        "hint": "当前 AstrBot 人格提示仍由宿主读取并单独校验；这里补充本次回复任务的约束。",
+        "type": "text",
+        "default": "保持当前 AstrBot 人格，只根据本轮输入和有依据的材料回复。"
+      },
+      "additional_providers": {
+        "description": "V2 备用模型 Provider",
+        "hint": "显式注册可用于任务选择、回退和规则替换的 AstrBot OpenAI 兼容 Provider。各自配置费率和请求限制；保存后重载 V2 生效，不需要新建安装。",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "text_provider": {
+            "name": "备用模型",
+            "items": {
+              "provider_id": {
+                "description": "AstrBot Provider",
+                "_special": "select_provider",
+                "type": "string",
+                "default": ""
+              },
+              "max_output_tokens": {
+                "description": "最大输出 Token",
+                "type": "int",
+                "default": 2048
+              },
+              "maximum_input_estimate": {
+                "description": "最大输入估算 Token",
+                "type": "int",
+                "default": 131072
+              },
+              "output_parameter": {
+                "description": "输出限制参数",
+                "type": "string",
+                "options": [
+                  "max_tokens",
+                  "max_completion_tokens"
+                ],
+                "default": "max_tokens"
+              },
+              "streaming": {
+                "description": "默认流式请求",
+                "type": "bool",
+                "default": false
+              },
+              "input_microusd_per_million": {
+                "description": "输入费率（microUSD / 百万 Token）",
+                "type": "int",
+                "default": 0
+              },
+              "cached_input_microusd_per_million": {
+                "description": "缓存输入费率（microUSD / 百万 Token）",
+                "type": "int",
+                "default": 0
+              },
+              "output_microusd_per_million": {
+                "description": "输出费率（microUSD / 百万 Token）",
+                "type": "int",
+                "default": 0
+              }
+            }
+          }
+        }
+      },
+      "fallback_provider_id": {
+        "description": "回复任务的回退 Provider",
+        "hint": "留空不回退；须在备用模型列表中注册。前一 Provider 确认未开始时回退；开启拒答替代后，明确拒答也可切换。流式中断和结果未知不会重试。",
+        "_special": "select_provider",
+        "type": "string",
+        "default": ""
+      },
+      "fallback_on_refusal": {
+        "description": "明确拒答后尝试备用模型",
+        "hint": "仅识别 Provider 的拒答标记或内容过滤结束信号；普通文本、解析失败和未知结果不触发替代。原模型的实际费用仍计入预算。需先配置回退 Provider。",
+        "type": "bool",
+        "default": false
+      },
+      "replacement_rules": {
+        "description": "回复模型替换规则 JSON",
+        "hint": "默认 [] 关闭。示例：[{\"id\":\"code\",\"provider_id\":\"已注册的 Provider ID\",\"keywords\":[\"写代码\"],\"priority\":10}]。可加 model 覆盖模型名，费用按该 Provider 配置费率估算；time_window 支持 timezone、start/end（HH:MM）及 weekdays（0=周一）。仅匹配本轮消息，关键词和时段同时配置时须同时命中；同一任务的工具续答保持首次选择。",
+        "type": "text",
+        "default": "[]"
+      },
+      "max_output_tokens": {
+        "description": "最大输出 Token",
+        "type": "int",
+        "default": 2048
+      },
+      "streaming": {
+        "description": "对话模型使用流式请求",
+        "hint": "收齐流式回复并校验后，按分段设置依次发送。中断或缺少正常结束信号时不发送残稿，也不自动重试；私人书写等后台任务保持原有完整响应协议。",
+        "type": "bool",
+        "default": false
+      },
+      "maximum_input_estimate": {
+        "description": "最大输入估算 Token",
+        "type": "int",
+        "default": 131072
+      },
+      "output_parameter": {
+        "description": "输出限制参数",
+        "type": "string",
+        "options": [
+          "max_tokens",
+          "max_completion_tokens"
+        ],
+        "default": "max_tokens"
+      },
+      "input_microusd_per_million": {
+        "description": "输入费率（microUSD / 百万 Token）",
+        "type": "int",
+        "default": 0
+      },
+      "cached_input_microusd_per_million": {
+        "description": "缓存输入费率（microUSD / 百万 Token）",
+        "type": "int",
+        "default": 0
+      },
+      "output_microusd_per_million": {
+        "description": "输出费率（microUSD / 百万 Token）",
+        "type": "int",
+        "default": 0
+      }
+    }
+  },
+  "segmentation": {
+    "description": "回复｜文字分段",
+    "hint": "单目标和多目标共用，适用于 V2 接管的私聊和群聊回复。默认关闭；模型分段优先，规则补充分段可单独开启。分段间隔在下方运行设置中配置。与模型设置一样，已初始化运行档会固定这份配置。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "开启分段发送",
+        "type": "bool",
+        "default": false
+      },
+      "llm_controlled": {
+        "description": "允许模型决定分段",
+        "type": "bool",
+        "default": true
+      },
+      "rules_enabled": {
+        "description": "启用规则补充分段",
+        "type": "bool",
+        "default": false
+      },
+      "rule_mode": {
+        "description": "补充分段方式",
+        "type": "string",
+        "options": [
+          "words",
+          "regex",
+          "sentences",
+          "paragraphs"
+        ],
+        "default": "words"
+      },
+      "split_words": {
+        "description": "分段标记列表",
+        "hint": "默认包含常用标点和换行；匹配到的分隔符保留在上一段。",
+        "type": "text",
+        "default": "[\"。\", \"？\", \"！\", \"~\", \"…\", \"“\", \"\\n\"]"
+      },
+      "match_width_variants": {
+        "description": "分段词匹配全角/半角变体",
+        "type": "bool",
+        "default": true
+      },
+      "rule_regex": {
+        "description": "正则分段表达式",
+        "type": "text",
+        "default": ".*?[。？！~…\\n]+|.+$"
+      },
+      "threshold": {
+        "description": "规则分段最小正文长度",
+        "type": "int",
+        "default": 120
+      },
+      "min_segment_chars": {
+        "description": "规则分段每段最少字符",
+        "type": "int",
+        "default": 12
+      },
+      "max_segments": {
+        "description": "最多消息数",
+        "hint": "范围 1–64，超出时合并尾段，保留完整正文。",
+        "type": "int",
+        "default": 4
+      },
+      "prompt": {
+        "description": "自定义模型分段提示",
+        "hint": "留空使用默认提示，最多 4000 字。{{split_marker}} 会替换成完整分段标记。",
+        "type": "text",
+        "default": ""
+      }
+    }
+  },
+  "voice_reply": {
+    "description": "回复｜语音强化",
+    "hint": "单目标和多目标共用，默认关闭。支持触发条件、模型选句、分段范围、组件位置和独立会话冷却。修改后重载插件；已生成的回复按生成时计划投递，合成失败保留文字。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用语音回复",
+        "type": "bool",
+        "default": false
+      },
+      "trigger_mode": {
+        "description": "语音触发",
+        "type": "string",
+        "options": [
+          "always",
+          "request",
+          "adaptive"
+        ],
+        "default": "always",
+        "hint": "always 总是尝试；request 仅用户请求语音时；adaptive 由模型用语音标签选句。"
+      },
+      "generation_mode": {
+        "description": "朗读文本来源",
+        "type": "string",
+        "options": [
+          "plain",
+          "model_tag"
+        ],
+        "default": "plain",
+        "hint": "plain 朗读选中的可见段落；model_tag 只朗读模型用 <pc_tts> 包裹的内容。"
+      },
+      "segment_mode": {
+        "description": "语音分段范围",
+        "type": "string",
+        "options": [
+          "each",
+          "first",
+          "last"
+        ],
+        "default": "each"
+      },
+      "delivery_mode": {
+        "description": "发送形态",
+        "type": "string",
+        "options": [
+          "voice_and_text",
+          "voice_only"
+        ],
+        "default": "voice_and_text",
+        "hint": "voice_only 仅在合成成功且朗读覆盖整段文字时隐藏文字；部分朗读或合成失败保留完整文字。"
+      },
+      "position": {
+        "description": "语音组件位置",
+        "type": "string",
+        "options": [
+          "after_media",
+          "after_text",
+          "before_text"
+        ],
+        "default": "after_media",
+        "hint": "after_media 在图片后，after_text 在文字后图片前，before_text 在文字前。"
+      },
+      "language": {
+        "description": "朗读语种",
+        "type": "string",
+        "options": [
+          "zh",
+          "ja",
+          "en"
+        ],
+        "default": "zh"
+      },
+      "foreign_text_mode": {
+        "description": "外语可见文字",
+        "type": "string",
+        "options": [
+          "original",
+          "translation",
+          "bilingual"
+        ],
+        "default": "original",
+        "hint": "与模型选句配合：translation 显示标签外译文，缺少译文时保留该句原文；bilingual 同时显示原文与译文。"
+      },
+      "probability": {
+        "description": "基础触发概率",
+        "type": "float",
+        "default": 1.0
+      },
+      "private_probability": {
+        "description": "私聊概率覆盖",
+        "type": "float",
+        "default": -1.0,
+        "hint": "-1 继承基础概率，范围 0–1。"
+      },
+      "group_probability": {
+        "description": "群聊概率覆盖",
+        "type": "float",
+        "default": -1.0,
+        "hint": "-1 继承基础概率，范围 0–1。"
+      },
+      "cooldown_seconds": {
+        "description": "会话冷却秒数",
+        "type": "int",
+        "default": 0
+      },
+      "max_speech_chars": {
+        "description": "单段最长朗读字符",
+        "type": "int",
+        "default": 1800
+      },
+      "timeout_seconds": {
+        "description": "合成超时秒数",
+        "type": "int",
+        "default": 30
+      },
+      "trigger_keywords": {
+        "description": "请求触发词",
+        "type": "text",
+        "default": "",
+        "hint": "逗号或换行分隔；留空使用内置语音请求词。"
+      },
+      "provider_id": {
+        "description": "指定 TTS Provider ID",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用当前会话 TTS Provider。"
+      },
+      "zh_provider_id": {
+        "description": "中文 TTS Provider ID",
+        "type": "string",
+        "default": ""
+      },
+      "ja_provider_id": {
+        "description": "日语 TTS Provider ID",
+        "type": "string",
+        "default": ""
+      },
+      "en_provider_id": {
+        "description": "英语 TTS Provider ID",
+        "type": "string",
+        "default": ""
+      },
+      "extra_prompt": {
+        "description": "模型选句补充提示",
+        "type": "text",
+        "default": ""
+      }
+    }
+  },
+  "poke": {
+    "description": "互动｜戳一戳",
+    "hint": "默认关闭。仅响应已配置目标对当前 Bot 的 OneBot 戳一戳；发送沿用该目标已认证的 OneBot 通道及关系权限。通知按账号、目标、发送者和秒级时间去重；同一秒内重复戳会合并。未知发送结果不会自动重试。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用戳一戳回应",
+        "type": "bool",
+        "default": false
+      },
+      "trigger_probability": {
+        "description": "回应概率",
+        "type": "float",
+        "default": 1.0
+      },
+      "replies": {
+        "description": "预设短句",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "在呢，怎么啦？",
+          "收到你的戳戳啦。",
+          "我在这里。"
+        ]
+      },
+      "back_probability": {
+        "description": "反戳概率",
+        "type": "float",
+        "default": 0.0
+      }
+    }
+  },
+  "runtime": {
+    "description": "运行｜预算、等待与任务容量",
+    "hint": "单目标和多目标共用。依次设置模型调用预算、输入等待和超时、分段间隔、前后台并发及排队保留上限。",
+    "type": "object",
+    "items": {
+      "budget_tokens": {
+        "description": "各层 Token 预算",
+        "type": "int",
+        "default": 1000000
+      },
+      "budget_cost_microusd": {
+        "description": "各层费用预算（microUSD）",
+        "type": "int",
+        "default": 100000000
+      },
+      "enable_daily_token_soft_limit": {
+        "description": "每日 Token 软限额默认开关",
+        "hint": "沿用 V1 默认开启。软限额只延后可选的低优先级后台任务（内置清单：日程规划、成长进展、群记忆批次），私聊回复、记忆反思、日记与角色状态维护始终可用。保存后可在陪伴小屋的治理设置里按安装/角色实时修改；这里的默认值只用于尚未写过该设置的数据根。",
+        "type": "bool",
+        "default": true
+      },
+      "daily_token_soft_limit": {
+        "description": "每日 Token 软限额默认阈值",
+        "hint": "沿用 V1 默认 800000；0 表示不设软限额。按当日已结算与已预留的 Token 合计判断，与每日硬额度（budget_tokens）互相独立。",
+        "type": "int",
+        "default": 800000
+      },
+      "daily_token_soft_deferred_kinds": {
+        "description": "软限额延后的任务类型",
+        "hint": "留空使用内置的低优先级清单。可填写以逗号或换行分隔的任务 kind，例如 role.journal.write；这些 kind 只在装配时固定，运行中改配置请用治理设置。",
+        "type": "text",
+        "default": ""
+      },
+      "quiet_seconds": {
+        "description": "连续输入静默秒数",
+        "type": "int",
+        "default": 0
+      },
+      "maximum_wait_seconds": {
+        "description": "连续输入最长等待秒数",
+        "type": "int",
+        "default": 0
+      },
+      "turn_timeout_seconds": {
+        "description": "单轮超时秒数",
+        "type": "int",
+        "default": 180
+      },
+      "part_gap_seconds": {
+        "description": "分段间隔秒数",
+        "type": "int",
+        "default": 0
+      },
+      "foreground_slots": {
+        "description": "前台任务槽",
+        "type": "int",
+        "default": 2
+      },
+      "background_slots": {
+        "description": "后台任务槽",
+        "type": "int",
+        "default": 1
+      },
+      "queued_per_lane": {
+        "description": "每通道排队上限",
+        "type": "int",
+        "default": 64
+      },
+      "retained_tasks": {
+        "description": "保留任务上限",
+        "type": "int",
+        "default": 2048
+      },
+      "forward_max_nodes": {
+        "description": "单次合并转发最多读取节点数",
+        "hint": "结构上限为 32，只能收紧不能放宽。默认等于原常量，未编辑的安装行为不变。已落库的转发事件不受影响，仍可正常读取。",
+        "type": "int",
+        "default": 32
+      },
+      "forward_max_depth": {
+        "description": "合并转发最大嵌套深度",
+        "hint": "结构上限为 4，只能收紧不能放宽。已落库的转发事件不受影响，仍可正常读取。",
+        "type": "int",
+        "default": 4
+      },
+      "forward_max_forwards": {
+        "description": "单次输入最多合并转发条数",
+        "hint": "结构上限为 4，只能收紧不能放宽。已落库的转发事件不受影响，仍可正常读取。",
+        "type": "int",
+        "default": 4
+      }
+    }
+  },
+  "news": {
+    "description": "资讯来源（宿主级默认）",
+    "hint": "主动问候与每日热点读取在会话未单独配置资讯来源时使用的默认源；bilibili 需填 UID，rss/json 需填订阅地址。",
+    "type": "object",
+    "items": {
+      "source_kind": {
+        "description": "默认来源类型",
+        "hint": "host 表示使用环境变量 COMPANION_V2_NEWS_* 配置的源；disabled 关闭默认资讯。",
+        "type": "string",
+        "options": [
+          "host",
+          "disabled",
+          "bilibili",
+          "rss",
+          "json",
+          "search",
+          "hot"
+        ],
+        "default": "host"
+      },
+      "bilibili_uid": {
+        "description": "B 站 UID",
+        "hint": "默认来源为 bilibili 时生效。",
+        "type": "string",
+        "default": ""
+      },
+      "feed_url": {
+        "description": "订阅/接口地址",
+        "hint": "默认来源为 rss 或 json 时生效，须为 http(s) 地址。",
+        "type": "string",
+        "default": ""
+      },
+      "hot_sources": {
+        "description": "热点榜来源",
+        "hint": "逗号分隔的榜单名；默认来源为 hot 时生效。",
+        "type": "string",
+        "default": "weibo,hackernews"
+      },
+      "search_url": {
+        "description": "搜索接口地址",
+        "hint": "默认来源为 search 时使用的自定义搜索端点。",
+        "type": "string",
+        "default": ""
+      },
+      "hot_result_count": {
+        "description": "热点条数",
+        "hint": "每次热点读取保留的条数。",
+        "type": "int",
+        "default": 10
+      }
+    }
+  },
+  "solar_terms": {
+    "description": "节气表年份范围",
+    "hint": "节气与黄历材料支持的公历年份边界；仅在需要超出默认范围时调整。",
+    "type": "object",
+    "items": {
+      "minimum_year": {
+        "description": "最早年份",
+        "type": "int",
+        "default": 1901
+      },
+      "maximum_year": {
+        "description": "最晚年份",
+        "type": "int",
+        "default": 2099
+      }
+    }
+  },
+  "legacy": {
+    "description": "兼容｜从 V1 迁移数据",
+    "hint": "首次从 V1 换到 V2 时用。V1 的数据留在原来的插件数据目录里，这里填它的绝对路径（例如 …/data/plugin_data/astrbot_plugin_private_companion）。留空则按 V2 数据目录的同级目录自动寻找 V1。迁移是只读 V1、单向写入 V2：过程中不会修改或删除 V1 的任何文件，所以可以先试算几遍再决定。实际执行在「陪伴小屋 → 开始使用」的最后一步完成。",
+    "type": "object",
+    "items": {
+      "v1_root": {
+        "description": "V1 数据目录（绝对路径）",
+        "hint": "留空时按 …/plugin_data/astrbot_plugin_private_companion 与 V2 数据目录的同级位置查找。找不到就报「没有找到 V1 数据目录」，不会创建任何东西。",
+        "type": "text",
+        "default": ""
+      },
+      "allow_auto_apply": {
+        "description": "允许在启动时自动执行一次迁移",
+        "hint": "默认关闭。开启后宿主在加载运行档时试算一次，若结论是「有可以迁移的来源」就自动写入 V2。V1 数据不受影响，但写入之后 V2 里就会多出这批设置，所以默认让人先看过试算结果再动手。",
+        "type": "bool",
+        "default": false
+      }
+    }
+  }
+}

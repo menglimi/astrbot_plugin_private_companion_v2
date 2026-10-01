@@ -1,0 +1,61 @@
+/* 旧的宽松变量名桥接 + 尺寸与动效维度
+   必须加载在 styles.css 之后：styles.css 的 :root[data-theme=...] 优先级更高，
+   会保留它原有的色值；本文件只负责把未迁移页面用的旧变量名接到语义令牌上。
+   页面逐步迁移后，本文件旧的宽松名可以按页删除，最后整段移除。 */
+
+/* === 旧变量名桥接：未迁移页面继续按原样渲染 === */
+:root{
+  --bg:var(--t-canvas);
+  --paper:var(--t-veil);
+  --ink:var(--t-text);
+  --secondary:var(--t-text-soft);
+  --muted:var(--t-text-faint);
+  --accent:var(--t-accent);
+  --accent-dark:var(--t-accent-hover);
+  --lavender:var(--t-accent-quiet);
+  --line:var(--t-line);
+  --green:var(--t-ok);
+  --shadow:var(--t-shadow);
+  /* --radius 原先只由 styles.css 那几套已删除的硬编码色板定义，
+     删掉后 styles.css 的 .panel / .empty-state / dialog 等就没有圆角值了
+     （无效值不会回落到默认，圆角会整个消失）。接回圆角维度。 */
+  --radius:var(--r-lg);
+}
+
+/* === 尺寸：圆角 / 间距 / 字号 ===
+   本文件排在 tokens.css 之后，且同为 :root 优先级，所以这里**不能**再声明尺度令牌——
+   先前这里有一份与 tokens.css 完全重复的 --r-* / --sp-* / --type-scale 定义，
+   结果是 tokens.css 里新增的任何尺度令牌（--r-xl、--sp-7/8、--fs-*、--density-scale）
+   都被这份旧快照静默覆盖，改动看着写进去了却毫无效果。
+   尺度只有一个源：tokens.css。--radius 的桥接在上面的旧变量名块里。 */
+
+/* === 组件级令牌：配置页外壳与边界卡片 === */
+:root{
+  --card-bg:var(--t-surface);
+  --card-border:var(--t-line);
+  --card-radius:var(--r-md);
+  --card-shadow:var(--t-shadow);
+  --card-pad:var(--pad);
+  --field-bg:var(--t-surface);
+  --field-border:var(--t-line-firm);
+  --field-radius:var(--r-sm);
+  --focus-ring:0 0 0 3px var(--t-focus);
+}
+
+/* === 维度作用到既有排版 === */
+/* body 的字号规则由 tokens.css 声明（它乘的是 --font-scale，即用户字号偏好 × 版式疏密）。
+   这里不再重复——排在后面会覆盖掉密度那一维。 */
+:root[data-motion] *,:root[data-motion] *::before,:root[data-motion] *::after{
+  transition-duration:var(--dur)!important;
+}
+:root[data-motion="low"] *,:root[data-motion="low"] *::before,:root[data-motion="low"] *::after,
+:root[data-motion="off"] *,:root[data-motion="off"] *::before,:root[data-motion="off"] *::after{
+  animation-duration:0s!important;
+}
+:root[data-radius] .panel,
+:root[data-radius] .content-panel,
+:root[data-radius] .capability,
+:root[data-radius] .console-section,
+:root[data-radius] .empty-state{
+  border-radius:var(--r-lg);
+}

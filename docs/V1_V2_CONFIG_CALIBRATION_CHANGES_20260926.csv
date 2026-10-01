@@ -1,0 +1,366 @@
+子类,配置键,原判定,新判定,改动依据,备注
+A1,enable_lunar_perception,待接入,已接入,companion_v2/conversation/date_context.py,农历经 lunardate 优先、lunarcalendar 回退
+A1,enable_holiday_perception,待接入,已接入,companion_v2/conversation/date_context.py + companion_v2/agenda/annual_calendar.py,固定节日与放假调休
+A1,enable_solar_term_perception,待接入,部分接入,companion_v2/agenda/annual_calendar.py,节气仅能逐年手填，无自动数据源
+A1,holiday_country,待接入,部分接入,companion_v2/agenda/annual_calendar.py,只有假日名，无地区参数不可切国家
+A1,environment_perception_timezone,待接入,已接入,companion_v2/conversation/perception_settings.py,IANA 校验
+A1,enable_environment_perception,待接入,部分接入,companion_v2/conversation/perception_settings.py,拆为四个窄开关，无总开关
+A1,enable_platform_perception,待接入,已接入,companion_v2/model_gateway/perception.py,platform_enabled
+A1,enable_model_perception,待接入,部分接入,companion_v2/model_gateway/perception.py,有模型路由感知，无“当前模型配置”完整投影
+A1,enable_weather_alerts,待接入,已接入,companion_v2/proactive/weather_alerts.py + official_alert_events.py,alert/update/cancel 过滤与 v34 持久更新链
+A1,enable_weather_context,待接入,部分接入,astrbot_host/weather.py,只进规划与主动材料，不进普通对话上下文
+A1,weather_alert_api_host,待接入,已接入,astrbot_host/qweather_alerts.py,HOST_PATTERN 限定 *.qweatherapi.com
+A1,weather_alert_api_key,待接入,已接入,astrbot_host/qweather_alerts.py,X-QW-Api-Key 与 JWT 互斥；flat 旧别名不迁
+A1,weather_alert_token,待接入,已接入,astrbot_host/qweather_alerts.py,Ed25519 短时 JWT
+A1,weather_alert_min_severity,待接入,部分接入,companion_v2/proactive/weather_alerts.py,只定义 SEVERITIES 枚举并校验，无最低级别过滤
+A1,weather_alert_refresh_minutes,待接入,部分接入,companion_v2/proactive/official_alert_events.py,POLL_INTERVAL 固定 5 分钟不可配
+A1,weather_lat,待接入,已接入,companion_v2/agenda/planning_config.py,WeatherLocation.latitude
+A1,weather_lon,待接入,已接入,companion_v2/agenda/planning_config.py,WeatherLocation.longitude
+A1,weather_location,待接入,已接入,companion_v2/agenda/planning_config.py,configured_weather_location
+A1,weather_api_host,待接入,已接入,astrbot_host/weather.py,固定 api.open-meteo.com
+A1,weather_token,待接入,已接入,astrbot_host/qweather_alerts.py,JWT 或 API Key 二选一
+A1,weather_refresh_minutes,待接入,部分接入,companion_v2/agenda/weather_material.py,MAX_AGE 固定 2 小时不可配
+A1,weather_source,待接入,部分接入,astrbot_host/weather.py,Open-Meteo 硬编码，和风仅限预警
+A1,weather_city,待接入,部分接入,companion_v2/agenda/planning_config.py,仅地点名字符串，无城市编码
+A1,weather_api_key,待接入,部分接入,astrbot_host/weather.py,Open-Meteo 免密钥，无凭据字段
+A2,enable_forward_message_adaptation,待接入,已接入,companion_v2/conversation/forwards/service.py,
+A2,enable_group_companion,待接入,已接入,companion_v2/conversation/group_context.py,
+A2,enable_group_history_injection,待接入,已接入,companion_v2/conversation/group_history.py,
+A2,enable_message_debounce,待接入,已接入,companion_v2/conversation/flow.py,quiet_seconds/maximum_wait_seconds
+A2,enable_reactive_poke,待接入,已接入,companion_v2/conversation/pokes.py,
+A2,enable_recall_cancel_reply,待接入,已接入,companion_v2/conversation/recalls.py,取消未发分段
+A2,enable_recall_enhancement,待接入,部分接入,companion_v2/conversation/recalls.py,失效链完整，无违禁词主动撤回
+A2,forward_message_debounce_seconds,待接入,已接入,companion_v2/conversation/flow.py,静默期覆盖合并转发
+A2,forward_message_max_chars,待接入,已接入,companion_v2/conversation/forwards/models.py,
+A2,forward_message_max_messages,待接入,已接入,companion_v2/conversation/forwards/models.py,MAX_NODES=32
+A2,forward_message_mode,待接入,已接入,companion_v2/conversation/forwards/service.py,统一自然阅读
+A2,forward_message_parse_nested,待接入,已接入,companion_v2/conversation/forwards/models.py,MAX_DEPTH=4
+A2,group_scene_recent_limit,待接入,已接入,companion_v2/conversation/group_context.py,MAX_ITEMS=16
+A2,group_scene_recent_max_chars,待接入,已接入,companion_v2/conversation/group_context.py,MAX_BYTES=16384
+A2,image_message_debounce_seconds,待接入,已接入,companion_v2/conversation/flow.py,
+A2,inbound_message_debounce_seconds,待接入,部分接入,companion_v2/conversation/flow.py,按事件键幂等去重，无重复文本窗口
+A2,message_debounce_max_merge_messages,待接入,已接入,companion_v2/conversation/flow.py,单批上限 32 条
+A2,reactive_poke_normal_replies,待接入,已接入,companion_v2/conversation/pokes.py,DEFAULT_REPLIES
+A2,reactive_poke_normal_reply_probability,待接入,部分接入,companion_v2/conversation/pokes.py,确定性哈希选择，无独立概率档
+A2,reactive_poke_prompts,待接入,部分接入,companion_v2/conversation/pokes.py,只有固定预设回复
+A2,reactive_poke_trigger_probability,待接入,已接入,companion_v2/conversation/pokes.py,trigger_probability
+A2,text_message_debounce_max_wait_seconds,待接入,已接入,companion_v2/conversation/flow.py,
+A2,text_message_debounce_seconds,待接入,已接入,companion_v2/conversation/flow.py,
+A3,enable_private_image_gif_enhancement,待接入,已接入,companion_v2/conversation/media/animation.py,MAX_SELECTED_FRAMES=4
+A3,private_image_gif_max_frames,待接入,已接入,companion_v2/conversation/media/animation.py,
+A3,forward_message_image_limit,待接入,已接入,companion_v2/conversation/forwards/models.py,
+A3,forward_message_image_vision,待接入,已接入,companion_v2/conversation/forwards/service.py,
+A3,forward_message_image_vision_timeout_seconds,待接入,部分接入,companion_v2/conversation/forwards/service.py,受统一轮次超时约束
+A3,enable_reality_touch_camera,待接入,部分接入,reality 提供方,V2 宿主不含摄像头装配
+A4,enable_bilibili_integration,待接入,已接入,companion_v2/proactive/news_sources.py + astrbot_host/news.py,SOURCE_KINDS 含 bilibili
+A4,enable_news_integration,待接入,已接入,companion_v2/proactive/news_events.py,24 小时窗口与 URL 去重
+A4,news_sources,待接入,已接入,companion_v2/proactive/news_sources.py,host/disabled/bilibili/rss/json
+A4,news_min_interval_hours,待接入,已接入,companion_v2/proactive/configuration.py,15–1440 分钟
+A4,news_max_items_per_source,待接入,部分接入,astrbot_host/news.py,只保首个唯一项，无条数上限
+A4,WEB_EXPLORATION_API_BASE_URL,待接入,部分接入,astrbot_host/news.py,可配 JSON 源但不是搜索接口
+A4,WEB_EXPLORATION_API_KEY,待接入,部分接入,astrbot_host/news.py,来源限 HTTPS 且禁内嵌凭据
+A4,bilibili_share_cooldown_hours,待接入,部分接入,companion_v2/proactive/configuration.py,统一间隔无 B 站专属冷却
+B1,enable_expression_learning,待接入,已接入,companion_v2/expression/style_service.py,本会话实现
+B1,enable_expression_manual_review,待接入,已接入,companion_v2/expression/style_management.py,本会话实现
+B1,enable_expression_style_review,待接入,已接入,companion_v2/conversation/style_context.py,本会话实现
+B1,enable_group_slang_learning,待接入,已接入,companion_v2/memory/group/slang.py,
+B1,enable_group_slang_meanings,待接入,已接入,companion_v2/memory/group/slang.py,
+B1,enable_memory_companion_open_loop_search,待接入,已接入,companion_v2/conversation/open_items_context.py,
+B1,enable_memory_companion_private_recall,待接入,已接入,companion_v2/memory/recall_query.py,
+B1,enable_new_framework_reflection_writer,待接入,已接入,companion_v2/memory/reflection.py,
+B1,enable_companion_memory,待接入,已接入,companion_v2/memory/configuration.py,
+B1,max_learned_expression_items,待接入,已接入,companion_v2/expression/style_evidence.py,SAMPLE_LIMIT=24
+B1,memory_companion_context_max_chars,待接入,已接入,companion_v2/memory/configuration.py,
+B1,memory_companion_context_top_k,待接入,已接入,companion_v2/memory/configuration.py,
+B1,roleplay_knowledge_source_ids,待接入,已接入,companion_v2/knowledge/retrieval.py,
+B1,enable_livingmemory_integration,待接入,不适用,V2 原生记忆,不再对接外部记忆插件
+B1,enable_memory_companion_bridge,待接入,不适用,V2 原生记忆,桥接层按设计不迁入
+B1,livingmemory_tool_name,待接入,不适用,V2 原生记忆,无外部工具名
+B1,max_group_slang_terms,待接入,部分接入,companion_v2/memory/group/slang.py,存储存在无显式上限
+B1,max_group_recent_messages,待接入,部分接入,companion_v2/conversation/group_context.py,
+B1,enable_memory_companion_dream_fragment,待接入,部分接入,companion_v2/role_work/journal/models.py,梦境碎片为 V2 内部产物
+B1,enable_memory_companion_cross_window_emotion,待接入,部分接入,companion_v2/memory/private_domain.py,有跨窗口记忆无情绪连续性
+B1,enable_memory_companion_feature_context,待接入,部分接入,companion_v2/memory/context.py,
+B1,enable_worldbook_member_recognition,待接入,部分接入,companion_v2/knowledge/retrieval.py,有世界书检索无群成员关系网
+B1,max_companion_memory_items,待接入,部分接入,companion_v2/memory/configuration.py,core_items 预算非条目上限
+B1,memory_refresh_interval_minutes,待接入,部分接入,companion_v2/memory/scheduling.py,按每日时刻非间隔
+B1,roleplay_user_profile_prompt,待接入,部分接入,companion_v2/identity_policy/personas.py,
+B1,enable_auto_user_profile_creation,待接入,部分接入,companion_v2/memory/reflection.py,
+B1,enable_group_social_context,待接入,部分接入,companion_v2/memory/group/context.py,有群公共记忆无氛围总开关
+B1,worldbook_config_paths,待接入,部分接入,companion_v2/knowledge/retrieval.py,检索在无关系网配置路径
+B1,expression_learning_mode,待接入,部分接入,companion_v2/expression/style_management.py,人工采纳替代模式开关
+B1,expression_private_application_mode,待接入,部分接入,companion_v2/expression/style_evidence.py,作用域固定当前私聊
+B1,expression_private_application_user_ids,待接入,部分接入,companion_v2/expression/style_evidence.py,受众即当前对象
+B1,expression_private_learning_source_ids,待接入,部分接入,companion_v2/expression/style_evidence.py,
+B1,expression_private_learning_source_mode,待接入,部分接入,companion_v2/expression/style_evidence.py,
+B1,group_slang_summary_minutes,待接入,部分接入,companion_v2/memory/group/slang.py,粒度不同
+B2,LLM_PROVIDER_ID,待接入,已接入,companion_v2/model_gateway/routing.py,
+B2,enable_open_loop_tracking,待接入,已接入,companion_v2/conversation/open_items_context.py,
+B2,enable_reaction_expression_experiment,待接入,已接入,companion_v2/storage/semantic.py,
+B2,enable_llm_emotion_judgement,待接入,部分接入,companion_v2/relationships/service.py,
+B2,enable_relationship_analysis,待接入,部分接入,companion_v2/relationships/service.py,
+B2,emotion_judgement_mode,待接入,部分接入,companion_v2/relationships/service.py,模型提案无复核范围开关
+B2,enable_dialogue_episode_memory,待接入,部分接入,companion_v2/memory/experiences.py,有经历无对话片段语义
+B2,auto_profile_platforms,待接入,部分接入,companion_v2/legacy/scope_mapping.py,按 scope 隔离无平台建档列表
+B2,episode_memory_refresh_messages,待接入,部分接入,companion_v2/conversation/messages.py,有合并阈值非片段整理
+B2,episode_memory_refresh_minutes,待接入,部分接入,companion_v2/conversation/messages.py,
+B2,default_enable_configured_targets,待接入,部分接入,companion_v2/host/application.py,显式 target 激活
+B3,enable_cycle_state,待接入,已接入,companion_v2/role_work/state/configuration.py,cycle_enabled
+B3,enable_health_state,待接入,已接入,companion_v2/role_work/state/configuration.py,health_enabled
+B3,enable_hunger_state,待接入,已接入,companion_v2/role_work/state/configuration.py,hunger_enabled
+B3,enable_advanced_cycle_strategy,待接入,已接入,companion_v2/role_work/state/cycle.py,cycle_mode=six_phase
+B3,enable_personal_goals,待接入,已接入,companion_v2/role_work/growth/configuration.py,
+B3,enable_personal_goal_auto_progress,待接入,已接入,companion_v2/role_work/growth/progress.py,本会话前批次
+B3,enable_daily_case_review_experiment,待接入,已接入,companion_v2/role_work/journal/self_review_service.py,本会话实现
+B3,enable_daily_plan,待接入,已接入,companion_v2/agenda/planning_config.py,planning_enabled
+B3,daily_plan_item_count,待接入,已接入,companion_v2/agenda/planning_config.py,planning_max_items
+B3,daily_plan_prompt,待接入,已接入,companion_v2/agenda/planning_config.py,planning_prompt
+B3,advanced_cycle_menstrual_days,待接入,已接入,companion_v2/role_work/state/cycle.py,
+B3,advanced_cycle_follicular_days,待接入,已接入,companion_v2/role_work/state/cycle.py,
+B3,advanced_cycle_ovulation_days,待接入,已接入,companion_v2/role_work/state/cycle.py,
+B3,advanced_cycle_luteal_days,待接入,已接入,companion_v2/role_work/state/cycle.py,
+B3,advanced_cycle_pms_days,待接入,已接入,companion_v2/role_work/state/cycle.py,
+B3,advanced_cycle_pre_ovulation_days,待接入,已接入,companion_v2/role_work/state/cycle.py,
+B3,advanced_cycle_discomfort_simulation,待接入,部分接入,companion_v2/role_work/state/cycle.py,cycle_discomfort_enabled
+B3,advanced_cycle_start_offset,待接入,部分接入,companion_v2/role_work/state/cycle.py,以 cycle_initialization 取代
+B3,enable_daily_review,待接入,部分接入,companion_v2/role_work/journal/self_review_service.py,行为复盘不等于终盘巡视
+B3,enable_detail_enhancement,待接入,部分接入,companion_v2/agenda/planning_config.py,planning_refine_minutes
+B3,detail_enhancement_lead_minutes,待接入,部分接入,companion_v2/agenda/planning_config.py,
+B3,enable_enhanced_dreams,待接入,部分接入,companion_v2/role_work/life/runtime.py,有梦境生成无强化题材
+B3,enable_humanized_states,待接入,部分接入,companion_v2/role_work/state/configuration.py,role.state.enabled
+B3,enable_postprocessing_trace,待接入,部分接入,companion_v2/diagnostics/service.py,
+B3,enable_skill_growth_passive_injection,待接入,部分接入,companion_v2/conversation/growth_context.py,成长注入非技能认知
+B3,daily_review_auto_apply_guidance,待接入,部分接入,companion_v2/role_work/journal/self_review_management.py,
+B3,dream_afterglow_mode,待接入,部分接入,companion_v2/role_work/journal/models.py,有碎片无强度模式
+B3,daily_plan_time,待接入,部分接入,companion_v2/agenda/planning_config.py,有窗口无每日生成时刻
+B3,important_date_lookahead_days,待接入,部分接入,companion_v2/proactive/date_events.py,
+B3,schedule_persona_prompt,待接入,部分接入,companion_v2/identity_policy/personas.py,
+B3,schedule_worldview_prompt,待接入,部分接入,companion_v2/identity_policy/personas.py,
+B3,worldview_adaptation_mode,待接入,部分接入,companion_v2/identity_policy/personas.py,
+B3,worldview_adaptation_prompt,待接入,部分接入,companion_v2/identity_policy/personas.py,
+B4,balance_message_cooldown_hours,待接入,已接入,companion_v2/proactive/configuration.py,
+B4,check_interval_seconds,待接入,已接入,companion_v2/proactive/configuration.py,interval_seconds
+B4,idle_minutes,待接入,已接入,companion_v2/proactive/configuration.py,idle_seconds
+B4,max_daily_messages,待接入,已接入,companion_v2/proactive/configuration.py,max_contacts_24h
+B4,quiet_hours,待接入,已接入,companion_v2/proactive/configuration.py,quiet_start/quiet_end
+B4,enable_llm_proactive_message,待接入,已接入,companion_v2/proactive/service.py,
+B4,enable_meal_care_proactive,待接入,已接入,companion_v2/proactive/meal_events.py,
+B4,enable_environment_change_proactive,待接入,已接入,companion_v2/proactive/weather_change_events.py,
+B4,external_share_require_source_link,待接入,部分接入,companion_v2/proactive/news_events.py,资讯强制带来源链接
+B4,greeting_idle_minutes,待接入,部分接入,companion_v2/proactive/configuration.py,idle_seconds
+B4,meal_care_followup_minutes,待接入,部分接入,companion_v2/proactive/meal_events.py,
+B4,meal_care_max_daily,待接入,部分接入,companion_v2/proactive/meal_events.py,
+B4,meal_care_min_interval_hours,待接入,部分接入,companion_v2/proactive/meal_events.py,
+B4,news_share_cooldown_hours,待接入,部分接入,companion_v2/proactive/news_events.py,有轮询与去重无冷却小时
+B4,news_share_probability,待接入,部分接入,companion_v2/proactive/news_events.py,
+B4,environment_change_check_minutes,待接入,部分接入,companion_v2/proactive/weather_change_events.py,有检测无独立间隔字段
+B4,environment_change_cooldown_minutes,待接入,部分接入,companion_v2/proactive/weather_change_events.py,
+B4,proactive_generation_history_limit,待接入,部分接入,companion_v2/delivery/history.py,
+B4,proactive_history_context_mode,待接入,部分接入,companion_v2/delivery/history.py,
+B4,proactive_history_max_chars,待接入,部分接入,companion_v2/delivery/history.py,
+B4,proactive_history_recent_raw_count,待接入,部分接入,companion_v2/delivery/history.py,
+B4,proactive_prompt_template,待接入,部分接入,companion_v2/proactive/prompts.py,提示词内置无模板配置
+B4,proactive_share_priority,待接入,部分接入,companion_v2/proactive/configuration.py,purpose weight
+B4,proactive_share_probability,待接入,部分接入,companion_v2/proactive/configuration.py,
+B4,default_proactive_daily_limit,待接入,部分接入,companion_v2/proactive/configuration.py,无新用户默认
+B4,default_proactive_enabled,待接入,部分接入,companion_v2/proactive/configuration.py,无新用户默认
+B4,enable_daily_greetings,待接入,部分接入,companion_v2/proactive/configuration.py,有 greeting 目的无锚点时刻
+B4,enable_experimental_motivation_model,待接入,部分接入,companion_v2/proactive/planner.py,非驱力-诱因-唤醒模型
+B4,max_proactive_plan_lag_minutes,待接入,部分接入,companion_v2/proactive/models.py,机会过期无重排
+B4,min_interval_minutes,待接入,部分接入,companion_v2/proactive/configuration.py,全局非按用户
+B4,require_private_opt_in,待接入,部分接入,companion_v2/identity_policy/private_domain.py,授权链在无此入口语义
+B4,include_schedule_in_messages,待接入,待接入,companion_v2,主动未带日程背景，确无实现
+C1,BACKUP_EXTERNAL_IMAGE_API_BASE_URL,待接入,不适用,提供方凭据按设计留在 Image 插件,
+C1,BACKUP_EXTERNAL_IMAGE_API_KEY,待接入,不适用,同上,
+C1,BACKUP_EXTERNAL_IMAGE_API_MODEL,待接入,不适用,同上,
+C1,COMFYUI_SELFIE_WORKFLOW_NAME,待接入,不适用,同上,
+C1,COMFYUI_TEXT2IMG_WORKFLOW_NAME,待接入,不适用,同上,
+C1,EXTERNAL_IMAGE_API_BASE_URL,待接入,不适用,同上,
+C1,EXTERNAL_IMAGE_API_KEY,待接入,不适用,同上,
+C1,EXTERNAL_IMAGE_API_MODEL,待接入,不适用,同上,
+C1,backup_external_image_api_custom_headers,待接入,不适用,同上,
+C1,backup_external_image_api_platform,待接入,不适用,同上,
+C1,backup_external_image_api_size,待接入,不适用,同上,
+C1,backup_external_image_api_timeout_seconds,待接入,不适用,同上,
+C1,comfyui_photo_wait_seconds,待接入,不适用,同上,
+C1,enable_backup_external_image_api,待接入,不适用,同上,
+C1,external_image_api_custom_headers,待接入,不适用,同上,
+C1,external_image_api_endpoints,待接入,不适用,同上,
+C1,external_image_api_platform,待接入,不适用,同上,
+C1,external_image_api_size,待接入,不适用,同上,
+C1,external_image_api_timeout_seconds,待接入,不适用,同上,
+C1,photo_generation_backend,待接入,不适用,同上,
+C1,custom_photo_tool_extra_params,待接入,部分接入,astrbot_host/native_extensions/images.py,声明式工具合同无自由 JSON 参数
+C1,enable_natural_language_photo_generation,待接入,部分接入,companion_v2/conversation/tool_loop.py,无规则快判层
+C1,enable_photo_reference_image,待接入,部分接入,companion_v2/conversation/generation.py,支持单张参考缺一致性编排
+C1,enable_photo_text_action,待接入,部分接入,astrbot_host/native_extensions/images.py,有端口无主动拍照链
+C1,enable_user_requested_photo_generation,待接入,部分接入,astrbot_host/native_extensions/images.py,无独立授权维度
+C1,photo_persona_reference_image_path,待接入,部分接入,companion_v2/conversation/generation.py,
+C1,natural_language_photo_generation_max_daily,待接入,部分接入,companion_v2/model_gateway/budget.py,统一额度非该路径专属
+C1,photo_action_max_daily,待接入,部分接入,companion_v2/model_gateway/budget.py,按安装/角色额度
+C1,proactive_photo_text_probability,待接入,部分接入,companion_v2/proactive/service.py,有图库原图投递无该概率
+C2,daily_diary_creativity,待接入,部分接入,companion_v2/role_work/journal/,无写实程度旋钮
+C2,daily_diary_custom_direction,待接入,部分接入,companion_v2/role_work/journal/,
+C2,daily_diary_form,待接入,部分接入,companion_v2/role_work/journal/,无形式枚举
+C2,daily_diary_generate_share_seed,待接入,部分接入,companion_v2/proactive/service.py,日记回执可成候选
+C2,daily_diary_length,待接入,部分接入,companion_v2/role_work/journal/,无篇幅档位
+C2,daily_diary_time,待接入,部分接入,companion_v2/role_work/journal/triggers.py,有排程时刻
+C2,enable_daily_diary,待接入,部分接入,companion_v2/role_work/journal/triggers.py,日记触发已接
+C2,max_diary_entries,待接入,部分接入,companion_v2/role_work/journal/,有归档与修订无保留上限键
+D1,enable_group_context_injection,待接入,已接入,companion_v2/conversation/group_context.py,
+D1,enable_llm_controlled_segmenting,待接入,已接入,companion_v2/conversation/segmentation.py,llm_controlled
+D1,enable_llm_streaming,待接入,已接入,companion_v2/conversation/generation.py,本批前已交付
+D1,enable_segmented_plugin_rules,待接入,已接入,companion_v2/conversation/segmentation.py,rules_enabled
+D1,enable_segmented_proactive_reply,待接入,已接入,companion_v2/conversation/segmentation.py,enabled
+D1,llm_controlled_segmenting_prompt,待接入,已接入,companion_v2/conversation/segmentation.py,prompt
+D1,segmented_proactive_component_order,待接入,已接入,companion_v2/conversation/generation.py,组件计划
+D1,segmented_proactive_image_strategy,待接入,已接入,companion_v2/conversation/generation.py,image_position
+D1,segmented_proactive_max_segments,待接入,已接入,companion_v2/conversation/segmentation.py,max_segments
+D1,segmented_proactive_min_segment_chars,待接入,已接入,companion_v2/conversation/segmentation.py,
+D1,segmented_proactive_split_mode,待接入,已接入,companion_v2/conversation/segmentation.py,rule_mode
+D1,segmented_proactive_threshold,待接入,已接入,companion_v2/conversation/segmentation.py,threshold
+D1,segmented_proactive_voice_strategy,待接入,已接入,companion_v2/conversation/voice_reply.py,position
+D1,segmented_proactive_interval_max,待接入,部分接入,companion_v2/conversation/reply_settings.py,单值无区间
+D1,segmented_proactive_interval_min,待接入,部分接入,companion_v2/conversation/reply_settings.py,part_gap_ms
+D1,segmented_proactive_group_enabled,待接入,部分接入,companion_v2/conversation/segmentation.py,分段统一生效无群聊独立开关
+D1,segmented_proactive_private_enabled,待接入,部分接入,companion_v2/conversation/segmentation.py,无私聊独立开关
+D1,segmented_proactive_group_max_segments,待接入,部分接入,companion_v2/conversation/segmentation.py,全局非群聊专属
+D1,segmented_proactive_group_min_segment_chars,待接入,部分接入,companion_v2/conversation/segmentation.py,全局
+D1,segmented_proactive_group_threshold,待接入,部分接入,companion_v2/conversation/segmentation.py,全局
+D1,segmented_proactive_private_max_segments,待接入,部分接入,companion_v2/conversation/segmentation.py,全局
+D1,segmented_proactive_private_min_segment_chars,待接入,部分接入,companion_v2/conversation/segmentation.py,全局
+D1,segmented_proactive_private_threshold,待接入,部分接入,companion_v2/conversation/segmentation.py,全局
+D1,segmented_proactive_match_width_variants,待接入,部分接入,companion_v2/conversation/segment_control.py,受控标记与保护区间
+D1,enable_mai_style_integration,待接入,部分接入,companion_v2/conversation/style_context.py,以风格学习实现
+D1,enable_passive_state_continuity_anchor,待接入,部分接入,companion_v2/role_work/state/service.py,无被动锚点独立语义
+D1,enable_passive_state_delta_injection,待接入,部分接入,companion_v2/conversation/state_context.py,无增量注入开关
+D1,enable_persona_voice_channels,待接入,部分接入,companion_v2/conversation/style_context.py,无独立分通道开关
+D1,inject_passive_states,待接入,部分接入,companion_v2/conversation/state_context.py,状态按材料注入
+D1,default_style,待接入,部分接入,companion_v2/expression/style_service.py,有风格学习无默认语气
+D1,persona_conversation_voice_prompt,待接入,部分接入,companion_v2/conversation/style_context.py,
+D1,persona_creative_voice_prompt,待接入,部分接入,content 提供方,创作风格归 Content
+D1,task_prompt_overrides,待接入,部分接入,companion_v2/model_gateway/service.py,由模型页管理
+D2,auto_voice_enabled,待接入,已接入,companion_v2/conversation/voice_reply.py,
+D2,auto_voice_cooldown_seconds,待接入,已接入,companion_v2/conversation/voice_reply.py,cooldown_seconds
+D2,auto_voice_max_chars,待接入,已接入,companion_v2/conversation/voice_reply.py,max_speech_chars
+D2,auto_voice_probability,待接入,已接入,companion_v2/conversation/voice_reply.py,probability
+D2,enable_tts_enhancement,待接入,已接入,companion_v2/conversation/voice_reply.py,整族强化策略
+D2,tts_delivery_mode,待接入,已接入,companion_v2/conversation/voice_reply.py,delivery_mode
+D2,tts_extra_prompt,待接入,已接入,companion_v2/conversation/voice_reply.py,extra_prompt
+D2,tts_foreign_text_mode,待接入,已接入,companion_v2/conversation/voice_reply.py,foreign_text_mode
+D2,tts_generation_mode,待接入,已接入,companion_v2/conversation/voice_reply.py,generation_mode
+D2,tts_group_min_interval_seconds,待接入,已接入,companion_v2/conversation/voice_reply.py,
+D2,tts_group_trigger_probability,待接入,已接入,companion_v2/conversation/voice_reply.py,group_probability
+D2,tts_private_min_interval_seconds,待接入,已接入,companion_v2/conversation/voice_reply.py,
+D2,tts_private_trigger_probability,待接入,已接入,companion_v2/conversation/voice_reply.py,private_probability
+D2,tts_provider_id_en,待接入,已接入,companion_v2/conversation/voice_reply.py,en_provider_id
+D2,tts_provider_id_ja,待接入,已接入,companion_v2/conversation/voice_reply.py,ja_provider_id
+D2,tts_provider_id_zh,待接入,已接入,companion_v2/conversation/voice_reply.py,zh_provider_id
+D2,tts_session_min_interval_seconds,待接入,已接入,companion_v2/conversation/voice_reply.py,持久冷却
+D2,tts_trigger_keywords,待接入,已接入,companion_v2/conversation/voice_reply.py,trigger_keywords
+D2,tts_trigger_probability,待接入,已接入,companion_v2/conversation/voice_reply.py,probability
+D2,tts_voice_language,待接入,已接入,companion_v2/conversation/voice_reply.py,language
+D2,voice_action_max_chars,待接入,已接入,companion_v2/conversation/voice_reply.py,被动链
+D2,auto_voice_full_conversion_enabled,待接入,部分接入,companion_v2/conversation/voice_reply.py,segment_mode 无完整转换语义
+D2,main_user_voice_probability,待接入,部分接入,companion_v2/conversation/voice_reply.py,按私聊/群聊非按主用户
+D2,tts_constraint_mode,待接入,部分接入,companion_v2/conversation/voice_reply.py,无约束强度档
+D2,tts_frequency_control_mode,待接入,部分接入,companion_v2/conversation/voice_reply.py,无模式枚举
+D2,tts_message_scope,待接入,部分接入,companion_v2/conversation/voice_reply.py,无生效范围枚举
+D2,tts_synthesis_backend,待接入,部分接入,astrbot_host/voice.py,走 AstrBot TTS provider 无后端枚举
+D3,enable_owned_reaction_asset_workbench,待接入,已接入,astrbot_host/semantic_api.py,
+D3,owned_reaction_assets,待接入,已接入,companion_v2/expression/reactions.py,独立图库
+D3,reaction_expression_cooldown_seconds,待接入,已接入,companion_v2/expression/reaction_preferences.py,
+D3,reaction_expression_delivery_mode,待接入,已接入,companion_v2/conversation/generation.py,reactions_delivery_mode
+D3,reaction_expression_group_enabled,待接入,已接入,companion_v2/expression/semantic_service.py,
+D3,reaction_expression_image_format,待接入,已接入,companion_v2/adapters/astrbot/onebot.py,QQ 子类型待现场验证
+D3,reaction_expression_private_enabled,待接入,已接入,companion_v2/expression/semantic_service.py,
+D3,reaction_expression_proactive_enabled,待接入,已接入,companion_v2/proactive/service.py,
+D3,reaction_expression_trigger_probability,待接入,已接入,companion_v2/expression/reaction_preferences.py,
+D3,reaction_expression_embedding_backfill_batch_size,待接入,部分接入,companion_v2/model_gateway/semantic_search.py,共享 batch_size
+D3,reaction_expression_embedding_backfill_enabled,待接入,部分接入,companion_v2/model_gateway/semantic_search.py,按需补向量无后台开关
+D3,reaction_expression_embedding_candidate_limit,待接入,部分接入,companion_v2/model_gateway/semantic_search.py,分页扫描
+D3,reaction_expression_embedding_enabled,待接入,部分接入,companion_v2/model_gateway/semantic_search.py,混合检索
+D3,reaction_expression_embedding_score_threshold,待接入,部分接入,companion_v2/model_gateway/semantic_search.py,固定阈值
+D3,reaction_expression_embedding_timeout_ms,待接入,部分接入,companion_v2/storage/semantic.py,秒级复用
+D3,reaction_expression_embedding_weight,待接入,部分接入,companion_v2/model_gateway/semantic_search.py,固定权重
+D3,reaction_expression_semantic_trigger_enabled,待接入,部分接入,companion_v2/expression/semantic_service.py,模型按意图调工具
+D3,reaction_expression_vision_verify_mode,待接入,部分接入,companion_v2/expression/reactions.py,vision_review 开关
+D3,reaction_expression_candidate_limit,待接入,部分接入,companion_v2/expression/reactions.py,候选数固定
+D3,allow_generate_photo_on_reaction_turns,待接入,部分接入,companion_v2/conversation/tool_loop.py,
+D3,reaction_expression_embedding_backfill_interval_seconds,待接入,待接入,companion_v2,无后台回填间隔，确缺
+D3,reaction_expression_low_latency_mode,待接入,待接入,companion_v2,需评估时延，确缺
+D4,enable_qq_presence_sync,待接入,已接入,companion_v2/role_work/state/service.py,ONLINE_MODES
+D4,enable_qq_custom_presence_sync,待接入,已接入,companion_v2/delivery/presence.py,
+D4,reactive_poke_back_probability,待接入,已接入,companion_v2/conversation/pokes.py,back_probability
+D4,reactive_poke_back_times,待接入,部分接入,companion_v2/conversation/pokes.py,反戳为单次
+D5,enable_precise_platform_send,待接入,部分接入,companion_v2/conversation/delivery.py,统一走原生端口
+E1,grants,待接入,已接入,companion_v2/identity_policy/object_access.py,CapabilityGrant
+E1,plugin_specific_persona_id,待接入,已接入,companion_v2/identity_policy/personas.py,PersonaBinding
+E1,group_whitelist_ids,待接入,已接入,astrbot_host/group_authority.py,逐群显式授权
+E1,bot_name,待接入,部分接入,companion_v2/identity_policy/personas.py,走宿主与页面展示
+E1,bot_scope_ids,待接入,部分接入,companion_v2/identity_policy/personas.py,target/role 绑定替代
+E1,bot_scope_mode,待接入,部分接入,companion_v2/identity_policy/personas.py,无三选一模式枚举
+E1,enable_multi_persona_mode,待接入,部分接入,astrbot_host/multi_controller.py,多 target×role 达成
+E1,group_access_mode,待接入,部分接入,astrbot_host/multi_settings.py,仅 preview/onebot_group
+E1,group_blacklist_ids,待接入,部分接入,companion_v2/identity_policy/group_audience.py,以授权判定准入
+E1,group_operations,待接入,部分接入,companion_v2/identity_policy/object_access.py,统一 action 注册表
+E1,multi_persona_ids,待接入,部分接入,companion_v2/identity_policy/personas.py,经绑定路由
+E1,photo_generation_allowed_scopes,待接入,部分接入,companion_v2/model_gateway/budget.py,按 scope 记账
+E1,private_user_aliases,待接入,部分接入,companion_v2/identity_policy/directory.py,声明校验+显式绑定
+E1,private_user_delivery_aliases,待接入,部分接入,astrbot_host/multi_authority.py,按原会话身份映射
+E1,public_operations,待接入,部分接入,companion_v2/identity_policy/object_access.py,STANDARD 默认拒绝
+E1,target_platform,待接入,部分接入,companion_v2/adapters/astrbot/staging_config.py,来自解析后 scope
+E1,target_user_ids,待接入,部分接入,astrbot_host/multi_settings.py,target 目录显式绑定
+E1,QZONE_COOKIE,待接入,不适用,无空间发布域,按凭据不外置设计不迁
+E2,COMPANION_MEMORY_PROVIDER_ID,待接入,已接入,companion_v2/memory/reflection.py,memory.reflect 任务卡
+E2,DAILY_PLAN_PROVIDER_ID,待接入,已接入,companion_v2/agenda/planning.py,calendar.plan 任务卡
+E2,DREAM_DIARY_PROVIDER_ID,待接入,已接入,companion_v2/role_work/journal/writing.py,diary/dream 两卡
+E2,model_fallback_overrides,待接入,已接入,companion_v2/model_gateway/management.py,fallback 字段
+E2,model_replacement_rules,待接入,已接入,companion_v2/model_gateway/replacement_rules.py,
+E2,model_token_limit_overrides,待接入,已接入,companion_v2/model_gateway/management.py,max_output_tokens
+E2,EMBEDDING_PROVIDER_ID,待接入,部分接入,companion_v2/model_gateway/embedding.py,在语义服务配置非任务卡
+E2,MAI_STYLE_PROVIDER_ID,待接入,部分接入,companion_v2/expression/style_service.py,由表达学习承担
+E2,NEWS_PROVIDER_ID,待接入,部分接入,companion_v2/proactive/service.py,共用 proactive.compose
+E2,PHOTO_PROMPT_PROVIDER_ID,待接入,部分接入,astrbot_host/model_api.py,image 段配置
+E2,PLUGIN_VISION_PROVIDER_ID,待接入,部分接入,companion_v2/model_gateway/management.py,走能力协商
+E2,SENSITIVE_REPLACEMENT_PROVIDER_ID,待接入,部分接入,companion_v2/model_gateway/service.py,provider fallback
+E2,VOICE_PROMPT_PROVIDER_ID,待接入,部分接入,astrbot_host/model_api.py,voice 段配置
+E2,model_replacement_scope,待接入,部分接入,companion_v2/model_gateway/routing.py,按任务卡生效
+E2,provider_config_mode,待接入,部分接入,companion_v2/model_gateway/routing.py,仅任务卡模式
+E3,enable_group_injection_guard,待接入,已接入,companion_v2/adapters/astrbot/inbound.py,
+E3,enable_group_privacy_guard,待接入,已接入,companion_v2/identity_policy/group_audience.py,
+E3,enable_outbound_secret_redaction,待接入,已接入,companion_v2/sources/privacy.py,redact_text/fields
+E3,enable_framework_error_leak_guard,待接入,部分接入,companion_v2/diagnostics/service.py,失败分类与脱敏投影
+E3,enable_proactive_message_review,待接入,部分接入,companion_v2/proactive/service.py,发送前复核偏好与时效
+E3,enable_sensitive_model_replacement,待接入,部分接入,companion_v2/model_gateway/service.py,fallback_on_refusal
+E3,intercept_astrbot_group_context,待接入,部分接入,companion_v2/adapters/astrbot/inbound.py,自建受众输入
+E3,sensitive_replacement_keywords,待接入,部分接入,companion_v2/model_gateway/replacement_rules.py,语义为路由替换
+E4,enable_balance_awareness,待接入,已接入,companion_v2/proactive/configuration.py,默认关闭
+E4,balance_api_url,待接入,已接入,astrbot_host/service_balance.py,强制 https 禁内嵌凭据
+E4,balance_api_key,待接入,已接入,astrbot_host/service_balance.py,
+E4,balance_api_auth_header,待接入,已接入,astrbot_host/service_balance.py,
+E4,balance_api_auth_scheme,待接入,已接入,astrbot_host/service_balance.py,
+E4,balance_api_custom_headers,待接入,已接入,astrbot_host/service_balance.py,≤8 项与鉴权头互斥
+E4,balance_json_path,待接入,已接入,astrbot_host/service_balance.py,点分路径含数组索引
+E4,balance_total_json_path,待接入,已接入,astrbot_host/service_balance.py,
+E4,balance_used_json_path,待接入,已接入,astrbot_host/service_balance.py,余额=总额−已用
+E4,balance_value_divisor,待接入,已接入,astrbot_host/service_balance.py,分转元
+E4,balance_request_timeout_seconds,待接入,已接入,astrbot_host/service_balance.py,1–10 秒
+E4,balance_check_interval_minutes,待接入,已接入,companion_v2/proactive/configuration.py,60 分钟 5–1440
+E4,balance_low_threshold,待接入,已接入,companion_v2/proactive/configuration.py,默认 10
+E4,balance_critical_threshold,待接入,已接入,companion_v2/proactive/configuration.py,默认 3
+E4,balance_low_percent_threshold,待接入,已接入,companion_v2/proactive/configuration.py,默认 15
+E4,balance_critical_percent_threshold,待接入,已接入,companion_v2/proactive/configuration.py,默认 5
+E4,balance_currency_label,待接入,已接入,companion_v2/proactive/configuration.py,默认元
+E4,balance_include_amount_in_message,待接入,已接入,companion_v2/proactive/configuration.py,默认 false
+E5,storage_backend,待接入,已接入,companion_v2/storage/runtime.py,固定 SQLite 独立数据根
+E5,storage_sqlite_path,待接入,已接入,astrbot_host/controller.py,数据根下 runtime/
+E5,external_image_download_proxy,待接入,部分接入,astrbot_host/model_api.py,image 段有 proxy
+E5,external_image_download_use_environment_proxy,待接入,部分接入,astrbot_host/service_balance.py,适配器固定 trust_env=False
+E5,page_font_family,待接入,部分接入,pages/陪伴小屋/app.js,前端样式非配置键
+E5,page_theme,待接入,部分接入,pages/陪伴小屋/app.js,浏览器显示偏好
+E5,enable_standalone_webui,待接入,不适用,并入 Dashboard 唯一入口,
+E5,standalone_webui_access_token,待接入,不适用,同上,鉴权走已认证操作者
+E5,standalone_webui_host,待接入,不适用,同上,
+E5,standalone_webui_port,待接入,不适用,同上,
+E5,standalone_webui_session_ttl_hours,待接入,不适用,同上,

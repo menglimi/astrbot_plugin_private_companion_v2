@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta name="companion-api-host" content="astrbot_plugin_private_companion_v2">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#eef1f8">
+  <meta name="color-scheme" content="light">
+  <title>我会永远陪着你 V2.0 · 陪伴小屋</title>
+  <script>
+    /* 主题引导：在样式生效前应用已保存的显示维度，避免刷新时的主题闪烁。
+       与 product-page.js 的 appearance 存储保持同一组键，读取失败时静默用默认值。
+
+       这里刻意内联、不引 theme.js：引导必须在样式生效前跑完，多一个网络往返
+       就会先画一帧默认主题再跳过去。下面是 theme.js 注册表的等价副本，
+       两份必须一致——tests/test_theme_registry.cjs 会比对，改一处要改两处。 */
+    (function(){
+      try{
+        var THEMES={courtyard:"day",dawn:"dawn",dusk:"dusk",night:"night",walnut:"dusk",contrast:"day"};
+        var FALLBACK="courtyard";
+        var LEGACY={mist:"dawn",grove:"courtyard",coral:"dusk",light:"dawn",dark:"night"};
+        var root=document.documentElement;
+        var read=function(key,allowed,fallback){
+          var value=localStorage.getItem(key);
+          return allowed.indexOf(value)>=0?value:fallback;
+        };
+        var theme=localStorage.getItem("companion-v2-theme")||"";
+        theme=LEGACY[theme]||theme;
+        root.dataset.theme=Object.prototype.hasOwnProperty.call(THEMES,theme)?theme:FALLBACK;
+        root.dataset.density=read("companion-v2-density",["compact","standard","roomy"],"standard");
+        root.dataset.radius=read("companion-v2-radius",["sharp","standard","round"],"standard");
+        root.dataset.typeScale=read("companion-v2-type-scale",["s","m","l","xl"],"m");
+        root.dataset.motion=read("companion-v2-motion",["full","low","off"],"full");
+        /* 主题已在样式生效前写好，可以放行首屏。
+           在此之前 body 保持 visibility:hidden，不出现默认主题一闪。 */
+        root.dataset.themeReady="";
+      }catch(_){document.documentElement.dataset.themeReady="";}
+    })();
+  </script>
+  <script>
+    /* 先随机挑一张启动动图。真正的 src 放在 body 里的 inert template 中，
+       让宿主页面服务能把它改写成带插件路径和 asset_token 的地址；不能在这里
+       直接给 img.src 写相对路径，因为内联脚本里的字符串不会经过宿主改写。 */
+    (function(){
+      var root=document.documentElement;
+      var reduceMotion=root.dataset.motion==="low"||root.dataset.motion==="off"
+        ||(window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+      if(reduceMotion)return;
+      var choices=[
+        "assets/room-loading-tea-coffee.gif?v=boot-gif-once-20261001",
+        "assets/room-loading-mug.gif?v=boot-gif-once-20261001"
+      ];
+      root.dataset.roomBootGif=choices[Math.floor(Math.random()*choices.length)];
+    })();
+  </script>
+  <link rel="stylesheet" href="tokens.css?v=theme-material-20261001">
+  <link rel="stylesheet" href="styles.css?v=room-side-workbench-20261001">
+  <link rel="stylesheet" href="tokens-bridge.css?v=scale-system-20260930">
+  <link rel="stylesheet" href="memory-page.css?v=memory-config-ownership-20261001">
+  <link rel="stylesheet" href="contact-page.css?v=contact-relationship-link-20261001">
+  <link rel="stylesheet" href="learning-page.css?v=scale-system-20260930">
+  <link rel="stylesheet" href="state-page.css?v=state-config-ux-20261001">
+  <link rel="stylesheet" href="reply-page.css?v=reply-voice-20260926">
+  <link rel="stylesheet" href="expression-config.css?v=expression-domain-views-20261001">
+  <link rel="stylesheet" href="config-editor.css?v=config-ownership-20261001">
+  <link rel="stylesheet" href="workbench.css?v=word-list-editor-20261001">
+  <!-- 配置控制台外壳。
+       console.css 定义 .console / .console-section / .console-section-head /
+       .console-row / .console-mount-head 等管理页的全部结构样式，
+       但它此前**从未被这里引用**——navigation.css 里那句「配置页外壳已迁到
+       console.css」说明迁移做了一半就断了。真实页面里这些 class 一个规则都
+       没有，十几个管理页于是渲染成浏览器默认样式堆叠的裸 HTML：标题、说明、
+       控件同字号同灰度一路铺下来，就是用户说的「一坨文字」。
+       预览构建器按这里的引用收集样式，所以漏引时预览也同样无样式，
+       两边表现一致，一直没被察觉。 -->
+  <link rel="stylesheet" href="console.css?v=page-lead-two-20260930">
+  <link rel="stylesheet" href="output-page.css?v=output-compact-r2-20261001">
+  <link rel="stylesheet" href="decision-page.css?v=reply-decision-split-20261001">
+  <link rel="stylesheet" href="action-page.css?v=qzone-extension-20261001">
+<link rel="stylesheet" href="home.css?v=home-sidebar-20260930">
+  <link rel="stylesheet" href="models-page.css?v=model-workbench-20261001">
+  <link rel="stylesheet" href="product-page.css?v=no-host-state-20260929">
+  <link rel="stylesheet" href="semantic-page.css?v=reality-eight-scoped-actions-20261001">
+  <link rel="stylesheet" href="setup-guide.css?v=mode-bind-model-fix-20261001">
+  <link rel="stylesheet" href="backup-page.css?v=scale-tokens-20260930">
+  <link rel="stylesheet" href="maintenance-page.css?v=token-cache-maintenance-20261001-prompt-v2">
+  <link rel="stylesheet" href="navigation.css?v=console-20260926">
+  <link rel="stylesheet" href="appearance-page.css?v=theme-material-r2-20261001">
+  <link rel="stylesheet" href="entrance.css?v=room-boot-gif-once-20261001">
+  <!-- 外壳布局：小屋常驻 + 左栏 + 右栏 + 下方面板。必须在 styles.css 之后，
+       它覆盖旧的固定定位左栏与顶栏栅格。 -->
+  <link rel="stylesheet" href="shell.css?v=sidebar-scope-20260930">
+  <link rel="stylesheet" href="self-page.css?v=self-voice-canon-20261001">
+  <link rel="stylesheet" href="theme-skins.css?v=theme-material-20261001">
+  <!-- 小屋就绪闸门（见 tokens.css）。
+       体素包 677 KB，它是首屏唯一一个「到了才能画」的资源：在它解析完之前，
+       app.js 的 mountStage() 不会执行，.room-stage 是个空盒子。所以在这一行
+       上挂 onload 只记下资源已到，并留一个 7 秒兜底——加载失败时不能让页面一直白着，
+       到期放行，由 mountStage() 的 catch 走降级视图。
+       onload 必须写在这一行本身：defer 脚本按文档顺序执行，换成在末尾统一
+       绑定的话，包可能在监听挂上之前就已经加载完了（缓存命中时几乎必然如此），
+       那放行就永远等不到。 -->
+  <!-- 页面桥 SDK 不在这里静态引入。
+       `AstrBotPluginPage` 由宿主的页面桥脚本定义，但不同宿主对它的扩展式
+       不一样：有的在重写 HTML 时自动补这条脚本，有的要页面自己引。静态引
+       一遍会在自动注入的宿主里加载两次。
+       所以改由 product-page.js 的 requestBridgeSdk() 处理：先等，等不到再自己
+       拉进来，两种情况都成立。见那里的注释。
+       注意：这里**不能写出桥脚本的完整路径**。宿主注入前会先判断 HTML 里有没有
+       这个字符串，有就跳过注入；而它注入的那条带 asset_token，页面自己猜的候选
+       地址不带，端点无 token 直接 401。写在这里会让宿主跳过注入、页面又拉不到，
+       整页连不上桥。 -->
+  <!-- 体素包 677 KB，是首屏唯一「到了才画得出小屋」的资源：在它解析完之前
+       mountStage() 不会执行，入场序列也就无从开始。预声明让它与 HTML 同时
+       开始下载，而不是排在 lucide 之后才轮到——代价只是多一条 link。
+       地址（含 ?v=）必须与下面那条 script 完全一致，否则会被当成两个资源，
+       反而下载两遍。 -->
+  <link rel="preload" href="assets/voxel-room.js?v=home-v2-entrance-20260930" as="script">
+  <script defer src="assets/lucide.min.js"></script>
+  <script defer src="assets/voxel-room.js?v=home-v2-entrance-20260930" onload="document.documentElement.dataset.roomAsset=''" onerror="document.documentElement.dataset.roomAsset=''"></script>
+  <script>
+    /* 兜底放行。
+     *
+     * 普通开场约 2830ms，状态页搭建约 3830ms；这里留 7 秒余量。
+     *
+     * 注意「放行」的语义已经在 2026-09-30 改过：它不再由入场**结束**触发，
+     * 而是由入场**启动**触发（见 app.js 的 startEntrance）。现在这条只在
+     * 入场根本没启动时兜底——体素包拦截、尺寸不可测、脚本缺失——那时
+     * 页面已经在启动幕上停着了，所以要给宽，宁可多等两秒也不要卡在看不见
+     * 的界面上。
+     *
+     * 正常路径不走这里：入场启动后 app.js 的 ready 回调会放行，
+     * settleEntrance() 只负责收尾并再次幂等写入。
+     * 这条只在入场根本没启动（体素包没到、尺寸不可测、入口脚本缺失）时兜底，
+     * 所以宁可给宽——卡在一个看不见的界面上比多等两秒糟得多。 */
+    setTimeout(function(){document.documentElement.dataset.roomReady="";},7000);
+  </script>
+  <script defer src="theme.js?v=theme-material-20261001"></script>
+  <!-- 外壳状态：选中的家具与配置分区。app.js 依赖它决定下方渲染什么，
+       所以在 app.js 之前。 -->
+  <script defer src="shell.js?v=shell-rebuild-20260929"></script>
+  <!-- 入场序列：只驱动体素控制器的公开接口，必须在 app.js 之前就位。 -->
+  <script defer src="entrance.js?v=entrance-state-build-20261001"></script>
+  <script defer src="config-snapshot.js?v=config-aligned-20260925"></script>
+  <script defer src="workspace-bundle.js?v=contacts-split-20260930"></script>
+  <script defer src="home-sidebar.js?v=text-cleanup-20260930"></script>
+  <script defer src="product-page.js?v=text-cleanup-20260930"></script>
+  <!-- 首次使用引导：依赖 product-page.js 的桥接与错误翻译。 -->
+  <script defer src="setup-guide.js?v=mode-bind-model-fix-20261001"></script>
+  <script defer src="semantic-page.js?v=text-cleanup-20260930"></script>
+  <script defer src="perception-page.js?v=perception-camera-consent-20261001"></script>
+  <script defer src="perception-native-page.js?v=location-placeholder-generic-20261001"></script>
+  <script defer src="perception-overview.js?v=perception-camera-runtime-20261001"></script>
+  <script defer src="reality-access.js?v=reality-eight-scoped-actions-20261001"></script>
+  <script defer src="screen-access.js?v=screen-native-consent-20261001"></script>
+  <script defer src="room-editor.js?v=room-side-workbench-20261001"></script>
+  <script defer src="memory-page.js?v=text-cleanup-20260930"></script>
+  <script defer src="contact-page.js?v=contact-relationship-link-20261001"></script>
+  <script defer src="learning-page.js?v=text-cleanup-20260930"></script>
+  <script defer src="state-maintenance.js?v=state-config-ux-20261001"></script>
+  <script defer src="state-contact.js?v=text-cleanup-20260930"></script>
+  <script defer src="calendar-editor.js?v=text-cleanup-20260930"></script>
+  <script defer src="state-editor.js?v=state-config-ux-20261001"></script>
+  <script defer src="state-page.js?v=state-config-ux-20261001"></script>
+  <script defer src="reply-page.js?v=config-ownership-20261001"></script>
+  <!-- 工作台内核必须先于使用它的编辑器加载（config-editor / expression-page
+       都依赖 CompanionWorkbench）。 -->
+  <script defer src="workbench-page.js?v=plain-words-20260930"></script>
+  <!-- 记忆策略位于记忆页的独立视图。 -->
+  <script defer src="memory-settings-section.js?v=memory-config-ownership-20261001"></script>
+  <script defer src="config-editor.js?v=role-voice-canon-20261001"></script>
+  <script defer src="role-profile-draft.js?v=role-profile-draft-20261001"></script>
+  <script defer src="decision-page.js?v=decision-context-20261001"></script>
+  <script defer src="expression-page.js?v=text-cleanup-20260930"></script>
+  <script defer src="models-page.js?v=native-image-mask-20261001"></script>
+  <script defer src="image-materials-page.js?v=native-image-materials-20261001"></script>
+  <script defer src="maintenance-page.js?v=token-cache-maintenance-20261001-prompt-v2"></script>
+  <script defer src="appearance-page.js?v=theme-material-r2-20261001"></script>
+  <!-- 备份与还原：后端 backup_api.py 有六条真实路由，而这一页此前没有任何
+       入口加载它——资料与维护页的挂载点永远停在「正在读取快照列表…」。 -->
+  <script defer src="backup-page.js?v=text-cleanup-20260930"></script>
+  <script defer src="app.js?v=qzone-extension-20261001"></script>
+</head>
+<body>
+  <!-- 启动幕：首屏闸门（tokens.css 的 data-room-ready）在体素包解析完之前
+       一直关着，那段时间 body 是 visibility:hidden。这一层靠自己的
+       visibility:visible 在闸门关闭期间照样显示，把空白等待填成
+       「正在打开小屋」。写死在 HTML 里而不是由 JS 创建，是为了让它跟着
+       文档一起到达——由脚本补的话，它自己也要等脚本，等于没补。
+       样式见 entrance.css 的 .room-boot。 -->
+  <div class="room-boot" aria-hidden="true">
+    <div class="room-boot-visual" aria-hidden="true">
+      <span class="room-boot-glow"></span>
+      <img id="roomBootGif" class="room-boot-gif" alt="" hidden>
+      <!-- template 内的静态 src 会由宿主改写；template 本身不会提前请求两张图。 -->
+      <template id="roomBootGifTea" data-room-boot-gif="assets/room-loading-tea-coffee.gif?v=boot-gif-once-20261001">
+        <img class="room-boot-gif" src="assets/room-loading-tea-coffee.gif?v=boot-gif-once-20261001" alt="">
+      </template>
+      <template id="roomBootGifMug" data-room-boot-gif="assets/room-loading-mug.gif?v=boot-gif-once-20261001">
+        <img class="room-boot-gif" src="assets/room-loading-mug.gif?v=boot-gif-once-20261001" alt="">
+      </template>
+    </div>
+    <span class="room-boot-text">正在打开小屋…</span>
+  </div>
+  <script>
+    (function(){
+      var source=document.documentElement.dataset.roomBootGif;
+      var image=document.getElementById("roomBootGif");
+      if(!source||!image)return;
+      var templates=document.querySelectorAll("template[data-room-boot-gif]");
+      var selected=null;
+      for(var i=0;i<templates.length;i++){
+        if(templates[i].getAttribute("data-room-boot-gif")===source){
+          selected=templates[i];
+          break;
+        }
+      }
+      var candidate=selected&&selected.content&&selected.content.firstElementChild;
+      if(!candidate)return;
+      /* candidate.src 已经是宿主改写后的绝对地址；用它预载，避免再次把
+         未改写的相对字符串交给浏览器。随后克隆同一节点，复用缓存响应。 */
+      var preload=document.createElement("link");
+      preload.rel="preload";
+      preload.as="image";
+      preload.href=candidate.src;
+      preload.setAttribute("fetchpriority","low");
+      document.head.appendChild(preload);
+      var clone=candidate.cloneNode(true);
+      clone.id=image.id;
+      clone.hidden=false;
+      image.replaceWith(clone);
+    })();
+  </script>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <!-- 外壳栅格。小屋在 .stage-region 里，是 #main 的兄弟而不是它的内容——
+       首页内的面板切换（点家具、看家具目录）因此不会重挂 3D 场景。
+       选了左侧某一项配置分区时小屋缩成窄条退到背景，但仍不销毁。 -->
+  <div id="homeShell">
+    <nav class="rail" aria-label="插件导航">
+      <a href="#life" class="rail-brand" id="railBrand" aria-label="陪伴小屋，回到小屋">
+        <span class="brand-symbol"><i data-lucide="house"></i></span>
+        <span>陪伴小屋<small>V2.0</small></span>
+      </a>
+      <div id="shellNav" class="shell-nav"></div>
+      <div class="rail-foot">
+        <button class="shell-nav-link" id="searchButton" aria-label="搜索功能与内容" title="搜索 · Ctrl / ⌘ K"><i data-lucide="search"></i><span>搜索</span></button>
+        <button class="shell-nav-link" id="appearanceButton" aria-label="外观与设置" title="外观与设置"><i data-lucide="palette"></i><span>外观与设置</span></button>
+      </div>
+    </nav>
+    <header class="topbar">
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <div class="global-tools">
+        <span class="preview-badge" data-host-badge role="status" aria-live="polite"><span class="host-dot"></span><span class="host-label">正在读取宿主状态…</span></span>
+      </div>
+    </header>
+    <section id="productScope" class="product-scope" aria-label="当前对象与角色" hidden></section>
+    <div class="shell-body">
+      <section class="stage-region" aria-label="小屋">
+        <div class="stage-bar">
+          <h2><i data-lucide="box"></i>小屋</h2>
+          <span class="stage-spacer"></span>
+          <button id="backHome" class="away-only" data-shell-home title="回到小屋"><i data-lucide="house"></i>回到小屋</button>
+        </div>
+        <div class="room-stage" id="stageScene">
+          <div class="voxel-room" data-voxel-room role="group" aria-label="可旋转、可点选家具的体素小屋"></div>
+          <!-- 镜头复位与家具布置常驻场景右上角：它们只作用于小屋本身，
+               放进容器才不会在速览条移到下方后显得无处安放。 -->
+          <div class="stage-overlay home-only">
+            <button class="stage-overlay-button" data-voxel-reset title="镜头复位，回到小屋全景"><i data-lucide="rotate-ccw"></i>重置</button>
+            <button class="stage-overlay-button" data-detail="arrange" title="布置房间"><i data-lucide="armchair"></i>布置</button>
+          </div>
+          <div class="voxel-hint home-only"><i data-lucide="mouse"></i>拖动旋转 · 滚轮缩放 · 点击家具查看</div>
+        </div>
+        <div class="stage-furniture-strip home-only" id="stageFurniture" aria-label="小屋家具"></div>
+      </section>
+      <aside class="shell-side" id="shellSide" aria-label="当前状态与日程"></aside>
+      <section class="shell-panel" id="shellPanel" aria-label="内容面板"></section>
+    </div>
+  </div>
+  <!-- #main 保留：既有的路由渲染（人物、记忆、专题配置）仍然写进这里，
+       它现在是小屋下方面板区的另一处落点。 -->
+  <main id="main" tabindex="-1" hidden></main>  <dialog id="detailDialog" class="detail-dialog" aria-labelledby="dialogTitle"><div id="dialogContent"></div></dialog>
+  <dialog id="searchDialog" class="search-dialog" aria-label="搜索功能与内容">
+    <div class="search-field"><i data-lucide="search"></i><input id="globalSearch" type="search" placeholder="搜索功能与设置…" aria-label="搜索功能与内容"><button class="icon-button" data-close-search aria-label="关闭搜索"><i data-lucide="x"></i></button></div>
+    <div id="searchResults" class="search-results"></div><div class="search-hint"><kbd>Esc</kbd> 关闭</div>
+  </dialog>
+  <dialog id="navigationDialog" class="navigation-dialog" aria-labelledby="navigationTitle">
+    <header class="navigation-dialog-head"><h1 id="navigationTitle">全部功能</h1><button class="icon-button" data-close-navigation aria-label="关闭导航"><i data-lucide="x"></i></button></header>
+    <div id="navigationList" class="navigation-list"></div>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>关系与记忆 · 陪伴</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="../../embedded-bridge.js" defer></script>
+  <script src="app.js?v=relationship-connection-20260924" defer></script>
+</head>
+<body>
+  <main>
+    <header class="heading">
+      
+      <button id="refresh" class="secondary" type="button">刷新记录</button>
+    </header>
+    <section class="scope" aria-label="当前管理范围">
+      <div><span>当前角色</span><strong id="role">—</strong></div>
+      <div><span>关系对象</span><strong id="subject">—</strong></div>
+      <div><span>当前会话</span><strong id="scope">—</strong></div>
+      <div><span>操作人</span><strong id="operator">—</strong></div>
+    </section>
+    
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <div class="workspace">
+      <section class="inventory" aria-labelledby="inventory-heading">
+        <div class="section-head"><h2 id="inventory-heading">关系记录</h2><span id="count" class="muted"></span></div>
+        <label class="filter-label" for="state">筛选状态</label>
+        <select id="state"><option value="">全部状态</option><option value="proposed">待审阅</option>
+          <option value="reviewed">已审阅</option><option value="adopted">已采用</option><option value="retracted">已撤回</option></select>
+        <div id="list" class="record-list" aria-busy="true"><p class="empty">正在读取关系记录…</p></div>
+        <div class="pagination"><button id="previous" type="button" class="secondary" disabled>上一页</button>
+          <span id="page-number">第 1 页</span><button id="next" type="button" class="secondary" disabled>下一页</button></div>
+      </section>
+      <section id="detail" class="detail" aria-labelledby="detail-heading">
+        <div class="placeholder"><span class="placeholder-mark" aria-hidden="true">↗</span>
+          <h2 id="detail-heading">选择一条记录</h2></div>
+      </section>
+    </div>
+    
+  </main>
+  <dialog id="editor" aria-labelledby="dialog-heading">
+    <form id="change-form">
+      <div class="section-head"><h2 id="dialog-heading">更正理解</h2><button id="close-dialog" type="button" class="quiet">关闭</button></div>
+      <p id="dialog-description" class="muted"></p>
+      <div id="text-fields"><label for="interpretation">完整的关系理解</label>
+        <textarea id="interpretation" rows="7" maxlength="16384"></textarea>
+        </div>
+      <p id="dialog-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="cancel-dialog" type="button" class="secondary">取消</button>
+        <button id="confirm" type="submit" class="primary">保存更正</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

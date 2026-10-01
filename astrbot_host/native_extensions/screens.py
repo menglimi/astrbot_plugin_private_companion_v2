@@ -1,0 +1,101 @@
+"""Adopt one native desktop capture into Screen-owned V2 originals."""
+
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+
+from companion_v2.conversation.external_tools import ExternalToolResponse
+from companion_v2.execution.models import TaskError, digest, encode, require
+from companion_v2.foundation.refs import AssetRef, ScopeKind, SourceRef, VersionRef
+from companion_v2.screen.models import (
+    ClockQuality, ScreenCapture, ScreenCaptureRef, ScreenCoverage, ScreenMediaKind,
+)
+from companion_v2.screen.originals import ScreenImage
+from companion_v2.screen.repositories import ScreenRepository
+from companion_v2.sources.models import SourceRecord
+
+
+ACTION = "screen.capture"
+CAPTURE_TTL = timedelta(minutes=30)
+
+
+class ScreenAdopter:
+    def __init__(self, registry, application):
+        self.registry = registry
+        self.application = application
+        self.screens = ScreenRepository(application.runtime, authorizer=application.tasks.identity)
+
+    @staticmethod
+    def reference(invocation, observed_at):
+        token = digest(invocation.invocation_id)
+        scope = invocation.context.scope
+        source_id = "screen-source-" + token
+        asset_id = "screen-asset-" + token
+        return ScreenCaptureRef("screen-capture-" + token,
+            SourceRef(source_id, "screen", scope, VersionRef(source_id, 1),
+                      observed_at, observed_at + CAPTURE_TTL),
+            AssetRef(asset_id, "screen", scope, VersionRef(asset_id, 1), "pending"))
+
+    def preflight(self, invocation):
+        if invocation.context.scope.kind is not ScopeKind.PRIVATE:
+            raise TaskError("screen_scope_denied", "screen capture requires the original private conversation")
+        reference = self.reference(invocation, self.registry.now())
+        return reference, require(self.screens.admit_capture(reference,
+            role=invocation.context.role_binding.role, resolved=invocation.context.actor,
+            observed_at=self.registry.now()))
+
+    def recheck(self, invocation, reference, stamp):
+        current = require(self.screens.admit_capture(reference,
+            role=invocation.context.role_binding.role, resolved=invocation.context.actor,
+            observed_at=self.registry.now()))
+        if current != stamp:
+            raise TaskError("screen_admission_changed", "screen access changed during the original device call")
+
+    def adopt(self, invocation, native, reference, stamp):
+        if native.state != "succeeded" or len(native.artifacts) != 1:
+            raise TaskError("screen_artifact_unavailable", "one original screenshot is required")
+        artifact = native.artifacts[0]
+        result = native.result
+        if (type(result) is not dict or set(result) != {
+                "device_id", "surface", "captured_at", "clock_quality", "window_title", "gaps"}
+                or type(result["gaps"]) is not list or len(result["gaps"]) > 16
+                or any(type(gap) is not str for gap in result["gaps"])
+                or result["window_title"] is not None and type(result["window_title"]) is not str):
+            raise TaskError("screen_artifact_invalid", "screenshot coverage differs from the native receipt")
+        try:
+            image = ScreenImage(artifact.mime_type, artifact.content)
+            if image.content_hash != artifact.content_hash or len(image.content) != artifact.size_bytes:
+                raise ValueError("artifact content changed")
+            captured_at = datetime.fromisoformat(result["captured_at"])
+            coverage = ScreenCoverage(result["surface"],
+                ("image.viewport", "window.title") if result["window_title"] else ("image.viewport",),
+                tuple(result["gaps"]), ClockQuality(result["clock_quality"]))
+            now = self.registry.now()
+            bound = ScreenCaptureRef(reference.capture_id, reference.source,
+                AssetRef(reference.asset.asset_id, "screen", reference.asset.scope,
+                         reference.asset.version, image.content_hash))
+            capture = ScreenCapture(bound, result["device_id"], ScreenMediaKind.IMAGE,
+                coverage, captured_at, now, now)
+        except (ValueError, TypeError, KeyError) as error:
+            raise TaskError("screen_artifact_invalid", "screenshot cannot be decoded from its native receipt") from error
+        self.recheck(invocation, reference, stamp)
+        require(self.screens.publish_image(capture, image, audience=invocation.context.audience,
+            window_title=result["window_title"], role=invocation.context.role_binding.role,
+            resolved=invocation.context.actor, observed_at=now, expected_admission_stamp=stamp))
+        # The adopted original is the only input of the bounded interpretation chain.
+        # Queueing it here keeps the model answer a separate supervised task; a window
+        # that has not enabled interpretation is skipped inside the service.
+        interpretation = getattr(self.application, "screen_interpretation", None)
+        if interpretation is not None:
+            interpretation.submit(invocation.context, bound, purpose="reply",
+                                  parent_task_id=invocation.parent_task_id)
+        payload = encode({"native": native.metadata(invocation.descriptor.binding),
+                          "screen_capture": {"reference": asdict(bound),
+                                             "content_hash": image.content_hash}})
+        source_id = "native:" + invocation.invocation_id
+        source = SourceRecord(SourceRef(source_id, "screen", invocation.context.scope,
+            VersionRef(invocation.invocation_id, 1), now), invocation.context.audience,
+            digest(payload), payload)
+        return ExternalToolResponse(invocation.invocation_id, invocation.context.key,
+            invocation.arguments_hash, invocation.descriptor.binding, native.state, native.effect,
+            source=source, operation_id=native.operation_id, receipt_ref=native.receipt_ref,
+            dependencies=(bound.source,))

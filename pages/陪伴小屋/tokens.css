@@ -1,0 +1,441 @@
+/* 陪伴小屋语义令牌层
+   单一变量源：主题、密度、圆角、字号、动效全部在此声明。
+
+   色板取向：界面色取自体素小屋本身的材料——木作、草地、黄昏、夜色——
+   而不是从通用仪表盘继承的冷紫。这样界面看起来像屋子的一部分，
+   而不是叠在屋子上面的一块玻璃。
+
+   每套主题必须声明全部 --t-* 变量。令牌被组件直接引用，
+   漏掉一个不会回落成默认值，而是变成无效值（继承失败即透明/黑）。
+   完整性由 tools/audit_theme_tokens.py 校验。 */
+
+/* === 主题色板 ===
+   六套，按明暗分组，每套对应小屋的一个时段或一种陈设风格。
+   :root 不带 data-theme 时用庭院兜底，避免令牌为空。
+
+   每个色板写两条选择器：一条 :root[data-theme=...]（整站生效），
+   一条 [data-theme=...]（同块作用域）。后者是给主题色卡用的——
+   色卡预览元素带上 data-theme 就能取到那套主题的真实色值，
+   于是「色卡里画出来的」就是「选中后真实的」，不需要另抄一份色值。
+   两条选择器必须成对出现，audit_theme_tokens.py 会核对两边的令牌集合一致。 */
+:root,
+:root[data-theme="dawn"],
+[data-theme="dawn"],
+:root[data-theme="light"]{
+  /* 晨雾 · 清晨的浅暖米白，木色点缀 */
+  --t-canvas:#f4f1ea;
+  --t-surface:#fffdf8;
+  --t-surface-soft:#f9f6ef;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#ece7dc;
+  --t-veil:rgba(255,253,248,.72);
+  --t-text:#3b3730;
+  --t-text-strong:#282520;
+  --t-text-soft:#6d675b;
+  --t-text-faint:#8c857a;
+  --t-text-invert:#fffdf8;
+  --t-accent:#9a6f45;
+  --t-accent-hover:#7d5936;
+  --t-accent-quiet:#f2e8d9;
+  --t-accent-ink:#7a5636;
+  --t-accent-solid:#8a6540;
+  --t-accent-solid-hover:#725235;
+  --t-on-solid:#fffdf8;
+  --t-line:rgba(120,105,85,.16);
+  --t-line-firm:rgba(120,105,85,.28);
+  --t-ok:#5f7f52;
+  --t-ok-quiet:#eaf0e3;
+  --t-ok-ink:#4e6a43;
+  --t-warn:#a8802f;
+  --t-warn-quiet:#f8efda;
+  --t-warn-ink:#87661f;
+  --t-risk:#a86055;
+  --t-risk-quiet:#f7e9e5;
+  --t-risk-ink:#8a4c43;
+  --t-focus:rgba(154,111,69,.26);
+  --t-shadow:0 8px 28px rgba(96,80,60,.07);
+  --t-shadow-lift:0 14px 36px rgba(96,80,60,.13);
+  --t-brand:#a87d52;
+  /* 场景联动：界面用晨光时，小屋也走清晨光照 */
+  --t-scene-light:dawn;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:linear-gradient(90deg,color-mix(in srgb,var(--t-accent) 8%,transparent) 1px,transparent 1px),
+    repeating-linear-gradient(0deg,transparent 0 31px,color-mix(in srgb,var(--t-accent) 5%,transparent) 31px 32px);
+  --skin-canvas-size:40px 100%,auto;
+  --skin-r-2xs:2px;--skin-r-xs:5px;--skin-r-sm:8px;--skin-r-md:11px;--skin-r-lg:15px;--skin-r-xl:20px;
+}
+
+:root[data-theme="courtyard"],
+[data-theme="courtyard"]{
+  /* 庭院 · 日间的清爽草绿与天光，是默认主题 */
+  --t-canvas:#eef3ec;
+  --t-surface:#fdfefb;
+  --t-surface-soft:#f5f9f3;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#e3ebe0;
+  --t-veil:rgba(253,254,251,.72);
+  --t-text:#333a33;
+  --t-text-strong:#212822;
+  --t-text-soft:#616b60;
+  --t-text-faint:#828c80;
+  --t-text-invert:#fdfefb;
+  --t-accent:#4a7c50;
+  --t-accent-hover:#3a6540;
+  --t-accent-quiet:#e6efe4;
+  --t-accent-ink:#3b6541;
+  --t-accent-solid:#46754c;
+  --t-accent-solid-hover:#375e3d;
+  --t-on-solid:#fdfefb;
+  --t-line:rgba(74,90,74,.14);
+  --t-line-firm:rgba(74,90,74,.26);
+  --t-ok:#4a7c50;
+  --t-ok-quiet:#e4efe2;
+  --t-ok-ink:#3b6541;
+  --t-warn:#9c7422;
+  --t-warn-quiet:#f7f0dc;
+  --t-warn-ink:#7d5c17;
+  --t-risk:#a5524a;
+  --t-risk-quiet:#f7e9e6;
+  --t-risk-ink:#874139;
+  --t-focus:rgba(74,124,80,.24);
+  --t-shadow:0 8px 28px rgba(58,80,60,.06);
+  --t-shadow-lift:0 14px 36px rgba(58,80,60,.12);
+  --t-brand:#57875d;
+  --t-scene-light:day;
+  --skin-heading-font:"MiSans","Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  --skin-canvas-pattern:linear-gradient(90deg,transparent 0 63px,color-mix(in srgb,var(--t-accent) 5%,transparent) 63px 64px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:3px;--skin-r-xs:7px;--skin-r-sm:10px;--skin-r-md:14px;--skin-r-lg:19px;--skin-r-xl:26px;
+}
+
+:root[data-theme="dusk"],
+[data-theme="dusk"]{
+  /* 暮色 · 偏深暖的琥珀与陶土，傍晚 */
+  --t-canvas:#faf1e8;
+  --t-surface:#fffaf4;
+  --t-surface-soft:#fbf4ec;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#efe0d3;
+  --t-veil:rgba(255,250,244,.74);
+  --t-text:#453831;
+  --t-text-strong:#312721;
+  --t-text-soft:#7a685e;
+  --t-text-faint:#9b887c;
+  --t-text-invert:#fffaf4;
+  --t-accent:#b85f42;
+  --t-accent-hover:#9b4b32;
+  --t-accent-quiet:#fae5da;
+  --t-accent-ink:#964b33;
+  --t-accent-solid:#a8553b;
+  --t-accent-solid-hover:#8d452f;
+  --t-on-solid:#fffaf4;
+  --t-line:rgba(120,88,70,.16);
+  --t-line-firm:rgba(120,88,70,.28);
+  --t-ok:#5b7f5c;
+  --t-ok-quiet:#e9f0e5;
+  --t-ok-ink:#4a6a4b;
+  --t-warn:#a8792b;
+  --t-warn-quiet:#f9eed8;
+  --t-warn-ink:#89601d;
+  --t-risk:#ab4f45;
+  --t-risk-quiet:#fae7e4;
+  --t-risk-ink:#8d3f36;
+  --t-focus:rgba(184,95,66,.24);
+  --t-shadow:0 8px 28px rgba(110,74,54,.08);
+  --t-shadow-lift:0 14px 36px rgba(110,74,54,.14);
+  --t-brand:#c26c4d;
+  --t-scene-light:dusk;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(135deg,transparent 0 11px,color-mix(in srgb,var(--t-accent) 4%,transparent) 11px 12px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:2px;--skin-r-xs:4px;--skin-r-sm:7px;--skin-r-md:10px;--skin-r-lg:14px;--skin-r-xl:18px;
+}
+
+:root[data-theme="night"],
+[data-theme="night"],
+:root[data-theme="dark"],
+[data-theme="dark"]{
+  /* 夜读 · 低照度靛蓝与月白，夜间查看 */
+  --t-canvas:#15171f;
+  --t-surface:#22252f;
+  --t-surface-soft:#1c1f28;
+  --t-surface-raised:#282c38;
+  --t-surface-sunken:#181a22;
+  --t-veil:rgba(28,30,39,.82);
+  --t-text:#e5e6ec;
+  --t-text-strong:#f5f5f9;
+  --t-text-soft:#a5a8b8;
+  --t-text-faint:#7b7f90;
+  --t-text-invert:#171920;
+  --t-accent:#93a8d8;
+  --t-accent-hover:#7b92c8;
+  --t-accent-quiet:#252a3a;
+  --t-accent-ink:#b3c3e8;
+  --t-accent-solid:#61749f;
+  --t-accent-solid-hover:#7b92c8;
+  --t-on-solid:#12141b;
+  --t-line:rgba(255,255,255,.10);
+  --t-line-firm:rgba(255,255,255,.20);
+  --t-ok:#6fbf9a;
+  --t-ok-quiet:#1c3029;
+  --t-ok-ink:#87d0ad;
+  --t-warn:#d9ae6d;
+  --t-warn-quiet:#312818;
+  --t-warn-ink:#e6c287;
+  --t-risk:#d18f98;
+  --t-risk-quiet:#301f23;
+  --t-risk-ink:#dda1aa;
+  --t-focus:rgba(147,168,216,.30);
+  --t-shadow:0 10px 26px rgba(0,0,0,.32);
+  --t-shadow-lift:0 14px 32px rgba(0,0,0,.46);
+  --t-brand:#8b9ed0;
+  --t-scene-light:night;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(0deg,transparent 0 35px,color-mix(in srgb,var(--t-accent) 5%,transparent) 35px 36px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:2px;--skin-r-xs:4px;--skin-r-sm:7px;--skin-r-md:10px;--skin-r-lg:14px;--skin-r-xl:18px;
+}
+
+:root[data-theme="walnut"],
+[data-theme="walnut"]{
+  /* 深林 · 胡桃木与苔绿的深色，暖而稳 */
+  --t-canvas:#1d1a16;
+  --t-surface:#2a2620;
+  --t-surface-soft:#242019;
+  --t-surface-raised:#332e26;
+  --t-surface-sunken:#1a1713;
+  --t-veil:rgba(36,32,25,.84);
+  --t-text:#e8e2d6;
+  --t-text-strong:#f5f0e6;
+  --t-text-soft:#b3aa99;
+  --t-text-faint:#8a8171;
+  --t-text-invert:#1a1713;
+  --t-accent:#b5926a;
+  --t-accent-hover:#c8a67f;
+  --t-accent-quiet:#332c22;
+  --t-accent-ink:#d0b28e;
+  --t-accent-solid:#8a6c4a;
+  --t-accent-solid-hover:#a3805a;
+  --t-on-solid:#1a1713;
+  --t-line:rgba(232,226,214,.12);
+  --t-line-firm:rgba(232,226,214,.22);
+  --t-ok:#8aa87a;
+  --t-ok-quiet:#262b1f;
+  --t-ok-ink:#a3bf92;
+  --t-warn:#cfa75f;
+  --t-warn-quiet:#2e2718;
+  --t-warn-ink:#ddba7b;
+  --t-risk:#c98a80;
+  --t-risk-quiet:#2f2220;
+  --t-risk-ink:#d79f96;
+  --t-focus:rgba(181,146,106,.28);
+  --t-shadow:0 10px 26px rgba(0,0,0,.34);
+  --t-shadow-lift:0 14px 32px rgba(0,0,0,.48);
+  --t-brand:#aa8a63;
+  --t-scene-light:dusk;
+  --skin-heading-font:"FangSong","STSong","Songti SC",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(90deg,transparent 0 79px,color-mix(in srgb,var(--t-accent) 5%,transparent) 79px 80px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:1px;--skin-r-xs:3px;--skin-r-sm:5px;--skin-r-md:8px;--skin-r-lg:12px;--skin-r-xl:16px;
+}
+
+:root[data-theme="contrast"],
+[data-theme="contrast"]{
+  /* 高对比 · 纯黑白加单一高饱和强调，给弱视与强光环境 */
+  --t-canvas:#ffffff;
+  --t-surface:#ffffff;
+  --t-surface-soft:#f4f4f4;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#e8e8e8;
+  --t-veil:rgba(255,255,255,.92);
+  --t-text:#000000;
+  --t-text-strong:#000000;
+  --t-text-soft:#2b2b2b;
+  --t-text-faint:#444444;
+  --t-text-invert:#ffffff;
+  --t-accent:#0033cc;
+  --t-accent-hover:#002599;
+  --t-accent-quiet:#e0e8ff;
+  --t-accent-ink:#002599;
+  --t-accent-solid:#0033cc;
+  --t-accent-solid-hover:#002599;
+  --t-on-solid:#ffffff;
+  --t-line:rgba(0,0,0,.42);
+  --t-line-firm:rgba(0,0,0,.72);
+  --t-ok:#0a6b2f;
+  --t-ok-quiet:#dff5e5;
+  --t-ok-ink:#075423;
+  --t-warn:#8a5a00;
+  --t-warn-quiet:#fdf0d5;
+  --t-warn-ink:#6b4500;
+  --t-risk:#a80016;
+  --t-risk-quiet:#fde5e8;
+  --t-risk-ink:#840012;
+  --t-focus:rgba(0,51,204,.40);
+  --t-shadow:0 2px 0 rgba(0,0,0,.28);
+  --t-shadow-lift:0 3px 0 rgba(0,0,0,.42);
+  --t-brand:#0033cc;
+  --t-scene-light:day;
+  --skin-heading-font:"MiSans","Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  --skin-canvas-pattern:none;
+  --skin-canvas-size:auto;
+  --skin-r-2xs:0px;--skin-r-xs:1px;--skin-r-sm:2px;--skin-r-md:3px;--skin-r-lg:4px;--skin-r-xl:6px;
+}
+
+/* === 尺寸：圆角 / 间距 / 字号 === */
+:root{
+  --r-2xs:var(--skin-r-2xs,3px);
+  --r-xs:var(--skin-r-xs,6px);
+  --r-sm:var(--skin-r-sm,9px);
+  --r-md:var(--skin-r-md,12px);
+  --r-lg:var(--skin-r-lg,16px);
+  --r-pill:999px;
+
+  --r-xl:var(--skin-r-xl,22px);
+
+  --sp-1:4px;
+  --sp-2:8px;
+  --sp-3:12px;
+  --sp-4:16px;
+  --sp-5:22px;
+  --sp-6:30px;
+  --sp-7:40px;
+  --sp-8:54px;
+
+  /* 字号尺度：八档，步进约 1.18–1.25。
+     在此之前本文件根本没有字号令牌，页面各自取数，于是同一个界面上会同时存在
+     9.5/10.5/11.5/12.5/13.5 五种小数——每档差 1px，眼睛分辨不出，
+     层级就只剩下噪音。字号收敛成八档之后，"哪一行是标题"由档位回答，
+     不再靠 0.5px 的差别暗示。
+
+     小字只留 micro / tiny 两档：曾经还有一档 --fs-small(12.5px)，
+     与 --fs-body(13.5px) 只差 1px，读起来是同一级却各占一档，
+     反而让"标签 vs 正文"的界线变模糊，因此合并进 body。 */
+  --fs-micro:calc(10.5px * var(--font-scale));
+  --fs-tiny:calc(11.5px * var(--font-scale));
+  --fs-body:calc(13.5px * var(--font-scale));
+  --fs-lead:calc(15px * var(--font-scale));
+  --fs-title:calc(17px * var(--font-scale));
+  --fs-head:calc(21px * var(--font-scale));
+  --fs-display:calc(27px * var(--font-scale));
+  --fs-hero:calc(36px * var(--font-scale));
+
+  --gap:13px;
+  --pad:20px;
+  --pad-lg:26px;
+  --rail-w:92px;
+  --shell-pad:32px;
+  /* 两个独立维度相乘：type-scale 是用户的无障碍字号偏好，density 是版式疏密。
+     两者都作用到同一批 --fs-* 上，所以"字号调小 + 宽松排版"这种组合是对的。 */
+  --type-scale:1;
+  --density-scale:1;
+  --font-scale:calc(var(--type-scale) * var(--density-scale));
+  --motion:1;
+
+  --dur-fast:.16s;
+  --dur:.24s;
+  --dur-slow:.4s;
+  /* 主题叠化时长。比普通过渡慢，因为整页都在换色。 */
+  --dur-theme:.36s;
+}
+:root[data-radius="sharp"]{--r-2xs:1px;--r-xs:2px;--r-sm:4px;--r-md:5px;--r-lg:7px;--r-xl:9px}
+:root[data-radius="round"]{--r-2xs:5px;--r-xs:10px;--r-sm:14px;--r-md:20px;--r-lg:26px;--r-xl:34px}
+:root[data-density="compact"]{--gap:9px;--pad:15px;--pad-lg:19px;--sp-4:12px;--sp-5:16px;--sp-6:22px;--sp-7:30px;--sp-8:40px;--density-scale:.96}
+:root[data-density="roomy"]{--gap:18px;--pad:26px;--pad-lg:34px;--sp-4:21px;--sp-5:28px;--sp-6:38px;--sp-7:50px;--sp-8:68px;--density-scale:1.04}
+:root[data-type-scale="s"]{--type-scale:.94}
+:root[data-type-scale="l"]{--type-scale:1.08}
+:root[data-type-scale="xl"]{--type-scale:1.18}
+:root[data-motion="low"]{--motion:.35;--dur-fast:.06s;--dur:.1s;--dur-slow:.16s;--dur-theme:.2s}
+:root[data-motion="off"]{--motion:0;--dur-fast:0s;--dur:0s;--dur-slow:0s;--dur-theme:0s}
+
+/* === 组件级令牌 === */
+:root{
+  --card-bg:var(--t-surface);
+  --card-border:var(--t-line);
+  --card-radius:var(--r-md);
+  --card-shadow:var(--t-shadow);
+  --card-pad:var(--pad);
+  --field-bg:var(--t-surface);
+  --field-border:var(--t-line-firm);
+  --field-radius:var(--r-sm);
+  --focus-ring:0 0 0 3px var(--t-focus);
+  /* 模态遮罩。由正文色派生而不是写死：写死的深灰在暗色主题里会显得比背景还亮，
+     模态一开反而像页面被"点亮"了一块。派生值随主题自动变深或变浅。 */
+  --scrim:color-mix(in srgb, var(--t-text) 42%, transparent);
+  /* 数字一律用等宽字形：额度、权重、时长、上限在本界面出现极频繁，
+     对齐后能整列扫读，而不是逐行读。 */
+  --numeric-font:"MiSans","SF Mono","Cascadia Mono",Consolas,monospace;
+  --numeric-spacing:.01em;
+  /* 别名：保留给早期页面用的名字。--t-danger 曾在 semantic-page.css 里被引用
+     却从未声明，那条 color 声明整条失效、警告文字退化成普通正文色。
+     别名集中在这里，别再让页面各自拼一个令牌名。 */
+  --t-danger:var(--t-risk-ink);
+  --t-danger-quiet:var(--t-risk-quiet);
+  --t-caution:var(--t-warn-ink);
+  --t-line-strong:var(--t-line-firm);
+}
+
+/* === 维度作用到既有排版 === */
+/* .large-text 是类选择器，优先级高于 :root[data-type-scale] body，
+   所以这里要显式写出复合情况，否则「放大辅助文字」一开，字号设置就失效。 */
+:root[data-type-scale] body{font-size:calc(14px * var(--font-scale))}
+:root[data-type-scale] body.large-text{font-size:calc(16px * var(--font-scale))}
+:root[data-motion] *,:root[data-motion] *::before,:root[data-motion] *::after{
+  transition-duration:var(--dur)!important;
+}
+:root[data-motion="low"] *,:root[data-motion="low"] *::before,:root[data-motion="low"] *::after,
+:root[data-motion="off"] *,:root[data-motion="off"] *::before,:root[data-motion="off"] *::after{
+  animation-duration:0s!important;
+}
+:root[data-radius] .panel,
+:root[data-radius] .content-panel,
+:root[data-radius] .capability,
+:root[data-radius] .console-section,
+:root[data-radius] .empty-state{
+  border-radius:var(--r-lg);
+}
+
+/* === 主题叠化覆层 ===
+   自定义属性不能插值——改 data-theme 是整页令牌在一帧内换掉。
+   所以换主题时不逐属性过渡，而是盖一层用旧主题渲染的覆层再淡出：
+   视觉上两个主题叠化，且不需要给任何组件补 transition。 */
+.theme-crossfade{
+  position:fixed;
+  inset:0;
+  z-index:9999;
+  pointer-events:none;
+  background:var(--t-canvas);
+  opacity:1;
+}
+.theme-crossfade.is-fading{transition:opacity var(--dur-theme) ease;opacity:0}
+
+/* 首屏引导：主题读到之前不显示任何界面，避免默认主题闪一下再切。
+   引导脚本在样式生效前就写好 data-theme，读到即移除本属性。 */
+:root:not([data-theme-ready]) body{visibility:hidden}
+:root[data-motion="off"]:not([data-theme-ready]) body{visibility:visible}
+
+/* 小屋就绪闸门。
+ *
+ * 问题：左栏、顶栏、右栏状态卡、下方面板都是纯 DOM，先就位；而体素包
+ * （assets/voxel-room.js，677 KB、defer）要下载并解析完，app.js 才第一次
+ * mountStage()。中间的几百毫秒里 .room-stage 只是一个 clamp(360px,46vh,520px)
+ * 的空盒子——用户看到的是「UI 全部加载好了，小屋才出现」。
+ *
+ * 更糟的是入场序列会把顺序固定下来：entrance.css 的 UI 浮现延迟是 1920ms
+ * （pullBack 1500 + settle 420，与 entrance.js 的 TIMING 对齐），而它的前提是
+ * 「小屋先到、UI 后到」。现在实际反了，于是那 1920ms 里屏幕上什么都没有，
+ * 等小屋到了才在已经铺好的页面里补一场搭建动画。
+ *
+ * 解法与上面那条同源：把闸门从「主题读到」放宽到「体素包也到了」。
+ * 首帧就是入场序列的第一拍（全屏静置），而不是先画一页再补动画。
+ *
+ * data-room-ready 由 voxel-room.js 的 onload 写入，兜底 3 秒——体素包万一
+ * 加载失败（网络、被拦截），页面不能一直白着；到期放行，由 mountStage 的
+ * catch 走 showVoxelFallback()。放行逻辑见 index.html 的引导脚本。 */
+:root:not([data-room-ready]) body{visibility:hidden}
+:root[data-motion="off"]:not([data-room-ready]) body{visibility:visible}
+
+/* 尊重系统偏好：与我们自己的动效维度取更严格的一方。 */
+@media (prefers-reduced-motion: reduce){
+  .theme-crossfade.is-fading{transition-duration:.01s}
+}

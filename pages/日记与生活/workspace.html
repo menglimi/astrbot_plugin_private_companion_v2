@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>日记与生活 · 陪伴</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="/api/plugin/page/bridge-sdk.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="host-controls"><button id="start-host" class="secondary" type="button">启动当前配置</button>
+        <button id="stop-host" class="quiet" type="button">停止运行</button>
+        <button id="refresh" class="secondary" type="button">刷新记录</button></div></header>
+    <section class="scope" aria-label="当前范围">
+      <div><span>角色</span><strong id="role">—</strong></div><div><span>私聊对象</span><strong id="participant">—</strong></div>
+      <div><span>运行状态</span><strong id="host-state">正在连接…</strong></div><div><span>生活日程</span><strong id="routine-state">—</strong></div>
+    </section>
+    <p id="next-routines" class="muted schedule-hint"></p>
+    <section class="sleep-plan" aria-label="角色共享作息">
+      <div><span>自动睡眠范围</span><strong id="sleep-scope">正在读取…</strong></div>
+      <div><span>唯一执行窗口</span><strong id="sleep-executor">—</strong></div>
+      <div><span>下次入睡 / 计划唤醒</span><strong id="sleep-next">—</strong></div>
+      <div><span>当前睡眠唤醒</span><strong id="sleep-active-wake">—</strong></div>
+    </section>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <details id="settings"><summary>日程与偏好</summary>
+      <form id="config-form">
+        <div class="config-grid">
+          <label class="check"><input id="enabled" type="checkbox">启用生活日程与执行权限</label>
+          <label>日记时区<input id="timezone" type="text" value="Asia/Shanghai" required></label>
+          <label class="check"><input id="diary_enabled" type="checkbox">每天写日记</label>
+          <label>日记时间<input id="diary_time" type="time" value="23:50" required></label>
+          <label class="check"><input id="sleep_enabled" type="checkbox">按日程入睡</label>
+          <label>入睡时间<input id="sleep_time" type="time" value="00:30" required></label>
+          <label>入睡时区<input id="sleep_timezone" type="text" value="Asia/Shanghai" required></label>
+          <label>睡眠时长（分钟）<input id="sleep_minutes" type="number" min="1" max="1440" value="480" required></label>
+          <label class="check"><input id="reading_enabled" type="checkbox">自动阅读书架中的待读片段</label>
+          <label class="check"><input id="derive_enabled" type="checkbox">正文保存后提取摘要与梦境碎片</label>
+        </div>
+        <div class="form-footer"><p class="muted">睡眠按角色共享；日记、阅读和权限按当前窗口保存。</p>
+          <button class="primary" type="submit">保存设置</button></div>
+      </form>
+    </details>
+    <nav class="tabs" aria-label="生活记录">
+      <button type="button" data-tab="archive" aria-current="page">日记与梦境</button>
+      <button type="button" data-tab="reading">阅读书架</button>
+      <button type="button" data-tab="sleep">睡眠记录</button>
+      <button type="button" data-tab="receipts">执行记录</button>
+    </nav>
+    <section id="archive" class="tab-panel">
+      <div class="section-head"><div><h2>私人书写</h2></div>
+        <button id="write-diary" class="primary" type="button">写今天的日记</button></div>
+      <div class="archive-layout"><aside><div id="journal-list" aria-label="日记目录"><p class="empty">正在读取记录…</p></div>
+        <div class="pagination"><button id="newer" class="quiet" type="button" disabled>较新记录</button><button id="older" class="quiet" type="button" disabled>较早记录</button></div></aside>
+        <article id="journal-detail" aria-live="polite"><p class="empty">选择一篇日记或梦境。</p></article></div>
+    </section>
+    <section id="reading" class="tab-panel" hidden>
+      <div class="section-head"><div><h2>阅读书架</h2></div>
+        <button id="add-text" class="primary" type="button">添加原文</button></div>
+      <div id="reading-list" class="activity-list"></div>
+    </section>
+    <section id="sleep" class="tab-panel" hidden>
+      <div class="section-head"><div><h2>睡眠与醒来</h2></div>
+        <button id="start-sleep" class="primary" type="button">开始睡眠</button></div>
+      <div id="sleep-list" class="activity-list"></div>
+    </section>
+    <div id="activity-pages" class="pagination" hidden><button id="first-activities" class="quiet" type="button">回到首批</button><button id="more-activities" class="quiet" type="button">下一批记录</button></div>
+    <section id="receipts" class="tab-panel" hidden>
+      <div class="section-head"><div><h2>执行记录</h2></div></div>
+      <div id="receipt-list" class="activity-list"></div>
+      <form id="retry-form" class="retry-form"><h3>重试已确定失败的书写</h3>
+        <label>原执行编号<input id="retry-id" required autocomplete="off"></label>
+        <label>日记日期<input id="retry-date" type="date" required></label>
+        <p class="muted">只可重试已确定失败的日记；梦境请到睡眠记录重试。</p>
+        <button class="secondary" type="submit">重试这天的日记</button>
+      </form>
+    </section>
+  </main>
+  <dialog id="editor" aria-labelledby="dialog-title">
+    <form id="editor-form"><div class="section-head"><h2 id="dialog-title">编辑</h2><button id="close-dialog" class="quiet" type="button" aria-label="关闭">关闭</button></div>
+      <p id="dialog-description" class="muted"></p>
+      <label id="title-field">标题<input id="text-title" maxlength="160"></label>
+      <label id="body-field">正文<textarea id="text-body" rows="12"></textarea></label>
+      <label id="glow-field">醒后余韵<textarea id="text-glow" rows="3"></textarea></label>
+      <label id="minutes-field">睡眠时长（分钟）<input id="minutes" type="number" min="1" max="1440" value="480"></label>
+      <label id="retry-field">原执行编号（首次记录留空）<input id="dream-retry"></label>
+      <p id="dialog-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="dialog-submit" class="primary" type="submit">确认</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

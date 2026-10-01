@@ -1,0 +1,642 @@
+import base64
+from contextlib import closing
+from dataclasses import replace
+from datetime import timedelta
+import hashlib
+import io
+import json
+import sqlite3
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+from PIL import Image
+
+from astrbot_host.media import inspect_image
+from companion_v2.conversation.media.animation import CapturedAnimation, PromptAnimation
+from companion_v2.conversation.media.models import CapturedImage, ImageDescriptor
+from companion_v2.conversation.media.reply import ImageReplyDraft
+from companion_v2.execution.models import TaskError
+from companion_v2.model_gateway.embedding import EmbeddingGateway, unit
+from companion_v2.storage.semantic import SemanticStore
+from tests.test_host_application import HostFixture
+from tests.test_role_tool_loop import requested, answered, call
+
+
+class SemanticPort:
+    def __init__(self):
+        self.version = "model-1"
+        self.calls = []
+        self.failing = False
+        self.rerank_failing = False
+        self.rerank_scores = None
+        self.analysis_images = []
+
+    def binding(self, identifier, kind):
+        return kind + self.version
+
+    def inventory(self):
+        return {"embedding": [{"id": "test", "name": "test"}], "rerank": []}
+
+    async def embed(self, identifier, texts):
+        self.calls.extend(texts)
+        if self.failing:
+            raise RuntimeError("unavailable")
+        return [[1., 0., 0.] if any(w in t for w in ("安慰", "抱抱")) else
+                [0., 1., 0.] if "嘲笑" in t else [0., 0., 1.] for t in texts]
+
+    async def analyze(self, identifier, prompt, images=()):
+        self.analysis_images.append(tuple(images))
+        if "为聊天表情建立元数据" in prompt:
+            return {"name": "挥手", "description": "两帧颜色交替的动画", "intents": "回应问候"}
+        return {"fit": True, "reason": "与安慰意图贴合"} if images else []
+
+    async def rerank(self, identifier, query, documents):
+        if self.rerank_failing:
+            raise RuntimeError("rerank unavailable")
+        return self.rerank_scores if self.rerank_scores is not None else list(reversed(range(len(documents))))
+
+
+def picture():
+    content = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXmEAAAAASUVORK5CYII=")
+    return CapturedImage(ImageDescriptor(0, "image/png", 1, 1, len(content), hashlib.sha256(content).hexdigest()), content)
+
+
+def animation():
+    output = io.BytesIO()
+    first = Image.new("RGB", (8, 8), "red")
+    second = Image.new("RGB", (8, 8), "green")
+    first.save(output, format="GIF", save_all=True, append_images=[second], duration=[120, 180], loop=0)
+    return inspect_image(output.getvalue(), 0)
+
+
+class EmbeddingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cache_isolated_by_owner_and_model(self):
+        port = SemanticPort()
+        gateway = EmbeddingGateway(port)
+        await gateway.embed("a", ["抱抱"])
+        await gateway.embed("a", ["抱抱"])
+        self.assertEqual(len(port.calls), 1)
+        await gateway.embed("b", ["抱抱"])
+        port.version = "model-2"
+        await gateway.embed("a", ["抱抱"])
+        self.assertEqual(len(port.calls), 3)
+
+    def test_reject_nonfinite_and_zero_vectors(self):
+        for payload in ([0, 0], [float("nan")], [float("inf")], [True]):
+            with self.assertRaises(ValueError):
+                unit(payload)
+
+    def test_feedback_columns_upgrade_existing_catalog(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "semantic-catalog.sqlite3"
+            with closing(sqlite3.connect(path)) as db:
+                with db:
+                    db.execute("CREATE TABLE reaction_inputs (owner TEXT, event_key TEXT, actor TEXT, PRIMARY KEY(owner,event_key))")
+                    db.execute("INSERT INTO reaction_inputs VALUES ('owner','event','speaker')")
+                    db.execute("PRAGMA user_version=2")
+            store = SemanticStore(Path(temporary))
+            with store.db() as db:
+                row = db.execute("SELECT * FROM reaction_inputs WHERE event_key='event'").fetchone()
+                self.assertEqual((row["actor"], row["received_at"], row["signal"]),
+                                 ("speaker", None, None))
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+
+
+class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
+    async def semantic_host(self, *, images=False, automatic_reactions=True):
+        if images:
+            self.sender = replace(self.sender, supports_images=True)
+            self.providers = tuple(replace(p, capabilities=("text", "tools", "image")) for p in self.providers)
+        host = self.host()
+        self.port = SemanticPort()
+        self.semantic = host.application.attach_semantics(self.port)
+        if images and automatic_reactions:
+            settings = self.semantic.store.settings()
+            self.semantic.store.configure({"reactions_trigger_probability": 1.0,
+                                           "reactions_cooldown_seconds": 0}, settings["revision"])
+        await self.start(host)
+        return host
+
+    async def test_text_delivery_preserves_unresolved_reaction_usage_error(self):
+        async def respond(_envelope):
+            return answered("我在。")
+
+        self.model_behavior = respond
+        host = await self.semantic_host()
+        app = host.application
+        self.semantic.errors["reaction_usage"] = "reaction_usage_manifest_changed"
+        batch = host.receive(self.event("text-only", text="在吗？")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertEqual(self.semantic.errors["reaction_usage"], "reaction_usage_manifest_changed")
+
+    async def test_memory_tool_generates_vectors_without_model_supplied_vector(self):
+        phase = {"seed": True}
+        async def respond(envelope):
+            if not envelope.tool_history:
+                if phase["seed"]:
+                    handles = json.loads(next(m.payload for m in envelope.original.context.materials if m.purpose == "current_input_handles"))
+                    return requested(call("save", "memory.proposal.submit", proposal={"operation": "add", "predicate": "饮品偏好",
+                        "object": "不喝咖啡", "representation": "用户不喝咖啡", "evidence_handles": handles}))
+                return requested(call("recall", "memory.query", query_intent="那种苦味饮料", kind="facts"))
+            if not phase["seed"]:
+                payload = json.loads(envelope.tool_history[-1].result_json)["payload"]
+                self.assertEqual(payload["mode"], "hybrid")
+                self.assertTrue(payload["items"])
+                self.assertGreater(payload["vector_coverage"]["embedded"], 0)
+            return answered("记得了。")
+        self.model_behavior = respond
+        host = await self.semantic_host()
+        app = host.application
+        first = host.receive(self.event("seed", text="我不喝咖啡")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        phase["seed"] = False
+        second = host.receive(self.event("query", text="那种苦味饮料")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second))["state"], "complete")
+
+    async def test_private_turn_automatically_injects_semantic_fact(self):
+        phase = {"seed": True}
+
+        async def respond(envelope):
+            if phase["seed"]:
+                if not envelope.tool_history:
+                    handles = json.loads(next(m.payload for m in envelope.original.context.materials
+                                              if m.purpose == "current_input_handles"))
+                    return requested(call("save", "memory.proposal.submit", proposal={
+                        "operation": "add", "predicate": "饮品偏好", "object": "不喝咖啡",
+                        "representation": "用户不喝咖啡", "evidence_handles": handles,
+                    }))
+                return answered("记好了。")
+            material = next((m for m in envelope.original.context.materials if m.purpose == "current_memory"), None)
+            self.assertIsNotNone(material)
+            self.assertEqual(json.loads(material.payload)["object"], "不喝咖啡")
+            return answered("记得，你平时不喝咖啡。")
+
+        self.model_behavior = respond
+        host = await self.semantic_host()
+        app = host.application
+        first = host.receive(self.event("semantic-seed", text="我不喝咖啡")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        phase["seed"] = False
+        second = host.receive(self.event("semantic-followup", text="那种苦味饮料我平时喝吗？")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second))["state"], "complete")
+
+    async def test_private_turn_keeps_lexical_recall_when_embedding_fails(self):
+        phase = {"seed": True}
+
+        async def respond(envelope):
+            if phase["seed"]:
+                if not envelope.tool_history:
+                    handles = json.loads(next(m.payload for m in envelope.original.context.materials
+                                              if m.purpose == "current_input_handles"))
+                    return requested(call("save", "memory.proposal.submit", proposal={
+                        "operation": "add", "predicate": "饮品偏好", "object": "不喝咖啡",
+                        "representation": "用户不喝咖啡", "evidence_handles": handles,
+                    }))
+                return answered("记好了。")
+            material = next((m for m in envelope.original.context.materials if m.purpose == "current_memory"), None)
+            self.assertIsNotNone(material)
+            self.assertEqual(json.loads(material.payload)["object"], "不喝咖啡")
+            return answered("我记得你不喝咖啡。")
+
+        self.model_behavior = respond
+        host = await self.semantic_host()
+        app = host.application
+        first = host.receive(self.event("lexical-seed", text="我不喝咖啡")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        self.port.failing = True
+        phase["seed"] = False
+        second = host.receive(self.event("lexical-followup", text="不喝咖啡吗？")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second))["state"], "complete")
+
+    async def test_private_turn_automatically_injects_semantic_experience(self):
+        async def respond(envelope):
+            material = next((m for m in envelope.original.context.materials if m.purpose == "current_experience"), None)
+            if material is not None:
+                self.assertIn("小桥", json.loads(material.payload)["statements"][0]["text"])
+            return answered("记得那次走到了小桥边。")
+
+        self.model_behavior = respond
+        host = await self.semantic_host()
+        app = host.application
+        first = host.receive(self.event("experience-seed", text="我们在河边散步，走到了小桥边")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        context = self.context(app, first)
+        row = app.runtime.read_one("SELECT event_json FROM conversation_inputs WHERE batch_id = ?", (first,))
+        from companion_v2.memory.codec import source as source_from_json
+        source = source_from_json(json.loads(row["event_json"])["source"])
+        evidence = app.memory.writer.access.capture(context, source)
+        saved = app.memory.experiences.save(context, view_id="river-walk", expected_revision=0,
+            title="河边散步", statements=({"text": "那次散步走到了小桥边。", "evidence": (evidence,), "atoms": ()},))
+        self.assertEqual(saved.unwrap()["state"], "saved")
+        second = host.receive(self.event("experience-followup", text="那次户外活动最后到哪儿了？")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second))["state"], "complete")
+
+    async def test_selected_catalog_image_reaches_existing_delivery(self):
+        async def respond(envelope):
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="想安慰一下"))
+            images = envelope.original.images
+            self.assertEqual(len(images), 1)
+            value = answered("抱抱你。")
+            return replace(value, draft=ImageReplyDraft("抱抱你。", (), images=(images[0].source,)))
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True)
+        app = host.application
+        batch = host.receive(self.event("reaction", text="有点难过")).unwrap()
+        context = self.context(app, batch)
+        self.semantic.reactions.import_image(self.semantic.owner(context), picture(),
+            {"name": "抱抱", "description": "伸手抱抱", "intents": "安慰"})
+        self.semantic.errors["reaction_usage"] = "reaction_usage_manifest_changed"
+        self.advance(app)
+        state = await self.done(app, batch)
+        self.assertEqual(state["state"], "complete", dict(state))
+        self.assertEqual([(part.text, len(getattr(part, "images", ()))) for part in self.sent],
+                         [("抱抱你。", 0), ("", 1)])
+        self.assertEqual(len(self.sent[-1].images), 1)
+        self.assertEqual(self.sent[-1].images[0].descriptor.content_hash, picture().descriptor.content_hash)
+        history = app.messages.history(context).unwrap()["items"]
+        self.assertEqual([(part["text"], len(part.get("images", ()))) for part in history],
+                         [("抱抱你。", 0), ("", 1)])
+        with self.semantic.store.db() as db:
+            usage = db.execute("SELECT id,batch FROM uses").fetchall()
+        self.assertEqual([(row["id"], row["batch"]) for row in usage], [(picture().descriptor.content_hash, batch)])
+        self.assertNotIn("reaction_usage", self.semantic.errors)
+
+    async def test_reaction_can_precede_text_or_share_its_message(self):
+        async def respond(envelope):
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="安慰"))
+            image = envelope.original.images[0]
+            return replace(answered("抱抱你。"), draft=ImageReplyDraft("抱抱你。", (), images=(image.source,)))
+
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True)
+        app = host.application
+        settings = self.semantic.store.settings()
+        self.semantic.store.configure({"reactions_delivery_mode": "separate_before"}, settings["revision"])
+        first = host.receive(self.event("reaction-before", text="难过" )).unwrap()
+        context = self.context(app, first)
+        self.semantic.reactions.import_image(self.semantic.owner(context), picture(),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        self.advance(app)
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        self.assertEqual([(part.text, len(getattr(part, "images", ()))) for part in self.sent],
+                         [("", 1), ("抱抱你。", 0)])
+        self.assertEqual([len(part.get("images", ())) for part in app.messages.history(context).unwrap()["items"]],
+                         [1, 0])
+
+        settings = self.semantic.store.settings()
+        self.semantic.store.configure({"reactions_delivery_mode": "same_message"}, settings["revision"])
+        second = host.receive(self.event("reaction-same", text="还是难过")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second, seconds=8))["state"], "complete")
+        self.assertEqual([(part.text, len(getattr(part, "images", ()))) for part in self.sent[-1:]],
+                         [("抱抱你。", 1)])
+
+    async def test_automatic_probability_zero_keeps_explicit_reaction_request(self):
+        async def respond(envelope):
+            if not any(tool.action == "reaction.search" for tool in envelope.tools):
+                return answered("我在。")
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="安慰"))
+            image = envelope.original.images[0]
+            return replace(answered("抱抱你。"), draft=ImageReplyDraft("抱抱你。", (), images=(image.source,)))
+
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True, automatic_reactions=False)
+        app = host.application
+        settings = self.semantic.store.settings()
+        self.assertEqual((settings["reactions_trigger_probability"], settings["reactions_cooldown_seconds"]),
+                         (0.2, 180))
+        self.semantic.store.configure({"reactions_trigger_probability": 0}, settings["revision"])
+        ordinary = host.receive(self.event("reaction-auto-zero", text="有点难过")).unwrap()
+        context = self.context(app, ordinary)
+        self.semantic.reactions.import_image(self.semantic.owner(context), picture(),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        self.advance(app)
+        self.assertEqual((await self.done(app, ordinary))["state"], "complete")
+        self.assertNotIn("reaction.search", {tool.action for tool in self.called[-1].tools})
+        self.assertNotIn("可以调用 reaction.search", self.called[-1].original.instruction)
+        self.assertFalse(getattr(self.sent[-1], "images", ()))
+
+        explicit = host.receive(self.event("reaction-explicit-zero", text="给我发表情包")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, explicit))["state"], "complete")
+        self.assertIn("reaction.search", {tool.action for tool in self.called[-1].tools})
+        self.assertEqual([(part.text, len(getattr(part, "images", ()))) for part in self.sent[-1:]],
+                         [("抱抱你。", 1)])
+        self.assertEqual([(part["text"], len(part.get("images", ()))) for part in
+                          app.messages.history(context).unwrap()["items"][-1:]], [("抱抱你。", 1)])
+
+    async def test_reaction_cooldown_uses_confirmed_delivery_and_survives_restart(self):
+        async def respond(envelope):
+            if not any(tool.action == "reaction.search" for tool in envelope.tools):
+                return answered("我在。")
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="安慰"))
+            image = envelope.original.images[0]
+            return replace(answered("抱抱你。"), draft=ImageReplyDraft("抱抱你。", (), images=(image.source,)))
+
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True)
+        app = host.application
+        settings = self.semantic.store.settings()
+        self.semantic.store.configure({"reactions_cooldown_seconds": 180}, settings["revision"])
+        first = host.receive(self.event("reaction-cooldown-first", text="有点难过")).unwrap()
+        context = self.context(app, first)
+        self.semantic.reactions.import_image(self.semantic.owner(context), picture(),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        self.advance(app)
+        self.assertEqual((await self.done(app, first, seconds=12))["state"], "complete")
+        self.assertEqual(len(self.sent[-1].images), 1)
+
+        second = host.receive(self.event("reaction-cooldown-second", text="还是有点难过")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second, seconds=12))["state"], "complete")
+        self.assertNotIn("reaction.search", {tool.action for tool in self.called[-1].tools})
+        await app.close()
+        restarted = self.host(runtime=self.open_runtime())
+        self.semantic = restarted.application.attach_semantics(self.port)
+        await self.start(restarted, 1, 1)
+        app = restarted.application
+        third = restarted.receive(self.event("reaction-cooldown-restart", text="再安慰我一下")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, third, seconds=12))["state"], "complete")
+        self.assertNotIn("reaction.search", {tool.action for tool in self.called[-1].tools})
+
+        explicit = restarted.receive(self.event("reaction-cooldown-explicit", text="给我发表情包")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, explicit, seconds=12))["state"], "complete")
+        self.assertEqual(len(self.sent[-1].images), 1)
+        self.clock.advance(timedelta(seconds=180))
+        after = restarted.receive(self.event("reaction-cooldown-expired", text="有点难过")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, after, seconds=12))["state"], "complete")
+        self.assertIn("reaction.search", {tool.action for tool in self.called[-1].tools})
+
+    async def test_reaction_pause_single_request_and_resume_persist(self):
+        host = await self.semantic_host(images=True)
+        app = host.application
+        paused = host.receive(self.event("reaction-pause", text="别再发表情包")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, paused))["state"], "complete")
+        context = self.context(app, paused)
+        self.assertNotIn("reaction.search", {t.action for t in self.semantic.catalog_for(context, paused)})
+        self.assertIn("暂停自动发表情", self.called[-1].original.instruction)
+
+        requested_batch = host.receive(self.event("reaction-request", text="给我发表情包")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, requested_batch))["state"], "complete")
+        self.assertIn("reaction.search", {t.action for t in self.semantic.catalog_for(context, requested_batch)})
+        self.assertTrue(self.semantic.reaction_preferences.state(context, requested_batch)[0])
+        self.assertNotIn("reaction.search", {t.action for t in self.semantic.catalog_for(context)})
+
+        await app.close()
+        restarted = self.host(runtime=self.open_runtime())
+        self.semantic = restarted.application.attach_semantics(self.port)
+        await self.start(restarted, 1, 1)
+        app = restarted.application
+        resumed = restarted.receive(self.event("reaction-resume", text="恢复发表情包")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, resumed))["state"], "complete")
+        context = self.context(app, resumed)
+        self.assertIn("reaction.search", {t.action for t in self.semantic.catalog_for(context, resumed)})
+        self.assertEqual(self.semantic.reaction_preferences.state(context, resumed), (False, False))
+
+    async def test_delivered_reaction_feedback_is_once_per_asset_and_speaker(self):
+        phase = {"send": True}
+
+        async def respond(envelope):
+            if not phase["send"]:
+                return answered("收到。")
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="安慰"))
+            image = envelope.original.images[0]
+            return replace(answered("抱抱。"), draft=ImageReplyDraft("抱抱。", (), images=(image.source,)))
+
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True)
+        app = host.application
+        first = host.receive(self.event("reaction-feedback-source", text="有点难过")).unwrap()
+        context = self.context(app, first)
+        owner = self.semantic.owner(context)
+        item = self.semantic.reactions.import_image(owner, picture(),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        self.advance(app)
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        phase["send"] = False
+
+        feedback_event = self.event("reaction-negative", text="刚才那张表情包不合适")
+        feedback = host.receive(feedback_event).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, feedback))["state"], "complete")
+        self.assertEqual(self.semantic.reaction_preferences.scores(context)[item["id"]], -1)
+        self.assertEqual(host.receive(feedback_event).unwrap(), feedback)
+        second = host.receive(self.event("reaction-repeat-feedback", text="这张表情包不错")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second))["state"], "complete")
+        self.assertEqual(self.semantic.reaction_preferences.scores(context)[item["id"]], -1)
+        with self.semantic.store.db() as db:
+            recorded = db.execute("SELECT feedback_signal FROM reaction_deliveries WHERE owner=? AND id=?",
+                                  (owner, item["id"])).fetchone()
+        self.assertEqual(recorded["feedback_signal"], "negative")
+
+    async def test_reaction_preference_isolated_by_speaker_and_session(self):
+        host = await self.semantic_host(images=True)
+        app = host.application
+        batch = host.receive(self.event("scope-pause", text="别再发表情包")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        context = self.context(app, batch)
+        other_speaker = replace(context, actor=self.standard)
+        other_scope = replace(context.scope, session_id="session-b")
+        other_session = replace(context, role_binding=replace(context.role_binding, scope=other_scope),
+            audience=replace(context.audience, scope=other_scope))
+        preferences = self.semantic.reaction_preferences
+        self.assertEqual(preferences.state(context)[0], True)
+        self.assertEqual(preferences.state(other_speaker)[0], False)
+        self.assertEqual(preferences.state(other_session)[0], False)
+        self.assertEqual(len({preferences.actor(value) for value in
+                              (context, other_speaker, other_session)}), 3)
+
+    async def test_feedback_stays_on_latest_delivery_and_changes_selection(self):
+        host = await self.semantic_host(images=True)
+        app = host.application
+        batch = host.receive(self.event("feedback-ranking", text="有点难过")).unwrap()
+        context = self.context(app, batch)
+        owner = self.semantic.owner(context)
+        first = self.semantic.reactions.import_image(owner, picture(),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        alternative_bytes = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(alternative_bytes, format="PNG")
+        second = self.semantic.reactions.import_image(owner, inspect_image(alternative_bytes.getvalue(), 0),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        actor = self.semantic.reaction_preferences.actor(context)
+        at = self.clock.now().timestamp()
+        with self.semantic.store.db() as db:
+            db.execute("INSERT INTO reaction_deliveries VALUES (?,?,?,?,?,NULL,NULL)",
+                       (owner, actor, "old", second["id"], at - 20))
+            db.execute("INSERT INTO reaction_deliveries VALUES (?,?,?,?,?,NULL,NULL)",
+                       (owner, actor, "new", first["id"], at - 10))
+        preferences = self.semantic.reaction_preferences
+        preferences._observe(owner, actor, "negative-feedback", "刚才那张表情包不合适", at)
+        preferences._observe(owner, actor, "repeat-feedback", "这张表情包不错", at + 1)
+        with self.semantic.store.db() as db:
+            rows = db.execute("SELECT id,feedback_signal FROM reaction_deliveries ORDER BY delivered_at").fetchall()
+        self.assertEqual([(row["id"], row["feedback_signal"]) for row in rows],
+                         [(second["id"], None), (first["id"], "negative")])
+        self.assertEqual(preferences.scores(context), {first["id"]: -1})
+
+        async def same_candidates(*_args, **_kwargs):
+            return {"items": [{"id": first["id"], "score": 0.9},
+                              {"id": second["id"], "score": 0.85}], "mode": "test"}
+
+        self.semantic.search.search = same_candidates
+        self.assertEqual((await self.semantic.reactions.search(context, batch, "ranked", "安慰"))
+                         ["items"][0]["id"], second["id"])
+
+    async def test_confirmed_reaction_is_deprioritized_on_the_next_reply(self):
+        async def respond(envelope):
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="安慰"))
+            image = envelope.original.images[0]
+            return replace(answered("抱抱。"), draft=ImageReplyDraft("抱抱。", (), images=(image.source,)))
+
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True)
+        app = host.application
+        first = host.receive(self.event("first-reaction", text="有些难过")).unwrap()
+        context = self.context(app, first)
+        owner = self.semantic.owner(context)
+        alternative_bytes = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(alternative_bytes, format="PNG")
+        alternative = inspect_image(alternative_bytes.getvalue(), 0)
+        for image in (picture(), alternative):
+            self.semantic.reactions.import_image(owner, image,
+                {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        self.advance(app)
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        initial_hash = self.sent[-1].images[0].descriptor.content_hash
+        second = host.receive(self.event("second-reaction", text="还是有点难过")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, second))["state"], "complete")
+        self.assertNotEqual(self.sent[-1].images[0].descriptor.content_hash, initial_hash)
+        with self.semantic.store.db() as db:
+            usage = db.execute("SELECT id,batch FROM uses ORDER BY batch").fetchall()
+        self.assertEqual({row["batch"] for row in usage}, {first, second})
+
+    async def test_late_reaction_receipt_accounts_once_after_catalog_revision(self):
+        async def respond(envelope):
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="安慰"))
+            image = envelope.original.images[0]
+            return replace(answered("抱抱你。"), draft=ImageReplyDraft("抱抱你。", (), images=(image.source,)))
+
+        async def accepted(envelope):
+            return self.receipt(envelope, "accepted" if getattr(envelope, "images", ()) else "delivered")
+
+        self.model_behavior, self.send_behavior = respond, accepted
+        host = await self.semantic_host(images=True)
+        app = host.application
+        batch = host.receive(self.event("late-reaction", text="难过")).unwrap()
+        context = self.context(app, batch)
+        owner = self.semantic.owner(context)
+        item = self.semantic.reactions.import_image(owner, picture(),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        self.advance(app)
+        self.assertEqual((await self.done(app, batch))["state"], "blocked")
+        with self.semantic.store.db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM uses").fetchone()[0], 0)
+        delivered_at = self.clock.now()
+        self.clock.advance(timedelta(seconds=1))
+        self.semantic.reaction_preferences._observe(owner, self.semantic.reaction_preferences.actor(context),
+            "late-feedback", "刚才那张表情包不合适", self.clock.now().timestamp())
+        self.assertEqual(self.semantic.reaction_preferences.scores(context), {})
+        self.semantic.store.put(owner, "reaction", item["id"],
+            {**item["payload"], "description": "更新后的说明"}, expected=item["revision"])
+        self.receipt_now = lambda: delivered_at
+        receipt = self.receipt(self.sent[-1])
+        await app.close()
+        restarted = self.host(runtime=self.open_runtime())
+        self.semantic = restarted.application.attach_semantics(self.port)
+        await self.start(restarted, 1, 1)
+        app = restarted.application
+        context = self.context(app, batch)
+        self.assertEqual(app.record_receipt(receipt).unwrap(), "delivered")
+        self.assertEqual(app.record_receipt(receipt).unwrap(), "delivered")
+        app.reconcile_delivery(context, receipt.part_id).unwrap()
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        with self.semantic.store.db() as db:
+            usage = db.execute("SELECT id,batch FROM uses").fetchall()
+        self.assertEqual([(row["id"], row["batch"]) for row in usage], [(item["id"], batch)])
+        self.assertEqual(self.semantic.reaction_preferences.scores(context), {item["id"]: -1})
+        self.assertNotIn("reaction_usage", self.semantic.errors)
+
+    async def test_no_provider_keeps_lexical_reactions_and_truthful_state(self):
+        host = await self.semantic_host(images=True)
+        batch = host.receive(self.event("lookup")).unwrap()
+        context = self.context(host.application, batch)
+        owner = self.semantic.owner(context)
+        self.semantic.reactions.import_image(owner, picture(), {"name": "抱抱", "description": "安慰"})
+        self.port.failing = True
+        result = await self.semantic.search.search(owner, "reaction", "抱抱", context=context)
+        self.assertEqual(result["mode"], "lexical")
+        self.assertEqual(result["fallback_reason"], "RuntimeError")
+        self.assertEqual(len(result["items"]), 1)
+        closed = await host.application.close()
+        self.assertEqual(closed.pending_handles, ())
+
+    async def test_animated_reaction_retains_original_frames_and_delivers_gif(self):
+        async def respond(envelope):
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="回应问候"))
+            selected = envelope.original.images
+            self.assertEqual(len(selected), 1)
+            self.assertIsInstance(selected[0], PromptAnimation)
+            self.assertEqual(len(selected[0].frames), 2)
+            return replace(answered("你好。"), draft=ImageReplyDraft("你好。", (), images=(selected[0].source,)))
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True)
+        app = host.application
+        batch = host.receive(self.event("animated", text="你好呀")).unwrap()
+        context = self.context(app, batch)
+        original = animation()
+        self.assertIsInstance(original, CapturedAnimation)
+        imported = self.semantic.reactions.import_image(self.semantic.owner(context), original, {"name": "挥手"})
+        analyzed = await self.semantic.reactions.analyze(self.semantic.owner(context), imported["id"])
+        retained = self.semantic.reactions.captured(analyzed)
+        self.assertEqual(retained.content, original.content)
+        self.assertEqual([f.content for f in retained.frames], [f.content for f in original.frames])
+        self.assertEqual(len(self.port.analysis_images[-1]), 2)
+        self.advance(app)
+        state = await self.done(app, batch)
+        self.assertEqual(state["state"], "complete", dict(state))
+        self.assertEqual(self.sent[-1].images[0].descriptor.mime_type, "image/gif")
+        self.assertEqual(self.sent[-1].images[0].descriptor.content_hash, original.descriptor.content_hash)
+
+    async def test_rerank_reorders_only_current_page_and_keeps_fallback_order(self):
+        host = await self.semantic_host()
+        batch = host.receive(self.event("rerank")).unwrap()
+        context = self.context(host.application, batch)
+        self.semantic.store.configure({"rerank_provider": "ranker"}, 0)
+        payload = {"items": [{"id": "first", "evidence": ["a"]}, {"id": "second", "evidence": ["b"]}],
+                   "next_cursor": "opaque", "mode": "hybrid"}
+        self.port.rerank_scores = [0.1, 0.9]
+        ranked = await self.semantic.memory.rerank(context, "相关经历", payload)
+        self.assertEqual([item["id"] for item in ranked["items"]], ["second", "first"])
+        self.assertEqual(ranked["next_cursor"], payload["next_cursor"])
+        self.assertEqual(ranked["items"][0]["evidence"], ["b"])
+        self.port.rerank_failing = True
+        fallback = await self.semantic.memory.rerank(context, "相关经历", payload)
+        self.assertEqual(fallback["items"], payload["items"])
+        self.assertEqual(fallback["rerank_state"], "unavailable_kept_retrieval_order")

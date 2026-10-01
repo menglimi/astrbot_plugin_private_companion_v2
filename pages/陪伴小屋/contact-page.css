@@ -1,0 +1,880 @@
+/* 陪伴小屋 · 主动与联系（节律盘）
+   联系是六个专题域里唯一「按一天分布」的域：一天 24 格里哪些允许开口、
+   两次之间隔多久、连发几轮、什么时候收尾。这一页的视觉重量全部用来
+   把那个分布画出来——一个钟面，四圈同心。
+
+   为什么不是记忆页那套档案库：记忆的轴是**生命周期**（写入→更正→撤回→遗忘），
+   联系的轴是**时刻**。同一个布局套两个轴向不同的域，等于把时间画成状态。
+
+   色值全部走 tokens.css 的语义令牌（不得写死十六进制），
+   切主题时整页跟着变。环上四圈各自的语义色映射到令牌：
+     免打扰 → --t-text-faint（不是危险色：静默是设计出来的，不是故障）
+     活动曲线柱子 → --t-accent（峰值另用 --t-accent-solid）
+     强度档位 → --t-warn（它同时放宽间隔与收窄门槛，属于「会放大」的那类）
+     问候窗口 → --t-ok（有界且明确的时刻）
+   环心状态四档用 ok / faint / warn / risk，与判定四档一一对应。
+
+   版式：桌面第一行是「盘面 + 三个总开关 + 免打扰」，下面三块铺满整页宽；
+   窄屏全部单栏，盘面缩小到 240px 以让出首屏。 */
+
+.ct-app{
+  display:grid;grid-template-columns:206px minmax(0,1fr);
+  gap:var(--sp-5);align-items:start;
+  color:var(--t-text);font-size:var(--fs-body);line-height:1.7;
+
+  /* 纵向节奏三档。之前这一页的纵向间距是「哪儿有地方就往哪儿塞」：
+     同一列表里相邻两行只差 1px，而相邻两块之间却有 16px——
+     行距比块距还小，一屏读下来是一条糊掉的带子，边界全靠 hover 才看得见。
+     现在按「相邻的两样是不是同一件事」分档：
+       section 30px：一屏里的大块之间（换话题）
+       block   22px：卡片与卡片、卡片内的小节之间（换一组）
+       row      8px：同一个列表里行与行之间（同一组的下一条）
+     三者都挂在共享的 sp token 上而不是写死 px，
+     紧凑 / 宽松两档密度改 sp 时这里会跟着变。 */
+  --ct-v-section:var(--sp-6);
+  --ct-v-block:var(--sp-5);
+  --ct-v-row:var(--sp-2);
+}
+.ct-main{min-width:0;display:flex;flex-direction:column;gap:var(--ct-v-section)}
+/* 换页容器。页头、提示、正文一起进出：它们是一屏的三段，
+   只滑正文会出现「标题先换、内容后到」的两拍。 */
+.ct-view{display:flex;flex-direction:column;gap:var(--ct-v-section);min-width:0}
+/* 换页入场。旧的一屏没法离场（DOM 整块重写），所以只写入场；
+   位移带方向：往后点从右边进、往回点从左边进，
+   没有方向的话换页就是「闪一下」，说不清是往哪走。
+   只动 transform 与 opacity：这一屏重的时候有二十来个字段，
+   动画属性一多就开始掉帧。 */
+@keyframes ct-view-next{from{opacity:0;transform:translate3d(22px,0,0)}}
+@keyframes ct-view-prev{from{opacity:0;transform:translate3d(-22px,0,0)}}
+.ct-view.is-from-next{animation:ct-view-next .3s cubic-bezier(.22,1,.36,1)}
+.ct-view.is-from-prev{animation:ct-view-prev .3s cubic-bezier(.22,1,.36,1)}
+
+/* ===== 左侧轨道 =====
+   五项不是平级页签：节律盘是「此刻」，其余是配置面。
+   用一条竖线串起来，与记忆页的轨道同源但更窄——这一页只有五项。 */
+.ct-rail{display:flex;flex-direction:column;gap:2px;position:sticky;top:12px;min-width:0}
+.ct-rail::before{
+  content:"";position:absolute;left:15px;top:22px;bottom:22px;width:1px;
+  background:var(--t-line);z-index:0;
+}
+.ct-rail button{
+  position:relative;z-index:1;display:flex;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-2);border:0;border-radius:var(--r-sm);background:transparent;
+  color:var(--t-text-soft);font:inherit;font-size:var(--fs-body);text-align:left;cursor:pointer;
+  transition:background .18s ease,color .18s ease;
+}
+.ct-rail button:hover{background:var(--t-surface-soft);color:var(--t-text)}
+.ct-rail button[aria-pressed="true"]{
+  background:var(--t-surface-raised);color:var(--t-text-strong);
+  font-weight:600;box-shadow:var(--t-shadow);
+}
+.ct-rail-icon{
+  flex:none;display:grid;place-items:center;width:31px;height:31px;
+  border:1px solid var(--t-line);border-radius:50%;
+  background:var(--t-surface);color:var(--t-text-faint);
+  transition:border-color .18s ease,color .18s ease,background .18s ease;
+}
+.ct-rail button[aria-pressed="true"] .ct-rail-icon{
+  border-color:transparent;background:var(--t-accent-quiet);color:var(--t-accent-ink);
+}
+/* 点中那一下。按钮每次渲染都重建，选中态的 transition 永远不会响，
+   所以「啪」地贴上去的观感要靠一次性动画补：
+   底色从「未选中」的透明长成高亮，图标弹一下 —— from 写旧模样、to 不写，
+   终点自动落在选中态上。 */
+@keyframes ct-rail-pick{from{background:transparent;box-shadow:none}}
+@keyframes ct-rail-pop{from{transform:scale(.82)}}
+.ct-rail button.is-picked{animation:ct-rail-pick .26s ease}
+.ct-rail button.is-picked .ct-rail-icon{animation:ct-rail-pop .34s cubic-bezier(.34,1.4,.5,1)}
+.ct-rail-icon svg{width:16px;height:16px}
+.ct-rail-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ===== 页头 ===== */
+.ct-head{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);
+  flex-wrap:wrap;
+}
+.ct-head-main{display:flex;align-items:center;gap:var(--sp-2);min-width:0}
+.ct-head h2{margin:0;font-size:var(--fs-title);font-weight:650;color:var(--t-text-strong)}
+/* 页头上的判定徽标：与环心同一套色，两处看到的是同一个判定。 */
+.ct-verdict{
+  display:inline-flex;align-items:center;gap:var(--sp-1);padding:2px var(--sp-2) 2px var(--sp-2);
+  border-radius:var(--r-pill);font-size:var(--fs-tiny);font-weight:600;
+  background:var(--t-surface-soft);color:var(--t-text-soft);
+  transition:background var(--dur-fast) ease,color var(--dur-fast) ease;
+}
+.ct-verdict .ct-dot{
+  width:7px;height:7px;border-radius:50%;background:currentColor;flex:none;
+}
+.ct-verdict.is-open{background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+.ct-verdict.is-open .ct-dot{animation:ct-breathe 2.6s ease-in-out infinite}
+.ct-verdict.is-quiet{background:var(--t-surface-soft);color:var(--t-text-faint)}
+.ct-verdict.is-low{background:var(--t-warn-quiet);color:var(--t-warn-ink)}
+.ct-verdict.is-blocked{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+@keyframes ct-breathe{
+  0%,100%{transform:scale(1);opacity:1}
+  50%{transform:scale(1.5);opacity:.55}
+}
+.ct-head-actions{display:flex;gap:var(--sp-2);flex:none}
+.ct-btn{
+  display:inline-flex;align-items:center;gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface);color:var(--t-text-soft);
+  font:inherit;font-size:var(--fs-body);cursor:pointer;
+  transition:background .16s ease,border-color .16s ease,color .16s ease,transform .1s ease;
+}
+.ct-btn svg{width:14px;height:14px}
+.ct-btn:hover:not(:disabled){background:var(--t-surface-soft);color:var(--t-text);border-color:var(--t-line-firm)}
+.ct-btn:active:not(:disabled){transform:translateY(1px)}
+.ct-btn:disabled{opacity:.5;cursor:default}
+.ct-btn.is-primary{
+  background:var(--t-accent-solid);color:var(--t-on-solid);border-color:transparent;font-weight:600;
+}
+.ct-btn.is-primary:hover:not(:disabled){background:var(--t-accent-solid-hover);color:var(--t-on-solid)}
+.ct-btn.is-quiet{border-color:transparent;background:transparent;padding:var(--sp-1) var(--sp-2);color:var(--t-text-faint)}
+.ct-btn.is-quiet:hover{background:var(--t-surface-soft);color:var(--t-text-soft)}
+
+/* ===== 通知 ===== */
+.ct-notice{
+  display:flex;align-items:flex-start;gap:var(--sp-2);margin:0;
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);
+  background:var(--t-ok-quiet);color:var(--t-ok-ink);font-size:var(--fs-body);
+}
+.ct-notice.is-error{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.ct-notice svg{width:14px;height:14px;flex:none;margin-top:3px}
+.ct-notice span{flex:1;min-width:0}
+.ct-notice button{
+  border:0;background:transparent;color:inherit;font-size:var(--fs-title);line-height:1;cursor:pointer;
+  padding:0 2px;opacity:.6;
+}
+.ct-notice button:hover{opacity:1}
+
+/* ===== 空态 ===== */
+.ct-empty{
+  display:flex;flex-direction:column;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-7) var(--sp-5);text-align:center;color:var(--t-text-faint);
+  border:1px dashed var(--t-line);border-radius:var(--r-md);
+}
+.ct-empty svg{width:22px;height:22px}
+.ct-empty strong{color:var(--t-text-soft);font-size:var(--fs-body)}
+.ct-empty p{margin:0;font-size:var(--fs-body);max-width:44ch}
+.ct-spinner{
+  width:15px;height:15px;border-radius:50%;
+  border:2px solid var(--t-line);border-top-color:var(--t-accent);
+  animation:ct-spin .7s linear infinite;
+}
+@keyframes ct-spin{to{transform:rotate(360deg)}}
+
+/* ===== 节律盘：盘面 + 总开关 + 免打扰同一行 =====
+   第一行只放「一改就立刻改变盘面几何」的那几项：盘面、三个总开关、免打扰外圈。
+   改完不用滚动就能看见环变了——控件与图形同屏，这是这一行存在的唯一理由。
+   下面三块（24 格曲线 / 强度档位 / 三个窗口）是「按一天铺开的数据」，
+   它们铺满整页宽而不是挤在右栏：24 根柱子需要的是横向空间，
+   放在 320px 的栏里每根柱子只剩十来像素，谁也读不出来。
+   盘面保持 sticky：下面三块可以很长，滚下去时「此刻」不该滚出视野。 */
+.ct-dial-wrap{display:grid;grid-template-columns:minmax(0,300px) minmax(0,1fr);gap:var(--sp-5);align-items:start}
+.ct-dial-stage{position:sticky;top:12px;display:flex;flex-direction:column;align-items:center;gap:var(--sp-3)}
+.ct-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--ct-v-block);align-content:start;min-width:0}
+/* .ct-rest 与 .ct-dial-wrap 是 .ct-main 的两个相邻子项，间距已由那里的
+   flex gap 给出，这里不再加 margin——两处都加会得到双倍行距。 */
+.ct-rest{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--ct-v-block);align-items:start}
+.ct-rest > .is-wide{grid-column:1 / -1}
+
+/* 钟面本体。四圈同心，半径在 JS 里固定：
+   免打扰 132 / 曲线 112 / 问候 94 / 强度 76，中心 150（viewBox 300）。 */
+.ct-dial{width:100%;max-width:340px;height:auto;display:block;overflow:visible}
+.ct-ring-base{fill:none;stroke:var(--t-line);stroke-width:1;opacity:.7}
+/* 刻度：六个小时点长一点，其余只点一下。0/6/12/18 带数字。 */
+.ct-tick{stroke:var(--t-line-firm);stroke-width:1;stroke-linecap:round;opacity:.55}
+.ct-tick.is-major{stroke:var(--t-text-faint);stroke-width:1.4;opacity:.85}
+.ct-tick-label{fill:var(--t-text-faint);font-size:var(--fs-micro);text-anchor:middle;font-variant-numeric:tabular-nums}
+
+/* 外圈 · 免打扰弧。静默是设计出来的，所以用中性色而不是危险色：
+   它不该看起来像故障。 */
+.ct-quiet path{
+  stroke:var(--t-text-faint);stroke-linecap:butt;opacity:.22;
+  transition:opacity var(--dur-slow) ease;
+}
+.ct-quiet.is-on path{opacity:.5}
+.ct-quiet.is-on:hover path{opacity:.72}
+
+/* 次圈 · 24 小时活动柱子。未启用时全部等高且极淡——
+   「曲线没开」和「曲线全是 1.0」在视觉上必须不同，否则用户分不清
+   自己是没开还是拉平了。 */
+.ct-bar{
+  stroke:var(--t-line);stroke-width:5.4;stroke-linecap:round;opacity:.42;
+  /* 柱子沿半径方向长大，所以变换原点必须是**环心**（viewBox 300 见方，
+     中心 150,150），不是柱子自己的包围盒——用 fill-box 的话每根柱子
+     会各转各的，波形就散了。 */
+  transform-box:view-box;transform-origin:150px 150px;
+}
+.ct-bar.is-on{stroke:var(--t-accent);opacity:.72}
+.ct-bar.is-peak{stroke:var(--t-accent-solid);opacity:.95}
+/* 开页涟漪：24 根柱子从 0:00（正上方）向两侧依次立起来，在 12:00 会合。
+   延迟按「到 0:00 的环形距离」而不是下标：按下标排的话波前只有一个方向，
+   看起来是「逐根加载」，不是一圈荡开的涟漪。波前走完 12 格 × 26ms ≈ 312ms，
+   加 780ms 时长刚好一秒出头，再长就挡住页面了。
+   关键帧只写 from 与中段、**不写 to**：to 由元素自身的层叠值补齐，
+   于是峰值柱（.is-peak，opacity .95）落回 .95 而不是被硬编码成 .72。 */
+.ct-dial.is-scanning .ct-bar.is-on{
+  animation:ct-bar-ripple .78s cubic-bezier(.22,.9,.28,1) both;
+  animation-delay:calc(var(--i,0) * 26ms);
+}
+@keyframes ct-bar-ripple{
+  from{opacity:0;transform:scale(.62)}
+  58%{opacity:1;transform:scale(1.1)}
+}
+.ct-dial.is-entering{animation:ct-draw .82s cubic-bezier(.16,1,.3,1) both}
+@keyframes ct-draw{from{opacity:0;transform:rotate(-7deg) scale(.94)}to{opacity:1;transform:none}}
+/* 切强度档位时的一次短促呼吸：只有这一圈会变，盘面替它说明。
+   触发方式是 .ct-dial-stage.is-pulse-tier（见下面「盘面变化」一节），
+   不是当场往 DOM 上加类——加在旧节点上会被紧接着的 render() 换掉，
+   动画一帧都放不出来。 */
+.ct-dial-stage.is-pulse-tier .ct-dial{animation:ct-shift .5s cubic-bezier(.34,1.4,.5,1)}
+@keyframes ct-shift{
+  0%{transform:scale(1)}
+  42%{transform:scale(1.028)}
+  100%{transform:scale(1)}
+}
+
+/* 三圈 · 问候窗口与失眠窗口。弧要沿半径方向起落，原点同样取环心。 */
+.ct-anchor path{
+  stroke:var(--t-ok);stroke-linecap:round;opacity:.62;cursor:pointer;
+  transform-box:view-box;transform-origin:150px 150px;
+}
+.ct-anchor:hover path{opacity:.95}
+.ct-insomnia path{
+  stroke:var(--t-warn);stroke-linecap:round;opacity:.5;stroke-dasharray:2 3;
+  transform-box:view-box;transform-origin:150px 150px;
+}
+
+/* 游标：从环心指出的一条细线加一个小圆，按角色所在时区走。 */
+.ct-cursor-line{stroke:var(--t-text-strong);stroke-width:1;opacity:.3}
+.ct-cursor-dot{fill:var(--t-accent-solid);stroke:var(--t-surface);stroke-width:2}
+.ct-dial.is-scanning .ct-cursor-dot{animation:ct-cursor-in .9s ease-out both}
+@keyframes ct-cursor-in{from{r:0}to{r:3.6}}
+.ct-scan-hint{font-size:var(--fs-tiny);color:var(--t-text-faint);text-align:center}
+
+/* ===== 盘面变化 =====
+   用户改了某一圈，就只让那一圈动：整盘一起闪等于什么都没说清。
+   类加在 .ct-dial-stage 上（.ct-center 是 svg 的兄弟节点，不在 svg 里），
+   `is-pulse-*` 由 JS 按「改动的字段属于哪一圈」逐帧给出，见 PULSE_PART。
+   这些规则必须排在 .is-scanning 的柱子规则**之后**：开页与改动互斥，
+   但万一同时命中，最后一条声明生效——让「刚改的那一圈」赢，而不是入场。 */
+.ct-dial-stage.is-pulse-quiet .ct-quiet path{animation:ct-quiet-bloom .62s cubic-bezier(.22,.9,.28,1) both}
+@keyframes ct-quiet-bloom{from{opacity:0;stroke-width:1}}
+.ct-dial-stage.is-pulse-curve .ct-bar.is-on{
+  animation:ct-bar-swell .5s cubic-bezier(.22,.9,.28,1) both;
+  animation-delay:calc(var(--i,0) * 14ms);
+}
+@keyframes ct-bar-swell{from{transform:scale(.86)}55%{transform:scale(1.06)}}
+.ct-dial-stage.is-pulse-greet .ct-anchor path{
+  animation:ct-anchor-in .5s cubic-bezier(.22,.9,.28,1) both;
+  animation-delay:calc(var(--a,0) * 70ms);
+}
+.ct-dial-stage.is-pulse-greet .ct-insomnia path{animation:ct-anchor-in .5s cubic-bezier(.22,.9,.28,1) both}
+@keyframes ct-anchor-in{from{opacity:0;transform:scale(.9)}}
+.ct-dial-stage.is-pulse-cursor .ct-cursor-dot{animation:ct-cursor-in .45s ease-out both}
+.ct-dial-stage.is-pulse-cursor .ct-cursor-line{animation:ct-cursor-fade .45s ease-out both}
+@keyframes ct-cursor-fade{from{opacity:0}}
+.ct-dial-stage.is-pulse-center .ct-center{animation:ct-center-in .46s cubic-bezier(.22,.9,.28,1) both}
+@keyframes ct-center-in{from{opacity:0;transform:translate(-50%,-46%)}}
+
+/* 环心：这一页唯一一句「此刻」。
+   absolute 定位在钟面正中，宽度限制在 30% 以内，避免压到柱子。
+   这里**不再**声明 position: .ct-dial-stage 已经是 sticky（sticky 也是定位元素，
+   足够当绝对定位的包含块）。原先这里有一条 `position:relative`，
+   它排在 sticky 后面、又只改 position 不改 top——于是 `top:12px` 落在一个
+   relative 元素上，把整个盘面往下推了 12px，而 sticky 一次都没生效过。 */
+.ct-center{
+  position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:44%;max-width:150px;display:flex;flex-direction:column;align-items:center;
+  gap:var(--sp-1);text-align:center;pointer-events:none;
+}
+.ct-center-title{font-size:var(--fs-body);font-weight:650;line-height:1.3}
+.ct-center-detail{font-size:var(--fs-tiny);line-height:1.5;color:var(--t-text-faint)}
+.ct-center-action{
+  pointer-events:auto;padding:3px var(--sp-1);border:0;border-radius:var(--r-xs);
+  background:transparent;color:var(--t-accent-ink);font-size:var(--fs-micro);
+  font-weight:650;line-height:1.35;white-space:nowrap;cursor:pointer;
+  transition:background var(--dur-fast) ease,color var(--dur-fast) ease;
+}
+.ct-center-action:hover{background:var(--t-accent-quiet);color:var(--t-accent-solid-hover)}
+.ct-center-action:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
+.ct-center-flag{
+  display:inline-flex;align-items:center;gap:var(--sp-1);margin-top:2px;
+  font-size:var(--fs-micro);color:var(--t-warn-ink);
+}
+.ct-center-flag svg{width:11px;height:11px}
+.ct-center.is-open .ct-center-title{color:var(--t-ok-ink)}
+.ct-center.is-open .ct-dot{color:var(--t-ok)}
+.ct-center.is-quiet .ct-center-title{color:var(--t-text-soft)}
+.ct-center.is-low .ct-center-title{color:var(--t-warn-ink)}
+.ct-center.is-blocked .ct-center-title{color:var(--t-risk-ink)}
+/* 钟面正中的小圆点是「此刻可以开口」的呼吸点，只在 open 时出现。 */
+.ct-center.is-open::before{
+  content:"";position:absolute;left:50%;top:-16px;width:5px;height:5px;border-radius:50%;
+  transform:translateX(-50%);background:var(--t-ok);
+  animation:ct-breathe 2.6s ease-in-out infinite;
+}
+
+/* ===== 控制块 =====
+   .ct-controls 的排布在「节律盘」那一节定义（第一行的两栏卡片）。 */
+.ct-block{
+  display:flex;flex-direction:column;gap:var(--sp-4);
+  padding:var(--ct-v-block);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-surface);
+}
+/* 标题前一小段色条，颜色就是这一块管的那一圈：免打扰中性、曲线强调色、
+   档位警告色、问候成功色。与盘面四圈同一套映射，看标题就知道改的是哪一圈。 */
+.ct-block > h3{
+  display:flex;align-items:center;gap:var(--sp-2);margin:0;
+  font-size:var(--fs-body);font-weight:650;color:var(--t-text-strong);
+  letter-spacing:.02em;
+}
+.ct-block > h3::before{
+  content:"";flex:none;width:3px;height:12px;border-radius:var(--r-2xs);
+  background:var(--ring,var(--t-line-firm));opacity:.9;
+}
+.ct-block.is-ring-quiet{--ring:var(--t-text-faint)}
+.ct-block.is-ring-curve{--ring:var(--t-accent)}
+.ct-block.is-ring-tier{--ring:var(--t-warn)}
+.ct-block.is-ring-greet{--ring:var(--t-ok)}
+.ct-note{margin:0;font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.6}
+
+/* 开关。整行可点，说明写在标签里——比把说明另起一行更省纵向空间。
+   画法：轨道是一枚描边胶囊（不用 border，避免与内阴影叠出双层边），
+   滑块是实心圆、带投影；开启时整条轨道填成实色、滑块反白。
+   上一版的坑在「关」态：轨道用近白的 sunken 面、滑块用纯白，
+   两者只差一点亮度，剩下的全靠一圈 1px 深描边——远看就是个空的小方框，
+   滑块根本看不见。现在关态轨道用 text-faint 调进 surface 的中灰（color-mix，
+   六套主题各自调出各自的灰），滑块纯白 + 投影，不靠描边撑轮廓。
+   尺寸 40×22：滑块 18、行程 18px 都是整数，缩放到非整数倍时不会糊。 */
+.ct-switch{
+  display:flex;align-items:flex-start;gap:var(--sp-2);padding:var(--sp-1) 0;cursor:pointer;
+  border-radius:var(--r-xs);
+}
+.ct-switch input{position:absolute;opacity:0;width:0;height:0}
+.ct-switch-track{
+  /* 「关」态轨道色：写成局部变量，让下面两条翻转动画的起点能直接引用，
+     色值只此一处，改色不会改漏一边。 */
+  --switch-off:color-mix(in srgb,var(--t-text-faint) 32%,var(--t-surface));
+  flex:none;position:relative;width:40px;height:22px;margin-top:1px;
+  border-radius:var(--r-pill);background:var(--switch-off);
+  transition:background .24s cubic-bezier(.4,0,.2,1);
+}
+.ct-switch-track i{
+  position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+  background:var(--t-surface-raised);
+  box-shadow:0 1px 3px rgba(0,0,0,.28),0 0 1px rgba(0,0,0,.14);
+  transition:transform .26s cubic-bezier(.34,1.32,.5,1),background .24s ease;
+}
+/* 悬停只加深轨道，不换底色语义：轨道底色的变化留给「开 / 关」这一个含义。 */
+.ct-switch:hover .ct-switch-track{background:color-mix(in srgb,var(--t-text-faint) 48%,var(--t-surface))}
+.ct-switch input:checked + .ct-switch-track{background:var(--t-accent-solid)}
+.ct-switch input:checked + .ct-switch-track i{
+  transform:translateX(18px);background:var(--t-on-solid);
+}
+/* 翻转动画。
+   为什么是 keyframes 而不是接着用 transition：点开关会整块重写 DOM，
+   新节点一出生就是终态（input 已 checked），transition 没有起点可插值，
+   于是「扳动」这一步在界面上是凭空跳变，开和关都没有动画可言。
+   两向各写一条一次性动画：from 是**改动前**的模样，to 不写，
+   隐式终点取当前计算值，播完自然停在终态，不需要额外收尾。
+   曲线上一开一关不对称：开带一点回弹（顶到头才有「扣上了」的手感），
+   关走 ease-out 且短一些——关是「收」，再加回弹会显得拖沓。 */
+@keyframes ct-flip-on-track{from{background:var(--switch-off)}}
+@keyframes ct-flip-off-track{from{background:var(--t-accent-solid)}}
+@keyframes ct-flip-on-knob{from{transform:translateX(0)}}
+@keyframes ct-flip-off-knob{from{transform:translateX(18px)}}
+.ct-switch.is-flip-on .ct-switch-track{animation:ct-flip-on-track .26s cubic-bezier(.34,1.4,.5,1)}
+.ct-switch.is-flip-off .ct-switch-track{animation:ct-flip-off-track .2s ease-out}
+.ct-switch.is-flip-on .ct-switch-track i{animation:ct-flip-on-knob .26s cubic-bezier(.34,1.4,.5,1)}
+.ct-switch.is-flip-off .ct-switch-track i{animation:ct-flip-off-knob .2s ease-out}
+/* 触发源的开关与节律盘那一屏的主配置开关共用同一套画法，只是类挂的位置不同
+   （那边挂在 .ct-switch 上，这边挂在 .ct-src-row.is-toggle 上），两边都要能播。 */
+.ct-src-row.is-toggle.is-flip-on .ct-switch-track{animation:ct-flip-on-track .26s cubic-bezier(.34,1.4,.5,1)}
+.ct-src-row.is-toggle.is-flip-off .ct-switch-track{animation:ct-flip-off-track .2s ease-out}
+.ct-src-row.is-toggle.is-flip-on .ct-switch-track i{animation:ct-flip-on-knob .26s cubic-bezier(.34,1.4,.5,1)}
+.ct-src-row.is-toggle.is-flip-off .ct-switch-track i{animation:ct-flip-off-knob .2s ease-out}
+/* 整行闪一下，作为「这条刚动过」的回执。两个方向闪同一种色：
+   开关往哪边走已经由滑块说清楚了，行闪只负责「我收到了」，不抢占方向信息。 */
+@keyframes ct-row-flash{from{background:var(--t-accent-quiet)}}
+/* 两个状态拆成两条规则，而不是写成一条逗号选择器：减弱动效块里它们是两条独立的
+   归零规则，而那边的检查是「按选择器整串比对」。合成一条时语义一样、检查却过不去，
+   报出来的是「动画没登记」——指错了地方。逐条对应，样式与检查就是同一个形状。 */
+.ct-src-row.is-flip-on{animation:ct-row-flash .5s ease-out}
+.ct-src-row.is-flip-off{animation:ct-row-flash .5s ease-out}
+.ct-switch input:checked + .ct-switch-track:hover{background:var(--t-accent-solid-hover)}
+.ct-switch input:focus-visible + .ct-switch-track{outline:2px solid var(--t-focus);outline-offset:2px}
+.ct-switch-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+.ct-switch-text strong{font-size:var(--fs-body);font-weight:600;color:var(--t-text)}
+.ct-switch-text small{font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.5}
+/* 改过但没保存的字段左边一条竖线。不用边框包整行，那会让一排开关看起来像表格。 */
+.ct-switch.is-dirty,.ct-field.is-dirty,.ct-field-pair.is-dirty,.ct-quota.is-dirty,
+.ct-src-row.is-dirty{
+  box-shadow:inset 2px 0 0 var(--t-caution);
+}
+
+/* 文本 / 数字 / 时间字段 */
+.ct-field{display:flex;flex-direction:column;gap:var(--sp-2);min-width:0}
+.ct-field-label{
+  display:flex;align-items:baseline;gap:var(--sp-1);
+  font-size:var(--fs-tiny);font-weight:600;color:var(--t-text-soft);
+}
+.ct-field-label small{font-weight:400;color:var(--t-text-faint);font-variant-numeric:tabular-nums}
+.ct-field input,.ct-field select,.ct-field textarea{
+  width:100%;padding:var(--sp-2) var(--sp-2);box-sizing:border-box;
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface-sunken);color:var(--t-text);
+  font:inherit;font-size:var(--fs-body);
+  transition:border-color .16s ease,background .16s ease;
+}
+.ct-field textarea{resize:vertical;line-height:1.6}
+.ct-field input:focus,.ct-field select:focus,.ct-field textarea:focus{
+  outline:none;border-color:var(--t-accent);background:var(--t-surface);
+}
+.ct-field-help{font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.5}
+.ct-field-pair{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3);padding:2px 0}
+.ct-field-pair .ct-field-help{grid-column:1 / -1}
+.ct-input-unit{display:flex;align-items:center;gap:var(--sp-1)}
+.ct-input-unit i{font-style:normal;font-size:var(--fs-tiny);color:var(--t-text-faint);flex:none}
+
+/* ===== 强度档位 =====
+   五档并排，各带一条按 (1 − interval_factor) 变长的底条：
+   档位的差别是「更快 / 更多」，这句话只有并排画出来才成立。 */
+.ct-tiers{display:flex;gap:var(--sp-1);flex-wrap:wrap}
+.ct-tier{
+  position:relative;flex:1 1 0;min-width:74px;
+  display:flex;flex-direction:column;align-items:center;gap:2px;
+  padding:var(--sp-3) var(--sp-2) var(--sp-3);overflow:hidden;
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface-sunken);color:var(--t-text-soft);
+  font:inherit;cursor:pointer;
+  transition:border-color .18s ease,background .18s ease,color .18s ease,transform .16s ease;
+}
+.ct-tier:hover{border-color:var(--t-line-firm);color:var(--t-text);transform:translateY(-1px)}
+.ct-tier.is-on{
+  border-color:var(--t-accent);background:var(--t-surface);color:var(--t-text-strong);
+}
+.ct-tier-bar{
+  position:absolute;left:0;bottom:0;height:3px;width:var(--fill);
+  background:var(--t-warn);opacity:.5;
+  transition:width .42s cubic-bezier(.16,1,.3,1),opacity .2s ease;
+}
+.ct-tier.is-on .ct-tier-bar{opacity:1}
+.ct-tier-label{font-size:var(--fs-body);font-weight:600}
+.ct-tier-meta{font-size:var(--fs-micro);color:var(--t-text-faint);font-variant-numeric:tabular-nums}
+.ct-tier.is-dirty{box-shadow:inset 2px 0 0 var(--t-caution)}
+
+/* ===== 24 小时曲线编辑器 =====
+   可直接拖涂：按住横拖过若干小时就改成那个高度。
+   24 个数字没人愿意输，但涂一条线谁都愿意。 */
+.ct-curve{display:flex;flex-direction:column;gap:var(--sp-2)}
+.ct-curve-plot{
+  position:relative;display:flex;align-items:flex-end;gap:1px;
+  height:96px;padding:var(--sp-1);box-sizing:border-box;
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface-sunken);cursor:crosshair;
+  touch-action:none;
+}
+.ct-curve-col{
+  flex:1 1 0;display:flex;align-items:flex-end;height:100%;min-width:0;
+}
+.ct-curve-col i{
+  display:block;width:100%;min-height:2px;border-radius:var(--r-2xs) var(--r-2xs) 0 0;
+  background:var(--t-line-firm);opacity:.6;
+  transition:height .1s ease,background .16s ease,opacity .16s ease;
+}
+.ct-curve.is-on .ct-curve-col i{background:var(--t-accent);opacity:.7}
+.ct-curve-col:hover i{background:var(--t-accent-solid);opacity:1}
+.ct-curve-axis{
+  position:relative;height:13px;font-size:var(--fs-micro);color:var(--t-text-faint);
+  font-variant-numeric:tabular-nums;
+}
+.ct-curve-axis span{position:absolute;left:var(--at);transform:translateX(-50%)}
+.ct-curve-actions{display:flex;align-items:center;gap:var(--sp-1);flex-wrap:wrap}
+/* 拖涂只有指针设备能用，所以下面那个文本口是键盘用户唯一的入口。 */
+.ct-curve-text textarea{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:var(--fs-tiny);line-height:1.5;word-break:break-all;
+}
+
+/* ===== 契机矩阵 =====
+   15 类契机 × 三列。权重不是数字输入而是**条形**——权重是相对值，
+   绝对值没有意义，只有一列里并排画出来才知道谁主要。 */
+.ct-purposes{display:flex;flex-direction:column;gap:var(--ct-v-block)}
+.ct-purposes-sum{
+  font-size:var(--fs-body);color:var(--t-text-soft);padding:0 2px;
+}
+.ct-purposes-sum strong{color:var(--t-text-strong);font-size:var(--fs-lead);font-variant-numeric:tabular-nums}
+.ct-bucket{
+  display:flex;flex-direction:column;gap:var(--sp-3);
+  padding:var(--ct-v-block);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-surface);
+}
+.ct-bucket > header{display:flex;align-items:baseline;gap:var(--sp-2);flex-wrap:wrap}
+.ct-bucket > header h3{margin:0;font-size:var(--fs-body);font-weight:650;color:var(--t-text-strong)}
+.ct-bucket > header span{font-size:var(--fs-tiny);color:var(--t-text-faint);flex:1;min-width:0}
+.ct-bucket > header em{
+  font-style:normal;font-size:var(--fs-micro);color:var(--t-text-faint);
+  padding:1px var(--sp-2);border-radius:var(--r-pill);background:var(--t-surface-soft);
+}
+/* 行与行之间给 8px：之前是 1px，15 行挤成一条连续的带子，
+   只能靠 hover 底色才知道这一行到哪儿结束。行距必须比行内的内容间距大，
+   否则「同一行的三列」和「相邻的两行」在视觉上是同一种距离。 */
+.ct-purpose-list{display:flex;flex-direction:column;gap:var(--ct-v-row)}
+.ct-purpose{
+  display:grid;
+  /* 三段分宽按「谁需要横向空间」：名字列 max-content——它曾用 1fr
+     固定占一份，而最长的名字也只有七个字，于是每行名字右侧都拖着
+     一段谁也不用的空白，权重条却被压在中间；改后名字贴着文字，
+     让出的宽度全给权重条。权重条 1fr：相对长短只有拉开了才读得出。
+     状态列 max-content：所有行按最宽的那枚章对齐，既不裁字也不乱。 */
+  grid-template-columns:max-content minmax(260px,1fr) max-content;
+  align-items:center;gap:var(--sp-4);
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-xs);
+  transition:background .16s ease,opacity .16s ease;
+}
+.ct-purpose:hover{background:var(--t-surface-soft)}
+/* 关闭的契机整体压暗但不隐藏——「这一类此刻不开」本身就是信息。 */
+.ct-purpose:not(.is-on){opacity:.52}
+.ct-purpose:not(.is-on):hover{opacity:.8}
+.ct-purpose.is-blocked{opacity:.62}
+
+.ct-check{display:flex;align-items:center;gap:var(--sp-2);cursor:pointer;min-width:0}
+.ct-check input{position:absolute;opacity:0;width:0;height:0}
+.ct-check-box{
+  flex:none;display:grid;place-items:center;width:17px;height:17px;
+  border:1px solid var(--t-line-firm);border-radius:var(--r-xs);
+  background:var(--t-surface-sunken);color:transparent;
+  transition:background .16s ease,border-color .16s ease,color .16s ease;
+}
+.ct-check-box svg{width:11px;height:11px}
+.ct-check input:checked + .ct-check-box{
+  background:var(--t-accent-solid);border-color:transparent;color:var(--t-on-solid);
+}
+.ct-check input:focus-visible + .ct-check-box{outline:2px solid var(--t-focus);outline-offset:2px}
+.ct-purpose-name{
+  font-size:var(--fs-body);color:var(--t-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.ct-purpose.is-blocked .ct-purpose-name{color:var(--t-text-faint);text-decoration:line-through}
+
+/* 权重条：range 铺满一层（透明轨道专供键盘与无障碍），
+   填充条与数字在上面。 */
+.ct-weight{position:relative;display:flex;align-items:center;gap:var(--sp-2)}
+.ct-weight input[type="range"]{
+  position:relative;z-index:2;flex:1;min-width:0;height:16px;margin:0;
+  background:transparent;-webkit-appearance:none;appearance:none;cursor:pointer;
+}
+.ct-weight input[type="range"]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:11px;height:11px;border-radius:50%;
+  background:var(--t-accent-solid);border:2px solid var(--t-surface);cursor:grab;
+}
+.ct-weight input[type="range"]::-moz-range-thumb{
+  width:11px;height:11px;border:2px solid var(--t-surface);border-radius:50%;
+  background:var(--t-accent-solid);cursor:grab;
+}
+.ct-weight-fill{
+  position:absolute;left:0;top:50%;height:4px;width:var(--w);transform:translateY(-50%);
+  border-radius:var(--r-pill);background:var(--t-accent);opacity:.7;
+  pointer-events:none;transition:width .12s ease;
+}
+.ct-weight::before{
+  content:"";position:absolute;left:0;right:26px;top:50%;height:4px;transform:translateY(-50%);
+  border-radius:var(--r-pill);background:var(--t-surface-sunken);pointer-events:none;
+}
+.ct-weight em{
+  flex:none;width:24px;font-style:normal;font-size:var(--fs-micro);color:var(--t-text-faint);
+  text-align:right;font-variant-numeric:tabular-nums;
+}
+
+.ct-purpose-state{display:flex;justify-content:flex-end}
+.ct-chip{
+  display:inline-block;padding:1px var(--sp-2);border-radius:var(--r-pill);
+  font-size:var(--fs-micro);white-space:nowrap;
+  background:var(--t-surface-soft);color:var(--t-text-faint);
+}
+.ct-chip.is-ok{background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+.ct-chip.is-risk{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.ct-chip.is-paused{background:var(--t-warn-quiet);color:var(--t-warn-ink)}
+
+/* ===== 开口闸门 =====
+   后端判定的顺序，一圈一圈往外。逐条入场（--i 是序号），
+   让「哪一道先关」这个顺序看得见。 */
+.ct-gates{display:flex;flex-direction:column;gap:var(--sp-4)}
+.ct-gates-sum{margin:0;font-size:var(--fs-body);color:var(--t-text-soft)}
+.ct-gates-sum strong{color:var(--t-risk-ink);font-size:var(--fs-lead);font-variant-numeric:tabular-nums}
+.ct-gate{
+  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface);
+  animation:ct-gate-in .42s cubic-bezier(.16,1,.3,1) both;
+  animation-delay:calc(var(--i,0) * 38ms);
+}
+@keyframes ct-gate-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.ct-gate-mark{
+  display:grid;place-items:center;width:22px;height:22px;border-radius:50%;
+  background:var(--t-surface-soft);color:var(--t-text-faint);
+}
+.ct-gate-mark svg{width:12px;height:12px}
+.ct-gate.is-ok .ct-gate-mark{background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+.ct-gate.is-shut{border-color:var(--t-risk);background:var(--t-risk-quiet)}
+.ct-gate.is-shut .ct-gate-mark{background:var(--t-risk);color:var(--t-on-solid)}
+.ct-gate-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ct-gate-body strong{font-size:var(--fs-body);font-weight:600;color:var(--t-text-strong)}
+.ct-gate-body p{margin:0;font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.5}
+.ct-gate-body code{
+  align-self:flex-start;margin-top:3px;padding:1px var(--sp-1);border-radius:var(--r-xs);
+  background:var(--t-surface-sunken);color:var(--t-text-soft);
+  font-size:var(--fs-micro);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.ct-gate-state{
+  font-size:var(--fs-tiny);font-weight:650;color:var(--t-text-faint);white-space:nowrap;
+}
+.ct-gate.is-ok .ct-gate-state{color:var(--t-ok-ink)}
+.ct-gate.is-shut .ct-gate-state{color:var(--t-risk-ink)}
+
+/* ===== 额度与去重 =====
+   额度没有实时读出口，所以画成刻度（两端写 0 与上限），不画进度条。
+   画成进度条等于宣称知道已用量——那是编的。 */
+/* 额度与去重。三块不再竖着排成一整条通栏：这一屏没有盘面，块直接铺满
+   .ct-main 的全部宽度，额度滑块的「0 … max」刻度被甩到屏幕两端，
+   标签在左极、值在右极，中间隔着一整片空白——视线要在两个边缘之间横跳，
+   这就是「往两侧挤」的来源。改成两栏，每条滑块的横向旅程减半。
+   连发与收尾条目最多（1 开关 + 6 个数），占满整行、组内自己分两列。 */
+.ct-budgets{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:var(--ct-v-block);align-items:start;
+}
+.ct-budgets > .ct-block{min-width:0}
+.ct-budgets > .is-wide{
+  grid-column:1 / -1;display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:var(--sp-3) var(--sp-6);align-items:start;
+}
+.ct-budgets > .is-wide > h3,
+.ct-budgets > .is-wide > .ct-switch{grid-column:1 / -1}
+/* 数字输入框不再吃满整列：数值只有两三位，通栏的底色块让视线来回跑，
+   也把「值」和「单位」推成两个互相找不着的东西。定宽 + 单位紧跟，
+   读「45 秒」是同一眼的事。 */
+.ct-budgets .ct-field input[type="number"]{max-width:150px}
+/* 一条额度 = 标题行 + 滑轨 + 两端刻度，三样是同一件东西，所以行内只给 8px；
+   真正要拉开的是**条与条**之间，由父级的 gap 给。
+   padding 从 4px 提到 8px：滑轨的滑块有 13px 高，4px 的上下留白
+   会让相邻两条的滑块几乎贴在一起，拖的时候分不清抓的是哪一条。 */
+.ct-quota{display:flex;flex-direction:column;gap:var(--sp-2);padding:var(--sp-2) 0}
+.ct-quota-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-3)}
+.ct-quota-head strong{font-size:var(--fs-body);font-weight:600;color:var(--t-text)}
+.ct-quota-value{display:inline-flex;align-items:baseline;gap:3px;flex:none}
+.ct-quota-value b{
+  font-size:var(--fs-lead);font-weight:650;color:var(--t-text-strong);
+  font-variant-numeric:tabular-nums;
+}
+.ct-quota-value i{font-style:normal;font-size:var(--fs-micro);color:var(--t-text-faint)}
+.ct-quota input[type="range"]{
+  width:100%;height:18px;margin:0;background:transparent;
+  -webkit-appearance:none;appearance:none;cursor:pointer;
+}
+.ct-quota input[type="range"]::-webkit-slider-runnable-track{
+  height:4px;border-radius:var(--r-pill);background:var(--t-surface-sunken);
+}
+.ct-quota input[type="range"]::-moz-range-track{
+  height:4px;border-radius:var(--r-pill);background:var(--t-surface-sunken);
+}
+.ct-quota input[type="range"]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:13px;height:13px;margin-top:-var(--sp-1);
+  border-radius:50%;background:var(--t-accent-solid);
+  border:2px solid var(--t-surface);cursor:grab;
+}
+.ct-quota input[type="range"]::-moz-range-thumb{
+  width:13px;height:13px;border:2px solid var(--t-surface);border-radius:50%;
+  background:var(--t-accent-solid);cursor:grab;
+}
+.ct-quota-scale{
+  display:flex;justify-content:space-between;
+  font-size:var(--fs-micro);color:var(--t-text-faint);font-variant-numeric:tabular-nums;
+}
+
+/* ===== 外部触发源 =====
+   这些不是「一天」上的东西，是「素材从哪来」，所以单独一屏。
+   每一组是一张卡片：图标 + 组名 + 「n/m 开启」；组内一行一件事，
+   标签在左、控件在右，行间一条细线。
+   上一版把每个字段竖排堆在卡片里（标签、控件、说明各占一行），
+   扫一眼全是左对齐的灰标签，既看不出「这一组开了几项」，
+   也读不出「哪一行是哪一项」——控件与标签的距离比行距还远。
+   条目多的三组（屏幕与动作、约定与生成上下文、余额与其它）占满整行，
+   组内自己分两栏：否则它们会把同行的短卡片拉出一大块空白。
+   卡片最小 380px（原来 320）：320 会挤出三列，每张卡里那条天地被压到
+   「标签 + 控件」刚好没碰上，眼睛却已经觉得要碰上了——挤的感觉就是这么来的。
+   380 稳掉一列，宁可往下多滚半屏，也不要让一堆控件在窄列里互相挤。 */
+.ct-sources{
+  display:grid;gap:var(--ct-v-block);align-items:start;
+  grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr));
+}
+.ct-src-lead{
+  grid-column:1 / -1;margin:0 0 2px;font-size:var(--fs-tiny);color:var(--t-text-faint);
+  line-height:1.6;font-variant-numeric:tabular-nums;
+}
+.ct-src-group{
+  display:flex;flex-direction:column;gap:var(--sp-3);min-width:0;
+  padding:var(--ct-v-block);
+  border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--t-surface);
+  transition:border-color .18s ease;
+}
+.ct-src-group:hover{border-color:var(--t-line-firm)}
+.ct-src-group.is-wide{grid-column:1 / -1}
+.ct-src-rows{display:grid;grid-template-columns:minmax(0,1fr)}
+.ct-src-group.is-wide .ct-src-rows{
+  grid-template-columns:repeat(2,minmax(0,1fr));column-gap:var(--sp-6);
+}
+/* 行距给 4px：行本身已有 12px 上下内边距，但间距为 0 时相邻两行的
+   hover 底色会粘成一片，看不出刚悬停的是哪一行。4px 只用来断开底色，
+   真正的行距仍由行内边距给——再往上加，59 项这一屏会长得没有尽头。 */
+.ct-src-col{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0}
+.ct-src-head{display:flex;align-items:center;gap:var(--sp-2)}
+.ct-src-icon{
+  flex:none;display:grid;place-items:center;width:24px;height:24px;
+  border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--t-accent-ink);
+}
+.ct-src-icon svg{width:14px;height:14px}
+.ct-src-head h3{
+  flex:1;min-width:0;margin:0;font-size:var(--fs-body);font-weight:650;color:var(--t-text-strong);
+}
+.ct-src-badge{
+  flex:none;font-style:normal;font-size:var(--fs-micro);padding:1px var(--sp-2);border-radius:var(--r-pill);
+  background:var(--t-surface-soft);color:var(--t-text-faint);
+  font-variant-numeric:tabular-nums;
+}
+.ct-src-badge.is-on{background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+.ct-src-hint{margin:0;font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.5}
+.ct-src-row{
+  display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;
+  gap:var(--sp-3);padding:var(--sp-3) var(--sp-2) var(--sp-3) var(--sp-3);border-radius:var(--r-sm);
+  min-height:44px;
+  transition:background .16s ease;
+}
+/* 行与行之间不画通栏细线：wide 组内是两个独立分栏，
+   两栏行高对不齐，穿行的线会交错成一张破网——「乱」的主要来源就是它。
+   分隔交给行距与悬停底色。 */
+.ct-src-row:hover{background:var(--t-surface-soft)}
+.ct-src-label{display:flex;flex-direction:column;gap:1px;min-width:0;font-size:var(--fs-body);color:var(--t-text)}
+.ct-src-label small{font-size:var(--fs-micro);color:var(--t-text-faint);line-height:1.45}
+.ct-src-control{display:flex;align-items:center;gap:var(--sp-1);flex:none}
+.ct-src-control i{font-style:normal;font-size:var(--fs-micro);color:var(--t-text-faint)}
+/* 输入框不再用 sunken 底：浅色主题下它泛绿，一屏几十个框看过去像一块块
+   绿斑。改成白底 + 实线描边，靠边界而不是靠色块站住。 */
+.ct-src-row input[type="text"],.ct-src-row input[type="number"],.ct-src-row select{
+  width:130px;padding:var(--sp-1) var(--sp-2);box-sizing:border-box;
+  border:1px solid var(--t-line-firm);border-radius:var(--r-xs);
+  background:var(--t-surface-raised);color:var(--t-text);
+  font:inherit;font-size:var(--fs-body);
+  transition:border-color .16s ease,box-shadow .16s ease;
+}
+.ct-src-row input[type="text"]:hover,.ct-src-row input[type="number"]:hover,
+.ct-src-row select:hover{border-color:var(--t-text-faint)}
+.ct-src-row input[type="number"]{width:84px;text-align:right;font-variant-numeric:tabular-nums}
+/* 下拉的选项文字比数字长（「不限制（全部转发）」），给宽一点，别把选项截成谜语。 */
+.ct-src-row select{width:150px}
+.ct-src-row input:focus,.ct-src-row select:focus{
+  outline:none;border-color:var(--t-accent);box-shadow:0 0 0 3px var(--t-focus);
+}
+/* 开关在这套行里只是右侧那一枚轨道，没有文字列，所以去掉行内边距。
+   整行都是 label，点哪儿都能切；悬停反馈要给整行，不能只给那 40px 的轨道。 */
+.ct-src-row .ct-switch{padding:0;gap:0}
+.ct-src-row .ct-switch-track{margin-top:0}
+.ct-src-row.is-toggle:hover .ct-switch-track{
+  background:color-mix(in srgb,var(--t-text-faint) 48%,var(--t-surface));
+}
+.ct-src-row.is-toggle.is-on:hover .ct-switch-track{background:var(--t-accent-solid-hover)}
+
+/* ===== 中屏 =====
+   1180px 以下右栏放不下两张卡片（每张只剩 260px 左右，数值输入框会挤到
+   标签上），于是两张卡片改竖排；盘面仍在左侧。 */
+@media (max-width:1180px){
+  .ct-controls{grid-template-columns:minmax(0,1fr)}
+}
+
+/* ===== 窄屏 =====
+   880px 以下：轨道横过来，钟面缩小并取消 sticky，
+   控制器单栏。钟面缩到 240px 是因为手机首屏还要看到环心那句话。 */
+@media (max-width:880px){
+  .ct-app{grid-template-columns:minmax(0,1fr);gap:var(--sp-3)}
+  .ct-rail{
+    position:static;flex-direction:row;overflow-x:auto;gap:var(--sp-1);
+    padding-bottom:var(--sp-1);scrollbar-width:none;
+  }
+  .ct-rail::-webkit-scrollbar{display:none}
+  .ct-rail::before{display:none}
+  .ct-rail button{
+    flex:none;flex-direction:column;gap:var(--sp-1);padding:var(--sp-2) var(--sp-2);
+    font-size:var(--fs-tiny);text-align:center;min-width:64px;
+  }
+  .ct-rail-label{overflow:visible;text-overflow:clip;white-space:nowrap;max-width:none}
+  .ct-dial-wrap{grid-template-columns:minmax(0,1fr);gap:var(--sp-4)}
+  .ct-dial-stage{position:static}
+  .ct-dial{max-width:250px;margin:0 auto}
+  .ct-center{width:48%;max-width:126px}
+  .ct-center-title{font-size:var(--fs-body)}
+  .ct-center-detail{font-size:var(--fs-micro)}
+  .ct-rest{grid-template-columns:minmax(0,1fr)}
+  .ct-tiers{gap:var(--sp-1)}
+  .ct-tier{min-width:58px;padding:var(--sp-2) var(--sp-1) var(--sp-2)}
+  .ct-tier-label{font-size:var(--fs-tiny)}
+  .ct-tier-meta{font-size:var(--fs-micro)}
+  .ct-purpose{
+    grid-template-columns:minmax(0,1fr) minmax(80px,1fr);
+    row-gap:var(--sp-1);
+  }
+  .ct-purpose-state{grid-column:1 / -1;justify-content:flex-start}
+  .ct-sources{grid-template-columns:minmax(0,1fr)}
+  .ct-budgets{grid-template-columns:minmax(0,1fr)}
+  .ct-budgets > .is-wide{grid-template-columns:minmax(0,1fr)}
+  .ct-src-group.is-wide .ct-src-rows{grid-template-columns:minmax(0,1fr)}
+  .ct-src-row{grid-template-columns:minmax(0,1fr) minmax(0,140px)}
+  .ct-block{padding:var(--sp-3)}
+  .ct-head{align-items:flex-start}
+  .ct-head-actions{width:100%}
+  .ct-head-actions .ct-btn{flex:1;justify-content:center}
+  .ct-curve-plot{height:76px}
+}
+
+/* ===== 减弱动效 =====
+   压时长到瞬时，而不是 animation:none——
+   关掉动画会让依赖 transitionend 的逻辑永远不结算。
+   入场位移、涟漪、盘面变化、扫描、呼吸点全部归零，信息一条不丢。
+   延迟也要一并归零：开页涟漪与问候弧的延迟最长到 ~312ms，
+   只压时长的话会先空白一段再「啪」地出现——那不是减弱动效，是闪烁。 */
+@media (prefers-reduced-motion:reduce){
+  .ct-dial.is-entering,.ct-dial.is-scanning .ct-bar.is-on,
+  .ct-dial.is-scanning .ct-cursor-dot,.ct-gate,.ct-verdict.is-open .ct-dot,
+  .ct-center.is-open::before,.ct-spinner,
+  .ct-dial-stage.is-pulse-quiet .ct-quiet path,
+  .ct-dial-stage.is-pulse-curve .ct-bar.is-on,
+  .ct-dial-stage.is-pulse-greet .ct-anchor path,
+  .ct-dial-stage.is-pulse-greet .ct-insomnia path,
+  .ct-dial-stage.is-pulse-cursor .ct-cursor-dot,
+  .ct-dial-stage.is-pulse-cursor .ct-cursor-line,
+  .ct-dial-stage.is-pulse-center .ct-center,
+  .ct-dial-stage.is-pulse-tier .ct-dial,
+  .ct-switch.is-flip-on .ct-switch-track,.ct-switch.is-flip-off .ct-switch-track,
+  .ct-switch.is-flip-on .ct-switch-track i,.ct-switch.is-flip-off .ct-switch-track i,
+  .ct-src-row.is-toggle.is-flip-on .ct-switch-track,
+  .ct-src-row.is-toggle.is-flip-off .ct-switch-track,
+  .ct-src-row.is-toggle.is-flip-on .ct-switch-track i,
+  .ct-src-row.is-toggle.is-flip-off .ct-switch-track i,
+  .ct-src-row.is-flip-on,.ct-src-row.is-flip-off,
+  .ct-view.is-from-next,.ct-view.is-from-prev,
+  .ct-rail button.is-picked,.ct-rail button.is-picked .ct-rail-icon{
+    animation-duration:.001ms !important;
+    animation-delay:0s !important;
+    animation-iteration-count:1 !important;
+  }
+  .ct-verdict.is-open .ct-dot,.ct-center.is-open::before{opacity:1;transform:none}
+  .ct-bar,.ct-quiet path,.ct-tier,.ct-tier-bar,.ct-btn,.ct-rail button,.ct-rail-icon,
+  .ct-switch-track,.ct-switch-track i,.ct-check-box,.ct-weight-fill,.ct-curve-col i,
+  .ct-src-group,.ct-src-row{
+    transition-duration:.001ms !important;
+  }
+  .ct-dial.is-entering{opacity:1;transform:none}
+  .ct-tier:hover{transform:none}
+}

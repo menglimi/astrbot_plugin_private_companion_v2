@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>陪伴小屋 V2 · 11 页排版 / UI / UX 设计稿</title>
+<style>
+:root{
+  --bg:#f5f6f8; --panel:#ffffff; --line:#e4e7ec; --line-2:#eef0f4;
+  --ink:#1b1f27; --ink-2:#5b6472; --ink-3:#8b95a5;
+  --brand:#4a6cf7; --brand-soft:#eef2ff;
+  --ok:#2f9e6e; --ok-soft:#e8f6ef;
+  --warn:#c9821a; --warn-soft:#fdf3e3;
+  --off:#b6bcc8; --off-soft:#f1f2f5;
+  --radius:12px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:14px;line-height:1.6}
+.wrap{max-width:1180px;margin:0 auto;padding:32px 28px 80px}
+h1{font-size:26px;margin:0 0 6px;letter-spacing:-.2px}
+.sub{color:var(--ink-2);font-size:13px;margin-bottom:26px}
+h2{font-size:19px;margin:0;letter-spacing:-.1px}
+h3{font-size:15px;margin:0 0 8px}
+p{margin:0 0 10px}
+.doc{margin:0 0 34px;padding:18px 20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+.page{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px 22px 24px;margin-bottom:28px}
+.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
+  border-bottom:1px solid var(--line-2);padding-bottom:14px;margin-bottom:16px;flex-wrap:wrap}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.chip{font-size:12px;background:var(--off-soft);color:var(--ink-2);border:1px solid var(--line);
+  padding:2px 9px;border-radius:999px;white-space:nowrap}
+.chip.b{background:var(--brand-soft);color:var(--brand);border-color:#d5deff}
+.chip.g{background:var(--ok-soft);color:var(--ok);border-color:#c9e9d9}
+.chip.w{background:var(--warn-soft);color:var(--warn);border-color:#f0dcb8}
+.chip.o{background:#f3f4f6;color:var(--ink-3);border-color:var(--line)}
+.idx{font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+
+/* wireframe */
+.wf{background:#fbfbfc;border:1px dashed #cfd5df;border-radius:10px;padding:14px;margin-bottom:14px}
+.wf-shell{display:grid;grid-template-columns:132px 1fr;gap:0;min-height:230px;
+  border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+.wf-nav{background:#fafbfc;border-right:1px solid var(--line);padding:10px 8px}
+.wf-nav .g{font-size:10px;color:var(--ink-3);padding:6px 6px 4px;letter-spacing:.4px}
+.wf-nav .i{font-size:11.5px;padding:5px 8px;border-radius:6px;color:var(--ink-2);margin-bottom:2px}
+.wf-nav .i.on{background:var(--brand-soft);color:var(--brand);font-weight:600}
+.wf-nav .i.dim{color:var(--ink-3)}
+.wf-main{padding:12px 14px}
+.wf-top{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  border-bottom:1px solid var(--line-2);padding-bottom:9px;margin-bottom:11px}
+.wf-t{font-size:14px;font-weight:600}
+.wf-t span{font-weight:400;color:var(--ink-3);font-size:11.5px;margin-left:6px}
+.wf-actions{display:flex;gap:6px}
+.wf-btn{font-size:10.5px;border:1px solid var(--line);border-radius:5px;padding:3px 8px;color:var(--ink-2);background:#fff}
+.wf-btn.p{background:var(--brand);border-color:var(--brand);color:#fff}
+.wf-btn.g{background:var(--ok-soft);border-color:#c9e9d9;color:var(--ok)}
+.wf-btn.w{background:var(--warn-soft);border-color:#f0dcb8;color:var(--warn)}
+.wf-btn.o{background:var(--off-soft);color:var(--ink-3)}
+.wf-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.wf-grid{display:grid;gap:10px}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+.g23{grid-template-columns:1.55fr 1fr}
+.g32{grid-template-columns:1fr 1.6fr}
+.card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:9px 11px}
+.card.dim{background:#fafbfc}
+.card.hl{border-color:#c9d6ff;background:#fcfdff}
+.card.off{background:#f6f7f9;border-style:dashed}
+.ch{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:7px}
+.ct{font-size:12px;font-weight:600}
+.cx{font-size:10px;color:var(--ink-3)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  font-size:11.5px;color:var(--ink-2);padding:4px 0;border-bottom:1px dashed var(--line-2)}
+.row:last-child{border-bottom:none}
+.row .k{display:flex;align-items:center;gap:6px;min-width:0}
+.row .k b{font-weight:500;color:var(--ink)}
+.sw{width:22px;height:12px;border-radius:6px;background:var(--off);flex:none;position:relative}
+.sw::after{content:"";position:absolute;top:1.5px;left:1.5px;width:9px;height:9px;border-radius:50%;background:#fff}
+.sw.on{background:var(--ok)}
+.sw.on::after{left:11.5px}
+.inp{height:20px;border:1px solid var(--line);border-radius:4px;background:#fff;
+  display:flex;align-items:center;padding:0 7px;font-size:10.5px;color:var(--ink-3)}
+.inp.wide{flex:1}
+.field{display:flex;align-items:center;gap:7px;margin-bottom:6px}
+.field label{font-size:11px;color:var(--ink-2);width:72px;flex:none}
+.fbar{height:8px;border-radius:4px;background:var(--line-2);overflow:hidden}
+.fbar i{display:block;height:100%;background:var(--brand);border-radius:4px}
+.sl{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink-2);margin:6px 0}
+.sl .track{flex:1;height:5px;background:var(--line-2);border-radius:3px;position:relative}
+.sl .track i{position:absolute;top:0;left:0;height:100%;background:var(--brand);border-radius:3px}
+.sl .track b{position:absolute;top:-3px;width:11px;height:11px;border-radius:50%;background:#fff;
+  border:2px solid var(--brand)}
+.tbl{font-size:11px}
+.tbl .th{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);
+  font-weight:600;color:var(--ink-2)}
+.tbl .tr{display:flex;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line-2);color:var(--ink-2);align-items:center}
+.tbl .c1{flex:2}.tbl .c2{flex:1}.tbl .c3{flex:1}.tbl .c4{flex:1.2}.tbl .c5{flex:.8}
+.pill{font-size:9.5px;padding:1px 6px;border-radius:999px;border:1px solid var(--line);color:var(--ink-3);background:#fff}
+.pill.ok{background:var(--ok-soft);border-color:#c9e9d9;color:var(--ok)}
+.pill.warn{background:var(--warn-soft);border-color:#f0dcb8;color:var(--warn)}
+.pill.off{background:var(--off-soft);color:var(--ink-3)}
+.pill.b{background:var(--brand-soft);border-color:#d5deff;color:var(--brand)}
+.skel{height:9px;border-radius:4px;background:linear-gradient(90deg,#eef0f4,#e3e6ec,#eef0f4);margin:6px 0}
+.mk{font-size:10.5px;color:var(--ink-3);text-align:center;padding:14px 6px;line-height:1.7}
+.mk b{display:block;color:var(--ink-2);font-size:11.5px;margin-bottom:3px}
+.tl{position:relative;padding-left:14px}
+.tl::before{content:"";position:absolute;left:3px;top:4px;bottom:4px;width:1px;background:var(--line)}
+.tl .ev{position:relative;padding:5px 0;font-size:11px;color:var(--ink-2)}
+.tl .ev::before{content:"";position:absolute;left:-14px;top:10px;width:7px;height:7px;border-radius:50%;
+  background:#fff;border:2px solid var(--brand)}
+.tl .ev i{color:var(--ink-3);font-style:normal;font-size:10px;margin-left:6px}
+.cloud{display:flex;flex-wrap:wrap;gap:5px;align-items:center;justify-content:center;padding:8px 4px}
+.cloud span{font-size:11px;padding:2px 7px;border-radius:5px;background:var(--off-soft);color:var(--ink-2)}
+.cloud span.big{font-size:14px;font-weight:600;background:var(--brand-soft);color:var(--brand)}
+.cloud span.mid{font-size:12.5px;background:#eef1f6}
+.bubble{background:#fff;border:1px solid var(--line);border-radius:10px 10px 10px 3px;
+  padding:8px 10px;font-size:11.5px;color:var(--ink);margin-bottom:6px;max-width:86%}
+.bubble.me{background:var(--brand-soft);border-color:#dbe3ff;border-radius:10px 10px 3px 10px;margin-left:auto}
+.bubble i{display:block;font-style:normal;color:var(--ink-3);font-size:10px;margin-top:3px}
+.annot{border-left:3px solid var(--brand);background:#f8faff;padding:8px 12px;
+  font-size:12px;color:var(--ink-2);border-radius:0 6px 6px 0;margin:10px 0 0}
+.annot b{color:var(--ink)}
+.annot.w{border-color:var(--warn);background:#fffdf7}
+.annot.o{border-color:var(--off);background:#f8f9fa}
+.kpi{display:flex;gap:8px;margin-bottom:10px}
+.kpi .k{flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fff}
+.kpi .k b{display:block;font-size:17px;line-height:1.3;font-variant-numeric:tabular-nums}
+.kpi .k span{font-size:10.5px;color:var(--ink-3)}
+.hub{border:1px solid var(--line);border-radius:8px;background:#fff;padding:10px 12px}
+.hub .ht{font-size:12px;font-weight:600;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.hub .hmeta{font-size:10.5px;color:var(--ink-3);margin-bottom:6px}
+.hub .link{font-size:10.5px;color:var(--brand)}
+.tabs{display:flex;gap:14px;border-bottom:1px solid var(--line);margin-bottom:10px;font-size:11.5px}
+.tabs span{padding-bottom:6px;color:var(--ink-3)}
+.tabs span.on{color:var(--brand);border-bottom:2px solid var(--brand);font-weight:600}
+.savebar{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  margin-top:10px;padding:7px 10px;border:1px solid #f0dcb8;background:var(--warn-soft);
+  border-radius:7px;font-size:11px;color:var(--ink-2)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-2);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:middle}
+.ux{margin:8px 0 0;padding:0;list-style:none}
+.ux li{position:relative;padding-left:16px;font-size:13px;color:var(--ink-2);margin-bottom:5px}
+.ux li::before{content:"";position:absolute;left:3px;top:9px;width:5px;height:5px;border-radius:50%;background:var(--brand)}
+.ux li b{color:var(--ink)}
+.foot{color:var(--ink-3);font-size:12px;margin-top:30px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>陪伴小屋 V2 · 页面排版 / UI / UX 设计稿</h1>
+<div class="sub">依据：V1 1010 条配置按六段归位清单（<code>V1_CONFIG_BY_SEGMENT_20260925.csv</code>）＋ 侧边栏导航（能力配置 6 页 / 专属配置 5 页）。每个线框标注的条数即该页承载的真实配置量。</div>
+
+<!-- ===== 0 ===== -->
+<div class="doc">
+<h2>0. 通用外壳与组件规范（11 页共用）</h2>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav">
+      <div class="g">能力配置</div>
+      <div class="i">感知</div><div class="i">决策</div><div class="i">行动</div>
+      <div class="i">产出</div><div class="i">表达</div><div class="i">治理</div>
+      <div class="g" style="margin-top:8px">专属配置</div>
+      <div class="i">身份与权限</div><div class="i">主动与联系</div><div class="i">记忆与经历</div>
+      <div class="i">模型与连接</div><div class="i">治理与维护</div>
+      <div class="g" style="margin-top:8px">其它</div>
+      <div class="i dim">维护工具（页脚）</div>
+    </div>
+    <div class="wf-main">
+      <div class="wf-top">
+        <div class="wf-t">页面标题 <span>段徽标 · 153 条配置 · 来源：V1 配置页</span></div>
+        <div class="wf-actions"><div class="wf-btn">搜索配置</div><div class="wf-btn">筛选</div><div class="wf-btn o">重置</div></div>
+      </div>
+      <div class="wf-bar">
+        <div class="wf-btn">全部</div><div class="wf-btn o">仅看已启用</div><div class="wf-btn o">仅看未配置</div><div class="wf-btn o">高级</div>
+      </div>
+      <div class="wf-grid g2">
+        <div class="card"><div class="ch"><div class="ct">分区卡片</div><div class="cx">28 条</div></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>开关项</b></div><span class="cx">已启用</span></div>
+          <div class="field"><label>数值项</label><div class="inp wide">120</div></div>
+          <div class="field"><label>凭据项</label><div class="inp wide">••••••••</div></div>
+        </div>
+        <div class="card dim"><div class="ch"><div class="ct">分区卡片（次级）</div><div class="cx">默认折叠</div></div>
+          <div class="skel" style="width:80%"></div><div class="skel" style="width:60%"></div><div class="skel" style="width:70%"></div>
+        </div>
+      </div>
+      <div class="savebar"><span>3 项未保存改动 · <b style="color:var(--warn)">超时与重试</b> 已修改</span>
+        <span><span class="wf-btn o">放弃</span> <span class="wf-btn p">保存</span></span></div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--ok)"></i>已接通 / 已启用</span>
+    <span><i style="background:var(--brand)"></i>可配置主项</span>
+    <span><i style="background:var(--warn)"></i>风险 / 需确认</span>
+    <span><i style="background:var(--off)"></i>未接入 / 遗留 / 不进 UI</span>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>壳层一致：</b>顶部「标题 + 一句话说明 + 段徽标 + 条数」；右上筛选条（全部 / 仅看已启用 / 仅看未配置 / 高级）；内容区 8vp 栅格双列卡片，密集区用表格。</li>
+  <li><b>保存模型：</b>底部 sticky 保存条，脏项计数 + 逐项「重置为默认」；凭据类改动单独二次确认，不与普通开关同批提交。</li>
+  <li><b>能力驱动显隐：</b>沿用 V1 的 <code>hidden</code> 机制——能力未启用时对应分区不渲染，而不是渲染成灰态。（行动页、产出页是主要受益方）</li>
+  <li><b>三种空态：</b>① 未接入能力 → 引导安装/接入；② 尚无数据 → 说明「什么条件会出现数据」；③ 遗留不进 UI → 完全不出现（E6 30 条）。</li>
+  <li><b>可解释性：</b>凡是会影响她行为的配置，卡片内必须能看到「当前值 → 作用在哪一步」，不可只给开关。</li>
+</ul>
+</div>
+
+<!-- ===== 1 感知 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P1 · 感知</h2>
+    <div class="chips"><span class="chip b">能力配置</span><span class="chip">153 条</span>
+      <span class="chip o">A1 环境与世界源 29</span><span class="chip o">A2 交互源 48</span>
+      <span class="chip o">A3 媒体理解 44</span><span class="chip o">A4 外部资讯 32</span></div></div>
+  <div class="idx">来源：V1 配置页（weather / debounce / group / qzone 组）</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav">
+      <div class="g">感知</div>
+      <div class="i on">环境与世界源</div><div class="i">交互源</div>
+      <div class="i">媒体理解</div><div class="i">外部资讯</div>
+      <div class="g" style="margin-top:8px">源状态</div>
+      <div class="i dim">天气 · 已连接</div><div class="i dim">预警 · 未配置</div>
+      <div class="i dim">新闻 · 未接入</div>
+    </div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">环境与世界源 <span>29 条 · 决定她"知道现在是什么时候、什么天气"</span></div>
+        <div class="wf-actions"><div class="wf-btn g">测试连接</div></div></div>
+      <div class="wf-grid g23">
+        <div class="card hl">
+          <div class="ch"><div class="ct">天气数据源</div><span class="pill ok">已连接 · 3 分钟前</span></div>
+          <div class="field"><label>数据源</label><div class="inp wide">和风天气</div></div>
+          <div class="field"><label>城市</label><div class="inp wide">杭州 · 余杭区</div></div>
+          <div class="field"><label>经纬度</label><div class="inp wide">120.30 , 30.27</div></div>
+          <div class="field"><label>API Key</label><div class="inp wide">••••••••3f2a</div></div>
+          <div class="sl">刷新间隔<span class="track"><i style="width:30%"></i><b style="left:30%"></b></span>30 分钟</div>
+          <div class="row"><div class="k"><b>天气上下文注入</b></div><span class="sw on"></span></div>
+        </div>
+        <div class="card">
+          <div class="ch"><div class="ct">气象预警</div><span class="pill warn">未配置凭据</span></div>
+          <div class="field"><label>凭据</label><div class="inp wide">未填写</div></div>
+          <div class="row"><div class="k"><b>启用预警感知</b></div><span class="sw"></span></div>
+          <div class="row"><div class="k"><b>最低预警级别</b></div><span class="cx">橙色</span></div>
+          <div class="annot w" style="margin-top:8px">凭据缺失时开关仍可开，但会在保存条上以警示态提示"已启用但未配置凭据"。</div>
+        </div>
+      </div>
+      <div class="wf-grid g4" style="margin-top:10px">
+        <div class="card"><div class="ct" style="font-size:11.5px;margin-bottom:6px">历法 · 9 条</div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>农历</b></div></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>节气</b></div></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>节假日</b></div></div>
+          <div class="row"><div class="k"><span class="sw"></span><b>轻量黄历</b></div></div>
+        </div>
+        <div class="card"><div class="ct" style="font-size:11.5px;margin-bottom:6px">世界观 · 4 条</div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>世界观适配</b></div></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>平台感知</b></div></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>模型感知</b></div></div>
+          <div class="row"><div class="k"><b>时区</b></div><span class="cx">Asia/Shanghai</span></div>
+        </div>
+        <div class="card dim"><div class="ct" style="font-size:11.5px;margin-bottom:6px">交互源 · 48 条（次级页）</div>
+          <div class="skel" style="width:85%"></div><div class="skel" style="width:65%"></div><div class="skel" style="width:75%"></div>
+          <div class="cx" style="margin-top:6px">收口防抖 / 群高强度 / 合并转发 / 空间收件箱</div>
+        </div>
+        <div class="card dim"><div class="ct" style="font-size:11.5px;margin-bottom:6px">外部资讯 · 32 条（次级页）</div>
+          <div class="skel" style="width:70%"></div><div class="skel" style="width:80%"></div><div class="skel" style="width:60%"></div>
+          <div class="cx" style="margin-top:6px">新闻 / 搜索 / B站 / 资料归档</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>左二级导航固定：</b>四个子类做成左栏常驻，右侧只渲染当前子类——A1 视觉上是"主卡 + 三张概览卡"，避免 153 条一次性平铺。</li>
+  <li><b>源状态徽章是核心 UX：</b>天气/预警/新闻等外部源在左栏底部常驻状态（已连接 / 未配置 / 失败 + 上次成功时间）。V2 目前这些源大多未接入，徽章能直接暴露缺口。</li>
+  <li><b>凭据与开关解耦：</b>允许先开开关后填 Key，但保存条必须给出警示；「测试连接」按钮结果内联显示在卡片内，不弹窗打断。</li>
+  <li><b>A3 媒体理解要独立一屏：</b>识图提示词是大段文本域，配上模板下拉与「试跑一张图」，比纯表单更可用；识屏/摄像头（现实触及）归入此类而非实验区。</li>
+  <li><b>命名纠正：</b>沿用 V1 时会遇到的坑——「消息收口防抖」组里过半是识图转述增强，要按语义放进 A3，不要按组名留在 A2。</li>
+</ul>
+</div>
+
+<!-- ===== 2 决策 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P2 · 决策（段枢纽页）</h2>
+    <div class="chips"><span class="chip b">能力配置</span><span class="chip">387 条（本页不承载表单）</span>
+      <span class="chip o">B1 记忆 73</span><span class="chip o">B2 关系 98</span><span class="chip o">B3 自我 72</span><span class="chip o">B4 主动 144</span></div></div>
+  <div class="idx">去向：4 个子类各自落到专属页 / 首页</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">能力配置</div><div class="i on">决策</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">专属配置</div><div class="i dim">主动与联系</div><div class="i dim">记忆与经历</div><div class="i dim">身份与权限</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">决策 <span>她怎么想、怎么决定来找你 · 387 条</span></div></div>
+      <div class="wf-grid g4">
+        <div class="hub"><div class="ht">认知与记忆 <span class="cx">B1 · 73</span></div>
+          <div class="hmeta">她记得什么</div><div class="fbar"><i style="width:19%"></i></div>
+          <div style="margin-top:7px" class="link">→ 记忆与经历</div></div>
+        <div class="hub"><div class="ht">关系与情感 <span class="cx">B2 · 98</span></div>
+          <div class="hmeta">她怎么看你</div><div class="fbar"><i style="width:25%"></i></div>
+          <div style="margin-top:7px" class="link">→ 身份与权限</div></div>
+        <div class="hub"><div class="ht">角色自我 <span class="cx">B3 · 72</span></div>
+          <div class="hmeta">她自己怎么样</div><div class="fbar"><i style="width:19%"></i></div>
+          <div style="margin-top:7px" class="link">→ 首页小屋（生活页签）</div></div>
+        <div class="hub hl"><div class="ht">决策与主动 <span class="cx">B4 · 144</span></div>
+          <div class="hmeta">她什么时候来找你</div><div class="fbar"><i style="width:37%"></i></div>
+          <div style="margin-top:7px" class="link">→ 主动与联系</div></div>
+      </div>
+      <div class="annot"><b>枢纽页不承载任何表单。</b>决策段 387 条是全站最大段，但四个子类各有更合适的承载页；本页只做分发与概览，避免与专属页重复维护同一份配置。</div>
+      <div class="card dim" style="margin-top:10px">
+        <div class="ch"><div class="ct">决策链路（只读）</div><div class="cx">点击任一环跳到对应页</div></div>
+        <div class="row"><div class="k"><b>感知</b> 看到了什么</div><span class="cx">→</span></div>
+        <div class="row"><div class="k"><b>记忆</b> 记得什么</div><span class="cx">→</span></div>
+        <div class="row"><div class="k"><b>关系</b> 关系处在什么位置</div><span class="cx">→</span></div>
+        <div class="row"><div class="k"><b>主动</b> 决定做点什么</div><span class="cx">→ 表达 / 行动</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>枢纽而非表单：</b>四个卡片显示条数占比 + 实时指标（记忆条数、关系节点数、今日主动候选数），点击直达。</li>
+  <li><b>链路图放底部：</b>让"感知→记忆→关系→主动"这条链可见，用户才知道改哪一环会影响什么。</li>
+  <li><b>不做二级配置位：</b>如果这里能改配置，就会与专属页双写。只有"分段配置不可在此修改"的提示。</li>
+</ul>
+</div>
+
+<!-- ===== 3 行动 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P3 · 行动 / 生活与活动</h2>
+    <div class="chips"><span class="chip b">能力配置</span><span class="chip">18 条 + 能力聚合</span>
+      <span class="chip o">C3 生活行为 8</span><span class="chip o">C4 社交发布 10</span><span class="chip w">V2 多数未接入</span></div></div>
+  <div class="idx">配置在七个伴侣插件，不在主 schema</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">能力配置</div><div class="i on">行动</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">能力状态</div><div class="i dim">5 / 7 未接入</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">行动 <span>她实际去做了什么 · 18 条 + 伴侣能力</span></div></div>
+      <div class="wf-grid g4">
+        <div class="card hl"><div class="ch"><div class="ct">Image 绘画</div><span class="pill ok">已接入</span></div>
+          <div class="cx">native_v2 · 基础链已通</div><div style="margin-top:6px" class="wf-btn o">去配置</div></div>
+        <div class="card hl"><div class="ch"><div class="ct">Content 创作</div><span class="pill ok">已接入</span></div>
+          <div class="cx">content_v2 · 基础链已通</div><div style="margin-top:6px" class="wf-btn o">去配置</div></div>
+        <div class="card off"><div class="ch"><div class="ct">Screen 屏幕</div><span class="pill warn">有领域无执行器</span></div>
+          <div class="cx">暂无原生业务链</div><div style="margin-top:6px" class="wf-btn o">了解</div></div>
+        <div class="card off"><div class="ch"><div class="ct">Together 共在</div><span class="pill off">未接入</span></div>
+          <div class="cx">无 v2 目录</div><div style="margin-top:6px" class="wf-btn o">—</div></div>
+      </div>
+      <div class="wf-grid g4" style="margin-top:9px">
+        <div class="card off"><div class="ch"><div class="ct">Reality 现实</div><span class="pill off">未接入</span></div><div class="cx">无 v2 目录</div></div>
+        <div class="card off"><div class="ch"><div class="ct">Game 游戏</div><span class="pill off">未接入</span></div><div class="cx">无 v2 目录</div></div>
+        <div class="card off"><div class="ch"><div class="ct">Live 直播</div><span class="pill off">未接入</span></div><div class="cx">无 v2 目录</div></div>
+        <div class="card dim"><div class="mk"><b>+ 接入伴侣</b>接入后自动出现在此处</div></div>
+      </div>
+      <div class="wf-grid g2" style="margin-top:10px">
+        <div class="card"><div class="ch"><div class="ct">生活行为</div><div class="cx">C3 · 8 条</div></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>阅读</b></div><span class="cx">沙发 / 书桌</span></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>睡眠与梦境</b></div><span class="cx">床</span></div>
+          <div class="row"><div class="k"><span class="sw"></span><b>出行 / 外出</b></div><span class="cx">—</span></div>
+        </div>
+        <div class="card"><div class="ch"><div class="ct">社交发布</div><div class="cx">C4 · 10 条</div></div>
+          <div class="row"><div class="k"><b>发布节奏</b></div><span class="cx">每日 1 条</span></div>
+          <div class="row"><div class="k"><b>最低分数阈值</b></div><span class="cx">0.72</span></div>
+          <div class="row"><div class="k"><span class="sw"></span><b>评论回复</b></div></div>
+        </div>
+      </div>
+      <div class="annot w" style="margin-top:10px"><b>空态是这一页的常态。</b>V2 七个伴侣里五个尚无原生业务链，卡片按"未接入"渲染并给出跳转；全部未接入时整区折叠为引导块，不在侧边栏制造错觉。</div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>上区是能力聚合，不是配置：</b>七张伴侣卡显示接入状态（已接入 / 有领域无执行器 / 未接入），可跳转到对应插件配置。这一页的性质是"能力状态与跳转"。</li>
+  <li><b>下区才是配置：</b>仅 18 条，单双列即可；与生活家具联动（阅读→沙发/书桌、睡眠→床），回首页小屋可见。</li>
+  <li><b>能力驱动显隐：</b>全部未接入时，本页在侧边栏不出现（沿用 V1 <code>hidden</code>），避免"点进去全是灰"的挫败感。</li>
+</ul>
+</div>
+
+<!-- ===== 4 产出 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P4 · 产出 / 创作与作品</h2>
+    <div class="chips"><span class="chip b">能力配置</span><span class="chip">73 条</span>
+      <span class="chip o">C1 图像生成 55</span><span class="chip o">C2 创作作品 18</span></div></div>
+  <div class="idx">来源：V1 生图页 + 创作页（原 hidden 页）</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">能力配置</div><div class="i on">产出</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">产出物</div><div class="i dim">作品 24</div><div class="i dim">封面模板 6</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">产出 <span>她做出了什么可留存的东西 · 73 条</span></div></div>
+      <div class="tabs"><span class="on">图像生成</span><span>创作与作品</span><span>素材与参考图</span></div>
+      <div class="wf-grid g32">
+        <div class="card">
+          <div class="ch"><div class="ct">生图参数</div><div class="cx">C1 · 55 条</div></div>
+          <div class="field"><label>默认尺寸</label><div class="inp wide">1024 × 1024</div></div>
+          <div class="field"><label>采样步数</label><div class="inp wide">28</div></div>
+          <div class="field"><label>批量张数</label><div class="inp wide">1 – 4</div></div>
+          <div class="field"><label>负向提示</label><div class="inp wide">低质量, 变形…</div></div>
+          <div class="sl">并发上限<span class="track"><i style="width:40%"></i><b style="left:40%"></b></span>2</div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>水印</b></div></div>
+          <div class="annot w" style="margin-top:8px"><b>生图范围授权</b>单独成块：允许的会话范围（私聊 / 指定群 / 仅核心用户），改动需二次确认。</div>
+        </div>
+        <div class="card dim">
+          <div class="ch"><div class="ct">提示词模板库</div><div class="cx">点选后填入左侧</div></div>
+          <div class="row"><div class="k"><b>日常随手拍</b></div><span class="pill b">常用</span></div>
+          <div class="row"><div class="k"><b>夜晚窗边侧影</b></div><span class="pill">氛围</span></div>
+          <div class="row"><div class="k"><b>穿搭展示</b></div><span class="pill">衣柜</span></div>
+          <div class="row"><div class="k"><b>封面图</b></div><span class="pill b">常用</span></div>
+          <div class="annot" style="margin-top:8px">右侧常驻示例预览：改任一参数即时重绘占位图，参数不再靠想象。</div>
+        </div>
+      </div>
+      <div class="wf-grid g4" style="margin-top:10px">
+        <div class="card"><div class="cx">作品卡 · 封面占位</div><div class="skel" style="height:44px;margin:6px 0"></div><div class="cx">《窗边的雨》· 散文</div></div>
+        <div class="card"><div class="cx">作品卡 · 封面占位</div><div class="skel" style="height:44px;margin:6px 0"></div><div class="cx">《七月书单》· 清单</div></div>
+        <div class="card dim"><div class="cx">作品卡</div><div class="skel" style="height:44px;margin:6px 0"></div><div class="cx">草稿 · 未发布</div></div>
+        <div class="card off"><div class="mk"><b>+ 新建作品</b>或由她自主创作</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>三 Tab：</b>图像生成（参数为主）/ 创作与作品（列表为主）/ 素材与参考图（衣柜、素材库，V2 尚未接入则整 Tab 不显示）。</li>
+  <li><b>参数 + 预览并排：</b>左表单右示例预览，生图类配置脱离预览就是盲调。</li>
+  <li><b>危险项成块：</b>范围授权（谁能让她生图）单独成块并二次确认，不混在普通参数里。</li>
+  <li><b>作品卡是内容视图：</b>封面占位 + 标题 + 类型 + 状态，与配置区明显分离——这一页同时是"设置页"和"作品柜"。</li>
+</ul>
+</div>
+
+<!-- ===== 5 表达 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P5 · 表达 / 回复与表达</h2>
+    <div class="chips"><span class="chip b">能力配置</span><span class="chip">167 条（D5 13 条在主动与联系）</span>
+      <span class="chip o">D1 文本形态 70</span><span class="chip o">D2 语音 44</span><span class="chip o">D3 表情 22</span><span class="chip o">D4 平台动作 31</span></div></div>
+  <div class="idx">来源：V1 提示词页 + 配置页投递区</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">表达</div>
+      <div class="i on">文本形态</div><div class="i">语音</div><div class="i">表情配图</div><div class="i">平台动作</div>
+      <div class="g" style="margin-top:8px">实时预览</div><div class="i dim">随改动更新</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">文本形态 <span>D1 · 70 条 · 她怎么把话说出来</span></div>
+        <div class="wf-actions"><div class="wf-btn">提示词模板</div><div class="wf-btn o">高级</div></div></div>
+      <div class="wf-grid g23">
+        <div class="card">
+          <div class="ch"><div class="ct">分段与注入</div><div class="cx">改这里右侧立刻变</div></div>
+          <div class="sl">单段字数<span class="track"><i style="width:45%"></i><b style="left:45%"></b></span>约 45 字</div>
+          <div class="sl">段间延迟<span class="track"><i style="width:30%"></i><b style="left:30%"></b></span>0.9 秒</div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>标点切分</b></div></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>注入自身状态</b></div><span class="cx">心情 / 困倦</span></div>
+          <div class="row"><div class="k"><span class="sw"></span><b>注入日程</b></div></div>
+          <div class="row"><div class="k"><b>回复风格提示词</b></div><span class="cx">已选：自然口语</span></div>
+          <div class="annot" style="margin-top:8px">「注入自身状态」是内核与表达的桥接项，开关旁注明它会把哪些状态带进回复。</div>
+        </div>
+        <div class="card hl">
+          <div class="ch"><div class="ct">分段预览</div><div class="cx">实时</div></div>
+          <div class="bubble">刚才窗外下了一阵雨，我把窗户关上了。<i>第 1 段 · 0.0s</i></div>
+          <div class="bubble">你那边呢，也在下雨吗？<i>第 2 段 · 0.9s</i></div>
+          <div class="bubble me">我这边晴天。<i>用户</i></div>
+          <div class="bubble">那挺好的，适合出去走走。<i>第 3 段 · 1.8s</i></div>
+        </div>
+      </div>
+      <div class="wf-grid g3" style="margin-top:10px">
+        <div class="card off"><div class="ch"><div class="ct">语音</div><span class="pill off">未接入合成</span></div>
+          <div class="cx">V2 无 TTS，仅保留语音政策（语速 / 音色 / 念哪些段）</div>
+          <div class="row"><div class="k"><span class="sw"></span><b>分段朗读标注</b></div></div>
+        </div>
+        <div class="card dim"><div class="ch"><div class="ct">表情配图</div><div class="cx">D3 · 22 条</div></div>
+          <div class="row"><div class="k"><b>投递形态</b></div><span class="cx">跟随段落</span></div>
+          <div class="row"><div class="k"><b>触发阈值</b></div><span class="cx">0.6</span></div>
+        </div>
+        <div class="card dim"><div class="ch"><div class="ct">平台动作</div><div class="cx">D4 · 31 条</div></div>
+          <div class="row"><div class="k"><span class="sw"></span><b>戳一戳响应</b></div><span class="cx">入站</span></div>
+          <div class="row"><div class="k"><span class="sw"></span><b>反戳</b></div><span class="cx">出站</span></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>撤回增强</b></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>实时预览是这一页的灵魂：</b>右侧仿聊天气泡随参数即时重排（分段、延迟、状态注入）。表达类配置看不见效果就等于盲调。</li>
+  <li><b>语音区诚实标注"未接入合成"：</b>V2 有语音政策（哪些段要念）但没有 TTS，卡片顶部常驻能力提示，避免用户以为开了就能出声。</li>
+  <li><b>平台动作区分入站/出站：</b>戳一戳的"被戳响应"与"反戳"是两个方向却常在同一配置组，UI 上必须分行标注，否则极易误配。</li>
+  <li><b>D5 时机 13 条不在此页：</b>它属于"何时说"而非"怎么说"，归到主动与联系页，本页只留一行跳转提示。</li>
+</ul>
+</div>
+
+<!-- ===== 6 治理 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P6 · 治理（段枢纽页）</h2>
+    <div class="chips"><span class="chip b">能力配置</span><span class="chip">199 条</span>
+      <span class="chip o">E1 身份 18</span><span class="chip o">E2 模型 44</span><span class="chip o">E3 风控 51</span><span class="chip o">E4 预算 37</span><span class="chip o">E5 存储 19</span><span class="chip o">E6 遗留 30 不进 UI</span></div></div>
+  <div class="idx">去向：身份与权限 / 模型与连接 / 治理与维护</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">能力配置</div><div class="i on">治理</div>
+      <div class="g" style="margin-top:8px">专属配置</div><div class="i dim">身份与权限</div><div class="i dim">模型与连接</div><div class="i dim">治理与维护</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">治理 <span>约束上面每一段的横切层 · 199 条</span></div></div>
+      <div class="kpi">
+        <div class="k"><b>1,284</b><span>今日模型调用</span></div>
+        <div class="k"><b>62%</b><span>预算已用</span></div>
+        <div class="k"><b>3</b><span>待处理诊断事件</span></div>
+        <div class="k"><b>正常</b><span>来源隔离 / 撤回传播</span></div>
+      </div>
+      <div class="wf-grid g4">
+        <div class="hub"><div class="ht">身份与权限 <span class="cx">E1 · 18</span></div><div class="hmeta">谁能用、谁能改</div><div style="margin-top:7px" class="link">→ 身份与权限</div></div>
+        <div class="hub"><div class="ht">模型分配 <span class="cx">E2 · 44</span></div><div class="hmeta">每个任务用哪个模型</div><div style="margin-top:7px" class="link">→ 模型与连接</div></div>
+        <div class="hub hl"><div class="ht">风控 · 预算 · 存储 <span class="cx">E3–E5 · 107</span></div><div class="hmeta">花多少、拦什么、存哪</div><div style="margin-top:7px" class="link">→ 治理与维护</div></div>
+        <div class="hub"><div class="ht">遗留兼容 <span class="cx">E6 · 30</span></div>
+          <div class="hmeta" style="color:var(--ink-3)">不进 UI，存在的意义是消失</div>
+          <div class="cx" style="margin-top:7px">—</div></div>
+      </div>
+      <div class="annot o" style="margin-top:10px">治理是横切层，不产生面向用户的功能，但约束感知→表达的每一段。本页只做分发与概览指标，配置一律下沉到三个专属页。</div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>KPI 行优先：</b>进入治理类页面的动机通常是"是不是出问题了/花了多少"，四个指标一眼扫完再决定去哪。</li>
+  <li><b>E6 明确标注"不进 UI"：</b>给用户一个解释而不是直接消失，避免有人以为功能丢了。</li>
+  <li><b>与"治理与维护"的区别写清楚：</b>本页是段入口与概览，那一页是具体的用量 / 风控 / 备份 / 诊断。</li>
+</ul>
+</div>
+
+<!-- ===== 7 身份与权限 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P7 · 身份与权限</h2>
+    <div class="chips"><span class="chip g">专属配置</span><span class="chip">116 条</span>
+      <span class="chip o">B2 关系与情感 98</span><span class="chip o">E1 身份与权限 18</span></div></div>
+  <div class="idx">来源：V1 私聊页 + 群聊页 + 社交关系网</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">专属配置</div><div class="i on">身份与权限</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">筛选</div><div class="i dim">核心 3</div><div class="i dim">重要 8</div><div class="i dim">普通 27</div><div class="i dim">待归并 2</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">身份与权限 <span>她认识谁、关系如何、各有什么权限 · 116 条</span></div>
+        <div class="wf-actions"><div class="wf-btn">新增用户</div><div class="wf-btn o">合并身份</div></div></div>
+      <div class="tabs"><span class="on">私聊人物</span><span>群名单</span><span>权限策略</span></div>
+      <div class="wf-grid g32">
+        <div class="card">
+          <div class="ch"><div class="ct">人物目录</div><div class="cx">38 人 · 2 条待归并</div></div>
+          <div class="tbl">
+            <div class="th"><div class="c1">显示名</div><div class="c2">权限</div><div class="c3">关系</div></div>
+            <div class="tr"><div class="c1"><b>阿岚</b></div><div class="c2"><span class="pill b">核心</span></div><div class="c3">伴侣</div></div>
+            <div class="tr"><div class="c1"><b>小林</b></div><div class="c2"><span class="pill warn">重要</span></div><div class="c3">朋友</div></div>
+            <div class="tr"><div class="c1"><b>?</b> 临时 QQ 身份</div><div class="c2"><span class="pill off">待归并</span></div><div class="c3">—</div></div>
+          </div>
+        </div>
+        <div class="card hl">
+          <div class="ch"><div class="ct">阿岚 · 关系节点</div><span class="pill b">核心</span></div>
+          <div class="row"><div class="k"><b>显示名 / 别名</b></div><span class="cx">阿岚 · 岚岚</span></div>
+          <div class="row"><div class="k"><b>群名片</b></div><span class="cx">岚</span></div>
+          <div class="sl">亲密度<span class="track"><i style="width:78%"></i><b style="left:78%"></b></span>0.78</div>
+          <div class="sl">情绪倾向<span class="track"><i style="width:62%"></i><b style="left:62%"></b></span>偏安定</div>
+          <div class="row"><div class="k"><b>身份归并</b></div><span class="cx">3 个平台身份 → 1 主用户</span></div>
+          <div class="annot" style="margin-top:8px">关系数值只读展示；要调的是"她如何看待"，不是"直接改分数"——关系由互动自然演进。</div>
+        </div>
+      </div>
+      <div class="wf-grid g3" style="margin-top:10px">
+        <div class="card dim"><div class="ch"><div class="ct">群资料与名单</div><div class="cx">白 / 黑 / 仅建资料</div></div>
+          <div class="row"><div class="k"><b>观察开关</b></div><span class="sw on"></span></div>
+          <div class="row"><div class="k"><b>白名单群</b></div><span class="cx">4</span></div>
+        </div>
+        <div class="card dim"><div class="ch"><div class="ct">权限三档</div><div class="cx">核心 / 重要 / 普通</div></div>
+          <div class="row"><div class="k"><b>核心</b></div><span class="cx">全能力</span></div>
+          <div class="row"><div class="k"><b>普通</b></div><span class="cx">受限</span></div>
+        </div>
+        <div class="card off"><div class="ch"><div class="ct">世界书</div><span class="pill off">已退役</span></div>
+          <div class="cx">V1 标注 retired，V2 不复刻；改为「身份、别名与边界资料」</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>Master-detail 是唯一合理布局：</b>左人物目录（可搜索、按权限筛选、待归并置顶），右关系节点详情。98 条关系配置全部附着在具体的人身上，脱离人物没有意义。</li>
+  <li><b>关系数值只读：</b>亲密度/情绪倾向是演算结果，不提供直接编辑入口；可编辑的是别名、群名片、权限档位。</li>
+  <li><b>身份归并要有明确操作：</b>临时平台身份单独一类，选中后"合并到主用户"，合并前显示将被合并的来源。</li>
+  <li><b>世界书不复刻：</b>V1 的社交关系网带 <code>data-retired-worldbook</code>，V2 该区块改为"身份、别名与边界资料"。</li>
+  <li><b>危险操作二次确认：</b>删除身份、降权限会影响历史记忆归属，需明确展示影响范围。</li>
+</ul>
+</div>
+
+<!-- ===== 8 主动与联系 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P8 · 主动与联系</h2>
+    <div class="chips"><span class="chip g">专属配置</span><span class="chip">157 条</span>
+      <span class="chip o">B4 决策与主动 144</span><span class="chip o">D5 时机编排 13</span><span class="chip w">全站最大单页</span></div></div>
+  <div class="idx">来源：V1 主动页 + 观察页·用户交互影响</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">专属配置</div><div class="i on">主动与联系</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">节奏</div><div class="i dim">免打扰 23:00–08:00</div><div class="i dim">强度 中</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">主动与联系 <span>她什么时候主动来找你 · 157 条</span></div>
+        <div class="wf-actions"><div class="wf-btn">立即触发</div><div class="wf-btn o">暂停 24h</div></div></div>
+      <div class="kpi">
+        <div class="k"><b>6</b><span>今日主动候选</span></div>
+        <div class="k"><b>2</b><span>已发送</span></div>
+        <div class="k"><b>3</b><span>已跳过</span></div>
+        <div class="k"><b>21:40</b><span>下次可触发</span></div>
+      </div>
+      <div class="wf-grid g23">
+        <div class="card hl">
+          <div class="ch"><div class="ct">今日候选队列</div><div class="cx">按优先级 · 每条带来源与理由</div></div>
+          <div class="row"><div class="k"><span class="pill b">日程</span><b>提醒今晚的约定</b></div><span class="pill ok">待发送</span></div>
+          <div class="row"><div class="k"><span class="pill">情绪</span><b>问问白天那件事</b></div><span class="pill warn">待确认</span></div>
+          <div class="row"><div class="k"><span class="pill">环境</span><b>下雨了，提醒带伞</b></div><span class="pill ok">待发送</span></div>
+          <div class="row"><div class="k"><span class="pill">群</span><b>群里提到了你</b></div><span class="pill off">已跳过</span></div>
+          <div class="annot" style="margin-top:8px">候选必须显示<b>来源 + 理由 + 状态</b>。V2 的群参与带原请求证明链，skip 不可撤销——所以"跳过"按钮需确认气泡，且跳过后不可恢复。</div>
+        </div>
+        <div class="card">
+          <div class="ch"><div class="ct">联系节奏</div><div class="cx">B4 144 · D5 13</div></div>
+          <div class="sl">主动强度<span class="track"><i style="width:55%"></i><b style="left:55%"></b></span>中</div>
+          <div class="sl">最小间隔<span class="track"><i style="width:35%"></i><b style="left:35%"></b></span>90 分钟</div>
+          <div class="row"><div class="k"><b>免打扰时段</b></div><span class="cx">23:00 – 08:00</span></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>安静旁听</b></div><span class="cx">不产出回复</span></div>
+          <div class="row"><div class="k"><span class="sw on"></span><b>入站防抖</b></div><span class="cx">12 秒</span></div>
+          <div class="row"><div class="k"><b>忙时最小延迟</b></div><span class="cx">6 秒</span></div>
+          <div class="annot" style="margin-top:8px">免打扰时段做成可拖时段条（一天 24 格），比两个时间输入框直观得多。</div>
+        </div>
+      </div>
+      <div class="wf-grid g2" style="margin-top:10px">
+        <div class="card"><div class="ch"><div class="ct">主动任务记录</div><div class="cx">可回溯</div></div>
+          <div class="tbl"><div class="th"><div class="c1">时间</div><div class="c2">来源</div><div class="c3">结果</div></div>
+          <div class="tr"><div class="c1">20:12</div><div class="c2">日程</div><div class="c3"><span class="pill ok">已发送</span></div></div>
+          <div class="tr"><div class="c1">18:30</div><div class="c2">情绪</div><div class="c3"><span class="pill off">跳过</span></div></div></div>
+        </div>
+        <div class="card"><div class="ch"><div class="ct">用户交互影响</div><div class="cx">哪些互动影响了后续主动</div></div>
+          <div class="row"><div class="k"><b>昨晚深度夜聊</b></div><span class="cx">情绪 ↑</span></div>
+          <div class="row"><div class="k"><b>白天被忽略两次</b></div><span class="cx">主动 ↓</span></div>
+          <div class="row"><div class="k"><b>群内被 @</b></div><span class="cx">插话意愿 ↑</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>队列优先于配置：</b>上半屏是"她现在想做什么"（候选队列 + KPI），下半屏才是 157 条节奏配置。用户进来第一诉求通常是"她为什么没来找我"。</li>
+  <li><b>可解释性是硬要求：</b>每条候选必须显示来源、理由、状态；V2 的证明链在这里是天然优势，UI 不该浪费。</li>
+  <li><b>skip 不可撤销：</b>代码层已如此（群参与 skip 单独调用且不可撤销），UI 必须给确认气泡，否则误点不可恢复。</li>
+  <li><b>免打扰用时段条：</b>24 格可拖时段条替代两个时间输入。</li>
+  <li><b>"暂停 24h"是一键总闸：</b>比让用户去改强度滑块更直接。</li>
+</ul>
+</div>
+
+<!-- ===== 9 记忆与经历 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P9 · 记忆与经历</h2>
+    <div class="chips"><span class="chip g">专属配置</span><span class="chip">73 条</span>
+      <span class="chip o">B1 认知与记忆</span><span class="chip g">群黑话已接通</span><span class="chip w">归档未接入</span></div></div>
+  <div class="idx">来源：V1 观察页·记忆构成 / 黑话词云 / 插件协同</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">专属配置</div><div class="i on">记忆与经历</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">记忆量</div><div class="i dim">共同经历 412</div><div class="i dim">黑话 68</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">记忆与经历 <span>她记得什么 · 73 条</span></div>
+        <div class="wf-actions"><div class="wf-btn">搜索记忆</div><div class="wf-btn o">纠正</div></div></div>
+      <div class="wf-grid g23">
+        <div class="card">
+          <div class="ch"><div class="ct">共同经历</div><div class="cx">时间线 · 含原话与来源</div></div>
+          <div class="tl">
+            <div class="ev">一起看的那场雨 —— 她说"伞借你" <i>来源：私聊 · 6 月</i></div>
+            <div class="ev">你提到怕打雷 <i>来源：私聊 · 7 月</i></div>
+            <div class="ev">群里那次争论 <i>来源：群 · 8 月</i></div>
+            <div class="ev">你换了新工作 <i>来源：观察推断 · 本周</i></div>
+          </div>
+        </div>
+        <div class="card hl">
+          <div class="ch"><div class="ct">群黑话词云</div><span class="pill ok">V2 已接通</span></div>
+          <div class="cloud">
+            <span class="big">开摆</span><span class="mid">上分</span><span>寄了</span>
+            <span class="mid">摸鱼局</span><span>绷不住</span><span class="mid">拉满了</span>
+            <span>你先</span><span>稳住</span>
+          </div>
+          <div class="cx" style="text-align:center">点击词条 → 证据绑定与纠正（revision CAS，人工纠正不被自动推断覆盖）</div>
+        </div>
+      </div>
+      <div class="wf-grid g3" style="margin-top:10px">
+        <div class="card"><div class="ch"><div class="ct">记忆构成</div><div class="cx">占比</div></div>
+          <div class="row"><div class="k"><b>私聊</b></div><span class="cx">52%</span></div>
+          <div class="fbar"><i style="width:52%"></i></div>
+          <div class="row"><div class="k"><b>群聊</b></div><span class="cx">28%</span></div>
+          <div class="fbar"><i style="width:28%"></i></div>
+          <div class="row"><div class="k"><b>观察推断</b></div><span class="cx">14%</span></div>
+          <div class="fbar"><i style="width:14%"></i></div>
+        </div>
+        <div class="card dim"><div class="ch"><div class="ct">记忆插件协同</div><div class="cx">外部插件状态</div></div>
+          <div class="row"><div class="k"><b>向量检索插件</b></div><span class="pill ok">在用</span></div>
+          <div class="row"><div class="k"><b>用量</b></div><span class="cx">1.2 万条</span></div>
+          <div class="row"><div class="k"><b>自动 embedding</b></div><span class="pill warn">部分</span></div>
+        </div>
+        <div class="card off"><div class="ch"><div class="ct">归档与导入导出</div><span class="pill off">未接入</span></div>
+          <div class="mk"><b>冷归档尚未接入</b>V2 当前无导入导出</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>时间是记忆的主索引：</b>共同经历用时间线，每条显示原话 + 来源（私聊/群/观察推断），可点开完整上下文。</li>
+  <li><b>黑话词云可交互：</b>点词条看到证据绑定，可纠正；纠正结果按 revision CAS 生效，UI 需提示"人工纠正不会被自动推断覆盖"。</li>
+  <li><b>记忆构成用占比条：</b>私聊/群/观察/系统四分，让用户知道她的记忆偏向哪里，从而判断要不要调整观察范围。</li>
+  <li><b>归档区诚实留白：</b>冷归档与导入导出 V2 未接入，保留区块并标注原因，比隐藏更好——用户会来找。</li>
+</ul>
+</div>
+
+<!-- ===== 10 模型与连接 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P10 · 模型与连接</h2>
+    <div class="chips"><span class="chip g">专属配置</span><span class="chip">44 条</span>
+      <span class="chip o">E2 模型分配</span><span class="chip w">当前仅 OpenAI 官方系 Provider</span></div></div>
+  <div class="idx">来源：V1 模型页 · V2 限制见 astrbot_host/native.py:13</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">专属配置</div><div class="i on">模型与连接</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">Provider</div><div class="i dim">3 已连接</div><div class="i dim">1 失败</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">模型与连接 <span>每个任务用哪个模型 · 44 条</span></div>
+        <div class="wf-actions"><div class="wf-btn g">测试全部</div></div></div>
+      <div class="annot w" style="margin:0 0 10px"><b>当前限制：</b>V2 <code>astrbot_host/native.py:13</code> 硬编码 OpenAI 官方系 Provider，其它 Provider 暂不可用。此提示常驻页顶，不因滚动消失。</div>
+      <div class="card">
+        <div class="ch"><div class="ct">任务路由矩阵</div><div class="cx">行内编辑 · 每行含超时与重试</div></div>
+        <div class="tbl">
+          <div class="th"><div class="c1">任务</div><div class="c2">Provider</div><div class="c3">模型</div><div class="c4">超时 / 重试</div><div class="c5">状态</div></div>
+          <div class="tr"><div class="c1"><b>对话</b></div><div class="c2">主 Provider</div><div class="c3">gpt-4o</div><div class="c4">60s / 2</div><div class="c5"><span class="pill ok">正常</span></div></div>
+          <div class="tr"><div class="c1"><b>角色扮演</b></div><div class="c2">主 Provider</div><div class="c3">gpt-4o</div><div class="c4">60s / 2</div><div class="c5"><span class="pill ok">正常</span></div></div>
+          <div class="tr"><div class="c1"><b>创作 / 提纲</b></div><div class="c2">创作 Provider</div><div class="c3">gpt-4.1</div><div class="c4">120s / 1</div><div class="c5"><span class="pill ok">正常</span></div></div>
+          <div class="tr"><div class="c1"><b>智能收口（小模型）</b></div><div class="c2">轻量 Provider</div><div class="c3">gpt-4o-mini</div><div class="c4">8s / 1</div><div class="c5"><span class="pill ok">正常</span></div></div>
+          <div class="tr"><div class="c1"><b>生图引擎</b></div><div class="c2">绘图 Provider</div><div class="c3">—</div><div class="c4">180s / 1</div><div class="c5"><span class="pill warn">未配置</span></div></div>
+          <div class="tr"><div class="c1"><b>识图</b></div><div class="c2">视觉 Provider</div><div class="c3">—</div><div class="c4">30s / 1</div><div class="c5"><span class="pill off">失败</span></div></div>
+        </div>
+      </div>
+      <div class="wf-grid g3" style="margin-top:10px">
+        <div class="card"><div class="ch"><div class="ct">主 Provider</div><span class="pill ok">已连接</span></div>
+          <div class="row"><div class="k"><b>Base URL</b></div><span class="cx">•••••••</span></div>
+          <div class="row"><div class="k"><b>凭据</b></div><span class="cx">••••••••</span></div>
+          <div class="row"><div class="k"><b>可用模型</b></div><span class="cx">6</span></div>
+          <div style="margin-top:6px"><span class="wf-btn o">展开编辑</span> <span class="wf-btn g">测试</span></div>
+        </div>
+        <div class="card off"><div class="ch"><div class="ct">视觉 Provider</div><span class="pill off">未配置</span></div>
+          <div class="cx">识图能力依赖此项，未配置时 A3 媒体理解不可用</div></div>
+        <div class="card dim"><div class="ch"><div class="ct">运行设置</div><div class="cx">超时与重试</div></div>
+          <div class="sl">全局超时<span class="track"><i style="width:50%"></i><b style="left:50%"></b></span>60s</div>
+          <div class="sl">最大重试<span class="track"><i style="width:33%"></i><b style="left:33%"></b></span>2</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</ul>
+<ul class="ux">
+  <li><b>路由矩阵是主视图：</b>任务 × Provider/模型/超时/重试/状态，行内编辑。44 条配置的本质是"谁干哪件事"，表格比卡片组更清楚。</li>
+  <li><b>Provider 限制要常驻：</b>当前只支持 OpenAI 官方系，页顶提示条不随滚动消失，避免用户反复试错。</li>
+  <li><b>凭据默认脱敏：</b>显示 ••••，点"展开编辑"才显示，改动需二次确认——V2 页面目前只展示脱敏快照，这个行为应保留。</li>
+  <li><b>未配置的 Provider 要说明后果：</b>如"视觉 Provider 未配置 → 识图不可用"，跨页影响要写清楚。</li>
+</ul>
+</div>
+
+<!-- ===== 11 治理与维护 ===== -->
+<div class="page">
+<div class="page-head">
+  <div><h2>P11 · 治理与维护</h2>
+    <div class="chips"><span class="chip g">专属配置</span><span class="chip">107 条</span>
+      <span class="chip o">E3 风控 51</span><span class="chip o">E4 预算 37</span><span class="chip o">E5 存储部署 19</span></div></div>
+  <div class="idx">来源：V1 Token 页 + 排障页 + 配置页部分</div>
+</div>
+<div class="wf">
+  <div class="wf-shell">
+    <div class="wf-nav"><div class="g">专属配置</div><div class="i on">治理与维护</div><div class="i">…</div>
+      <div class="g" style="margin-top:8px">状态</div><div class="i dim">预算 62%</div><div class="i dim">3 事件</div></div>
+    <div class="wf-main">
+      <div class="wf-top"><div class="wf-t">治理与维护 <span>花多少、拦什么、存哪、怎么排障 · 107 条</span></div>
+        <div class="wf-actions"><div class="wf-btn o">复制诊断摘要</div></div></div>
+      <div class="tabs"><span class="on">用量与预算</span><span>风控</span><span>缓存与配额</span><span>备份与恢复</span><span>运行诊断</span></div>
+      <div class="kpi">
+        <div class="k"><b>62%</b><span>今日预算已用</span></div>
+        <div class="k"><b>¥18.4</b><span>今日花费</span></div>
+        <div class="k"><b>128k</b><span>今日 Token</span></div>
+        <div class="k"><b>正常</b><span>账户余额</span></div>
+      </div>
+      <div class="wf-grid g23">
+        <div class="card">
+          <div class="ch"><div class="ct">48 小时趋势</div><div class="cx">按小时</div></div>
+          <div style="display:flex;align-items:flex-end;gap:3px;height:64px;padding:4px 0">
+            <i style="flex:1;height:22%;background:#dbe3ff;border-radius:2px 2px 0 0"></i>
+            <i style="flex:1;height:35%;background:#dbe3ff;border-radius:2px 2px 0 0"></i>
+            <i style="flex:1;height:28%;background:#dbe3ff;border-radius:2px 2px 0 0"></i>
+            <i style="flex:1;height:52%;background:#b9c8ff;border-radius:2px 2px 0 0"></i>
+            <i style="flex:1;height:78%;background:var(--brand);border-radius:2px 2px 0 0"></i>
+            <i style="flex:1;height:61%;background:#b9c8ff;border-radius:2px 2px 0 0"></i>
+            <i style="flex:1;height:40%;background:#dbe3ff;border-radius:2px 2px 0 0"></i>
+            <i style="flex:1;height:31%;background:#dbe3ff;border-radius:2px 2px 0 0"></i>
+          </div>
+          <div class="row"><div class="k"><b>按任务拆分</b></div><span class="cx">对话 46% · 收口 21% · 创作 18%</span></div>
+          <div class="row"><div class="k"><b>按 Provider 拆分</b></div><span class="cx">主 72% · 创作 20%</span></div>
+          <div class="sl">预算阈值<span class="track"><i style="width:62%"></i><b style="left:62%"></b></span>80% 提醒</div>
+        </div>
+        <div class="card dim">
+          <div class="ch"><div class="ct">运行诊断</div><div class="cx">3 项待处理</div></div>
+          <div class="row"><div class="k"><b>统一身份与隔离</b></div><span class="pill ok">正常</span></div>
+          <div class="row"><div class="k"><b>SQLite 并发</b></div><span class="pill warn">1 次锁等待</span></div>
+          <div class="row"><div class="k"><b>消息收口追踪</b></div><span class="pill ok">正常</span></div>
+          <div class="row"><div class="k"><b>最近注入内容</b></div><span class="cx">查看最近 20 条</span></div>
+          <div class="annot o" style="margin-top:8px">「最近注入内容」用于排查上下文污染、错时、串线，是排障第一入口，单独成块而不是藏在诊断里。</div>
+        </div>
+      </div>
+      <div class="wf-grid g3" style="margin-top:10px">
+        <div class="card dim"><div class="ch"><div class="ct">风控</div><div class="cx">E3 · 51 条</div></div>
+          <div class="row"><div class="k"><b>禁词表</b></div><span class="cx">12 条</span></div>
+          <div class="row"><div class="k"><b>敏感过滤等级</b></div><span class="cx">中</span></div>
+          <div class="row"><div class="k"><b>范围限制</b></div><span class="cx">私聊 / 白名单群</span></div>
+        </div>
+        <div class="card dim"><div class="ch"><div class="ct">缓存与配额</div><div class="cx">E4 · 37 条</div></div>
+          <div class="row"><div class="k"><b>图片缓存</b></div><span class="cx">240 MB</span></div>
+          <div class="row"><div class="k"><b>表情包缓存</b></div><span class="cx">86 MB</span></div>
+          <div class="row"><div class="k"><b>清理</b></div><span class="pill">按 7 天</span></div>
+        </div>
+        <div class="card"><div class="ch"><div class="ct">备份与恢复</div><div class="cx">E5 · 19 条</div></div>
+          <div class="row"><div class="k"><b>最近自动备份</b></div><span class="cx">今日 03:00</span></div>
+          <div class="row"><div class="k"><b>存储方式</b></div><span class="cx">V2 独立数据根</span></div>
+          <div class="annot w" style="margin-top:6px">不提供 V1 数据迁移入口——V2 使用独立数据根，明令禁止读取 V1 用户数据。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="ux">
+  <li><b>用量页默认：</b>进入维护页最常见的动机是"花了多少/是不是出问题了"，用量与预算放在第一个 Tab。</li>
+  <li><b>预算阈值可视化：</b>进度条 + 阈值刻度，超阈值时页顶出现预警条，而不是只在设置里静默。</li>
+  <li><b>"最近注入内容"单独成块：</b>排查上下文污染、错时、串线时这是第一入口，别藏在诊断列表里。</li>
+  <li><b>备份区明确边界：</b>只做 V2 自身备份与恢复，不出现 V1 迁移入口（V2 独立数据根，禁止读 V1 数据）。</li>
+  <li><b>一键"复制诊断摘要"：</b>反馈问题时用户要贴的东西，做成一次复制。</li>
+</ul>
+</div>
+
+<!-- ===== 附 ===== -->
+<div class="doc">
+<h2>附：覆盖自查与两处口径</h2>
+<div class="wf-grid g2" style="display:grid;gap:12px">
+  <div class="card"><div class="ct" style="margin-bottom:8px">11 页 × 配置条数</div>
+    <div class="row"><div class="k"><b>表达 / 回复与表达</b></div><span class="cx">167</span></div>
+    <div class="row"><div class="k"><b>主动与联系</b></div><span class="cx">157</span></div>
+    <div class="row"><div class="k"><b>感知</b></div><span class="cx">153</span></div>
+    <div class="row"><div class="k"><b>身份与权限</b></div><span class="cx">116</span></div>
+    <div class="row"><div class="k"><b>治理与维护</b></div><span class="cx">107</span></div>
+    <div class="row"><div class="k"><b>记忆与经历</b></div><span class="cx">73</span></div>
+    <div class="row"><div class="k"><b>产出 / 创作与作品</b></div><span class="cx">73</span></div>
+    <div class="row"><div class="k"><b>首页小屋（B3）</b></div><span class="cx">72</span></div>
+    <div class="row"><div class="k"><b>模型与连接</b></div><span class="cx">44</span></div>
+    <div class="row"><div class="k"><b>行动 / 生活与活动</b></div><span class="cx">18</span></div>
+    <div class="row"><div class="k" style="color:var(--ink-3)"><b>不进 UI（E6）</b></div><span class="cx">30</span></div>
+    <div class="row"><div class="k"><b>决策 / 治理</b></div><span class="cx">枢纽页，不承载表单</span></div>
+  </div>
+  <div class="card dim">
+    <div class="ct" style="margin-bottom:8px">两处需要在实现时留意</div>
+    <ul class="ux" style="margin-top:0">
+      <li><b>行动页配置不在主 schema：</b>18 条只是主插件侧，七个伴侣插件各有自己的配置，本页上区做的是能力聚合与跳转。</li>
+      <li><b>E6 遗留兼容 30 条不进 UI：</b>这类条目存在的意义是消失，给了入口反而被当成正式功能。</li>
+      <li><b>首页小屋承载 B3 角色自我 72 条：</b>不在侧边栏内，通过生活家具与页签（书写/阅读/睡眠/回执）进入。</li>
+      <li><b>能力驱动显隐：</b>行动页与产出页在能力全未接入时不应出现在侧边栏（沿用 V1 的 <code>hidden</code>）。</li>
+    </ul>
+  </div>
+</div>
+</div>
+
+<div class="foot">设计依据：V1 1010 条配置按六段归位清单 · 164 项功能盘点 · 17 个 V1 tab 归位 · V2 侧边栏导航（能力配置 6 / 专属配置 5）。线框为排版与交互意图示意，非最终视觉稿。</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,228 @@
+/* 入场序列的呈现层。
+   3D 部分由 entrance.js 通过体素控制器的公开接口驱动，
+   这里只管启动幕、波纹光晕与 UI 浮现——纯 DOM，不碰 canvas。 */
+
+/* === 启动幕 ===
+ *
+ * 体素包 677 KB，是首屏唯一一个「到了才画得出小屋」的资源。在它解析完
+ * 之前 app.js 的 mountStage() 不会执行，而首屏闸门（tokens.css 的
+ * `data-room-ready`）把 body 设成 visibility:hidden——于是那段时间用户
+ * 面对的是一整屏空白，然后所有东西一起冒出来。这正是用户报的
+ * 「小屋加载过慢，UI 全部显示后小屋对应的卡片才生硬地补齐」。
+ *
+ * 这一层幕把它填掉：一个铺满视口的软底、一段只播一遍的角色动图和一行提示。
+ * 减少动态效果时不加载动图，只留下静态光晕。它不假装是小屋（那样反而更像加载失败），
+ * 只是让这段等待看起来是「正在打开」，而不是「页面坏了」。
+ *
+ * visibility:visible 是这里的关键：首屏闸门把 body 设成 hidden，
+ * visibility 会继承，但子元素可以自己改回 visible——靠这一条，
+ * 幕才能在闸门关闭期间照常显示。 */
+.room-boot{
+  position:fixed;
+  inset:0;
+  /* 高过入场期间全屏的舞台（z-index:40），但仍在 dialog 的 top-layer 之下。 */
+  z-index:50;
+  display:grid;
+  place-content:center;
+  place-items:center;
+  gap:var(--sp-4);
+  grid-auto-rows:min-content;
+  visibility:visible;
+  background:var(--t-surface-soft);
+  opacity:1;
+  transition:opacity .18s ease,visibility 0s linear .18s;
+}
+:root[data-room-ready] .room-boot{
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+}
+.room-boot-glow{
+  position:absolute;
+  inset:0;
+  margin:auto;
+  width:min(220px,90%);
+  aspect-ratio:1;
+  border-radius:50%;
+  background:radial-gradient(circle,var(--t-accent-quiet) 0%,transparent 70%);
+  animation:room-boot-breathe 1.9s ease-in-out infinite;
+}
+.room-boot-visual{
+  position:relative;
+  display:grid;
+  place-items:center;
+  width:min(300px,68vw);
+  height:min(300px,38svh);
+}
+.room-boot-gif{
+  position:relative;
+  z-index:1;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+}
+/* 只动 opacity 与 transform：等待期间不该有重排。 */
+@keyframes room-boot-breathe{
+  0%,100%{opacity:.35;transform:scale(.72)}
+  50%{opacity:.9;transform:scale(1)}
+}
+.room-boot-text{
+  /* 这里原来写的是 `var(--fs-1,13px)` —— --fs-1 这个令牌不存在。
+     字号尺度重做时令牌改名成了语义档位（micro/tiny/body/…），
+     这一页没跟着改，于是它一直吃 fallback 的 13px：
+     表面上显示正常，实际上字号设置与密度两维对这一行完全无效。
+     等价替换为 --fs-body（13.5px，与 fallback 同一级），并去掉 fallback——
+     留着 fallback 会让将来再写错名字时继续静默生效，而不是当场暴露。 */
+  font-size:var(--fs-body);
+  letter-spacing:.04em;
+  color:var(--t-text-soft);
+}
+/* 减少动效：不呼吸，只留静态提示。 */
+@media (prefers-reduced-motion: reduce){
+  .room-boot-glow{animation:none;opacity:.7;transform:none}
+}
+:root:is([data-motion="low"],[data-motion="off"]) .room-boot-glow{animation:none;opacity:.7;transform:none}
+
+/* === 波纹 ===
+   三层同心光环从容器中心摊开，错开 160ms 出发。
+   用 scale + opacity 而不是 width/height：前者由合成器处理，不触发重排。 */
+.entrance-ripple{
+  position:absolute;inset:0;display:grid;place-items:center;
+  pointer-events:none;z-index:2;overflow:hidden;
+}
+.entrance-ripple span{
+  position:absolute;
+  width:min(38%,240px);aspect-ratio:1;border-radius:50%;
+  border:1px solid var(--t-accent);
+  opacity:0;
+  transform:scale(.12);
+  animation:entrance-ripple 1.5s cubic-bezier(.16,.72,.32,1) var(--delay,0ms) both;
+}
+/* 第二层用一次要色，三层同色会糊成一团。 */
+.entrance-ripple span:nth-child(2){border-color:var(--t-ok);border-width:2px}
+.entrance-ripple span:nth-child(3){border-color:var(--t-text-faint)}
+@keyframes entrance-ripple{
+  0%{opacity:0;transform:scale(.12)}
+  18%{opacity:.75}
+  100%{opacity:0;transform:scale(3.4)}
+}
+
+/* === 场景拉远 ===
+ * 外壳保留完整布局，只让 3D 内容框做等比缩放。
+ * 标题、家具条和提示都占着最终位置，不参与画面几何。
+ * 50vw 按真实视口定位，避免 left:50% 被页面滚动条宽度带偏。
+ */
+.is-entrance,.is-entrance *{
+  /* tokens.css 为所有元素写了 transition-duration；默认 property:all 会让
+     fixed 定位、每帧 transform 和隐藏 UI 都追着目标跑。这里只关闭过渡，
+     UI 的 keyframes 仍按自己的时间轴播放。 */
+  transition-property:none!important;
+}
+.is-entrance-pull .stage-region{position:relative;z-index:40}
+.is-entrance-pull .stage-region .room-stage{
+  overflow:visible;
+  background:transparent;
+  border-color:transparent;
+  box-shadow:none;
+}
+.is-entrance-pull .stage-region .voxel-room{
+  position:fixed;
+  inset:auto;
+  left:50vw;
+  bottom:0;
+  width:var(--entrance-w,100vw);
+  height:var(--entrance-h,100vh);
+  margin:0;
+  border-radius:var(--entrance-radius,0px);
+  transform-origin:bottom center;
+  transform:
+    translateX(-50%)
+    translate(var(--entrance-tx,0px),var(--entrance-ty,0px))
+    scale(var(--entrance-scale,1));
+  z-index:40;
+  will-change:transform;
+  pointer-events:none;
+}
+.is-entrance .stage-region .voxel-room{pointer-events:none}
+
+/* === UI 浮现 ===
+ * 由实际拉远完成后的 entrance-reveal 启动，不按页面加载时间猜测。
+ * 先留 90ms 的落定缓冲，导航轻移入，状态和内容面板依次上浮，
+ * 最后才出现小屋操作面；没有缩放字体或弹簧过冲。
+ * 隐藏期间仍保留所有布局空间，落场不会改变小屋的目标矩形。
+ */
+.is-entrance .rail,
+.is-entrance .topbar,
+.is-entrance .product-scope,
+.is-entrance .shell-side,
+.is-entrance .shell-panel,
+.is-entrance .stage-region .stage-bar,
+.is-entrance .stage-region .stage-furniture-strip,
+.is-entrance .stage-region .stage-overlay,
+.is-entrance .stage-region .voxel-hint{
+  opacity:0;
+  pointer-events:none;
+}
+.is-entrance.entrance-reveal .rail,
+.is-entrance.entrance-reveal .topbar,
+.is-entrance.entrance-reveal .product-scope,
+.is-entrance.entrance-reveal .shell-side,
+.is-entrance.entrance-reveal .shell-panel,
+.is-entrance.entrance-reveal .stage-region .stage-bar,
+.is-entrance.entrance-reveal .stage-region .stage-furniture-strip,
+.is-entrance.entrance-reveal .stage-region .stage-overlay,
+.is-entrance.entrance-reveal .stage-region .voxel-hint{
+  animation:entrance-ui var(--entrance-ui-duration,620ms) cubic-bezier(.22,1,.36,1) both;
+  animation-delay:calc(var(--entrance-ui-pause,90ms) + var(--entrance-delay,0ms));
+}
+.is-entrance .rail{--entrance-delay:0ms;--entrance-from-x:-12px;--entrance-from-y:0px}
+.is-entrance .topbar{--entrance-delay:40ms;--entrance-from-y:-8px}
+.is-entrance .product-scope{--entrance-delay:60ms;--entrance-from-y:6px}
+.is-entrance .stage-region .stage-bar{--entrance-delay:70ms;--entrance-from-y:6px}
+.is-entrance .shell-side{--entrance-delay:110ms;--entrance-from-x:12px;--entrance-from-y:4px}
+.is-entrance .shell-panel{--entrance-delay:170ms;--entrance-from-y:16px}
+.is-entrance .stage-region .stage-furniture-strip{--entrance-delay:210ms;--entrance-from-y:10px}
+.is-entrance .stage-region .stage-overlay,
+.is-entrance .stage-region .voxel-hint{--entrance-delay:240ms;--entrance-from-y:4px}
+@keyframes entrance-ui{
+  from{opacity:0;transform:translate3d(var(--entrance-from-x,0px),var(--entrance-from-y,10px),0)}
+  to{opacity:1;transform:translate3d(0,0,0)}
+}
+/* 动画结束后交回原有样式，不强行打开本来不可交互的提示条。 */
+.entrance-settled .rail,
+.entrance-settled .topbar,
+.entrance-settled .product-scope,
+.entrance-settled .shell-side,
+.entrance-settled .shell-panel,
+.entrance-settled .stage-region .stage-bar,
+.entrance-settled .stage-region .stage-furniture-strip,
+.entrance-settled .stage-region .stage-overlay,
+.entrance-settled .stage-region .voxel-hint{
+  animation:none;opacity:1;transform:none;
+}
+
+/* 减少动效时直接显示终态；JS 同样跳过拉远和等待。 */
+@media (prefers-reduced-motion:reduce){
+  .is-entrance-pull .stage-region .voxel-room{
+    position:absolute;inset:0;width:auto;height:auto;transform:none;clip-path:none;
+    border-radius:0;will-change:auto;pointer-events:auto;
+  }
+  .is-entrance-pull .stage-region .room-stage{
+    overflow:hidden;background:var(--t-surface-soft);border-color:var(--t-line);
+  }
+  .is-entrance :is(.rail,.topbar,.product-scope,.shell-side,.shell-panel,.stage-bar,.stage-furniture-strip,.stage-overlay,.voxel-hint){
+    animation:none;opacity:1;transform:none;
+  }
+  .is-entrance .stage-region .voxel-room{pointer-events:auto}
+}
+:root:is([data-motion="low"],[data-motion="off"]) .is-entrance-pull .stage-region .voxel-room{
+  position:absolute;inset:0;width:auto;height:auto;transform:none;clip-path:none;
+  border-radius:0;will-change:auto;pointer-events:auto;
+}
+:root:is([data-motion="low"],[data-motion="off"]) .is-entrance-pull .stage-region .room-stage{
+  overflow:hidden;background:var(--t-surface-soft);border-color:var(--t-line);
+}
+:root:is([data-motion="low"],[data-motion="off"]) .is-entrance :is(.rail,.topbar,.product-scope,.shell-side,.shell-panel,.stage-bar,.stage-furniture-strip,.stage-overlay,.voxel-hint){
+  animation:none;opacity:1;transform:none;
+}
+:root:is([data-motion="low"],[data-motion="off"]) .is-entrance .stage-region .voxel-room{pointer-events:auto}

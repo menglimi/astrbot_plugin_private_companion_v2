@@ -1,0 +1,130 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>模型与连接 · 排版预览</title>
+<link rel="stylesheet" href="../pages/陪伴小屋/styles.css">
+<link rel="stylesheet" href="../pages/陪伴小屋/models-page.css">
+<style>body{margin:0;background:var(--bg);padding:24px}
+.wrap{max-width:1120px;margin:0 auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:24px 26px;box-shadow:var(--shadow)}
+.note{margin:0 0 18px;font-size:12px;color:#667085;line-height:1.7}</style></head>
+<body><div class="wrap">
+<p class="note">静态预览 · 数据为示例，用于确认新版「模型与连接」页的排版与交互。实际数据来自 V2 宿主的 <code>/model</code> 接口。缩小窗口可查看 ≤860px 的卡片式降级。</p>
+<div class="model-workspace"><div class="model-tabs" role="tablist" aria-label="模型配置分类"><button type="button" role="tab" data-model-tab="fn" aria-selected="true" class="active">功能模型</button><button type="button" role="tab" data-model-tab="voice" aria-selected="false" class="">语音模型</button><button type="button" role="tab" data-model-tab="image" aria-selected="false" class="">生图模型</button></div><div class="model-head"><div><p>当前对象与角色 · 任务 → Provider 路由</p>
+      <h3>谁干哪一件事</h3></div><div class="model-head-actions"><button type="button" class="button small" data-model-action="refresh" >刷新配置</button></div></div><div class="model-subtabs" role="tablist" aria-label="功能模型视图"><button type="button" role="tab" data-model-sub="map" aria-selected="false" class="">态势图</button><button type="button" role="tab" data-model-sub="cfg" aria-selected="true" class="active">模型配置</button><button type="button" role="tab" data-model-sub="pol" aria-selected="false" class="">替换策略</button></div><div class="model-subpane"><div class="model-cfg-note">生效中 · 快速配置 · 5 项任务可覆盖</div><div class="model-seg" role="group" aria-label="配置模式"><button type="button" data-model-cm="quick" aria-pressed="false" class="">快速配置</button><button type="button" data-model-cm="precise" aria-pressed="true" class="active">精准配置</button></div><div class="model-notice " role="status" aria-live="polite">已读取当前任务配置。</div><div class="model-overview"><div><strong>5</strong><span>已注册任务</span></div>
+      <div><strong>3</strong><span>可用 Provider</span></div>
+      <div><strong>2</strong><span>单独设置的任务</span></div>
+      <div><strong>运行中</strong><span>宿主状态</span></div></div><div class="model-rail" aria-label="已接入的 Provider"><button type="button" class="model-provider-card" data-model-provider="primary" aria-pressed="false">
+        <span class="model-provider-top"><strong>primary</strong><em>3 项任务</em></span>
+        <span class="model-provider-caps"><small>text</small></span>
+        <span class="model-provider-foot">单次输出上限 8192</span></button><button type="button" class="model-provider-card" data-model-provider="secondary" aria-pressed="false">
+        <span class="model-provider-top"><strong>secondary</strong><em>2 项任务</em></span>
+        <span class="model-provider-caps"><small>text</small><small>vision</small></span>
+        <span class="model-provider-foot">单次输出上限 16384</span></button><button type="button" class="model-provider-card" data-model-provider="draft-vision" aria-pressed="false">
+        <span class="model-provider-top"><strong>draft-vision</strong><em>0 项任务</em></span>
+        <span class="model-provider-caps"><small>vision</small></span>
+        <span class="model-provider-foot">单次输出上限 4096</span></button>
+      </div><div class="model-toolbar"><label class="model-search"><span>搜索任务</span>
+        <input type="search" data-model-search value="" placeholder="名称、用途或任务键"></label>
+      <div class="model-switches" role="group" aria-label="视图"><button type="button" data-model-view="tasks" aria-pressed="true" class="active">按任务</button><button type="button" data-model-view="providers" aria-pressed="false" class="">按 Provider</button></div>
+      <div class="model-filters" role="group" aria-label="来源筛选"><button type="button" data-model-custom="all" aria-pressed="true" class="active">全部</button><button type="button" data-model-custom="custom" aria-pressed="false" class="">单独设置</button><button type="button" data-model-custom="inherited" aria-pressed="false" class="">跟随上级</button></div>
+      <div class="model-filters" role="group" aria-label="通道筛选"><button type="button" data-model-lane="all" aria-pressed="true" class="active">全部通道</button><button type="button" data-model-lane="foreground" aria-pressed="false" class="">前台</button><button type="button" data-model-lane="background" aria-pressed="false" class="">后台</button></div></div>
+    <div class="model-selection" role="status">已选 <strong>2</strong> 项任务
+      <select data-model-assign aria-label="批量指派 Provider" ><option value="">批量指派 Provider…</option><option value="primary">primary</option><option value="secondary">secondary</option><option value="draft-vision">draft-vision</option></select>
+      <button type="button" class="button small" data-model-action="inherit" >恢复跟随上级</button>
+      <button type="button" class="button small" data-model-action="clear-selection">取消选择</button></div><div class="model-queue-slot"><div class="model-queue " role="status">
+      <span><b>2</b> 项改动待保存 · 保存前不影响正在进行的任务</span>
+      <button type="button" class="button primary small" data-model-action="save-all" >全部保存</button>
+      <button type="button" class="button small" data-model-action="discard-all" >全部放弃</button></div></div><div class="model-matrix-scroll"><table class="model-matrix"><thead><tr>
+      <th scope="col"><span class="sr-only">选择</span></th><th scope="col">任务</th><th scope="col">主 Provider</th><th scope="col">备用</th>
+      <th scope="col">输出上限</th><th scope="col">来源</th><th scope="col">采用</th></tr></thead>
+      <tbody><tr class="model-row dirty open">
+      <td data-label="选择"><input type="checkbox" data-model-pick="conversation.reply"  aria-label="选择 对话回复"></td>
+      <td data-label="任务"><button type="button" class="model-task-open" data-model-open="conversation.reply" aria-expanded="true">
+          <strong>对话回复<i class="dot" aria-label="有未保存改动"></i></strong>
+          <small>当前私聊的正文生成</small></button>
+        <span class="model-task-meta"><em class="tag">前台</em><em class="tag cap">text</em></span></td>
+      <td data-label="主 Provider"><div class="model-inline"><select data-model-field="provider" data-model-kind="conversation.reply" aria-label="对话回复 主 Provider" ><option value="primary" selected>primary</option><option value="secondary" >secondary</option>
+      </select></div></td>
+      <td data-label="备用"><div class="model-inline"><select data-model-field="fallback" data-model-kind="conversation.reply" aria-label="对话回复 备用 Provider" ><option value="">不使用备用 Provider</option><option value="primary" >primary</option><option value="secondary" >secondary</option>
+      </select></div></td>
+      <td data-label="输出上限"><div class="model-inline num"><input type="number" min="1" max="8192" step="1" data-model-field="max_output_tokens" data-model-kind="conversation.reply"
+          value="4096" aria-label="对话回复 输出上限" ><span>/ 8192</span></div></td>
+      <td data-label="来源"><span class="model-source own">当前对象单独设置</span></td>
+      <td data-label="采用"><span class="model-state ">下次任务</span></td></tr>
+    <tr class="model-detail-row"><td colspan="7"><div class="model-detail">
+      <div class="model-detail-head"><span>对话 · 前台</span><h4>对话回复</h4><p>当前私聊的正文生成</p></div>
+      
+      
+      
+      <div class="model-detail-grid">
+        <label class="model-textarea"><span>任务附加提示词 <em data-prompt-scope="prompt"></em></span>
+           <textarea data-model-field="prompt" data-model-kind="conversation.reply" rows="5" maxlength="8000" ></textarea>
+          <small>人格仍然保留；留空表示不添加任务指令。最多 8000 字。</small></label>
+        <div class="model-detail-side">
+          <p class="model-detail-label">跟随上级</p>
+           <label class="model-inherit"><input type="checkbox" data-model-inherit="provider" data-model-kind="conversation.reply"  >主 Provider</label><label class="model-inherit"><input type="checkbox" data-model-inherit="fallback" data-model-kind="conversation.reply" checked >备用 Provider</label><label class="model-inherit"><input type="checkbox" data-model-inherit="prompt" data-model-kind="conversation.reply" checked >附加提示词</label><label class="model-inherit"><input type="checkbox" data-model-inherit="max_output_tokens" data-model-kind="conversation.reply"  >输出上限</label>
+          <p class="model-detail-note">上级取值：主 Provider primary · 输出上限 4096（来源 安装级）</p>
+        </div></div>
+      <div class="model-editor-actions">
+        <button type="button" class="button primary" data-model-action="save-one" data-model-kind="conversation.reply" >保存本任务</button>
+        <button type="button" class="button" data-model-action="discard" data-model-kind="conversation.reply" >放弃草稿</button>
+        
+        
+      </div></div></td></tr><tr class="model-row picked">
+      <td data-label="选择"><input type="checkbox" data-model-pick="memory.reflect" checked aria-label="选择 记忆整理"></td>
+      <td data-label="任务"><button type="button" class="model-task-open" data-model-open="memory.reflect" aria-expanded="false">
+          <strong>记忆整理</strong>
+          <small>从已授权素材整理认识</small></button>
+        <span class="model-task-meta"><em class="tag">后台</em><em class="tag cap">text</em></span></td>
+      <td data-label="主 Provider"><div class="model-inline"><select data-model-field="provider" data-model-kind="memory.reflect" aria-label="记忆整理 主 Provider" ><option value="primary" selected>primary</option><option value="secondary" >secondary</option>
+      </select></div></td>
+      <td data-label="备用"><div class="model-inline"><select data-model-field="fallback" data-model-kind="memory.reflect" aria-label="记忆整理 备用 Provider" ><option value="">不使用备用 Provider</option><option value="primary" >primary</option><option value="secondary" >secondary</option>
+      </select></div></td>
+      <td data-label="输出上限"><div class="model-inline num"><input type="number" min="1" max="8192" step="1" data-model-field="max_output_tokens" data-model-kind="memory.reflect"
+          value="4096" aria-label="记忆整理 输出上限" ><span>/ 8192</span></div></td>
+      <td data-label="来源"><span class="model-source inherit">跟随 安装级</span></td>
+      <td data-label="采用"><span class="model-state ">已采用</span></td></tr>
+    <tr class="model-row dirty picked">
+      <td data-label="选择"><input type="checkbox" data-model-pick="calendar.plan" checked aria-label="选择 日程规划"></td>
+      <td data-label="任务"><button type="button" class="model-task-open" data-model-open="calendar.plan" aria-expanded="false">
+          <strong>日程规划<i class="dot" aria-label="有未保存改动"></i></strong>
+          <small>基于已有目标规划下一步</small></button>
+        <span class="model-task-meta"><em class="tag">后台</em><em class="tag cap">text</em></span></td>
+      <td data-label="主 Provider"><div class="model-inline"><select data-model-field="provider" data-model-kind="calendar.plan" aria-label="日程规划 主 Provider" ><option value="primary" >primary</option><option value="secondary" selected>secondary</option>
+      </select></div></td>
+      <td data-label="备用"><div class="model-inline"><select data-model-field="fallback" data-model-kind="calendar.plan" aria-label="日程规划 备用 Provider" ><option value="">不使用备用 Provider</option><option value="primary" >primary</option><option value="secondary" >secondary</option>
+      </select></div></td>
+      <td data-label="输出上限"><div class="model-inline num"><input type="number" min="1" max="16384" step="1" data-model-field="max_output_tokens" data-model-kind="calendar.plan"
+          value="4096" aria-label="日程规划 输出上限" ><span>/ 16384</span></div></td>
+      <td data-label="来源"><span class="model-source pending">待保存</span></td>
+      <td data-label="采用"><span class="model-state ">已采用</span></td></tr>
+    <tr class="model-row">
+      <td data-label="选择"><input type="checkbox" data-model-pick="role.journal.diary"  aria-label="选择 日记"></td>
+      <td data-label="任务"><button type="button" class="model-task-open" data-model-open="role.journal.diary" aria-expanded="false">
+          <strong>日记</strong>
+          <small>保存私人书写</small></button>
+        <span class="model-task-meta"><em class="tag">后台</em><em class="tag cap">text</em></span></td>
+      <td data-label="主 Provider"><div class="model-inline"><select data-model-field="provider" data-model-kind="role.journal.diary" aria-label="日记 主 Provider" ><option value="primary" >primary</option><option value="secondary" selected>secondary</option>
+      </select></div></td>
+      <td data-label="备用"><div class="model-inline"><select data-model-field="fallback" data-model-kind="role.journal.diary" aria-label="日记 备用 Provider" ><option value="">不使用备用 Provider</option><option value="primary" >primary</option><option value="secondary" >secondary</option>
+      </select></div></td>
+      <td data-label="输出上限"><div class="model-inline num"><input type="number" min="1" max="16384" step="1" data-model-field="max_output_tokens" data-model-kind="role.journal.diary"
+          value="4096" aria-label="日记 输出上限" ><span>/ 16384</span></div></td>
+      <td data-label="来源"><span class="model-source own">当前对象单独设置</span></td>
+      <td data-label="采用"><span class="model-state ">下次任务</span></td></tr>
+    <tr class="model-row">
+      <td data-label="选择"><input type="checkbox" data-model-pick="role.reading.consume"  aria-label="选择 阅读理解"></td>
+      <td data-label="任务"><button type="button" class="model-task-open" data-model-open="role.reading.consume" aria-expanded="false">
+          <strong>阅读理解</strong>
+          <small>阅读实际提供的原文</small></button>
+        <span class="model-task-meta"><em class="tag">后台</em><em class="tag cap">text</em><em class="tag cap">vision</em></span></td>
+      <td data-label="主 Provider"><div class="model-inline"><select data-model-field="provider" data-model-kind="role.reading.consume" aria-label="阅读理解 主 Provider" ><option value="secondary" >secondary</option>
+      <option value="primary" selected>primary · 未注册</option></select></div></td>
+      <td data-label="备用"><div class="model-inline"><select data-model-field="fallback" data-model-kind="role.reading.consume" aria-label="阅读理解 备用 Provider" ><option value="">不使用备用 Provider</option><option value="secondary" >secondary</option>
+      </select></div></td>
+      <td data-label="输出上限"><div class="model-inline num"><input type="number" min="1" max="8192" step="1" data-model-field="max_output_tokens" data-model-kind="role.reading.consume"
+          value="4096" aria-label="阅读理解 输出上限" ><span>/ 8192</span></div></td>
+      <td data-label="来源"><span class="model-source inherit">跟随 安装级</span></td>
+      <td data-label="采用"><span class="model-state ">已采用</span></td></tr>
+    </tbody></table></div><details class="model-gaps"><summary>V2 网关当前尚未接入的模型设置（5 组）</summary>
+    <ul><li><strong>关键词替换规则</strong><span>model_replacement_rules · model_replacement_scope</span><small>命中关键词或任务时临时换模型</small></li><li><strong>时段替换</strong><span>DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID</span><small>高价时段切换到替代模型</small></li><li><strong>模型配置模式</strong><span>provider_config_mode</span><small>当前宿主的集中 / 分散配置模式</small></li><li><strong>超时与 Token 覆盖</strong><span>model_timeout_overrides · model_token_limit_overrides</span><small>按任务覆盖单次超时与输出上限</small></li><li><strong>连通性测试</strong><span>模型工作区入口</span><small>逐 Provider 发送样例请求验证可用性</small></li></ul>
+    <p>当前宿主共保留 44 项模型与连接配置（41 个按任务分配的模型槽 + 配置模式、替换规则与遗留覆盖）。V2 只开放宿主实际注册的任务；未注册的任务不出现在上方矩阵，也不会有隐藏开关。</p></details></div></div>
+</div></body></html>

@@ -1,0 +1,443 @@
+/* 学习与反思页（培育轨道）测试。
+ *
+ * 这一页有三条查出来的契约，每一条都值一条断言：
+ *   ① 动作由后端给。`RoleGrowthManagement._project()` 按状态与来源可读性算出 actions；
+ *      页面自己按状态推断会给出一个后端一定拒绝的按钮。
+ *   ② 来源不可读时后端把 title/description/progress_note 一律置 null——
+ *      页面必须说"读不到"，不能显示成一张空卡。
+ *   ③ 权限是一个开关加一个从属项：read 关闭时 proposals 被后端强制跟从，
+ *      页面上不能留一个"开了也没用"的独立开关。
+ *
+ * 另外两条是别的页也踩过的：只提交动过的字段、状态动作必须先过 actions 门。
+ */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+const vm = require('node:vm');
+
+const source = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/learning-page.js'), 'utf8');
+const HOST = 'astrbot_plugin_private_companion_v2';
+const GROWTH = '/' + HOST + '/growth';
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
+
+/* 一条成长记录，形状照 `_project()` 的返回。
+   actions 是后端算出来的，夹具要能逐条改，测试才有意义。 */
+function record(id, state, kind = 'skill', extra = {}) {
+  return {
+    growth_id: id, revision: 2, kind, state,
+    title: id + ' 的标题', description: id + ' 的描述', progress_note: '最近的进展',
+    source_count: 2, unavailable_reason: null,
+    proposed_by: 'user-1', confirmed_by: state === 'proposed' ? null : 'user-1',
+    changed_by: 'user-1',
+    created_at: '2026-09-01T02:00:00+00:00', updated_at: '2026-09-20T03:00:00+00:00',
+    actions: [], view_token: 'v'.repeat(64),
+    ...extra,
+  };
+}
+/* 后端按状态给的默认动作集（照 _project 写）。 */
+const ACTIONS_FOR = {
+  proposed: ['confirm', 'revise', 'withdraw', 'retire'],
+  active: ['revise', 'pause', 'complete', 'retire'],
+  paused: ['resume', 'revise', 'complete', 'retire'],
+  achieved: ['retire'],
+  retired: ['retire'],
+};
+function withActions(rows) {
+  return rows.map(row => ({...row, actions: ACTIONS_FOR[row.state] || []}));
+}
+function review(id, extra = {}) {
+  return {
+    review_id: id, growth_id: 'g-1', base_revision: 2, growth_title: 'g-1 的标题',
+    progress_note: '今天练了一小时', receipt_stream: 'receipts', created_at: '2026-09-25T01:00:00+00:00',
+    unavailable_reason: null, actions: ['accept', 'reject'], view_token: 'w'.repeat(64),
+    ...extra,
+  };
+}
+function access(extra = {}) {
+  return {
+    settings: {read_enabled: true, proposals_enabled: true, ...(extra.settings || {})},
+    effective: {read_enabled: {allowed: true, reason: null},
+                proposals_enabled: {allowed: true, reason: null}, ...(extra.effective || {})},
+    edit_token: 'a'.repeat(64),
+  };
+}
+
+function harness() {
+  const requests = [];
+  const window = {
+    CompanionProduct: {
+      hosted: () => true,
+      role: () => ({role_id: 'role-1', growth_api: GROWTH}),
+      bridgeNow: () => window.AstrBotPluginPage,
+      bridgeFor: () => ({then: resolve => resolve(window.AstrBotPluginPage)}),
+    },
+    AstrBotPluginPage: {
+      ready: () => Promise.resolve({pluginName: HOST}),
+      apiGet: (route, params) => new Promise((resolve, reject) => requests.push({method: 'GET', route, params, resolve, reject})),
+      apiPost: (route, values) => new Promise((resolve, reject) => requests.push({method: 'POST', route, values, resolve, reject})),
+    },
+    document: {
+      addEventListener: () => {}, querySelector: () => null, querySelectorAll: () => [],
+      body: {classList: {add: () => {}, remove: () => {}, toggle: () => {}}}, title: '',
+    },
+    matchMedia: () => ({matches: false}),
+    console, Intl, Date, JSON, Math, Number, Object, Array, String, Set, Map, Boolean, Error, Promise,
+    localStorage: {getItem: () => null, setItem: () => {}, removeItem: () => {}},
+  };
+  vm.runInNewContext(source, {
+    window, document: window.document, console, Intl, Date, JSON, Math, Number, Object, Array,
+    String, Set, Map, Boolean, Error, Promise, localStorage: window.localStorage, URL,
+    /* 计时器必须给：bounded() 用 Promise.race 包了 15 秒超时，
+       少了 setTimeout 第一个请求在发出前就抛「clearTimeout is not defined」，
+       整页停在初始状态——看起来像请求逻辑有问题，其实是夹具不全。 */
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    /* 修订表单用 FormData 取值；桩只实现 get。 */
+    FormData: class { constructor() {} get() { return ""; } },
+  });
+
+  function root() {
+    const handlers = {};
+    const node = {
+      isConnected: true, innerHTML: '', __handlers: handlers,
+      addEventListener(type, handler) { handlers[type] = handler; },
+      removeEventListener() {},
+      contains() { return true; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      dispatch(type, event) { return handlers[type]?.(event); },
+    };
+    return node;
+  }
+  const page = window.CompanionLearningPage;
+  const element = root();
+  return {page, element, requests, window,
+    reply: (request, payload) => request.resolve({status: 'ok', data: payload}),
+    fail: (request, code) => request.resolve({status: 'error', message: code, data: {code}}),
+    settle};
+}
+
+/* 列表与审阅都从挂载时并行发起，所以夹具要循环答「谁在飞就答谁」。 */
+async function boot(h, rows = [], reviews = [], extra = {}) {
+  const mounted = h.page.mount(h.element);
+  await h.settle();
+  const answered = new Set();
+  for (let round = 0; round < 20; round++) {
+    const pending = h.requests.filter(r => !answered.has(r));
+    if (!pending.length) break;
+    for (const request of pending) {
+      answered.add(request);
+      if (request.route === 'growth') {
+        h.reply(request, {items: withActions(rows),
+          next_cursor: extra.next || null,
+          context_key: 'ctx', role_id: 'role-1',
+          profile_id: 'profile-1', operator_name: 'operator',
+          access: extra.access === null ? undefined : (extra.access || access())});
+        continue;
+      }
+      if (request.route === 'growth/progress') {
+        h.reply(request, {items: reviews, next_cursor: extra.reviewNext || null,
+          context_key: 'ctx', role_id: 'role-1'});
+        continue;
+      }
+      h.reply(request, {});
+    }
+    await h.settle();
+  }
+  await mounted;
+  return {requests: h.requests};
+}
+
+/* 桩元素：closest 按「自己命中哪些选择器」回答。 */
+function node(attrs) {
+  const self = {
+    dataset: attrs, type: '', checked: false, value: '',
+    closest(sel) {
+      const probes = {view: '[data-view]', action: '[data-action]', act: '[data-act]',
+                      id: '[data-id]', open: '[data-open]', review: '[data-review]',
+                      confirm: '[data-confirm]', filterState: '[data-filter-state]',
+                      filterKind: '[data-filter-kind]', access: '[data-access]'};
+      for (const [key, pattern] of Object.entries(probes)) {
+        if (attrs[key] !== undefined && sel === pattern) return self;
+      }
+      return null;
+    },
+  };
+  return self;
+}
+const click = (h, attrs) => h.element.dispatch('click',
+  {target: node(attrs), preventDefault() {}, stopPropagation() {}});
+const change = (h, attrs) => h.element.dispatch('change', {target: node(attrs), preventDefault() {}});
+
+/* ---- 接线 ------------------------------------------------------------- */
+
+test('挂载后同时读列表与待审阅，路径是插件相对路径', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')], [review('r-1')]);
+  const routes = h.requests.map(r => r.method + ' ' + r.route.split('?')[0]).sort();
+  assert.equal(routes.join('|'), 'GET growth|GET growth/progress');
+  for (const request of h.requests) {
+    assert.ok(!request.route.startsWith('/' + HOST + '/'),
+      '桥只接受裸路由名，带上插件目录名会整族 404：' + request.route);
+  }
+  assert.equal(h.page.state.data.ready, true);
+  assert.equal(h.page.state.data.items.length, 1);
+  assert.equal(h.page.state.data.reviews.length, 1);
+});
+
+test('没有角色路由时不发请求，并说明原因', async () => {
+  const h = harness();
+  h.window.CompanionProduct.role = () => null;
+  await h.page.mount(h.element);
+  await h.settle();
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.page.state.data.ready, false);
+  assert.ok(h.element.innerHTML.includes('按「角色 + 对象」保存'), '要说清是缺对象');
+});
+
+test('权限随列表一起回来，不用另发一次请求', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')]);
+  const gets = h.requests.filter(r => r.method === 'GET');
+  assert.equal(gets.length, 2, '读取只有列表与审阅两次：' + gets.map(r => r.route).join(','));
+  click(h, {view: 'gate'});
+  assert.ok(h.element.innerHTML.includes('读取成长记录'), '权限开关要用列表里带回来的那一份');
+});
+
+/* ---- 动作门：这一页最重要的一条 ---------------------------------------
+   后端按状态算出 actions。页面自己按状态推断，就会给出一个后端一定拒绝的按钮，
+   而用户点了才知道不行——那是最差的一种失败。 */
+
+test('卡片上只出现后端给的动作，页面不自己推断', async () => {
+  const h = harness();
+  /* proposed 的记录后端给 confirm/revise/withdraw/retire。
+     卡片上只显示前两个（详情里给全部），但**绝不能**出现 pause——那不是这个状态的动作。 */
+  await boot(h, [record('g-1', 'proposed')]);
+  const html = h.element.innerHTML;
+  const shown = [...html.matchAll(/data-act="([a-z]+)"/g)].map(m => m[1]);
+  assert.ok(shown.length >= 2, '要有动作按钮');
+  assert.ok(!shown.includes('pause'), 'proposed 状态不该出现「暂停」');
+  assert.ok(!shown.includes('resume'), 'proposed 状态不该出现「继续」');
+  for (const action of shown) {
+    assert.ok(ACTIONS_FOR.proposed.includes(action),
+      '出现了后端没给的动作：' + action);
+  }
+});
+
+test('后端收回动作后，点旧按钮不发请求而是刷新', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'proposed')]);
+  /* 模拟"后端不再给 confirm"：直接把记录的动作改掉，再点。 */
+  h.page.state.data.items[0].actions = ['retire'];
+  const before = h.requests.length;
+  click(h, {act: 'confirm', id: 'g-1'});
+  await h.settle();
+  const posted = h.requests.slice(before).filter(r => r.method === 'POST');
+  assert.equal(posted.length, 0, '后端没给的动作绝不能发出去');
+  assert.equal(h.page.state.data.error, true);
+  assert.ok(h.page.state.data.notice.includes('不接受'), '要说明为什么');
+});
+
+test('状态动作的载荷是后端要的那五个字段', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')]);
+  click(h, {act: 'pause', id: 'g-1'});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  assert.ok(post, '要有一次 POST');
+  assert.equal(post.route, 'growth/command');
+  /* 跨 realm 陷阱：vm 里创建的对象原型与本 realm 不同，
+     deepEqual 会把内容相同的两个对象判成不等。转成字符串比。 */
+  assert.equal(Object.keys(post.values).sort().join(","),
+    'action,expected_revision,growth_id,operation_key,view_token');
+  assert.equal(post.values.action, 'pause');
+  assert.equal(post.values.expected_revision, 2, '必须带上读到的版本');
+  assert.equal(post.values.view_token, 'v'.repeat(64));
+});
+
+test('修订额外带标题与正文，且空标题不发', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')]);
+  click(h, {act: 'revise', id: 'g-1'});
+  assert.equal(h.page.state.data.detailId, 'g-1', '修订要先打开详情');
+  const before = h.requests.length;
+  /* 空标题应当被挡下。 */
+  h.element.dispatch('submit', {target: {closest: sel => sel === '[data-form="revise"]' ? {} : null},
+    preventDefault() {}});
+  await h.settle();
+  assert.equal(h.requests.slice(before).filter(r => r.method === 'POST').length, 0);
+  assert.ok(h.page.state.data.notice.includes('标题不能为空'));
+});
+
+/* ---- 找不到来源：后端把内容抹掉，页面要说出来 -------------------------- */
+
+test('来源不可读取时说明读不到，而不是显示空卡', async () => {
+  const h = harness();
+  const blind = record('g-9', 'active', 'goal', {
+    title: null, description: null, progress_note: null,
+    unavailable_reason: 'growth_source_expired', source_count: 3,
+    actions: ['retire'],
+  });
+  await boot(h, [blind]);
+  const html = h.element.innerHTML;
+  assert.ok(html.includes('来源已不可读取'), '卡片要说清读不到');
+  assert.ok(!html.includes('未命名记录'), '不能把 null 标题显示成「未命名」——那听起来像还没起名');
+  assert.ok(html.includes('原来源已过期'), '要翻译 unavailable_reason');
+  assert.ok(html.includes('is-blind'), '要有专门的视觉标记');
+  /* 详情里也要说清楚，并且要说明为什么只能归档。 */
+  click(h, {id: 'g-9'});
+  assert.ok(h.element.innerHTML.includes('读不到来源就不该把内容摊出来'));
+});
+
+/* ---- 审阅队列 --------------------------------------------------------- */
+
+test('依据读不出来时只剩不采纳，并解释为什么', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')],
+    [review('r-1', {progress_note: null, unavailable_reason: 'source_expired', actions: ['reject']})]);
+  click(h, {view: 'reviews'});
+  const html = h.element.innerHTML;
+  assert.ok(html.includes('不采纳'), '要给出可用的那个动作');
+  assert.ok(!/data-review="accept"/.test(html), '依据不可读时后端不给采纳，页面也不能给');
+  assert.ok(html.includes('无法核对'), '要解释为什么没有采纳');
+});
+
+test('审阅裁决的载荷只有那五个字段', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')], [review('r-1')]);
+  click(h, {view: 'reviews'});
+  click(h, {review: 'accept', id: 'r-1'});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  assert.equal(post.route, 'growth/progress/command');
+  /* growth_api 对 progress_command 做的是 set(data) != fields 的严格相等校验，
+     多一个字段就整条拒绝。 */
+  assert.equal(Object.keys(post.values).sort().join(","),
+    'action,expected_revision,operation_key,review_id,view_token');
+  assert.equal(post.values.review_id, 'r-1');
+  assert.equal(post.values.action, 'accept');
+});
+
+/* ---- 权限：一个开关加一个从属项 --------------------------------------- */
+
+test('读取关闭时，提案那一项跟随而不是独立', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')], [], {
+    access: access({settings: {read_enabled: false, proposals_enabled: false}}),
+  });
+  click(h, {view: 'gate'});
+  const html = h.element.innerHTML;
+  assert.ok(html.includes('跟随读取的判定'), '要画出从属关系');
+  assert.ok(html.includes('is-following'), '要有专门的视觉标记');
+});
+
+test('开关保存只提交这一个布尔，并带上 edit_token', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')]);
+  click(h, {view: 'gate'});
+  change(h, {access: 'proposals_enabled', checked: false});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  assert.equal(post.values.action, 'configure');
+  assert.equal(Object.keys(post.values.changes).join(","), 'proposals_enabled', '一次只动一项');
+  assert.equal(post.values.changes.proposals_enabled, false);
+  assert.equal(post.values.edit_token, 'a'.repeat(64));
+});
+
+/* ---- 状态与轨道 ------------------------------------------------------- */
+
+test('五段都在轨道上，空段也留着', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active'), record('g-2', 'achieved', 'goal')]);
+  const html = h.element.innerHTML;
+  for (const key of ['proposed', 'active', 'paused', 'achieved']) {
+    assert.ok(html.includes('data-lane="' + key + '"'), '主线缺了这一段：' + key);
+  }
+  /* 归档段在没有任何归档记录时不渲染——它是旁支，不是主线的一段。 */
+  assert.ok(!html.includes('data-lane="retired"'), '没有归档记录时不该画归档段');
+  const retired = record('g-3', 'retired');
+  await boot(h, [record('g-1', 'active'), retired]);
+  assert.ok(h.element.innerHTML.includes('data-lane="retired"'), '有归档记录时要画出来');
+});
+
+test('不认识的状态单独列出，不混进已知段', async () => {
+  const h = harness();
+  /* 把一条记录的状态改成这一版页面不认识的取值。 */
+  await boot(h, [record('g-1', 'active', 'skill', {state: 'archived_by_newer_version'})]);
+  const html = h.element.innerHTML;
+  assert.ok(html.includes('状态未识别'), '新状态要单独列出来');
+  assert.ok(html.includes('archived_by_newer_version'), '要显示原始取值');
+  /* 关键：不能把它塞进任何已知状态段——塞进 achieved 会误报「已结束」，
+     塞进 active 会误报「还在推进」。
+     逐段切开比，而且只看**卡片**部分：未知段自己的提示文案里就写着这个状态名，
+     用整段文本判会把那条解释误认成"塞进去了"。 */
+  const lanes = html.split('data-lane="').slice(1);
+  assert.equal(lanes.length, 4, '该只有四条主线');
+  for (const lane of lanes) {
+    const key = lane.slice(0, lane.indexOf('"'));
+    const cards = lane.split('data-id="').slice(1);
+    for (const card of cards) {
+      assert.ok(!card.includes('archived_by_newer_version'),
+        '未知状态的记录被塞进了 ' + key + ' 段的卡片里——那会误报进度');
+    }
+    assert.ok(!lane.includes('aria-label="归档"'), '未知状态不该被当成归档渲染');
+  }
+});
+
+test('筛选走服务端参数，不本地过滤', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')]);
+  const before = h.requests.length;
+  click(h, {filterState: 'proposed'});
+  await h.settle();
+  const request = h.requests.slice(before).find(r => r.method === 'GET');
+  assert.ok(request, '筛选要重新读一次');
+  assert.equal(request.route, 'growth');
+  assert.equal(request.params.state, 'proposed', '筛选条件应通过页面桥参数传递');
+});
+
+/* ---- 不可逆动作要确认 ------------------------------------------------- */
+
+test('归档与撤回要先确认，取消则什么都不发', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'proposed')]);
+  click(h, {act: 'retire', id: 'g-1'});
+  assert.ok(h.element.innerHTML.includes('lea-confirm'), '不可逆动作要出确认条');
+  const before = h.requests.length;
+  click(h, {confirm: 'no'});
+  await h.settle();
+  assert.equal(h.requests.slice(before).filter(r => r.method === 'POST').length, 0, '取消就什么都不发');
+  assert.ok(!h.element.innerHTML.includes('lea-confirm'), '取消后确认条要收起来');
+});
+
+test('确认条的两条路径都在同一个 click 处理器里判定', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'proposed')]);
+  click(h, {act: 'withdraw', id: 'g-1'});
+  click(h, {confirm: 'yes'});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  assert.equal(post.values.action, 'withdraw');
+});
+
+/* ---- 渲染完整性 ------------------------------------------------------- */
+
+test('四个视图都能渲染出内容', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active'), record('g-2', 'proposed')], [review('r-1')]);
+  const markers = {track: 'lea-lanes', reviews: 'lea-reviews', sources: 'lea-sources', gate: 'lea-gate'};
+  for (const [view, marker] of Object.entries(markers)) {
+    click(h, {view});
+    assert.ok(h.element.innerHTML.includes(marker), view + ' 视图渲染为空');
+  }
+});
+
+test('卸载后清干净，重复挂载不叠加', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')]);
+  h.page.unmount();
+  assert.equal(h.page.state.data, null);
+  await boot(h, [record('g-1', 'active')]);
+  assert.equal(h.page.state.data.ready, true);
+});

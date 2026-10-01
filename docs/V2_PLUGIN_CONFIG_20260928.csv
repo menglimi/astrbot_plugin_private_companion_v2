@@ -1,0 +1,81 @@
+path,kind,default,description
+legacy.allow_auto_apply,bool,False,允许在启动时自动执行一次迁移
+legacy.v1_root,text,,V1 数据目录（绝对路径）
+model.additional_providers,template_list,[],V2 备用模型 Provider
+model.cached_input_microusd_per_million,int,0,缓存输入费率（microUSD / 百万 Token）
+model.fallback_on_refusal,bool,False,明确拒答后尝试备用模型
+model.fallback_provider_id,string,,回复任务的回退 Provider
+model.input_microusd_per_million,int,0,输入费率（microUSD / 百万 Token）
+model.max_output_tokens,int,2048,最大输出 Token
+model.maximum_input_estimate,int,131072,最大输入估算 Token
+model.output_microusd_per_million,int,0,输出费率（microUSD / 百万 Token）
+model.output_parameter,string,max_tokens,输出限制参数
+model.provider_id,string,,模型 Provider
+model.replacement_rules,text,[],回复模型替换规则 JSON
+model.streaming,bool,False,对话模型使用流式请求
+model.task_prompt,text,保持当前 AstrBot 人格，只根据本轮输入和有依据的材料回复。,任务提示
+multi_host.capabilities,list,"['configuration.read', 'conversation.reply', 'memory.propose', 'memory.read', 'memory.reflect', 'memory.subscribe', 'text']",目标公共能力
+multi_host.enabled,bool,False,启用多目标运行实例
+multi_host.group_targets,template_list,[],群聊目标列表
+multi_host.installation_id,string,main,共享安装 ID
+multi_host.personas,template_list,[],原生人格映射列表
+multi_host.targets,template_list,[],私聊目标列表
+poke.back_probability,float,0.0,反戳概率
+poke.enabled,bool,False,启用戳一戳回应
+poke.replies,list,"['在呢，怎么啦？', '收到你的戳戳啦。', '我在这里。']",预设短句
+poke.trigger_probability,float,1.0,回应概率
+runtime.background_slots,int,1,后台任务槽
+runtime.budget_cost_microusd,int,100000000,各层费用预算（microUSD）
+runtime.budget_tokens,int,1000000,各层 Token 预算
+runtime.daily_token_soft_deferred_kinds,text,,软限额延后的任务类型
+runtime.daily_token_soft_limit,int,800000,每日 Token 软限额默认阈值
+runtime.enable_daily_token_soft_limit,bool,True,每日 Token 软限额默认开关
+runtime.foreground_slots,int,2,前台任务槽
+runtime.forward_max_depth,int,4,合并转发最大嵌套深度
+runtime.forward_max_forwards,int,4,单次输入最多合并转发条数
+runtime.forward_max_nodes,int,32,单次合并转发最多读取节点数
+runtime.maximum_wait_seconds,int,0,连续输入最长等待秒数
+runtime.part_gap_seconds,int,0,分段间隔秒数
+runtime.queued_per_lane,int,64,每通道排队上限
+runtime.quiet_seconds,int,0,连续输入静默秒数
+runtime.retained_tasks,int,2048,保留任务上限
+runtime.turn_timeout_seconds,int,180,单轮超时秒数
+segmentation.enabled,bool,False,开启分段发送
+segmentation.llm_controlled,bool,True,允许模型决定分段
+segmentation.match_width_variants,bool,True,分段词匹配全角/半角变体
+segmentation.max_segments,int,4,最多消息数
+segmentation.min_segment_chars,int,12,规则分段每段最少字符
+segmentation.prompt,text,,自定义模型分段提示
+segmentation.rule_mode,string,words,补充分段方式
+segmentation.rule_regex,text,.*?[。？！~…\n]+|.+$,正则分段表达式
+segmentation.rules_enabled,bool,False,启用规则补充分段
+segmentation.split_words,text,"[""。"", ""？"", ""！"", ""~"", ""…"", ""“"", ""\n""]",分段标记列表
+segmentation.threshold,int,120,规则分段最小正文长度
+staging.enabled,bool,False,允许 V2 运行实例启动（单目标）
+staging.profile_id,string,main,独立 Profile ID
+target.account_id,string,,Bot QQ 账号
+target.bot_id,string,staging-bot,V2 Bot ID
+target.participant_id,string,,测试参与者 QQ
+target.persona_id,string,,AstrBot 人格 ID
+target.platform_id,string,default,OneBot 平台实例 ID
+target.role_id,string,staging-role,V2 角色 ID
+voice_reply.cooldown_seconds,int,0,会话冷却秒数
+voice_reply.delivery_mode,string,voice_and_text,发送形态
+voice_reply.en_provider_id,string,,英语 TTS Provider ID
+voice_reply.enabled,bool,False,启用语音回复
+voice_reply.extra_prompt,text,,模型选句补充提示
+voice_reply.foreign_text_mode,string,original,外语可见文字
+voice_reply.generation_mode,string,plain,朗读文本来源
+voice_reply.group_probability,float,-1.0,群聊概率覆盖
+voice_reply.ja_provider_id,string,,日语 TTS Provider ID
+voice_reply.language,string,zh,朗读语种
+voice_reply.max_speech_chars,int,1800,单段最长朗读字符
+voice_reply.position,string,after_media,语音组件位置
+voice_reply.private_probability,float,-1.0,私聊概率覆盖
+voice_reply.probability,float,1.0,基础触发概率
+voice_reply.provider_id,string,,指定 TTS Provider ID
+voice_reply.segment_mode,string,each,语音分段范围
+voice_reply.timeout_seconds,int,30,合成超时秒数
+voice_reply.trigger_keywords,text,,请求触发词
+voice_reply.trigger_mode,string,always,语音触发
+voice_reply.zh_provider_id,string,,中文 TTS Provider ID

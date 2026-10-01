@@ -1,0 +1,216 @@
+"""Cooperative local async workers with bounded cancellation and tracked handles.
+
+Handlers must use cancellable async I/O and own/await their children. Blocking or
+untrusted plugin code needs process isolation and is not supported by this runner.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+import inspect
+from time import perf_counter
+from types import MappingProxyType
+from typing import Awaitable, Callable, Mapping
+
+from companion_v2.foundation.outcome import Outcome
+
+from .models import Lane, TaskClaim, TaskError, TaskRecord, TaskResult, require
+from .service import TaskSupervisor
+
+
+@dataclass(frozen=True)
+class RunResult:
+    task: TaskRecord | None
+
+
+@dataclass(frozen=True)
+class TaskRun:
+    supervisor: TaskSupervisor
+    claim: TaskClaim
+    task: TaskRecord
+
+    def validate(self) -> TaskRecord:
+        return require(self.supervisor.validate(self.claim))
+
+    def begin_effect(self) -> TaskRecord:
+        return require(self.supervisor.begin_effect(self.claim))
+
+    def record_operation(self, operation_id: str) -> TaskRecord:
+        return require(self.supervisor.record_operation(self.claim, operation_id))
+
+
+class _TaskRunner:
+    def __init__(self, supervisor: TaskSupervisor,
+                 handlers: Mapping[str, Callable[[TaskRun], Awaitable[TaskResult]]], *,
+                 check_interval: float = 0.05, stop_grace: float = 0.1):
+        if not 0.001 <= check_interval <= 1 or not 0 <= stop_grace <= 1:
+            raise ValueError("runner cancellation intervals must be bounded")
+        if (not handlers or not set(handlers).issubset(supervisor.registrations)
+                or not all(inspect.iscoroutinefunction(h) for h in handlers.values())):
+            raise ValueError("handlers must be registered trusted asynchronous functions")
+        self.supervisor = supervisor
+        self.handlers = MappingProxyType(dict(handlers))
+        self.check_interval = check_interval
+        self.stop_grace = stop_grace
+        self._handles: dict[str, tuple[TaskClaim, asyncio.Task]] = {}
+        self._abandoned: dict[str, str] = {}
+        self._closed = False
+
+    @property
+    def active_handles(self) -> tuple[str, ...]:
+        return tuple(self._handles)
+
+    def _stopped(self, claim: TaskClaim, reason: str):
+        stopped = self.supervisor.stop(claim, reason=reason)
+        if stopped.failure:
+            # A replaced controller may accept stop evidence, but never our result.
+            return self.supervisor.acknowledge_stopped(claim, proof_ref="supervised_coroutine_stopped")
+        return stopped
+
+    def _done(self, claim: TaskClaim, worker: asyncio.Task):
+        if not worker.cancelled():
+            worker.exception()
+        reason = self._abandoned.pop(claim.attempt_id, None)
+        if reason:
+            self._stopped(claim, reason)
+        self._handles.pop(claim.attempt_id, None)
+
+    async def _abort(self, claim, worker, reason):
+        self._abandoned[claim.attempt_id] = reason
+        abandon_reason = "runner_cancelled" if reason == "cancelled" else reason
+        abandoned = self.supervisor.abandon(claim, reason=abandon_reason)
+        worker.cancel()
+        await asyncio.wait((worker,), timeout=self.stop_grace)
+        if worker.done():
+            self._abandoned.pop(claim.attempt_id, None)
+            return self._stopped(claim, reason)
+        return abandoned
+
+    async def _run(self, select) -> Outcome[RunResult]:
+        if self._closed:
+            return Outcome.failed("task_runner_closed", "runner no longer accepts work")
+        claim = None
+        worker = None
+        try:
+            claim = require(select()).claim
+            if claim is None:
+                return Outcome.success(RunResult(None))
+            task = require(self.supervisor.begin(claim))
+            definition = self.supervisor.registrations[task.spec.kind].definition
+            budget = min(definition.timeout_seconds, (task.spec.deadline_at - self.supervisor.now()).total_seconds())
+            started = perf_counter()
+            worker = asyncio.create_task(self.handlers[task.spec.kind](TaskRun(self.supervisor, claim, task)),
+                                         name=f"companion:{task.spec.kind}:{task.task_id}:{task.attempt_no}")
+            self._handles[claim.attempt_id] = (claim, worker)
+            worker.add_done_callback(lambda done: self._done(claim, done))
+            while True:
+                remaining = budget - (perf_counter() - started)
+                if remaining <= 0:
+                    return Outcome.success(RunResult(require(await self._abort(claim, worker, "timeout"))))
+                done, _ = await asyncio.wait((worker,), timeout=min(self.check_interval, remaining))
+                if done:
+                    if worker.cancelled():
+                        return Outcome.success(RunResult(require(self._stopped(claim, "cancelled"))))
+                    try:
+                        result = worker.result()
+                    except (Exception, asyncio.CancelledError):
+                        return Outcome.success(RunResult(require(self._stopped(claim, "worker_error"))))
+                    if not isinstance(result, TaskResult):
+                        return Outcome.success(RunResult(require(self._stopped(claim, "worker_error"))))
+                    finished = self.supervisor.finish(claim, result, execution_ms=(perf_counter() - started) * 1000)
+                    if finished.failure:
+                        reason = "timeout" if finished.failure.code == "task_attempt_expired" else "permission_changed"
+                        return Outcome.success(RunResult(require(self._stopped(claim, reason))))
+                    return Outcome.success(RunResult(finished.unwrap()))
+                valid = self.supervisor.validate(claim)
+                if valid.failure:
+                    reason = ("cancelled" if valid.failure.code == "task_cancellation_requested" else
+                              "timeout" if valid.failure.code == "task_attempt_expired" else "permission_changed")
+                    return Outcome.success(RunResult(require(await self._abort(claim, worker, reason))))
+        except asyncio.CancelledError:
+            if claim is not None and worker is not None:
+                await self._abort(claim, worker, "runner_cancelled")
+            raise
+        except TaskError as error:
+            if claim is not None and worker is None:
+                self.supervisor.abandon(claim, reason="permission_changed")
+            return Outcome.failed(error.code, str(error))
+        except Exception:
+            if claim is not None:
+                if worker is None:
+                    self.supervisor.abandon(claim, reason="worker_error")
+                else:
+                    await self._abort(claim, worker, "worker_error")
+            return Outcome.failed("task_runner_error", "local execution failed; private error details omitted")
+
+    async def close(self) -> tuple[str, ...]:
+        """Return still-running handles after a bounded stop; retain their quota slots."""
+        self._closed = True
+        handles = tuple(self._handles.values())
+        for claim, worker in handles:
+            self._abandoned[claim.attempt_id] = "runner_cancelled"
+            self.supervisor.abandon(claim, reason="runner_cancelled")
+            worker.cancel()
+        if handles:
+            await asyncio.wait(tuple(worker for _, worker in handles), timeout=self.stop_grace)
+        return self.active_handles
+
+
+class LocalTaskRunner(_TaskRunner):
+    def __init__(self, supervisor, handlers, *, check_interval=0.05, stop_grace=0.1):
+        if set(handlers) != set(supervisor.registrations):
+            raise ValueError("every registered task requires a trusted asynchronous handler")
+        super().__init__(supervisor, handlers, check_interval=check_interval, stop_grace=stop_grace)
+
+    async def run_once(self, lane: Lane) -> Outcome[RunResult]:
+        return await self._run(lambda: self.supervisor.claim(lane))
+
+
+class ExactTaskRunner(_TaskRunner):
+    """Run one submitted child; share cancellation/fencing semantics with queue workers."""
+
+    def __init__(self, supervisor, kinds: frozenset[str], handler, *, check_interval=0.05, stop_grace=0.1, waiting=None):
+        super().__init__(supervisor, {kind: handler for kind in kinds},
+                         check_interval=check_interval, stop_grace=stop_grace)
+        if waiting is not None and waiting.supervisor is not supervisor:
+            raise ValueError("waiting must use the original task supervisor")
+        if waiting is not None:
+            waiting.register(kinds)
+        self.waiting, self._waiting = waiting, {}
+
+    @property
+    def active_handles(self):
+        return super().active_handles + tuple("waiting:" + task_id for task_id in self._waiting.values())
+
+    async def run(self, context, task_id: str) -> Outcome[RunResult]:
+        if self._closed:
+            return Outcome.failed("task_runner_closed", "runner no longer accepts work")
+        current = self.supervisor.read(context, task_id)
+        if current.failure:
+            return Outcome(failure=current.failure)
+        if current.unwrap().spec.kind not in self.handlers:
+            return Outcome.failed("task_kind_mismatch", "exact runner does not own this task kind")
+        if self.waiting is None:
+            result = await self._run(lambda: self.supervisor.claim_task(context, task_id))
+        else:
+            invocation = asyncio.current_task()
+            self._waiting[invocation] = task_id
+            try:
+                selected = await self.waiting.claim(context, task_id)
+            finally:
+                self._waiting.pop(invocation, None)
+            result = await self._run(lambda: selected)
+        if result.is_success and result.unwrap().task is None:
+            current = self.supervisor.read(context, task_id)
+            return Outcome(failure=current.failure) if current.failure else Outcome.success(RunResult(current.unwrap()))
+        return result
+
+    async def close(self):
+        self._closed = True
+        waiting = tuple(self._waiting)
+        for invocation in waiting:
+            invocation.cancel()
+        if waiting:
+            await asyncio.wait(waiting, timeout=self.stop_grace)
+        return await super().close()

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="courtyard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>记忆与经历 · 档案库（静态预览）</title>
+<style>
+/* tokens.css 的庭院与夜读两套，内联让预览自包含。
+   真页面读 tokens.css，六套主题都能切；预览带两套足够看明暗对比。
+   页面样式里没有一个写死的色值，所以明暗切换是整页跟着变。 */
+/*__THEMES__*/
+*{box-sizing:border-box}
+body{margin:0;background:var(--t-canvas);color:var(--t-text);
+  font:14px/1.7 MiSans,"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  padding:20px;transition:background .3s,color .3s}
+.wrap{max-width:1180px;margin:0 auto}
+.bar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.bar h1{font-size:14px;font-weight:600;margin:0 auto 0 0;color:var(--t-text-strong)}
+.bar button{font:inherit;font-size:12px;padding:6px 11px;border-radius:6px;cursor:pointer;
+  color:var(--t-text);background:var(--t-surface);border:1px solid var(--t-line-firm)}
+.bar button:hover{background:var(--t-surface-soft)}
+.bar .hint{font-size:11px;color:var(--t-text-faint);width:100%;margin:0}
+/* 预览划一条边界：框内是页面本体。 */
+#memoryWorkspace{border:1px dashed var(--t-line-firm);border-radius:9px;padding:16px;
+  background:var(--t-surface-soft)}
+.log{
+  margin-top:14px;padding:10px 12px;border-radius:6px;
+  background:var(--t-surface-sunken);color:var(--t-text-faint);
+  font:11px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;
+  max-height:120px;overflow:auto;white-space:pre-wrap;
+}
+/* ===== memory-page.css 原样内联 ===== */
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>记忆与经历 · 档案库（静态预览 · 数据是编的）</h1>
+    <button id="theme">明 / 暗</button>
+    <p class="hint">这一页跑的<b>就是</b> pages/陪伴小屋/memory-page.js 本体，只把页面桥换成返回假数据的桩。
+      改状态、点动作都会走一遍真实路径——下面那行会打印实际发出的请求。</p>
+  </div>
+  <section id="memoryWorkspace" aria-label="记忆与经历工作区"></section>
+  <div class="log" id="log">（还没有请求）</div>
+</div>
+
+<script>
+/* 假页面桥。形状照真实 SDK：apiGet / apiPost 返回 Promise，回执是 {status,data} 信封。
+   契约要点：路由必须是**插件相对路径**（不带插件目录名），真宿主会自己拼回去。 */
+const REPLY = __PAYLOAD__;
+const log = document.getElementById('log');
+/* 请求记录：供 tools/check_memory_preview.cjs 断言，也打印在页面上。 */
+window.__requests = [];
+let lines = [];
+function note(text) {
+  window.__requests.push(text);
+  lines.unshift(text);
+  log.textContent = lines.slice(0, 12).join('\n');
+}
+function envelope(value) {
+  return new Promise(resolve => setTimeout(() => resolve({status: 'ok', data: value}), 110));
+}
+window.AstrBotPluginPage = {
+  ready: () => Promise.resolve({pluginName: 'astrbot_plugin_private_companion_v2'}),
+  apiGet: (route, query) => {
+    note('GET  ' + route + (query && Object.keys(query).length ? '  ' + JSON.stringify(query) : ''));
+    if (route === 'page/targets') return envelope(JSON.parse(JSON.stringify(REPLY.catalog)));
+    if (/\/reflections$/.test(route)) {
+      if (query && query.batch_id) {
+        const batch = REPLY.batches.items.find(b => b.batch_id === query.batch_id);
+        return batch ? envelope(JSON.parse(JSON.stringify(batch))) : envelope({});
+      }
+      return envelope(JSON.parse(JSON.stringify(REPLY.batches)));
+    }
+    /* 版本历史是**按需**单独读的（点开详情里的历史才发），不随详情下发。 */
+    if (/\/revisions$/.test(route)) {
+      return envelope({items: JSON.parse(JSON.stringify(REPLY.revisions))});
+    }
+    /* 事实流：第一页给游标，第二页收尾——好让"预读多页"真的走两跳。 */
+    if (!query || !query.after_id) {
+      return envelope({items: JSON.parse(JSON.stringify(REPLY.facts.items)),
+                       next_cursor: 'cursor-2', context_mode: 'default'});
+    }
+    return envelope({items: [], next_cursor: null, context_mode: 'default'});
+  },
+  apiPost: (route, values) => {
+    note('POST ' + route + '  ' + JSON.stringify(values || {}));
+    /* 详情与来源都是 POST（要带 atom_id + revision 做版本校验），不是 GET。
+       详情**必须**带 sources 数组（页面拿它做响应校验），并回显 revision——
+       两者缺一，selectFact 会判定 invalid_response 而整个详情作废。 */
+    if (/\/detail$/.test(route)) {
+      const item = REPLY.facts.items.find(f => f.atom_id === values.atom_id)
+        || REPLY.facts.items[0];
+      const detail = JSON.parse(JSON.stringify(item));
+      detail.revision = values.revision;
+      return envelope({item: detail,
+                       sources: JSON.parse(JSON.stringify(REPLY.sources))});
+    }
+    if (/\/source$/.test(route)) return envelope(JSON.parse(JSON.stringify(REPLY.source)));
+    return envelope({revision: 4, result: {}, changed: 1});
+  },
+};
+window.CompanionProduct = {
+  hosted: () => true,
+  selection: () => null,
+  choose: () => {},
+  role: () => ({role_id: 'role-1',
+    memory_api: '/astrbot_plugin_private_companion_v2/memory'}),
+  bridgeNow: () => window.AstrBotPluginPage,
+  bridgeFor: () => Promise.resolve(window.AstrBotPluginPage),
+};
+</script>
+<script>
+/* ===== memory-page.js 原样内联（预览与真页面同一个文件） ===== */
+/*__JS__*/
+</script>
+<script>
+window.CompanionMemoryPage.mount(document.getElementById('memoryWorkspace'));
+
+document.getElementById('theme').onclick = () => {
+  const root = document.documentElement;
+  root.dataset.theme = root.dataset.theme === 'courtyard' ? 'night' : 'courtyard';
+};
+</script>
+</body>
+</html>

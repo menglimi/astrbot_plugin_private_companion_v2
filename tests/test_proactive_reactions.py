@@ -1,0 +1,137 @@
+"""Proactive reactions share the owned catalog and confirmed delivery accounting."""
+
+from dataclasses import replace
+import json
+import unittest
+from unittest.mock import patch
+
+from companion_v2.delivery.media import ImageDeliveryEnvelope, image_manifest
+from companion_v2.delivery.service import DeliveryRequest
+from tests.proactive_support import ContactFixture
+from tests.test_role_tool_loop import answered
+from tests.test_semantic_integration import SemanticPort, animation, picture
+
+
+class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
+    async def enabled_reactions(self, *, proactive=True):
+        self.sender = replace(self.sender, supports_images=True)
+        host = self.host()
+        self.semantic = host.application.attach_semantics(SemanticPort())
+        await self.start(host)
+        app = host.application
+        self.settings(app, {"enabled": True}).unwrap()
+        self.semantic.store.configure({"reactions_proactive_enabled": proactive,
+                                       "reactions_trigger_probability": 1.0,
+                                       "reactions_cooldown_seconds": 0}, 0)
+        return app
+
+    def import_reaction(self, image=None, *, label="安慰"):
+        context = self.contact_context()
+        return self.semantic.reactions.import_image(self.semantic.owner(context), image or picture(),
+            {"name": label, "description": label, "intents": label})
+
+    def choose_reaction(self, intent="安慰"):
+        async def respond(_envelope):
+            return answered(json.dumps({"decision": "send", "text": "我在这里。",
+                                        "reaction_intent": intent}, ensure_ascii=False))
+        self.model_behavior = respond
+
+    def uses(self):
+        with self.semantic.store.db() as db:
+            return db.execute("SELECT COUNT(*) FROM uses").fetchone()[0]
+
+    async def test_default_off_preserves_text_only_contact(self):
+        app = await self.enabled_reactions(proactive=False)
+        self.import_reaction()
+        self.choose_reaction()
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, "delivered")
+        self.assertNotIn("reaction_intent", self.called[0].original.instruction)
+        self.assertNotIsInstance(self.sent[0], ImageDeliveryEnvelope)
+        self.assertEqual(self.uses(), 0)
+
+    async def test_original_image_and_history_are_bound_to_confirmed_contact(self):
+        app = await self.enabled_reactions()
+        original = picture()
+        item = self.import_reaction(original)
+        self.choose_reaction()
+        task = (await self.contact(app)).unwrap().task
+        row = await self.delivery_state(app, task.task_id, "delivered")
+        await self.until(lambda: self.uses() == 1)
+        envelope = self.sent[0]
+        self.assertIsInstance(envelope, ImageDeliveryEnvelope)
+        self.assertIn("reaction_intent", self.called[0].original.instruction)
+        self.assertEqual(envelope.images[0].descriptor.content_hash, item["id"])
+        self.assertEqual(envelope.images[0].data_base64, __import__("base64").b64encode(original.content).decode("ascii"))
+        contact = self.runtime.read_one("SELECT * FROM proactive_contacts WHERE task_id=?", (task.task_id,))
+        record = json.loads(contact["record_json"])
+        self.assertEqual(record["reaction"]["manifest"], image_manifest(envelope.images[0]))
+        self.assertEqual(contact["payload_hash"], row["payload_hash"])
+        self.assertEqual(app.background_history.recent(self.contact_context()).unwrap()[0]["text"], "我在这里。")
+        self.assertEqual(app.record_receipt(self.receipt(envelope)).unwrap(), "delivered")
+        self.assertEqual(self.uses(), 1)
+
+    async def test_animated_original_is_sent_as_gif(self):
+        app = await self.enabled_reactions()
+        original = animation()
+        self.import_reaction(original, label="回应问候")
+        self.choose_reaction("回应问候")
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, "delivered")
+        envelope = self.sent[0]
+        self.assertIsInstance(envelope, ImageDeliveryEnvelope)
+        self.assertEqual(envelope.images[0].descriptor.mime_type, "image/gif")
+        self.assertEqual(envelope.images[0].data_base64,
+                         __import__("base64").b64encode(original.content).decode("ascii"))
+
+    async def test_catalog_change_blocks_queued_image_and_text_as_one_payload(self):
+        app = await self.enabled_reactions()
+        item = self.import_reaction()
+        self.choose_reaction()
+        with patch.object(app.background, "advance", return_value=False):
+            task = (await self.contact(app)).unwrap().task
+            row = app.proactive._delivery_row(task.task_id)
+            request = DeliveryRequest.restore(row["request_json"])
+            self.semantic.store.put(item["owner"], "reaction", item["id"], item["payload"],
+                                    expected=item["revision"], enabled=False)
+            self.assertFalse(app.proactive.delivery_text(request, self.clock.now()).is_success)
+        app.notify()
+        await self.delivery_state(app, task.task_id, "cancelled")
+        self.assertEqual((self.sent, self.uses()), ([], 0))
+
+    async def test_unknown_then_late_receipt_after_restart_accounts_once(self):
+        app = await self.enabled_reactions()
+        self.import_reaction()
+        self.choose_reaction()
+        async def unknown(envelope):
+            return self.receipt(envelope, "unknown")
+        self.send_behavior = unknown
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, "unknown")
+        envelope = self.sent[0]
+        self.assertEqual(self.uses(), 0)
+        await app.close()
+        host = self.host(runtime=self.open_runtime())
+        self.semantic = host.application.attach_semantics(SemanticPort())
+        restarted = (await self.start(host, task_generation=1, model_generation=1)).application
+        self.assertEqual(restarted.record_receipt(self.receipt(envelope)).unwrap(), "delivered")
+        self.assertEqual(restarted.record_receipt(self.receipt(envelope)).unwrap(), "delivered")
+        self.assertEqual((len(self.sent), self.uses()), (1, 1))
+
+    async def test_restart_repairs_accounting_after_confirmed_receipt(self):
+        app = await self.enabled_reactions()
+        self.import_reaction()
+        self.choose_reaction()
+        app.outbound.on_delivered = None
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, "delivered")
+        self.assertEqual(self.uses(), 0)
+        await app.close()
+        host = self.host(runtime=self.open_runtime())
+        self.semantic = host.application.attach_semantics(SemanticPort())
+        await self.start(host, task_generation=1, model_generation=1)
+        self.assertEqual(self.uses(), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

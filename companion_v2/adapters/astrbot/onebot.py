@@ -1,0 +1,248 @@
+"""Pinned OneBot reverse-WebSocket delivery with actual API message references."""
+
+import asyncio
+from datetime import datetime, timezone
+import logging
+from uuid import uuid4
+
+from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
+from companion_v2.delivery.components import build_component_plan
+from companion_v2.delivery.models import DeliveryEnvelope
+from companion_v2.delivery.media import ImageDeliveryEnvelope, payload_hash
+from companion_v2.execution.models import digest, require
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import ScopeKind
+
+from .native import account_number, check_version, native_id
+
+
+logger = logging.getLogger(__name__)
+
+
+class OneBotTextSender:
+    """Shared reverse-WS transport; subclasses fix the audience and API action."""
+
+    supports_images = False
+
+    def __init__(self, bridge, *, binding, version, reverse_api_type, authorize, now=None, voice=None,
+                 voice_delivery=None, reaction_image_format=None):
+        check_version(version)
+        if not callable(authorize):
+            raise ValueError("OneBot delivery requires a current authorization callback")
+        self.bridge, self.binding, self.reverse_api_type = bridge, binding, reverse_api_type
+        self.authorize = authorize
+        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.voice = voice
+        self.voice_delivery = voice_delivery
+        self.reaction_image_format = reaction_image_format or (lambda: "image")
+
+    def local_sender(self):
+        return LocalSender(self.binding, self.send, supports_images=self.supports_images)
+
+    async def _final_dispatch_check(self, envelope, scope, context):
+        """Re-read every live boundary immediately before a native API call.
+
+        The earlier preflight protects model and voice work, but those steps can
+        await while the host account, persona, conversation, permissions, or
+        group admission changes.  Keep this check adjacent to ``call_action``;
+        a returned API handle is used without another await before dispatch.
+        """
+        authorization = self.authorize()
+        if isinstance(authorization, Outcome):
+            require(authorization)
+        await self.bridge.verify_role(scope, context.role_binding)
+        client = self.bridge.client(scope)
+        api = client._api._wsr_api
+        if (type(api) is not self.reverse_api_type or api._api_clients is not client._wsr_api_clients
+                or not client._wsr_api_clients.get(scope.account_id)):
+            raise ValueError("original account connection is unavailable")
+        if envelope.before_dispatch is None:
+            raise ValueError("delivery envelope has no dispatch fence")
+        # Recheck withdrawal, task ownership, sender binding and group admission
+        # after all host awaits and immediately before the native side effect.
+        envelope.before_dispatch()
+        return api
+
+    async def send(self, envelope):
+        def receipt(status, platform_ref=None):
+            return DeliveryReceipt(envelope.part_id, envelope.operation_id, envelope.context.key,
+                envelope.payload_hash, self.binding, status, "onebot-ack-" + uuid4().hex,
+                platform_ref, self.now() if status == "delivered" else None)
+
+        voice_plan = None
+        voice_segment = None
+        voice_included = False
+        render_state = "unavailable" if self.voice is None else "not_applicable"
+        try:
+            context, scope = envelope.context, envelope.context.scope
+            principal = context.actor.principal
+            if type(envelope) not in (DeliveryEnvelope, ImageDeliveryEnvelope):
+                return receipt("not_sent")
+            images = envelope.images if isinstance(envelope, ImageDeliveryEnvelope) else ()
+            image_position = envelope.image_position if isinstance(envelope, ImageDeliveryEnvelope) else "after_text"
+            plan = envelope.plan
+            if images:
+                if not self.supports_images:
+                    return receipt("not_sent")
+                envelope.__post_init__()
+            if (envelope.sender != self.binding or payload_hash(envelope.text, images, image_position=image_position) != envelope.payload_hash
+                    or (not envelope.text.strip() and (envelope.text != "" or not images))
+                    or len(envelope.text) > 65536
+                    or principal.host_id != self.bridge.host_id
+                    or principal.installation_id != scope.installation_id or principal.platform != scope.platform
+                    or principal.bot_id != scope.bot_id or principal.account_id != scope.account_id):
+                return receipt("not_sent")
+            action, target = self.route(context)
+            authorization = self.authorize()
+            if isinstance(authorization, Outcome):
+                require(authorization)
+            await self.bridge.verify_role(scope, context.role_binding)
+            client = self.bridge.client(scope)
+            api = client._api._wsr_api
+            if (type(api) is not self.reverse_api_type or api._api_clients is not client._wsr_api_clients
+                    or not client._wsr_api_clients.get(scope.account_id)):
+                return receipt("not_sent")
+            if envelope.before_dispatch is None:
+                return receipt("not_sent")
+            if self.voice is not None and envelope.text:
+                try:
+                    if envelope.voice is not None:
+                        # A sealed proactive presentation: the owner re-read this
+                        # plan from its own record, so no per-part claim is needed.
+                        voice_plan = {"speech": envelope.voice.speech, "provider_id": envelope.voice.provider_id,
+                                      "timeout_seconds": envelope.voice.timeout_seconds,
+                                      "position": envelope.voice.position,
+                                      "delivery_mode": envelope.voice.delivery_mode}
+                        render_state = "empty"
+                        voice_segment = await self.voice(context, voice_plan["speech"],
+                            provider_id=voice_plan["provider_id"], timeout_seconds=voice_plan["timeout_seconds"])
+                    elif self.voice_delivery is None:
+                        voice_segment = await self.voice(context, envelope.text)
+                    else:
+                        voice_plan = self.voice_delivery.claim(envelope)
+                        if voice_plan is not None:
+                            render_state = "empty"
+                            voice_segment = await self.voice(context, voice_plan["speech"],
+                                provider_id=voice_plan["provider_id"], timeout_seconds=voice_plan["timeout_seconds"])
+                        else:
+                            render_state = "cooldown"
+                except Exception as error:
+                    render_state = "failed"
+                    logger.warning("V2 voice rendering unavailable: %s", type(error).__name__)
+            authorization = self.authorize()
+            if isinstance(authorization, Outcome):
+                require(authorization)
+            if self.voice is not None:
+                await self.bridge.verify_role(scope, context.role_binding)
+                client = self.bridge.client(scope)
+                api = client._api._wsr_api
+                if (type(api) is not self.reverse_api_type or api._api_clients is not client._wsr_api_clients
+                        or not client._wsr_api_clients.get(scope.account_id)):
+                    raise ValueError("original account disconnected during voice synthesis")
+            envelope.before_dispatch()
+            component_plan = build_component_plan(
+                envelope.text,
+                images,
+                voice_segment,
+                position=voice_plan["position"] if voice_plan is not None else "after_media",
+                image_position=image_position,
+                voice_only=(voice_plan is not None and voice_plan["delivery_mode"] == "voice_only"),
+                speech=voice_plan["speech"] if voice_plan is not None else None,
+                order=plan.order if plan is not None else (),
+                mentions=plan.mentions if plan is not None else (),
+                faces=plan.faces if plan is not None else (),
+            )
+            voice_included = component_plan.voice_included
+            if voice_plan is not None and voice_segment is not None:
+                render_state = "ready" if voice_included else "invalid"
+            message = []
+            if plan is not None and plan.quote:
+                message.append({"type": "reply", "data": {"id": plan.quote}})
+            for component in component_plan.components:
+                if component.kind == "text":
+                    message.append({"type": "text", "data": {"text": component.value}})
+                elif component.kind == "image":
+                    data = {"file": "base64://" + component.value.data_base64}
+                    if (component.value.parent.owner == "expression.reactions"
+                            and self.reaction_image_format() == "qq_emoji"):
+                        data["sub_type"] = 1
+                    message.append({"type": "image", "data": data})
+                elif component.kind == "at":
+                    message.append({"type": "at", "data": {"qq": component.value}})
+                elif component.kind == "face":
+                    message.append({"type": "face", "data": {"id": str(component.value)}})
+                else:
+                    # The component plan has already checked the native record shape.
+                    message.append(component.value)
+            if self.voice_delivery is not None and envelope.voice is None:
+                self.voice_delivery.record(envelope.part_id, render_state, component_plan.kinds,
+                                           component_plan.text_hidden)
+            if envelope.poke is not None:
+                api = await self._final_dispatch_check(envelope, scope, context)
+                await self._poke(api, context, envelope.poke)
+        except asyncio.CancelledError:
+            if voice_plan is not None and envelope.voice is None and self.voice_delivery is not None:
+                self.voice_delivery.release(voice_plan, envelope.part_id)
+            raise
+        except Exception:
+            if voice_plan is not None and envelope.voice is None and self.voice_delivery is not None:
+                self.voice_delivery.release(voice_plan, envelope.part_id)
+            return receipt("not_sent")
+        try:
+            api = await self._final_dispatch_check(envelope, scope, context)
+            # Direct reverse-WS call: never use the host boolean result or its HTTP/account fallback.
+            result = await api.call_action(action, self_id=scope.account_id,
+                **target, message=message)
+            message_id = native_id(result["message_id"])
+            # OneBot message IDs are positive integers. A negative or zero ID is
+            # not a delivery receipt we can safely persist as confirmed.
+            if str(int(message_id)) != message_id or int(message_id) <= 0:
+                return receipt("unknown")
+            return receipt("delivered", "onebot-message:" + digest([scope.platform, scope.account_id])[:24] + ":" + message_id)
+        except Exception:
+            # Once dispatch was attempted, a timeout/error cannot prove non-delivery.
+            return receipt("unknown")
+        finally:
+            if (not voice_included and voice_plan is not None and envelope.voice is None
+                    and self.voice_delivery is not None):
+                self.voice_delivery.release(voice_plan, envelope.part_id)
+
+    async def _poke(self, api, context, plan):
+        """Open one message with the sealed native poke, without blocking the text.
+
+        A poke is a separate OneBot action, so it cannot share the message ACK.
+        A failure or timeout is recorded and never retried: the recipient may or
+        may not have received it, and the sealed message still goes out.
+        """
+        scope = context.scope
+        try:
+            if scope.kind is ScopeKind.PRIVATE:
+                action, target = "friend_poke", {"user_id": int(scope.native_scope_id)}
+            elif scope.kind is ScopeKind.GROUP:
+                action, target = "group_poke", {"group_id": int(scope.native_scope_id),
+                                                "user_id": int(account_number(
+                                                    context.actor.principal.native_account_id))}
+            else:
+                return
+            for _ in range(plan.count):
+                try:
+                    await api.call_action(action, self_id=scope.account_id, **target)
+                except Exception as error:
+                    logger.warning("V2 proactive poke was not confirmed: %s", type(error).__name__)
+                    return
+        except Exception as error:
+            logger.warning("V2 proactive poke route was unavailable: %s", type(error).__name__)
+
+    def route(self, context):
+        raise NotImplementedError("a sender must bind one explicit audience and API action")
+
+
+class OneBotPrivateSender(OneBotTextSender):
+    supports_images = True
+
+    def route(self, context):
+        scope = context.scope
+        if (scope.kind is not ScopeKind.PRIVATE or context.audience.recipients != (context.actor.subject,)
+                or account_number(context.actor.principal.native_account_id) != scope.native_scope_id):
+            raise ValueError("private delivery requires the original single recipient")
+        return "send_private_msg", {"user_id": int(scope.native_scope_id)}

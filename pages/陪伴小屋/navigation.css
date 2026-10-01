@@ -1,0 +1,38 @@
+.rail{width:158px;padding:var(--sp-5) var(--sp-3) var(--sp-4);align-items:stretch}
+.brand{margin-bottom:var(--sp-3)}
+.rail-links{flex:1;min-height:0;overflow-y:auto;gap:1px;scrollbar-width:thin;scrollbar-color:#cbd2de transparent}
+.nav-group{display:grid;gap:2px;padding:var(--sp-1) 0 var(--sp-2);border-bottom:1px solid #e5e9f1}
+.nav-group:last-child{border-bottom:0}
+.nav-group-title{padding:var(--sp-1) var(--sp-3) 3px;color:#8a94a3;font-size:var(--fs-micro);line-height:1.3}
+.rail-link{min-height:37px;padding:var(--sp-1) var(--sp-2);justify-content:flex-start;flex-direction:row;gap:var(--sp-2);border-radius:var(--r-xs);font-size:var(--fs-body);text-align:left;white-space:nowrap}
+.rail-link:last-child{margin-top:0}
+.rail-link svg{width:17px;height:17px;flex:none}
+.rail-bottom{padding-top:var(--sp-2);gap:var(--sp-1)}
+.shell{margin-left:calc(var(--sp-6) + var(--sp-8) + var(--sp-8) + var(--sp-5))}
+.mobile-nav{display:none}
+.navigation-dialog{position:fixed;inset:auto 12px 84px;z-index:40;width:min(460px,calc(100% - 24px));max-height:min(74vh,690px);margin:0 auto;padding:0;border:1px solid #dce4ed;border-radius:var(--r-sm);background:#f8fafc;color:#354253;box-shadow:0 16px 48px #283b5360;overflow:auto}
+.navigation-dialog::backdrop{background:#1c2d4070}
+.navigation-dialog-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:var(--sp-3) var(--sp-4);background:#f8fafcf2;border-bottom:1px solid #e0e6ee}
+.navigation-dialog-head h1{font-size:var(--fs-head);line-height:1.4;font-weight:600}
+.navigation-list{padding:var(--sp-2) var(--sp-4) var(--sp-5)}
+.navigation-group{padding:var(--sp-2) 0 var(--sp-3);border-bottom:1px solid #e2e8ee}
+.navigation-group:last-child{border:0}
+.navigation-group h2{padding:0 3px var(--sp-1);color:#7c8997;font-size:var(--fs-tiny);font-weight:500}
+.navigation-group .navigation-link{display:inline-flex;align-items:center;gap:var(--sp-2);width:calc(50% - 4px);min-height:42px;padding:var(--sp-2) var(--sp-2);margin:2px;text-align:left;color:#45556a;border-radius:var(--r-xs);font-size:var(--fs-body)}
+.navigation-link svg{width:17px;height:17px;flex:none}
+.navigation-link.active{background:#e7ecf8;color:#526499;font-weight:600}
+.navigation-link:hover{background:#ecf1f5}
+.rail-link:focus-visible,.mobile-nav-link:focus-visible,.navigation-link:focus-visible{outline:2px solid #5c78a5;outline-offset:2px}
+/* 配置页外壳已迁到 console.css（.console / .console-section / .boundary）。
+   原有的 .config-page / .config-jump / .config-section* / .config-provider-* 已无引用，删除。 */
+@media(min-width:1740px){.shell{margin-left:auto}}
+@media(max-width:650px){
+  .rail{top:auto;bottom:0;left:0;right:0;width:100%;height:76px;padding:var(--sp-1) var(--sp-2) calc(var(--sp-1) + env(safe-area-inset-bottom));align-items:center}
+  #mainNav{display:none}
+  .mobile-nav{display:flex;width:100%;height:100%;gap:2px;justify-content:space-between}
+  .mobile-nav-link{display:flex;flex:1;min-width:0;min-height:52px;align-items:center;justify-content:center;flex-direction:column;gap:var(--sp-1);padding:var(--sp-1) 2px;border-radius:var(--r-xs);font-size:var(--fs-micro);line-height:1.2;color:#72788b;text-align:center}
+  .mobile-nav-link svg{width:18px;height:18px;flex:none}
+  .mobile-nav-link.active{background:#e8ebf9;color:#5864a7;font-weight:600}
+  .mobile-nav-link span{white-space:nowrap}
+  .shell{margin-left:0}
+}

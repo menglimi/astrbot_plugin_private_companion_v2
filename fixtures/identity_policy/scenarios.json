@@ -1,0 +1,25 @@
+{
+  "schema_version": "companion-v2.identity-policy-fixture.v1",
+  "installation_id": "installation-alpha",
+  "observed_at": "2026-09-21T00:00:00+00:00",
+  "principal": {
+    "host_id": "astrbot-fixture-host",
+    "platform": "onebot",
+    "native_account_id": "account-a"
+  },
+  "subject": {
+    "kind": "human",
+    "subject_id": "subject-a"
+  },
+  "private_scope": {
+    "platform": "onebot",
+    "kind": "private",
+    "native_scope_id": "private-a"
+  },
+  "group_scope": {
+    "platform": "onebot",
+    "kind": "group",
+    "native_scope_id": "group-a"
+  },
+  "capability": "conversation.read"
+}

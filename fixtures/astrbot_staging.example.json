@@ -1,0 +1,81 @@
+{
+  "schema_version": "companion-v2.astrbot-staging.v1",
+  "scope": {
+    "installation_id": "management-installation",
+    "platform": "qq-main",
+    "kind": "private",
+    "native_scope_id": "200",
+    "bot_id": "bot-a",
+    "account_id": "100",
+    "conversation_id": "astrbot-conversation:conversation-1",
+    "session_id": "200"
+  },
+  "host": {
+    "host_id": "host",
+    "ecosystem_id": "companion"
+  },
+  "subject_id": "test-participant",
+  "persona": {
+    "persona_id": "original",
+    "role_id": "persona-a",
+    "instruction_hash": "93f2e2bc596d248ad9977b579bcf458fdcebb20d9f63d9462e7090c48bafb950"
+  },
+  "access": {
+    "authority_ref": "synthetic-local-administrator",
+    "valid_from": "2026-09-21T00:00:00+00:00",
+    "expires_at": null,
+    "capabilities": [
+      "configuration.read",
+      "conversation.reply",
+      "text"
+    ]
+  },
+  "model": {
+    "provider_id": "native-model",
+    "provider_fingerprint": "838832f9dc0e89ef592772aca0e9ae56e014d9592ac4f344ff8e51eb639792d6",
+    "tariff": {
+      "input": 2000000,
+      "cached_input": 1000000,
+      "output": 4000000
+    },
+    "task_prompt": "保持原角色，只使用有依据的材料。",
+    "max_output_tokens": 100,
+    "maximum_input_estimate": 131072,
+    "output_parameter": "max_tokens"
+  },
+  "budget": {
+    "installation": {
+      "tokens": 100000000,
+      "cost_microusd": 1000000000
+    },
+    "bot": {
+      "tokens": 100000000,
+      "cost_microusd": 1000000000
+    },
+    "role": {
+      "tokens": 100000000,
+      "cost_microusd": 1000000000
+    },
+    "window": {
+      "tokens": 100000000,
+      "cost_microusd": 1000000000
+    },
+    "background": {
+      "tokens": 100000000,
+      "cost_microusd": 1000000000
+    }
+  },
+  "policy": {
+    "quiet_seconds": 0,
+    "maximum_wait_seconds": 0,
+    "turn_timeout_seconds": 180,
+    "part_gap_seconds": 0
+  },
+  "limits": {
+    "foreground_slots": 2,
+    "background_slots": 2,
+    "queued_per_lane": 64,
+    "retained_tasks": 2048
+  },
+  "delivery_mode": "preview"
+}

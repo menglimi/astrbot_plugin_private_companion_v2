@@ -1,0 +1,37 @@
+/* 主题的结构语言：页面基底、标题、导航、面板边界和常用控件共用一组皮肤令牌。 */
+:root[data-theme="night"],:root[data-theme="walnut"]{color-scheme:dark}
+:root[data-theme="courtyard"],:root[data-theme="dawn"],
+:root[data-theme="dusk"],:root[data-theme="contrast"]{color-scheme:light}
+
+body{background-color:var(--t-canvas)}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{
+  outline-color:var(--t-accent);outline-offset:3px}
+::selection{background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+
+.button{border-color:var(--t-line-firm);border-radius:var(--r-sm);background:var(--t-surface);
+  color:var(--t-text);box-shadow:none}
+.button:hover{border-color:var(--t-accent);background:var(--t-surface-raised);color:var(--t-accent-ink)}
+.button.primary{border-color:var(--t-accent-solid);background:var(--t-accent-solid);
+  color:var(--t-on-solid);box-shadow:var(--t-shadow)}
+.button.primary:hover{border-color:var(--t-accent-solid-hover);background:var(--t-accent-solid-hover);color:var(--t-on-solid)}
+.button.danger{border-color:var(--t-risk);background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),textarea,select{
+  border-color:var(--t-line-firm);border-radius:var(--r-sm);background-color:var(--t-surface);color:var(--t-text)}
+
+#homeShell{background-color:var(--t-canvas);background-image:var(--skin-canvas-pattern,none);
+  background-size:var(--skin-canvas-size,auto);background-attachment:fixed}
+#homeShell .rail{background-color:var(--t-surface);background-image:var(--skin-canvas-pattern,none);
+  background-size:var(--skin-canvas-size,auto);border-right-color:var(--t-line)}
+#homeShell .shell-nav-link{border-radius:var(--skin-r-xs,var(--r-sm))}
+#homeShell .shell-nav-link[aria-pressed="true"]{box-shadow:inset 3px 0 var(--t-accent)}
+#homeShell .shell-panel{border-radius:var(--r-lg);box-shadow:var(--t-shadow-lift)}
+#homeShell .shell-panel-head{background-color:var(--t-surface-soft);
+  background-image:var(--skin-canvas-pattern,none);background-size:var(--skin-canvas-size,auto)}
+#homeShell .page-heading h1,#homeShell .shell-panel-head h2,#homeShell .stage-bar h2,
+#homeShell .ap-block-head h2{font-family:var(--skin-heading-font,inherit)}
+#homeShell .stage-region .room-stage{background-color:var(--t-surface-soft);
+  background-image:var(--skin-canvas-pattern,none);background-size:var(--skin-canvas-size,auto)}
+
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{scroll-behavior:auto!important}
+}

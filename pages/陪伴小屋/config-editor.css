@@ -1,0 +1,25 @@
+/* Shared editor for configuration groups whose controls live outside their own page.
+   Field rows, toggles, notices and action buttons reuse reply-page.css. */
+/* 编辑器本体**不再画卡片**。
+ *
+ * 它总是挂在某个 console-section 里面，外层已经有分区标题与分隔线；
+ * 自己再画一张带边框的卡、配一个 h3 + 一段 p，就成了「卡片套卡片、
+ * 两层标题两层说明」——一屏里全是等宽的框和同灰度的字，控件反而找不到。
+ * 现在它只负责把字段排成两列。 */
+.config-editors{display:flex;flex-direction:column;gap:var(--sp-4)}
+.config-editor{padding:0}
+.config-editor>header h3{margin:0 0 var(--sp-1);font-size:var(--fs-body);font-weight:600;color:var(--t-text-strong)}
+/* 说明降到 faint，与分区说明同级——它是次要信息，不该和字段标签抢注意力。 */
+.config-editor>header p{margin:0;color:var(--t-text-faint);line-height:1.7;font-size:var(--fs-tiny);max-width:62ch}
+.config-editor-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-4);margin:var(--sp-3) 0 0}
+.config-editor-fields>label{display:flex;flex-direction:column;gap:var(--sp-2);min-width:0;font-size:var(--fs-body);color:var(--t-text)}
+.config-editor-fields>label>small{color:var(--t-text-faint);line-height:1.7;font-size:var(--fs-tiny);max-width:62ch}
+.config-editor-fields input,.config-editor-fields select,.config-editor-fields textarea{width:100%;min-width:0;border:1px solid #c8ccda;border-radius:var(--r-sm);background:#ffffffb3;color:var(--ink);padding:var(--sp-2) var(--sp-3)}
+.config-editor-fields textarea{resize:vertical;line-height:1.8}
+.config-editor-fields>.reply-toggle{grid-column:1/-1}
+.config-editor-scope{margin:var(--sp-1) 0 0;color:var(--secondary);font-size:var(--fs-body);line-height:1.8}
+@media (max-width:820px){.config-editor-fields{grid-template-columns:minmax(0,1fr)}}
+
+/* 挂载点本身不画东西，但要是一个干净的块级上下文：
+   它在分区正文里与其它小节依次排下来，靠间距分开，不需要自己的边框。 */
+.config-editor-host{display:block;min-width:0}

@@ -1,0 +1,9 @@
+# AstrBot provides its SDK, aiocqhttp, aiohttp and Pillow.
+# Windows does not ship an IANA timezone database for zoneinfo.
+tzdata>=2025.2; sys_platform == "win32"
+# QWeather official-alert JWT signing (AstrBot's bundled runtime already includes it).
+cryptography>=42
+# Explicit lunar anniversaries in proactive greetings.
+lunarcalendar>=0.0.9
+# Bounded execution for administrator-configured presentation cleanup patterns.
+regex>=2024.11.6

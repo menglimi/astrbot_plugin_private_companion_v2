@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.sqlite3-*
+.coverage
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+*.egg-info/
+coverage.xml
+
+# 本机运行与核对产物（AGENTS.md：不进源码根，也不进版本库）
+/data/
+/tools/data/
+/.p4-tmp/
+/.verify-shards/
+/.workbuddy/
+/%SystemDrive%/
+/=ro
+*.log

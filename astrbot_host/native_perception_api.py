@@ -1,0 +1,437 @@
+"""Target-scoped dashboard bridge for V2-owned perception settings."""
+
+import asyncio
+import json
+import math
+from types import SimpleNamespace
+
+from astrbot.api.web import request
+
+from companion_v2.agenda.planning_config import configured_annual_calendars, configured_weather_location
+from companion_v2.capabilities.reality_access import ACTION as REALITY_SNAPSHOT_ACTION, RealitySnapshotAccess
+from companion_v2.capabilities.reality_camera import ACTION as REALITY_CAMERA_ACTION, RealityCameraAccess
+from companion_v2.configuration.models import ConfigurationError
+from companion_v2.conversation.perception_management import PerceptionManagement
+from companion_v2.conversation.date_context import project_local_date
+from companion_v2.execution.models import TaskError, require
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import ScopeKind
+from companion_v2.proactive.management import ContactManagement
+from companion_v2.role_work.state.management import StateManagement
+
+from .management_identity import dashboard_operator
+
+
+PREFIX = "/astrbot_plugin_private_companion_v2/perception-native"
+STATE_FIELDS = frozenset(("planning_timezone", "planning_annual_calendars",
+                          "planning_weather_enabled", "planning_weather_location",
+                          "planning_weather_max_age_minutes"))
+CONTACT_FIELDS = frozenset(("news_share_enabled", "news_check_interval_minutes", "news.enabled",
+                            "news_source_kind", "news_source_uid", "news_source_url",
+                            "news_daily_hot_read_enabled", "news_hot_sources", "news_hot_result_count",
+                            "web_exploration_enabled", "web_exploration_interests",
+                            "web_exploration_min_interval_hours", "web_exploration_result_count",
+                            "external_event_self_link_enabled"))
+
+
+class NativePerceptionWebAPI:
+    def __init__(self, controller):
+        self.controller = controller
+
+    def routes(self):
+        return [(PREFIX, self.status, ["GET"], "Read native perception settings"),
+                (PREFIX + "/runtime", self.runtime_snapshot, ["GET"], "Read current perception data"),
+                (PREFIX + "/configure", self.configure, ["POST"], "Save native perception settings"),
+                (PREFIX + "/news-diagnostic", self.news_diagnostic, ["POST"],
+                 "Check the configured news source")]
+
+    def _status(self, app, context, operator):
+        model = require(PerceptionManagement(app, context).status(operator))
+        state = require(StateManagement(app, context).status(operator))
+        contact = require(ContactManagement(app, context).status(operator))
+        port = app.contact_schedule.news_events.port
+        # ContactManagement has already authorized and read the effective window values.
+        # Reuse them for diagnostics so a read does not require a proactive grant of its own.
+        preferences = SimpleNamespace(values=contact["settings"])
+        diagnostic = app.contact_schedule.news_events.diagnostic(context, preferences)
+        source = diagnostic.get("source", {})
+        weather = app.contact_schedule.weather_events
+        alerts = app.contact_schedule.official_alert_events
+        return {"model": model, "contact": contact,
+                "environment": {"settings": {name: state["settings"][name] for name in STATE_FIELDS},
+                                "edit_token": state["edit_token"],
+                                "sources": {"weather_ready": weather is not None and weather.port is not None,
+                                            "alerts_ready": alerts is not None and alerts.port is not None}},
+                "news": {"settings": {name: contact["settings"][name] for name in CONTACT_FIELDS},
+                         "edit_token": contact["edit_token"],
+                         "source": {"ready": bool(source.get("ready")),
+                                    "kind": source.get("kind", ""),
+                                    "label": source.get("label", "")},
+                         "diagnostic": diagnostic,
+                         "contact_enabled": contact["settings"]["enabled"],
+                         "automatic_enabled": contact["settings"]["automatic_enabled"]}}
+
+    @staticmethod
+    def _other_injections(app, context):
+        try:
+            rows = app.runtime.read_all("""SELECT contributions_json FROM conversation_batches
+                WHERE origin_key = ? AND state = 'ready' ORDER BY created_at DESC LIMIT 1""",
+                (context.key,))
+            if not rows:
+                return []
+            saved = json.loads(rows[0]["contributions_json"])
+            materials = saved.get("materials", []) if isinstance(saved, dict) else []
+        except (ValueError, TypeError, KeyError, OSError):
+            return []
+        labels = {"knowledge.v2": "知识库素材"}
+        counts = {}
+        for material in materials[:32] if isinstance(materials, list) else ():
+            if not isinstance(material, dict) or material.get("state") != "ready":
+                continue
+            if str(material.get("purpose") or "").startswith("merged_input:"):
+                continue
+            label = labels.get(material.get("owner"), "其他上下文素材")
+            counts[label] = counts.get(label, 0) + 1
+        return [{"label": label, "detail": f"最近完成的对话实际加入 {count} 项"}
+                for label, count in counts.items()]
+
+    async def _weather_snapshot(self, app, settings):
+        if not settings.get("planning_weather_enabled"):
+            return {"state": "disabled"}
+        try:
+            location = configured_weather_location(settings.get("planning_weather_location", ""))
+        except ConfigurationError:
+            return {"state": "unavailable"}
+        if location is None:
+            return {"state": "unconfigured"}
+        port = getattr(getattr(app, "calendar_planning", None), "weather_port", None)
+        if port is None:
+            return {"state": "unavailable"}
+        try:
+            snapshot = await asyncio.wait_for(port.fetch(location), timeout=7)
+        except Exception:
+            return {"state": "unavailable"}
+        alerts = []
+        for alert in snapshot.alerts[:4]:
+            alerts.append({"title": str(alert.title)[:160],
+                           "severity": str(alert.severity)[:32],
+                           "starts_at": alert.starts_at.isoformat(),
+                           "ends_at": alert.ends_at.isoformat(),
+                           "description": str(alert.description)[:240]})
+        return {"state": "available", "location": snapshot.location,
+                "provider": snapshot.provider, "observed_at": snapshot.observed_at.isoformat(),
+                "condition": snapshot.condition, "temperature_c": snapshot.temperature_c,
+                "humidity_pct": snapshot.humidity_pct, "wind_kph": snapshot.wind_kph,
+                "alert_count": len(snapshot.alerts), "alerts": alerts}
+
+    @staticmethod
+    def _public_mobile_snapshot(snapshot, read_at):
+        def number(value):
+            return value if type(value) in (int, float) and math.isfinite(value) else None
+
+        def text(value, limit=100):
+            return value.strip()[:limit] if type(value) is str else ""
+
+        location = snapshot.get("location") if type(snapshot.get("location")) is dict else {}
+        place = location.get("place") if type(location.get("place")) is dict else {}
+        device = snapshot.get("device") if type(snapshot.get("device")) is dict else {}
+        activity = snapshot.get("activity") if type(snapshot.get("activity")) is dict else {}
+        telemetry = snapshot.get("telemetry") if type(snapshot.get("telemetry")) is dict else {}
+        measurements = []
+        raw_measurements = telemetry.get("measurements")
+        for item in raw_measurements if type(raw_measurements) is list else ():
+            if type(item) is not dict or number(item.get("value")) is None:
+                continue
+            measurements.append({"label": text(item.get("label") or item.get("type"), 40),
+                                 "value": number(item.get("value")), "unit": text(item.get("unit"), 16),
+                                 "captured_at": number(item.get("captured_at"))})
+        telemetry_activity = telemetry.get("activity")
+        if type(telemetry_activity) is not dict:
+            telemetry_activity = {}
+        return {
+            "location": {"available": location.get("available") is True,
+                         "label": text(place.get("area_label"), 80),
+                         "captured_at": number(location.get("captured_at")),
+                         "age_seconds": number(location.get("age_seconds"))},
+            "device": {"available": device.get("available") is True,
+                       "app_state": text(device.get("app_state"), 24),
+                       "battery_percent": number(device.get("battery_percent")),
+                       "charging": device.get("charging") is True,
+                       "last_report_at": number(device.get("last_report_at")),
+                       "age_seconds": number(device.get("age_seconds"))},
+            "activity": {"available": activity.get("available") is True,
+                         "label": text(activity.get("display_title") or activity.get("app_label"), 100),
+                         "category": text(activity.get("category"), 24),
+                         "last_report_at": number(activity.get("last_report_at")),
+                         "age_seconds": number(activity.get("age_seconds")),
+                         "stale": activity.get("stale") is True},
+            "health": {"available": telemetry.get("available") is True,
+                       "measurements": measurements,
+                       "activity": text(telemetry_activity.get("label") or telemetry_activity.get("state"), 80),
+                       "captured_at": number(telemetry.get("captured_at")),
+                       "age_seconds": number(telemetry.get("age_seconds"))},
+            "read_at": read_at.isoformat(),
+        }
+
+    def _reality_snapshot(self, app, context, operator, observed_at):
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            return {"state": "unavailable", "reason": "reality_private_required"}
+        registry = getattr(self.controller, "native_extensions", None)
+        declarations = registry.declarations() if registry is not None else ()
+        entries = tuple(item for item in declarations
+                        if item.descriptor.tool.action == REALITY_SNAPSHOT_ACTION)
+        if (len(entries) != 1 or registry.current_declaration(entries[0].host_tool_id) != entries[0]):
+            return {"state": "unavailable", "reason": "reality_provider_unavailable"}
+        try:
+            access = RealitySnapshotAccess(app, context, entries[0].descriptor.package)
+            status = access.status(operator, observed_at)
+        except TaskError as error:
+            return {"state": "unavailable", "reason": error.code}
+        if not status["invokable"]:
+            return {"state": "blocked", "reason": status["reason"]}
+        external = getattr(app, "external", None)
+        if external is None:
+            return {"state": "ready", "reason": "no_recent_snapshot"}
+        rows = app.runtime.read_all("""SELECT i.* FROM extension_tool_invocations AS i
+            JOIN conversation_batches AS b ON b.batch_id = i.batch_id
+            WHERE i.action = ? AND i.state = 'succeeded' AND b.origin_key = ?
+            ORDER BY i.finished_at DESC, i.created_at DESC LIMIT 8""",
+            (REALITY_SNAPSHOT_ACTION, context.key))
+        for row in rows:
+            try:
+                result, material = external.snapshot(row, context, observed_at)
+                if result["state"] != "succeeded" or material is None:
+                    continue
+                document = json.loads(material.payload)
+                mobile = document.get("native", {}).get("result", {}).get("snapshot")
+                if type(mobile) is dict:
+                    return {"state": "available", "reason": "",
+                            "snapshot": self._public_mobile_snapshot(mobile, observed_at),
+                            "captured_at": row["finished_at"] or row["created_at"]}
+            except (TaskError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+        return {"state": "ready", "reason": "no_recent_snapshot"}
+
+    @staticmethod
+    def _public_camera_observation(value):
+        if type(value) is not dict:
+            return {}
+        limits = {"scene_description": 500, "purpose_answer": 240, "activity_detail": 160,
+                  "uncertainty": 180, "summary": 500, "presence": 32, "activity": 32,
+                  "interruptibility": 32, "brightness": 32, "answer_status": 32,
+                  "food_visibility": 32, "visible_food": 80}
+        result = {key: item.strip()[:limit] for key, limit in limits.items()
+                  if type((item := value.get(key))) is str and item.strip()}
+        evidence = value.get("visible_evidence")
+        if type(evidence) is list:
+            result["visible_evidence"] = [item.strip()[:100] for item in evidence[:6]
+                                           if type(item) is str and item.strip()]
+        confidence = value.get("confidence")
+        if type(confidence) in (int, float) and math.isfinite(confidence):
+            result["confidence"] = round(max(0.0, min(1.0, confidence)), 2)
+        return result
+
+    def _reality_camera_snapshot(self, app, context, operator, observed_at):
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            return {"state": "unavailable", "reason": "reality_private_required"}
+        registry = getattr(self.controller, "native_extensions", None)
+        declarations = registry.declarations() if registry is not None else ()
+        entries = tuple(item for item in declarations
+                        if item.descriptor.tool.action == REALITY_CAMERA_ACTION)
+        if (len(entries) != 1 or registry.current_declaration(entries[0].host_tool_id) != entries[0]):
+            return {"state": "unavailable", "reason": "reality_provider_unavailable"}
+        try:
+            access = RealityCameraAccess(app, context, entries[0].descriptor.package)
+            status = access.status(operator, observed_at)
+        except TaskError as error:
+            return {"state": "unavailable", "reason": error.code}
+        if not status["invokable"]:
+            return {"state": "blocked", "reason": status["reason"]}
+        external = getattr(app, "external", None)
+        if external is None:
+            return {"state": "ready", "reason": "no_recent_observation"}
+        rows = app.runtime.read_all("""SELECT i.* FROM extension_tool_invocations AS i
+            JOIN conversation_batches AS b ON b.batch_id = i.batch_id
+            WHERE i.action = ? AND i.state = 'succeeded' AND b.origin_key = ?
+            ORDER BY i.finished_at DESC, i.created_at DESC LIMIT 8""",
+            (REALITY_CAMERA_ACTION, context.key))
+        for row in rows:
+            try:
+                result, material = external.snapshot(row, context, observed_at)
+                if result["state"] != "succeeded" or material is None:
+                    continue
+                document = json.loads(material.payload)
+                native = document.get("native", {}).get("result", {})
+                observation = self._public_camera_observation(native.get("observation"))
+                if (native.get("captured") is True and native.get("status") in ("success", "observation_uncertain")
+                        and observation):
+                    return {"state": "available", "reason": "",
+                            "status": native["status"], "answer_available": native.get("answer_available") is True,
+                            "purpose": native.get("purpose", ""), "observation": observation,
+                            "message": native.get("message", ""),
+                            "captured_at": row["finished_at"] or row["created_at"]}
+            except (TaskError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+        return {"state": "ready", "reason": "no_recent_observation"}
+
+    @staticmethod
+    def _screen_snapshot(app, context, observed_at):
+        repository = getattr(app, "screen_repository", None)
+        if repository is None:
+            return {"state": "unavailable", "reason": "screen_repository_unavailable"}
+        result = repository.latest_analysis(scope=context.scope, resolved=context.actor,
+                                            observed_at=observed_at)
+        if not result.is_success:
+            return {"state": "blocked", "reason": result.failure.code}
+        rows = result.unwrap()
+        if not rows:
+            return {"state": "empty"}
+        material = rows[0]
+        capture = material.material.capture
+        analysis = material.analysis
+        return {"state": "available", "interpretation": analysis.interpretation,
+                "purpose": analysis.purpose, "created_at": analysis.created_at.isoformat(),
+                "captured_at": capture.captured_at.isoformat(),
+                "surface": capture.coverage.surface, "units": list(analysis.input_units)}
+
+    async def runtime_snapshot(self):
+        from .web_api import outcome_response
+        try:
+            if request.query:
+                raise TaskError("perception_request_invalid", "target overrides are not accepted")
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load a V2 profile first")
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                app, context = session.application, session.profile.target
+                status = self._status(app, context, operator)
+                observed_at = controller.now()
+                model_settings = status["model"]["settings"]
+                calendar = {"status": "disabled"}
+                if model_settings["calendar_enabled"]:
+                    environment_settings = status["environment"]["settings"]
+                    calendar = {"status": "available", **project_local_date(
+                        observed_at, model_settings["calendar_timezone"],
+                        configured_annual_calendars(environment_settings["planning_annual_calendars"]),
+                        holiday_enabled=model_settings["holiday_enabled"],
+                        holiday_country=model_settings["holiday_country"],
+                        lunar_enabled=model_settings["lunar_enabled"],
+                        automatic_solar_terms_enabled=model_settings["automatic_solar_terms_enabled"],
+                        almanac_enabled=model_settings["almanac_enabled"],
+                        solar_term_port=getattr(getattr(app, "messages", None), "solar_term_port", None))}
+                result = {"observed_at": observed_at.isoformat(),
+                          "calendar": calendar,
+                          "weather": await self._weather_snapshot(
+                              app, status["environment"]["settings"]),
+                          "screen": self._screen_snapshot(app, context, observed_at),
+                          "reality": self._reality_snapshot(app, context, operator, observed_at),
+                          "camera": self._reality_camera_snapshot(app, context, operator, observed_at),
+                          "other_injections": self._other_injections(app, context)}
+                return outcome_response(Outcome.success(result))
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+            return outcome_response(Outcome.failed("perception_request_invalid", "invalid perception request"))
+
+    async def news_diagnostic(self):
+        from .web_api import outcome_response
+        try:
+            if request.query:
+                raise TaskError("perception_request_invalid", "target overrides are not accepted")
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load a V2 profile first")
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                app, context = session.application, session.profile.target
+                # _status performs the same target and dashboard authorization checks used by GET.
+                self._status(app, context, operator)
+                contact = require(ContactManagement(app, context).status(operator))
+                preferences = SimpleNamespace(values=contact["settings"])
+                diagnostic = await app.contact_schedule.news_events.probe(context, preferences)
+                return outcome_response(Outcome.success({"diagnostic": diagnostic,
+                                                          "status": self._status(app, context, operator)}))
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+            return outcome_response(Outcome.failed("perception_request_invalid", "invalid perception request"))
+
+    async def _run(self, data=None):
+        from .web_api import outcome_response
+        try:
+            if request.query:
+                raise TaskError("perception_request_invalid", "target overrides are not accepted")
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load a V2 profile first")
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                app, context = session.application, session.profile.target
+                if data is None:
+                    value = self._status(app, context, operator)
+                else:
+                    section = data["section"]
+                    if section == "model":
+                        result = require(PerceptionManagement(app, context).configure(operator, data["command"]))
+                    elif section == "environment":
+                        command = {"action": "configure", **data["command"]}
+                        if set(command["changes"]) - STATE_FIELDS:
+                            raise TaskError("perception_request_invalid", "unknown environment field")
+                        result = require(StateManagement(app, context).command(operator, command))
+                    else:
+                        if set(data["command"]["changes"]) - CONTACT_FIELDS:
+                            raise TaskError("perception_request_invalid", "unknown news field")
+                        result = require(ContactManagement(app, context).configure(operator, data["command"]))
+                    value = {"result": result, "status": self._status(app, context, operator)}
+                return outcome_response(Outcome.success(value))
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+            return outcome_response(Outcome.failed("perception_request_invalid", "invalid perception request"))
+
+    async def status(self):
+        return await self._run()
+
+    async def configure(self):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 32 * 1024:
+                raise ValueError("request is too large")
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate field")
+                    result[key] = value
+                return result
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
+                              parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite value")))
+            if (type(data) is not dict or set(data) != {"section", "command"}
+                    or data["section"] not in ("model", "environment", "news")
+                    or type(data["command"]) is not dict
+                    or set(data["command"]) != {"operation_key", "edit_token", "changes"}
+                    or type(data["command"]["changes"]) is not dict or not data["command"]["changes"]):
+                raise ValueError("invalid perception command")
+            return await self._run(data)
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("perception_request_invalid", "invalid UTF-8 perception command"))

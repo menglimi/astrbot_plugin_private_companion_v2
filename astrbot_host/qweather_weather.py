@@ -1,0 +1,158 @@
+"""QWeather current-weather adapter, the default source for the role's own location.
+
+QWeather and Open-Meteo disagree on how they name a sky, so the mapping below is the
+only place that difference is allowed to exist: it lands on the Open-Meteo/WMO code
+scale that ``WeatherSnapshot.weather_code`` already uses, and every consumer keeps
+working without knowing which provider answered.
+
+The fetch is bounded the same way the alert adapter is -- fixed destination, short
+timeout, no redirects, capped body -- because a provider misbehaving must not become a
+runtime problem for the role.
+"""
+
+import json
+from datetime import datetime, timezone
+
+import aiohttp
+
+from companion_v2.agenda.planning_config import WeatherLocation
+from companion_v2.proactive.external_materials import parse_weather_response
+
+from .qweather_credentials import MAX_RESPONSE_BYTES, credentials_from_environment
+from .qweather_location import resolve_qweather_location
+
+
+ENDPOINT = "/v7/weather/now"
+
+# QWeather "now" icon codes -> WMO codes. Grouped by the icon's hundreds digit, which
+# is what QWeather's own icon set is organised by (1xx clear, 3xx rain, 4xx snow...),
+# so a code this table has not seen still lands in the right family instead of failing
+# the whole observation.
+_WMO_BY_QWEATHER_ICON = {
+    100: 0, 150: 0, 101: 2, 102: 2, 103: 1, 104: 3, 151: 2, 152: 2, 153: 1, 154: 3,
+    300: 80, 301: 82, 302: 95, 303: 95, 304: 96, 305: 61, 306: 63, 307: 65,
+    308: 65, 309: 51, 310: 65, 311: 65, 312: 65, 313: 66, 314: 61, 315: 63,
+    316: 65, 317: 65, 318: 65, 350: 80, 351: 82, 399: 61,
+    400: 71, 401: 73, 402: 75, 403: 75, 404: 66, 405: 66, 406: 66, 407: 71,
+    408: 73, 409: 75, 410: 75, 456: 85, 457: 86, 499: 73,
+    500: 45, 501: 48, 502: 45, 503: 45, 504: 45, 507: 45, 508: 45, 509: 45,
+    510: 45, 511: 45, 512: 45, 513: 45, 514: 45, 515: 45,
+    900: 95, 901: 95, 999: 0,
+}
+_FAMILY_FALLBACK = {1: 2, 2: 2, 3: 80, 4: 73, 5: 45, 9: 95}
+
+# Only reached when QWeather sends an observation with no text label, which would
+# otherwise fail the shared parser and discard a reading the icon already describes.
+_LABEL_BY_WMO = {
+    0: "晴", 1: "多云", 2: "多云", 3: "阴", 45: "雾", 48: "雾凇",
+    51: "毛毛雨", 61: "小雨", 63: "中雨", 65: "大雨", 66: "冻雨", 71: "小雪",
+    73: "中雪", 75: "大雪", 80: "阵雨", 82: "强阵雨", 85: "阵雪", 86: "强阵雪",
+    95: "雷暴", 96: "雷暴伴冰雹",
+}
+
+
+def weather_code_for(icon):
+    """Map a QWeather icon code onto the WMO scale, or ``None`` when unusable."""
+    if type(icon) is str and icon.isdigit():
+        icon = int(icon)
+    if type(icon) is not int or icon < 0:
+        return None
+    if icon in _WMO_BY_QWEATHER_ICON:
+        return _WMO_BY_QWEATHER_ICON[icon]
+    return _FAMILY_FALLBACK.get(icon // 100)
+
+
+def _number(value):
+    if type(value) in (int, float):
+        return value
+    if type(value) is str:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def normalize_qweather_now(payload, location):
+    """Map a QWeather ``/v7/weather/now`` body onto the provider-neutral envelope."""
+    if type(payload) is not dict or payload.get("code") != "200":
+        raise ValueError("QWeather current weather is unavailable")
+    now = payload.get("now")
+    if type(now) is not dict:
+        raise ValueError("QWeather current weather is unavailable")
+    temperature = _number(now.get("temp"))
+    if temperature is None:
+        raise ValueError("QWeather temperature is unavailable")
+    code = weather_code_for(now.get("icon"))
+    condition = now.get("text")
+    if type(condition) is not str:
+        condition = ""
+    condition = condition.strip()
+    if not condition:
+        # The icon already names the sky. Losing a whole observation over a missing
+        # label would be the tail wagging the dog.
+        condition = _LABEL_BY_WMO.get(code, "")
+    if not condition:
+        raise ValueError("QWeather condition is unavailable")
+    observed = now.get("obsTime")
+    if type(observed) is not str or not observed.strip():
+        raise ValueError("QWeather observation time is unavailable")
+    try:
+        timestamp = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("QWeather observation time is invalid") from error
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("QWeather observation time must be timezone aware")
+    envelope = {
+        "provider": "qweather",
+        "location": location.name,
+        "observed_at": timestamp.isoformat(),
+        "current": {
+            "temperature_c": temperature,
+            "condition": condition,
+            "humidity_pct": _number(now.get("humidity")),
+            "wind_kph": _number(now.get("windSpeed")),
+        },
+    }
+    if code is not None:
+        envelope["current"]["weather_code"] = code
+    return parse_weather_response(envelope)[0]
+
+
+class QWeatherWeatherPort:
+    def __init__(self, credentials, *, now=None):
+        self._credentials = credentials
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    async def fetch(self, location):
+        if type(location) is not WeatherLocation:
+            raise ValueError("QWeather weather query requires an explicit role location")
+        at = self._now()
+        timeout = aiohttp.ClientTimeout(total=6)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+            location = await resolve_qweather_location(session, location, self._credentials, at)
+            url = (f"https://{self._credentials.host}{ENDPOINT}"
+                   f"/{location.longitude:.2f},{location.latitude:.2f}")
+            async with session.get(url, headers=self._credentials.headers(at),
+                                  allow_redirects=False) as response:
+                if (response.status != 200 or response.content_length is not None
+                        and response.content_length > MAX_RESPONSE_BYTES):
+                    raise ValueError("QWeather weather response is unavailable")
+                raw = await response.content.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ValueError("QWeather weather response exceeds the limit")
+        return normalize_qweather_now(json.loads(raw), location)
+
+
+def configured_qweather_weather_port():
+    """Prefer QWeather when host credentials exist, else fall back to Open-Meteo.
+
+    QWeather is the default because it is the only source that can also serve official
+    alerts, so one credential covers both. Open-Meteo stays the zero-configuration
+    path for an installation that never set any credential.
+    """
+    credentials = credentials_from_environment(label="host")
+    if credentials is None:
+        from .weather import OpenMeteoWeatherPort
+        return OpenMeteoWeatherPort()
+    return QWeatherWeatherPort(credentials)

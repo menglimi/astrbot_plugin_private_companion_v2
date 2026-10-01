@@ -1,0 +1,7 @@
+.decision-page{min-width:0;display:grid;gap:var(--sp-4);color:var(--t-text)}
+.decision-workspace{min-width:0}
+.decision-page .config-editors{min-width:0}
+.decision-configs{min-width:0;display:grid;gap:var(--sp-4)}
+.decision-reply-workspace{min-width:0}
+
+@media(prefers-reduced-motion:reduce){.decision-page *{scroll-behavior:auto;animation:none;transition:none}}

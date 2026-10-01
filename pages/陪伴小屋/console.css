@@ -1,0 +1,163 @@
+/* 配置控制台组件层
+   十一个配置页共用的外壳与原子件。全部走 tokens.css 的语义令牌，
+   不写死颜色，切主题时整页跟着变。
+
+   页面外壳结构（只有这两层，刻意不再往下套框）：
+   .console
+     .console-section           分区：标题 + 副行说明 + 内容
+       .console-mount-head      分区内的次级标题
+       .console-row             跳转行：标签 + 说明 + 打开
+
+   曾经还有 .console-summary（页级「子类数 / 已接入 / 待接入」统计）与
+   .console-index（左侧 A1/B2/C3 编号导航）、.boundary（边界说明卡）——
+   都是脚手架，且从未被真渲染过，已连同样式一起删掉。 */
+
+/* 分区之间靠分隔线分区，所以间距比卡片时代收一档：
+   卡片需要大间距来分开两张卡，分隔线不需要。 */
+.console{display:flex;flex-direction:column;gap:var(--sp-5);min-width:0}
+
+/* 两个 .console 并列时（治理与维护页把「宿主」与「资料」两块拼在一起），
+   它们各是一个独立列，彼此之间没有任何间距可继承——gap 只作用于子项。
+   给第二个起补一条上留白，间距档与 .console 自己的 gap 一致，
+   这样"块与块"和"分区与分区"看起来是同一个节奏。 */
+.console+.console{margin-top:var(--sp-5)}
+
+/* === 卷首 ===
+ *
+ * 六个专题页（决策/行动/产出/表达/自我/关系）都有多个分区，
+ * 原先直接以第一个分区开头：用户看不到这一页有哪几块，也回不到上面那一块。
+ * 这里给一句主句与一条锚点索引。
+ *
+ * 主句用 15px——与分区标题同一档。不是标题，因为它下面紧跟着分区标题；
+ * 比分区标题大就会变成"页标题 + 小节标题"的二级结构，而这一页只有一个主题。
+ * 索引用胶囊而不是列表：它们是**跳转**，不是目录条目，
+ * 竖排会占掉一屏且让人以为要点进去看。 */
+/* 卷首与分区在同一列里：调用方把两者都放进 .console 内，
+   这样它们共用同一套 gap（一个间距档），不必在卷首上另写 margin-bottom。
+   卷首作为 .console 的第一个子项，会命中 .console-section:first-child 那条
+   去掉上分隔线的规则吗——不会，它不是 .console-section。 */
+.console-lead{min-width:0}
+.console-lead h1{
+  margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:600;letter-spacing:.01em;
+}
+.console-lead p{
+  max-width:62ch;margin:var(--sp-2) 0 0;
+  color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.8;
+}
+.console-toc{
+  display:flex;flex-wrap:wrap;gap:var(--sp-1);
+  margin:var(--sp-3) 0 0;padding:0;list-style:none;
+}
+.console-toc a{
+  display:inline-flex;align-items:center;gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-pill);
+  background:var(--t-surface);color:var(--t-text-soft);font-size:var(--fs-tiny);text-decoration:none;
+  transition:border-color var(--dur) ease,color var(--dur) ease,background var(--dur) ease;
+}
+.console-toc a:hover,.console-toc a:focus-visible{
+  border-color:var(--t-accent);background:var(--t-accent-quiet);color:var(--t-accent-ink);
+}
+.console-toc a:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
+.console-toc svg{width:12px;height:12px;flex:none}
+
+.console-main{display:flex;flex-direction:column;gap:var(--sp-5);min-width:0}
+
+/* === 分区 ===
+ *
+ * 刻意**不用卡片边框**。旧版每块功能都是一张圆角卡，卡里再套一张，
+ * 于是屏面上全是等宽的框，视觉重量一样、层级靠嵌套表示——用户扫视时
+ * 只能看到「一片框」，看不到可以动手的地方。
+ *
+ * 现在用一条细分隔线分开各分区，层级靠字号与留白表达：
+ *   分区标题 15px/600  ← 唯一的重字形
+ *   分区说明 11.5px    ← faint 灰，限宽 60ch，与标题同一行右侧
+ *   次级标题 13px/600
+ *   次级说明 11px      ← faint 灰，紧贴次级标题
+ * 分隔线是**结构信息**（这里换了一件事），不是装饰，所以保留。 */
+.console-section{
+  padding-top:var(--sp-5);
+  border-top:1px solid var(--t-line);
+  scroll-margin-top:var(--sp-3);
+}
+.console-section:first-child{padding-top:0;border-top:0}
+.console-section-head{
+  display:flex;align-items:baseline;justify-content:space-between;
+  gap:var(--sp-4);flex-wrap:wrap;margin:0 0 var(--sp-4);
+}
+.console-section-copy{min-width:0}
+.console-section-copy h2{color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:600;margin:0;letter-spacing:.01em}
+/* 说明是次要信息：不说就删掉，说了也不许超过一行半。
+   限宽是硬要求——不限宽时它会拉成一整行，又变回「一坨文字」。 */
+.console-section-note{
+  flex:1 1 260px;min-width:0;max-width:62ch;margin:0;
+  color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.7;
+}
+.console-section-head .pill{margin-top:2px}
+.console-section-body{min-width:0}
+.console-section-body:empty{display:none}
+
+/* === 分区内的次级标题 === */
+.console-block-head{display:flex;align-items:baseline;gap:var(--sp-2);margin:0 0 var(--sp-3)}
+.console-block-head h3{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:600;margin:0}
+.console-block-head small{color:var(--t-text-faint);font-size:var(--fs-tiny)}
+
+/* === 提供方 / 能力行 === */
+.console-rows{display:flex;flex-direction:column}
+/* 跳转行：单行高度、无图标。说明在标签下面一行小字，
+   不是与标签并列的第二列——并列会让它读起来和标签同等重要。 */
+.console-row{
+  display:flex;align-items:center;gap:var(--sp-3);
+  padding:var(--sp-3) 0;border-bottom:1px solid var(--t-line);
+}
+.console-row:last-child{border-bottom:0}
+/* 带图标的跳转行。
+ *
+ * 图标只在**去向确实不同**时才有意义（记忆整理 / 日记 / 宿主是三处不同地方），
+ * 所以 settingsJump 那种「每行都是同一个箭头」的用法已经去掉了图标。
+ * 这里留着的三个图标各自指向不同去处，是对比，不是装饰。
+ * 尺寸收到与文字齐平——34px 的圆角色块在这一屏里视觉重量接近标题。 */
+.console-row-icon{
+  flex:none;display:grid;place-items:center;width:20px;height:20px;
+  color:var(--t-text-faint);
+}
+.console-row-icon svg{width:16px;height:16px}
+.console-row-main{flex:1;min-width:0}
+.console-row-main strong{display:block;color:var(--t-text);font-size:var(--fs-body);font-weight:500}
+.console-row-main small{display:block;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.6;margin-top:3px;max-width:62ch}
+
+/* === 工作区头（挂载子模块前的一行说明） ===
+ *
+ * 说明改到标题**下面**、更小更淡，并且不再居中平分：
+ * 原来它和标题并排两端，视觉重量与标题相当，等于给了次要信息主视线。 */
+.console-mount-head{display:block;margin:0 0 var(--sp-3)}
+.console-mount-head h3{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:600;margin:0}
+.console-mount-head .console-mount-note{
+  max-width:62ch;margin:var(--sp-1) 0 0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.7;
+}
+
+/* === 行内说明 === */
+.console-note-inline{
+  padding:var(--sp-3) var(--sp-4);border-radius:var(--r-sm);
+  background:var(--t-surface-soft);border:1px solid var(--t-line);
+  color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.85;
+}
+
+/* === 载入占位 === */
+.console-loading{
+  display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-4) var(--sp-4);
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface-soft);color:var(--t-text-soft);font-size:var(--fs-body);
+}
+.console-loading::before{
+  content:"";flex:none;width:12px;height:12px;border-radius:50%;
+  border:2px solid var(--t-line-firm);border-top-color:var(--t-accent);
+  animation:console-spin .8s linear infinite;
+}
+@keyframes console-spin{to{transform:rotate(360deg)}}
+:root[data-motion="off"] .console-loading::before{animation:none}
+
+@media(max-width:650px){
+  /* 窄屏上说明与标题并排会挤成两行半，改成换行独占一行。 */
+  .console-section-head{flex-direction:column;align-items:flex-start;gap:var(--sp-2)}
+  .console-section-note{max-width:none}
+}

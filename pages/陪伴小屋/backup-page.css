@@ -1,0 +1,256 @@
+/* 备份与还原工作区。
+ *
+ * 这一页此前没有独立样式表——模块写完却从未被加载，所以也就没人发现
+ * 它引用的类名一个都没有定义。下面这些类名是从 backup-page.js 里逐个
+ * 抄出来的实际渲染产物，不是照命名习惯猜的。
+ *
+ * 样式全部用 tokens.css 已有的变量，不新增色值：备份页在「资料与维护」
+ * 下，和相邻分区视觉上必须是同一层。
+ */
+
+.backup-workspace {
+  display: flex;
+  flex-direction: column;
+  gap:var(--sp-3);
+}
+
+.backup-notice {
+  margin:0;
+  padding:var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--t-line);
+  background: var(--t-surface-sunken);
+  color: var(--t-text-soft);
+  font-size:var(--fs-body);
+  line-height: 1.6;
+}
+
+/* 失败与成功共用一套壳，只换边框与文字色——备份页的操作不可逆，
+   大面积饱和色块会喧宾夺主。 */
+.backup-notice.is-error {
+  border-color: var(--t-risk);
+  color: var(--t-danger);
+  background: var(--t-risk-quiet);
+}
+
+.backup-loading {
+  margin:0;
+  padding:var(--sp-3);
+  color: var(--t-text-soft);
+  font-size:var(--fs-body);
+}
+
+/* ── 创建区 ───────────────────────────────────────────────────── */
+.backup-create {
+  display: flex;
+  flex-direction: column;
+  gap:var(--sp-2);
+}
+
+.backup-create-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap:var(--sp-2);
+  align-items: center;
+}
+
+.backup-create-row input[type="text"] {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+/* ── 快照列表 ─────────────────────────────────────────────────── */
+.backup-list-block {
+  display: flex;
+  flex-direction: column;
+  gap:var(--sp-2);
+}
+
+.backup-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap:var(--sp-3);
+  margin:0;
+  font-size:var(--fs-body);
+  color: var(--t-text-soft);
+}
+
+.backup-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.backup-snapshot-list {
+  list-style: none;
+  margin:0;
+  padding:0;
+  display: flex;
+  flex-direction: column;
+  gap:var(--sp-2);
+}
+
+.backup-snapshot-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap:var(--sp-2) var(--sp-3);
+  align-items: center;
+  padding:var(--sp-3);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-md);
+  background: var(--t-surface);
+}
+
+.backup-snapshot-main {
+  flex: 1 1 260px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap:2px;
+}
+
+.backup-snapshot-title {
+  font-size:var(--fs-lead);
+  font-weight: 600;
+  color: var(--t-text);
+}
+
+/* 时间、字节数与哈希都要竖排对齐才好比对——哈希是拿来逐字核对的，
+   比例字体下很难看出两串的差别。 */
+.backup-snapshot-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap:var(--sp-2) var(--sp-3);
+  font-size:var(--fs-body);
+  color: var(--t-text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.backup-snapshot-note {
+  font-size:var(--fs-body);
+  color: var(--t-text-soft);
+  overflow-wrap: anywhere;
+}
+
+.backup-snapshot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap:var(--sp-2);
+  align-items: center;
+}
+
+.backup-tag {
+  display: inline-flex;
+  align-items: center;
+  padding:1px var(--sp-1);
+  border-radius: 999px;
+  border: 1px solid var(--t-line);
+  font-size:var(--fs-tiny);
+  color: var(--t-text-soft);
+}
+
+.backup-empty {
+  padding:var(--sp-4);
+  border: 1px dashed var(--t-line);
+  border-radius: var(--r-md);
+  color: var(--t-text-soft);
+  font-size:var(--fs-body);
+  text-align: center;
+}
+
+/* ── 还原 ─────────────────────────────────────────────────────── */
+
+/* 有还原在等重启时提示条常驻：这条信息决定「现在重启会不会退回旧数据」，
+   不该藏在列表里。 */
+.backup-pending {
+  padding:var(--sp-3);
+  border: 1px solid var(--t-warn);
+  border-radius: var(--r-md);
+  background: var(--t-warn-quiet);
+  font-size:var(--fs-body);
+  line-height: 1.6;
+}
+
+.backup-preview {
+  display: flex;
+  flex-direction: column;
+  gap:var(--sp-2);
+  padding:var(--sp-3);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-md);
+  background: var(--t-surface-sunken);
+}
+
+.backup-preview-head {
+  font-size:var(--fs-lead);
+  font-weight: 600;
+  color: var(--t-text);
+}
+
+.backup-preview-lead {
+  margin:0;
+  font-size:var(--fs-body);
+  line-height: 1.7;
+  color: var(--t-text);
+}
+
+.backup-preview-hash {
+  font-family: var(--numeric-font);
+  font-size:var(--fs-body);
+  overflow-wrap: anywhere;
+}
+
+/* 影响范围：还原是整根替换，多目标下不止当前角色。
+   语气与 warn 同族但更轻——它是范围说明，不是风险警告。 */
+.backup-preview-scope {
+  margin:0;
+  padding:var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--m-line2);
+  font-size: var(--fs-tiny);
+  line-height: 1.7;
+  color: var(--m-ink2);
+}
+
+/* 会替换掉什么：这是整个页面唯一需要用户读全的一段。 */
+.backup-preview-warn {
+  margin:0;
+  padding:var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--t-risk);
+  font-size:var(--fs-body);
+  line-height: 1.7;
+  color: var(--t-danger);
+}
+
+.backup-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap:var(--sp-2);
+  align-items: center;
+}
+
+/* ── 窄屏 ─────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .backup-snapshot-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .backup-snapshot-actions .button,
+  .backup-preview-actions .button {
+    flex: 1 1 auto;
+  }
+}
+
+/* 读不到列表时的说明块。跟工作区容器同一套底色与边框，避免出现时跳版；
+   中间给一句原因加一个出口，而不是留一块空框。 */
+.backup-workspace .backup-unavailable {
+  display: flex;
+  flex-direction: column;
+  gap:var(--sp-3);
+  align-items: flex-start;
+  padding:var(--sp-5);
+  min-height: 96px;
+  border: 1px solid var(--t-line-firm);
+  border-radius: var(--r-md);
+  background: var(--t-surface-sunken);
+}
+.backup-workspace .backup-unavailable p { margin:0; line-height: 1.6; }
+.backup-workspace .backup-unavailable-actions { display: flex; gap:var(--sp-2); flex-wrap: wrap; }

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="courtyard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>学习与反思 · 培育轨道（静态预览）</title>
+<style>
+/* tokens.css 的庭院与夜读两套，内联让预览自包含。
+   真页面读 tokens.css，六套主题都能切；预览带两套足够看明暗对比。
+   页面样式里没有一个写死的色值，所以明暗切换是整页跟着变。 */
+/*__THEMES__*/
+*{box-sizing:border-box}
+body{margin:0;background:var(--t-canvas);color:var(--t-text);
+  font:14px/1.7 MiSans,"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  padding:20px;transition:background .3s,color .3s}
+.wrap{max-width:1180px;margin:0 auto}
+.bar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.bar h1{font-size:14px;font-weight:600;margin:0 auto 0 0;color:var(--t-text-strong)}
+.bar button{font:inherit;font-size:12px;padding:6px 11px;border-radius:6px;cursor:pointer;
+  color:var(--t-text);background:var(--t-surface);border:1px solid var(--t-line-firm)}
+.bar button:hover{background:var(--t-surface-soft)}
+.bar .hint{font-size:11px;color:var(--t-text-faint);width:100%;margin:0}
+/* 预览划一条边界：框内是页面本体。 */
+#learningWorkspace{border:1px dashed var(--t-line-firm);border-radius:9px;padding:16px;
+  background:var(--t-surface-soft)}
+.log{
+  margin-top:14px;padding:10px 12px;border-radius:6px;
+  background:var(--t-surface-sunken);color:var(--t-text-faint);
+  font:11px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;
+  max-height:120px;overflow:auto;white-space:pre-wrap;
+}
+/* ===== learning-page.css 原样内联 ===== */
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>学习与反思 · 培育轨道（静态预览 · 数据是编的）</h1>
+    <button id="theme">明 / 暗</button>
+    <button id="blind">切换来源失效</button>
+    <p class="hint">这一页跑的<b>就是</b> pages/陪伴小屋/learning-page.js 本体，只把页面桥换成返回假数据的桩。
+      改状态、点动作、裁决审阅都会走一遍真实路径——下面那行会打印实际发出的请求。</p>
+  </div>
+  <section id="learningWorkspace" aria-label="学习与反思工作区"></section>
+  <div class="log" id="log">（还没有请求）</div>
+</div>
+
+<script>
+/* 假页面桥。形状照真实 SDK：apiGet / apiPost 返回 Promise，回执是 {status,data} 信封。
+   契约要点：路由必须是**插件相对路径**（不带插件目录名），真宿主会自己拼回去。 */
+const REPLY = __PAYLOAD__;
+const log = document.getElementById('log');
+/* 请求记录：供 tools/check_learning_preview.cjs 断言，也打印在页面上。 */
+window.__requests = [];
+let lines = [];
+function note(text) {
+  window.__requests.push(text);
+  lines.unshift(text);
+  log.textContent = lines.slice(0, 12).join('\n');
+}
+function envelope(value) {
+  return new Promise(resolve => setTimeout(() => resolve({status: 'ok', data: value}), 110));
+}
+window.AstrBotPluginPage = {
+  ready: () => Promise.resolve({pluginName: 'astrbot_plugin_private_companion_v2'}),
+  apiGet: route => {
+    note('GET  ' + route);
+    if (route === 'growth') return envelope(JSON.parse(JSON.stringify(REPLY.list)));
+    if (route.indexOf('growth/progress') === 0) return envelope(JSON.parse(JSON.stringify(REPLY.progress)));
+    return envelope({});
+  },
+  apiPost: (route, values) => {
+    note('POST ' + route + '  ' + JSON.stringify(values));
+    /* 让写操作真的改到假数据上，这样"做完之后重新读一遍"看到的是自洽的结果。 */
+    if (values.action === 'pause' || values.action === 'complete' || values.action === 'retire'
+        || values.action === 'withdraw' || values.action === 'confirm' || values.action === 'resume') {
+      const row = REPLY.list.items.find(r => r.growth_id === values.growth_id);
+      if (row) {
+        const next = {confirm: 'active', resume: 'active', pause: 'paused',
+                      complete: 'achieved', retire: 'retired', withdraw: 'retired'}[values.action];
+        row.state = next;
+        row.actions = {proposed: ['confirm', 'revise', 'withdraw', 'retire'],
+                       active: ['revise', 'pause', 'complete', 'retire'],
+                       paused: ['resume', 'revise', 'complete', 'retire'],
+                       achieved: ['retire'], retired: ['retire']}[next] || [];
+        row.revision += 1;
+      }
+    }
+    if (values.action === 'configure') Object.assign(REPLY.list.access.settings, values.changes);
+    if (route.indexOf('growth/progress/command') === 0) {
+      REPLY.progress.items = REPLY.progress.items.filter(r => r.review_id !== values.review_id);
+    }
+    return envelope({revision: 4, result: {}});
+  },
+};
+window.CompanionProduct = {
+  hosted: () => true,
+  role: () => ({role_id: 'chengxi',
+    growth_api: '/astrbot_plugin_private_companion_v2/growth'}),
+  bridgeNow: () => window.AstrBotPluginPage,
+  bridgeFor: () => Promise.resolve(window.AstrBotPluginPage),
+};
+</script>
+<script>
+/* ===== learning-page.js 原样内联（预览与真页面同一个文件） ===== */
+/*__JS__*/
+</script>
+<script>
+window.CompanionLearningPage.mount(document.getElementById('learningWorkspace'));
+
+document.getElementById('theme').onclick = () => {
+  const root = document.documentElement;
+  root.dataset.theme = root.dataset.theme === 'courtyard' ? 'night' : 'courtyard';
+};
+/* 「切换来源失效」把那条正常记录的标题抹掉并挂上 unavailable_reason——
+   重演后端在来源读不出来时的真实行为：内容不返回。 */
+let blind = false;
+document.getElementById('blind').onclick = () => {
+  blind = !blind;
+  const row = REPLY.list.items.find(r => r.growth_id === 'g-skill-2');
+  if (blind) {
+    Object.assign(row, {title: null, description: null, progress_note: null,
+      unavailable_reason: 'growth_source_expired', actions: ['retire']});
+  } else {
+    Object.assign(row, {title: '按镜头语言描述画面',
+      description: '按镜头语言描述画面——由互动中提出的长期方向。',
+      progress_note: '本周试了三次，讲得比上月具体。',
+      unavailable_reason: null, actions: ['revise', 'pause', 'retire']});
+  }
+  window.CompanionLearningPage.unmount();
+  window.CompanionLearningPage.mount(document.getElementById('learningWorkspace'));
+};
+</script>
+</body>
+</html>

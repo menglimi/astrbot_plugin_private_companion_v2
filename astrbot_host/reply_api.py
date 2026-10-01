@@ -1,0 +1,139 @@
+"""Dashboard-only reply preferences, offline preview and sanitized diagnostics."""
+
+import json
+
+from astrbot.api.web import request
+from companion_v2.configuration.models import ConfigurationError
+from companion_v2.conversation.recall_management import RecallManagement
+from companion_v2.conversation.reply_management import ReplyManagement
+from companion_v2.execution.models import TaskError
+from companion_v2.foundation.outcome import Outcome
+from .management_identity import dashboard_operator
+
+
+PREFIX = "/astrbot_plugin_private_companion_v2/reply"
+
+
+class ReplyWebAPI:
+    def __init__(self, controller):
+        self.controller = controller
+
+    def routes(self):
+        return [(PREFIX, self.status, ["GET"], "Read reply settings and recent diagnostics"),
+                (PREFIX + "/preview", self.preview, ["POST"], "Preview reply segmentation without model access"),
+                (PREFIX + "/configure", self.configure, ["POST"], "Save reply settings for subsequent turns"),
+                (PREFIX + "/expression", self.expression, ["GET"], "Read the expression-learning bounds"),
+                (PREFIX + "/expression/configure", self.expression_configure, ["POST"],
+                 "Save the expression-learning bounds"),
+                (PREFIX + "/recalls", self.recalls, ["GET"],
+                 "Read this window's withdrawn messages within the configured bound")]
+
+    def _tts_catalog(self):
+        try:
+            providers = tuple(self.controller.context.get_all_tts_providers())
+        except Exception:
+            return {"state": "unavailable", "providers": []}
+        identifiers = set()
+        for provider in providers:
+            try:
+                identifier = provider.meta().id
+            except Exception:
+                continue
+            if type(identifier) is str and identifier.strip() and len(identifier) <= 128:
+                identifiers.add(identifier)
+        return {"state": "ready", "providers": [{"id": identifier} for identifier in sorted(identifiers)]}
+
+    async def _run(self, action):
+        from .web_api import outcome_response
+        try:
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            if request.query:
+                raise TaskError("reply_request_invalid", "reply routes do not accept target overrides")
+            data = None
+            if action not in ("status", "expression"):
+                raw = await request.body()
+                if len(raw) > 300000:
+                    raise ValueError("reply request is too large")
+                def unique(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("duplicate field")
+                        result[key] = value
+                    return result
+                def finite(value):
+                    raise ValueError("nonfinite value")
+                data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=finite)
+                expected = {"settings", "text"} if action == "preview" else {"operation_key", "edit_token", "changes"}
+                if (type(data) is not dict or not expected <= set(data)
+                        or set(data) - expected - ({"image_count"} if action == "preview" else set())):
+                    raise ValueError("unexpected or missing reply fields")
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load the V2 profile first")
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                manager = ReplyManagement(session.application, session.profile.target)
+                if action == "status":
+                    result = manager.status(operator)
+                elif action == "preview":
+                    result = manager.preview(operator, data["settings"], data["text"], data.get("image_count", 0))
+                elif action == "expression":
+                    result = manager.expression_status(operator)
+                elif action == "expression_configure":
+                    result = manager.expression_configure(operator, data)
+                else:
+                    result = manager.configure(operator, data)
+                if result.is_success and action in ("status", "configure"):
+                    status = result.value if action == "status" else result.value["status"]
+                    status["tts"] = self._tts_catalog()
+                return outcome_response(result)
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("reply_request_invalid", "invalid UTF-8 reply settings request"))
+
+    async def status(self):
+        return await self._run("status")
+
+    async def preview(self):
+        return await self._run("preview")
+
+    async def configure(self):
+        return await self._run("configure")
+
+    async def expression(self):
+        return await self._run("expression")
+
+    async def expression_configure(self):
+        return await self._run("expression_configure")
+
+    async def recalls(self):
+        from .web_api import outcome_response
+        try:
+            query = request.query
+            if set(query.keys()) - {"limit"} or any(len(query.getlist(key)) != 1 for key in query.keys()):
+                raise ValueError("unexpected recall query fields")
+            limit = int(query.get("limit", "5"))
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load the V2 profile first")
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                return outcome_response(RecallManagement(session.application, session.profile.target)
+                                        .transcribe(operator, limit=limit))
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError):
+            return outcome_response(Outcome.failed("recall_request_invalid", "invalid recall query"))

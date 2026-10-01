@@ -1,0 +1,221 @@
+"""Bounded planning material from the original calendar, goals and memory owners."""
+
+from datetime import date, datetime, time, timedelta
+import json
+from zoneinfo import ZoneInfo
+
+from companion_v2.conversation.messages import event_from_document
+from companion_v2.conversation.date_context import FIXED_HOLIDAYS, project_local_date
+from companion_v2.execution.models import TaskError, digest, require
+from companion_v2.identity_policy.private_domain import source_ref
+from companion_v2.memory.models import AtomRef
+from companion_v2.memory.pinned import visible_fact
+from companion_v2.role_work.growth.configuration import INFLUENCE_NOTES, skill_settings
+from .planning_config import configured_annual_calendars, configured_weather_location, configured_weather_max_age, planning_values
+from .weather_material import planning_weather_material
+
+
+MATERIAL_CHARS = 16384
+
+
+def planning_calendar_context(at, end, zone, annual_calendars=()):
+    local_start, local_end = at.astimezone(zone), end.astimezone(zone)
+    last_day = local_end.date() - timedelta(days=1) if local_end.time() == time.min else local_end.date()
+    holidays = []
+    for year in range(local_start.year, last_day.year + 1):
+        for (month, day), name in FIXED_HOLIDAYS.items():
+            candidate = date(year, month, day)
+            if local_start.date() <= candidate <= last_day:
+                holidays.append({"date": candidate.isoformat(), "name": name})
+    holidays.sort(key=lambda item: item["date"])
+    configured = {}
+    for calendar in annual_calendars:
+        for field, values in (("holiday", calendar.holiday_days),
+                              ("makeup_workday", calendar.makeup_workdays),
+                              ("solar_terms", calendar.solar_terms)):
+            for day, name in values:
+                if local_start.date() <= day <= last_day:
+                    row = configured.setdefault(day, {"date": day.isoformat(), "holiday": None,
+                                                        "makeup_workday": None, "solar_terms": []})
+                    if field == "solar_terms":
+                        row[field].append(name)
+                    else:
+                        row[field] = name
+    days, used_chars, partial = [], 0, False
+    for row in (configured[day] for day in sorted(configured)):
+        size = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+        if used_chars + size > 4096:
+            partial = True
+            break
+        days.append(row)
+        used_chars += size
+    return {"today": project_local_date(at, zone.key),
+            "fixed_gregorian_holidays_in_window": holidays,
+            "configured_annual_calendar": {"basis": "operator_configured_annual_calendar",
+                "years": sorted(item.year for item in annual_calendars), "days": days, "partial": partial}}
+
+
+def capture(planner, context, instruction, mode, slot, occurrence=None, *, weather=None, weather_location=None):
+    app, at = planner.app, planner.tasks.now()
+    app.calendar.access.check(context, "calendar.write", at=at)
+    settings = planning_values(app.role_state.settings(context)[0])
+    if not settings["planning_enabled"] or not settings["calendar_enabled"]:
+        raise TaskError("planning_disabled", "enable automatic planning and calendar access first")
+    zone = ZoneInfo(settings["planning_timezone"])
+    end = (datetime.combine(at.astimezone(zone).date() + timedelta(days=1), time(), zone)
+           if mode == "daily" else at + timedelta(days=settings["planning_horizon_days"]))
+    calendar_context = planning_calendar_context(at, end, zone,
+                                                 configured_annual_calendars(settings["planning_annual_calendars"]))
+    inventory = app.calendar.inventory(context, limit=100)
+    sources, calendar, goals, memories, inputs = [], [], [], [], []
+    goal_refs, calendar_refs, memory_refs, growth_refs, experience_refs = {}, {}, [], [], []
+    coverage = {"calendar_partial": bool(inventory["next_cursor"] or inventory["skipped"])}
+    used_chars = len(settings["planning_prompt"]) + 2048 + len(json.dumps(calendar_context, ensure_ascii=False))
+    current_weather = None
+    if settings["planning_weather_enabled"]:
+        location = configured_weather_location(settings["planning_weather_location"])
+        if location == weather_location and weather is not None:
+            current_weather = planning_weather_material(weather, location, at,
+                                                        max_age=configured_weather_max_age(settings))
+        if current_weather is None:
+            coverage["weather_unavailable"] = True
+        elif used_chars + len(json.dumps(current_weather, ensure_ascii=False)) <= MATERIAL_CHARS:
+            used_chars += len(json.dumps(current_weather, ensure_ascii=False))
+        else:
+            current_weather = None
+            coverage["material_limited"] = True
+
+    def include(references):
+        refs = tuple(source_ref(ref) if type(ref) is dict else ref for ref in references)
+        combined = tuple(dict.fromkeys((*sources, *refs)))
+        if len(combined) > 8 or any(ref.scope != context.scope for ref in refs):
+            coverage["evidence_limited"] = True
+            return False
+        app.calendar.access.evidence(context, combined, at=at)
+        sources[:] = combined
+        return True
+
+    def offer(bucket, value, references):
+        nonlocal used_chars
+        size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        if used_chars + size > MATERIAL_CHARS:
+            coverage["material_limited"] = True
+            return False
+        if not include(references):
+            return False
+        bucket.append(value)
+        used_chars += size
+        return True
+
+    if occurrence is not None:
+        original = app.calendar.read(context, occurrence["id"])
+        if original["revision"] != occurrence["revision"] or original["kind"] != "role_plan" or original["state"] != "accepted":
+            raise TaskError("planning_target_changed", "the selected role plan changed")
+        include(original["sources"])
+
+    # Current input is material, never an instruction to impersonate its author.
+    rows = app.runtime.read_all("""SELECT i.event_json FROM conversation_inputs i
+        JOIN conversation_batches b USING(batch_id) JOIN conversation_flows f USING(batch_id)
+        WHERE b.origin_key = ? AND i.withdrawn = 0 AND f.state = 'complete'
+        ORDER BY f.sequence DESC, i.position DESC LIMIT 2""", (context.key,))
+    for row in reversed(rows):
+        event = event_from_document(json.loads(row["event_json"]), context)
+        try:
+            record = app.messages._read_source(event.source, context, event.capability, at)
+            offer(inputs, record.payload[:2048], (event.source,))
+            if len(record.payload) > 2048:
+                coverage["inputs_partial"] = True
+        except TaskError:
+            coverage["inputs_unavailable"] = True
+
+    for item in inventory["items"]:
+        if item["state"] == "cancelled":
+            continue
+        projected = {name: item[name] for name in ("id", "revision", "kind", "state", "title", "schedule", "duration_minutes")}
+        projected["detail"] = item["detail"][:512]
+        projected["exceptions"] = item["exceptions"]
+        if len(item["detail"]) > 512 or item.get("details"):
+            coverage["calendar_details_partial"] = True
+        if offer(calendar, projected, item["sources"]):
+            calendar_refs[item["id"]] = {"id": item["id"], "revision": item["revision"]}
+    try:
+        reader = app.role_growth_context.reader
+        candidates = reader.candidates(context, at)
+        coverage["goals_partial"] = candidates.truncated or bool(candidates.skipped)
+        for candidate in candidates.items[:8]:
+            record = reader.ledger.record(candidate.reference["growth_id"], owner=reader.owner(context))
+            value = json.loads(candidate.payload)
+            for key in ("description", "progress_note"):
+                if len(value[key]) > 512:
+                    coverage["goals_partial"] = True
+                value[key] = value[key][:512]
+            if offer(goals, {**value, **candidate.reference}, record.sources):
+                growth_refs.append(candidate.reference)
+                if value["kind"] == "goal" and value["state"] == "active":
+                    goal_refs[record.growth_id] = candidate.reference
+        coverage["goals_partial"] |= len(candidates.items) > 8
+    except TaskError:
+        coverage["goals_unavailable"] = True
+    if growth_refs:
+        _, strength = skill_settings(app.runtime, context)
+        if strength:
+            instruction = instruction + "\n" + INFLUENCE_NOTES[strength]
+    snapshot = app.memory.context.capture(context, "planning-" + digest([context.key, slot]), tuple(sources),
+                                          at + timedelta(minutes=3))
+    coverage["memory_partial"] = snapshot.get("state") != "ready" or any(snapshot.get(k) for k in
+        ("recall_pending", "core_omitted", "recall_unavailable")) or len(snapshot["references"]) > 4
+    for reference in snapshot["references"][:4]:
+        try:
+            item = require(app.memory.writer.read(context, AtomRef(**reference)))
+            if offer(memories, visible_fact(item), (item["source"],)):
+                memory_refs.append(reference)
+        except TaskError:
+            coverage["memory_partial"] = True
+    for reference in snapshot.get("experience_references", ())[:1]:
+        try:
+            item = require(app.memory.experiences.read(context, reference["view_id"], expected_revision=reference["revision"]))
+            projected = {"basis": "recorded_experience", "view_id": reference["view_id"],
+                "statements": [{"text": s["text"], "kind": s.get("kind")} for s in item["statements"]]}
+            if offer(memories, projected, (item["source"],)):
+                experience_refs.append(reference)
+        except TaskError:
+            coverage["memory_partial"] = True
+    existing = [(item["title"], item["schedule"]["anchor"], item["duration_minutes"])
+                for item in inventory["items"] if item["state"] != "cancelled"]
+    material = {"mode": mode, "now": at.isoformat(), "end": end.isoformat(),
+        "timezone": settings["planning_timezone"], "max_items": settings["planning_max_items"],
+        "planning_preferences": settings["planning_prompt"], "calendar_context": calendar_context,
+        "current_reports": inputs,
+        "calendar": calendar, "confirmed_goals_and_skills": goals, "memories": memories,
+        "coverage": coverage, "occurrence_to_refine": ({key: occurrence[key] for key in
+            ("id", "revision", "sequence", "kind", "state", "title", "start", "end")} if occurrence else None)}
+    if current_weather is not None:
+        material["current_weather"] = current_weather
+    return {"context": context, "instruction": instruction, "mode": mode, "slot": slot, "at": at, "end": end,
+        "settings": settings, "sources": tuple(sources), "calendar_snapshot": digest(inventory),
+        "goal_refs": goal_refs, "calendar_refs": calendar_refs, "memory_refs": memory_refs, "growth_refs": growth_refs,
+        "experience_refs": experience_refs, "existing": existing,
+        "occurrence": occurrence, "material": material}
+
+
+def validate(planner, job, at, *, committed=False):
+    app, context = planner.app, job["context"]
+    app.calendar.access.check(context, "calendar.write", at=at)
+    if planning_values(app.role_state.settings(context)[0]) != job["settings"]:
+        raise TaskError("planning_settings_changed", "planning preferences changed")
+    binding = app.state_maintenance.bindings.get(context.key)
+    if binding is None or binding[:2] != (context, job["instruction"]):
+        raise TaskError("planning_role_changed", "the original role is no longer bound")
+    app.calendar.access.evidence(context, job["sources"], at=at)
+    if committed:
+        return
+    if digest(app.calendar.inventory(context, limit=100)) != job["calendar_snapshot"]:
+        raise TaskError("planning_calendar_changed", "calendar changed while planning")
+    if job["growth_refs"]:
+        app.role_growth_context.reader.read(tuple(job["growth_refs"]), context, at)
+    for reference in job["memory_refs"]:
+        require(app.memory.writer.read(context, AtomRef(**reference)))
+    for reference in job["experience_refs"]:
+        require(app.memory.experiences.read(context, reference["view_id"], expected_revision=reference["revision"]))
+    if at >= job["end"] or job["occurrence"] is not None and at >= datetime.fromisoformat(job["occurrence"]["end"]):
+        raise TaskError("planning_window_expired", "the original planning window ended")

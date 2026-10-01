@@ -1,0 +1,128 @@
+"""Native registration is read-only on load and refreshed on session restart."""
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+# The SDK fixture sets a temporary ASTRBOT_ROOT before importing the host.
+from tests import test_astrbot_staging_host as support
+from tests.multi_host_support import MultiFixture
+from tests.staging_bootstrap_support import database_contents
+from tests.test_management_access import NOW
+from tests.test_native_extensions_registry import Port, Star
+from companion_v2.capabilities.repositories import CapabilityRepository
+
+
+class NativeSingleSessionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory(prefix="native-single-session-")
+        self.addCleanup(temporary.cleanup)
+        self.native = support.WebContext()
+        self.star = Star(Port())
+        self.native.get_all_stars = lambda: (self.star,)
+        types = support.NativeAdapterTypes("4.27.2", support.FakeEvent, support.FakeProvider,
+                                           support.NS, support.NS, support.FakeReverseApi)
+        self.controller = support.AstrBotStagingController(self.native, support.host_config(),
+            Path(temporary.name), native_types=types, now=lambda: NOW)
+        self.addAsyncCleanup(self.controller.terminate)
+
+    async def test_single_load_is_read_only_start_registers_only_stop_rebuilds_registry(self):
+        c = self.controller
+        (await c.initialize_profile()).unwrap()
+        repository = CapabilityRepository(c.runtime)
+        self.assertEqual(repository.descriptors(extension_id="image"), ())
+        before = database_contents(c.runtime)
+        (await c.load_existing()).unwrap()
+        self.assertEqual(database_contents(c.runtime), before)
+        old = c.native_extensions
+        declaration = old.declarations()[0]
+        self.assertIsNotNone(old.role_guard)
+        (await c.start()).unwrap()
+        self.assertEqual(repository.descriptors(extension_id="image"), (declaration.descriptor.package,))
+        self.assertFalse(repository.installation(extension_id="image").is_success)
+        (await c.stop()).unwrap()
+        self.assertIsNone(old.current_declaration(declaration.host_tool_id))
+        self.star = Star(Port())
+        (await c.start()).unwrap()
+        self.assertIsNot(c.native_extensions, old)
+        self.assertEqual(c.native_extensions.current_declaration(declaration.host_tool_id), declaration)
+
+    async def test_no_optional_provider_initializes_and_starts_without_executor(self):
+        self.native.get_all_stars = lambda: ()
+        (await self.controller.initialize_profile()).unwrap()
+        (await self.controller.start()).unwrap()
+        self.assertIsNone(self.controller.session.application.external)
+
+    async def test_changed_descriptor_at_same_version_blocks_only_the_optional_provider(self):
+        c = self.controller
+        (await c.initialize_profile()).unwrap()
+        (await c.start()).unwrap()
+        declaration = c.native_extensions.declarations()[0]
+        repository = CapabilityRepository(c.runtime)
+        retained = repository.descriptors(extension_id="image")
+        (await c.stop()).unwrap()
+        changed = Port()
+        changed.document["package"]["artifact_hash"] = "changed-content-same-version"
+        self.star = Star(changed)
+        started = (await c.start()).unwrap()
+        self.assertTrue(started["started"])
+        self.assertTrue(c.status()["accepting"])
+        self.assertEqual(c.native_extensions.declarations(), ())
+        self.assertIsNone(c.native_extensions.current_declaration(declaration.host_tool_id))
+        self.assertIn((self.star.root_dir_name, "capability_descriptor_conflict"), c.native_extensions.issues)
+        self.assertEqual(repository.descriptors(extension_id="image"), retained)
+        self.assertFalse(repository.installation(extension_id="image").is_success)
+        self.assertEqual(changed.before, 0)
+
+
+class NativeMultiSessionTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_changed_descriptor_does_not_stop_the_shared_host(self):
+        stars = [Star(Port())]
+        self.native.get_all_stars = lambda: stars
+        c = self.controller
+        (await c.initialize_profile()).unwrap()
+        (await c.start()).unwrap()
+        declaration = c.native_extensions.declarations()[0]
+        retained = CapabilityRepository(c.runtime).descriptors(extension_id="image")
+        (await c.stop()).unwrap()
+        changed = Port()
+        changed.document["package"]["artifact_hash"] = "changed-content-same-version"
+        stars[:] = [Star(changed)]
+        (await c.start()).unwrap()
+        self.assertEqual(c.session.application.state, "running")
+        self.assertEqual(c.native_extensions.declarations(), ())
+        self.assertIsNone(c.native_extensions.current_declaration(declaration.host_tool_id))
+        self.assertEqual(CapabilityRepository(c.runtime).descriptors(extension_id="image"), retained)
+        self.assertEqual(changed.before, 0)
+
+    async def test_multi_load_is_read_only_start_registers_only_stop_rebuilds_registry(self):
+        stars = [Star(Port())]
+        self.native.get_all_stars = lambda: stars
+        c = self.controller
+        (await c.initialize_profile()).unwrap()
+        repository = CapabilityRepository(c.runtime)
+        self.assertEqual(repository.descriptors(extension_id="image"), ())
+        before = database_contents(c.runtime)
+        (await c.load_existing()).unwrap()
+        self.assertEqual(database_contents(c.runtime), before)
+        old = c.native_extensions
+        declaration = old.declarations()[0]
+        self.assertIsNotNone(old.role_guard)
+        (await c.start()).unwrap()
+        self.assertEqual(repository.descriptors(extension_id="image"), (declaration.descriptor.package,))
+        self.assertFalse(repository.installation(extension_id="image").is_success)
+        (await c.stop()).unwrap()
+        self.assertIsNone(old.current_declaration(declaration.host_tool_id))
+        stars[:] = [Star(Port())]
+        (await c.start()).unwrap()
+        self.assertIsNot(c.native_extensions, old)
+        self.assertEqual(c.native_extensions.current_declaration(declaration.host_tool_id), declaration)
+
+    async def test_no_optional_provider_initializes_and_starts_without_executor(self):
+        self.native.get_all_stars = lambda: ()
+        app = await self.start_host()
+        self.assertIsNone(app.external)
+
+
+if __name__ == "__main__":
+    unittest.main()

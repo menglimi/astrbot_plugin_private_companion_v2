@@ -1,0 +1,156 @@
+"""Per-task configuration adoption with explicit provider and prompt provenance."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from types import MappingProxyType
+
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationSnapshot
+from companion_v2.configuration.registry import FieldDefinition, ValueKind
+from companion_v2.configuration.service import ConfigurationService
+from companion_v2.conversation.foreground import PromptRequest
+from companion_v2.execution.models import TaskError, digest, require
+from companion_v2.execution.runner import TaskRun
+
+from .models import LocalProvider, ModelEnvelope, ModelTaskProfile
+from .replacement_rules import checked_rules, match_route, validate_targets
+
+
+CONSUMER = "model_gateway"
+
+
+def configuration_fields(profiles: tuple[ModelTaskProfile, ...]) -> tuple[FieldDefinition, ...]:
+    fields = []
+    for profile in profiles:
+        for suffix, kind, default in (
+            ("provider", ValueKind.TEXT, profile.default_provider),
+            ("fallback", ValueKind.TEXT, profile.default_fallback),
+            ("prompt", ValueKind.TEXT, profile.default_prompt),
+            ("max_output_tokens", ValueKind.INTEGER, profile.max_output_tokens),
+            ("replacement_rules", ValueKind.TEXT, profile.replacement_rules),
+            ("fallback_on_refusal", ValueKind.BOOLEAN, profile.fallback_on_refusal),
+            ("timeout_seconds", ValueKind.INTEGER, profile.timeout_seconds),
+            ("replacement_scope", ValueKind.TEXT, profile.replacement_scope),
+        ):
+            boundaries = ({"minimum": 1, "maximum": 600} if suffix == "timeout_seconds" else
+                          {"minimum": 1, "maximum": 32768} if kind is ValueKind.INTEGER else {})
+            fields.append(FieldDefinition(profile.group + "." + suffix, profile.group, CONSUMER,
+                                          kind, default, **boundaries))
+    return tuple(fields)
+
+
+@dataclass(frozen=True)
+class ResolvedModelPlan:
+    envelope: ModelEnvelope
+    snapshot: ConfigurationSnapshot
+    providers: tuple[LocalProvider, ...]
+    consumer_generation: int | None
+    audit: dict
+
+
+class ModelRouter:
+    def __init__(self, configuration: ConfigurationService, profiles: tuple[ModelTaskProfile, ...],
+                 providers: tuple[LocalProvider, ...]):
+        self.configuration = configuration
+        self.profiles = MappingProxyType({p.kind: p for p in profiles})
+        self.providers = MappingProxyType({p.binding.provider: p for p in providers})
+        if not profiles or len(self.profiles) != len(profiles) or len(self.providers) != len(providers):
+            raise ValueError("model profiles and provider IDs must be unique")
+        for field in configuration_fields(profiles):
+            if configuration.registry.fields.get(field.field_id) != field:
+                raise ValueError("model fields must use the shared configuration registry")
+        self.generation: int | None = None
+        for profile in profiles:
+            validate_targets(checked_rules(profile.replacement_rules), self.providers,
+                             capabilities=profile.capabilities, max_output_tokens=profile.max_output_tokens)
+
+    def start(self, *, expected_generation: int) -> int:
+        self.generation = self.configuration.start_consumer(CONSUMER, expected_generation=expected_generation)
+        return self.generation
+
+    def resolve(self, run: TaskRun, request: PromptRequest) -> ResolvedModelPlan:
+        task = run.validate()
+        context = task.spec.context
+        profile = self.profiles.get(task.spec.kind)
+        if profile is None or run.supervisor.registrations[task.spec.kind].definition.lane != profile.lane:
+            raise TaskError("model_task_unregistered", "model task type and lane must be registered")
+        if (request.role_binding != context.role_binding or request.event.scope != context.scope
+                or request.event.principal != context.actor.principal):
+            raise TaskError("model_context_mismatch", "model request must retain its original identity and role")
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
+                              context.role_binding.role, context.scope)
+        snapshot = require(self.configuration.read(context.actor, target=target,
+                           group_id=profile.group, observed_at=run.supervisor.now()))
+        values = {name.rsplit(".", 1)[1]: item.value for name, item in snapshot.fields.items()}
+        if values["fallback"] == values["provider"]:
+            raise TaskError("model_fallback_duplicate", "fallback must select a different provider")
+        try:
+            rules = checked_rules(values["replacement_rules"])
+            validate_targets(rules, self.providers, capabilities=profile.capabilities,
+                             max_output_tokens=values["max_output_tokens"])
+        except ValueError as error:
+            raise TaskError("model_route_invalid", str(error)) from error
+        # Only sealed inputs can trigger keyword routing. Recalled memory,
+        # persona prompts and tool continuations cannot change the chosen route.
+        texts = [material.payload for material in request.context.materials
+                 if material.source is not None and material.source.scope == context.scope
+                 and (material.purpose == "current_source" and material.source == request.event.source
+                      or material.purpose.startswith("merged_input:"))] if hasattr(request.event, "source") else []
+        evaluated_at = run.supervisor.now()
+        in_scope = (values["replacement_scope"] == "all" or
+                    values["replacement_scope"] == "conversation" and profile.kind == "conversation.reply" or
+                    values["replacement_scope"] == "plugin" and profile.kind != "conversation.reply")
+        match = match_route(rules, "\n".join(texts), evaluated_at) if in_scope else None
+        primary = match.provider_id if match else values["provider"]
+        provider_ids = (primary,) + ((values["fallback"],) if values["fallback"] and values["fallback"] != primary else ())
+        selected = []
+        for provider_id in provider_ids:
+            provider = self.providers.get(provider_id)
+            if provider is None:
+                raise TaskError("model_provider_unavailable", "configured provider has no local adapter")
+            if not set(profile.capabilities).issubset(provider.capabilities):
+                raise TaskError("model_capability_mismatch", "provider lacks required model task capabilities")
+            if (request.images or request.videos) and "image" not in provider.capabilities:
+                raise TaskError("model_capability_mismatch", "the original images require an image-capable provider")
+            if request.audios and "audio" not in provider.capabilities:
+                raise TaskError("model_capability_mismatch", "the original voice requires an audio-capable provider")
+            if values["max_output_tokens"] > provider.maximum_output_tokens:
+                raise TaskError("model_output_limit", "configured output exceeds provider capability")
+            selected.append(provider)
+        audit = {
+            "profile": {"kind": profile.kind, "version": profile.version, "lane": profile.lane.value},
+            "configuration_token": snapshot.resolution_token,
+            "fields": {key: {"source": item.source.document() if item.source else "registry_default",
+                             "explicit": item.explicit, "revision": item.source_revision}
+                       for key, item in snapshot.fields.items()},
+            "providers": [asdict(p.binding) for p in selected],
+            "role_revision": context.role_binding.revision,
+            "role_prompt_hash": digest(request.role_instruction),
+            "task_prompt_hash": digest(values["prompt"]),
+            "request_hash": digest(request),
+            "max_output_tokens": values["max_output_tokens"],
+            "timeout_seconds": values["timeout_seconds"],
+            "replacement_scope": values["replacement_scope"],
+            "transport": selected[0].transport,
+            "provider_transports": {p.binding.provider: p.transport for p in selected},
+            "consumer_generation": self.generation,
+            "fallback_on_refusal": values["fallback_on_refusal"] if in_scope else False,
+            "replacement": None if match is None else {
+                "rule_id": match.rule_id, "reason": match.reason, "provider_id": match.provider_id,
+                "model": match.model, "matched_keyword_hash": digest(match.matched_keyword) if match.matched_keyword else None,
+                "evaluated_at": evaluated_at.isoformat(), "input_basis": "sealed_current_inputs"},
+        }
+        return ResolvedModelPlan(ModelEnvelope(request, values["prompt"], values["max_output_tokens"],
+                                              snapshot.resolution_token, model_override=match.model if match else ""),
+                                 snapshot, tuple(selected), self.generation, audit)
+
+    def validate_plan(self, plan: ResolvedModelPlan):
+        consumer = self.configuration.runtime.read_one(
+            "SELECT generation FROM configuration_consumers WHERE consumer_id = ?", (CONSUMER,))
+        if (consumer is None or plan.consumer_generation is None or self.generation != plan.consumer_generation
+                or consumer["generation"] != plan.consumer_generation):
+            raise TaskError("consumer_generation_conflict", "model plan belongs to a replaced consumer")
+
+    def adopt(self, run: TaskRun, plan: ResolvedModelPlan):
+        require(self.configuration.report_application(run.task.spec.context.actor, snapshot=plan.snapshot,
+                generation=self.generation, succeeded=True, observed_at=run.supervisor.now()))

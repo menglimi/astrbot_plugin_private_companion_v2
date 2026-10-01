@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>人格问卷 · 陪伴</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="../../embedded-bridge.js" defer></script>
+  <script src="app.js?v=persona-questionnaire-20261001" defer></script>
+</head>
+<body>
+  <main class="persona-workspace">
+    <header class="persona-hero">
+      <div class="persona-hero-copy">
+        <p class="eyebrow">SELF / CHARACTER PROFILE</p>
+        <h1>人格问卷</h1>
+        <p>先整理角色的稳定设定，再生成可继续编辑的人格稿。</p>
+      </div>
+      <div class="hero-actions">
+        <span class="save-boundary" id="boundaryNote">保存为版本后，复制到 AstrBot 人格设置</span>
+        <button id="refresh" class="secondary" type="button">重新读取</button>
+      </div>
+      <section class="scope" aria-label="当前编辑范围">
+        <div><span>人格</span><strong id="persona-name">—</strong></div>
+        <div><span>状态</span><strong id="persona-state">—</strong></div>
+        <div><span>原文</span><strong id="original-count">—</strong></div>
+        <div><span>版本</span><strong id="version-count">—</strong></div>
+      </section>
+    </header>
+
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+
+    <section id="absent" class="absent" hidden aria-label="宿主人格状态">
+      <h2 id="absent-title">AstrBot 现在没有为这个会话选中人格</h2>
+      <p id="absent-body" class="muted">仍可编写并保存草稿。</p>
+    </section>
+
+    <section class="questionnaire" aria-labelledby="questionnaire-heading">
+      <header class="section-heading">
+        <div><p class="eyebrow">01 / SHAPE THE CHARACTER</p><h2 id="questionnaire-heading">角色问卷</h2></div>
+        <div class="questionnaire-progress"><strong id="questionnaire-count">0 / 12</strong><span>已填写</span><i><b id="questionnaire-progress-bar"></b></i></div>
+      </header>
+      <div class="questionnaire-layout">
+        <nav id="questionnaire-nav" class="questionnaire-nav" role="tablist" aria-label="问卷分区"></nav>
+        <section class="questionnaire-stage" aria-live="polite">
+          <header class="questionnaire-stage-head"><span id="questionnaire-index">01 / 04</span><h3 id="questionnaire-group-title">角色底色</h3><p id="questionnaire-group-note"></p></header>
+          <div id="questionnaire-fields" class="questionnaire-fields"></div>
+          <footer class="questionnaire-stage-foot">
+            <button id="questionnaire-prev" class="secondary small" type="button">上一组</button>
+            <span id="questionnaire-step">01 / 04</span>
+            <button id="questionnaire-next" class="secondary small" type="button">下一组</button>
+          </footer>
+        </section>
+        <aside class="questionnaire-aside">
+          <span class="aside-mark" aria-hidden="true">01</span>
+          <strong>回答先留在问卷里</strong>
+          <p>生成后会整理成一份完整草稿。你可以在下方逐句修改，再保存多个版本。</p>
+          <button id="load-questionnaire" class="quiet" type="button">从当前成稿载入回答</button>
+          <button id="sync-questionnaire" class="primary" type="button">生成 / 同步成稿</button>
+        </aside>
+      </div>
+    </section>
+
+    <section class="draft-section" aria-labelledby="draft-heading">
+      <header class="section-heading draft-heading">
+        <div><p class="eyebrow">02 / REVIEW & SAVE</p><h2 id="draft-heading">人格成稿</h2></div>
+        <div class="draft-actions">
+          <button id="reset-draft" class="secondary small" type="button">恢复已保存稿</button>
+          <button id="copy-draft" class="secondary small" type="button">复制成稿</button>
+        </div>
+      </header>
+      <textarea id="draft" class="editor" spellcheck="false" aria-label="可编辑的人格成稿"></textarea>
+      <div class="draft-meta"><span id="draft-meter">—</span><span id="draft-source">还没有存过草稿</span></div>
+      <div class="save-row">
+        <label class="note-field">版本备注
+          <input id="note" type="text" maxlength="200" placeholder="例如：明确说话节奏与拒绝边界">
+        </label>
+        <button id="save" class="primary" type="button">存为新版本</button>
+      </div>
+    </section>
+
+    <details class="reference-section">
+      <summary>当前 AstrBot 人格原文</summary>
+      <button id="copy-original" class="quiet" type="button">复制原文</button>
+      <textarea id="original" class="editor readonly" readonly spellcheck="false" aria-label="AstrBot 人格原文（只读）"></textarea>
+      <p class="meter"><span id="original-meter">—</span></p>
+    </details>
+
+    <details class="history" aria-label="版本记录">
+      <summary class="history-head"><span><strong>版本记录</strong><small>可预览、复制或恢复历史版本</small></span></summary>
+      <label class="history-limit">最近
+          <select id="limit">
+            <option value="10">10</option>
+            <option value="30" selected>30</option>
+            <option value="100">100</option>
+          </select> 版
+        </label>
+      <div class="history-body">
+        <ol id="versions" class="version-list" aria-live="polite"></ol>
+        <aside id="preview" class="preview" aria-label="版本预览">
+          <div class="placeholder"><span class="placeholder-mark" aria-hidden="true">✦</span>
+            <h2>选择一版查看</h2></div>
+        </aside>
+      </div>
+    </details>
+
+    
+  </main>
+</body>
+</html>

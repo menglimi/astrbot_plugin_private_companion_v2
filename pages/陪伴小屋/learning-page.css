@@ -1,0 +1,501 @@
+/* 陪伴小屋 · 学习与反思（培育轨道）
+   这一域是六个专题域里唯一「有方向」的：一条技能或目标从提出走到达成，
+   中间可能暂停、可能归档。所以视觉主体是一条**纵向轨道**，四段主线加一条旁支，
+   每张卡停在自己那一段里——状态不是标签，是坐标。
+
+   为什么不是记忆页的档案库、也不是联系页的钟面：
+   记忆的轴是生命周期（一条事实的四种归宿，无方向），
+   联系的轴是一天（24 格的节律，循环），
+   成长的轴是**推进**（有起点、有终点、有岔路）。三个轴向不同，
+   同一套布局套上去就会把有方向的流程画成无方向的堆积。
+
+   色值全部走 tokens.css 的语义令牌（不得写死十六进制），切主题时整页跟着变。
+   五个状态各自一档语义色：
+     proposed → --t-text-faint（还没开始，中性）
+     active   → --t-accent（正在推进，主色）
+     paused   → --t-warn（停下来了，需要留意）
+     achieved → --t-ok（达成）
+     retired  → --t-line-firm（归档，退到背景里）
+   「来源不可读取」用 --t-risk：那是失效，不是缺字段。
+
+   版式：桌面是轨道单列（宽屏时轨道内的卡片两列），详情覆盖在轨道右侧；
+   窄屏轨道单列、详情整屏推入。 */
+
+.lea-app{
+  display:grid;grid-template-columns:206px minmax(0,1fr);
+  gap:var(--sp-5);align-items:start;
+  color:var(--t-text);font-size:var(--fs-body);line-height:1.7;
+}
+.lea-main{min-width:0;display:flex;flex-direction:column;gap:var(--sp-4)}
+
+/* ===== 左侧轨道 =====
+   与记忆页、联系页同源的分区轨道，三项同构不同色。
+   未读审阅数用一个计数点挂在「待审阅」上——那是这一页唯一会到点的一条。 */
+.lea-rail{display:flex;flex-direction:column;gap:2px;position:sticky;top:12px;min-width:0}
+.lea-rail::before{
+  content:"";position:absolute;left:15px;top:22px;bottom:22px;width:1px;
+  background:var(--t-line);z-index:0;
+}
+.lea-rail button{
+  position:relative;z-index:1;display:flex;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-2);border:0;border-radius:var(--r-sm);background:transparent;
+  color:var(--t-text-soft);font:inherit;font-size:var(--fs-body);text-align:left;cursor:pointer;
+  transition:background .18s ease,color .18s ease;
+}
+.lea-rail button:hover{background:var(--t-surface-soft);color:var(--t-text)}
+.lea-rail button[aria-pressed="true"]{
+  background:var(--t-surface-raised);color:var(--t-text-strong);
+  font-weight:600;box-shadow:var(--t-shadow);
+}
+.lea-rail-icon{
+  flex:none;display:grid;place-items:center;width:31px;height:31px;
+  border:1px solid var(--t-line);border-radius:50%;
+  background:var(--t-surface);color:var(--t-text-faint);
+  transition:border-color .18s ease,color .18s ease,background .18s ease;
+}
+.lea-rail button[aria-pressed="true"] .lea-rail-icon{
+  border-color:transparent;background:var(--t-accent-quiet);color:var(--t-accent-ink);
+}
+.lea-rail-icon svg{width:16px;height:16px}
+.lea-rail-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 待审阅计数：只在有条目时出现，带一次轻微的落位。 */
+.lea-count{
+  flex:none;font-style:normal;font-size:var(--fs-micro);font-weight:700;
+  min-width:16px;padding:0 var(--sp-1);border-radius:var(--r-pill);text-align:center;
+  background:var(--t-accent-solid);color:var(--t-on-solid);
+  animation:lea-count-in .3s cubic-bezier(.34,1.4,.5,1) both;
+}
+@keyframes lea-count-in{from{transform:scale(.4);opacity:0}to{transform:none;opacity:1}}
+
+/* ===== 页头 ===== */
+.lea-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
+.lea-head-main{display:flex;align-items:center;gap:var(--sp-2);min-width:0;flex-wrap:wrap}
+.lea-head h2{margin:0;font-size:var(--fs-title);font-weight:650;color:var(--t-text-strong)}
+.lea-pill{
+  display:inline-block;padding:2px var(--sp-2);border-radius:var(--r-pill);
+  font-size:var(--fs-tiny);font-weight:600;
+  background:var(--t-surface-soft);color:var(--t-text-soft);
+}
+.lea-id{font-size:var(--fs-tiny);color:var(--t-text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lea-head-actions{display:flex;gap:var(--sp-2);flex:none}
+
+.lea-btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface);color:var(--t-text-soft);
+  font:inherit;font-size:var(--fs-body);cursor:pointer;
+  transition:background .16s ease,border-color .16s ease,color .16s ease,transform .1s ease;
+}
+.lea-btn svg{width:14px;height:14px}
+.lea-btn:hover:not(:disabled){background:var(--t-surface-soft);color:var(--t-text);border-color:var(--t-line-firm)}
+.lea-btn:active:not(:disabled){transform:translateY(1px)}
+.lea-btn:disabled{opacity:.5;cursor:default}
+.lea-btn.is-primary{background:var(--t-accent-solid);color:var(--t-on-solid);border-color:transparent;font-weight:600}
+.lea-btn.is-primary:hover:not(:disabled){background:var(--t-accent-solid-hover);color:var(--t-on-solid)}
+.lea-btn.is-quiet{border-color:transparent;background:transparent;padding:var(--sp-1) var(--sp-2);color:var(--t-text-faint)}
+.lea-btn.is-quiet:hover:not(:disabled){background:var(--t-surface-soft);color:var(--t-text-soft)}
+.lea-btn.is-wide{width:100%;margin-top:var(--sp-3)}
+
+/* 卡片上的小按钮。它们浮在可点击的卡片上面，所以要有自己的边界，
+   否则用户以为点的是卡片、其实是按钮（或者反过来）。 */
+.lea-mini{
+  padding:3px var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-xs);
+  background:var(--t-surface);color:var(--t-text-soft);
+  font:inherit;font-size:var(--fs-tiny);cursor:pointer;white-space:nowrap;
+  transition:background .14s ease,border-color .14s ease,color .14s ease;
+}
+.lea-mini:hover{background:var(--t-surface-soft);color:var(--t-text);border-color:var(--t-line-firm)}
+.lea-mini.is-primary{
+  background:var(--t-accent-quiet);color:var(--t-accent-ink);border-color:transparent;font-weight:600;
+}
+.lea-mini.is-primary:hover{background:var(--t-accent-solid);color:var(--t-on-solid)}
+
+/* ===== 通知 ===== */
+.lea-notice{
+  display:flex;align-items:flex-start;gap:var(--sp-2);margin:0;
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);
+  background:var(--t-ok-quiet);color:var(--t-ok-ink);font-size:var(--fs-body);
+}
+.lea-notice.is-error{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.lea-notice svg{width:14px;height:14px;flex:none;margin-top:3px}
+.lea-notice span{flex:1;min-width:0}
+.lea-notice button{
+  border:0;background:transparent;color:inherit;font-size:var(--fs-title);line-height:1;cursor:pointer;
+  padding:0 2px;opacity:.6;
+}
+.lea-notice button:hover{opacity:1}
+
+/* ===== 空态 ===== */
+.lea-empty{
+  display:flex;flex-direction:column;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-7) var(--sp-5);text-align:center;color:var(--t-text-faint);
+  border:1px dashed var(--t-line);border-radius:var(--r-md);
+}
+.lea-empty svg{width:22px;height:22px}
+.lea-empty strong{color:var(--t-text-soft);font-size:var(--fs-body)}
+.lea-empty p{margin:0;font-size:var(--fs-body);max-width:44ch}
+.lea-spinner{
+  width:15px;height:15px;border-radius:50%;
+  border:2px solid var(--t-line);border-top-color:var(--t-accent);
+  animation:lea-spin .7s linear infinite;
+}
+@keyframes lea-spin{to{transform:rotate(360deg)}}
+
+/* ===== 筛选 ===== */
+.lea-filters{
+  display:flex;align-items:center;gap:var(--sp-1);flex-wrap:wrap;
+  padding:var(--sp-2) var(--sp-2);border-radius:var(--r-sm);background:var(--t-surface-soft);
+}
+.lea-filters-label{font-size:var(--fs-tiny);color:var(--t-text-faint);margin-inline-start:6px}
+.lea-filters-label:first-child{margin-inline-start:0}
+.lea-filters button{
+  padding:3px var(--sp-2);border:1px solid transparent;border-radius:var(--r-pill);
+  background:transparent;color:var(--t-text-soft);
+  font:inherit;font-size:var(--fs-tiny);cursor:pointer;
+  transition:background .14s ease,color .14s ease,border-color .14s ease;
+}
+.lea-filters button:hover{background:var(--t-surface);color:var(--t-text)}
+.lea-filters button[aria-pressed="true"]{
+  background:var(--t-surface-raised);color:var(--t-text-strong);
+  border-color:var(--t-line-firm);font-weight:600;
+}
+
+/* ===== 轨道 =====
+   四段主线纵排，每段一条左边线串起该段的卡片——那条线就是「这一段」的视觉容器。
+   段的顺序固定，空段也留着：按有内容的段动态缩短轨道会让人以为流程变了。 */
+.lea-track{display:flex;flex-direction:column;gap:var(--sp-4)}
+.lea-lanes{display:flex;flex-direction:column;gap:var(--sp-3)}
+
+.lea-lane{
+  position:relative;padding:var(--sp-3) var(--sp-4) var(--sp-4);
+  border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-surface);
+}
+/* 每段的左边一条竖线，颜色跟着该段的状态走。 */
+.lea-lane::before{
+  content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;
+  border-radius:0 var(--r-2xs) var(--r-2xs) 0;background:var(--t-line-firm);opacity:.5;
+}
+.lea-lane.lea-proposed::before{background:var(--t-text-faint)}
+.lea-lane.lea-active::before{background:var(--t-accent-solid)}
+.lea-lane.lea-paused::before{background:var(--t-warn)}
+.lea-lane.lea-achieved::before{background:var(--t-ok)}
+.lea-lane.lea-retired::before{background:var(--t-line-firm)}
+
+.lea-lane > header{
+  display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;margin-bottom:var(--sp-3);
+}
+.lea-lane-dot{
+  flex:none;width:9px;height:9px;border-radius:50%;background:var(--t-line-firm);
+}
+.lea-proposed .lea-lane-dot{background:var(--t-text-faint)}
+.lea-active .lea-lane-dot{background:var(--t-accent-solid)}
+/* 进行中那一段的点会呼吸：它是唯一「正在动」的一段。 */
+.lea-active .lea-lane-dot{animation:lea-pulse 2.8s ease-in-out infinite}
+.lea-paused .lea-lane-dot{background:var(--t-warn)}
+.lea-achieved .lea-lane-dot{background:var(--t-ok)}
+@keyframes lea-pulse{
+  0%,100%{box-shadow:0 0 0 0 var(--t-accent-quiet)}
+  50%{box-shadow:0 0 0 4px var(--t-accent-quiet)}
+}
+.lea-lane > header h3{margin:0;font-size:var(--fs-body);font-weight:650;color:var(--t-text-strong)}
+.lea-lane > header em{
+  font-style:normal;font-size:var(--fs-micro);font-weight:700;
+  min-width:16px;padding:0 var(--sp-1);border-radius:var(--r-pill);text-align:center;
+  background:var(--t-surface-soft);color:var(--t-text-faint);
+}
+.lea-lane-hint{font-size:var(--fs-tiny);color:var(--t-text-faint);flex:1;min-width:0}
+.lea-lane-empty{margin:0;font-size:var(--fs-tiny);color:var(--t-text-faint);padding:2px 0 2px var(--sp-4)}
+.lea-lane-warn{
+  margin:0 0 var(--sp-2);font-size:var(--fs-tiny);line-height:1.6;
+  padding:var(--sp-2) var(--sp-2);border-radius:var(--r-sm);
+  background:var(--t-warn-quiet);color:var(--t-warn-ink);
+}
+/* 状态未识别那一段用警示色描边：把它混进任何已知段都会误报进度。 */
+.lea-lane.is-unknown{border-color:var(--t-warn);background:var(--t-warn-quiet)}
+.lea-lane.is-unknown::before{background:var(--t-warn)}
+
+/* ===== 卡片 ===== */
+.lea-card{
+  position:relative;display:flex;flex-direction:column;gap:var(--sp-1);
+  padding:var(--sp-3) var(--sp-3);margin-bottom:var(--sp-1);cursor:pointer;
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface-raised);
+  transition:border-color .16s ease,background .16s ease,transform .16s ease,box-shadow .16s ease;
+}
+.lea-card:last-child{margin-bottom:0}
+.lea-card:hover{
+  border-color:var(--t-line-firm);transform:translateX(2px);box-shadow:var(--t-shadow);
+}
+.lea-card:focus-visible{outline:2px solid var(--t-focus);outline-offset:2px}
+.lea-card-top{display:flex;align-items:center;gap:var(--sp-2)}
+.lea-kind{
+  font-size:var(--fs-micro);font-weight:600;padding:1px var(--sp-2);border-radius:var(--r-pill);
+  background:var(--t-surface-soft);color:var(--t-text-soft);
+}
+.lea-rev{font-size:var(--fs-micro);color:var(--t-text-faint);font-variant-numeric:tabular-nums}
+.lea-card-title{margin:0;font-size:var(--fs-body);font-weight:600;color:var(--t-text-strong);line-height:1.45}
+.lea-card-note{
+  margin:0;font-size:var(--fs-tiny);color:var(--t-text-soft);line-height:1.6;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.lea-card-foot{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;
+  margin-top:2px;
+}
+.lea-card-meta{font-size:var(--fs-micro);color:var(--t-text-faint)}
+.lea-card-actions{display:flex;gap:var(--sp-1);flex:none}
+
+/* 来源不可读取：整卡降级到警示色，标题位换成一句说明。
+   这不是「字段缺失」——后端在来源读不出来时不返回标题、描述与进展，
+   所以卡片必须说清"读不到"，而不是显示成一张空卡。 */
+.lea-card.is-blind{border-color:var(--t-risk);background:var(--t-risk-quiet)}
+.lea-card.is-blind::before{
+  content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;
+  border-radius:0 var(--r-2xs) var(--r-2xs) 0;background:var(--t-risk);
+}
+.lea-card.is-blind:hover{border-color:var(--t-risk-ink)}
+.lea-blind-label{color:var(--t-risk-ink);font-style:italic}
+.lea-card-why{margin:0;font-size:var(--fs-tiny);color:var(--t-risk-ink);line-height:1.55}
+/* 状态动作做完之后给一次轻微的落位：卡片滑进新的一段。 */
+.lea-card.is-entered{animation:lea-enter .5s cubic-bezier(.16,1,.3,1) both}
+@keyframes lea-enter{
+  from{opacity:0;transform:translateY(-8px)}
+  to{opacity:1;transform:none}
+}
+
+/* ===== 确认条 =====
+   出现在轨道里、被点卡片所属那一段的下方——不居中弹窗。
+   弹窗会把轨道整个盖住，用户看不到自己正要移走的那张卡。 */
+.lea-confirm{
+  display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;
+  margin-top:var(--sp-3);padding:var(--sp-2) var(--sp-3);
+  border:1px solid var(--t-caution);border-radius:var(--r-sm);
+  background:var(--t-warn-quiet);
+  animation:lea-confirm-in .26s cubic-bezier(.16,1,.3,1) both;
+}
+@keyframes lea-confirm-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.lea-confirm-text{font-size:var(--fs-body);color:var(--t-warn-ink);flex:1;min-width:0}
+.lea-confirm-target{
+  font-size:var(--fs-tiny);color:var(--t-text-faint);
+  max-width:22ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+
+/* ===== 详情 ===== */
+.lea-detail{
+  display:flex;flex-direction:column;gap:var(--sp-3);
+  padding:var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-surface);
+  animation:lea-detail-in .3s cubic-bezier(.16,1,.3,1) both;
+}
+@keyframes lea-detail-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.lea-detail-head{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
+.lea-detail-title{margin:0;font-size:var(--fs-title);font-weight:650;color:var(--t-text-strong);line-height:1.4}
+.lea-detail-desc{margin:0;font-size:var(--fs-body);color:var(--t-text-soft);line-height:1.7;white-space:pre-wrap}
+.lea-detail-note{
+  display:flex;flex-direction:column;gap:3px;
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);background:var(--t-surface-soft);
+}
+.lea-detail-note span{font-size:var(--fs-micro);font-weight:600;color:var(--t-text-faint)}
+.lea-detail-note p{margin:0;font-size:var(--fs-body);color:var(--t-text);line-height:1.7;white-space:pre-wrap}
+
+/* 来源不可读取时详情顶部的说明块。 */
+.lea-blind{
+  display:flex;gap:var(--sp-2);padding:var(--sp-3) var(--sp-3);border-radius:var(--r-sm);
+  background:var(--t-risk-quiet);color:var(--t-risk-ink);
+}
+.lea-blind svg{width:18px;height:18px;flex:none;margin-top:2px}
+.lea-blind strong{font-size:var(--fs-body);display:block;margin-bottom:3px}
+.lea-blind p{margin:0;font-size:var(--fs-tiny);line-height:1.6}
+.lea-blind-note{margin-top:var(--sp-1) !important;color:var(--t-text-soft)}
+
+/* 提出 / 确认 / 变更这一条链，以及时间与来源。 */
+.lea-chain,.lea-times{
+  display:flex;gap:var(--sp-4);flex-wrap:wrap;margin:0;
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);background:var(--t-surface-soft);
+}
+.lea-chain > div,.lea-times > div{display:flex;flex-direction:column;gap:1px;min-width:0}
+.lea-chain dt,.lea-times dt{font-size:var(--fs-micro);color:var(--t-text-faint)}
+.lea-chain dd,.lea-times dd{
+  margin:0;font-size:var(--fs-tiny);color:var(--t-text-soft);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:28ch;
+}
+
+.lea-detail-actions{
+  display:flex;flex-direction:column;gap:var(--sp-2);
+  padding-top:var(--sp-3);border-top:1px solid var(--t-line);
+}
+.lea-detail-actions h4,.lea-revise h4{
+  margin:0;font-size:var(--fs-body);font-weight:650;color:var(--t-text-strong);
+}
+.lea-detail-why{margin:0;font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.6}
+.lea-action-row{display:flex;gap:var(--sp-1);flex-wrap:wrap}
+.lea-action-notes{
+  list-style:none;margin:2px 0 0;padding:0;display:flex;flex-direction:column;gap:3px;
+}
+.lea-action-notes li{display:flex;gap:var(--sp-2);font-size:var(--fs-tiny);color:var(--t-text-faint)}
+.lea-action-notes strong{flex:none;min-width:4.5em;color:var(--t-text-soft);font-weight:600}
+
+/* ===== 修订表单 ===== */
+.lea-revise{
+  display:flex;flex-direction:column;gap:var(--sp-3);
+  padding-top:var(--sp-3);border-top:1px solid var(--t-line);
+}
+.lea-field{display:flex;flex-direction:column;gap:var(--sp-1)}
+.lea-field > span{font-size:var(--fs-tiny);font-weight:600;color:var(--t-text-soft)}
+.lea-field input,.lea-field textarea{
+  width:100%;padding:var(--sp-2) var(--sp-2);box-sizing:border-box;
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface-sunken);color:var(--t-text);
+  font:inherit;font-size:var(--fs-body);line-height:1.6;
+  transition:border-color .16s ease,background .16s ease;
+}
+.lea-field textarea{resize:vertical}
+.lea-field input:focus,.lea-field textarea:focus{
+  outline:none;border-color:var(--t-accent);background:var(--t-surface);
+}
+.lea-form-actions{display:flex;justify-content:flex-end;gap:var(--sp-2)}
+
+/* ===== 待审阅 =====
+   每一条是**一条待裁决的进展**，不是一条记录：它挂在某个目标上，带自己的依据。 */
+.lea-reviews{display:flex;flex-direction:column;gap:var(--sp-3)}
+.lea-reviews-sum{margin:0;font-size:var(--fs-body);color:var(--t-text-soft)}
+.lea-reviews-sum strong{color:var(--t-text-strong);font-size:var(--fs-lead);font-variant-numeric:tabular-nums}
+.lea-review{
+  display:flex;flex-direction:column;gap:var(--sp-2);
+  padding:var(--sp-3) var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-surface);
+  animation:lea-review-in .42s cubic-bezier(.16,1,.3,1) both;
+  animation-delay:calc(var(--i,0) * 46ms);
+}
+@keyframes lea-review-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+.lea-review > header{display:flex;align-items:baseline;gap:var(--sp-2);flex-wrap:wrap}
+.lea-review-target{font-size:var(--fs-body);font-weight:600;color:var(--t-text-strong);flex:1;min-width:0}
+.lea-review-time{font-size:var(--fs-micro);color:var(--t-text-faint)}
+.lea-review-note{
+  margin:0;font-size:var(--fs-body);color:var(--t-text);line-height:1.7;white-space:pre-wrap;
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);background:var(--t-surface-soft);
+}
+.lea-review-note.is-empty{color:var(--t-text-faint);font-style:italic}
+.lea-review > footer{display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.lea-review.is-blind{border-color:var(--t-risk)}
+.lea-review-warn{margin:0;font-size:var(--fs-tiny);color:var(--t-risk-ink);line-height:1.6}
+.lea-reviews-empty{
+  display:flex;flex-direction:column;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-7) var(--sp-5);text-align:center;color:var(--t-text-faint);
+  border:1px dashed var(--t-line);border-radius:var(--r-md);
+}
+.lea-reviews-empty svg{width:26px;height:26px;color:var(--t-ok)}
+.lea-reviews-empty strong{color:var(--t-text-soft);font-size:var(--fs-body)}
+.lea-reviews-empty p{margin:0;font-size:var(--fs-body);max-width:40ch}
+
+/* ===== 来源与凭证 ===== */
+.lea-sources{display:flex;flex-direction:column;gap:var(--sp-3)}
+.lea-block{
+  display:flex;flex-direction:column;gap:var(--sp-2);
+  padding:var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-surface);
+}
+.lea-block > h3{margin:0;font-size:var(--fs-body);font-weight:650;color:var(--t-text-strong)}
+.lea-note{margin:0;font-size:var(--fs-tiny);color:var(--t-text-soft);line-height:1.7}
+.lea-note.is-ok{
+  display:flex;align-items:center;gap:var(--sp-1);color:var(--t-ok-ink);
+}
+.lea-note.is-ok svg{width:14px;height:14px;flex:none}
+.lea-blind-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--sp-1)}
+.lea-blind-list li{
+  display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);
+  background:var(--t-risk-quiet);
+}
+.lea-blind-list code{
+  font-size:var(--fs-micro);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--t-text-soft);overflow:hidden;text-overflow:ellipsis;max-width:24ch;
+}
+.lea-blind-list span{font-size:var(--fs-tiny);color:var(--t-risk-ink);flex:1;min-width:0}
+.lea-blind-list em{font-style:normal;font-size:var(--fs-micro);color:var(--t-text-faint);flex:none}
+
+/* ===== 权限开关 =====
+   两个布尔，但**不是两个独立开关**：read 关闭时 proposals 会被后端强制跟从。 */
+.lea-gate{display:flex;flex-direction:column;gap:var(--sp-3)}
+.lea-gate-list{display:flex;flex-direction:column;gap:var(--sp-2)}
+.lea-switch{
+  padding:var(--sp-3) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-surface);
+  transition:border-color .16s ease,background .16s ease;
+}
+.lea-switch.is-following{border-color:var(--t-line-firm);background:var(--t-surface-soft)}
+.lea-switch label{display:flex;align-items:flex-start;gap:var(--sp-2);cursor:pointer}
+.lea-switch input{position:absolute;opacity:0;width:0;height:0}
+.lea-switch-track{
+  flex:none;position:relative;width:34px;height:19px;margin-top:2px;
+  border-radius:var(--r-pill);background:var(--t-surface-sunken);
+  border:1px solid var(--t-line);
+  transition:background .2s ease,border-color .2s ease;
+}
+.lea-switch-track i{
+  position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;
+  background:var(--t-text-faint);
+  transition:transform .22s cubic-bezier(.34,1.4,.5,1),background .2s ease;
+}
+.lea-switch input:checked + .lea-switch-track{background:var(--t-accent-quiet);border-color:var(--t-accent)}
+.lea-switch input:checked + .lea-switch-track i{
+  transform:translateX(15px);background:var(--t-accent-solid);
+}
+.lea-switch input:disabled + .lea-switch-track{opacity:.5}
+.lea-switch input:focus-visible + .lea-switch-track{outline:2px solid var(--t-focus);outline-offset:2px}
+.lea-switch-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+.lea-switch-text strong{font-size:var(--fs-body);font-weight:600;color:var(--t-text)}
+.lea-switch-text small{font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.5}
+.lea-switch-note{
+  display:flex;align-items:flex-start;gap:var(--sp-1);margin:var(--sp-2) 0 0 44px;
+  font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.6;
+}
+.lea-switch-note svg{width:13px;height:13px;flex:none;margin-top:2px}
+.lea-switch-note.is-warn{color:var(--t-warn-ink)}
+
+/* ===== 窄屏 ===== */
+@media (max-width:880px){
+  .lea-app{grid-template-columns:minmax(0,1fr);gap:var(--sp-3)}
+  .lea-rail{
+    position:static;flex-direction:row;overflow-x:auto;gap:var(--sp-1);
+    padding-bottom:var(--sp-1);scrollbar-width:none;
+  }
+  .lea-rail::-webkit-scrollbar{display:none}
+  .lea-rail::before{display:none}
+  .lea-rail button{
+    flex:none;flex-direction:column;gap:var(--sp-1);padding:var(--sp-2) var(--sp-2);
+    font-size:var(--fs-tiny);text-align:center;min-width:64px;
+  }
+  .lea-rail-label{overflow:visible;text-overflow:clip;white-space:nowrap;max-width:none}
+  .lea-head{align-items:flex-start}
+  .lea-head-actions{width:100%}
+  .lea-head-actions .lea-btn{flex:1}
+  .lea-lane{padding:var(--sp-3)}
+  .lea-card:hover{transform:none}
+  .lea-card-foot{flex-direction:column;align-items:flex-start;gap:var(--sp-2)}
+  .lea-confirm-target{max-width:none;width:100%}
+  .lea-chain,.lea-times{gap:var(--sp-3) var(--sp-4)}
+  .lea-chain dd,.lea-times dd{max-width:20ch}
+  .lea-action-notes li{flex-direction:column;gap:1px}
+  .lea-action-notes strong{min-width:0}
+  .lea-switch-note{margin-left:0}
+  .lea-review > footer .lea-btn{flex:1}
+}
+
+/* ===== 减弱动效 =====
+   压时长到瞬时，而不是 animation:none——
+   关掉动画会让依赖 transitionend 的逻辑永远不结算。
+   呼吸点、落位、计数弹入全部归零，信息一条不丢。 */
+@media (prefers-reduced-motion:reduce){
+  .lea-active .lea-lane-dot,.lea-count,.lea-card.is-entered,.lea-confirm,
+  .lea-detail,.lea-review{
+    animation-duration:.001ms !important;
+    animation-iteration-count:1 !important;
+  }
+  .lea-card,.lea-btn,.lea-mini,.lea-rail button,.lea-rail-icon,.lea-filters button,
+  .lea-switch-track,.lea-switch-track i,.lea-field input,.lea-field textarea{
+    transition-duration:.001ms !important;
+  }
+  .lea-card:hover{transform:none}
+}

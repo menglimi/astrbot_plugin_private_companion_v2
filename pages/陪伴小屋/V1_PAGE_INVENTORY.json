@@ -1,0 +1,4124 @@
+{
+  "source": "C:\\Users\\99505\\.astrbot\\data\\plugins\\astrbot_plugin_private_companion\\pages\\陪伴面板\\index.html",
+  "date": "2026-09-24",
+  "method": "Static HTML definitions; dynamic forms separately reviewed in app.js; no production data read",
+  "navigation": [
+    {
+      "text": "01总览",
+      "id": null,
+      "line": 261,
+      "hidden": false,
+      "target": "dashboard"
+    },
+    {
+      "text": "02小屋",
+      "id": null,
+      "line": 262,
+      "hidden": false,
+      "target": "home"
+    },
+    {
+      "text": "03世界知识",
+      "id": null,
+      "line": 263,
+      "hidden": false,
+      "target": "roleplay"
+    },
+    {
+      "text": "04用户",
+      "id": null,
+      "line": 264,
+      "hidden": false,
+      "target": "private"
+    },
+    {
+      "text": "05群聊",
+      "id": null,
+      "line": 265,
+      "hidden": false,
+      "target": "group"
+    },
+    {
+      "text": "06学习",
+      "id": null,
+      "line": 266,
+      "hidden": false,
+      "target": "learning"
+    },
+    {
+      "text": "07观察",
+      "id": null,
+      "line": 267,
+      "hidden": false,
+      "target": "memory"
+    },
+    {
+      "text": "08主动",
+      "id": null,
+      "line": 268,
+      "hidden": false,
+      "target": "proactive"
+    },
+    {
+      "text": "09创作",
+      "id": null,
+      "line": 269,
+      "hidden": true,
+      "target": "creative"
+    },
+    {
+      "text": "10生图",
+      "id": null,
+      "line": 270,
+      "hidden": true,
+      "target": "image"
+    },
+    {
+      "text": "11Token",
+      "id": null,
+      "line": 271,
+      "hidden": false,
+      "target": "tokens"
+    },
+    {
+      "text": "12排障",
+      "id": null,
+      "line": 272,
+      "hidden": false,
+      "target": "troubleshooting"
+    },
+    {
+      "text": "13配置",
+      "id": null,
+      "line": 273,
+      "hidden": false,
+      "target": "config"
+    },
+    {
+      "text": "14模型",
+      "id": null,
+      "line": 274,
+      "hidden": false,
+      "target": "models"
+    },
+    {
+      "text": "15实验",
+      "id": null,
+      "line": 275,
+      "hidden": false,
+      "target": "experimental"
+    },
+    {
+      "text": "16提示词",
+      "id": null,
+      "line": 276,
+      "hidden": false,
+      "target": "prompts"
+    },
+    {
+      "text": "17现实触及",
+      "id": null,
+      "line": 277,
+      "hidden": true,
+      "target": "reality"
+    }
+  ],
+  "panels": [
+    {
+      "id": "panel-dashboard",
+      "line": 280,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "今日概览",
+          "id": null,
+          "line": 283,
+          "hidden": false
+        },
+        {
+          "text": "今日",
+          "id": null,
+          "line": 294,
+          "hidden": false
+        },
+        {
+          "text": "当前",
+          "id": null,
+          "line": 301,
+          "hidden": false
+        },
+        {
+          "text": "时间轴",
+          "id": null,
+          "line": 310,
+          "hidden": false
+        },
+        {
+          "text": "动态与记忆",
+          "id": null,
+          "line": 323,
+          "hidden": false
+        },
+        {
+          "text": "近期动向",
+          "id": null,
+          "line": 327,
+          "hidden": false
+        },
+        {
+          "text": "记忆概况",
+          "id": null,
+          "line": 331,
+          "hidden": false
+        },
+        {
+          "text": "运行能力",
+          "id": null,
+          "line": 337,
+          "hidden": false
+        },
+        {
+          "text": "私聊策略",
+          "id": null,
+          "line": 351,
+          "hidden": false
+        },
+        {
+          "text": "群聊策略",
+          "id": null,
+          "line": 355,
+          "hidden": false
+        },
+        {
+          "text": "长线主动",
+          "id": null,
+          "line": 359,
+          "hidden": false
+        },
+        {
+          "text": "私聊关系分布",
+          "id": null,
+          "line": 371,
+          "hidden": false
+        },
+        {
+          "text": "群聊观测分布",
+          "id": null,
+          "line": 375,
+          "hidden": false
+        },
+        {
+          "text": "今日新闻见闻",
+          "id": null,
+          "line": 379,
+          "hidden": false
+        },
+        {
+          "text": "主动搜索记录",
+          "id": null,
+          "line": 383,
+          "hidden": false
+        },
+        {
+          "text": "最近活跃热力",
+          "id": null,
+          "line": 387,
+          "hidden": false
+        },
+        {
+          "text": "陪伴系插件",
+          "id": "dashboardCompanionTerminalTitle",
+          "line": 397,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "导出快照",
+          "id": "exportSnapshotBtn",
+          "line": 287,
+          "hidden": false
+        },
+        {
+          "text": "完整日程",
+          "id": null,
+          "line": 313,
+          "hidden": false
+        },
+        {
+          "text": "查看群聊观察",
+          "id": null,
+          "line": 324,
+          "hidden": false
+        },
+        {
+          "text": "配置",
+          "id": null,
+          "line": 338,
+          "hidden": false
+        },
+        {
+          "text": "重新检查",
+          "id": "dashboardCompanionTerminalRefresh",
+          "line": 402,
+          "hidden": false
+        },
+        {
+          "text": "查看排障",
+          "id": null,
+          "line": 403,
+          "hidden": false
+        }
+      ],
+      "fields": [],
+      "labels": [
+        {
+          "text": "互动与主动私聊、群聊和长线主动策略",
+          "id": null,
+          "line": 346,
+          "hidden": false
+        },
+        {
+          "text": "观察与内容记录关系分布、群聊观察、新闻、搜索和活跃情况",
+          "id": null,
+          "line": 366,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-home",
+      "line": 411,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "她的小屋",
+          "id": null,
+          "line": 416,
+          "hidden": false
+        },
+        {
+          "text": "家具与功能",
+          "id": null,
+          "line": 500,
+          "hidden": false
+        },
+        {
+          "text": "布置房间",
+          "id": "homeRoomEditorTitle",
+          "line": 511,
+          "hidden": false
+        },
+        {
+          "text": "生活日历",
+          "id": "homeRoomInspectorTitle",
+          "line": 551,
+          "hidden": false
+        },
+        {
+          "text": "读取中",
+          "id": "homeRoomDate",
+          "line": 559,
+          "hidden": false
+        },
+        {
+          "text": "生活状态",
+          "id": "homeRoomStateTitle",
+          "line": 572,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "逛小屋",
+          "id": null,
+          "line": 421,
+          "hidden": false
+        },
+        {
+          "text": "布置房间",
+          "id": null,
+          "line": 422,
+          "hidden": false
+        },
+        {
+          "text": "管理能力 ↗",
+          "id": null,
+          "line": 423,
+          "hidden": false
+        },
+        {
+          "text": "☼",
+          "id": null,
+          "line": 425,
+          "hidden": false
+        },
+        {
+          "text": "房间视图",
+          "id": null,
+          "line": 429,
+          "hidden": false
+        },
+        {
+          "text": "功能清单",
+          "id": null,
+          "line": 429,
+          "hidden": false
+        },
+        {
+          "text": "正在读取小屋里的角色…看看我 / 调整外貌 ↗",
+          "id": null,
+          "line": 430,
+          "hidden": false
+        },
+        {
+          "text": "手账翻开最近一页正在读取手账…↗",
+          "id": null,
+          "line": 432,
+          "hidden": false
+        },
+        {
+          "text": "便签留下一件小事正在读取便签…↗",
+          "id": null,
+          "line": 433,
+          "hidden": false
+        },
+        {
+          "text": "相册翻翻留下的照片回到同一张原照片，看看当时的片刻。↗",
+          "id": null,
+          "line": 434,
+          "hidden": false
+        },
+        {
+          "text": "↻",
+          "id": null,
+          "line": 446,
+          "hidden": false
+        },
+        {
+          "text": "开门",
+          "id": null,
+          "line": 452,
+          "hidden": false
+        },
+        {
+          "text": "↺ 复位",
+          "id": null,
+          "line": 453,
+          "hidden": false
+        },
+        {
+          "text": "重试",
+          "id": null,
+          "line": 464,
+          "hidden": false
+        },
+        {
+          "text": "全景",
+          "id": null,
+          "line": 472,
+          "hidden": false
+        },
+        {
+          "text": "电影巡游",
+          "id": null,
+          "line": 477,
+          "hidden": false
+        },
+        {
+          "text": "下一镜 →",
+          "id": null,
+          "line": 478,
+          "hidden": false
+        },
+        {
+          "text": "遇见一次",
+          "id": null,
+          "line": 485,
+          "hidden": false
+        },
+        {
+          "text": "刷新小屋记录",
+          "id": null,
+          "line": 501,
+          "hidden": false
+        },
+        {
+          "text": "全部",
+          "id": null,
+          "line": 502,
+          "hidden": false
+        },
+        {
+          "text": "日常生活",
+          "id": null,
+          "line": 502,
+          "hidden": false
+        },
+        {
+          "text": "拓展能力",
+          "id": null,
+          "line": 502,
+          "hidden": false
+        },
+        {
+          "text": "收纳家具",
+          "id": null,
+          "line": 521,
+          "hidden": false
+        },
+        {
+          "text": "↑",
+          "id": null,
+          "line": 535,
+          "hidden": false
+        },
+        {
+          "text": "←",
+          "id": null,
+          "line": 536,
+          "hidden": false
+        },
+        {
+          "text": "→",
+          "id": null,
+          "line": 538,
+          "hidden": false
+        },
+        {
+          "text": "↓",
+          "id": null,
+          "line": 539,
+          "hidden": false
+        },
+        {
+          "text": "↶ 左转 45°",
+          "id": null,
+          "line": 541,
+          "hidden": false
+        },
+        {
+          "text": "右转 45° ↷",
+          "id": null,
+          "line": 541,
+          "hidden": false
+        },
+        {
+          "text": "↶ 撤销",
+          "id": null,
+          "line": 544,
+          "hidden": false
+        },
+        {
+          "text": "↷ 重做",
+          "id": null,
+          "line": 544,
+          "hidden": false
+        },
+        {
+          "text": "默认布局",
+          "id": null,
+          "line": 544,
+          "hidden": false
+        },
+        {
+          "text": "读取最新版本，保留草稿",
+          "id": null,
+          "line": 546,
+          "hidden": true
+        },
+        {
+          "text": "取消",
+          "id": null,
+          "line": 548,
+          "hidden": false
+        },
+        {
+          "text": "保存布置",
+          "id": null,
+          "line": 548,
+          "hidden": false
+        },
+        {
+          "text": "×",
+          "id": null,
+          "line": 551,
+          "hidden": false
+        },
+        {
+          "text": "打开对应设置 ↗",
+          "id": null,
+          "line": 553,
+          "hidden": false
+        },
+        {
+          "text": "翻开日历 →",
+          "id": null,
+          "line": 561,
+          "hidden": false
+        },
+        {
+          "text": "♧ 当前穿搭暂无穿搭照片 →",
+          "id": null,
+          "line": 580,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "homeRoomLightMode",
+          "line": 489
+        },
+        {
+          "id": "homeRoomMotion",
+          "type": "checkbox",
+          "line": 490
+        },
+        {
+          "id": "homeRoomEvents",
+          "type": "checkbox",
+          "line": 491
+        },
+        {
+          "id": "homeRoomSearch",
+          "type": "search",
+          "placeholder": "查找家具或功能",
+          "line": 500
+        },
+        {
+          "id": "homeRoomFurniture",
+          "line": 520
+        },
+        {
+          "id": "homeRoomObjectModel",
+          "line": 522
+        },
+        {
+          "id": "homeRoomSurface",
+          "line": 523
+        },
+        {
+          "id": "homeRoomFurnitureX",
+          "type": "number",
+          "line": 528
+        },
+        {
+          "id": "homeRoomFurnitureZ",
+          "type": "number",
+          "line": 529
+        },
+        {
+          "id": "homeRoomFurnitureY",
+          "type": "number",
+          "line": 530
+        },
+        {
+          "id": "homeRoomFurnitureRotation",
+          "type": "number",
+          "line": 531
+        },
+        {
+          "id": "homeRoomSheetStation",
+          "line": 590
+        }
+      ],
+      "labels": [
+        {
+          "text": "小屋氛围",
+          "id": null,
+          "line": 487,
+          "hidden": false
+        },
+        {
+          "text": "光线随当地时间常驻白天常驻夜晚",
+          "id": null,
+          "line": 489,
+          "hidden": false
+        },
+        {
+          "text": "动态天气与小景",
+          "id": null,
+          "line": 490,
+          "hidden": false
+        },
+        {
+          "text": "偶尔发生的小事件",
+          "id": null,
+          "line": 491,
+          "hidden": false
+        },
+        {
+          "text": "查找家具或功能",
+          "id": null,
+          "line": 500,
+          "hidden": false
+        },
+        {
+          "text": "房屋样式原木小屋⌄",
+          "id": null,
+          "line": 514,
+          "hidden": false
+        },
+        {
+          "text": "选择家具",
+          "id": null,
+          "line": 519,
+          "hidden": false
+        },
+        {
+          "text": "物件形态",
+          "id": "homeRoomModelField",
+          "line": 522,
+          "hidden": true
+        },
+        {
+          "text": "摆放表面",
+          "id": null,
+          "line": 523,
+          "hidden": false
+        },
+        {
+          "text": "左右 X",
+          "id": null,
+          "line": 528,
+          "hidden": false
+        },
+        {
+          "text": "前后 Z",
+          "id": null,
+          "line": 529,
+          "hidden": false
+        },
+        {
+          "text": "高度 Y",
+          "id": null,
+          "line": 530,
+          "hidden": true
+        },
+        {
+          "text": "朝向 °",
+          "id": null,
+          "line": 531,
+          "hidden": false
+        },
+        {
+          "text": "切换家具",
+          "id": null,
+          "line": 590,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-roleplay",
+      "line": 595,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "世界知识",
+          "id": null,
+          "line": 598,
+          "hidden": false
+        },
+        {
+          "text": "世界知识工作台",
+          "id": null,
+          "line": 672,
+          "hidden": false
+        },
+        {
+          "text": "角色资料",
+          "id": null,
+          "line": 686,
+          "hidden": false
+        },
+        {
+          "text": "外貌信息",
+          "id": null,
+          "line": 726,
+          "hidden": false
+        },
+        {
+          "text": "整体服饰倾向与具体衣物",
+          "id": null,
+          "line": 763,
+          "hidden": false
+        },
+        {
+          "text": "具体衣物",
+          "id": null,
+          "line": 776,
+          "hidden": false
+        },
+        {
+          "text": "世界观蓝图",
+          "id": null,
+          "line": 836,
+          "hidden": false
+        },
+        {
+          "text": "AstrBot 知识库参考",
+          "id": null,
+          "line": 906,
+          "hidden": false
+        },
+        {
+          "text": "用户与关系资料",
+          "id": null,
+          "line": 916,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "预览",
+          "id": "worldPreviewToggle",
+          "line": 603,
+          "hidden": false
+        },
+        {
+          "text": "保存",
+          "id": null,
+          "line": 604,
+          "hidden": false
+        },
+        {
+          "text": "生成导入草稿",
+          "id": "generateRoleplayDraftBtn",
+          "line": 654,
+          "hidden": false
+        },
+        {
+          "text": "01角色设定",
+          "id": null,
+          "line": 664,
+          "hidden": false
+        },
+        {
+          "text": "02角色衣柜",
+          "id": null,
+          "line": 665,
+          "hidden": false
+        },
+        {
+          "text": "03世界设定",
+          "id": null,
+          "line": 666,
+          "hidden": false
+        },
+        {
+          "text": "04引用资料",
+          "id": null,
+          "line": 667,
+          "hidden": false
+        },
+        {
+          "text": "05关系资料",
+          "id": null,
+          "line": 668,
+          "hidden": false
+        },
+        {
+          "text": "旧版文案",
+          "id": null,
+          "line": 678,
+          "hidden": false
+        },
+        {
+          "text": "标准化填写",
+          "id": null,
+          "line": 679,
+          "hidden": false
+        },
+        {
+          "text": "中性",
+          "id": null,
+          "line": 691,
+          "hidden": false
+        },
+        {
+          "text": "男性",
+          "id": null,
+          "line": 692,
+          "hidden": false
+        },
+        {
+          "text": "女性",
+          "id": null,
+          "line": 693,
+          "hidden": false
+        },
+        {
+          "text": "非人/拟人",
+          "id": null,
+          "line": 694,
+          "hidden": false
+        },
+        {
+          "text": "添加衣物",
+          "id": null,
+          "line": 788,
+          "hidden": false
+        },
+        {
+          "text": "上传图片并识图",
+          "id": null,
+          "line": 789,
+          "hidden": false
+        },
+        {
+          "text": "测试识图模型",
+          "id": null,
+          "line": 806,
+          "hidden": false
+        },
+        {
+          "text": "恢复内置提示词",
+          "id": null,
+          "line": 813,
+          "hidden": false
+        },
+        {
+          "text": "复制内置提示词到编辑框",
+          "id": null,
+          "line": 814,
+          "hidden": false
+        },
+        {
+          "text": "填入示例",
+          "id": null,
+          "line": 838,
+          "hidden": false
+        },
+        {
+          "text": "填入示例",
+          "id": null,
+          "line": 919,
+          "hidden": false
+        },
+        {
+          "text": "保存世界知识",
+          "id": null,
+          "line": 942,
+          "hidden": false
+        },
+        {
+          "text": "×",
+          "id": "worldPreviewClose",
+          "line": 945,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "type": "checkbox",
+          "line": 640
+        },
+        {
+          "type": "checkbox",
+          "line": 644
+        },
+        {
+          "type": "checkbox",
+          "line": 648
+        },
+        {
+          "name": "bot_name",
+          "type": "hidden",
+          "line": 697
+        },
+        {
+          "name": "default_style",
+          "type": "hidden",
+          "line": 698
+        },
+        {
+          "name": "roleplay_knowledge_source_ids",
+          "type": "hidden",
+          "line": 699
+        },
+        {
+          "name": "schedule_persona_prompt",
+          "placeholder": "姓名：\n种族：\n生日：\n性别：\n识别点：\n发型发色：\n瞳色：\n服饰风格：\n职业/身份：\n性格描述：\n核心欲望/目标：\n爱好：\n禁忌：\n关键设定：\n其他补充信息：",
+          "line": 701
+        },
+        {
+          "line": 720
+        },
+        {
+          "line": 721
+        },
+        {
+          "line": 722
+        },
+        {
+          "line": 723
+        },
+        {
+          "line": 727
+        },
+        {
+          "line": 728
+        },
+        {
+          "line": 729
+        },
+        {
+          "line": 730
+        },
+        {
+          "line": 734
+        },
+        {
+          "line": 735
+        },
+        {
+          "line": 736
+        },
+        {
+          "line": 737
+        },
+        {
+          "line": 738
+        },
+        {
+          "line": 743
+        },
+        {
+          "line": 744
+        },
+        {
+          "name": "private_image_self_recognition_hint",
+          "placeholder": "例如：常用头像的构图或标志；聊天截图中使用的昵称；OC / 二创形象的别名；表情包固定签名或水印。\n不要重复填写发色、瞳色、服装等上方已有外貌信息，也不要填写用户资料。",
+          "line": 753
+        },
+        {
+          "name": "enable_wardrobe",
+          "type": "checkbox",
+          "line": 768
+        },
+        {
+          "name": "enable_wardrobe_prompt",
+          "type": "checkbox",
+          "line": 769
+        },
+        {
+          "name": "wardrobe_tendency",
+          "placeholder": "例如：偏爱宽松针织与低饱和色，居家穿棉质家居服，出门常套一件长大衣，配饰只用细银链。",
+          "line": 772
+        },
+        {
+          "type": "text",
+          "placeholder": "例如：米色针织开衫",
+          "line": 782
+        },
+        {
+          "placeholder": "款式、颜色、材质、版型、图案与明显细节。",
+          "line": 785
+        },
+        {
+          "type": "file",
+          "line": 790
+        },
+        {
+          "name": "wardrobe_items",
+          "type": "hidden",
+          "line": 794
+        },
+        {
+          "name": "wardrobe_image_prompt",
+          "placeholder": "留空使用内置提示词。",
+          "line": 810
+        },
+        {
+          "name": "wardrobe_prompt_max_items",
+          "type": "number",
+          "line": 824
+        },
+        {
+          "name": "wardrobe_image_max_count",
+          "type": "number",
+          "line": 827
+        },
+        {
+          "name": "worldview_adaptation_mode",
+          "line": 840
+        },
+        {
+          "name": "schedule_worldview_prompt",
+          "placeholder": "所处世界：\n时代背景：\n基本法则/基调：\n特殊规则：\n主要活动场景：\n世界观关系网：\n其他补充信息：",
+          "line": 852
+        },
+        {
+          "name": "worldview_adaptation_prompt",
+          "placeholder": "可选。只有需要把现实平台换成世界观称呼时再填，例如：\n群聊 = 公会闲谈\n识屏 = 水晶映像\nB站 = 影像记录\nQQ空间 = 公开札记\n资料柜 = 行囊书匣",
+          "line": 861
+        },
+        {
+          "line": 871
+        },
+        {
+          "line": 872
+        },
+        {
+          "line": 873
+        },
+        {
+          "line": 874
+        },
+        {
+          "line": 879
+        },
+        {
+          "line": 880
+        },
+        {
+          "line": 881
+        },
+        {
+          "placeholder": "可留空，例如 公会闲谈",
+          "line": 893
+        },
+        {
+          "placeholder": "可留空，例如 水晶映像",
+          "line": 894
+        },
+        {
+          "placeholder": "可留空，例如 影像记录",
+          "line": 895
+        },
+        {
+          "placeholder": "可留空，例如 公开札记",
+          "line": 896
+        },
+        {
+          "placeholder": "可留空，例如 行囊书匣",
+          "line": 897
+        },
+        {
+          "name": "default_nickname",
+          "line": 921
+        },
+        {
+          "name": "roleplay_user_profile_prompt",
+          "placeholder": "对用户的称呼：\n用户性别：\n用户生日：\n用户职业：\n是角色的XX：\n与角色的相处方式：\n其他补充信息：",
+          "line": 924
+        },
+        {
+          "line": 933
+        },
+        {
+          "line": 934
+        },
+        {
+          "line": 935
+        },
+        {
+          "line": 936
+        },
+        {
+          "line": 937
+        },
+        {
+          "line": 938
+        }
+      ],
+      "labels": [
+        {
+          "text": "快速从已有人格导入 读取 AstrBot 当前人格，生成可检查、可编辑的世界知识草稿。 当前来源 读取中...",
+          "id": null,
+          "line": 622,
+          "hidden": false
+        },
+        {
+          "text": "角色资料身份、外观与性格",
+          "id": null,
+          "line": 639,
+          "hidden": false
+        },
+        {
+          "text": "世界观资料背景、规则与场景",
+          "id": null,
+          "line": 643,
+          "hidden": false
+        },
+        {
+          "text": "用户与关系称呼、关系与互动",
+          "id": null,
+          "line": 647,
+          "hidden": false
+        },
+        {
+          "text": "角色资料补充",
+          "id": null,
+          "line": 700,
+          "hidden": false
+        },
+        {
+          "text": "姓名",
+          "id": null,
+          "line": 720,
+          "hidden": false
+        },
+        {
+          "text": "种族",
+          "id": null,
+          "line": 721,
+          "hidden": false
+        },
+        {
+          "text": "生日",
+          "id": null,
+          "line": 722,
+          "hidden": false
+        },
+        {
+          "text": "性别",
+          "id": null,
+          "line": 723,
+          "hidden": false
+        },
+        {
+          "text": "识别点",
+          "id": null,
+          "line": 727,
+          "hidden": false
+        },
+        {
+          "text": "发型发色",
+          "id": null,
+          "line": 728,
+          "hidden": false
+        },
+        {
+          "text": "瞳色",
+          "id": null,
+          "line": 729,
+          "hidden": false
+        },
+        {
+          "text": "服饰风格",
+          "id": null,
+          "line": 730,
+          "hidden": false
+        },
+        {
+          "text": "职业/身份",
+          "id": null,
+          "line": 734,
+          "hidden": false
+        },
+        {
+          "text": "性格描述",
+          "id": null,
+          "line": 735,
+          "hidden": false
+        },
+        {
+          "text": "核心欲望/目标",
+          "id": null,
+          "line": 736,
+          "hidden": false
+        },
+        {
+          "text": "爱好",
+          "id": null,
+          "line": 737,
+          "hidden": false
+        },
+        {
+          "text": "禁忌",
+          "id": null,
+          "line": 738,
+          "hidden": false
+        },
+        {
+          "text": "深入设定（可选）关键背景和无法归入上方字段的补充。",
+          "id": null,
+          "line": 741,
+          "hidden": false
+        },
+        {
+          "text": "关键设定",
+          "id": null,
+          "line": 743,
+          "hidden": false
+        },
+        {
+          "text": "其他补充信息",
+          "id": null,
+          "line": 744,
+          "hidden": false
+        },
+        {
+          "text": "特殊图像身份线索（可选）只补充上方外貌字段无法表达的识别信息。",
+          "id": null,
+          "line": 749,
+          "hidden": false
+        },
+        {
+          "text": "头像、截图与二创识别线索",
+          "id": null,
+          "line": 752,
+          "hidden": false
+        },
+        {
+          "text": "启用角色衣柜",
+          "id": null,
+          "line": 768,
+          "hidden": false
+        },
+        {
+          "text": "把衣柜写入角色提示词",
+          "id": null,
+          "line": 769,
+          "hidden": false
+        },
+        {
+          "text": "整体服饰倾向",
+          "id": null,
+          "line": 771,
+          "hidden": false
+        },
+        {
+          "text": "衣物名称",
+          "id": null,
+          "line": 781,
+          "hidden": false
+        },
+        {
+          "text": "描述",
+          "id": null,
+          "line": 784,
+          "hidden": false
+        },
+        {
+          "text": "识图设置在这里调整衣柜识图使用的模型和描述提示词。",
+          "id": null,
+          "line": 797,
+          "hidden": false
+        },
+        {
+          "text": "衣柜识图模型",
+          "id": null,
+          "line": 801,
+          "hidden": false
+        },
+        {
+          "text": "衣物描述提示词",
+          "id": null,
+          "line": 809,
+          "hidden": false
+        },
+        {
+          "text": "注入提示词的衣物条数上限",
+          "id": null,
+          "line": 823,
+          "hidden": false
+        },
+        {
+          "text": "单次识图添加上限（上限 3 张）",
+          "id": null,
+          "line": 826,
+          "hidden": false
+        },
+        {
+          "text": "适配模式 自动 现代日常 幻想世界 科幻世界 自定义 关闭",
+          "id": null,
+          "line": 839,
+          "hidden": false
+        },
+        {
+          "text": "世界观/生活背景",
+          "id": null,
+          "line": 851,
+          "hidden": false
+        },
+        {
+          "text": "世界观翻译提示",
+          "id": null,
+          "line": 860,
+          "hidden": false
+        },
+        {
+          "text": "所处世界",
+          "id": null,
+          "line": 871,
+          "hidden": false
+        },
+        {
+          "text": "时代背景",
+          "id": null,
+          "line": 872,
+          "hidden": false
+        },
+        {
+          "text": "基本法则/基调",
+          "id": null,
+          "line": 873,
+          "hidden": false
+        },
+        {
+          "text": "特殊规则",
+          "id": null,
+          "line": 874,
+          "hidden": false
+        },
+        {
+          "text": "场景与关系（按需补充）只有设定涉及固定场景、阵营或人物网络时才需要填写。",
+          "id": null,
+          "line": 877,
+          "hidden": false
+        },
+        {
+          "text": "主要活动场景",
+          "id": null,
+          "line": 879,
+          "hidden": false
+        },
+        {
+          "text": "世界观关系网",
+          "id": null,
+          "line": 880,
+          "hidden": false
+        },
+        {
+          "text": "其他补充信息",
+          "id": null,
+          "line": 881,
+          "hidden": false
+        },
+        {
+          "text": "平台称呼转写（可选） 只有角色世界观需要把\"群聊、识屏、B站、QQ空间、资料柜\"换成设定内说法时再填；普通现代日常可以全部留空。",
+          "id": null,
+          "line": 886,
+          "hidden": false
+        },
+        {
+          "text": "群聊（可选）",
+          "id": null,
+          "line": 893,
+          "hidden": false
+        },
+        {
+          "text": "识屏（可选）",
+          "id": null,
+          "line": 894,
+          "hidden": false
+        },
+        {
+          "text": "B站（可选）",
+          "id": null,
+          "line": 895,
+          "hidden": false
+        },
+        {
+          "text": "QQ空间（可选）",
+          "id": null,
+          "line": 896,
+          "hidden": false
+        },
+        {
+          "text": "资料柜（可选）",
+          "id": null,
+          "line": 897,
+          "hidden": false
+        },
+        {
+          "text": "对用户的称呼",
+          "id": null,
+          "line": 921,
+          "hidden": false
+        },
+        {
+          "text": "用户与关系补充",
+          "id": null,
+          "line": 923,
+          "hidden": false
+        },
+        {
+          "text": "性别",
+          "id": null,
+          "line": 933,
+          "hidden": false
+        },
+        {
+          "text": "生日",
+          "id": null,
+          "line": 934,
+          "hidden": false
+        },
+        {
+          "text": "职业",
+          "id": null,
+          "line": 935,
+          "hidden": false
+        },
+        {
+          "text": "是角色的XX",
+          "id": null,
+          "line": 936,
+          "hidden": false
+        },
+        {
+          "text": "与角色的相处方式",
+          "id": null,
+          "line": 937,
+          "hidden": false
+        },
+        {
+          "text": "其他补充信息",
+          "id": null,
+          "line": 938,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-private",
+      "line": 952,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "用户档案",
+          "id": null,
+          "line": 955,
+          "hidden": false
+        },
+        {
+          "text": "成员目录",
+          "id": null,
+          "line": 969,
+          "hidden": false
+        },
+        {
+          "text": "新增用户",
+          "id": null,
+          "line": 986,
+          "hidden": false
+        },
+        {
+          "text": "身份归并",
+          "id": null,
+          "line": 994,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "筛选",
+          "id": "userFilterToggle",
+          "line": 960,
+          "hidden": false
+        },
+        {
+          "text": "私聊",
+          "id": null,
+          "line": 971,
+          "hidden": false
+        },
+        {
+          "text": "群聊",
+          "id": null,
+          "line": 972,
+          "hidden": false
+        },
+        {
+          "text": "＋ 新增用户",
+          "id": "addUserOpen",
+          "line": 976,
+          "hidden": false
+        },
+        {
+          "text": "管理身份归并",
+          "id": "aliasManageOpen",
+          "line": 977,
+          "hidden": false
+        },
+        {
+          "text": "×",
+          "id": null,
+          "line": 986,
+          "hidden": false
+        },
+        {
+          "text": "取消",
+          "id": null,
+          "line": 989,
+          "hidden": false
+        },
+        {
+          "text": "新增用户",
+          "id": null,
+          "line": 989,
+          "hidden": false
+        },
+        {
+          "text": "×",
+          "id": null,
+          "line": 994,
+          "hidden": false
+        },
+        {
+          "text": "取消",
+          "id": null,
+          "line": 996,
+          "hidden": false
+        },
+        {
+          "text": "保存归并规则",
+          "id": null,
+          "line": 996,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "userFilter",
+          "type": "search",
+          "placeholder": "搜索名称、ID、别名",
+          "line": 959
+        },
+        {
+          "id": "userStatusFilter",
+          "line": 964
+        },
+        {
+          "name": "user_id",
+          "placeholder": "QQ 号或 openid",
+          "line": 987
+        },
+        {
+          "name": "nickname",
+          "placeholder": "可选",
+          "line": 988
+        },
+        {
+          "name": "private_user_aliases",
+          "placeholder": "临时ID=主用户ID\n机器人侧ID=主用户ID",
+          "line": 995
+        }
+      ],
+      "labels": [
+        {
+          "text": "⌕",
+          "id": null,
+          "line": 959,
+          "hidden": false
+        },
+        {
+          "text": "状态 全部状态已启用已停用",
+          "id": null,
+          "line": 964,
+          "hidden": false
+        },
+        {
+          "text": "用户 ID",
+          "id": null,
+          "line": 987,
+          "hidden": false
+        },
+        {
+          "text": "称呼",
+          "id": null,
+          "line": 988,
+          "hidden": false
+        },
+        {
+          "text": "归并规则",
+          "id": null,
+          "line": 995,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-learning",
+      "line": 1001,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "学习工作台",
+          "id": null,
+          "line": 1005,
+          "hidden": false
+        },
+        {
+          "text": "技能学习",
+          "id": null,
+          "line": 1014,
+          "hidden": false
+        },
+        {
+          "text": "表达学习",
+          "id": null,
+          "line": 1044,
+          "hidden": false
+        },
+        {
+          "text": "分享表达规则",
+          "id": "expressionShareDialogTitle",
+          "line": 1065,
+          "hidden": false
+        },
+        {
+          "text": "导入表达规则",
+          "id": "expressionImportDialogTitle",
+          "line": 1092,
+          "hidden": false
+        },
+        {
+          "text": "陪伴能力已改为按需扩展",
+          "id": "extensionMigrationNoticeTitle",
+          "line": 1122,
+          "hidden": false
+        },
+        {
+          "text": "社交关系网",
+          "id": null,
+          "line": 1158,
+          "hidden": false
+        },
+        {
+          "text": "关系节点",
+          "id": null,
+          "line": 1180,
+          "hidden": false
+        },
+        {
+          "text": "群资料",
+          "id": null,
+          "line": 1197,
+          "hidden": false
+        },
+        {
+          "text": "同步状态",
+          "id": null,
+          "line": 1207,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "新增技能",
+          "id": null,
+          "line": 1035,
+          "hidden": false
+        },
+        {
+          "text": "表达库",
+          "id": "expressionViewLibraryTab",
+          "line": 1046,
+          "hidden": false
+        },
+        {
+          "text": "审核队列 0",
+          "id": "expressionViewReviewTab",
+          "line": 1047,
+          "hidden": false
+        },
+        {
+          "text": "×",
+          "id": null,
+          "line": 1068,
+          "hidden": false
+        },
+        {
+          "text": "取消",
+          "id": null,
+          "line": 1079,
+          "hidden": false
+        },
+        {
+          "text": "复制 JSON",
+          "id": null,
+          "line": 1080,
+          "hidden": false
+        },
+        {
+          "text": "下载 JSON",
+          "id": null,
+          "line": 1081,
+          "hidden": false
+        },
+        {
+          "text": "生成分享包",
+          "id": null,
+          "line": 1082,
+          "hidden": false
+        },
+        {
+          "text": "×",
+          "id": null,
+          "line": 1095,
+          "hidden": false
+        },
+        {
+          "text": "取消",
+          "id": null,
+          "line": 1109,
+          "hidden": false
+        },
+        {
+          "text": "预览导入",
+          "id": null,
+          "line": 1110,
+          "hidden": false
+        },
+        {
+          "text": "应用导入",
+          "id": null,
+          "line": 1111,
+          "hidden": false
+        },
+        {
+          "text": "×",
+          "id": null,
+          "line": 1125,
+          "hidden": false
+        },
+        {
+          "text": "稍后处理",
+          "id": null,
+          "line": 1148,
+          "hidden": false
+        },
+        {
+          "text": "知道了",
+          "id": null,
+          "line": 1149,
+          "hidden": false
+        },
+        {
+          "text": "同步资料",
+          "id": "worldbookImportBtn",
+          "line": 1162,
+          "hidden": false
+        },
+        {
+          "text": "清理待确认观察",
+          "id": "worldbookClearPendingBtn",
+          "line": 1163,
+          "hidden": false
+        },
+        {
+          "text": "新增节点",
+          "id": null,
+          "line": 1189,
+          "hidden": false
+        },
+        {
+          "text": "新增群资料",
+          "id": null,
+          "line": 1201,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "name",
+          "line": 1021
+        },
+        {
+          "name": "category",
+          "placeholder": "能力",
+          "line": 1022
+        },
+        {
+          "name": "level",
+          "line": 1024
+        },
+        {
+          "name": "keywords",
+          "placeholder": "逗号分隔",
+          "line": 1033
+        },
+        {
+          "name": "aliases",
+          "placeholder": "同义叫法，逗号分隔",
+          "line": 1034
+        },
+        {
+          "name": "expression_share_scope",
+          "type": "radio",
+          "line": 1072
+        },
+        {
+          "name": "expression_share_scope",
+          "type": "radio",
+          "line": 1073
+        },
+        {
+          "name": "title",
+          "placeholder": "我的表达分享",
+          "line": 1076
+        },
+        {
+          "placeholder": "点击“生成分享包”后显示",
+          "line": 1077
+        },
+        {
+          "type": "file",
+          "line": 1098
+        },
+        {
+          "line": 1099
+        },
+        {
+          "placeholder": "粘贴 private-companion-expression-pack 文件内容",
+          "line": 1101
+        },
+        {
+          "name": "expression_import_destination",
+          "type": "radio",
+          "line": 1104
+        },
+        {
+          "name": "expression_import_destination",
+          "type": "radio",
+          "line": 1105
+        },
+        {
+          "name": "extension_migration_reminder",
+          "type": "radio",
+          "line": 1145
+        },
+        {
+          "name": "extension_migration_reminder",
+          "type": "radio",
+          "line": 1146
+        },
+        {
+          "id": "worldbookMemberFilter",
+          "type": "search",
+          "placeholder": "QQ、B站身份、名称、别名或群名片",
+          "line": 1172
+        },
+        {
+          "name": "user_id",
+          "placeholder": "QQ 号或 bili:UID",
+          "line": 1186
+        },
+        {
+          "name": "name",
+          "placeholder": "成员显示名",
+          "line": 1187
+        },
+        {
+          "name": "priority",
+          "type": "number",
+          "line": 1188
+        },
+        {
+          "name": "group_id",
+          "placeholder": "例如 987654321",
+          "line": 1199
+        },
+        {
+          "name": "name",
+          "placeholder": "群资料名称",
+          "line": 1200
+        }
+      ],
+      "labels": [
+        {
+          "text": "新增或管理技能",
+          "id": null,
+          "line": 1019,
+          "hidden": false
+        },
+        {
+          "text": "技能",
+          "id": null,
+          "line": 1021,
+          "hidden": false
+        },
+        {
+          "text": "分类",
+          "id": null,
+          "line": 1022,
+          "hidden": false
+        },
+        {
+          "text": "等级 还不太熟 能慢慢试 能自己做 已经顺手 很拿手 有自己的办法",
+          "id": null,
+          "line": 1023,
+          "hidden": false
+        },
+        {
+          "text": "关键词",
+          "id": null,
+          "line": 1033,
+          "hidden": false
+        },
+        {
+          "text": "别名",
+          "id": null,
+          "line": 1034,
+          "hidden": false
+        },
+        {
+          "text": "当前筛选结果",
+          "id": null,
+          "line": 1072,
+          "hidden": false
+        },
+        {
+          "text": "全部已启用表达",
+          "id": null,
+          "line": 1073,
+          "hidden": false
+        },
+        {
+          "text": "文件标题",
+          "id": null,
+          "line": 1076,
+          "hidden": false
+        },
+        {
+          "text": "分享包 JSON",
+          "id": null,
+          "line": 1077,
+          "hidden": false
+        },
+        {
+          "text": "选择 JSON 文件",
+          "id": null,
+          "line": 1098,
+          "hidden": false
+        },
+        {
+          "text": "导入目标 正在读取目标...",
+          "id": null,
+          "line": 1099,
+          "hidden": false
+        },
+        {
+          "text": "或粘贴分享包 JSON",
+          "id": null,
+          "line": 1101,
+          "hidden": false
+        },
+        {
+          "text": "进入审核队列 推荐，审核后使用",
+          "id": null,
+          "line": 1104,
+          "hidden": false
+        },
+        {
+          "text": "直接启用 仅在你信任分享来源时使用",
+          "id": null,
+          "line": 1105,
+          "hidden": false
+        },
+        {
+          "text": "继续提醒",
+          "id": null,
+          "line": 1145,
+          "hidden": false
+        },
+        {
+          "text": "不再提醒",
+          "id": null,
+          "line": 1146,
+          "hidden": false
+        },
+        {
+          "text": "查找成员",
+          "id": null,
+          "line": 1170,
+          "hidden": false
+        },
+        {
+          "text": "新增关系节点",
+          "id": null,
+          "line": 1184,
+          "hidden": false
+        },
+        {
+          "text": "身份键",
+          "id": null,
+          "line": 1186,
+          "hidden": false
+        },
+        {
+          "text": "名称",
+          "id": null,
+          "line": 1187,
+          "hidden": false
+        },
+        {
+          "text": "优先级",
+          "id": null,
+          "line": 1188,
+          "hidden": false
+        },
+        {
+          "text": "群号",
+          "id": null,
+          "line": 1199,
+          "hidden": false
+        },
+        {
+          "text": "名称",
+          "id": null,
+          "line": 1200,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": [
+        {
+          "id": "learningPanelSocial",
+          "line": 1154
+        }
+      ]
+    },
+    {
+      "id": "panel-group",
+      "line": 1215,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "群聊观测",
+          "id": null,
+          "line": 1218,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "新增群聊",
+          "id": null,
+          "line": 1228,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "groupFilter",
+          "type": "search",
+          "placeholder": "筛选群 ID / 群名",
+          "line": 1221
+        },
+        {
+          "name": "group_id",
+          "placeholder": "群号、group_openid 或 GroupMessage UMO",
+          "line": 1225
+        },
+        {
+          "name": "group_name",
+          "placeholder": "可选",
+          "line": 1226
+        },
+        {
+          "name": "list_mode",
+          "line": 1227
+        }
+      ],
+      "labels": [
+        {
+          "text": "群 ID / UMO",
+          "id": null,
+          "line": 1225,
+          "hidden": false
+        },
+        {
+          "text": "群名称",
+          "id": null,
+          "line": 1226,
+          "hidden": false
+        },
+        {
+          "text": "名单 加入白名单并开始观察仅创建群资料（暂不观察）加入黑名单",
+          "id": null,
+          "line": 1227,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-memory",
+      "line": 1243,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "生活观察",
+          "id": null,
+          "line": 1245,
+          "hidden": false
+        },
+        {
+          "text": "梦境",
+          "id": null,
+          "line": 1274,
+          "hidden": false
+        },
+        {
+          "text": "当前扮演状态",
+          "id": null,
+          "line": 1283,
+          "hidden": false
+        },
+        {
+          "text": "今日状态原始值",
+          "id": null,
+          "line": 1287,
+          "hidden": false
+        },
+        {
+          "text": "日记碎片",
+          "id": null,
+          "line": 1291,
+          "hidden": false
+        },
+        {
+          "text": "梦境碎片池",
+          "id": null,
+          "line": 1295,
+          "hidden": false
+        },
+        {
+          "text": "日内状态变化",
+          "id": null,
+          "line": 1299,
+          "hidden": false
+        },
+        {
+          "text": "用户交互影响",
+          "id": null,
+          "line": 1325,
+          "hidden": false
+        },
+        {
+          "text": "私聊记忆构成",
+          "id": null,
+          "line": 1329,
+          "hidden": false
+        },
+        {
+          "text": "群聊黑话词云",
+          "id": null,
+          "line": 1333,
+          "hidden": false
+        },
+        {
+          "text": "记忆插件协同",
+          "id": null,
+          "line": 1337,
+          "hidden": false
+        },
+        {
+          "text": "生活日历",
+          "id": null,
+          "line": 1344,
+          "hidden": false
+        },
+        {
+          "text": "今日快照",
+          "id": null,
+          "line": 1358,
+          "hidden": false
+        },
+        {
+          "text": "本月记录",
+          "id": null,
+          "line": 1364,
+          "hidden": false
+        },
+        {
+          "text": "待确认候选",
+          "id": null,
+          "line": 1368,
+          "hidden": false
+        },
+        {
+          "text": "月历表",
+          "id": null,
+          "line": 1373,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "新增目标",
+          "id": null,
+          "line": 1318,
+          "hidden": false
+        },
+        {
+          "text": "‹",
+          "id": "calendarPreviousMonth",
+          "line": 1348,
+          "hidden": false
+        },
+        {
+          "text": "›",
+          "id": "calendarNextMonth",
+          "line": 1350,
+          "hidden": false
+        },
+        {
+          "text": "今天",
+          "id": "calendarTodayButton",
+          "line": 1351,
+          "hidden": false
+        },
+        {
+          "text": "新增记录",
+          "id": "calendarNewRecordButton",
+          "line": 1352,
+          "hidden": false
+        },
+        {
+          "text": "保存记录",
+          "id": null,
+          "line": 1415,
+          "hidden": false
+        },
+        {
+          "text": "清空",
+          "id": "calendarCancelEditButton",
+          "line": 1416,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "title",
+          "line": 1311
+        },
+        {
+          "name": "category",
+          "placeholder": "阅读 / 健康 / 学习",
+          "line": 1312
+        },
+        {
+          "name": "progress",
+          "type": "number",
+          "line": 1313
+        },
+        {
+          "name": "auto_step",
+          "type": "number",
+          "line": 1314
+        },
+        {
+          "name": "next_step",
+          "line": 1315
+        },
+        {
+          "name": "keywords",
+          "placeholder": "逗号分隔，用于匹配已完成日程",
+          "line": 1316
+        },
+        {
+          "name": "note",
+          "line": 1317
+        },
+        {
+          "name": "calendar_id",
+          "type": "hidden",
+          "line": 1381
+        },
+        {
+          "name": "kind",
+          "line": 1383
+        },
+        {
+          "name": "title",
+          "placeholder": "例如：暑假 / 工作日上学",
+          "line": 1390
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "line": 1391
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "line": 1392
+        },
+        {
+          "name": "new_date",
+          "type": "date",
+          "line": 1393
+        },
+        {
+          "name": "start_time",
+          "type": "time",
+          "line": 1394
+        },
+        {
+          "name": "end_time",
+          "type": "time",
+          "line": 1395
+        },
+        {
+          "name": "frequency",
+          "line": 1397
+        },
+        {
+          "name": "by_weekday",
+          "placeholder": "周一,周二 或 0,1",
+          "line": 1404
+        },
+        {
+          "name": "target_id",
+          "placeholder": "取消 / 替换 / 改期时填写",
+          "line": 1405
+        },
+        {
+          "name": "action",
+          "line": 1407
+        }
+      ],
+      "labels": [
+        {
+          "text": "个人目标 明确记录阅读、学习、健康和生活目标",
+          "id": null,
+          "line": 1304,
+          "hidden": false
+        },
+        {
+          "text": "新增目标",
+          "id": null,
+          "line": 1309,
+          "hidden": false
+        },
+        {
+          "text": "目标",
+          "id": null,
+          "line": 1311,
+          "hidden": false
+        },
+        {
+          "text": "分类",
+          "id": null,
+          "line": 1312,
+          "hidden": false
+        },
+        {
+          "text": "当前进度",
+          "id": null,
+          "line": 1313,
+          "hidden": false
+        },
+        {
+          "text": "每次推进",
+          "id": null,
+          "line": 1314,
+          "hidden": false
+        },
+        {
+          "text": "下一步",
+          "id": null,
+          "line": 1315,
+          "hidden": false
+        },
+        {
+          "text": "匹配词",
+          "id": null,
+          "line": 1316,
+          "hidden": false
+        },
+        {
+          "text": "备注",
+          "id": null,
+          "line": 1317,
+          "hidden": false
+        },
+        {
+          "text": "新增 / 编辑日历记录暑假、上学规则、补课或临时调整",
+          "id": null,
+          "line": 1379,
+          "hidden": false
+        },
+        {
+          "text": "类型 长期区间 单次事件 周期规则 例外调整",
+          "id": null,
+          "line": 1382,
+          "hidden": false
+        },
+        {
+          "text": "标题",
+          "id": null,
+          "line": 1390,
+          "hidden": false
+        },
+        {
+          "text": "开始日期",
+          "id": null,
+          "line": 1391,
+          "hidden": false
+        },
+        {
+          "text": "结束日期",
+          "id": null,
+          "line": 1392,
+          "hidden": false
+        },
+        {
+          "text": "改期到 仅“改期”例外填写",
+          "id": null,
+          "line": 1393,
+          "hidden": false
+        },
+        {
+          "text": "开始时间",
+          "id": null,
+          "line": 1394,
+          "hidden": false
+        },
+        {
+          "text": "结束时间",
+          "id": null,
+          "line": 1395,
+          "hidden": false
+        },
+        {
+          "text": "周期 每周 每天 每月 每年",
+          "id": null,
+          "line": 1396,
+          "hidden": false
+        },
+        {
+          "text": "周几（周期规则）",
+          "id": null,
+          "line": 1404,
+          "hidden": false
+        },
+        {
+          "text": "例外目标 ID 新增例外可留空",
+          "id": null,
+          "line": 1405,
+          "hidden": false
+        },
+        {
+          "text": "例外动作 替换 取消 改期 新增",
+          "id": null,
+          "line": 1406,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-proactive",
+      "line": 1423,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "今日主动候选",
+          "id": null,
+          "line": 1426,
+          "hidden": false
+        },
+        {
+          "text": "来源分布",
+          "id": null,
+          "line": 1432,
+          "hidden": false
+        },
+        {
+          "text": "状态分布",
+          "id": null,
+          "line": 1436,
+          "hidden": false
+        },
+        {
+          "text": "主动任务记录",
+          "id": null,
+          "line": 1440,
+          "hidden": false
+        },
+        {
+          "text": "候选记录",
+          "id": null,
+          "line": 1444,
+          "hidden": false
+        }
+      ],
+      "buttons": [],
+      "fields": [],
+      "labels": [],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-creative",
+      "line": 1451,
+      "hidden": true,
+      "headings": [
+        {
+          "text": "创作",
+          "id": null,
+          "line": 1454,
+          "hidden": false
+        },
+        {
+          "text": "备忘便签",
+          "id": "memoWorkspaceTitle",
+          "line": 1491,
+          "hidden": false
+        },
+        {
+          "text": "上层书架",
+          "id": null,
+          "line": 1541,
+          "hidden": false
+        },
+        {
+          "text": "抽屉夹层",
+          "id": null,
+          "line": 1551,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "新建便签",
+          "id": "memoCreateBtn",
+          "line": 1494,
+          "hidden": false
+        },
+        {
+          "text": "进行中 0",
+          "id": null,
+          "line": 1497,
+          "hidden": false
+        },
+        {
+          "text": "全部 0",
+          "id": null,
+          "line": 1498,
+          "hidden": false
+        },
+        {
+          "text": "已完成 0",
+          "id": null,
+          "line": 1499,
+          "hidden": false
+        },
+        {
+          "text": "取消",
+          "id": "memoCancelBtn",
+          "line": 1531,
+          "hidden": false
+        },
+        {
+          "text": "保存便签",
+          "id": null,
+          "line": 1532,
+          "hidden": false
+        },
+        {
+          "text": "打开抽屉",
+          "id": null,
+          "line": 1559,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "memoTitle",
+          "name": "title",
+          "placeholder": "例如：提交材料",
+          "line": 1504
+        },
+        {
+          "id": "memoContent",
+          "name": "content",
+          "placeholder": "补充地点、清单或需要记住的细节",
+          "line": 1505
+        },
+        {
+          "id": "memoDueAt",
+          "name": "due_at",
+          "type": "datetime-local",
+          "line": 1508
+        },
+        {
+          "id": "memoRepeat",
+          "name": "repeat",
+          "line": 1510
+        },
+        {
+          "name": "color",
+          "type": "radio",
+          "line": 1520
+        },
+        {
+          "name": "color",
+          "type": "radio",
+          "line": 1521
+        },
+        {
+          "name": "color",
+          "type": "radio",
+          "line": 1522
+        },
+        {
+          "name": "color",
+          "type": "radio",
+          "line": 1523
+        },
+        {
+          "name": "color",
+          "type": "radio",
+          "line": 1524
+        },
+        {
+          "id": "memoPinned",
+          "name": "pinned",
+          "type": "checkbox",
+          "line": 1526
+        },
+        {
+          "id": "memoRemind",
+          "name": "remind_enabled",
+          "type": "checkbox",
+          "line": 1527
+        },
+        {
+          "id": "bookshelfPassword",
+          "type": "password",
+          "placeholder": "输入夹层密码",
+          "line": 1557
+        }
+      ],
+      "labels": [
+        {
+          "text": "标题",
+          "id": null,
+          "line": 1504,
+          "hidden": false
+        },
+        {
+          "text": "内容",
+          "id": null,
+          "line": 1505,
+          "hidden": false
+        },
+        {
+          "text": "到期时间",
+          "id": null,
+          "line": 1508,
+          "hidden": false
+        },
+        {
+          "text": "重复 不重复 每天 每周 每月 每年",
+          "id": null,
+          "line": 1509,
+          "hidden": false
+        },
+        {
+          "text": "",
+          "id": null,
+          "line": 1520,
+          "hidden": false
+        },
+        {
+          "text": "",
+          "id": null,
+          "line": 1521,
+          "hidden": false
+        },
+        {
+          "text": "",
+          "id": null,
+          "line": 1522,
+          "hidden": false
+        },
+        {
+          "text": "",
+          "id": null,
+          "line": 1523,
+          "hidden": false
+        },
+        {
+          "text": "",
+          "id": null,
+          "line": 1524,
+          "hidden": false
+        },
+        {
+          "text": "置顶",
+          "id": null,
+          "line": 1526,
+          "hidden": false
+        },
+        {
+          "text": "到期提醒",
+          "id": null,
+          "line": 1527,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-tokens",
+      "line": 1569,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "Token 消耗监控",
+          "id": null,
+          "line": 1571,
+          "hidden": false
+        },
+        {
+          "text": "账户余额",
+          "id": null,
+          "line": 1596,
+          "hidden": false
+        },
+        {
+          "text": "Provider 消耗排行",
+          "id": "tokenProviderChartTitle",
+          "line": 1600,
+          "hidden": false
+        },
+        {
+          "text": "任务消耗排行",
+          "id": "tokenTaskChartTitle",
+          "line": 1604,
+          "hidden": false
+        },
+        {
+          "text": "近 48 小时趋势",
+          "id": null,
+          "line": 1609,
+          "hidden": false
+        },
+        {
+          "text": "每日统计",
+          "id": "tokenDailyChartTitle",
+          "line": 1613,
+          "hidden": false
+        },
+        {
+          "text": "每日明细",
+          "id": "tokenDailyTableTitle",
+          "line": 1617,
+          "hidden": false
+        },
+        {
+          "text": "Provider 明细",
+          "id": "tokenProviderTableTitle",
+          "line": 1621,
+          "hidden": false
+        },
+        {
+          "text": "任务明细",
+          "id": "tokenTaskTableTitle",
+          "line": 1625,
+          "hidden": false
+        },
+        {
+          "text": "最近调用",
+          "id": "tokenRecentTableTitle",
+          "line": 1629,
+          "hidden": false
+        },
+        {
+          "text": "AstrBot 主链会话",
+          "id": null,
+          "line": 1633,
+          "hidden": false
+        },
+        {
+          "text": "AstrBot 主链最近对话",
+          "id": null,
+          "line": 1637,
+          "hidden": false
+        },
+        {
+          "text": "记忆插件消耗",
+          "id": null,
+          "line": 1641,
+          "hidden": false
+        },
+        {
+          "text": "记忆插件任务 / Provider",
+          "id": null,
+          "line": 1645,
+          "hidden": false
+        },
+        {
+          "text": "记忆插件最近调用",
+          "id": null,
+          "line": 1652,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "清空统计",
+          "id": "resetTokenStatsBtn",
+          "line": 1573,
+          "hidden": false
+        },
+        {
+          "text": "陪伴插件",
+          "id": null,
+          "line": 1578,
+          "hidden": false
+        },
+        {
+          "text": "记忆插件",
+          "id": null,
+          "line": 1579,
+          "hidden": false
+        },
+        {
+          "text": "一起房间",
+          "id": null,
+          "line": 1580,
+          "hidden": true
+        },
+        {
+          "text": "LLM 主链",
+          "id": null,
+          "line": 1581,
+          "hidden": false
+        },
+        {
+          "text": "今日",
+          "id": null,
+          "line": 1584,
+          "hidden": false
+        },
+        {
+          "text": "总计",
+          "id": null,
+          "line": 1585,
+          "hidden": false
+        },
+        {
+          "text": "按日期",
+          "id": null,
+          "line": 1586,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "tokenDateSelect",
+          "line": 1590
+        }
+      ],
+      "labels": [
+        {
+          "text": "日期",
+          "id": null,
+          "line": 1588,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-troubleshooting",
+      "line": 1658,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "排障指挥台",
+          "id": null,
+          "line": 1663,
+          "hidden": false
+        },
+        {
+          "text": "你遇到了什么问题？",
+          "id": "troubleshootingProblemTitle",
+          "line": 1675,
+          "hidden": false
+        },
+        {
+          "text": "需要处理的信号",
+          "id": "troubleshootingChecksTitle",
+          "line": 1687,
+          "hidden": false
+        },
+        {
+          "text": "链路与运行状态",
+          "id": "troubleshootingChainTitle",
+          "line": 1709,
+          "hidden": false
+        },
+        {
+          "text": "统一身份与隔离",
+          "id": null,
+          "line": 1714,
+          "hidden": false
+        },
+        {
+          "text": "SQLite 并发",
+          "id": null,
+          "line": 1718,
+          "hidden": false
+        },
+        {
+          "text": "消息收口追踪",
+          "id": null,
+          "line": 1722,
+          "hidden": false
+        },
+        {
+          "text": "最近问题",
+          "id": "troubleshootingEventsTitle",
+          "line": 1730,
+          "hidden": false
+        },
+        {
+          "text": "最近注入内容",
+          "id": null,
+          "line": 1740,
+          "hidden": false
+        },
+        {
+          "text": "运行诊断",
+          "id": null,
+          "line": 1744,
+          "hidden": false
+        },
+        {
+          "text": "常见问题",
+          "id": null,
+          "line": 1748,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "执行检查",
+          "id": "refreshTroubleshootingBtn",
+          "line": 1667,
+          "hidden": false
+        },
+        {
+          "text": "全部",
+          "id": null,
+          "line": 1690,
+          "hidden": false
+        },
+        {
+          "text": "错误",
+          "id": null,
+          "line": 1691,
+          "hidden": false
+        },
+        {
+          "text": "警告",
+          "id": null,
+          "line": 1692,
+          "hidden": false
+        },
+        {
+          "text": "信息",
+          "id": null,
+          "line": 1693,
+          "hidden": false
+        }
+      ],
+      "fields": [],
+      "labels": [
+        {
+          "text": "已屏蔽的警告类型 0 不计入当前警告",
+          "id": null,
+          "line": 1697,
+          "hidden": false
+        },
+        {
+          "text": "证据与深度排查提示词注入、常见问题和运行诊断",
+          "id": null,
+          "line": 1737,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-image-cache",
+      "line": 1755,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "图片/表情包缓存",
+          "id": null,
+          "line": 1759,
+          "hidden": false
+        },
+        {
+          "text": "自有反应图素材",
+          "id": "ownedReactionAssetsTitle",
+          "line": 1794,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "返回配置页",
+          "id": null,
+          "line": 1763,
+          "hidden": false
+        },
+        {
+          "text": "批量编辑",
+          "id": "imageCacheBatchModeBtn",
+          "line": 1764,
+          "hidden": false
+        },
+        {
+          "text": "刷新缓存",
+          "id": "refreshImageCacheBtn",
+          "line": 1765,
+          "hidden": false
+        },
+        {
+          "text": "全选本页",
+          "id": "imageCacheSelectPageBtn",
+          "line": 1779,
+          "hidden": false
+        },
+        {
+          "text": "反选本页",
+          "id": "imageCacheInvertPageBtn",
+          "line": 1780,
+          "hidden": false
+        },
+        {
+          "text": "清空选择",
+          "id": "imageCacheClearSelectionBtn",
+          "line": 1781,
+          "hidden": false
+        },
+        {
+          "text": "批量删除",
+          "id": "imageCacheBulkDeleteBtn",
+          "line": 1782,
+          "hidden": false
+        },
+        {
+          "text": "刷新状态",
+          "id": "refreshOwnedReactionAssetsBtn",
+          "line": 1797,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "imageCacheFilter",
+          "type": "search",
+          "placeholder": "筛选摘要 / hash / provider / 类型",
+          "line": 1770
+        },
+        {
+          "id": "imageCacheScope",
+          "line": 1771
+        }
+      ],
+      "labels": [],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-config",
+      "line": 1804,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "管理能力",
+          "id": "companionManagementTitle",
+          "line": 1806,
+          "hidden": false
+        },
+        {
+          "text": "配置工作台",
+          "id": null,
+          "line": 1824,
+          "hidden": false
+        },
+        {
+          "text": "通用设置",
+          "id": null,
+          "line": 1838,
+          "hidden": false
+        },
+        {
+          "text": "外部主动能力",
+          "id": null,
+          "line": 1857,
+          "hidden": false
+        },
+        {
+          "text": "动态提示词注入位置",
+          "id": null,
+          "line": 1868,
+          "hidden": false
+        },
+        {
+          "text": "群聊名单",
+          "id": null,
+          "line": 1887,
+          "hidden": false
+        },
+        {
+          "text": "配置迁移",
+          "id": null,
+          "line": 1936,
+          "hidden": false
+        },
+        {
+          "text": "最近自动备份",
+          "id": null,
+          "line": 1984,
+          "hidden": false
+        },
+        {
+          "text": "导入后检查",
+          "id": null,
+          "line": 1988,
+          "hidden": false
+        },
+        {
+          "text": "存储方式",
+          "id": null,
+          "line": 1997,
+          "hidden": false
+        },
+        {
+          "text": "面板设置",
+          "id": null,
+          "line": 2034,
+          "hidden": false
+        },
+        {
+          "text": "预览",
+          "id": null,
+          "line": 2059,
+          "hidden": false
+        },
+        {
+          "text": "统计面板",
+          "id": "configPersonaStatsTitle",
+          "line": 2089,
+          "hidden": false
+        },
+        {
+          "text": "运行设置",
+          "id": null,
+          "line": 2103,
+          "hidden": false
+        },
+        {
+          "text": "主动调度",
+          "id": null,
+          "line": 2118,
+          "hidden": false
+        },
+        {
+          "text": "主动节奏",
+          "id": null,
+          "line": 2130,
+          "hidden": false
+        },
+        {
+          "text": "资源配额",
+          "id": null,
+          "line": 2146,
+          "hidden": false
+        },
+        {
+          "text": "功能开关",
+          "id": null,
+          "line": 2164,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "回小屋",
+          "id": null,
+          "line": 1806,
+          "hidden": false
+        },
+        {
+          "text": "刷新拓展目录",
+          "id": null,
+          "line": 1811,
+          "hidden": false
+        },
+        {
+          "text": "通用设置",
+          "id": null,
+          "line": 1828,
+          "hidden": false
+        },
+        {
+          "text": "人格运行",
+          "id": null,
+          "line": 1829,
+          "hidden": false
+        },
+        {
+          "text": "人格开关",
+          "id": null,
+          "line": 1830,
+          "hidden": false
+        },
+        {
+          "text": "查看相关模型",
+          "id": null,
+          "line": 1860,
+          "hidden": false
+        },
+        {
+          "text": "保存位置",
+          "id": null,
+          "line": 1881,
+          "hidden": false
+        },
+        {
+          "text": "保存名单",
+          "id": null,
+          "line": 1925,
+          "hidden": false
+        },
+        {
+          "text": "导出配置备份",
+          "id": "exportConfigBtn",
+          "line": 1942,
+          "hidden": false
+        },
+        {
+          "text": "预览导入",
+          "id": "previewConfigImportBtn",
+          "line": 1976,
+          "hidden": false
+        },
+        {
+          "text": "确认导入",
+          "id": "applyConfigImportBtn",
+          "line": 1977,
+          "hidden": false
+        },
+        {
+          "text": "保存存储方式",
+          "id": "saveStorageConfigBtn",
+          "line": 2026,
+          "hidden": false
+        },
+        {
+          "text": "示例按钮",
+          "id": null,
+          "line": 2062,
+          "hidden": false
+        },
+        {
+          "text": "保存运行设置",
+          "id": null,
+          "line": 2155,
+          "hidden": false
+        },
+        {
+          "text": "启用基础安全项",
+          "id": "enableSafeFeaturesBtn",
+          "line": 2175,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "passive_injection_position",
+          "line": 1875
+        },
+        {
+          "id": "groupAccessMode",
+          "line": 1900
+        },
+        {
+          "name": "groupAccessModeChoice",
+          "type": "radio",
+          "line": 1905
+        },
+        {
+          "name": "groupAccessModeChoice",
+          "type": "radio",
+          "line": 1906
+        },
+        {
+          "id": "groupWhitelist",
+          "placeholder": "一行一个或逗号分隔",
+          "line": 1916
+        },
+        {
+          "id": "groupBlacklist",
+          "placeholder": "一行一个或逗号分隔",
+          "line": 1920
+        },
+        {
+          "id": "importConfigFile",
+          "type": "file",
+          "line": 1944
+        },
+        {
+          "type": "checkbox",
+          "line": 1950
+        },
+        {
+          "type": "checkbox",
+          "line": 1951
+        },
+        {
+          "type": "checkbox",
+          "line": 1952
+        },
+        {
+          "type": "checkbox",
+          "line": 1953
+        },
+        {
+          "type": "checkbox",
+          "line": 1954
+        },
+        {
+          "id": "configImportMode",
+          "line": 1959
+        },
+        {
+          "id": "configImportConflict",
+          "line": 1966
+        },
+        {
+          "id": "configAllowChecksumMismatch",
+          "type": "checkbox",
+          "line": 1973
+        },
+        {
+          "id": "storageBackendSelect",
+          "name": "storage_backend",
+          "line": 2006
+        },
+        {
+          "id": "storageSqlitePathInput",
+          "name": "storage_sqlite_path",
+          "type": "text",
+          "placeholder": "留空时自动使用插件数据目录下 companions.db",
+          "line": 2013
+        },
+        {
+          "id": "storageSafetyCleanupToggle",
+          "name": "enable_store_control_tag_sanitization",
+          "type": "checkbox",
+          "line": 2017
+        },
+        {
+          "id": "appearanceFontSelect",
+          "line": 2042
+        },
+        {
+          "id": "configPersonaSelect",
+          "line": 2077
+        },
+        {
+          "name": "max_daily_messages",
+          "type": "number",
+          "line": 2122
+        },
+        {
+          "name": "idle_minutes",
+          "type": "number",
+          "line": 2123
+        },
+        {
+          "name": "min_interval_minutes",
+          "type": "number",
+          "line": 2124
+        },
+        {
+          "name": "check_interval_seconds",
+          "type": "number",
+          "line": 2125
+        },
+        {
+          "name": "enable_proactive_burst",
+          "type": "checkbox",
+          "line": 2134
+        },
+        {
+          "name": "proactive_burst_max_messages",
+          "type": "number",
+          "line": 2135
+        },
+        {
+          "name": "proactive_burst_gap_min_seconds",
+          "type": "number",
+          "line": 2136
+        },
+        {
+          "name": "proactive_burst_gap_max_seconds",
+          "type": "number",
+          "line": 2137
+        },
+        {
+          "name": "proactive_hour_activity_curve",
+          "type": "text",
+          "placeholder": "0.22,0.16,0.12,...,0.32",
+          "line": 2139
+        },
+        {
+          "name": "daily_token_limit",
+          "type": "number",
+          "line": 2149
+        },
+        {
+          "name": "enable_daily_token_soft_limit",
+          "type": "checkbox",
+          "line": 2150
+        },
+        {
+          "name": "daily_token_soft_limit",
+          "type": "number",
+          "line": 2151
+        },
+        {
+          "id": "featureFilter",
+          "type": "search",
+          "placeholder": "功能名、配置键或用途",
+          "line": 2173
+        }
+      ],
+      "labels": [
+        {
+          "text": "能力配置与运行状态",
+          "id": null,
+          "line": 1810,
+          "hidden": false
+        },
+        {
+          "text": "暂停、丢弃、恢复与更新",
+          "id": null,
+          "line": 1815,
+          "hidden": false
+        },
+        {
+          "text": "配置工作台 通用设置 多人格拓扑、AstrBot 路由状态、群聊范围、数据维护与页面外观。 人格管理 AstrBot 路由 群聊范围 页面外观 展开",
+          "id": null,
+          "line": 1835,
+          "hidden": false
+        },
+        {
+          "text": "注入位置 当前请求末尾 系统提示词 自动（缓存优先）",
+          "id": null,
+          "line": 1873,
+          "hidden": false
+        },
+        {
+          "text": "群聊名单 管理白名单 / 黑名单与当前群聊覆盖范围。",
+          "id": null,
+          "line": 1885,
+          "hidden": false
+        },
+        {
+          "text": "白名单",
+          "id": null,
+          "line": 1905,
+          "hidden": false
+        },
+        {
+          "text": "黑名单",
+          "id": null,
+          "line": 1906,
+          "hidden": false
+        },
+        {
+          "text": "批量编辑群号",
+          "id": null,
+          "line": 1912,
+          "hidden": false
+        },
+        {
+          "text": "白名单群号",
+          "id": null,
+          "line": 1914,
+          "hidden": false
+        },
+        {
+          "text": "黑名单群号",
+          "id": null,
+          "line": 1918,
+          "hidden": false
+        },
+        {
+          "text": "配置迁移 导出或导入可迁移配置、关系和群聊资料；缓存、Token、最近消息和运行日志不会写入备份。",
+          "id": null,
+          "line": 1934,
+          "hidden": false
+        },
+        {
+          "text": "选择备份文件",
+          "id": null,
+          "line": 1943,
+          "hidden": false
+        },
+        {
+          "text": "基础配置",
+          "id": null,
+          "line": 1950,
+          "hidden": false
+        },
+        {
+          "text": "关系/群资料",
+          "id": null,
+          "line": 1951,
+          "hidden": false
+        },
+        {
+          "text": "候选菜单/技能",
+          "id": null,
+          "line": 1952,
+          "hidden": false
+        },
+        {
+          "text": "模型配置",
+          "id": null,
+          "line": 1953,
+          "hidden": false
+        },
+        {
+          "text": "敏感配置",
+          "id": null,
+          "line": 1954,
+          "hidden": false
+        },
+        {
+          "text": "导入方式 合并导入，保留现有资料 覆盖可迁移资料",
+          "id": null,
+          "line": 1957,
+          "hidden": false
+        },
+        {
+          "text": "字段冲突 使用备份内容 保留当前内容 只补当前空字段",
+          "id": null,
+          "line": 1964,
+          "hidden": false
+        },
+        {
+          "text": "校验失败仍继续预览/导入",
+          "id": null,
+          "line": 1972,
+          "hidden": false
+        },
+        {
+          "text": "存储方式 切换陪伴插件主数据的保存后端与路径。",
+          "id": null,
+          "line": 1995,
+          "hidden": false
+        },
+        {
+          "text": "主数据保存方式 json sqlite",
+          "id": null,
+          "line": 2004,
+          "hidden": false
+        },
+        {
+          "text": "SQLite 数据文件路径",
+          "id": "storageSqlitePathWrap",
+          "line": 2011,
+          "hidden": false
+        },
+        {
+          "text": "数据安全清理 保存时清理模型泄漏的伪控制标签；原始群消息、成员原话和代码片段会保留。",
+          "id": null,
+          "line": 2016,
+          "hidden": false
+        },
+        {
+          "text": "面板设置 调整字体与配色主题。",
+          "id": null,
+          "line": 2032,
+          "hidden": false
+        },
+        {
+          "text": "页面字体 原始界面字体 微软雅黑 等线 思源黑体 / 苹方 宋体 楷体 仿宋 13.woff2 艺术字体",
+          "id": null,
+          "line": 2040,
+          "hidden": false
+        },
+        {
+          "text": "人格配置",
+          "id": null,
+          "line": 2075,
+          "hidden": false
+        },
+        {
+          "text": "运行节奏 运行设置 仅保留未归入功能开关的主动节奏与资源配额。 主动上限 触发间隔 检查频率 Token 配额 展开",
+          "id": null,
+          "line": 2100,
+          "hidden": false
+        },
+        {
+          "text": "每日主动配额",
+          "id": null,
+          "line": 2122,
+          "hidden": false
+        },
+        {
+          "text": "空闲门槛分钟",
+          "id": null,
+          "line": 2123,
+          "hidden": false
+        },
+        {
+          "text": "最小主动间隔分钟",
+          "id": null,
+          "line": 2124,
+          "hidden": false
+        },
+        {
+          "text": "后台检查间隔秒",
+          "id": null,
+          "line": 2125,
+          "hidden": false
+        },
+        {
+          "text": "启用爆发式主动消息",
+          "id": null,
+          "line": 2134,
+          "hidden": false
+        },
+        {
+          "text": "一次最多消息数",
+          "id": null,
+          "line": 2135,
+          "hidden": false
+        },
+        {
+          "text": "爆发最小间隔秒",
+          "id": null,
+          "line": 2136,
+          "hidden": false
+        },
+        {
+          "text": "爆发最大间隔秒",
+          "id": null,
+          "line": 2137,
+          "hidden": false
+        },
+        {
+          "text": "小时活跃曲线 按 0 点到 23 点填写 24 个逗号分隔权重；留空或数量不对时使用默认曲线。",
+          "id": null,
+          "line": 2138,
+          "hidden": false
+        },
+        {
+          "text": "每日插件 Token 限额",
+          "id": null,
+          "line": 2149,
+          "hidden": false
+        },
+        {
+          "text": "启用每日 Token 软限额",
+          "id": null,
+          "line": 2150,
+          "hidden": false
+        },
+        {
+          "text": "每日 Token 软限额",
+          "id": null,
+          "line": 2151,
+          "hidden": false
+        },
+        {
+          "text": "搜索配置",
+          "id": null,
+          "line": 2171,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-image",
+      "line": 2205,
+      "hidden": true,
+      "headings": [
+        {
+          "text": "生图运行",
+          "id": null,
+          "line": 2208,
+          "hidden": false
+        },
+        {
+          "text": "最近一次生成",
+          "id": null,
+          "line": 2225,
+          "hidden": false
+        },
+        {
+          "text": "统一引擎",
+          "id": null,
+          "line": 2234,
+          "hidden": false
+        },
+        {
+          "text": "最近生图调试",
+          "id": "imageRuntimeDebugTitle",
+          "line": 2241,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "刷新",
+          "id": "imageRuntimeRefreshBtn",
+          "line": 2213,
+          "hidden": false
+        },
+        {
+          "text": "生图配置",
+          "id": "imageRuntimeConfigBtn",
+          "line": 2214,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "imageRuntimeDebugTraceSelect",
+          "line": 2253
+        }
+      ],
+      "labels": [
+        {
+          "text": "打开下拉菜单查看完整 debug 日志",
+          "id": null,
+          "line": 2250,
+          "hidden": false
+        },
+        {
+          "text": "Trace",
+          "id": null,
+          "line": 2252,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-models",
+      "line": 2260,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "模型配置",
+          "id": null,
+          "line": 2263,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "任务模型",
+          "id": "modelsProvidersTab",
+          "line": 2267,
+          "hidden": false
+        },
+        {
+          "text": "语音合成",
+          "id": "modelsTtsTab",
+          "line": 2268,
+          "hidden": false
+        },
+        {
+          "text": "生图模型",
+          "id": "modelsImageTab",
+          "line": 2269,
+          "hidden": true
+        },
+        {
+          "text": "快速配置",
+          "id": null,
+          "line": 2284,
+          "hidden": false
+        },
+        {
+          "text": "精准配置",
+          "id": null,
+          "line": 2285,
+          "hidden": false
+        },
+        {
+          "text": "全部",
+          "id": null,
+          "line": 2291,
+          "hidden": false
+        },
+        {
+          "text": "已配置",
+          "id": null,
+          "line": 2292,
+          "hidden": false
+        },
+        {
+          "text": "自动回退",
+          "id": null,
+          "line": 2293,
+          "hidden": false
+        },
+        {
+          "text": "低延迟优先",
+          "id": null,
+          "line": 2294,
+          "hidden": false
+        },
+        {
+          "text": "效果优先",
+          "id": null,
+          "line": 2295,
+          "hidden": false
+        },
+        {
+          "text": "视觉/外部",
+          "id": null,
+          "line": 2296,
+          "hidden": false
+        },
+        {
+          "text": "测试全部模型",
+          "id": "testAllProvidersBtn",
+          "line": 2299,
+          "hidden": false
+        },
+        {
+          "text": "保存并覆盖两套模型配置",
+          "id": "saveProvidersBtn",
+          "line": 2300,
+          "hidden": false
+        },
+        {
+          "text": "保存并应用生图配置",
+          "id": "saveImageModelsBtn",
+          "line": 2315,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "providerFilter",
+          "type": "search",
+          "placeholder": "筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果",
+          "line": 2289
+        }
+      ],
+      "labels": [
+        {
+          "text": "旧模式配置（未启用原生路线时使用）",
+          "id": null,
+          "line": 2311,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-qzone",
+      "line": 2321,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "QQ 空间",
+          "id": null,
+          "line": 2325,
+          "hidden": false
+        },
+        {
+          "text": "QQ 空间",
+          "id": "qzoneAccountName",
+          "line": 2343,
+          "hidden": false
+        },
+        {
+          "text": "浏览范围",
+          "id": null,
+          "line": 2354,
+          "hidden": false
+        },
+        {
+          "text": "发布说说",
+          "id": null,
+          "line": 2369,
+          "hidden": false
+        },
+        {
+          "text": "空间动态",
+          "id": null,
+          "line": 2384,
+          "hidden": false
+        },
+        {
+          "text": "动态详情",
+          "id": null,
+          "line": 2395,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "刷新 Cookies",
+          "id": "qzoneRefreshCookiesBtn",
+          "line": 2329,
+          "hidden": false
+        },
+        {
+          "text": "刷新动态",
+          "id": "qzoneRefreshBtn",
+          "line": 2330,
+          "hidden": false
+        },
+        {
+          "text": "好友动态",
+          "id": null,
+          "line": 2357,
+          "hidden": false
+        },
+        {
+          "text": "我的空间",
+          "id": null,
+          "line": 2358,
+          "hidden": false
+        },
+        {
+          "text": "指定 QQ",
+          "id": null,
+          "line": 2359,
+          "hidden": false
+        },
+        {
+          "text": "查看",
+          "id": null,
+          "line": 2363,
+          "hidden": false
+        },
+        {
+          "text": "发布到空间",
+          "id": null,
+          "line": 2374,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "qzoneTargetUin",
+          "placeholder": "输入 QQ 号后查看",
+          "line": 2362
+        },
+        {
+          "id": "qzonePublishContent",
+          "placeholder": "写点公开发到 QQ 空间的话",
+          "line": 2373
+        }
+      ],
+      "labels": [],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-experimental",
+      "line": 2406,
+      "hidden": false,
+      "headings": [],
+      "buttons": [],
+      "fields": [],
+      "labels": [],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-prompts",
+      "line": 2410,
+      "hidden": false,
+      "headings": [
+        {
+          "text": "任务提示词",
+          "id": null,
+          "line": 2413,
+          "hidden": false
+        },
+        {
+          "text": "选择任务",
+          "id": "promptsEditorTitle",
+          "line": 2447,
+          "hidden": false
+        }
+      ],
+      "buttons": [
+        {
+          "text": "全部",
+          "id": null,
+          "line": 2430,
+          "hidden": false
+        },
+        {
+          "text": "已自定义",
+          "id": null,
+          "line": 2431,
+          "hidden": false
+        },
+        {
+          "text": "恢复默认",
+          "id": "promptsResetBtn",
+          "line": 2475,
+          "hidden": false
+        },
+        {
+          "text": "保存提示词",
+          "id": "promptsSaveBtn",
+          "line": 2476,
+          "hidden": false
+        }
+      ],
+      "fields": [
+        {
+          "id": "promptsSearch",
+          "type": "search",
+          "placeholder": "名称、任务键、用途或模型配置键",
+          "line": 2427
+        },
+        {
+          "id": "promptsTextarea",
+          "placeholder": "留空时完整使用插件内置任务提示词。填写后，这段指令会附加到该任务动态生成的提示词中。",
+          "line": 2469
+        }
+      ],
+      "labels": [
+        {
+          "text": "查找任务",
+          "id": null,
+          "line": 2425,
+          "hidden": false
+        },
+        {
+          "text": "自定义附加指令",
+          "id": null,
+          "line": 2467,
+          "hidden": false
+        }
+      ],
+      "retired_blocks": []
+    },
+    {
+      "id": "panel-reality",
+      "line": 2484,
+      "hidden": true,
+      "headings": [],
+      "buttons": [],
+      "fields": [],
+      "labels": [],
+      "retired_blocks": []
+    }
+  ]
+}

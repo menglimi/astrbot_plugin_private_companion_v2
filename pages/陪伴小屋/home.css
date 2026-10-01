@@ -1,0 +1,374 @@
+/* 小屋首页与生活专题页组件层
+ *
+ * 首页此前用的是另一套语汇：右栏三张 overview-card、生活观察三张同款卡、
+ * 家具目录一张等宽卡片网格。每张卡都带 radius + shadow + border（见
+ * styles.css 的 .overview-card / .furniture-card），而管理页同一时期已经改成
+ * 分隔线清单。结果是同一个插件里两种读法：管理页扫得动，首页要一张张看。
+ *
+ * 这一层把首页收到与管理页同一套结构件上：
+ *   分区用 border-top 分隔线，不用卡片框
+ *   层级靠字号与留白表达，不靠嵌套
+ *   说明限宽 62ch，不拉通栏
+ *   颜色一律取 tokens.css 的语义令牌，切主题整页跟着变
+ *
+ * 体素小屋不进这一层。它是首页唯一的主角，尺寸、圆角与背景渐变都留在
+ * styles.css 里由 .room-stage 管——那块的视觉重量是刻意的，与清单语汇不冲突。
+ */
+
+/* === 页首 ===
+ * 旧的 .home-jumpbar 是一条横贯整屏的工具栏，三个「跳到某段」按钮加一句
+ * 版本号。跳转本身有用，但「当前角色的生活空间 V2.0」这句不携带信息，
+ * 版本号在能力目录里已经有了。收成一行小字，不加边框。 */
+.home-lede{
+  display:flex;align-items:baseline;justify-content:space-between;
+  gap:var(--sp-4);flex-wrap:wrap;margin:0 0 var(--sp-4);
+}
+.home-lede-nav{display:flex;gap:var(--sp-1);flex-wrap:wrap}
+.home-lede-nav button{
+  display:inline-flex;align-items:center;gap:var(--sp-1);
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);
+  color:var(--t-text-soft);font-size:var(--fs-body);line-height:1.5;
+}
+.home-lede-nav button:hover{background:var(--t-surface-soft);color:var(--t-text-strong)}
+.home-lede-nav svg{width:14px;height:14px;color:var(--t-text-faint)}
+.home-lede-note{color:var(--t-text-faint);font-size:var(--fs-tiny);margin:0}
+
+/* === 小屋与右栏 ===
+ * 左列是体素小屋（主角），右栏是与它同时要看的状态。右栏比原来的
+ * 285px 收窄 15px：三张卡换成清单行后每行只用一行高度，不需要那么宽。 */
+.home-stage{
+  display:grid;grid-template-columns:minmax(0,1fr) 270px;
+  gap:var(--sp-5);align-items:start;
+}
+.home-stage-main{min-width:0}
+.home-stage-side{display:flex;flex-direction:column;gap:var(--sp-4);min-width:0}
+
+/* 小屋工具行：标题 + 两个文字动作。 */
+.room-bar{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;margin:0 0 var(--sp-3)}
+.room-bar h2{display:flex;align-items:center;gap:var(--sp-2);color:var(--t-text-strong);font-size:var(--fs-body);font-weight:600;margin:0}
+.room-bar h2 svg{width:15px;height:15px;color:var(--t-text-faint)}
+.room-bar-actions{display:flex;gap:var(--sp-1);flex-wrap:wrap}
+
+/* 场景下方的一行说明：天气摘要 + 来源。不画框，只当底注。 */
+.room-foot{
+  display:flex;align-items:baseline;justify-content:space-between;
+  gap:var(--sp-4);flex-wrap:wrap;margin:var(--sp-3) 0 0;
+  color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.7;
+}
+.room-foot b{color:var(--t-text-soft);font-weight:500}
+
+/* 常用生活入口：四格。改成分隔线格，不是四个圆角按钮块——
+ * 它们指向四处不同地方，分隔线正好表达「这是四个并列的入口」。 */
+.room-doors{
+  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+  margin-top:var(--sp-4);border-top:1px solid var(--t-line);
+}
+.room-doors button{
+  display:flex;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-3) 0;color:var(--t-text);font-size:var(--fs-body);text-align:left;min-width:0;
+}
+.room-doors button+button{padding-left:var(--sp-4)}
+.room-doors button:hover{color:var(--t-accent)}
+.room-doors svg{width:15px;height:15px;flex:none;color:var(--t-text-faint)}
+.room-doors button:hover svg{color:var(--t-accent)}
+.room-doors span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* === 分区 ===
+ * 与管理页 .console-section 同一形状：一条分隔线，标题与说明同一行，
+ * 说明靠右限宽。首页的分区比管理页少，所以说明可以直接跟在标题后面。 */
+.home-band{padding-top:var(--sp-5);border-top:1px solid var(--t-line);scroll-margin-top:14px}
+.home-band-head{
+  display:flex;align-items:baseline;justify-content:space-between;
+  gap:var(--sp-4);flex-wrap:wrap;margin:0 0 var(--sp-4);
+}
+.home-band-head h2{color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:600;margin:0;letter-spacing:.01em}
+.home-band-note{
+  flex:1 1 260px;min-width:0;max-width:62ch;margin:0;
+  color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.7;
+}
+
+/* === 概览行 ===
+ * 右栏三张卡与生活观察三张卡共用这一套。跳转行沿用管理页的形状：
+ * 单行高度、标签带说明、右侧一个动作。 */
+.home-rows{display:flex;flex-direction:column}
+.home-row{
+  display:flex;align-items:center;gap:var(--sp-3);
+  padding:var(--sp-3) 0;border-bottom:1px solid var(--t-line);min-width:0;
+}
+.home-row:last-child{border-bottom:0}
+.home-row-icon{
+  flex:none;display:grid;place-items:center;width:20px;height:20px;
+  color:var(--t-text-faint);
+}
+.home-row-icon svg{width:16px;height:16px}
+.home-row-main{flex:1;min-width:0}
+.home-row-main strong{display:block;color:var(--t-text);font-size:var(--fs-body);font-weight:500}
+.home-row-main small{
+  display:block;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.6;
+  margin-top:3px;max-width:62ch;
+}
+.home-row-value{flex:none;color:var(--t-text-soft);font-size:var(--fs-body);text-align:right}
+.home-row-value b{display:block;color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:600;line-height:1.3}
+.home-row-value small{color:var(--t-text-faint);font-size:var(--fs-micro)}
+
+/* === 生活观察 ===
+ * 原来的四页签（日记与梦境 / 生活轨迹 / 状态变化 / 交互影响）改成
+ * 段内切换条，样式与管理页的 section-tabs 对齐。 */
+.home-tabs{display:flex;gap:var(--sp-1);flex-wrap:wrap;margin:0 0 var(--sp-4)}
+.home-tabs button{
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);
+  color:var(--t-text-soft);font-size:var(--fs-body);line-height:1.5;
+}
+.home-tabs button:hover{background:var(--t-surface-soft)}
+.home-tabs button.active{background:var(--t-surface-raised);color:var(--t-accent);box-shadow:var(--t-shadow)}
+.home-band-body{min-width:0}
+.home-band-body:empty{display:none}
+
+/* 观察内容共用同一套行距，不再各自成卡。 */
+.home-note{
+  max-width:62ch;margin:0;color:var(--t-text-faint);
+  font-size:var(--fs-tiny);line-height:1.85;
+}
+.home-empty{
+  display:flex;flex-direction:column;gap:var(--sp-3);
+  padding:var(--sp-4) 0;color:var(--t-text-soft);font-size:var(--fs-body);
+}
+.home-empty strong{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:500}
+.home-empty p{max-width:62ch;margin:0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.85}
+.home-empty svg{width:18px;height:18px;color:var(--t-text-faint)}
+
+/* 心理能量：一个数字 + 一条 meter。用栅格对齐数字与量条。 */
+.home-energy{
+  display:grid;grid-template-columns:auto minmax(0,1fr);
+  align-items:center;gap:var(--sp-3) var(--sp-4);
+  padding:var(--sp-4) 0;border-bottom:1px solid var(--t-line);
+}
+.home-energy span{color:var(--t-text-soft);font-size:var(--fs-body)}
+.home-energy strong{color:var(--t-text-strong);font-size:var(--fs-head);font-weight:600}
+.home-energy strong small{color:var(--t-text-faint);font-size:var(--fs-tiny);font-weight:400}
+.home-energy meter{width:100%;height:6px}
+
+/* 状态事实：两列定义表。 */
+.home-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 var(--sp-5);margin:0}
+.home-facts>div{
+  display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-3);
+  padding:var(--sp-2) 0;border-bottom:1px solid var(--t-line);min-width:0;
+}
+.home-facts dt{color:var(--t-text-faint);font-size:var(--fs-tiny);margin:0}
+.home-facts dd{margin:0;color:var(--t-text);font-size:var(--fs-body);text-align:right;overflow-wrap:anywhere}
+
+/* === 家具目录 ===
+ * 换成按可用性分组的清单。旧版是等宽卡片网格，每张卡重复一遍
+ * 图标 + 名字 + 描述 + 归属 + 状态，扫二十张很累；而且「待处理」那个
+ * 筛选页签本来就是个分组，做成分组标题后不需要用户先点一下。 */
+.home-group-head{
+  display:flex;align-items:baseline;gap:var(--sp-3);
+  padding:var(--sp-4) 0 var(--sp-2);
+}
+.home-group-head h3{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:600;margin:0}
+.home-group-head small{color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.home-group-head .pill{margin-left:auto;flex:none}
+
+.home-tools{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:var(--sp-4);flex-wrap:wrap;margin:0 0 var(--sp-3);
+}
+.home-filters{display:flex;gap:var(--sp-1);flex-wrap:wrap}
+.home-filters button{
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);
+  color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.5;
+}
+.home-filters button:hover{background:var(--t-surface-soft)}
+.home-filters button.active{background:var(--t-surface-raised);color:var(--t-accent);box-shadow:var(--t-shadow)}
+.home-filters button span{color:var(--t-text-faint);margin-left:var(--sp-1)}
+.home-filters button.active span{color:var(--t-accent)}
+.home-search{
+  display:flex;align-items:center;gap:var(--sp-2);min-width:180px;
+  padding:0 0 0 var(--sp-2);border-radius:var(--r-sm);
+  border:1px solid var(--t-line);background:var(--t-surface);
+}
+.home-search svg{width:14px;height:14px;flex:none;color:var(--t-text-faint)}
+.home-search input{
+  flex:1;min-width:0;padding:var(--sp-2) var(--sp-2) var(--sp-2) 0;border:0;background:none;
+  color:var(--t-text);font-size:var(--fs-body);
+}
+
+/* 家具行：图标 + 名字与说明 + 归属 + 状态 + 一个动作。
+ * 与 .home-row 的区别是它多一格图标块、且名字右侧跟状态标签。 */
+.home-item{
+  display:grid;grid-template-columns:28px minmax(0,1fr) auto;
+  align-items:center;gap:var(--sp-3);
+  padding:var(--sp-3) 0;border-bottom:1px solid var(--t-line);min-width:0;
+}
+.home-item:last-child{border-bottom:0}
+.home-item-icon{
+  display:grid;place-items:center;width:28px;height:28px;
+  border-radius:var(--r-sm);background:var(--t-surface-soft);color:var(--t-text-soft);
+}
+.home-item-icon svg{width:15px;height:15px}
+.home-item-main{min-width:0}
+.home-item-title{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;min-width:0}
+.home-item-title strong{color:var(--t-text);font-size:var(--fs-body);font-weight:500}
+.home-item-main small{
+  display:block;margin-top:2px;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.6;
+}
+.home-item-end{display:flex;align-items:center;gap:var(--sp-3);flex:none}
+.home-item-owner{color:var(--t-text-faint);font-size:var(--fs-tiny);white-space:nowrap}
+.home-item-end button{
+  display:inline-flex;align-items:center;gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-2);border-radius:var(--r-sm);
+  color:var(--t-text-soft);font-size:var(--fs-tiny);white-space:nowrap;
+}
+.home-item-end button:hover{background:var(--t-surface-soft);color:var(--t-accent)}
+.home-item-end button svg{width:13px;height:13px}
+/* 不可用的家具压一档对比度，但仍可读、仍可点开看原因——
+ * 旧版靠整张卡套一层透明度和「预览已移除」四个字，用户看不出为什么。 */
+.home-item.unavailable .home-item-icon{background:none;color:var(--t-text-faint)}
+.home-item.unavailable .home-item-title strong{color:var(--t-text-soft)}
+
+.home-foot{
+  display:flex;align-items:baseline;justify-content:space-between;
+  gap:var(--sp-4);flex-wrap:wrap;
+  padding-top:var(--sp-3);border-top:1px solid var(--t-line);
+  color:var(--t-text-faint);font-size:var(--fs-tiny);
+}
+
+/* === 体素小屋的回退态 ===
+ * .voxel-fallback-actions 此前被 app.js 渲染却没有任何样式表定义它——
+ * 与管理页 console.css 那次是同一个毛病，只是范围小。补上。 */
+.voxel-fallback-actions{display:flex;gap:var(--sp-2);justify-content:center;margin-top:var(--sp-3)}
+
+@media(max-width:1100px){
+  .home-stage{grid-template-columns:minmax(0,1fr)}
+  .home-stage-side{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-4)}
+}
+@media(max-width:760px){
+  .home-stage-side{grid-template-columns:minmax(0,1fr)}
+  .room-doors{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .room-doors button+button{padding-left:0}
+  .room-doors button:nth-child(n+3){border-top:1px solid var(--t-line)}
+  .room-doors button:nth-child(even){padding-left:var(--sp-4)}
+  .home-facts{grid-template-columns:minmax(0,1fr)}
+  .home-item{grid-template-columns:28px minmax(0,1fr)}
+  .home-item-end{grid-column:2;justify-content:flex-start}
+  .home-band-head{flex-direction:column;align-items:flex-start;gap:var(--sp-2)}
+  .home-band-note{max-width:none}
+}
+
+/* 小屋右栏。承接 V1 的状态摘要与时间线，使用当前主题的分隔线与色板。 */
+.home-side-band{min-width:0;padding-top:var(--sp-4)}
+.shell-side>.home-side-band:first-child{padding-top:0;border-top:0}
+.home-side-band .home-band-head{
+  flex-direction:row;align-items:center;flex-wrap:nowrap;gap:var(--sp-2);margin-bottom:var(--sp-3);
+}
+.home-side-band .home-band-head h2{font-size:var(--fs-lead);letter-spacing:0}
+.home-side-action{
+  flex:none;min-height:36px;padding:var(--sp-1) 0 var(--sp-1) var(--sp-2);font-size:var(--fs-tiny);
+  color:var(--t-accent-ink);white-space:nowrap;
+}
+.home-side-action:focus-visible{outline:2px solid var(--t-accent);outline-offset:3px;border-radius:var(--r-2xs)}
+.home-state-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0 0}
+.home-state-tile{min-width:0;min-height:58px;padding:var(--sp-2) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface)}
+.home-state-tile:first-child{grid-column:1/-1}
+.home-state-tile dt{margin:0 0 var(--sp-1);font-size:var(--fs-micro);color:var(--t-text-soft)}
+.home-state-tile dd{margin:0;font-size:var(--fs-body);line-height:1.6;color:var(--t-text);overflow-wrap:anywhere}
+.home-state-tile dd.is-unrecorded{color:var(--t-text-faint)}
+.home-vitals{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-1)}
+.home-vital{
+  position:relative;display:flex;flex-direction:column;align-items:center;gap:var(--sp-1);min-width:0;min-height:72px;
+  padding:var(--sp-1) 2px;border:0;border-radius:var(--r-sm);background:transparent;color:var(--t-text-soft);cursor:help;
+  transition:background-color var(--dur-fast),color var(--dur-fast);
+}
+.home-vital:hover{background:var(--t-surface)}
+.home-vital:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
+.home-vital-glyph{
+  position:relative;display:grid;place-items:center;flex:none;width:42px;height:42px;border-radius:50%;
+  border:1px solid var(--t-line-firm);background:var(--t-surface-sunken);color:var(--t-text-soft);
+}
+.home-vital-glyph svg{width:22px;height:22px;stroke-width:1.7}
+.home-vital-label{font-size:var(--fs-micro);line-height:1.5;color:var(--t-text-soft)}
+.home-vital[data-tone="ok"] .home-vital-glyph{border-color:transparent;background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+.home-vital[data-tone="warn"] .home-vital-glyph{border-color:transparent;background:var(--t-warn-quiet);color:var(--t-warn-ink)}
+.home-vital[data-tone="risk"] .home-vital-glyph{border-color:transparent;background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.home-vital[data-tone="rest"] .home-vital-glyph{border-color:transparent;background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+.home-vital[data-visual="unknown"] .home-vital-glyph{border-style:dashed;background:transparent}
+.home-vital[data-visual="disabled"] .home-vital-glyph{background:transparent;opacity:.55}
+.home-vital[data-visual="disabled"] .home-vital-glyph::after{content:"";position:absolute;width:27px;height:1px;background:currentColor;transform:rotate(-45deg)}
+.home-vital-mark{position:absolute;right:-3px;top:-3px;font-size:var(--fs-micro);font-weight:600;line-height:1.3;background:var(--t-canvas);padding:1px 2px;border-radius:var(--r-2xs)}
+.home-vital-tooltip{
+  position:absolute;z-index:60;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);
+  display:block;width:max-content;min-width:140px;max-width:220px;padding:var(--sp-2) var(--sp-3);
+  border:1px solid var(--t-line-firm);border-radius:var(--r-sm);background:var(--t-surface-raised);box-shadow:var(--t-shadow-lift);
+  color:var(--t-text);text-align:left;white-space:normal;overflow-wrap:anywhere;
+  opacity:0;visibility:hidden;pointer-events:none;transition:opacity var(--dur-fast),visibility var(--dur-fast);
+}
+.home-vital:first-child .home-vital-tooltip{left:0;transform:none}
+.home-vital:last-child .home-vital-tooltip{left:auto;right:0;transform:none}
+.home-vital:is(:hover,:focus) .home-vital-tooltip{opacity:1;visibility:visible}
+.home-vital-tooltip strong{display:block;font-size:var(--fs-tiny);line-height:1.65;font-weight:600}
+.home-vital-tooltip>span{display:block;margin-top:var(--sp-1);font-size:var(--fs-tiny);line-height:1.7;color:var(--t-text-soft)}
+.home-vital-tooltip meter{display:block;appearance:none;width:100%;height:4px;margin-top:var(--sp-2);border:0;border-radius:var(--r-sm);background:var(--t-surface-sunken)}
+.home-vital-tooltip meter::-webkit-meter-bar{height:4px;border:0;border-radius:var(--r-sm);background:var(--t-surface-sunken);box-shadow:none}
+.home-vital-tooltip meter::-webkit-meter-optimum-value{border-radius:var(--r-sm);background:var(--t-accent)}
+.home-vital-tooltip meter::-moz-meter-bar{border-radius:var(--r-sm);background:var(--t-accent)}
+.home-side-caption{margin:var(--sp-3) 0 0;font-size:var(--fs-micro);line-height:1.65;color:var(--t-text-soft);overflow-wrap:anywhere}
+.home-agenda-date{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-2);margin:0 0 var(--sp-3);font-size:var(--fs-body);color:var(--t-text-strong)}
+.home-agenda-date span{font-size:var(--fs-micro);color:var(--t-text-soft)}
+.home-agenda-current{margin:0 0 var(--sp-3);font-size:var(--fs-tiny);line-height:1.7;color:var(--t-text-soft)}
+.home-agenda{display:flex;flex-direction:column;list-style:none;margin:0;padding:0}
+.home-agenda-item{position:relative;display:grid;grid-template-columns:18px minmax(0,1fr);gap:var(--sp-2);min-width:0;padding:0 0 var(--sp-3)}
+.home-agenda-item:not(:last-child)::before{content:"";position:absolute;top:10px;bottom:-6px;left:5px;width:1px;background:var(--t-line-firm)}
+.home-agenda-item:last-child{padding-bottom:0}
+.home-agenda-dot{z-index:1;width:11px;height:11px;margin-top:var(--sp-1);border:2px solid var(--t-canvas);border-radius:50%;background:var(--t-line-firm)}
+.home-agenda-body{min-width:0;padding:0 0 0 var(--sp-1)}
+.home-agenda-body time{display:block;font-size:var(--fs-micro);line-height:1.8;color:var(--t-text-soft);font-variant-numeric:tabular-nums}
+.home-agenda-body strong{display:block;margin:2px 0;font-size:var(--fs-body);font-weight:500;line-height:1.65;color:var(--t-text);overflow-wrap:anywhere}
+.home-agenda-body small{display:block;font-size:var(--fs-micro);line-height:1.7;color:var(--t-text-soft);overflow-wrap:anywhere}
+.home-agenda-item:is([data-tone="active"],[data-tone="current"]) .home-agenda-dot{background:var(--t-accent)}
+.home-agenda-item:is([data-tone="active"],[data-tone="current"]) .home-agenda-body{
+  padding:var(--sp-2) var(--sp-2);border-radius:var(--r-xs);background:var(--t-accent-quiet);
+}
+.home-agenda-item:is([data-tone="active"],[data-tone="current"]) .home-agenda-dot{margin-top:var(--sp-3)}
+.home-agenda-item:is([data-tone="active"],[data-tone="current"]) .home-agenda-body :is(time,strong,small){color:var(--t-accent-ink)}
+.home-side-warning{margin:var(--sp-2) 0 0;color:var(--t-warn-ink);font-size:var(--fs-micro);line-height:1.75;overflow-wrap:anywhere}
+.home-state-board{
+  position:relative;display:grid;grid-template-columns:repeat(auto-fit,minmax(48px,1fr));gap:2px;width:100%;min-height:76px;
+  padding:var(--sp-2) var(--sp-5) var(--sp-2) var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-xs);background:var(--t-surface);color:var(--t-text);
+  text-align:left;cursor:pointer;transition:border-color var(--dur-fast),background-color var(--dur-fast),box-shadow var(--dur-fast)
+}
+.home-state-board:hover{border-color:var(--t-line-firm);background:var(--t-surface-raised);box-shadow:0 5px 14px color-mix(in srgb,var(--t-ok-ink) 7%,transparent)}
+.home-state-board:focus-visible{outline:2px solid var(--t-accent);outline-offset:3px}
+.home-state-point{position:relative;display:flex;min-width:0;min-height:64px;flex-direction:column;align-items:center;justify-content:center;gap:3px;border-radius:var(--r-xs);color:var(--t-text-soft)}
+.home-state-glyph{display:grid;place-items:center;width:25px;height:25px;border-radius:50%;background:var(--t-surface-sunken);color:var(--t-accent-ink);transition:transform var(--dur-fast),background-color var(--dur-fast),color var(--dur-fast)}
+.home-state-glyph svg{width:15px;height:15px;stroke-width:1.8}
+.home-state-point[data-tone="ok"] .home-state-glyph{background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+.home-state-point[data-tone="warn"] .home-state-glyph{background:var(--t-warn-quiet);color:var(--t-warn-ink)}
+.home-state-point[data-tone="risk"] .home-state-glyph{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.home-state-point[data-tone="rest"] .home-state-glyph{background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+.home-state-point[data-visual="unknown"] .home-state-glyph{border:1px dashed var(--t-line-firm);background:transparent}
+.home-state-label{font-size:var(--fs-micro);line-height:1.25;color:var(--t-text-soft)}
+.home-state-point>strong{max-width:100%;font-size:var(--fs-micro);font-weight:600;line-height:1.25;color:var(--t-text-strong);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.home-state-point[data-tone="risk"]>strong{color:var(--t-risk-ink)}
+.home-state-tooltip{position:absolute;z-index:60;bottom:calc(100% + 7px);left:50%;display:grid;gap:3px;width:max-content;min-width:116px;max-width:205px;padding:var(--sp-2) var(--sp-2);transform:translateX(-50%);border:1px solid var(--t-line-firm);border-radius:var(--r-xs);background:var(--t-surface-raised);box-shadow:var(--t-shadow-lift);color:var(--t-text);text-align:left;white-space:normal;overflow-wrap:anywhere;opacity:0;visibility:hidden;pointer-events:none;transition:opacity var(--dur-fast),visibility var(--dur-fast)}
+.home-state-point:first-child .home-state-tooltip{left:0;transform:none}
+.home-state-point:nth-last-child(2) .home-state-tooltip{left:auto;right:0;transform:none}
+.home-state-point:hover .home-state-tooltip{opacity:1;visibility:visible}
+.home-state-tooltip b{font-size:var(--fs-micro);line-height:1.5}
+.home-state-tooltip>span{font-size:var(--fs-micro);line-height:1.55;color:var(--t-text-soft)}
+.home-state-tooltip meter{display:block;appearance:none;width:100%;height:4px;margin-top:var(--sp-1);border:0;border-radius:var(--r-sm);background:var(--t-surface-sunken)}
+.home-state-tooltip meter::-webkit-meter-bar{height:4px;border:0;border-radius:var(--r-sm);background:var(--t-surface-sunken);box-shadow:none}
+.home-state-tooltip meter::-webkit-meter-optimum-value{border-radius:var(--r-sm);background:var(--t-accent)}
+.home-state-tooltip meter::-moz-meter-bar{border-radius:var(--r-sm);background:var(--t-accent)}
+.home-state-empty{grid-column:1/-1;align-self:center;padding:0 var(--sp-1);font-size:var(--fs-tiny);color:var(--t-text-soft)}
+.home-state-open{position:absolute;right:6px;top:6px;display:grid;place-items:center;width:14px;height:14px;color:var(--t-text-faint);opacity:0;transform:translate(-2px,2px);transition:opacity var(--dur-fast),transform var(--dur-fast)}
+.home-state-open svg{width:13px;height:13px}
+.home-state-board:hover .home-state-open,.home-state-board:focus-visible .home-state-open{opacity:1;transform:none}
+@media(prefers-reduced-motion:reduce){.home-state-board,.home-state-glyph,.home-state-tooltip,.home-state-open{transition:none}}
+@media(min-width:761px) and (max-width:1120px){
+  .shell-side{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-6);align-items:start}
+  .shell-side>.home-band:not(.home-side-band){grid-column:1/-1}
+  .home-side-band{padding-top:0;border-top:0}
+}
+@media(max-width:760px){
+  .home-side-action{min-height:44px}
+}

@@ -1,0 +1,25 @@
+.expression-page{display:grid;gap:var(--sp-4);min-width:0}
+.expression-module-nav{position:sticky;top:var(--sp-2);z-index:6;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:var(--sp-1);min-width:0;padding:var(--sp-1);border:1px solid var(--t-line);border-radius:var(--r-xs);background:color-mix(in srgb,var(--t-surface) 94%,transparent);box-shadow:0 6px 18px color-mix(in srgb,var(--t-accent) 6%,transparent);backdrop-filter:blur(14px)}
+.expression-module-nav a{display:grid;grid-template-columns:28px minmax(0,1fr) 14px;align-items:center;gap:var(--sp-2);min-width:0;min-height:52px;padding:var(--sp-2);border:1px solid transparent;border-radius:var(--r-2xs);color:var(--t-text-soft);text-decoration:none;transition:background var(--dur) ease,border-color var(--dur) ease,color var(--dur) ease}
+.expression-module-nav a:hover,.expression-module-nav a:focus-visible{border-color:var(--t-line);background:var(--t-surface-raised);color:var(--t-text-strong)}
+.expression-module-nav a:focus-visible,.expression-route-button:focus-visible{outline:2px solid var(--t-focus);outline-offset:2px}
+.expression-module-code{display:grid;place-items:center;width:28px;height:28px;border:1px solid var(--t-line);border-radius:var(--r-2xs);background:var(--t-surface-soft);color:var(--t-accent-ink);font:650 10px/1 var(--numeric-font)}
+.expression-module-copy{display:grid;gap:3px;min-width:0}
+.expression-module-copy strong{overflow:hidden;color:inherit;font-size:var(--fs-tiny);font-weight:650;line-height:1.35;text-overflow:ellipsis;white-space:nowrap}
+.expression-module-copy small{overflow:hidden;color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.35;text-overflow:ellipsis;white-space:nowrap}
+.expression-module-arrow{display:grid;place-items:center;color:var(--t-text-faint)}
+.expression-module-arrow svg{width:13px;height:13px}
+.expression-route-button{display:inline-flex;align-items:center;justify-content:flex-start;gap:var(--sp-2);min-height:38px;margin:0 var(--sp-2) var(--sp-2) 0;padding:var(--sp-2) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-xs);background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-body);cursor:pointer;transition:background var(--dur) ease,border-color var(--dur) ease,color var(--dur) ease}
+.expression-route-button:hover{border-color:var(--t-accent);background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+.expression-route-button svg{width:15px;height:15px;flex:none}
+.expression-route-button svg:last-child{margin-left:auto;color:var(--t-text-faint)}
+.expression-capability-note{display:grid;grid-template-columns:minmax(110px,170px) minmax(0,1fr);gap:var(--sp-3);align-items:start;margin:var(--sp-2) 0 var(--sp-3);padding:var(--sp-3) 0;border-top:1px solid var(--t-line);color:var(--t-text-soft)}
+.expression-capability-note strong{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.expression-capability-note p{margin:0;max-width:76ch;font-size:var(--fs-body);line-height:1.65}
+.expression-page .wb-section-sidebar{top:70px;max-height:calc(100vh - 82px)}
+.perception-recall h3{margin:var(--sp-3) 0 var(--sp-1);font-size:var(--fs-title);color:var(--t-text-strong)}
+.perception-recall>p{margin:0 0 var(--sp-2);max-width:68ch;color:var(--t-text-soft);font-size:var(--fs-body);line-height:1.65}
+@media(max-width:900px){.expression-module-nav{grid-template-columns:repeat(6,minmax(132px,1fr));overflow-x:auto;scrollbar-width:thin}.expression-module-nav a{min-height:48px}}
+@media(max-width:760px){.expression-page .wb-section-sidebar{top:auto;max-height:none}}
+@media(max-width:650px){.expression-module-nav{top:var(--sp-1);gap:2px;padding:3px}.expression-module-nav a{grid-template-columns:24px minmax(0,1fr);min-height:46px;padding:var(--sp-1)}.expression-module-code{width:24px;height:24px}.expression-module-copy strong{font-size:var(--fs-micro)}.expression-module-copy small{display:none}.expression-module-arrow{display:none}.expression-route-button{width:100%;margin-right:0}.expression-capability-note{grid-template-columns:minmax(0,1fr);gap:var(--sp-1)}}
+@media(prefers-reduced-motion:reduce){.expression-module-nav a,.expression-route-button{transition:none}}

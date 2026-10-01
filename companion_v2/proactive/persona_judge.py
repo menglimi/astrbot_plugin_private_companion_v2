@@ -1,0 +1,171 @@
+"""Post-draft persona judgement: the model may only allow or withhold one contact.
+
+V1 reviewed a planned proactive message against the role's persona and worldview
+with a model judge that had its own threshold, cache and daily call allowance. V2
+keeps that judgement where the draft already exists: after the sealed body passed
+the presentation guards and before anything is committed or queued.
+
+The judge runs as its own supervised background task, so its model call has its
+own request, its own usage record and its own receipt; the contact's own model
+decision stays the single generation that produced the body. The judgement only
+answers "may this leave". It cannot rewrite the body, change the audience, the
+identity, the sources or the authorization of the contact it judges, and an
+unavailable, failed or unknown judgement is not a pass: the contact is withheld
+and the reason is recorded on the contact it withheld.
+"""
+
+from dataclasses import dataclass
+from datetime import timedelta
+import json
+
+from companion_v2.conversation.foreground import (BackgroundPromptTrigger, PromptMaterial,
+                                                  PromptRequest, SealedForegroundContext)
+from companion_v2.execution.models import digest, encode, stamp
+
+from .configuration import GROUP, PURPOSES, judge_exempt_purposes
+
+
+KIND = "proactive.judge"
+# The host owns the selectable output formats and reusing the contact format keeps
+# the judgement on the same JSON-only contract; the judge prompt is distinguished by
+# its own material purpose and by the judge task that issues it.
+OUTPUT_FORMAT = "proactive_contact"
+DRAFT_PURPOSE = "proactive_draft"
+DECISIONS = ("send", "drop")
+INSTRUCTION = """现在不是要你再写一条消息，而是替这个角色做一次发送前的自检。
+上面的人格就是判定标准：只有这条消息确实符合当前人格、世界观、关系边界和此刻语境，才允许发出。
+它是否重复、是否过度解读对方、是否宣称未发生的事、是否越过授权，都属于判定范围。
+你只能选择放行或拦下，不能改写正文、不能更换受众、不能补写事实，也不要输出正文。
+只输出 JSON，不添加 Markdown 围栏：
+{"decision":"send","score":85,"reason":"一句短理由"} 或 {"decision":"drop","score":20,"reason":"一句短理由"}。
+score 是 0 到 100 的整数，表示你对这个判断的把握与符合程度；理由里不要暴露检查过程。"""
+
+
+@dataclass(frozen=True)
+class JudgeVerdict:
+    """One bounded judgement; ``model_call_id`` is empty for a cached answer.
+
+    ``pending`` marks the state between the sealed draft and the model's answer:
+    the contact exists, its body is final, and nothing may leave until the
+    judgement resolves.
+    """
+
+    decision: str
+    score: int
+    reason: str
+    signature: str
+    allowed: bool
+    cached: bool = False
+    profile: str = KIND
+    model_call_id: str = ""
+    failure: str = ""
+    pending: bool = False
+    task_id: str = ""
+
+    def document(self):
+        return {"state": "pending" if self.pending else "resolved", "signature": self.signature,
+                "decision": self.decision or None, "score": self.score, "reason": self.reason,
+                "allowed": self.allowed, "cached": self.cached, "profile": self.profile,
+                "model_call_id": self.model_call_id or None, "failure": self.failure or None,
+                "task_id": self.task_id or None}
+
+
+def judge_request(job):
+    """The sealed judge prompt: persona, the finished body, and nothing to rewrite."""
+    materials = [PromptMaterial(GROUP, DRAFT_PURPOSE, json.dumps({
+        "purpose": PURPOSES[job["purpose"]], "purpose_id": job["purpose"],
+        "draft_body": job["body"], "contact_now": job["at"],
+        "draft_decision_confidence": job["confidence"],
+        "preference_note": job["note"]}, ensure_ascii=False))]
+    trigger = BackgroundPromptTrigger(job["cause_id"], job["context"].actor.principal,
+                                      job["context"].scope, job["observed_at"])
+    return PromptRequest(trigger, job["role_instruction"],
+                         SealedForegroundContext(tuple(materials), (), ()), INSTRUCTION,
+                         job["context"].role_binding, output_format=OUTPUT_FORMAT)
+
+
+def judge_output(text):
+    """A strictly bounded judgement; anything else is an unusable answer."""
+    data = json.loads(text)
+    allowed = {"decision", "score", "reason"}
+    if (not isinstance(data, dict) or set(data) != allowed
+            or data["decision"] not in DECISIONS or type(data["score"]) is not int
+            or not 0 <= data["score"] <= 100
+            or type(data["reason"]) is not str or not 1 <= len(data["reason"].strip()) <= 200):
+        raise ValueError("judgement must use its explicit decision, score and reason contract")
+    return data["decision"], data["score"], data["reason"].strip()
+
+
+def signature_for(purpose, body):
+    return "judge-" + digest([purpose, body])
+
+
+def exempt_purposes(preferences):
+    return judge_exempt_purposes(preferences.values["proactive_persona_judge_exempt_purposes"])
+
+
+class PersonaJudge:
+    """Cache and daily allowance for the judged contacts, read from existing records."""
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+
+    def cached(self, context, signature, at, *, ttl_minutes, threshold):
+        if ttl_minutes <= 0:
+            return None
+        row = self.runtime.read_one("""SELECT record_json FROM proactive_contacts
+            WHERE origin_key = ? AND created_at >= ?
+            AND json_extract(record_json, '$.judge.signature') = ?
+            ORDER BY created_at DESC, contact_id DESC LIMIT 1""",
+            (context.key, stamp(at - timedelta(minutes=ttl_minutes)), signature))
+        if row is None:
+            return None
+        try:
+            previous = json.loads(row["record_json"])["judge"]
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (not isinstance(previous, dict) or previous.get("failure")
+                or previous.get("decision") not in DECISIONS or type(previous.get("score")) is not int):
+            return None
+        return JudgeVerdict(previous["decision"], previous["score"], previous.get("reason", ""), signature,
+                            previous["decision"] == "send" and previous["score"] >= threshold, cached=True)
+
+    def decided_today(self, context, day_start):
+        """How many contacts already spent a judge model call in this local day."""
+        return self.runtime.read_one("""SELECT COUNT(*) FROM proactive_contacts
+            WHERE origin_key = ? AND created_at >= ?
+            AND json_extract(record_json, '$.judge.model_call_id') IS NOT NULL
+            AND json_extract(record_json, '$.judge.model_call_id') != ''""",
+            (context.key, stamp(day_start)))[0]
+
+    @staticmethod
+    def denied(signature, failure, *, reason):
+        return JudgeVerdict("drop", 0, reason, signature, False, failure=failure)
+
+    @staticmethod
+    def pending(signature, task_id):
+        return JudgeVerdict("", 0, "已封存草稿，等待主动人格判定", signature, False,
+                            pending=True, task_id=task_id)
+
+    def withheld(self, origin_key, contact_id, failure, *, reason):
+        """Mark one unresolved draft as withheld, without touching its sealed body.
+
+        Used when a judgement can no longer be completed: an unknown judgement is
+        never a pass, so the draft stays archived as a skip and is not delivered
+        or replayed.
+        """
+        with self.runtime.transaction() as connection:
+            row = connection.execute("""SELECT origin_key, record_json FROM proactive_contacts
+                WHERE contact_id = ?""", (contact_id,)).fetchone()
+            if row is None or row["origin_key"] != origin_key:
+                return False
+            data = json.loads(row["record_json"])
+            if data.get("decision") != "judge_pending":
+                return False
+            data["decision"] = "skip"
+            data["judge"] = {**(data.get("judge") or {}), "state": "resolved", "decision": "drop",
+                             "score": 0, "allowed": False, "reason": reason, "failure": failure,
+                             "cached": False}
+            connection.execute("UPDATE proactive_contacts SET record_json = ? WHERE contact_id = ?",
+                               (encode(data), contact_id))
+        return True

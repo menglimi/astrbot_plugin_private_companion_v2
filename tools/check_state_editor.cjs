@@ -1,0 +1,160 @@
+/* Command and conflict acceptance, exercised by check_state_page.cjs. */
+const assert=require("node:assert/strict");
+const path=require("node:path");
+
+async function run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir}) {
+  const root=rootPage();
+  const button=action=>root.locator(`[data-state-edit="${action}"]`);
+  const saved=async()=>{await page.waitForFunction(()=>{const button=document.querySelector("#state-refresh");return !document.querySelector("#state-edit-form")&&!!button&&!button.disabled;});};
+  const posts=()=>page.evaluate(()=>window.stateQA.posts);
+  const openFeature=async feature=>{
+    const trigger=root.locator(`[data-state-feature="${feature}"]`).first();
+    if(await trigger.getAttribute("aria-expanded")!=="true"){
+      const active=root.locator('[data-state-feature][aria-expanded="true"]').first();
+      if(await active.count())await active.click();
+      await trigger.click();
+    }
+  };
+  assert.equal((await posts()).length,0);
+
+  await button("home").click();
+  assert.equal(await root.locator("#state-config-enabled").isChecked(),true);
+  await root.locator("#state-config-maintenance_minutes").fill("45");
+  await root.locator("#state-config-home_show_location").uncheck();
+  await root.getByRole("button",{name:"保存状态与首页展示",exact:true}).click();await saved();
+  let requests=await posts();
+  assert.equal(requests[0].endpoint,first+"/command");
+  assert.deepEqual(requests[0].body.changes,{maintenance_minutes:45,home_show_location:false});
+  await page.evaluate(()=>{
+    const qa=window.stateQA;qa.posts=[];
+    sessionStorage.setItem("state-QA-backend",JSON.stringify({values:qa.values,pages:qa.pages,posts:qa.posts,
+      receipts:qa.receipts,applied:qa.applied,cancelledReminders:qa.cancelledReminders}));
+  });
+  await openFeature("presentation");
+
+  await button("settings").click();
+  await root.locator("#state-typing-seconds").fill("7");
+  await root.locator("#state-typing-enabled").uncheck();
+  await root.locator("#state-presence-enabled").check();
+  await page.evaluate(()=>document.dispatchEvent(new Event("visibilitychange")));
+  assert.equal(await root.locator("#state-typing-seconds").inputValue(),"7");
+  await root.locator("#state-typing-seconds").focus();
+  await checkWidth();
+  await page.screenshot({path:path.join(outputDir,"state-edit-mobile.png"),fullPage:true});
+  await page.setViewportSize({width:1366,height:980});await checkWidth();
+  await page.screenshot({path:path.join(outputDir,"state-edit-desktop.png"),fullPage:true});
+  await root.getByRole("button",{name:"保存展示设置",exact:true}).click();await saved();
+  requests=await posts();
+  assert.equal(requests[0].endpoint,first+"/command");
+  assert.deepEqual(requests[0].body.changes,{typing_enabled:false,typing_refresh_seconds:7,presence_enabled:true});
+  assert.match(await root.innerText(),/配置刷新间隔：7 秒/);
+  await page.setViewportSize({width:320,height:720});await checkWidth();
+
+  await button("settings").click();await root.locator("#state-typing-seconds").fill("8");
+  await page.evaluate(first=>{const value=window.stateQA.values[first];value.settings.typing_refresh_seconds=6;value.settings.presence_enabled=false;value.edit_token="concurrent-version";},first);
+  await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
+  await root.getByText("配置已被更新，填写内容已保留。请读取当前版本后核对。",{exact:true}).waitFor();
+  assert.equal(await root.locator("#state-typing-seconds").inputValue(),"8");
+  await page.evaluate(()=>{window.stateQA.failReadNext=true;});
+  await button("rebase").click();
+  await root.getByText("未收到状态确认，请刷新核对。",{exact:true}).waitFor();
+  await root.locator("#state-refresh").click();await loadDone();
+  assert.equal(await root.locator("#state-typing-seconds").inputValue(),"8");
+  assert.equal(await root.getByRole("button",{name:"保存展示设置",exact:true}).isDisabled(),true);
+  await button("rebase").click();
+  await root.getByText("已读取当前版本并保留你的修改，请核对后保存。",{exact:true}).waitFor();
+  assert.equal(await root.locator("#state-presence-enabled").isChecked(),false);
+  await root.getByRole("button",{name:"保存展示设置",exact:true}).click();await saved();
+  requests=await posts();
+  assert.deepEqual(requests.at(-1).body.changes,{typing_refresh_seconds:8});
+  assert.equal(requests.at(-1).body.edit_token,"concurrent-version");
+
+  await openFeature("planning");
+  await button("wording").first().click();
+  await root.locator("#state-public-wording").fill("超过八个字的公开文案");
+  const beforeInvalid=(await posts()).length;
+  await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(()=>document.activeElement?.textContent),"保存公开文案");
+  await page.keyboard.press("Enter");
+  await root.getByText("公开文案最多 8 个字，可留空。",{exact:true}).waitFor();
+  assert.equal((await posts()).length,beforeInvalid);
+  await root.locator("#state-public-wording").fill("散步中");
+  await page.evaluate(first=>{const item=window.stateQA.values[first].calendar.items[0];item.revision++;item.view_token="concurrent-plan";},first);
+  await root.getByRole("button",{name:"保存公开文案",exact:true}).click();
+  await root.getByText("日程已被更新，填写内容已保留。请读取当前版本后核对。",{exact:true}).waitFor();
+  assert.equal(await root.locator("#state-public-wording").inputValue(),"散步中");
+  await button("rebase").click();
+  await root.getByText("已读取当前版本并保留你的修改，请核对后保存。",{exact:true}).waitFor();
+  await root.getByRole("button",{name:"保存公开文案",exact:true}).click();await saved();
+  const wording=(await posts()).at(-1).body;
+  assert.equal(wording.action,"calendar.presence");
+  assert.equal(wording.expected_revision,2);assert.equal(wording.view_token,"concurrent-plan");
+  assert.deepEqual(wording.data,{presence:"散步中"});
+  assert.deepEqual(Object.keys(wording).sort(),["action","data","expected_revision","id","operation_key","view_token"]);
+  assert.match(await root.locator(".state-plan-list").innerText(),/散步中/);
+  await root.locator('[data-state-page="plan-a"]').click();await loadDone();
+  assert.match(await root.locator(".state-plan-list").innerText(),/晚间散步/);
+  await button("wording").first().click();await root.locator("#state-public-wording").fill("");
+  await page.evaluate(()=>{window.stateQA.dropNext=true;});
+  await root.getByRole("button",{name:"保存公开文案",exact:true}).click();
+  await root.getByText("有一笔保存尚待核对",{exact:true}).waitFor();
+  const pendingWording=(await posts()).at(-1),wordingApplied=await page.evaluate(()=>window.stateQA.applied);
+  await root.locator("#state-refresh").click();await loadDone();
+  assert.deepEqual((await posts()).at(-1),pendingWording);
+  await button("recover").click();await saved();
+  assert.deepEqual((await posts()).at(-1),pendingWording);
+  assert.equal(await page.evaluate(()=>window.stateQA.applied),wordingApplied);
+  assert.equal((await posts()).at(-1).body.id,"plan-b");
+  assert.equal((await posts()).at(-1).body.data.presence,"");
+  await root.locator('[data-state-page=""]').click();await loadDone();
+
+  await openFeature("presentation");
+  await button("settings").click();await root.locator("#state-typing-seconds").fill("9");
+  await page.evaluate(()=>{window.stateQA.dropNext=true;});
+  await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
+  await root.getByText("有一笔保存尚待核对",{exact:true}).waitFor();
+  const uncertain=(await posts()).at(-1),applied=await page.evaluate(()=>window.stateQA.applied);
+  await page.locator("#product-role").selectOption("望舒");await loadDone();
+  assert.doesNotMatch(await root.innerText(),/有一笔保存尚待核对/);
+  await page.locator("#product-role").selectOption("澄汐");await loadDone();
+  await root.getByText("有一笔保存尚待核对",{exact:true}).waitFor();
+  const sentBeforeReload=(await posts()).length;
+  await page.reload();await root.waitFor();await loadDone();
+  assert.equal(await root.locator('[data-state-feature="presentation"]').getAttribute("aria-expanded"),"true");
+  await root.getByText("有一笔保存尚待核对",{exact:true}).waitFor();
+  assert.equal((await posts()).length,sentBeforeReload);
+  await button("recover").click();await saved();
+  assert.deepEqual((await posts()).at(-1),uncertain);
+  assert.equal(await page.evaluate(()=>window.stateQA.applied),applied);
+  assert.match(await root.innerText(),/已核对原请求：保存成功/);
+
+  await button("settings").click();await root.locator("#state-typing-seconds").fill("6");
+  await page.evaluate(()=>{window.stateQA.holdNext=true;});
+  await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
+  await page.waitForFunction(()=>typeof window.stateQA.release==="function");
+  const held=(await posts()).at(-1);
+  await page.locator("#product-role").selectOption("望舒");await loadDone();
+  assert.match(await root.innerText(),/黄体期/);
+  await openFeature("presentation");
+  await page.evaluate(()=>window.stateQA.release());
+  await page.waitForFunction(first=>window.stateQA.values[first].settings.typing_refresh_seconds===6,first);
+  assert.equal(held.endpoint,first+"/command");
+  assert.equal(await page.evaluate(key=>window.stateQA.values[key].settings.typing_refresh_seconds,secondRole),4);
+  assert.match(await root.innerText(),/配置刷新间隔：4 秒/);
+  await page.locator("#product-role").selectOption("澄汐");await loadDone();await openFeature("presentation");
+  await root.getByText("配置刷新间隔：6 秒",{exact:false}).waitFor();
+  assert.equal(await page.locator("#product-role").inputValue(),"澄汐");
+
+  await openFeature("health");
+  const maintenance=await require("./check_state_maintenance.cjs").run({page,root,button,saved,posts,loadDone,checkWidth,first,secondRole,outputDir});
+  await openFeature("planning");
+  const calendar=await require("./check_calendar_editor.cjs").run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir});
+  await openFeature("presentation");
+  await button("settings").click();await root.locator("#state-typing-enabled").check();
+  await page.evaluate(()=>{window.stateQA.denyWrites=true;});
+  await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
+  await root.getByText("当前账号没有角色状态管理权限。",{exact:true}).waitFor();
+  assert.equal(await root.locator("#state-edit-form,.state-presentation,.state-plan-list").count(),0);
+  return {checks:"minimal config patch, drafts survive conflict and failed refresh, explicit conflict rebase, public-wording-only command, pagination and clearing, lost receipt across reload uses identical request, no automatic POST, role-bound in-flight save, shared target selection, revocation clears editor",maintenance,calendar,screenshots:[path.join(outputDir,"state-edit-desktop.png"),path.join(outputDir,"state-edit-mobile.png")]};
+}
+module.exports={run};

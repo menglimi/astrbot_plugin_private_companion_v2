@@ -1,0 +1,106 @@
+"""The native Screen consent route controls one private target and nothing wider."""
+
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace as NS
+import unittest
+
+from astrbot.api.web import PluginRequest, bind_request_context
+from starlette.requests import Request
+
+from astrbot_host.screen_access_api import PREFIX
+from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
+from companion_v2.identity_policy.models import GrantState
+from companion_v2.identity_policy.repository import PersistentIdentityDirectory
+from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS, SCREEN_READ
+from tests import test_astrbot_staging_host as support
+from tests.test_native_screen_flow import provider_module
+
+
+class ScreenAccessAPITests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory(prefix="companion-screen-access-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.native = support.WebContext()
+        provider = provider_module().NativeScreenProvider(
+            self.root / "screen-native", version="3.3.1", device_id="desktop",
+            platform_id="qq-main", account_id="100", bot_id="bot-a",
+            capture=lambda: b"unused", now=lambda: support.NOW)
+        self.addAsyncCleanup(provider.close)
+        star = NS(root_dir_name="astrbot_plugin_screen_companion",
+            version="3.3.1", activated=True,
+            star_cls=NS(extension_api=NS(companion_v2_native=lambda: provider)))
+        self.native.get_all_stars = lambda: (star,)
+        types = support.NativeAdapterTypes("4.27.2", support.FakeEvent, support.FakeProvider,
+                                          NS, NS, support.FakeReverseApi)
+        self.controller = support.AstrBotStagingController(
+            self.native, support.host_config(), self.root, native_types=types,
+            now=lambda: support.NOW)
+        self.addAsyncCleanup(self.controller.terminate)
+        self.controller.register_routes()
+        self.routes = {(path, methods[0]): handler
+                       for path, handler, methods, _ in self.native.registered_web_apis}
+
+    async def call(self, *, body=None, username="admin", route=PREFIX, query=b""):
+        method = "POST" if body is not None else "GET"
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else b""
+
+        async def receive():
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        request_route = route if method == "GET" else route + "/configure"
+        native = Request({"type": "http", "method": method, "path": request_route,
+                          "headers": [], "query_string": query}, receive=receive)
+        with bind_request_context(PluginRequest(native, username=username)):
+            return await self.routes[(request_route, method)]()
+
+    async def start(self):
+        self.assertTrue((await self.controller.initialize_profile()).is_success)
+        self.assertTrue((await self.controller.start()).is_success)
+
+    async def test_enable_revoke_and_replay_are_scoped_to_the_current_private_window(self):
+        await self.start()
+        initial = (await self.call())["data"]
+        self.assertFalse(initial["installed"])
+        self.assertFalse(initial["invokable"])
+        command = {"operation_key": "screen-enable-1", "edit_token": initial["edit_token"], "enabled": True}
+        enabled = await self.call(body=command)
+        self.assertEqual(enabled["status"], "ok", enabled)
+        self.assertTrue(enabled["data"]["status"]["invokable"])
+        self.assertTrue(enabled["data"]["status"]["consented"])
+        replay = await self.call(body=command)
+        self.assertTrue(replay["data"]["replayed"])
+        repository = CapabilityRepository(self.controller.runtime)
+        config = self.controller.configuration
+        for capability in (SCREEN_READ, SCREEN_PROCESS):
+            self.assertTrue(repository.authorize(extension_id=SCREEN_EXTENSION, capability_id=capability,
+                subject=config.subject, scope=config.scope).is_success)
+        current = (await self.call())["data"]
+        revoked = await self.call(body={"operation_key": "screen-revoke-1",
+            "edit_token": current["edit_token"], "enabled": False})
+        self.assertFalse(revoked["data"]["status"]["invokable"])
+        self.assertFalse(revoked["data"]["status"]["consented"])
+        for capability in (SCREEN_READ, SCREEN_PROCESS):
+            row = self.controller.runtime.read_one(
+                "SELECT state FROM capability_authorizations WHERE extension_id = ? AND capability_id = ?",
+                (SCREEN_EXTENSION, capability))
+            self.assertEqual(row["state"], CapabilityAuthorizationState.REVOKED.value)
+        grants = PersistentIdentityDirectory(self.controller.runtime).snapshot().grants
+        owned = [grant for grant in grants if grant.grant_id.startswith("screen-access:")]
+        self.assertTrue(owned)
+        self.assertTrue(all(grant.state is GrantState.REVOKED for grant in owned))
+        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_route_requires_dashboard_identity_and_rejects_query_overrides(self):
+        await self.start()
+        for username in (None, "", "api_key:synthetic"):
+            self.assertEqual((await self.call(username=username))["data"]["code"],
+                             "dashboard_identity_required")
+        self.assertEqual((await self.call(query=b"target_id=other"))["data"]["code"],
+                         "screen_access_request_invalid")
+
+
+if __name__ == "__main__":
+    unittest.main()

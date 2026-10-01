@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>关系与权限 · 陪伴</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="/api/plugin/page/bridge-sdk.js" defer></script>
+  <script src="app.js?v=relation-network-20261001" defer></script>
+</head>
+<body>
+  <main class="relationship-app">
+    <header class="page-heading">
+      <div>
+        <span class="eyebrow">IDENTITY · CONTEXT · ACCESS</span>
+        <h1>关系与权限</h1>
+        <p class="intro">查看真实往来、群成员归属与逐人能力授权。</p>
+      </div>
+      <div class="heading-actions">
+        <span class="sync-state" id="sync-state" role="status" aria-live="polite">正在连接</span>
+        <button id="refresh" class="secondary refresh-button" type="button" title="重新读取相识目录">
+          <span aria-hidden="true">↻</span><span>重新读取</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="scope-strip" aria-label="当前管理范围与往来概况">
+      <div class="scope-item"><span>运行实例</span><strong id="profile">—</strong></div>
+      <div class="scope-item"><span>管理者</span><strong id="operator">—</strong></div>
+      <div class="scope-metric"><span>全部相识</span><strong id="count-total">—</strong></div>
+      <div class="scope-metric"><span>私聊用户</span><strong id="count-private">—</strong></div>
+      <div class="scope-metric"><span>群友</span><strong id="count-group">—</strong></div>
+      <div class="scope-metric"><span>两边都有</span><strong id="count-both">—</strong></div>
+      <span id="count-split" class="sr-only">—</span>
+    </section>
+
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <div class="commandbar">
+      <nav class="view-tabs" role="tablist" aria-label="关系与权限视图">
+        <button class="tab active" id="tab-network" type="button" role="tab" data-tab="network" aria-controls="panel-network" aria-selected="true">
+          <span class="tab-mark network-mark" aria-hidden="true"></span><span>关系网</span>
+        </button>
+        <button class="tab" id="tab-people" type="button" role="tab" data-tab="people" aria-controls="panel-people" aria-selected="false">
+          <span class="tab-mark private-mark" aria-hidden="true"></span><span>私聊</span>
+        </button>
+        <button class="tab" id="tab-groups" type="button" role="tab" data-tab="groups" aria-controls="panel-groups" aria-selected="false">
+          <span class="tab-mark group-mark" aria-hidden="true"></span><span>群聊</span>
+        </button>
+      </nav>
+      <label class="search-field" for="directory-search">
+        <span aria-hidden="true">⌕</span>
+        <input id="directory-search" type="search" autocomplete="off" placeholder="搜索名称、账号或群号" aria-label="搜索成员和群聊">
+        <button id="clear-search" type="button" aria-label="清除搜索" title="清除搜索" hidden>清除</button>
+      </label>
+    </div>
+
+    <section id="panel-network" class="view-panel active" role="tabpanel" aria-labelledby="tab-network" aria-label="往来关系网">
+      <header class="panel-heading">
+        <div><span class="eyebrow">INTERACTION MAP</span><h2>往来关系网</h2>
+          <p>私聊线表示与 Bot 的直接往来；群聊节点区分运行实例目标与历史成员记录。</p></div>
+        <div class="graph-controls" role="group" aria-label="关系网范围">
+          <button class="graph-filter active" type="button" data-graph-scope="all" aria-pressed="true">全部</button>
+          <button class="graph-filter" type="button" data-graph-scope="private" aria-pressed="false">私聊</button>
+          <button class="graph-filter" type="button" data-graph-scope="group" aria-pressed="false">群聊</button>
+        </div>
+      </header>
+      <div class="graph-frame">
+        <div class="graph-meta"><span id="graph-summary">正在整理往来</span><span class="graph-scroll-hint">图谱较宽时可横向滚动</span></div>
+        <div id="relationship-graph" class="graph-viewport" aria-label="可交互的往来关系图"></div>
+        <div id="graph-empty" class="empty-state" hidden></div>
+        <footer class="graph-legend" aria-label="关系线说明">
+          <span><i class="legend-line private-line" aria-hidden="true"></i>私聊往来</span>
+          <span><i class="legend-line group-line" aria-hidden="true"></i>群成员记录</span>
+          <span class="graph-caveat">仅呈现 V2 已记录的往来，不推断成员彼此关系。</span>
+        </footer>
+      </div>
+    </section>
+
+    <section id="panel-people" class="view-panel" role="tabpanel" aria-labelledby="tab-people" aria-label="私聊用户">
+      <header class="panel-heading compact-heading">
+        <div><span class="eyebrow">PRIVATE CONTACTS</span><h2>私聊用户</h2>
+          <p>往来统计与逐人能力授权来自当前 V2 运行实例。</p></div>
+        <span class="result-count" id="people-result-count">0 人</span>
+      </header>
+      <div class="filter-row" role="group" aria-label="按往来类型筛选">
+        <button class="chip active" type="button" data-filter="all" aria-pressed="true">全部 <b id="chip-all">0</b></button>
+        <button class="chip" type="button" data-filter="private" aria-pressed="false">私聊 <b id="chip-private">0</b></button>
+        <button class="chip" type="button" data-filter="group" aria-pressed="false">群友 <b id="chip-group">0</b></button>
+        <button class="chip" type="button" data-filter="both" aria-pressed="false">两边都有 <b id="chip-both">0</b></button>
+      </div>
+      <div class="people-layout">
+        <div id="people-grid" class="people-grid" aria-live="polite"></div>
+        <aside id="person-detail" class="person-detail" aria-label="成员往来和能力授权">
+          <div class="placeholder"><span class="placeholder-mark" aria-hidden="true">01</span>
+            <h3>选择一位成员</h3><p>查看往来详情及实际授权状态。</p></div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="panel-groups" class="view-panel" role="tabpanel" aria-labelledby="tab-groups" aria-label="群聊往来">
+      <header class="panel-heading compact-heading">
+        <div><span class="eyebrow">GROUP CONTEXT</span><h2>群聊</h2>
+          <p>并列查看运行实例已配置的群目标，以及 V2 相识目录记录过的历史群聊。</p></div>
+        <span class="result-count" id="groups-result-count">0 个群</span>
+      </header>
+      <div class="groups-layout">
+        <div id="groups-list" class="groups-list" aria-label="群聊目标与历史记录" aria-live="polite"></div>
+        <section id="group-detail" class="group-detail" aria-label="群聊成员和往来统计">
+          <div class="placeholder"><span class="placeholder-mark" aria-hidden="true">02</span>
+            <h3>选择一个群聊</h3><p>查看群内已记录的相识成员。</p></div>
+        </section>
+      </div>
+    </section>
+
+    <footer class="page-foot"><span>权限状态以服务端当前记录为准；群目标配置在宿主管理中维护。</span></footer>
+  </main>
+</body>
+</html>

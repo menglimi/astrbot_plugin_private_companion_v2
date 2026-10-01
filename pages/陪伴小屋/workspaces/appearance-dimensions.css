@@ -1,0 +1,9 @@
+/* 已废弃，请勿引用。
+   2026-09-26：原计划把显示维度放在这个共享文件里，但工作区是通过 iframe 的
+   srcdoc 加载的，没有 base URL，任何外部 <link> 都无法解析；而且
+   tools/sync_framework_page.py 打包时会内联 style.css、丢弃其余样式表引用。
+   显示维度规则已改为直接写在下面三个源样式表末尾：
+     pages/宿主管理/style.css
+     pages/日记与生活/style.css
+     pages/关系与记忆/style.css
+   本文件留作说明，可以被安全删除。 */

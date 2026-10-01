@@ -1,0 +1,491 @@
+"""AstrBot 4.27.2 private capture, with explicit account/persona projections.
+
+Native classes are supplied by trusted assembly. Importing V2 never boots AstrBot.
+Async host reads finish before the SQLite intake transaction starts.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from companion_v2.execution.models import TaskError, digest, encode, require
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import AudienceRef, ScopeKind, ScopeRef, SubjectKind, SubjectRef
+from companion_v2.identity_policy.models import AuthenticatedHostPrincipal, _opaque
+from companion_v2.identity_policy.personas import ConversationRoute
+from companion_v2.conversation.media.models import CapturedImage, MAX_INPUT_IMAGES, check_manifest, fits_budget
+from companion_v2.conversation.quotes.models import CapturedQuote, message_number, event_images
+from companion_v2.conversation.forwards.models import CapturedForward, ForwardIntakePolicy, fits_forwards
+from companion_v2.conversation.media.audio.models import CapturedAudio, MAX_INPUT_AUDIOS, fits_audio_budget
+from companion_v2.conversation.media.video.models import CapturedVideo, MAX_VIDEOS, fits_video_budget
+
+
+SUPPORTED_VERSION = "4.27.2"
+MEDIA_PREPARE_TIMEOUT = 25
+
+
+def check_version(version):
+    if version != SUPPORTED_VERSION:
+        raise ValueError("AstrBot native adapters require the verified 4.27.2 contract")
+
+
+def native_id(value):
+    if type(value) not in (str, int):
+        raise ValueError("native identifiers must be explicit strings or integers")
+    return _opaque(str(value), field="native identifier")
+
+
+def account_number(value):
+    value = native_id(value)
+    if not value.isascii() or not value.isdecimal() or str(int(value)) != value or int(value) <= 0:
+        raise ValueError("OneBot private account identifiers must be canonical positive numbers")
+    return value
+
+
+def persona_instruction(persona):
+    """Retain the exact prompt and optional host-processed persona examples."""
+    if persona is None:
+        return ""
+    prompt = persona.get("prompt")
+    if not isinstance(prompt, str):
+        raise TaskError("host_persona_invalid", "selected host persona has no text prompt")
+    dialogs = persona.get("_begin_dialogs_processed") or []
+    if not isinstance(dialogs, list) or any(
+        not isinstance(d, dict) or set(d) != {"role", "content"}
+        or d["role"] not in ("user", "assistant") or not isinstance(d["content"], str) for d in dialogs
+    ):
+        raise TaskError("host_persona_invalid", "persona examples require the verified text format")
+    if dialogs:
+        prompt += "\n\n以下为人格的对话示例，用于保持说话风格，不代表本会话发生过的事情：\n" + encode(dialogs)
+    return prompt
+
+
+@dataclass(frozen=True)
+class HostAccount:
+    platform_id: str
+    self_id: str
+    bot_id: str
+
+    def __post_init__(self):
+        _opaque(self.platform_id, field="platform instance")
+        _opaque(self.bot_id, field="logical bot")
+        if ":" in self.platform_id or account_number(self.self_id) != self.self_id:
+            raise ValueError("account projection requires canonical host IDs")
+
+
+@dataclass(frozen=True)
+class HostPersona:
+    bot_id: str
+    persona_id: str | None
+    role: SubjectRef
+    instruction_hash: str
+
+    def __post_init__(self):
+        _opaque(self.bot_id, field="logical bot")
+        _opaque(self.instruction_hash, field="persona instruction hash")
+        if self.persona_id is not None:
+            _opaque(self.persona_id, field="host persona")
+        if self.role.kind is not SubjectKind.BOT:
+            raise ValueError("host persona projection requires a bot role")
+
+
+@dataclass(frozen=True)
+class NativeImageLocator:
+    position: int
+    locator: str
+
+
+@dataclass(frozen=True)
+class NativeAudioLocator:
+    position: int
+    locator: str
+
+
+@dataclass(frozen=True)
+class NativeVideoLocator:
+    position: int
+    locator: str
+
+
+@dataclass(frozen=True)
+class NativeConversationInput:
+    event_id: str
+    principal: AuthenticatedHostPrincipal
+    route: ConversationRoute
+    recipients: AudienceRef
+    text: str
+    at: datetime
+    role: SubjectRef
+    instruction: str
+    images: tuple[CapturedImage, ...] = ()
+    quotes: tuple[CapturedQuote, ...] = ()
+    forwards: tuple[CapturedForward, ...] = ()
+    audios: tuple[CapturedAudio, ...] = ()
+    videos: tuple[CapturedVideo, ...] = ()
+
+
+NativePrivateInput = NativeConversationInput  # Preserve the private adapter's public snapshot name.
+
+
+class NativeInputPorts:
+    """Consume only frozen snapshots produced by the trusted native bridges."""
+
+    def event_id(self, event): return event.event_id
+    def scope(self, event): return event.route.scope
+    def audience(self, event): return event.recipients
+    def payload(self, event): return event.text
+    def payload_hash(self, event):
+        original = digest([event.text, tuple(i.descriptor for i in event.images)]) if event.images else digest(event.text)
+        original = digest([original, tuple(a.descriptor for a in event.audios)]) if event.audios else original
+        return digest([original, tuple(v.descriptor for v in event.videos)]) if event.videos else original
+    def images(self, event): return event.images
+    def quotes(self, event): return event.quotes
+    def forwards(self, event): return event.forwards
+    def audios(self, event): return event.audios
+    def videos(self, event): return event.videos
+    def received_at(self, event): return event.at
+    def conversation_route(self, event): return event.route
+
+    def authenticated_principal(self, event):
+        if not isinstance(event, NativePrivateInput):
+            return Outcome.failed("host_snapshot_required", "native events must be captured before intake")
+        return Outcome.success(event.principal)
+
+    def role_instruction(self, event, context):
+        if context.role_binding.role != event.role:
+            raise TaskError("host_persona_projection_mismatch", "V2 and the selected host persona must agree")
+        return event.instruction
+
+
+class NativePrivateBridge:
+    scope_kind = ScopeKind.PRIVATE
+
+    def __init__(self, context, *, version, event_type, installation_id, host_id, identities,
+                 accounts: tuple[HostAccount, ...], personas: tuple[HostPersona, ...], image_type=None, image_loader=None,
+                 reply_type=None, quote_loader=None, forward_type=None, forward_loader=None, now=None,
+                 audio_type=None, audio_loader=None, component_reader=None, video_type=None, video_loader=None,
+                 forward_intake=None):
+        check_version(version)
+        self.context, self.event_type, self.identities = context, event_type, identities
+        self.installation_id, self.host_id = installation_id, host_id
+        if (image_type is None) != (image_loader is None) or (image_type is not None and (
+                not isinstance(image_type, type) or not callable(image_loader))):
+            raise ValueError("image intake needs an explicit native type and a trusted loader")
+        self.image_type, self.image_loader = image_type, image_loader
+        if (reply_type is None) != (quote_loader is None) or (reply_type is not None and (
+                not isinstance(reply_type, type) or not callable(quote_loader))):
+            raise ValueError("quote intake needs an explicit native reply type and a trusted loader")
+        self.reply_type, self.quote_loader = reply_type, quote_loader
+        if (forward_type is None) != (forward_loader is None) or (forward_type is not None and (
+                not isinstance(forward_type, type) or not callable(forward_loader))):
+            raise ValueError("forward intake needs an explicit native type and a trusted loader")
+        self.forward_type, self.forward_loader = forward_type, forward_loader
+        # Intake ceilings default to the structural constants, so an installation that
+        # never narrows them behaves exactly as before.
+        if forward_intake is None:
+            forward_intake = ForwardIntakePolicy()
+        if not isinstance(forward_intake, ForwardIntakePolicy):
+            raise ValueError("forward intake policy must be the declared structural type")
+        self.forward_intake = forward_intake
+        if (audio_type is None) != (audio_loader is None) or (audio_type is not None and (
+                not isinstance(audio_type, type) or not callable(audio_loader))):
+            raise ValueError("audio intake needs an explicit native type and a trusted loader")
+        if component_reader is not None and not callable(component_reader):
+            raise ValueError("component reader must be supplied by trusted host assembly")
+        self.audio_type, self.audio_loader, self.component_reader = audio_type, audio_loader, component_reader
+        if (video_type is None) != (video_loader is None) or (video_type is not None and (
+                not isinstance(video_type, type) or not callable(video_loader))):
+            raise ValueError("video intake needs an explicit native type and a trusted loader")
+        self.video_type, self.video_loader = video_type, video_loader
+        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.accounts = {(a.platform_id, a.self_id): a for a in accounts}
+        self.personas = {(p.bot_id, p.persona_id): p for p in personas}
+        if not accounts or len(self.accounts) != len(accounts) or len(self.personas) != len(personas):
+            raise ValueError("host projections must be explicit and unique")
+        if any(p.role.installation_id != installation_id for p in personas):
+            raise ValueError("persona projections cross installation")
+        self.platforms = {}
+        for account in accounts:
+            platform = context.get_platform_inst(account.platform_id)
+            if platform is None or platform.meta().name != "aiocqhttp" or platform.meta().id != account.platform_id:
+                raise ValueError("account projection requires its current OneBot platform")
+            self.platforms[account.platform_id] = (platform, platform.get_client())
+        self.ports = NativeInputPorts()
+
+    def account(self, scope):
+        """The registered account a private scope belongs to, or an explicit refusal."""
+        account = self.accounts.get((scope.platform, scope.account_id))
+        if (account is None or scope.installation_id != self.installation_id or scope.bot_id != account.bot_id
+                or scope.kind is not self.scope_kind):
+            raise TaskError("host_account_changed", "original host account projection is unavailable")
+        return account
+
+    def client(self, scope):
+        account = self.account(scope)
+        platform, client = self.platforms[account.platform_id]
+        if (self.context.get_platform_inst(account.platform_id) is not platform or platform.get_client() is not client
+                or platform.meta().id != account.platform_id or platform.meta().name != "aiocqhttp"):
+            raise TaskError("host_account_changed", "original platform/client was replaced")
+        return client
+
+    @staticmethod
+    def _umo(platform_id, sender_id):
+        return f"{platform_id}:FriendMessage:{sender_id}"
+
+    @staticmethod
+    def _conversation_key(umo, conversation_id):
+        return "astrbot-conversation:" + (native_id(conversation_id) if conversation_id is not None else "unopened-" + digest(umo))
+
+    async def _role(self, account, sender_id):
+        umo = self._umo(account.platform_id, sender_id)
+        return await self._role_for_umo(account, umo)
+
+    async def _selected_persona(self, account, umo):
+        """Whatever AstrBot has selected for one private conversation right now.
+
+        The conversation id is read before the persona await and re-checked after
+        it: the host may rebind the window while a persona lookup is in flight, and
+        a capture that kept the old persona for a new conversation would attribute
+        one role's voice to another conversation.
+        """
+        manager = self.context.conversation_manager
+        cid = await manager.get_curr_conversation_id(umo)
+        conversation = await manager.get_conversation(umo, cid, create_if_not_exists=False) if cid is not None else None
+        if cid is not None and conversation is None:
+            raise TaskError("host_conversation_missing", "selected host conversation is unavailable")
+        settings = self.context.get_config(umo=umo).get("provider_settings", {})
+        selected, persona, _, special = await self.context.persona_manager.resolve_selected_persona(
+            umo=umo, conversation_persona_id=conversation.persona_id if conversation is not None else None,
+            platform_name="aiocqhttp", provider_settings=settings)
+        if await manager.get_curr_conversation_id(umo) != cid:
+            raise TaskError("host_conversation_changed", "host conversation changed during capture")
+        return cid, selected, persona, special
+
+    async def _role_for_umo(self, account, umo):
+        cid, selected, persona, special = await self._selected_persona(account, umo)
+        projection = self.personas.get((account.bot_id, selected))
+        if special or projection is None or (persona is None and selected not in (None, "[%None]")):
+            raise TaskError("host_persona_unmapped", "selected persona needs an explicit V2 projection")
+        if persona is not None and persona.get("name") != selected:
+            raise TaskError("host_persona_invalid", "host returned a different persona")
+        instruction = persona_instruction(persona)
+        if digest(instruction) != projection.instruction_hash:
+            raise TaskError("host_persona_changed", "persona prompt/examples changed; refresh the trusted projection")
+        return self._conversation_key(umo, cid), projection.role, instruction
+
+    async def persona_snapshot(self, scope):
+        """The host persona text behind one private scope, for the workshop page.
+
+        Deliberately narrower than ``_role``: it neither compares the text against
+        the pinned projection nor returns ``instruction_hash`` (a security-relevant
+        value that never reaches a page). A persona that already drifted from the
+        pinned profile is *exactly* when an operator needs to look at it -- the
+        workshop exists to help them reconcile the two texts -- so failing the
+        digest check here would hide the page at the moment it matters.
+
+        The text is returned verbatim, trailing whitespace and host-processed
+        examples included: "the left pane is the original" has to stay literally
+        true, so nothing here may trim or normalise it. An installation with no
+        resolved persona yields ``resolved`` False and empty text, which the page
+        renders as a state rather than as a failure.
+        """
+        account = self.account(scope)
+        sender = account_number(scope.native_scope_id)
+        _, selected, persona, _ = await self._selected_persona(account, self._umo(account.platform_id, sender))
+        if persona is not None and persona.get("name") != selected:
+            raise TaskError("host_persona_invalid", "host returned a different persona")
+        name = persona.get("name") if persona is not None else ""
+        return {"persona_id": "" if selected in (None, "[%None]") else selected,
+                "name": name if isinstance(name, str) else "",
+                "text": persona_instruction(persona), "resolved": persona is not None}
+
+    async def verify_role(self, scope, binding, instruction=None):
+        self.client(scope)
+        sender = account_number(scope.native_scope_id)
+        if scope.session_id != sender or binding.scope != scope:
+            raise TaskError("host_route_changed", "original private session is inconsistent")
+        cid, role, prompt = await self._role(self.accounts[(scope.platform, scope.account_id)], sender)
+        self.client(scope)
+        if cid != scope.conversation_id or role != binding.role or (instruction is not None and prompt != instruction):
+            raise TaskError("host_persona_changed", "host conversation/persona differs from the original turn")
+        return prompt
+
+    async def verified_persona(self, scope, binding):
+        prompt = await self.verify_role(scope, binding)
+        matches = [persona for persona in self.personas.values()
+                   if persona.bot_id == scope.bot_id and persona.role == binding.role]
+        if len(matches) != 1:
+            raise TaskError("host_persona_ambiguous", "the verified role does not identify one host persona")
+        return {"persona_id": matches[0].persona_id, "prompt": prompt,
+                "bot_id": scope.bot_id, "account_id": scope.account_id}
+
+    async def _capture_images(self, locators):
+        images = []
+        for locator in locators:
+            image = await self.image_loader(locator)
+            if not isinstance(image, CapturedImage) or image.descriptor.position != locator.position:
+                raise TaskError("host_image_invalid", "image loader did not preserve the original component position")
+            images.append(image)
+            check_manifest(tuple(i.descriptor for i in images))
+        return tuple(images)
+
+    async def capture(self, event):
+        try:
+            from .quotes import NativeQuoteLocator, image_locator
+            from .forwards import NativeForwardLocator, resource_id
+            from companion_v2.conversation.quotes.models import event_audios, event_videos
+            if type(event) is not self.event_type:
+                raise TaskError("host_event_unsupported", "this profile accepts native OneBot private events")
+            message, meta, session = event.message_obj, event.platform_meta, event.session
+            platform_id = meta.id
+            if (getattr(message.type, "value", None) != "FriendMessage"
+                    or getattr(session.message_type, "value", None) != "FriendMessage" or message.group_id):
+                raise TaskError("host_scene_unsupported", "group and thread adapters are not installed")
+            sender, login = account_number(message.sender.user_id), account_number(message.self_id)
+            account = self.accounts.get((platform_id, login))
+            if (account is None or meta.name != "aiocqhttp" or session.platform_id != platform_id
+                    or session.platform_name != platform_id or session.session_id != sender
+                    or event.unified_msg_origin != self._umo(platform_id, sender)):
+                raise TaskError("host_route_mismatch", "event fields do not identify one registered private route")
+            parts = self.component_reader(event) if self.component_reader is not None else tuple(message.message)
+            if not parts or len(parts) > 128:
+                raise TaskError("host_media_unsupported", "message components are empty or exceed the intake budget")
+            text_parts, locators, quote_locators, forward_locators, audio_locators, video_locators = [], [], [], [], [], []
+            for position, part in enumerate(parts):
+                kind = getattr(part.type, "value", part.type)
+                if kind == "Plain" and isinstance(part.text, str):
+                    text_parts.append(part.text)
+                elif kind == "Image" and self.image_type is not None and type(part) is self.image_type:
+                    locators.append(image_locator(position, part.file, part.url))
+                    text_parts.append("\n[图片 " + str(len(locators)) + "]\n")
+                elif kind == "Reply" and self.reply_type is not None and type(part) is self.reply_type:
+                    quote_locators.append(NativeQuoteLocator(position, message_number(part.id)))
+                    text_parts.append("\n[引用消息]\n")
+                elif kind == "Forward" and self.forward_type is not None and type(part) is self.forward_type:
+                    forward_locators.append(NativeForwardLocator(position, resource_id(part.id)))
+                    text_parts.append("\n[合并转发 " + str(len(forward_locators)) + "]\n")
+                elif kind == "Record" and self.audio_type is not None and type(part) is self.audio_type:
+                    value = part.file if type(part.file) is str and part.file.startswith("base64://") else part.url or part.file
+                    if type(value) is not str or not value:
+                        raise TaskError("host_audio_unavailable", "voice has no original host attachment")
+                    audio_locators.append(NativeAudioLocator(position, value))
+                    text_parts.append("\n[语音 " + str(len(audio_locators)) + "]\n")
+                elif kind == "Video" and self.video_type is not None and type(part) is self.video_type:
+                    value = part.file if type(part.file) is str and part.file.startswith("base64://") else part.url or part.file
+                    if type(value) is not str or not value:
+                        raise TaskError("host_video_unavailable", "video has no original host attachment")
+                    video_locators.append(NativeVideoLocator(position, value))
+                    text_parts.append("\n[视频 " + str(len(video_locators)) + "]\n")
+                else:
+                    raise TaskError("host_media_unsupported", "this component needs its own governed source adapter")
+            if len(locators) > MAX_INPUT_IMAGES:
+                raise TaskError("host_image_limit", "too many images in one input")
+            if len(video_locators) > MAX_VIDEOS:
+                raise TaskError("host_video_limit", "too many video attachments in one input")
+            if len(audio_locators) > MAX_INPUT_AUDIOS:
+                raise TaskError("host_audio_limit", "too many voice attachments in one input")
+            if len(quote_locators) > 1:
+                raise TaskError("host_quote_unsupported", "one original reply component is supported per input")
+            if len(forward_locators) > self.forward_intake.max_forwards:
+                raise TaskError("host_forward_limit", "too many forwarded records in one input")
+            text = "".join(text_parts)
+            if not text.strip() or len(text) > 65536:
+                raise TaskError("host_text_invalid", "private input must be bounded nonempty text")
+            event_id = native_id(message.message_id)
+            at = datetime.fromtimestamp(event.created_at, timezone.utc)
+            principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, platform_id, sender, account.bot_id, login)
+            actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
+            # Freeze all event fields before any host await; later event middleware cannot restamp them.
+            event_client = event.bot
+            cid, role, instruction = await self._role(account, sender)
+            scope = ScopeRef(self.installation_id, platform_id, ScopeKind.PRIVATE, sender, account.bot_id, login, cid, sender)
+            if event_client is not self.client(scope):
+                raise TaskError("host_client_mismatch", "event did not originate from the registered account client")
+            frozen_images, frozen_quotes, frozen_forwards = tuple(locators), tuple(quote_locators), tuple(forward_locators)
+            frozen_audios, frozen_videos = tuple(audio_locators), tuple(video_locators)
+            async def prepare():
+                images = await self._capture_images(frozen_images)
+                audios = []
+                for locator in frozen_audios:
+                    audio = await self.audio_loader(locator)
+                    if type(audio) is not CapturedAudio or audio.descriptor.position != locator.position:
+                        raise TaskError("host_audio_invalid", "audio loader changed the original component position")
+                    audios.append(audio)
+                    if not fits_audio_budget(tuple(a.descriptor for a in audios), tuple(i.descriptor for i in images)):
+                        raise TaskError("host_audio_limit", "voice and images exceed the shared intake budget")
+                quotes = []
+                for locator in frozen_quotes:
+                    if locator.message_id == event_id:
+                        raise TaskError("host_quote_invalid", "an input cannot quote itself")
+                    quote = await self.quote_loader(locator, client=event_client, scope=scope,
+                                                    intake=self.forward_intake)
+                    if (not isinstance(quote, CapturedQuote) or quote.position != locator.position
+                            or quote.message_id != locator.message_id
+                            or quote.sender_id not in (sender, login)):
+                        raise TaskError("host_quote_invalid", "quote loader changed original attribution")
+                    quotes.append(quote)
+                forwards = await self.forward_loader(frozen_forwards, message_id=event_id, client=event_client, scope=scope,
+                                                     intake=self.forward_intake) if frozen_forwards else ()
+                if (not isinstance(forwards, tuple) or len(forwards) != len(frozen_forwards)
+                        or any(type(f) is not CapturedForward or (f.position, f.resource_hash) != (l.position, digest(l.resource))
+                               for f, l in zip(forwards, frozen_forwards)) or not fits_forwards(forwards)):
+                    raise TaskError("host_forward_invalid", "forward loader changed its original locator or coverage")
+                all_forwards = (*forwards, *(f for q in quotes for f in getattr(q, "forwards", ())))
+                if not fits_forwards(all_forwards):
+                    raise TaskError("host_forward_limit", "direct and quoted forwards exceed the shared input budget")
+                all_images = (*images, *(i for q in quotes for i in event_images(q)), *(i for f in forwards for n in f.nodes for i in n.images))
+                all_audios = (*audios, *(i for q in quotes for i in event_audios(q)),
+                              *(i for f in forwards for n in f.nodes for i in getattr(n, "audios", ())))
+                all_videos = (*videos, *(i for q in quotes for i in event_videos(q)),
+                              *(i for f in forwards for n in f.nodes for i in getattr(n, "videos", ())))
+                # Positions are unique within each parent, while the budget is shared.
+                if not fits_budget(tuple(i.descriptor for i in all_images)):
+                    raise TaskError("host_image_limit", "direct, quoted and forwarded images exceed the shared input budget")
+                audio_descriptors = tuple(i.descriptor if hasattr(i, "descriptor") else i for i in all_audios)
+                video_descriptors = tuple(i.descriptor if hasattr(i, "descriptor") else i for i in all_videos)
+                if not fits_audio_budget(audio_descriptors, tuple(i.descriptor for i in all_images)):
+                    raise TaskError("host_audio_limit", "voice and visual attachments exceed the shared intake budget")
+                direct_videos = []
+                for locator in frozen_videos:
+                    video = await self.video_loader(locator)
+                    if type(video) is not CapturedVideo or video.descriptor.position != locator.position:
+                        raise TaskError("host_video_invalid", "video loader changed the original component position")
+                    direct_videos.append(video)
+                    if not fits_video_budget((*video_descriptors, *(v.descriptor for v in direct_videos)),
+                                             tuple(i.descriptor for i in all_images), audio_descriptors):
+                        raise TaskError("host_video_limit", "video and other attachments exceed the shared intake budget")
+                return images, tuple(quotes), forwards, tuple(audios), tuple(direct_videos)
+            images, quotes, forwards, audios, videos = (), (), (), (), ()
+            if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos:
+                try:
+                    images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    raise TaskError("host_media_timeout", "attachment preparation exceeded its bounded intake time") from None
+            if images or quotes or forwards or audios or videos:
+                # Network/image preparation is outside SQLite; host changes during
+                # that await must not let a stale role or revoked human be admitted.
+                fresh_cid, fresh_role, fresh_instruction = await self._role(account, sender)
+                if (fresh_cid, fresh_role, fresh_instruction) != (cid, role, instruction):
+                    raise TaskError("host_persona_changed", "host role changed while preparing attachments")
+                fresh_actor = require(self.identities.resolve_authenticated(principal, observed_at=self.now()))
+                if (fresh_actor.subject, fresh_actor.binding_id, fresh_actor.binding_revision) != (
+                        actor.subject, actor.binding_id, actor.binding_revision) or event_client is not self.client(scope):
+                    raise TaskError("host_image_owner_changed", "original image sender or client changed")
+            return Outcome.success(NativePrivateInput(event_id, principal, ConversationRoute(scope, user=actor.subject),
+                AudienceRef(scope, (actor.subject,)), text, at, role, instruction, tuple(images), quotes, forwards, audios, videos))
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except asyncio.TimeoutError:
+            return Outcome.failed("host_capture_timeout", "native host capture did not complete in time")
+        except Exception:
+            # Host errors can contain credentials, message bodies or database paths.
+            return Outcome.failed("host_capture_failed", "native host fields or persona lookup could not be verified")
+
+    async def receive(self, host, event):
+        host.application.require_running()
+        captured = await self.capture(event)
+        if not captured.is_success:
+            return captured
+        return host.receive(captured.unwrap())
