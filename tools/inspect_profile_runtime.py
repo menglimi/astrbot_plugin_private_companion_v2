@@ -6,8 +6,11 @@ import sys
 from pathlib import Path
 
 
-PROFILE = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
-    r"C:\Users\99505\.astrbot\data\plugin_data\astrbot_plugin_private_companion_v2\profiles\qq-v2-stream-20260926"
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_PLUGIN_DATA = _PLUGIN_ROOT.parents[1] / "plugin_data" / _PLUGIN_ROOT.name
+
+PROFILE = Path(sys.argv[1]) if len(sys.argv) > 1 else (
+    _PLUGIN_DATA / "profiles" / "qq-v2-stream-20260926"
 )
 
 

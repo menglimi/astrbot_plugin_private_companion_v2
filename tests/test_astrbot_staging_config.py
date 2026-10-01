@@ -162,7 +162,9 @@ class StagingConfigurationTests(unittest.TestCase):
                 StagingConfiguration.parse(invalid)
         # ``delivery_mode`` is optional on the wire for older profiles. Missing and
         # legacy preview values both resolve to the official private sender.
-        self.assertNotIn("delivery_mode", self.document)
+        wire_optional = deepcopy(self.document)
+        wire_optional.pop("delivery_mode", None)
+        self.assertEqual(self.parse(wire_optional).delivery_mode, "onebot_private")
         self.assertEqual(self.parse(deepcopy(self.document)).delivery_mode, "onebot_private")
         for required in ("schema_version", "scope", "host", "subject_id", "persona",
                          "access", "model", "budget", "policy", "limits"):

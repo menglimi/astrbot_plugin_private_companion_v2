@@ -12,7 +12,8 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-V1_SCHEMA = Path(r"C:\Users\99505\.astrbot\data\plugins\astrbot_plugin_private_companion\_conf_schema.json")
+_ROOT = Path(__file__).resolve().parents[1]
+V1_SCHEMA = _ROOT.parent / "astrbot_plugin_private_companion" / "_conf_schema.json"
 AUDIT = Path("docs/V1_V2_CONFIG_COVERAGE_AUDIT_20260927.csv")
 OUT = Path(".verify-shards")
 SHARD_SIZE = 16

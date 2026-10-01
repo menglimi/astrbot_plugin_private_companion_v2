@@ -67,12 +67,12 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(expected.issubset(registered))
         memory_routes = [route for route in registered if "/targets/" in route and route.endswith("/memory")]
         self.assertEqual(len(memory_routes), 4)
-        self.assertEqual(
-            {handler.__self__.controller.target_id for route, handler in registered.items() if "/targets/" in route},
-            {"first", "second"},
-        )
+        # Reality 等按动作注册的路由是闭包而非绑定方法；目标绑定断言只看记忆路由。
+        memory_handlers = [handler for route, handler in registered.items() if route in memory_routes]
+        self.assertEqual({handler.__self__.controller.target_id for handler in memory_handlers},
+                         {"first", "second"})
         self.assertTrue(all(handler.__self__.controller.role_id in {"role-a", "role-b"}
-                            for route, handler in registered.items() if "/targets/" in route))
+                            for handler in memory_handlers))
 
         request = NS(username="dashboard-admin", query=_Query())
         with patch("astrbot_host.multi_api.request", request), patch("astrbot_host.memory_api.request", request):
@@ -87,7 +87,9 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual((await memory_settings())["status"], "ok")
             request.query = _Query({"target_id": "first"})
-            self.assertEqual((await registered[MULTI_HOST_PREFIX + "/authorize-delivery"]())["status"], "error")
+            authorized = await registered[MULTI_HOST_PREFIX + "/authorize-delivery"]()
+            self.assertEqual(authorized["status"], "ok")
+            self.assertFalse(authorized["data"]["required"])
             request.query = _Query()
             self.assertEqual((await registered[MULTI_HOST_PREFIX + "/stop"]())["status"], "ok")
 
@@ -107,8 +109,10 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(contexts[0].actor.subject, contexts[1].actor.subject)
         self.assertNotEqual(owner_key(contexts[0]), owner_key(contexts[1]))
         self.assertEqual(app.state, "running")
+        # 投递授权已移交按人权限（required: False）：每个目标自己的回复
+        # 直达各自的账号与私聊对象，而不是被静默吞掉。
         for platform in self.native.platforms.values():
-            self.assertEqual(platform.client._api._wsr_api.calls, [])
+            self.assertEqual(len(platform.client._api._wsr_api.calls), 1)
 
     async def test_two_bots_two_personas_keep_facts_and_sources_isolated_after_switch_back(self):
         app = await self.start_host()
@@ -174,18 +178,20 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.memory.writer.operation(other, pending["operation_id"]).failure.code,
                          "memory_operation_unavailable")
 
-    async def test_delivery_authorization_is_specific_to_each_actual_account_and_recipient(self):
+    async def test_delivery_authorization_is_compatibility_only_and_delivery_follows_each_target(self):
+        """正式版移除了按目标投递授权闸门：端点保留为兼容 no-op，投递按各自目标直达。"""
         self.controller = self.make_controller(multi_config(delivery_mode="onebot_private"))
         app = await self.start_host()
-        self.assertTrue((await self.controller.authorize_delivery("first")).is_success)
+        granted = (await self.controller.authorize_delivery("first")).unwrap()
+        self.assertEqual((granted["authorized"], granted["required"]), (True, False))
         for target in ("first", "second"):
             await self.accepted(target)
         self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls), 1)
-        self.assertEqual(self.native.platforms["qq-second"].client._api._wsr_api.calls, [])
-        self.assertTrue((await self.controller.revoke_delivery("first")).is_success)
+        self.assertEqual(len(self.native.platforms["qq-second"].client._api._wsr_api.calls), 1)
+        revoked = (await self.controller.revoke_delivery("first")).unwrap()
+        self.assertEqual((revoked["authorized"], revoked["required"]), (True, False))
         await self.accepted("first", "revoked")
-        self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls), 1)
-        self.assertTrue((await self.controller.authorize_delivery("second")).is_success)
+        self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls), 2)
         await self.accepted("second", "authorized")
         action, payload = self.native.platforms["qq-second"].client._api._wsr_api.calls[0]
         self.assertEqual((action, payload["self_id"], payload["user_id"]), ("send_private_msg", "101", 200))
@@ -220,7 +226,7 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.controller.receive_claimed(event)).failure.code, "host_not_claimed")
         self.assertEqual(database_contents(app.runtime), before)
 
-    async def test_identity_remapping_is_rejected_but_persona_rename_keeps_role_owner(self):
+    async def test_identity_remapping_and_persona_rename_are_rejected_as_binding_changes(self):
         await self.start_host()
         context, batch = await self.accepted()
         app = self.controller.session.application
@@ -229,13 +235,19 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         changed = multi_config()
         changed["multi_host"]["personas"][0]["role_id"] = "replacement"
         rejected = self.make_controller(changed)
-        self.assertEqual((await rejected.initialize_profile()).failure.code, "host_identity_conflict")
+        # 绑定差异检查先于旧的身份映射冲突，并点名变化的绑定类别。
+        self.assertEqual((await rejected.initialize_profile()).failure.code, "host_binding_changed")
         await rejected.terminate()
         renamed = multi_config()
         renamed["multi_host"]["personas"][0]["persona_id"] = "renamed"
         self.native.persona_records["renamed"] = {"name": "renamed", "prompt": self.native.persona["prompt"]}
         self.native.selections["qq-main"] = "renamed"
-        self.controller = self.make_controller(renamed)
+        renamed_controller = self.make_controller(renamed)
+        # 人格映射也在绑定契约里：换绑人格同样要重走绑定（见 page-designs/16-setup.md）。
+        self.assertEqual((await renamed_controller.initialize_profile()).failure.code, "host_binding_changed")
+        await renamed_controller.terminate()
+        self.native.selections["qq-main"] = "original"
+        self.controller = self.make_controller(multi_config())
         app = await self.start_host()
         current = self.controller.authority.context("first", "role-a")
         self.assertEqual(owner_key(context), owner_key(current))
@@ -330,7 +342,7 @@ class MultiHostVideoTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             content = payload["messages"][2]["content"]
             self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 4)
         for platform in self.native.platforms.values():
-            self.assertEqual(platform.client._api._wsr_api.calls, [])
+            self.assertEqual(len(platform.client._api._wsr_api.calls), 1)
 
 
 if __name__ == "__main__":

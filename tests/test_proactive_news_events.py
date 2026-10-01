@@ -14,7 +14,8 @@ from astrbot_host.news import NewsJsonPort, configured_news_port
 from companion_v2.proactive.external_materials import parse_news_response
 from companion_v2.proactive.news_events import SOURCE_OWNER
 from companion_v2.storage.runtime import StorageOpenError, StorageRuntime
-from companion_v2.storage.schema import SCHEMA_VERSION, SCHEMA_VERSION_V37
+from companion_v2.storage.schema import (REQUIRED_TABLES, SCHEMA_VERSION, SCHEMA_VERSION_V37,
+                                         V37_REQUIRED_TABLES)
 from tests.contact_schedule_support import ContactScheduleFixture
 
 
@@ -152,7 +153,7 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.contacts(app), ())
         self.assertIsNone(app.runtime.read_one("SELECT * FROM proactive_news_polls", ()))
 
-    async def test_stale_and_missing_date_do_not_reach_model(self):
+    async def test_stale_dated_news_is_refused_but_undated_news_reaches_the_model(self):
         old = self.article(age=timedelta(hours=25))
         undated = self.article("undated")
         del undated["published_at"]
@@ -160,8 +161,16 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         app, _ = await self.setup_news(port)
         self.advance(app, 60)
         await self.until(lambda: port.calls == 1 and not app.contact_schedule.active_handles)
-        self.assertEqual(self.contact_calls(), [])
-        self.assertEqual(self.contacts(app), ())
+        # 超过 24 小时的带日期条目仍然被拒；没有发布日期的条目交给模型
+        # 按"只保留可用日期"的材料规则自行取舍。
+        calls = self.contact_calls()
+        self.assertEqual(len(calls), 1)
+        material = next(m for m in calls[0].original.context.materials if m.owner == SOURCE_OWNER)
+        payload = json.loads(material.payload)
+        self.assertEqual(payload["title"], "有日期的资讯 undated")
+        self.assertIsNone(payload["published_at"])
+        self.assertNotIn("story-a", json.dumps(payload))
+        self.assertEqual(len(self.contacts(app)), 1)
 
 
 class NewsAdapterTests(unittest.TestCase):
@@ -186,8 +195,21 @@ class NewsStorageTests(unittest.TestCase):
             database = runtime.database_path
             runtime.close()
             with closing(sqlite3.connect(database)) as connection:
+                connection.execute("PRAGMA foreign_keys=OFF")
                 connection.execute('DROP TABLE "proactive_news_polls"')
                 connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v37-to-v38'")
+                # 模拟一份真实的 v37 库：v37 之后新增的表、迁移记录，以及 v46
+                # 追加到 model_calls 的用量列都必须先退场，否则降级副本会被
+                # v37 校验当作半截迁移或降级拷贝拒绝。
+                for table in sorted(REQUIRED_TABLES - V37_REQUIRED_TABLES - {"proactive_news_polls"}):
+                    connection.execute(f'DROP TABLE "{table}"')
+                # 用数值比较删 v37 及以后的记录：字典序会把 v5 排到 v37 之后。
+                connection.execute("DELETE FROM schema_migrations WHERE "
+                                   "CAST(substr(from_version, length('companion-v2.storage.v') + 1) AS INTEGER) >= 37",
+                                   ())
+                for column in ("input_tokens", "cached_input_tokens", "cache_creation_tokens",
+                               "output_tokens"):
+                    connection.execute(f"ALTER TABLE model_calls DROP COLUMN {column}")
                 connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
                                    (SCHEMA_VERSION_V37,))
                 connection.commit()

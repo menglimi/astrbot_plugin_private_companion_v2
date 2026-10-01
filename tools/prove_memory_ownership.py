@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PYTHON = "C:/Users/99505/.astrbot/backend/python/python.exe"
+_ASTRBOT_ROOT = ROOT.parents[2]
+PYTHON = _ASTRBOT_ROOT / "backend" / "python" / "python.exe"
 
 CONTEXT = ROOT / "companion_v2" / "memory" / "context.py"
 SERVICE = ROOT / "companion_v2" / "memory" / "service.py"
@@ -45,7 +46,7 @@ def run_tests():
     import os
 
     environment = dict(os.environ)
-    parts = ["C:/Users/99505/.astrbot/backend/app", str(ROOT), str(ROOT.parent)]
+    parts = [str(_ASTRBOT_ROOT / "backend" / "app"), str(ROOT), str(ROOT.parent)]
     environment["PYTHONPATH"] = ";".join(parts)
     completed = subprocess.run(
         [PYTHON, "-X", "utf8", "-m", "unittest", "tests.test_memory_ownership"],

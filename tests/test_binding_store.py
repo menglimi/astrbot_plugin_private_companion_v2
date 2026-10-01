@@ -68,7 +68,7 @@ class RoundTripTests(unittest.TestCase):
 class RefusalTests(unittest.TestCase):
     def test_a_binding_from_a_future_schema_is_refused(self):
         with self.assertRaises(ValueError):
-            PendingBinding.parse(json.dumps({**sample().document(), "schema_version": 2}))
+            PendingBinding.parse(json.dumps({**sample().document(), "schema_version": BINDING_SCHEMA + 1}))
 
     def test_unknown_fields_are_refused_rather_than_dropped(self):
         with self.assertRaises(ValueError):

@@ -175,7 +175,8 @@ class RefusalTests(unittest.TestCase):
     def test_the_confirmation_summary_shows_what_will_be_pinned(self):
         text = describe_pin(binding_identity(platform_id="default", account_id="10002",
                                              participant_id="10001", persona_id="晚星"))
-        for expected in ("10001", "10002", "晚星", "companion_confirm"):
+        # 确认动作在「开始使用」页完成，聊天里不再引导发送 companion_confirm。
+        for expected in ("10001", "10002", "晚星", "请回到「开始使用」"):
             self.assertIn(expected, text)
 
     def test_an_unnamed_persona_is_described_as_following_the_conversation(self):

@@ -676,7 +676,8 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await other.terminate()
 
-    async def test_revoke_waiting_for_start_still_leaves_intake_closed(self):
+    async def test_revoke_waiting_for_start_is_a_compatibility_no_op(self):
+        """投递授权已移交按人权限：撤回端点保持兼容回应，不再翻转接管开关。"""
         sender = self.make_controller(config=host_config(staging={
             "profile_id": "sender-start-race",
             "delivery_mode": "onebot_private",
@@ -684,7 +685,8 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         entered, release = asyncio.Event(), asyncio.Event()
         try:
             self.assertTrue((await sender.initialize_profile()).is_success)
-            self.assertTrue((await sender.authorize_delivery()).is_success)
+            granted = (await sender.authorize_delivery()).unwrap()
+            self.assertEqual((granted["authorized"], granted["required"]), (True, False))
 
             async def delayed(_):
                 entered.set()
@@ -697,9 +699,11 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             release.set()
             self.assertTrue((await starting).is_success)
-            self.assertTrue((await revoking).is_success)
-            self.assertFalse(sender.status()["accepting"])
-            self.assertFalse(sender.status()["delivery_authorization"]["authorized"])
+            revoked = (await revoking).unwrap()
+            self.assertEqual((revoked["authorized"], revoked["required"]), (True, False))
+            # 启动与撤回并发后，接管开关保持打开；闸门状态恒为"无需授权"。
+            self.assertTrue(sender.status()["accepting"])
+            self.assertEqual(sender.status()["delivery_authorization"]["state"], "not_required")
         finally:
             release.set()
             self.native.before_resolve = None

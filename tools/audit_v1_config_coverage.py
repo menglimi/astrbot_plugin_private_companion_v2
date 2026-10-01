@@ -19,7 +19,8 @@ import unittest
 from collections import Counter, defaultdict
 from pathlib import Path
 
-V1_SCHEMA = Path(r"C:\Users\99505\.astrbot\data\plugins\astrbot_plugin_private_companion\_conf_schema.json")
+_ROOT = Path(__file__).resolve().parents[1]
+V1_SCHEMA = _ROOT.parent / "astrbot_plugin_private_companion" / "_conf_schema.json"
 LEDGER = Path("docs/V1_V2_CONFIG_PROGRESS_20260926.csv")
 SOURCE_ROOTS = ("companion_v2", "astrbot_host", "main.py")
 # Dispositions that mean the key is accounted for, not owed.
