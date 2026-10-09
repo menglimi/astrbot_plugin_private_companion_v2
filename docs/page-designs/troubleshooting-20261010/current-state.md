@@ -83,6 +83,33 @@
 
 ## 三、客观问题清单（待用户点哪些是真问题）
 
+### 设计稿缺口对照（2026-10-10 03:30，V2 后端 + v1 面板逐项核对后）
+
+**V2 真有而设计稿 v1 缺失（已全部补进 index.html）：**
+
+| # | 缺失功能 | 真实实现 | 设计稿补法 |
+|---|---|---|---|
+| 1 | 全局「重新检查」 | `data-refresh` + `state.loading`，同步状态三态（已连接/正在同步/同步异常） | 页头右侧刷新按钮（spin loading 态）+ `syncLive` 状态点，点击重放渲染 |
+| 2 | 跨子页跳转 | 信号 action → `data-set-call-filter`（failed/uncertain/cache-low）与 `data-focus-panel` | 证据卡 actions：route 卡「查看失败调用」、calls 卡「查看未确认记录」、cache 卡已有；`probe:kind` 直达检测抽屉对应卡并高亮闪烁（`openProbe`） |
+| 3 | FAQ 常见问题 | 每分类一组 FAQ，答案末尾带定位按钮（真实文案 1540–1575 行） | 新增 05 板「常见问题」9 条真实文案，按当前分类过滤，按钮可直达探测卡 / 证据卡 / 最近调用 |
+| 4 | TTS 试听 | `audio_base64` → `<audio controls>` 内联回放 | TTS 卡 note 说明成功态提供内联试听；演示保持无 Provider（不造假控件） |
+| 5 | 内存采样细节 | `rss_source`（Windows 工作集 / Linux /proc）、`python_tracing_active` / `python_heap_current_bytes`、页面隐藏自动停止 | 结果区补「采样来源」「Python 堆：未开启追踪」「离开本页自动停止」三行 |
+| 6 | 磁贴动态状态 | 磁贴状态是 ok/unknown/warn 计算（1730–1735 行），不是纯信号计数 | 磁贴名前状态点 `data-tone`（error/warn/info/unknown/ok）；voice 演示为 unknown |
+| 7 | 余额接口可用性 | `balance` API（available/configured） | 预算证据卡 stats 补「余额接口：已配置 · 可用」 |
+| 8 | 同步状态指示 | `maint-live`（已连接/正在同步/同步异常） | 页头 `syncLive` 状态点 |
+
+**v1 有而 V2 无后端合同（是否移植待产品拍板，未进设计稿）：**
+
+| v1 能力 | 位置 | 备注 |
+|---|---|---|
+| 警告抑制 | `suppressed_warning_types` + 屏蔽管理器 + summary「已屏蔽 N 类」 | V2 后端无此字段 |
+| 链路测试 | `troubleshootingChainTestMarkup`（含屏幕伴侣 / QQ 空间 / 最近生图 / 链路步骤预览） | V2 只有单点探测 |
+| 提示词注入追踪 | `troubleshootingPromptInjectionMarkup`（module 分组注入明细） | V2 只保留来源元数据 |
+| 主动触达强度 | `troubleshootingProactiveIntensityMarkup` | V2 只有触达计数 |
+| ok 作为信号级别 | summary「错误/警告/信息/正常」四级 | V2 ok 只是计算状态，不进信号清单 |
+
+### 原问题清单
+
 | # | 现象 | 位置 |
 |---|---|---|
 | P1 | 分类切换是**全页重算**：选一个分类后，overview / signals / checks / evidence 四段同时变，但没有任何区块标注"这里变了" | `diagnosticsMarkup` 各段共用 `state.category` |
