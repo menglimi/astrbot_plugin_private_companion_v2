@@ -24,6 +24,9 @@ class RegisteredTools:
     def catalog_for(self, context):
         return self.allowed
 
+    def catalog_with_diagnostics(self, context):
+        return self.allowed, ()
+
 
 class ToolCatalogTests(MessageFixture):
     def tool_registry(self):
