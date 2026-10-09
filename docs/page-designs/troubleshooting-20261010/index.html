@@ -438,10 +438,17 @@
   .toast.show { opacity: 1; transform: translateY(0); }
 
   .doc-note { width: 100%; max-width: 1660px; padding-top: var(--sp-4); border-top: 1px solid var(--line-soft);
-    display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); font-size: var(--fs-micro); color: var(--text-3); line-height: 1.7; }
-  .doc-note .sep { opacity: .5; }
+    display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); font-size: var(--fs-micro); color: var(--text-3); line-height: 1.7; }  .doc-note .sep { opacity: .5; }
   .doc-note code { font-family: var(--mono); font-size: var(--fs-micro); padding: 0 4px; border-radius: var(--r-2xs); background: var(--card-2); }
   .doc-note b { color: var(--text-2); }
+
+  /* ---------- 05 常见问题 ---------- */
+  .faq-list { display: grid; gap: var(--sp-2); }
+  .faq-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-4); align-items: center;
+    padding: var(--sp-3) var(--sp-4); background: var(--card-2); border: 1px solid var(--line-soft); border-radius: var(--r-md); }
+  .faq-item strong { font-size: var(--fs-tiny); color: var(--text); }
+  .faq-item p { font-size: var(--fs-micro); color: var(--text-3); line-height: 1.7; margin-top: 3px; }
+  .faq-item .probe-btn { flex: 0 0 auto; }
 
   @media (max-width: 1240px) {
     .posture { grid-template-columns: minmax(0, 1fr); }
@@ -453,6 +460,8 @@
   @media (max-width: 820px) {
     .cat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .page-head { flex-wrap: wrap; }
+    .sync-box { justify-items: start; margin-left: 0; }
+    .faq-item { grid-template-columns: minmax(0, 1fr); }
   }
   @media (prefers-reduced-motion: reduce) {
     * { transition-duration: .01ms !important; }
@@ -552,12 +561,24 @@
   <div class="probe-grid" id="probeGrid"></div>
 </details>
 
+<!-- 05 常见问题：真实页每分类一组 FAQ，答案末尾带定位按钮 -->
+<section class="board" aria-label="常见问题" style="--d:.34s">
+  <div class="card-head">
+    <span class="eyebrow">FAQ / 05</span>
+    <h3>常见问题</h3>
+    <div class="tail">当前分类 <b id="faqCat">—</b><span class="sep">·</span><b id="faqCount">—</b></div>
+  </div>
+  <div class="faq-list" id="faqList"></div>
+</section>
+
 <footer class="doc-note">
-  <span><b>数据合同</b>：分类、信号、证据与检测字段全部对照 <code>maintenance-page.js</code> 的 <code>diagnosticItems</code> / <code>categoryFocusMarkup</code> / <code>operationsMarkup</code> / <code>integrationsMarkup</code> / <code>proactiveTestMarkup</code> / <code>memoryDiagnosticMarkup</code>。</span>
+  <span><b>数据合同</b>：分类、信号、证据、FAQ 与检测字段全部对照 <code>maintenance-page.js</code> 的 <code>diagnosticItems</code> / <code>categoryFocusMarkup</code> / <code>operationsMarkup</code> / <code>integrationsMarkup</code> / <code>proactiveTestMarkup</code> / <code>memoryDiagnosticMarkup</code> 与 FAQ 分组；后端能力对照 <code>astrbot_host/model_api.py</code>（storage_test / voice_test / image_test / memory_diagnostic / test / balance）。</span>
+  <span class="sep">·</span>
+  <span><b>跨子页动作</b>：真实实现通过 <code>data-set-call-filter</code>（最近调用：失败 / 未确认 / 低命中样本）与 <code>data-focus-panel</code> 跳转；本稿以按钮 + 提示表达，落码时接真实导航。</span>
   <span class="sep">·</span>
   <span><b>演示值</b>：所有计数、耗时、额度、内存数值均为演示值，落码时以真实回执为准。</span>
   <span class="sep">·</span>
-  <span><b>边界</b>：不展示消息正文与身份标识；未知结果不重放、投递未知不重发；图片检查只验注册不提交生成；TTS 不发给联系人。</span>
+  <span><b>边界</b>：不展示消息正文与身份标识；未知结果不重放、投递未知不重发；图片检查只验注册不提交生成；TTS 不发给联系人，合成成功后提供内联试听。</span>
   <span class="sep">·</span>
   <span><b>主题</b>：配色 / 圆角 / 间距 / 字号取自 <code>tokens.css</code> 六套主题 × <code>--t-*</code> 令牌；板宽按真实内容宽（上限 1660）。</span>
   <span class="sep">·</span>
@@ -712,7 +733,7 @@ const STAGE_STATE = {passed: "通过", failed: "失败", pending: "处理中", s
 let CAT = "model";
 let SEV = "all";
 let LINKED = "";        // 当前被信号定位到的证据卡
-let MEM = {running: false, samples: [], timer: null};
+let MEM = {running: false, samples: [], timer: null, source: ""};
 const MEM_LIMIT = 18;   // 真实实现：10 秒一次 × 3 分钟
 
 const $ = id => document.getElementById(id);
@@ -1001,8 +1022,64 @@ function renderStages() {
     '</ol><p class="next">' + esc(RESULTS.proactive.next) + "</p></div>";
 }
 
+/* ---------- 常见问题：文案取自真实页 FAQ（按分类组织，答案末尾带定位按钮） ---------- */
+const FAQS = [
+  {cats: ["all", "model"], q: "探测通过就代表真实回复正常吗？", a: "探测只确认 Provider 可响应，不会走角色提示、消息接收和投递链路；异常时再结合调用回执定位。", act: "probe:provider", label: "测试 Provider"},
+  {cats: ["all", "model"], q: "结果未知为什么不能重试？", a: "请求可能已到达 Provider，但回执未能确认。自动重放可能重复计费或产生重复回复，因此保留原记录供核对。", act: "calls:uncertain", label: "查看记录"},
+  {cats: ["all", "tasks"], q: "任务路由检查什么？", a: "核对主/备用 Provider 是否存在、能力是否匹配，以及输出上限是否超过 Provider 声明值；不读取提示词内容。", act: "ev:route", label: "查看路由"},
+  {cats: ["all", "delivery"], q: "未知投递结果为什么不能重发？", a: "片段可能已到达会话但回执缺失。重发可能造成重复消息，这里只保留原记录供核对。", act: "ev:delivery", label: "查看收口"},
+  {cats: ["all", "proactive"], q: "能从这里发送测试主动消息吗？", a: "可以。先选择用途并确认真实投递；系统会经过角色模型与人格复核再投递到核心管理员私聊，没有当前来源时不会调用模型。", act: "probe:proactive", label: "查看主动消息测试"},
+  {cats: ["all", "image_generation"], q: "注册检查会实际生成图片吗？", a: "不会。它只核对生图动作是否已注册且声明仍有效，不发起外部生成请求。", act: "probe:image", label: "检查生图工具"},
+  {cats: ["all", "voice"], q: "TTS 测试会把语音发给谁？", a: "不会发送给联系人。测试仅合成短音频并返回状态，成功后可内联试听；所选服务商可能计费。", act: "probe:tts", label: "运行 TTS 测试"},
+  {cats: ["all", "storage"], q: "SQLite 检查会修改数据吗？", a: "不会。检查通过只读快照执行 quick_check 和外键一致性核对。", act: "probe:storage", label: "运行只读检查"},
+  {cats: ["all", "storage"], q: "WAL 状态异常怎么办？", a: "先运行完整检查并核对插件连接状态；不要在页面中清理或重置数据库。", act: "probe:storage", label: "检查存储"},
+];
+function renderFaqs() {
+  const vis = FAQS.filter(f => f.cats.includes(CAT));
+  $("faqCat").textContent = catName(CAT);
+  $("faqCount").textContent = vis.length + " 条";
+  $("faqList").innerHTML = vis.map(f =>
+    '<article class="faq-item"><div><strong>' + esc(f.q) + "</strong><p>" + esc(f.a) + "</p></div>" +
+    '<button type="button" class="probe-btn" data-faq="' + f.act + '">' + esc(f.label) + "</button></article>").join("");
+}
+$("faqList").addEventListener("click", e => {
+  const b = e.target.closest("[data-faq]");
+  if (!b) return;
+  const act = b.dataset.faq;
+  if (act.startsWith("probe:")) return openProbe(act.split(":")[1]);
+  if (act.startsWith("calls:")) return toast("跳转最近调用 · 仅未确认与未知");
+  if (act.startsWith("ev:")) {
+    const key = act.slice(3);
+    if (!EVIDENCE[key]) return;
+    if (!EVIDENCE[key].cats.includes(CAT)) { CAT = "all"; render(); }
+    LINKED = key;
+    renderSignals(); renderEvidence();
+    const t = $("ev-" + key);
+    if (t) t.scrollIntoView({block: "nearest", behavior: "smooth"});
+  }
+});
+
 /* ---------- 渲染入口 ---------- */
-function render() { renderPosture(); renderSignals(); renderEvidence(); renderTimeline(); }
+function render() { renderPosture(); renderSignals(); renderEvidence(); renderTimeline(); renderFaqs(); }
+
+/* 全局重新检查：对应真实页 data-refresh；重新读取运行态快照并重放全部检测卡结果清空 */
+$("refreshBtn").addEventListener("click", () => {
+  const btn = $("refreshBtn");
+  if (btn.getAttribute("aria-busy") === "true") return;
+  btn.setAttribute("aria-busy", "true");
+  $("refreshLabel").textContent = "正在检查";
+  $("syncLive").dataset.state = "warn";
+  $("syncLive").innerHTML = "<i></i>正在同步";
+  setTimeout(() => {
+    Object.assign(RESULTS.storage, {state: "warn", title: "完整性检查完成", message: "quick_check 通过 · 外键未启用"});
+    render();
+    btn.setAttribute("aria-busy", "false");
+    $("refreshLabel").textContent = "重新检查";
+    $("syncLive").dataset.state = "";
+    $("syncLive").innerHTML = "<i></i>已连接 · 运行态快照";
+    toast("已重新读取运行态快照");
+  }, 1100);
+});
 
 /* ---------- 事件 ---------- */
 $("themebar").innerHTML = [["dawn", "晨雾"], ["courtyard", "庭院"], ["dusk", "暮色"], ["night", "夜读"], ["walnut", "深林"], ["contrast", "高对比"]]
@@ -1097,6 +1174,7 @@ function startMemory() {
   $("memStart").disabled = true; $("memStop").hidden = false;
   renderMemory();
   MEM.timer = setInterval(() => {
+    if (!MEM.samples.length) MEM.source = "Windows 工作集";   // 真实实现按平台回报 rss_source
     const base = 268435456 + MEM.samples.length * 2200000 + Math.round(Math.random() * 900000);
     MEM.samples.push({v: base, h: 18 + MEM.samples.length * 4, label: (base / 1048576).toFixed(1) + " MiB"});
     renderMemory();
@@ -1120,3 +1198,20 @@ document.addEventListener("keydown", e => {
     SEV = digits[e.key];
     Array.prototype.forEach.call($("sevChips").children, x => {
       const on = x.dataset.sevSet === SEV;
+      x.classList.toggle("is-active", on); x.setAttribute("aria-pressed", String(on));
+    });
+    renderSignals(); renderTimeline(); return;
+  }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  const i = CATS.findIndex(item => item[0] === CAT);
+  CAT = CATS[(i + (e.key === "ArrowDown" ? 1 : CATS.length - 1)) % CATS.length][0];
+  LINKED = "";
+  render();
+  e.preventDefault();
+});
+
+renderProbes();
+render();
+</script>
+</body>
+</html>
