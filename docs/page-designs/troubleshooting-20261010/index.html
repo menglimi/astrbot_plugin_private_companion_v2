@@ -1142,11 +1142,11 @@ function openProbe(kind) {
   document.querySelector("details.probes").open = true;
   const btn = document.querySelector('.probe [data-run="' + kind + '"]');
   if (!btn) return toast("未找到对应检测卡");
-  const card = btn.closest(".probe");
-  card.scrollIntoView({block: "center", behavior: "smooth"});
-  card.classList.remove("is-flash");
-  void card.offsetWidth;
-  card.classList.add("is-flash");
+  const target = btn.closest(".probe");
+  target.scrollIntoView({block: "center", behavior: "smooth"});
+  target.classList.remove("is-flash");
+  void target.offsetWidth;
+  target.classList.add("is-flash");
 }
 
 function runProbe(kind, resId) {
