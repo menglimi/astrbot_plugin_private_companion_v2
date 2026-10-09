@@ -15,7 +15,7 @@ from companion_v2.model_gateway.models import ModelTaskProfile
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 from companion_v2.storage.versioned_records import owner_key
-from .planning_config import configured_weather_location, planning_values
+from .planning_config import SCHEDULE_MODE_ORCHESTRATED, configured_weather_location, planning_values
 from .planning_inputs import capture, validate
 from .planning_output import INSTRUCTION, parse_output
 from .models import AgendaError
@@ -72,15 +72,16 @@ class CalendarPlanning:
         validate(self, job, at, committed=spec.task_id in self.committed)
         return True
 
-    async def run(self, context, instruction, *, mode, slot, occurrence=None):
+    async def run(self, context, instruction, *, mode, slot, occurrence=None, manual=False, refresh=False):
         invocation = asyncio.current_task()
         self.invocations.add(invocation)
         try:
-            return await self._run(context, instruction, mode=mode, slot=slot, occurrence=occurrence)
+            return await self._run(context, instruction, mode=mode, slot=slot, occurrence=occurrence,
+                                   manual=manual, refresh=refresh)
         finally:
             self.invocations.discard(invocation)
 
-    async def _run(self, context, instruction, *, mode, slot, occurrence=None):
+    async def _run(self, context, instruction, *, mode, slot, occurrence=None, manual=False, refresh=False):
         if mode not in ("daily", "horizon", "refine") or mode == "refine" and occurrence is None:
             raise ValueError("select an explicit planning mode and original period")
         if self.closed:
@@ -95,7 +96,7 @@ class CalendarPlanning:
         await self.guard(context, instruction)
         settings = planning_values(self.app.role_state.settings(context)[0])
         location = (configured_weather_location(settings["planning_weather_location"])
-                    if settings["planning_enabled"] and settings["calendar_enabled"]
+                    if (manual or settings["planning_enabled"]) and settings["calendar_enabled"]
                     and settings["planning_weather_enabled"] else None)
         weather = None
         if location is not None and self.weather_port is not None:
@@ -105,7 +106,7 @@ class CalendarPlanning:
                 logger.warning("V2 planning weather fetch failed: %s", type(error).__name__)
         with self.runtime.transaction():
             job = capture(self, context, instruction, mode, slot, occurrence,
-                          weather=weather, weather_location=location)
+                          weather=weather, weather_location=location, manual=manual, refresh=refresh)
             reservation = require(self.operations.reserve(OperationRef(identifier, OWNER, context.scope,
                 VersionRef(identifier, 1), identifier), parameter_hash=digest([owner_key(context), mode, slot]),
                 observed_at=job["at"]))
@@ -126,7 +127,8 @@ class CalendarPlanning:
             report = {"state": task.state, "mode": mode, "task_id": identifier, "code": task.reason}
             if identifier in self.committed:
                 report.update(saved=self.results.get(context.key, {}).get("saved", 0),
-                              rejected=self.results.get(context.key, {}).get("rejected", []))
+                              rejected=self.results.get(context.key, {}).get("rejected", []),
+                              replaced=self.results.get(context.key, {}).get("replaced", 0))
             self.results[context.key] = report
             return report
         finally:
@@ -149,6 +151,7 @@ class CalendarPlanning:
             items, rejected = parse_output(completion.draft.text, job)
             await self.guard(context, job["instruction"])
             receipts = []
+            replaced = 0
             with self.runtime.transaction():
                 run.validate()
                 run.begin_effect()
@@ -158,6 +161,13 @@ class CalendarPlanning:
                         expected_revision=selected["revision"], operation_key=run.task.task_id + ":detail",
                         data={"sequence": selected["sequence"], "detail": items}, sources=job["sources"]))
                 else:
+                    if job["refresh_plans"] and items:
+                        for selected in job["refresh_plans"]:
+                            receipts.append(self.app.calendar.command(context, identifier=selected["id"],
+                                action="cancel", expected_revision=selected["revision"],
+                                operation_key=run.task.task_id + ":replace:" + selected["id"],
+                                sources=job["sources"]))
+                            replaced += 1
                     for index, (event, basis) in enumerate(items):
                         identifier = "planned-" + digest([run.task.task_id, index])
                         receipts.append(self.app.calendar.command(context, identifier=identifier, action="create",
@@ -168,7 +178,7 @@ class CalendarPlanning:
                 self.committed.add(run.task.task_id)
                 run.record_operation(run.task.task_id)
             self.results[context.key] = {"state": "succeeded", "mode": job["mode"], "task_id": run.task.task_id,
-                                         "saved": len(receipts), "rejected": list(rejected)}
+                                         "saved": len(items), "replaced": replaced, "rejected": list(rejected)}
             self.app.notify()
             return TaskResult("succeeded", effect="committed", result_ref=run.task.task_id,
                               operation_id=run.task.task_id, receipt_ref=run.task.task_id)
@@ -178,10 +188,13 @@ class CalendarPlanning:
             raise
 
     def opportunity(self, context, settings, at):
+        if settings.get("schedule_simulation_mode", SCHEDULE_MODE_ORCHESTRATED) != SCHEDULE_MODE_ORCHESTRATED:
+            return None
         local = at.astimezone(ZoneInfo(settings["planning_timezone"]))
+        settings_token = self.app.role_state.planning_settings_token(context)
         for mode, period in (("daily", local.date().isoformat()),
                              ("horizon", "%04d-W%02d" % local.isocalendar()[:2])):
-            slot = mode + ":" + settings["planning_timezone"] + ":" + period
+            slot = mode + ":" + settings["planning_timezone"] + ":" + period + ":settings:" + settings_token
             if not self.attempted(context, slot):
                 return mode, slot, None
         page = self.app.calendar.occurrences(context, start=at,
@@ -225,7 +238,9 @@ class CalendarPlanning:
             self.next_checks[context.key] = at + timedelta(seconds=30)
             try:
                 settings = planning_values(self.app.role_state.settings(context)[0])
-                if not settings["planning_enabled"] or not settings["calendar_enabled"] or self.app.state_maintenance.foreground_busy(context):
+                if (settings["schedule_simulation_mode"] != SCHEDULE_MODE_ORCHESTRATED
+                        or not settings["planning_enabled"] or not settings["calendar_enabled"]
+                        or self.app.state_maintenance.foreground_busy(context)):
                     continue
                 opportunity = self.opportunity(context, settings, at)
                 if opportunity:
@@ -242,6 +257,7 @@ class CalendarPlanning:
     def status(self, context):
         settings = self.app.role_state.settings(context)[0]
         return {"enabled": settings["planning_enabled"], "calendar_enabled": settings["calendar_enabled"],
+            "schedule_simulation_mode": settings["schedule_simulation_mode"],
             "running": context.key in self.workers, "last_result": self.results.get(context.key),
             "next_check": self.next_checks[context.key].isoformat() if context.key in self.next_checks else None}
 

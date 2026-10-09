@@ -5,8 +5,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import unittest
+from zoneinfo import ZoneInfo
 
 from companion_v2.agenda.models import Frequency, Schedule
+from companion_v2.agenda.calendar_access import role_grant_prefix
 from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.execution.models import TaskContext, TaskError, encode
@@ -71,14 +73,57 @@ class StateFixture(HostFixture):
 
 
 class RoleStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_feature_switches_hide_projection_without_erasing_records_or_display_preferences(self):
+        _, app, context, manager = self.setup_state()
+        self.configure(manager, enabled=True, mood_enabled=True)
+        payload = state_data(energy=48, sleep="难以入睡", busy="忙碌", location="小屋", mood="心情平和",
+            conditions=[dict(kind="sleep", text="有点失眠", expires_at=None),
+                        dict(kind="mood", text="平缓的余韵", expires_at=None)])
+        app.role_state.write(context, data=payload, expected_revision=0, operation_key="seed-facets")
+        original = app.role_state.records.get(context, "current")
+        self.configure(manager, energy_enabled=False, sleep_enabled=False, busy_enabled=False,
+            location_enabled=False, mood_enabled=False, home_show_mood=False, home_only_special_sleep=True,
+            home_only_special_cycle=True)
+        read = app.role_state.read(context)
+        for name in ("energy", "sleep", "busy", "location", "mood"):
+            self.assertIsNone(read["values"][name], name)
+        self.assertEqual(read["values"]["conditions"], [])
+        self.assertEqual(app.role_state.records.get(context, "current"), original)
+        saved = manager.status(self.core).unwrap()["settings"]
+        self.assertFalse(saved["home_show_mood"])
+        self.assertTrue(saved["home_only_special_sleep"])
+        self.assertTrue(saved["home_only_special_cycle"])
+        self.configure(manager, energy_enabled=True, sleep_enabled=True, busy_enabled=True,
+            location_enabled=True, mood_enabled=True)
+        self.assertEqual(app.role_state.read(context)["values"]["sleep"], "难以入睡")
+        self.assertEqual(app.role_state.read(context)["values"]["energy"], 48)
+
     async def test_defaults_are_unknown_and_no_optional_grants(self):
         host, app, context, manager = self.setup_state()
         result = manager.status(self.core).unwrap()
         self.assertEqual(result["state"]["state"], "unknown")
         self.assertTrue(all(value is None for key, value in result["state"]["values"].items() if key != "conditions"))
         self.assertFalse(any(item["allowed"] for item in result["effective"].values()))
-        self.assertNotIn("calendar.query", {t.action for t in app.tools.catalog_for(context)})
+        settings, _token = app.role_state.settings(context)
+        self.assertTrue(settings["calendar_enabled"])
+        self.assertFalse(settings["planning_enabled"])
+        self.assertIn("calendar.query", {t.action for t in app.tools.catalog_for(context)})
         self.assertLessEqual(len(app.tools.catalog_for(context)), MAX_TOOL_CATALOG)
+
+    async def test_home_occurrences_cover_the_role_local_day(self):
+        _host, app, _context, manager = self.setup_state()
+        captured = {}
+
+        def occurrences(_context, *, start, end, operator=None):
+            captured.update(start=start, end=end)
+            return {"items": [], "partial": False, "skipped": 0}
+
+        app.calendar.occurrences = occurrences
+        result = manager.status(self.core).unwrap()
+        zone = ZoneInfo(result["settings"]["planning_timezone"])
+        local_start = app.now().astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        self.assertEqual(captured["start"], local_start.astimezone(timezone.utc))
+        self.assertEqual(captured["end"], (local_start + timedelta(days=1)).astimezone(timezone.utc))
 
     async def test_core_settings_exact_grants_replay_and_revoke(self):
         _, app, context, manager = self.setup_state()
@@ -87,12 +132,26 @@ class RoleStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
                        changes={"enabled": True, "calendar_enabled": True, "typing_enabled": True})
         manager.command(self.core, command).unwrap()
         self.assertTrue(manager.command(self.core, command).unwrap()["replayed"])
-        for action in ("role.state.read", "role.state.maintain", "calendar.read", "calendar.write", "platform.typing"):
+        for action in ("role.state.read", "role.state.maintain", "platform.typing"):
             self.assertTrue(app.tasks.check_context_access(context, action=action, observed_at=NOW).is_success, action)
+        for action in ("calendar.read", "calendar.write"):
+            app.calendar.access.check(context, action)
+            self.assertTrue(app.tasks.policy.scope_access(context.actor, scope=context.scope, action=action,
+                observed_at=NOW, allow_private_owner=True).is_success, action)
+            self.assertFalse(app.tasks.identity.authorize(context.actor, scope=context.scope,
+                capability=action, observed_at=NOW).is_success, action)
         self.assertFalse(app.tasks.identity.authorize(context.actor, scope=context.scope, capability="platform.presence", observed_at=NOW).is_success)
         self.assertFalse(manager.command(self.important, command).is_success)
+        role_prefix = role_grant_prefix(context.scope.installation_id, context.scope.bot_id, context.role_binding.role)
+        for action in ("calendar.read", "calendar.write"):
+            app.tasks.identity.issue_grant(grant_id=role_prefix + "legacy-" + action,
+                subject=context.actor.subject, scope=context.scope, capability=action,
+                tier=AuthorizationTier.STANDARD, valid_from=NOW,
+                expected_revision=app.tasks.identity.revision)
         self.configure(manager, enabled=False, calendar_enabled=False, typing_enabled=False)
         self.assertFalse(app.tasks.identity.authorize(context.actor, scope=context.scope, capability="platform.typing", observed_at=NOW).is_success)
+        for action in ("calendar.read", "calendar.write"):
+            self.assertFalse(app.tasks.identity.authorize(context.actor, scope=context.scope, capability=action, observed_at=NOW).is_success)
         self.assertEqual(app.role_state.activity_context(context)["state"], "unavailable")
 
     async def test_expiry_and_disabled_facets_do_not_invent_recovery(self):
@@ -309,6 +368,27 @@ class StateMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.called), 1)
         self.assertEqual(len(self.sent), 0)
         self.assertEqual(self.runtime.read_one("SELECT COUNT(*) AS n FROM model_calls", ())["n"], 1)
+
+    async def test_known_model_budget_failure_is_returned_for_maintenance_status(self):
+        _, app, context, _ = await self.ready()
+        async def exhausted(_envelope):
+            raise TaskError("model_budget_exhausted", "private budget details")
+        self.model_behavior = exhausted
+        result = await app.state_maintenance.run(context, "原角色人格提示", "budget-exhausted")
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["reason"], "worker_error")
+        self.assertEqual(result["code"], "model_budget_exhausted")
+
+    async def test_state_maintenance_does_not_reuse_conversation_inputs_already_in_the_previous_state(self):
+        host, app, context, _ = await self.ready()
+        host.receive(self.event("before-state")).unwrap()
+        app.role_state.write(context, data=state_data(energy=18), expected_revision=0, operation_key="seed")
+        self.clock.advance(timedelta(seconds=1))
+        host.receive(self.event("after-state")).unwrap()
+
+        job = app.state_maintenance.prepare(context, "原角色人格提示", "new-period")
+        inputs = [item.payload for item in job["materials"] if item.purpose == "reported_conversation"]
+        self.assertEqual(inputs, ["输入 after-state"])
 
     async def test_low_energy_enters_the_original_reply_without_refusal_gate(self):
         host, app, context, _ = await self.ready()

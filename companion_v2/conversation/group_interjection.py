@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
 
 from .group_observation import GroupPresenceStore, parse_moment
-from .group_timing import ADDRESS_MARKER, repeat_burst, repeat_decision, repeat_signature
+from .group_timing import ADDRESS_MARKER, clean_group_text, repeat_burst, repeat_decision, repeat_signature
 
 
 SPEECH_KIND = "speech"
@@ -100,7 +100,7 @@ def addresses_role(text, words):
     here decides participation -- it only separates an addressed reply from a
     self-initiated one for the budget and the feedback signal.
     """
-    compact = " ".join(str(text or "").split())
+    compact = clean_group_text(text)
     if not compact:
         return False
     if ADDRESS_MARKER in compact:
@@ -110,7 +110,7 @@ def addresses_role(text, words):
 
 def openings(text, *, mood_top=""):
     """Natural openings and refusals of the current message, as reason codes."""
-    compact = " ".join(str(text or "").split())
+    compact = clean_group_text(text)
     reasons = []
     if any(re.search(pattern, compact) for pattern in REFUSAL_MARKERS):
         reasons.append("refusal")
@@ -143,15 +143,20 @@ class GroupSpeechLedger:
     def load(self, owner):
         raw = self.store.read(owner, SPEECH_KIND) or {}
         repeat = raw.get("repeat") if type(raw.get("repeat")) is dict else {}
+        raw_signature = str(repeat.get("signature") or "")
+        signature = repeat_signature(raw_signature)
         pending = raw.get("pending") if type(raw.get("pending")) is dict else None
+        if pending is not None and pending.get("kind") in (REPEAT_FOLLOW, REPEAT_INTERRUPT):
+            pending_signature = repeat_signature(pending.get("signature"))
+            pending = ({**pending, "signature": pending_signature} if pending_signature else None)
         awaiting = raw.get("awaiting") if type(raw.get("awaiting")) is dict else None
         return {"day": str(raw.get("day") or ""), "used_today": max(0, int(_low(raw.get("used_today")))),
                 "last_act_at": str(raw.get("last_act_at") or ""),
                 "weight": min(WEIGHT_MAX, max(WEIGHT_MIN, _low(raw.get("weight"), WEIGHT_START))),
                 "pending": pending, "awaiting": awaiting, "recorded_batch": str(raw.get("recorded_batch") or ""),
-                "repeat": {"signature": str(repeat.get("signature") or ""),
-                           "acts": max(0, int(_low(repeat.get("acts")))),
-                           "last_act_at": str(repeat.get("last_act_at") or "")}}
+                "repeat": {"signature": signature,
+                           "acts": max(0, int(_low(repeat.get("acts")))) if signature == raw_signature else 0,
+                           "last_act_at": str(repeat.get("last_act_at") or "") if signature == raw_signature else ""}}
 
     def resolve(self, record, *, at, day, policy, items, origin_key, timezone_name):
         """Confirm or drop the last decision and settle its feedback.

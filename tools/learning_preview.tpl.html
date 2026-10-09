@@ -107,7 +107,11 @@ window.CompanionProduct = {
 /*__JS__*/
 </script>
 <script>
-window.CompanionLearningPage.mount(document.getElementById('learningWorkspace'));
+window.CompanionLearningPage.mount(document.getElementById('learningWorkspace'), {
+  growthApi: window.CompanionProduct.role().growth_api,
+  scopeKey: 'preview:chengxi',
+  roleLabel: '澄溪',
+});
 
 document.getElementById('theme').onclick = () => {
   const root = document.documentElement;

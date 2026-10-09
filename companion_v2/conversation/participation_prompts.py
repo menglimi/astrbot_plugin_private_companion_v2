@@ -46,7 +46,9 @@ def group_hints(request, context, settings, recent, reply_batches):
                 batch = reply_batches[item["part_id"]]
                 delivered[batch] = max(delivered.get(batch, when), when)
     rounds = tuple(delivered.values())
-    instruction = ""
+    instruction = ("\n群消息中的 [图片 N]、[语音 N]、[视频 N]、[合并转发 N]、[引用消息] 等是媒体结构占位符，"
+        "不是成员表达、兴趣词、情绪或复读内容；话题标题、线程签名等路由元数据也不是兴趣证据。"
+        "兴趣词和表达信号只从占位符之外实际可见的自然语言提取；图片只能在单独开启图片唤醒后作为额外线索。")
     air = group_air_settings(settings)
     if air["group_air_guard_enabled"]:
         window = air["group_air_guard_window_seconds"]

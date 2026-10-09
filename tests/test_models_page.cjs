@@ -61,6 +61,7 @@ function status() {
 function harness() {
   const requests = [];
   const store = new Map();
+  const audioBlobs = [], revokedAudioUrls = [];
   const window = {
     CompanionProduct: {
       hosted: () => true,
@@ -82,15 +83,36 @@ function harness() {
     },
     crypto: {randomUUID: () => 'key-' + requests.length},
   };
+  window.atob = atob;
+  window.Blob = Blob;
+  window.URL = {
+    createObjectURL: blob => { audioBlobs.push(blob); return `blob:preview-${audioBlobs.length}`; },
+    revokeObjectURL: url => revokedAudioUrls.push(url),
+  };
   vm.runInNewContext(source, {window, crypto: window.crypto, AbortController, setTimeout, clearTimeout});
   function root() {
     const handlers = {};
+    const providerPills = [];
     return {
       isConnected: true, innerHTML: '',
       addEventListener(type, handler) { handlers[type] = handler; },
       removeEventListener(type) { delete handlers[type]; },
-      querySelectorAll() { return []; },
+      querySelectorAll(selector) { return selector === '[data-provider-pill]' ? providerPills : []; },
       querySelector() { return null; },
+      providerPills,
+      addProviderPill(provider) {
+        const classes = new Set();
+        const pill = {dataset: {providerPill: provider}, classList: {
+          toggle(name, force) { if (force) classes.add(name); else classes.delete(name); },
+          contains(name) { return classes.has(name); },
+        }};
+        providerPills.push(pill);
+        return pill;
+      },
+      pointer(type, pill, related = null) {
+        const wrap = item => item ? {closest: selector => selector === '[data-provider-pill]' ? item : null} : null;
+        handlers[type]({type, target: wrap(pill), relatedTarget: wrap(related)});
+      },
       fire(type, selector, dataset) {
         handlers[type]({type, target: {dataset: dataset || {}, value: dataset?.value, checked: dataset?.checked, valueAsNumber: dataset?.valueAsNumber,
           matches: candidate => candidate === selector, closest: candidate => (candidate === selector ? {dataset} : null)}});
@@ -100,7 +122,7 @@ function harness() {
       change(selector, dataset) { this.fire('change', selector, dataset); },
     };
   }
-  return {page: window.CompanionModelsPage, requests, root, store};
+  return {page: window.CompanionModelsPage, requests, root, store, audioBlobs, revokedAudioUrls};
 }
 
 test('the routing matrix lists every registered task with its provider', async () => {
@@ -112,9 +134,21 @@ test('the routing matrix lists every registered task with its provider', async (
   assert.match(node.innerHTML, /任务/);
   assert.match(node.innerHTML, /对话回复/);
   assert.match(node.innerHTML, /记忆整理/);
-  assert.match(node.innerHTML, /2<\/strong><span>可用 Provider/);
+  assert.match(node.innerHTML, /2<\/strong><span>可用模型提供方/);
   assert.match(node.innerHTML, /前台/);
   assert.doesNotMatch(node.innerHTML, /保存本任务/);
+});
+
+test('loaded AstrBot providers are immediately available without a registration screen', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+
+  assert.match(node.innerHTML, /<option value="secondary"/);
+  assert.doesNotMatch(node.innerHTML, /模型通道|data-pool-/);
+  assert.equal(requests.some(item => /\/pool(?:\/|$)/.test(item.route)), false);
 });
 
 test('a slow reply from a previous mount cannot overwrite the current matrix', async () => {
@@ -183,20 +217,26 @@ test('restoring inheritance resets explicit fields through the reset list', asyn
   await flush();
 });
 
-test('clicking a provider card filters the matrix and switching view regroups by provider', async () => {
+test('the precise editor keeps provider filtering compact and localizes capability labels', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
   requests[0].resolve(status());
   await flush();
-  node.click('[data-model-provider]', {modelProvider: 'secondary'});
-  assert.match(node.innerHTML, /清除 Provider 筛选/);
-  node.click('[data-model-provider]', {modelProvider: 'secondary'});
-  assert.doesNotMatch(node.innerHTML, /清除 Provider 筛选/);
+  assert.doesNotMatch(node.innerHTML, /class="model-mlgd"/);
+  assert.match(node.innerHTML, /data-model-provider-filter/);
+  assert.match(node.innerHTML, /主模型提供方/);
+  assert.match(node.innerHTML, /class="model-rl"><span>文本生成<\/span>/);
+  assert.doesNotMatch(node.innerHTML, /class="model-rl"><span>text<\/span>/);
+  node.change('[data-model-provider-filter]', {value: 'secondary'});
+  assert.match(node.innerHTML, /<option value="secondary" selected>/);
+  assert.match(node.innerHTML, /没有匹配的任务/);
+  node.change('[data-model-provider-filter]', {value: ''});
+  assert.match(node.innerHTML, /data-fncard="conversation.reply"/);
   node.click('[data-model-view]', {modelView: 'providers'});
   assert.match(node.innerHTML, /2 \/ 2 项任务走这里/);
   assert.match(node.innerHTML, /0 \/ 2 项任务走这里/);
-  assert.match(node.innerHTML, /还有 2 项能力相符的任务由其他 Provider 承担/);
+  assert.match(node.innerHTML, /还有 2 项能力相符的任务由其他模型提供方承担/);
 });
 
 test('an unreadable host offers a retry that loads the matrix', async () => {
@@ -205,12 +245,12 @@ test('an unreadable host offers a retry that loads the matrix', async () => {
   page.mount(node);
   requests[0].reject(Object.assign(new Error('read failed'), {code: 'staging_not_initialized'}));
   await flush();
-  assert.match(node.innerHTML, /请先加载|请先在账号与会话加载 V2 运行实例/);
+  assert.match(node.innerHTML, /角色数据尚未就绪/);
   node.click('[data-model-action]', {modelAction: 'refresh'});
   requests[1].resolve(status());
   await flush();
   assert.match(node.innerHTML, /对话回复/);
-  assert.doesNotMatch(node.innerHTML, /请先在账号与会话加载 V2 运行实例/);
+  assert.doesNotMatch(node.innerHTML, /角色数据尚未就绪/);
 });
 
 test('a real dashboard bridge rejects with the code inside Error.message', async () => {
@@ -219,8 +259,8 @@ test('a real dashboard bridge rejects with the code inside Error.message', async
   page.mount(node);
   requests[0].reject(new Error('staging_not_initialized'));
   await flush();
-  assert.match(node.innerHTML, /请先在账号与会话加载 V2 运行实例/);
-  assert.doesNotMatch(node.innerHTML, /无法读取任务配置，请检查宿主连接/);
+  assert.match(node.innerHTML, /角色数据尚未就绪/);
+  assert.doesNotMatch(node.innerHTML, /无法读取任务配置，请重新读取状态/);
 });
 
 test('provider search narrows tasks and a routed task opens its editor', async () => {
@@ -237,6 +277,9 @@ test('provider search narrows tasks and a routed task opens its editor', async (
   assert.match(node.innerHTML, /data-model-view="tasks" aria-pressed="true"/);
   assert.match(node.innerHTML, /model-fncard open/);
   assert.match(node.innerHTML, /任务附加提示词/);
+  node.click('[data-model-sub]', {modelSub: 'pol'});
+  assert.match(node.innerHTML, /任务路由/);
+  assert.doesNotMatch(node.innerHTML, /\bProvider\b|MODEL ROUTING/);
 });
 
 test('a lower-capacity provider adjusts the draft output limit before saving', async () => {
@@ -303,8 +346,8 @@ test('an uncertain save keeps its original operation and blocks further edits un
   assert.doesNotMatch(node.innerHTML, /上次保存结果未确认/);
 });
 
-test('switching to the voice tab lazily loads the voice config and saves via the voice route', async () => {
-  const {page, requests, root} = harness();
+test('switching to the voice tab lazily loads, saves, and plays a synthesized sample result', async () => {
+  const {page, requests, root, audioBlobs, revokedAudioUrls} = harness();
   const node = root();
   page.mount(node);
   requests[0].resolve(status());
@@ -317,7 +360,7 @@ test('switching to the voice tab lazily loads the voice config and saves via the
   get.resolve(voice);
   await flush();
   assert.match(node.innerHTML, /语音模型/);
-  assert.match(node.innerHTML, /按语种配置 TTS/);
+  assert.match(node.innerHTML, /按语种配置语音合成/);
   node.change('[data-voice-provider]', {value: 'tts-live'});
   node.click('[data-voice-save]');
   const post = requests.find(r => r.method === 'POST' && r.route === 'model/voice/save');
@@ -329,9 +372,137 @@ test('switching to the voice tab lazily loads the voice config and saves via the
   node.click('[data-ve-test]');
   const testRequest = requests.find(r => r.route === 'model/voice/test');
   assert.deepEqual({...testRequest.values}, {provider_id: 'tts-live', language: 'ja'});
-  testRequest.resolve({status: 'ok', data: {provider_id: 'tts-live', status: 'ok', latency_ms: 25, code: ''}});
+  testRequest.resolve({status: 'ok', data: {provider_id: 'tts-live', status: 'ok', latency_ms: 25, code: '',
+    audio_base64: Buffer.from('RIFF0000WAVE').toString('base64'), audio_mime_type: 'audio/wav'}});
   await flush();
   assert.match(node.innerHTML, /语音合成成功/);
+  assert.match(node.innerHTML, /本次结果 · 试听/);
+  assert.match(node.innerHTML, /<audio class="model-test-audio" controls preload="none" src="blob:preview-1"/);
+  assert.equal(audioBlobs[0].type, 'audio/wav');
+  node.click('[data-voice-lang]', {voiceLang: 'en'});
+  assert.doesNotMatch(node.innerHTML, /blob:preview-1/);
+  assert.deepEqual(revokedAudioUrls, ['blob:preview-1']);
+});
+
+test('a dashboard bridge inner voice result with status ok is kept as the result', async () => {
+  const {page, requests, root, audioBlobs} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'voice'});
+  requests.find(r => r.route === 'model/voice').resolve({
+    languages: [{k: 'zh', n: '中文', bind: ''}, {k: 'ja', n: '日语', bind: 'tts-live'}, {k: 'en', n: '英语', bind: ''}],
+    providers: [{id: 'tts-live'}], timeout_seconds: 30, voice_enabled: true, edit_token: TOKEN,
+  });
+  await flush();
+  node.click('[data-ve-test]');
+  const request = requests.find(r => r.route === 'model/voice/test');
+  request.resolve({status: 'ok', provider_id: 'tts-live', latency_ms: 17, code: '', stage: 'audio_read',
+    audio_base64: Buffer.from('RIFF0000WAVE').toString('base64'), audio_mime_type: 'audio/wav'});
+  await flush();
+  assert.match(node.innerHTML, /语音合成成功/);
+  assert.match(node.innerHTML, /本次结果 · 试听/);
+  assert.equal(audioBlobs[0].type, 'audio/wav');
+  assert.doesNotMatch(node.innerHTML, /invalid_response/);
+});
+
+test('a direct bridge voice diagnostic keeps its stage and safe error text', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'voice'});
+  requests.find(r => r.route === 'model/voice').resolve({
+    languages: [{k: 'zh', n: '中文', bind: ''}, {k: 'ja', n: '日语', bind: 'tts-error'}, {k: 'en', n: '英语', bind: ''}],
+    providers: [{id: 'tts-error'}], timeout_seconds: 30, voice_enabled: true, edit_token: TOKEN,
+  });
+  await flush();
+  node.click('[data-ve-test]');
+  requests.find(r => r.route === 'model/voice/test').resolve({status: 'unknown', provider_id: 'tts-error',
+    code: 'model_voice_probe_failed', stage: 'synthesis', exception_type: 'RuntimeError',
+    error: 'Fish Audio API request failed: status 400', suggestion: '核对 API 地址、密钥和模型参数。'});
+  await flush();
+  assert.match(node.innerHTML, /阶段：调用 Provider 合成/);
+  assert.match(node.innerHTML, /错误：Fish Audio API request failed: status 400/);
+  assert.doesNotMatch(node.innerHTML, /invalid_response/);
+});
+
+test('a voice bridge rejection keeps the machine code instead of becoming invalid_response', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'voice'});
+  requests.find(r => r.route === 'model/voice').resolve({
+    languages: [{k: 'zh', n: '中文', bind: ''}, {k: 'ja', n: '日语', bind: 'tts-error'}, {k: 'en', n: '英语', bind: ''}],
+    providers: [{id: 'tts-error'}], timeout_seconds: 30, voice_enabled: true, edit_token: TOKEN,
+  });
+  await flush();
+  node.click('[data-ve-test]');
+  requests.find(r => r.route === 'model/voice/test').reject(new Error('model_voice_probe_failed'));
+  await flush();
+  assert.match(node.innerHTML, /语音合成未返回可确认结果/);
+  assert.match(node.innerHTML, /阶段：请求/);
+  assert.doesNotMatch(node.innerHTML, /invalid_response/);
+});
+
+test('voice synthesis failures show the provider stage, full safe error, and suggestion', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'voice'});
+  const get = requests.find(r => r.method === 'GET' && r.route === 'model/voice');
+  get.resolve({languages: [{k: 'zh', n: '中文', bind: ''}, {k: 'ja', n: '日语', bind: 'tts-error'}, {k: 'en', n: '英语', bind: ''}],
+    providers: [{id: 'tts-error'}], timeout_seconds: 30, voice_enabled: true, edit_token: TOKEN});
+  await flush();
+  node.click('[data-ve-test]');
+  const testRequest = requests.find(r => r.route === 'model/voice/test');
+  testRequest.resolve({status: 'ok', data: {provider_id: 'tts-error', status: 'unknown', latency_ms: 4033,
+    code: 'model_voice_probe_failed', stage: 'synthesis', exception_type: 'RuntimeError',
+    error: 'Fish Audio API request failed: status 400', suggestion: '核对 API 地址、密钥和模型参数。', request_id: 'abc123def456'}});
+  await flush();
+  assert.match(node.innerHTML, /语音合成未返回可确认结果/);
+  assert.match(node.innerHTML, /阶段：调用 Provider 合成/);
+  assert.match(node.innerHTML, /错误：Fish Audio API request failed: status 400/);
+  assert.match(node.innerHTML, /建议：核对 API 地址、密钥和模型参数/);
+  assert.match(node.innerHTML, /诊断号：abc123def456/);
+});
+
+test('TTS provider credentials remain visible as a masked draft through redraw and save', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+  node.click('[data-model-tab]', {modelTab: 'voice'});
+  const voice = {languages: [{k: 'zh', n: '中文', bind: ''}], providers: [], timeout_seconds: 30,
+    voice_enabled: true, edit_token: TOKEN};
+  requests.find(r => r.route === 'model/voice').resolve(voice);
+  await flush();
+  node.click('[data-voice-editor]');
+  const catalog = requests.find(r => r.route === 'model/tts/providers');
+  catalog.resolve({templates: [], items: [{id: 'tts-live', type: 'openai', label: 'OpenAI', enable: false,
+    loaded: false, fields: [{key: 'api_key', type: 'string', label: 'API Key', secret: true, set: false, options: []}]}]});
+  await flush();
+
+  node.change('[data-tts-field]', {ttsField: 'api_key', value: 'new-tts-key'});
+  assert.match(node.innerHTML, /type="password" data-tts-field="api_key" value="new-tts-key"/);
+  node.click('[data-tts-save]');
+  const post = requests.find(r => r.route === 'model/tts/providers/update');
+  assert.equal(post.values.values.api_key, 'new-tts-key');
+  assert.match(node.innerHTML, /type="password" data-tts-field="api_key" value="new-tts-key"/,
+    'the save-in-progress redraw must keep the masked draft in the form');
+  post.resolve({templates: [], items: [{id: 'tts-live', type: 'openai', label: 'OpenAI', enable: false,
+    loaded: false, fields: [{key: 'api_key', type: 'string', label: 'API Key', secret: true, set: true, options: []}]}]});
+  await flush();
+  assert.match(node.innerHTML, /已配置 · 留空表示保留/);
+  assert.match(node.innerHTML, /type="password" data-tts-field="api_key" value=""/,
+    'saved credentials must still be redacted after the response');
 });
 
 test('a provider shared across languages warns and can unbind the others before saving', async () => {
@@ -348,14 +519,14 @@ test('a provider shared across languages warns and can unbind the others before 
   await flush();
   assert.match(node.innerHTML, /同时绑定到中文/);
   node.click('[data-voice-unbind]');
-  assert.match(node.innerHTML, /已解除其他语种的同 Provider 绑定/);
+  assert.match(node.innerHTML, /已解除其他语种的同一服务绑定/);
   node.click('[data-voice-save]');
   const post = requests.find(r => r.method === 'POST' && r.route === 'model/voice/save');
   assert.equal(post.values.changes.voice_zh_provider_id, '');
   assert.ok(!Object.hasOwn(post.values.changes, 'voice_ja_provider_id'), 'untouched language must not be re-sent');
 });
 
-test('switching to the image tab loads image config and saves via the image route', async () => {
+test('image actions retain controls and send backend editing to the output workspace', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
@@ -371,9 +542,11 @@ test('switching to the image tab loads image config and saves via the image rout
   ], enabled: {'image.generate': true, 'image.edit': true, 'image.mask_edit': true}, authorization: 'checked_for_each_invocation'};
   get.resolve(image);
   await flush();
-  assert.match(node.innerHTML, /生图模型/);
-  assert.match(node.innerHTML, /Native/);
+  assert.match(node.innerHTML, /生图能力与连接/);
+  assert.match(node.innerHTML, /内置生图动作/);
   assert.match(node.innerHTML, /扩展未加载/);
+  assert.match(node.innerHTML, /data-go="manage" data-manage="output" data-output-target="capabilities"[^>]*>配置生图后端/);
+  assert.doesNotMatch(node.innerHTML, /data-img-config|data-imgcfg-save/);
   node.click('[data-img-test]', {imgTest: 'image.mask_edit'});
   const maskCheck = requests.find(r => r.route === 'model/image/test');
   assert.equal(maskCheck.values.action, 'image.mask_edit');
@@ -396,6 +569,7 @@ test('switching to the image tab loads image config and saves via the image rout
   check.resolve({...image.actions[0], check: 'registration_only'});
   await flush();
   assert.match(node.innerHTML, /已注册，可由后续真实任务调用/);
+  assert.equal(requests.filter(r => r.route.startsWith('model/image/config')).length, 0);
 });
 
 test('switching tabs round-trip keeps the functional matrix without reloading', async () => {
@@ -433,6 +607,47 @@ test('the functional page exposes the design subtabs and the situation map deriv
   node.click('[data-model-av]', {modelAv: 'lane'});
   assert.match(node.innerHTML, /前台/);
   assert.match(node.innerHTML, /后台/);
+});
+
+test('the situation map shows the inherited window provider as fallback when no task fallback is set', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  const data = status();
+  for (const item of data.tasks) {
+    item.fields.provider.value = 'secondary';
+    item.fields.provider.inherited_value = 'primary';
+    item.fields.fallback.value = '';
+    item.fields.fallback.inherited_value = '';
+  }
+  requests[0].resolve(data);
+  await flush();
+  node.click('[data-model-sub]', {modelSub: 'map'});
+  assert.match(node.innerHTML, /data-provider-pill="secondary"/);
+  assert.ok((node.innerHTML.match(/data-provider-pill="primary"/g) || []).length >= 2,
+    "the inherited window provider should appear as each task's fallback");
+  assert.match(node.innerHTML, /0<\/b><span>暂无回退/);
+});
+
+test('hovering a provider pill highlights every occurrence of that provider', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  const data = status();
+  data.tasks[0].fields.fallback.value = 'secondary';
+  data.tasks[1].fields.fallback.value = 'primary';
+  requests[0].resolve(data);
+  await flush();
+  node.click('[data-model-sub]', {modelSub: 'map'});
+  assert.equal((node.innerHTML.match(/data-provider-pill="primary"/g) || []).length, 3);
+
+  const primary = [node.addProviderPill('primary'), node.addProviderPill('primary'), node.addProviderPill('primary')];
+  const secondary = node.addProviderPill('secondary');
+  node.pointer('pointerover', primary[0]);
+  assert.ok(primary.every(pill => pill.classList.contains('is-hovered')));
+  assert.equal(secondary.classList.contains('is-hovered'), false);
+  node.pointer('pointerout', primary[0]);
+  assert.ok(primary.every(pill => !pill.classList.contains('is-hovered')));
 });
 
 test('quick config fans a slot provider out to every task via model/configure', async () => {
@@ -555,7 +770,9 @@ test('the situation map lists rule counts and routes a selected task into the ed
   node.click('[data-map-test]');
   const probe = requests.find(r => r.route === 'model/test');
   assert.deepEqual({...probe.values}, {provider_id: 'primary'});
-  probe.resolve({status: 'ok', data: {provider_id: 'primary', status: 'ok', latency_ms: 15, code: ''}});
+  /* The live Dashboard bridge resolves the inner result directly.  Its probe
+     also has status: "ok", so this catches the same collision as TTS audio. */
+  probe.resolve({provider_id: 'primary', status: 'ok', latency_ms: 15, code: ''});
   await flush();
   assert.match(node.innerHTML, /连接成功/);
   node.click('[data-map-clear]');
@@ -628,400 +845,44 @@ test('a provider without a model name degrades to its bare id', async () => {
   assert.doesNotMatch(node.innerHTML, /model-provider-model/);
 });
 
-/* 生图配置的边界表由扩展随配置一起下发（GET model/image/config 的 limits）。
-   页面据此做两件事：给数字框写 min/max、提交前挡下越界值。
-   这里守住"挡下"这一半——它是用户能看见的那一半。 */
-function imageConfig(limits) {
-  return {
-    revision: 'r'.repeat(64),
-    sections: {
-      preparation: {routes: [], default_generate_route: '', default_edit_route: '',
-                    daily_limit: 100, retention_days: 30, max_storage_mb: 512, max_concurrency: 2},
-      sd_webui: {base_url: '', timeout_seconds: 300},
-      comfyui: {base_url: '', timeout_seconds: 300, workflows: []},
-    },
-    limits,
-  };
-}
-const LIMITS = {
-  preparation: {daily_limit: {min: 1, max: 10000}, retention_days: {min: 1, max: 365},
-                max_storage_mb: {min: 16, max: 102400}, max_concurrency: {min: 1, max: 4}},
-  connection: {timeout_seconds: {min: 5, max: 1800}},
-  parameters: {common: {}, sd_webui: {}, float: {}, text: {}},
-  max_routes: 32, max_canvas_pixels: 16777216,
-  guidance: {max_items: 16, max_chars: 4000},
-};
 
-async function openImageConfig(node, requests, limits, routes, customize) {
-  node.click('[data-model-tab]', {modelTab: 'image'});
-  const image = {actions: [{action: 'image.generate', enabled: true, owner: 'image-plugin',
-    provider_id: 'native-image', loaded: true, current: true, registered: true, state: 'ready'}],
-    enabled: {'image.generate': true, 'image.edit': true, 'image.mask_edit': true}, authorization: 'checked_for_each_invocation'};
-  requests.find(r => r.method === 'GET' && r.route === 'model/image').resolve(image);
-  await flush();
-  node.click('[data-img-config]');
-  const config = requests.find(r => r.method === 'GET' && r.route === 'model/image/config');
-  assert.ok(config, 'opening the route editor should GET model/image/config');
-  const payload = imageConfig(limits);
-  if (routes) payload.sections.preparation.routes = routes;
-  if (customize) customize(payload);
-  config.resolve(payload);
-  await flush();
-}
 
-test('the route editor writes the extension limits onto its number inputs', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, LIMITS);
-  /* 上限来自扩展，不是页面自己抄的数字。 */
-  assert.match(node.innerHTML, /data-imgcfg-tab="routes"[^>]*aria-selected="true"/);
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'limits'});
-  assert.match(node.innerHTML, /min="1" max="10000" data-imgr-num="daily_limit"/);
-  assert.match(node.innerHTML, /min="1" max="4" data-imgr-num="max_concurrency"/);
-  assert.match(node.innerHTML, /min="16" max="102400" data-imgr-num="max_storage_mb"/);
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'comfyui'});
-  assert.match(node.innerHTML, /min="5" max="1800" data-imgr-sec="comfyui:timeout_seconds"/);
+test('the routing page does not render a global provider catalog cloud', () => {
+  const css = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/models-page.css'), 'utf8');
+  assert.doesNotMatch(source, /class="model-catalog"|AstrBot 模型列表|path \+ "\/catalog"/);
+  assert.doesNotMatch(css, /\.model-catalog/);
+  assert.match(source, /<i>令牌<\/i>/);
+  assert.match(source, /主模型提供方/);
+  assert.match(source, /备用模型提供方/);
 });
 
-test('an out-of-range value is refused before the save is posted', async () => {
+test('Laya page exposes official local install, first-run download, and SystemOne remote setup', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
   requests[0].resolve(status());
   await flush();
-  await openImageConfig(node, requests, LIMITS);
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'limits'});
-  node.change('[data-imgr-num]', {imgrNum: 'max_concurrency', valueAsNumber: 8});
+  node.click('[data-model-tab]', {modelTab: 'laya'});
+  const statusRequest = requests.find(item => item.method === 'GET' && item.route === 'model/laya');
+  assert.ok(statusRequest);
+  statusRequest.resolve({enabled: false, mode: 'local', endpoint: '', default_model: 'multilingual',
+    api_key_set: false, timeout_seconds: 20, package_installed: true, package_version: '0.4.0',
+    model_cache_ready: false, model_cache_path: 'C:/cache/huggingface/hub',
+    python_executable: 'C:/AstrBot/python.exe',
+    install_command: "& 'C:/AstrBot/python.exe' -m pip install 'laya==0.4.0'",
+    remote_install_command: "& 'C:/AstrBot/python.exe' -m pip install 'laya[serve]==0.4.0'",
+    remote_start_command: "$env:LAYA_DEFAULT_MODEL='multilingual'; & 'C:/AstrBot/python.exe' -m laya.serve",
+    revision: 'laya-revision'});
   await flush();
-  node.click('[data-imgcfg-save]');
-  await flush();
-  /* 关键：**没有发出** POST。提交一次才知道越界正是这次要修掉的东西。 */
-  assert.equal(requests.filter(r => r.route === 'model/image/config/save').length, 0,
-    'an out-of-range value must not be submitted');
-  /* 提示要说清是哪一格、允许多少、当前多少。 */
-  assert.match(node.innerHTML, /最大并发 需要在 1–4 之间，当前是 8。/);
-});
+  assert.match(node.innerHTML, /本地 Python 包/);
+  assert.match(node.innerHTML, /下载并验证模型/);
+  assert.match(node.innerHTML, /C:\/AstrBot\/python.exe/);
+  assert.match(node.innerHTML, /pip install .*laya==0\.4\.0/);
+  assert.doesNotMatch(node.innerHTML, /GGUF|OpenAI 兼容|chat\/completions/);
 
-test('an in-range value still reaches the extension for its own validation', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, LIMITS);
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'limits'});
-  assert.match(node.innerHTML, /所有面板共用同一份草稿/);
-  node.change('[data-imgr-num]', {imgrNum: 'max_concurrency', valueAsNumber: 3});
-  await flush();
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'routes'});
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'limits'});
-  assert.match(node.innerHTML, /有未保存更改/);
-  assert.match(node.innerHTML, /data-imgr-num="max_concurrency" value="3"/);
-  node.click('[data-imgcfg-save]');
-  const post = requests.find(r => r.route === 'model/image/config/save');
-  assert.ok(post, 'an in-range change must be submitted');
-  assert.equal(post.values.changes.preparation.max_concurrency, 3);
-});
-
-test('a host that does not publish limits leaves the editor usable', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  /* 旧版扩展不下发 limits。此时不能写空 min/max（浏览器会报非法数值），
-     也不能因此把保存路径整个堵死。 */
-  await openImageConfig(node, requests, undefined);
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'limits'});
-  assert.doesNotMatch(node.innerHTML, /min=""|max=""/);
-  node.change('[data-imgr-num]', {imgrNum: 'max_concurrency', valueAsNumber: 999});
-  await flush();
-  node.click('[data-imgcfg-save]');
-  const post = requests.find(r => r.route === 'model/image/config/save');
-  assert.ok(post, 'without limits the extension remains the only judge');
-  assert.equal(post.values.changes.preparation.max_concurrency, 999);
-});
-
-test('image configuration tabs preserve drafts and save only changed sections', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, LIMITS);
-  assert.match(node.innerHTML, /data-imgcfg-save disabled/);
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'comfyui'});
-  assert.match(node.innerHTML, /data-imgr-sec="comfyui:base_url"/);
-  node.change('[data-imgr-sec]', {imgrSec: 'comfyui:base_url', value: 'http://localhost:8188'});
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'sd_webui'});
-  node.change('[data-imgr-sec]', {imgrSec: 'sd_webui:base_url', value: 'http://localhost:7860'});
-  node.click('[data-imgcfg-tab]', {imgcfgTab: 'comfyui'});
-  assert.match(node.innerHTML, /data-imgr-sec="comfyui:base_url" value="http:\/\/localhost:8188"/);
-  node.click('[data-imgcfg-save]');
-  const post = requests.find(r => r.route === 'model/image/config/save');
-  assert.ok(post, 'edited connections must be submitted');
-  assert.deepEqual(JSON.parse(JSON.stringify(post.values.changes)), {
-    comfyui: {base_url: 'http://localhost:8188'},
-    sd_webui: {base_url: 'http://localhost:7860'},
-  });
-});
-
-test('ComfyUI workflow names appear in route selectors and save with the route', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, LIMITS, [{...COMFY_ROUTE, workflow_id: 'portrait'}], payload => {
-    payload.sections.comfyui.workflows = [
-      {name: 'portrait', path: 'portrait-api.json'},
-      {name: 'edit', path: 'edit-api.json'},
-    ];
-  });
-  assert.match(node.innerHTML, /<option value="portrait" selected>portrait<\/option>/);
-  node.change('[data-imgr-edit]', {imgrEdit: '0:workflow_id', value: 'edit'});
-  node.click('[data-imgcfg-save]');
-  const post = requests.find(r => r.route === 'model/image/config/save');
-  assert.equal(post.values.changes.preparation.routes[0].workflow_id, 'edit');
-});
-
-/* ---------- 路线的四个预置字段 ----------
-   parameters / guidance 给控件（边界来自扩展下发的 limits），
-   reference_bindings / masked_edit 只读（槽位表在扩展手里，蒙版是派生值）。
-   这一组守住"页面能改的只有前两个、且越界与不适用的组合当场挡下"。 */
-const ROUTE_LIMITS = {
-  preparation: {daily_limit: {min: 1, max: 10000}, retention_days: {min: 1, max: 365},
-                max_storage_mb: {min: 16, max: 102400}, max_concurrency: {min: 1, max: 4}},
-  connection: {timeout_seconds: {min: 5, max: 1800}},
-  parameters: {
-    common: {width: {min: 64, max: 4096}, height: {min: 64, max: 4096}, seed: {min: -1, max: 9007199254740991}},
-    sd_webui: {steps: {min: 1, max: 150}, batch_size: {min: 1, max: 4}},
-    float: {cfg_scale: {min: 0, max: 30}, denoising_strength: {min: 0, max: 1}},
-    text: {sampler_name: {max_length: 120}},
-  },
-  max_routes: 32, max_canvas_pixels: 16777216,
-  guidance: {max_items: 16, max_chars: 4000},
-};
-const COMFY_ROUTE = {route_id: 'r-comfy', operation: 'generate', backend: 'comfyui', workflow_id: 'wf', profile: 'default'};
-const SD_ROUTE = {route_id: 'r-sd', operation: 'generate', backend: 'sd_webui', profile: 'default'};
-
-/* 取某条路线的 edit_method 下拉框 HTML——按索引切片，避免相邻路线的选项混进来。 */
-function methodSelect(html, index) {
-  const at = html.indexOf(`data-imgr-guide="${index}:edit_method"`);
-  assert.ok(at >= 0, `route ${index} should render an edit_method select`);
-  return html.slice(at, html.indexOf('</select>', at));
-}
-
-test('parameter inputs follow the backend the route declares', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS, [COMFY_ROUTE, SD_ROUTE]);
-  /* ComfyUI 只有公共参数：宽、高、种子。 */
-  assert.match(node.innerHTML, /min="64" max="4096" data-imgr-param="0:width"/);
-  assert.match(node.innerHTML, /data-imgr-param="0:seed"/);
-  assert.doesNotMatch(node.innerHTML, /data-imgr-param="0:steps"/);
-  /* SD WebUI 多出步数、每批张数、两个浮点与采样器，边界一样来自扩展。 */
-  assert.match(node.innerHTML, /min="1" max="150" data-imgr-param="1:steps"/);
-  assert.match(node.innerHTML, /min="0" max="30" data-imgr-param="1:cfg_scale"/);
-  assert.match(node.innerHTML, /step="0.01"/);
-  assert.match(node.innerHTML, /maxlength="120" data-imgr-param="1:sampler_name"/);
-});
-
-test('an out-of-range parameter is refused before the save is posted', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS, [COMFY_ROUTE]);
-  node.change('[data-imgr-param]', {imgrParam: '0:width', value: '9999', valueAsNumber: 9999});
-  await flush();
-  node.click('[data-imgcfg-save]');
-  await flush();
-  assert.equal(requests.filter(r => r.route === 'model/image/config/save').length, 0,
-    'an out-of-range route parameter must not be submitted');
-  assert.match(node.innerHTML, /路线 r-comfy 的宽需要在 64–4096 之间，当前是 9999。/);
-});
-
-test('a declared parameter reaches the extension as a number', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS, [COMFY_ROUTE]);
-  node.change('[data-imgr-param]', {imgrParam: '0:width', value: '1024', valueAsNumber: 1024});
-  await flush();
-  node.click('[data-imgcfg-save]');
-  const post = requests.find(r => r.route === 'model/image/config/save');
-  assert.ok(post, 'an in-range parameter must be submitted');
-  assert.equal(post.values.changes.preparation.routes[0].parameters.width, 1024);
-  assert.equal(typeof post.values.changes.preparation.routes[0].parameters.width, 'number');
-});
-
-test('clearing a parameter drops the key instead of writing an empty value', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS,
-    [{...COMFY_ROUTE, parameters: {width: 1024, seed: 7}}]);
-  node.change('[data-imgr-param]', {imgrParam: '0:width', value: '', valueAsNumber: NaN});
-  node.change('[data-imgr-param]', {imgrParam: '0:seed', value: '', valueAsNumber: NaN});
-  await flush();
-  node.click('[data-imgcfg-save]');
-  const post = requests.find(r => r.route === 'model/image/config/save');
-  assert.ok(post, 'clearing the last parameter is still a change worth saving');
-  const params = post.values.changes.preparation.routes[0].parameters;
-  /* 空字符串会被扩展的参数类型校验拒掉，所以整段参数键一起删掉，回到它的默认值。 */
-  assert.equal(params, undefined);
-});
-
-test('the edit method options follow the operation, backend and mask declaration', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS, [
-    {...COMFY_ROUTE, route_id: 'gen'},
-    {route_id: 'edit-comfy', operation: 'edit', backend: 'comfyui', profile: 'default'},
-    {route_id: 'edit-sd', operation: 'edit', backend: 'sd_webui', profile: 'default'},
-    {route_id: 'edit-sd-mask', operation: 'edit', backend: 'sd_webui', profile: 'default', masked_edit: true},
-  ]);
-  const generate = methodSelect(node.innerHTML, 0);
-  assert.match(generate, /自动（未声明）/);
-  assert.doesNotMatch(generate, /指令编辑/);
-  const comfyEdit = methodSelect(node.innerHTML, 1);
-  for (const label of ['整图重绘', '指令编辑', '蒙版局部', '受控工作流']) assert.match(comfyEdit, new RegExp(label));
-  const sdEdit = methodSelect(node.innerHTML, 2);
-  assert.match(sdEdit, /整图重绘/);
-  assert.doesNotMatch(sdEdit, /蒙版局部/);
-  const sdMask = methodSelect(node.innerHTML, 3);
-  assert.match(sdMask, /蒙版局部/);
-  assert.doesNotMatch(sdMask, /整图重绘/);
-});
-
-test('a declared edit method that the backend cannot accept is refused with the allowed set', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS, [
-    {route_id: 'edit-sd', operation: 'edit', backend: 'sd_webui', profile: 'default',
-     guidance: {edit_method: 'instruction'}},
-  ]);
-  /* 页面补一条标注而不是静默改写配置。 */
-  assert.match(node.innerHTML, /当前不接受，保存会被拒/);
-  node.click('[data-imgcfg-save]');
-  await flush();
-  assert.equal(requests.filter(r => r.route === 'model/image/config/save').length, 0);
-  assert.match(node.innerHTML, /路线 edit-sd 的改图方式「指令编辑」不适用于当前操作或后端/);
-});
-
-test('guidance text and lists reach the extension in its declared shape', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS,
-    [{route_id: 'edit-comfy', operation: 'edit', backend: 'comfyui', profile: 'default'}]);
-  node.change('[data-imgr-guide]', {imgrGuide: '0:summary', value: '适合写实全身'});
-  node.change('[data-imgr-guide]', {imgrGuide: '0:suitable_for', value: '全身构图\n多主体同框\n'});
-  node.change('[data-imgr-guide]', {imgrGuide: '0:edit_method', value: 'instruction'});
-  await flush();
-  node.click('[data-imgcfg-save]');
-  const post = requests.find(r => r.route === 'model/image/config/save');
-  assert.ok(post, 'guidance edits must be submitted');
-  const guidance = post.values.changes.preparation.routes[0].guidance;
-  assert.equal(guidance.summary, '适合写实全身');
-  assert.equal(guidance.edit_method, 'instruction');
-  /* 数组是在 vm 上下文里建的，拷回本域再比，否则 deepEqual 只在原型上失败。 */
-  assert.deepEqual(Array.from(guidance.suitable_for), ['全身构图', '多主体同框']);
-});
-
-test('guidance beyond the published limits is refused before the save', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS,
-    [{route_id: 'edit-comfy', operation: 'edit', backend: 'comfyui', profile: 'default'}]);
-  const many = Array.from({length: 17}, (unused, index) => `场景 ${index + 1}`).join('\n');
-  node.change('[data-imgr-guide]', {imgrGuide: '0:suitable_for', value: many});
-  await flush();
-  node.click('[data-imgcfg-save]');
-  await flush();
-  assert.equal(requests.filter(r => r.route === 'model/image/config/save').length, 0);
-  assert.match(node.innerHTML, /「适用场景」最多 16 条，当前 17 条。/);
-});
-
-test('the two preset fields stay read-only but report what was declared', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS, [
-    {route_id: 'edit-mask', operation: 'edit', backend: 'comfyui', profile: 'default', masked_edit: true,
-     reference_bindings: [{slot: 'image1', role: 'edit_source', subject_ids: []},
-                          {slot: 'mask1', role: 'edit_mask', subject_ids: []}]},
-  ]);
-  /* 已声明的绑定按「用途 ← 槽位」列出来，并写清为什么本页不给控件。 */
-  assert.match(node.innerHTML, /底图 ← image1/);
-  assert.match(node.innerHTML, /蒙版 ← mask1/);
-  assert.match(node.innerHTML, /不是开关/);
-  /* 两个字段都不该出现任何控件。 */
-  assert.doesNotMatch(node.innerHTML, /data-imgr-param="0:masked_edit"/);
-  assert.doesNotMatch(node.innerHTML, /data-imgr-guide="0:reference_bindings"/);
-  assert.doesNotMatch(node.innerHTML, /data-imgr-masked/);
-});
-
-test('an expanded preset block survives a re-render', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  await openImageConfig(node, requests, ROUTE_LIMITS, [COMFY_ROUTE]);
-  assert.match(node.innerHTML, /data-imgr-ext="0"(?! open)/);
-  node.click('details[data-imgr-ext]', {imgrExt: '0'});
-  /* 任何一次重绘（这里用准备段的数字框触发）都不该把展开状态丢掉。 */
-  node.change('[data-imgr-num]', {imgrNum: 'max_concurrency', valueAsNumber: 3});
-  await flush();
-  assert.match(node.innerHTML, /data-imgr-ext="0" open/);
-});
-
-test('a route list too large for one save is refused with the route that fills it', async () => {
-  const {page, requests, root} = harness();
-  const node = root();
-  page.mount(node);
-  requests[0].resolve(status());
-  await flush();
-  /* 每格说明都在扩展允许的 4000 字以内，但 30 条路线加起来超过了宿主的请求体上限。
-     这正是路线说明可编辑之后才出现的失败方式。 */
-  const long = '很长的路线说明'.repeat(500);
-  const routes = Array.from({length: 30}, (unused, index) => ({
-    route_id: 'route-' + (index + 1), operation: 'edit', backend: 'comfyui', profile: 'default',
-    guidance: {summary: long, prompt_advice: long, test_notes: long},
-  }));
-  await openImageConfig(node, requests, ROUTE_LIMITS, routes);
-  node.change('[data-imgr-param]', {imgrParam: '0:width', value: '1024', valueAsNumber: 1024});
-  await flush();
-  node.click('[data-imgcfg-save]');
-  await flush();
-  assert.equal(requests.filter(r => r.route === 'model/image/config/save').length, 0,
-    'an oversized route document must not be posted');
-  assert.match(node.innerHTML, /超过一次能保存的 256 KB/);
-  assert.match(node.innerHTML, /最占地方的是「route-1」/);
+  node.change('[data-laya-field]', {layaField: 'mode', value: 'remote'});
+  assert.match(node.innerHTML, /SystemOne 服务地址/);
+  assert.match(node.innerHTML, /\/v1\/systemone/);
+  assert.match(node.innerHTML, /复制服务启动命令/);
+  assert.match(node.innerHTML, /data-laya-save/);
 });

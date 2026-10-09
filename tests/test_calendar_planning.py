@@ -15,15 +15,22 @@ from companion_v2.agenda.planning_inputs import capture, validate, MATERIAL_CHAR
 from companion_v2.agenda.planning_output import INSTRUCTION, parse_output
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.configuration.registry import FieldRegistry
+from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.conversation.models import InboundConversationEvent
-from companion_v2.execution.models import TaskError, digest, encode
-from companion_v2.foundation.refs import SourceRef, VersionRef, OperationRef
+from companion_v2.conversation.state_context import ConversationStateContext
+from companion_v2.execution.models import TaskContext, TaskError, digest, encode
+from companion_v2.foundation.refs import AudienceRef, SourceRef, VersionRef, OperationRef
+from companion_v2.identity_policy.personas import ConversationRoute
+from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.model_gateway.routing import configuration_fields
 from companion_v2.proactive.management import ContactManagement
 from companion_v2.role_work.growth import RoleGrowthRecord, GrowthKind
 from companion_v2.role_work.growth.progress import growth_progress_profile
 from companion_v2.role_work.growth.progress_management import GrowthProgressManagement
 from companion_v2.role_work.models import RoleActivity, RoleActivityState
+from companion_v2.role_work.state.configuration import configuration_fields as state_configuration_fields, target_for
+from companion_v2.role_work.state.ownership import role_schedule_key
+from companion_v2.storage.versioned_records import VersionedRecords
 from companion_v2.sources.models import SourceRecord
 from tests.test_management_access import NOW
 from tests.test_role_state import StateFixture, calendar_data
@@ -144,7 +151,7 @@ class CalendarRefinementTests(StateFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_planning_options_require_core_and_do_not_issue_calendar_grants(self):
         _, app, context, manager = self.setup_state()
-        self.configure(manager, planning_enabled=True, planning_horizon_days=180)
+        self.configure(manager, calendar_enabled=False, planning_enabled=True, planning_horizon_days=180)
         with self.assertRaises(TaskError):
             app.calendar.access.check(context, "calendar.write")
         before = manager.status(self.core).unwrap()
@@ -172,6 +179,21 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
                           growth_progress_profile("primary", max_output_tokens=100))
         self.registry = FieldRegistry(version="planning-tests", fields=configuration_fields(self.profiles))
 
+    async def test_planning_edits_get_a_new_attempt_while_home_display_edits_keep_the_plan(self):
+        app, context, manager = await self.ready()
+        settings, _ = app.role_state.settings(context)
+        original = app.calendar_planning.opportunity(context, settings, NOW)
+        self.configure(manager, home_show_location=False)
+        unchanged, _ = app.role_state.settings(context)
+        self.assertEqual(app.calendar_planning.opportunity(context, unchanged, NOW), original)
+
+        self.configure(manager, planning_enabled=False)
+        self.configure(manager, planning_enabled=True)
+        updated, _ = app.role_state.settings(context)
+        revised = app.calendar_planning.opportunity(context, updated, NOW)
+        self.assertEqual(revised[0], "daily")
+        self.assertNotEqual(revised[1], original[1])
+
     async def ready(self, *, automatic=False):
         host, app, context, manager = self.setup_state()
         self.configure(manager, calendar_enabled=True, planning_enabled=True)
@@ -190,13 +212,14 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.configure(manager, planning_annual_calendars=json.dumps([annual(2026,
             holidays=[{"name": "合成休假", "start": "2026-09-22", "end": "2026-09-22"}],
             solar_terms=[{"date": "2026-09-23", "name": "合成节气"}])], ensure_ascii=False))
+        self.clock.advance(datetime(2026, 9, 21, 16, 30, tzinfo=timezone.utc) - self.clock.now())
         source = self.source(app, context, "date-input")
         event = InboundConversationEvent("date-event", context.actor.principal, context.scope,
                                          source, "text", "date-input", self.clock.now())
         batch = app.messages.accept(context, event, role_instruction="原角色提示").unwrap()
+        app.messages.seal(context, batch, deadline_at=self.clock.now() + timedelta(minutes=2)).unwrap()
         row = app.messages.batch(batch)
 
-        self.clock.advance(datetime(2026, 9, 21, 16, 30, tzinfo=timezone.utc) - self.clock.now())
         request = app.messages._request(row, context, self.clock.now())
         payload = json.loads(next(item.payload for item in request.context.materials
                                   if item.purpose == "local_calendar_context"))
@@ -205,7 +228,16 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("未列日期和未配置年份", request.instruction)
 
         self.clock.advance(timedelta(days=1))
-        next_day = app.messages._request(row, context, self.clock.now())
+        continued = app.messages._request(row, context, self.clock.now())
+        self.assertEqual(next(item.payload for item in continued.context.materials
+                              if item.purpose == "local_calendar_context"),
+                         next(item.payload for item in request.context.materials
+                              if item.purpose == "local_calendar_context"))
+        next_source = self.source(app, context, "next-date-input")
+        next_event = InboundConversationEvent("next-date-event", context.actor.principal, context.scope,
+                                              next_source, "text", "next-date-input", self.clock.now())
+        next_batch = app.messages.accept(context, next_event, role_instruction="原角色提示").unwrap()
+        next_day = app.messages._request(app.messages.batch(next_batch), context, self.clock.now())
         payload = json.loads(next(item.payload for item in next_day.context.materials
                                   if item.purpose == "local_calendar_context"))
         self.assertEqual(payload["configured_annual_calendar"]["listed_today"],
@@ -236,9 +268,28 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
                                                   "days_until": 2, "calendar": "gregorian"}])
         self.assertIn("不证明用户与日期的关系", request.instruction)
 
-    async def plan(self, app, context, *, slot="manual-day", mode="daily", occurrence=None):
+    async def plan(self, app, context, *, slot="manual-day", mode="daily", occurrence=None,
+                   manual=False, refresh=False):
         return await app.calendar_planning.run(context, app.state_maintenance.bindings[context.key][1],
-            mode=mode, slot=slot, occurrence=occurrence)
+            mode=mode, slot=slot, occurrence=occurrence, manual=manual, refresh=refresh)
+
+    async def test_manual_plan_does_not_require_automatic_planning_and_refresh_replaces_only_generated_daily_plans(self):
+        app, context, manager = await self.ready()
+        self.configure(manager, planning_enabled=False)
+        with self.assertRaises(TaskError):
+            await self.plan(app, context, slot="initial")
+        manual = await self.plan(app, context, slot="manual-first", manual=True)
+        self.assertEqual(manual["state"], "succeeded", manual)
+        old = app.calendar.inventory(context)["items"][0]
+
+        refreshed = await self.plan(app, context, slot="manual-refresh", manual=True, refresh=True)
+        self.assertEqual(refreshed["state"], "succeeded", refreshed)
+        self.assertEqual(refreshed["replaced"], 1)
+        items = app.calendar.inventory(context)["items"]
+        prior = next(item for item in items if item["id"] == old["id"])
+        current = next(item for item in items if item["id"] != old["id"])
+        self.assertEqual(prior["state"], "cancelled")
+        self.assertEqual(current["state"], "accepted")
 
     async def test_real_host_saves_same_calendar_and_only_once_without_delivery_or_completion(self):
         app, context, manager = await self.ready()
@@ -436,7 +487,7 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
                 datetime(2027, 3, 13, 7, 30, tzinfo=timezone.utc), "America/New_York", Frequency.DAILY, count=3)))))
         local = now.astimezone(ZoneInfo("America/New_York"))
         for mode, period in (("daily", local.date().isoformat()), ("horizon", "%04d-W%02d" % local.isocalendar()[:2])):
-            slot = mode + ":America/New_York:" + period
+            slot = mode + ":America/New_York:" + period + ":settings:" + app.role_state.planning_settings_token(context)
             identifier = app.calendar_planning.identifier(context, slot)
             app.calendar_planning.operations.reserve(OperationRef(identifier, "calendar.planning", context.scope,
                 VersionRef(identifier, 1), identifier), parameter_hash=digest(slot), observed_at=now).unwrap()
@@ -512,7 +563,8 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         # One key for the whole local day, and it carries the date, not an hour.
         self.assertEqual(len(seen), 1, seen)
         slot = seen.pop()
-        self.assertEqual(slot, "daily:" + values["planning_timezone"] + ":" + day.isoformat())
+        self.assertEqual(slot, "daily:" + values["planning_timezone"] + ":" + day.isoformat()
+                         + ":settings:" + app.role_state.planning_settings_token(context))
         self.assertNotIn(":", day.isoformat())
 
     async def test_the_next_local_day_is_a_new_slot(self):
@@ -526,4 +578,158 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         after_midnight = datetime.combine(day + timedelta(days=1), time(0, 1), tzinfo=zone)
         second = app.calendar_planning.opportunity(context, values, after_midnight.astimezone(timezone.utc))
         self.assertNotEqual(first[1], second[1])
-        self.assertTrue(second[1].endswith((day + timedelta(days=1)).isoformat()))
+        self.assertIn(":" + (day + timedelta(days=1)).isoformat() + ":settings:", second[1])
+
+
+class CalendarGlobalSwitchTests(StateFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_state_maintenance_schedule_is_one_record_per_role(self):
+        _, app, context, manager = self.setup_state()
+        self.configure(manager, enabled=True)
+        other_scope = replace(context.scope, native_scope_id="other-window", conversation_id="conversation-other",
+                              session_id="session-other")
+        self.personas.register_route(ConversationRoute(other_scope, user=context.actor.subject), observed_at=NOW)
+        other_context = TaskContext(context.actor, self.identity.resolve_role(other_scope, observed_at=NOW).unwrap(),
+                                    AudienceRef(other_scope, (context.actor.subject,)))
+
+        app.state_maintenance.bind(context, "same persona")
+        app.state_maintenance.bind(other_context, "same persona")
+        rows = self.runtime.read_all("SELECT * FROM role_state_schedules", ())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["context_key"], role_schedule_key(context))
+        self.assertEqual(TaskContext.restore(json.loads(rows[0]["context_json"])), other_context)
+
+    async def test_role_plans_follow_role_while_private_calendar_entries_stay_in_their_window(self):
+        _, app, context, manager = self.setup_state()
+        legacy = VersionedRecords(self.runtime, "calendar")
+        legacy.change(context, "legacy-role-plan", operation_key="legacy-role-plan", expected_revision=0,
+            parameters=["legacy"], at=NOW, transform=lambda current: {
+                **calendar_data(), "state": "accepted", "sources": [], "exceptions": {}, "details": {},
+                "accepted_by": [], "changed_by": context.role_binding.role, "reminder_id": None,
+            })
+        legacy_fields = tuple(field for field in state_configuration_fields()
+                              if field.field_id in {"role.state.calendar_enabled", "role.state.planning_enabled",
+                                                    "role.state.schedule_simulation_mode",
+                                                    "role.state.planning_weather_enabled",
+                                                    "role.state.planning_weather_location",
+                                                    "role.state.planning_weather_max_age_minutes"})
+        SparseConfigurationOwner(self.runtime).write(target_for(context), legacy_fields,
+            changes={"role.state.calendar_enabled": False, "role.state.planning_enabled": False,
+                     "role.state.schedule_simulation_mode": "continuous",
+                     "role.state.planning_weather_enabled": True,
+                     "role.state.planning_weather_location": json.dumps({"name":"旧窗口地点"}, ensure_ascii=False),
+                     "role.state.planning_weather_max_age_minutes": 30},
+            reset=(), expected_revision=0, observed_at=NOW)
+        defaults = app.role_state.settings(context)[0]
+        self.assertTrue(defaults["calendar_enabled"])
+        self.assertFalse(defaults["planning_enabled"])
+        self.assertEqual(defaults["schedule_simulation_mode"], "orchestrated")
+        self.assertFalse(defaults["planning_weather_enabled"])
+        self.assertEqual(defaults["planning_weather_location"], "")
+        self.assertEqual(defaults["planning_weather_max_age_minutes"], 120)
+
+        other_scope = replace(context.scope, native_scope_id="second-private", conversation_id="conversation-second",
+                              session_id="session-second")
+        self.personas.register_route(ConversationRoute(other_scope, user=context.actor.subject), observed_at=NOW)
+        other_context = TaskContext(context.actor, self.identity.resolve_role(other_scope, observed_at=NOW).unwrap(),
+                                    AudienceRef(other_scope, (context.actor.subject,)))
+
+        role_location = json.dumps({"name":"角色所在地"}, ensure_ascii=False)
+        self.configure(manager, calendar_enabled=True, planning_enabled=True, schedule_simulation_mode="orchestrated",
+            planning_weather_enabled=True, planning_weather_location=role_location,
+            planning_weather_max_age_minutes=45)
+        for target in (context, other_context):
+            settings = app.role_state.settings(target)[0]
+            self.assertTrue(settings["calendar_enabled"])
+            self.assertTrue(settings["planning_enabled"])
+            self.assertEqual(settings["schedule_simulation_mode"], "orchestrated")
+            self.assertTrue(settings["planning_weather_enabled"])
+            self.assertEqual(settings["planning_weather_location"], role_location)
+            self.assertEqual(settings["planning_weather_max_age_minutes"], 45)
+            app.calendar.access.check(target, "calendar.write")
+            self.assertTrue(app.tasks.policy.scope_access(target.actor, scope=target.scope,
+                action="calendar.write", observed_at=NOW, allow_private_owner=True).is_success)
+            self.assertFalse(app.tasks.identity.authorize(target.actor, scope=target.scope,
+                capability="calendar.write", observed_at=NOW).is_success)
+
+        app.calendar.command(context, identifier="first-window-plan", action="create", expected_revision=0,
+            operation_key="create-first-window-plan", data=calendar_data(), sources=())
+        app.calendar.command(context, identifier="first-window-report", action="create", expected_revision=0,
+            operation_key="create-first-window-report", data=calendar_data(kind="user_report"), sources=())
+        app.calendar.command(context, identifier="first-window-commitment", action="create", expected_revision=0,
+            operation_key="create-first-window-commitment", data=calendar_data(kind="commitment"), sources=())
+        self.assertEqual(app.calendar.read(other_context, "first-window-plan")["kind"], "role_plan")
+        for identifier in ("first-window-report", "first-window-commitment"):
+            with self.subTest(identifier=identifier), self.assertRaises(TaskError) as missing:
+                app.calendar.read(other_context, identifier)
+            self.assertEqual(missing.exception.code, "calendar_unavailable")
+
+        self.assertEqual(app.calendar.read(other_context, "legacy-role-plan")["kind"], "role_plan")
+
+        private_source = self.source(app, context, "private-calendar-evidence")
+        app.calendar.command(context, identifier="evidence-bound-plan", action="create", expected_revision=0,
+            operation_key="create-evidence-bound-plan", data=calendar_data(), sources=(private_source,))
+        with self.assertRaises(TaskError) as hidden:
+            app.calendar.read(other_context, "evidence-bound-plan")
+        self.assertEqual(hidden.exception.code, "calendar_unavailable")
+
+        self.identity.issue_grant(grant_id="role-plan-reminder-create", subject=context.actor.subject,
+            scope=context.scope, capability="reminder.create", tier=AuthorizationTier.STANDARD,
+            valid_from=NOW, expected_revision=self.identity.revision)
+        self.identity.issue_grant(grant_id="role-plan-reminder-deliver", subject=context.actor.subject,
+            scope=context.scope, capability="reminder.deliver", tier=AuthorizationTier.STANDARD,
+            valid_from=NOW, expected_revision=self.identity.revision)
+        app.calendar.remind(context, identifier="first-window-plan", expected_revision=1,
+            operation_key="first-window-reminder", sequence=0)
+        reminder_id = app.calendar.read(context, "first-window-plan")["reminder_id"]
+        active_reminder = app.agenda.repository.reminder(reminder_id)
+        with self.assertRaises(TaskError) as cross_window:
+            app.calendar.command(other_context, identifier="first-window-plan", action="cancel",
+                expected_revision=2, operation_key="cross-window-cancel")
+        self.assertEqual(cross_window.exception.code, "calendar_reminder_context_mismatch")
+        self.assertEqual(app.agenda.repository.reminder(reminder_id).state, "active")
+        self.assertEqual(app.calendar.read(other_context, "first-window-plan")["state"], "accepted")
+
+        self.configure(manager, calendar_enabled=False)
+        for target in (context, other_context):
+            self.assertFalse(app.tasks.identity.authorize(target.actor, scope=target.scope,
+                capability="calendar.write", observed_at=NOW).is_success)
+            with self.assertRaises(TaskError) as disabled:
+                app.calendar.access.check(target, "calendar.read")
+            self.assertEqual(disabled.exception.code, "calendar_disabled")
+        calendar_items = manager.status(self.core).unwrap()["calendar"]["items"]
+        self.assertEqual(len(calendar_items), 5)
+        self.assertEqual({item["kind"] for item in calendar_items}, {"role_plan", "user_report", "commitment"})
+
+
+class ContinuousScheduleContextTests(StateFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_continuous_mode_supplies_calendar_context_without_role_state_and_rechecks_access(self):
+        _, app, context, manager = self.setup_state()
+        self.configure(manager, calendar_enabled=True, schedule_simulation_mode="continuous")
+        plan_source = self.source(app, context, "continuous-plan-source")
+        app.calendar.command(context, identifier="continuous-plan", action="create", expected_revision=0,
+            operation_key="continuous-plan", data=calendar_data(), sources=(plan_source,))
+
+        consumer = app.messages.role_state_context
+        self.assertIs(consumer.calendar, app.calendar)
+        snapshot = consumer.capture(context, NOW)
+        self.assertEqual(snapshot["projection_version"], 4)
+        self.assertEqual(snapshot["calendar"]["items"][0]["title"], "私人阅读安排")
+        source = self.source(app, context, "continuous-message")
+        materials = consumer.contributions(snapshot, context, NOW, fallback_source=source)
+        instruction = consumer.instruction(materials)
+        self.assertIn("连续日程（HDSI）", instruction)
+        self.assertIn("私人阅读安排", instruction)
+        self.assertIsNone(app.calendar_planning.opportunity(
+            context, planning_values(app.role_state.settings(context)[0]), NOW))
+
+        self.revoke_source(app, plan_source)
+        with self.assertRaises(TaskError):
+            consumer.contributions(snapshot, context, NOW, fallback_source=source)
+
+        second_source = self.source(app, context, "continuous-plan-source-2")
+        app.calendar.command(context, identifier="continuous-plan-2", action="create", expected_revision=0,
+            operation_key="continuous-plan-2", data=calendar_data(title="另一项角色计划"), sources=(second_source,))
+        second_snapshot = consumer.capture(context, NOW)
+        self.configure(manager, calendar_enabled=False)
+        with self.assertRaises(TaskError):
+            consumer.contributions(second_snapshot, context, NOW, fallback_source=source)

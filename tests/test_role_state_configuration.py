@@ -4,11 +4,22 @@ import unittest
 
 from companion_v2.execution.models import TaskError
 from companion_v2.identity_policy.models import AuthorizationTier
-from companion_v2.role_work.state.configuration import GROUP, OWNER, target_for
+from companion_v2.role_work.state.configuration import (DEFAULTS, EXPRESSION_PROMPTS, GROUP, OWNER,
+    configuration_fields, target_for, validate_expression_prompts)
 from tests.test_host_application import HostFixture
 
 
 class RoleStateConfigurationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
+    def test_state_expression_prompts_are_registered_and_bounded(self):
+        fields = {field.field_id: field for field in configuration_fields()}
+        for name in EXPRESSION_PROMPTS:
+            self.assertEqual(DEFAULTS[name], "")
+            self.assertIn(GROUP + "." + name, fields)
+        validate_expression_prompts({**DEFAULTS, "energy_expression_prompt": "随活动自然变化"})
+        for value in (None, 7, "x" * 513):
+            with self.assertRaises(Exception):
+                validate_expression_prompts({**DEFAULTS, "health_expression_prompt": value})
+
     async def test_standard_participant_consumes_core_settings_without_management_access(self):
         host = await self.start()
         app = host.application

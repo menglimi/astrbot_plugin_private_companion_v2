@@ -54,16 +54,21 @@
     })();
   </script>
   <link rel="stylesheet" href="tokens.css?v=theme-material-20261001">
-  <link rel="stylesheet" href="styles.css?v=room-side-workbench-20261001">
+  <link rel="stylesheet" href="styles.css?v=room-editor-v1-cards-20261004">
   <link rel="stylesheet" href="tokens-bridge.css?v=scale-system-20260930">
   <link rel="stylesheet" href="memory-page.css?v=memory-config-ownership-20261001">
-  <link rel="stylesheet" href="contact-page.css?v=contact-relationship-link-20261001">
-  <link rel="stylesheet" href="learning-page.css?v=scale-system-20260930">
-  <link rel="stylesheet" href="state-page.css?v=state-config-ux-20261001">
-  <link rel="stylesheet" href="reply-page.css?v=reply-voice-20260926">
-  <link rel="stylesheet" href="expression-config.css?v=expression-domain-views-20261001">
+  <link rel="stylesheet" href="contact-page.css?v=proactive-material-pool-20261007">
+  <link rel="stylesheet" href="learning-page.css?v=learning-workbench-20261002">
+  <link rel="stylesheet" href="self-review-page.css?v=learning-workbench-20261002">
+  <link rel="stylesheet" href="learning-hub.css?v=expression-samples-20261008">
+  <link rel="stylesheet" href="state-page.css?v=status-manual-maintenance-20261007">
+  <link rel="stylesheet" href="state-config.css?v=status-settings-20261007">
+  <link rel="stylesheet" href="weather-source.css?v=weather-source-config-20261007">
+  <link rel="stylesheet" href="reply-page.css?v=reply-segmentation-preview-20261007">
+  <link rel="stylesheet" href="expression-config.css?v=reply-component-placements-20261007">
+  <link rel="stylesheet" href="host-options.css?v=forward-intake-settings-20261004">
   <link rel="stylesheet" href="config-editor.css?v=config-ownership-20261001">
-  <link rel="stylesheet" href="workbench.css?v=word-list-editor-20261001">
+  <link rel="stylesheet" href="workbench.css?v=official-knowledge-20261007">
   <!-- 配置控制台外壳。
        console.css 定义 .console / .console-section / .console-section-head /
        .console-row / .console-mount-head 等管理页的全部结构样式，
@@ -74,28 +79,31 @@
        预览构建器按这里的引用收集样式，所以漏引时预览也同样无样式，
        两边表现一致，一直没被察觉。 -->
   <link rel="stylesheet" href="console.css?v=page-lead-two-20260930">
-  <link rel="stylesheet" href="output-page.css?v=output-compact-r2-20261001">
+  <link rel="stylesheet" href="output-page.css?v=output-interactions-20261007">
   <link rel="stylesheet" href="decision-page.css?v=reply-decision-split-20261001">
-  <link rel="stylesheet" href="action-page.css?v=qzone-extension-20261001">
-<link rel="stylesheet" href="home.css?v=home-sidebar-20260930">
-  <link rel="stylesheet" href="models-page.css?v=model-workbench-20261001">
+  <link rel="stylesheet" href="action-page.css?v=action-workspace-20261007">
+  <link rel="stylesheet" href="home.css?v=status-display-policy-20261007">
+  <link rel="stylesheet" href="models-page.css?v=tts-preview-diagnostics-20261007">
   <link rel="stylesheet" href="product-page.css?v=no-host-state-20260929">
-  <link rel="stylesheet" href="semantic-page.css?v=reality-eight-scoped-actions-20261001">
-  <link rel="stylesheet" href="setup-guide.css?v=mode-bind-model-fix-20261001">
-  <link rel="stylesheet" href="backup-page.css?v=scale-tokens-20260930">
-  <link rel="stylesheet" href="maintenance-page.css?v=token-cache-maintenance-20261001-prompt-v2">
+  <link rel="stylesheet" href="semantic-page.css?v=learning-semantic-layout-20261008">
+  <link rel="stylesheet" href="perception-subpages.css?v=perception-subpages-20261007">
+  <link rel="stylesheet" href="understanding-page.css?v=understanding-figma-layout-20261007">
+  <link rel="stylesheet" href="setup-guide.css?v=quick-config-inline-20261007">
+  <link rel="stylesheet" href="backup-page.css?v=data-subpages-20261008-r2">
+  <link rel="stylesheet" href="storage-page.css?v=data-subpages-20261008-r2">
+  <link rel="stylesheet" href="maintenance-page.css?v=prompt-workspace-redesign-20261010">
   <link rel="stylesheet" href="navigation.css?v=console-20260926">
-  <link rel="stylesheet" href="appearance-page.css?v=theme-material-r2-20261001">
-  <link rel="stylesheet" href="entrance.css?v=room-boot-gif-once-20261001">
+  <link rel="stylesheet" href="appearance-page.css?v=appearance-workbench-20261008">
+  <link rel="stylesheet" href="entrance.css?v=cottage-title-in-scene-20261005-r1">
   <!-- 外壳布局：小屋常驻 + 左栏 + 右栏 + 下方面板。必须在 styles.css 之后，
        它覆盖旧的固定定位左栏与顶栏栅格。 -->
-  <link rel="stylesheet" href="shell.css?v=sidebar-scope-20260930">
-  <link rel="stylesheet" href="self-page.css?v=self-voice-canon-20261001">
+  <link rel="stylesheet" href="shell.css?v=cottage-title-in-scene-20261005-r1">
+  <link rel="stylesheet" href="self-page.css?v=core-user-relationship-20261007">
   <link rel="stylesheet" href="theme-skins.css?v=theme-material-20261001">
   <!-- 小屋就绪闸门（见 tokens.css）。
        体素包 677 KB，它是首屏唯一一个「到了才能画」的资源：在它解析完之前，
        app.js 的 mountStage() 不会执行，.room-stage 是个空盒子。所以在这一行
-       上挂 onload 只记下资源已到，并留一个 7 秒兜底——加载失败时不能让页面一直白着，
+       上挂 onload 只忆下资源已到，并留一个 7 秒兜底——加载失败时不能让页面一直白着，
        到期放行，由 mountStage() 的 catch 走降级视图。
        onload 必须写在这一行本身：defer 脚本按文档顺序执行，换成在末尾统一
        绑定的话，包可能在监听挂上之前就已经加载完了（缓存命中时几乎必然如此），
@@ -138,48 +146,60 @@
   <script defer src="theme.js?v=theme-material-20261001"></script>
   <!-- 外壳状态：选中的家具与配置分区。app.js 依赖它决定下方渲染什么，
        所以在 app.js 之前。 -->
-  <script defer src="shell.js?v=shell-rebuild-20260929"></script>
+  <script defer src="shell.js?v=understanding-entry-20261007"></script>
   <!-- 入场序列：只驱动体素控制器的公开接口，必须在 app.js 之前就位。 -->
   <script defer src="entrance.js?v=entrance-state-build-20261001"></script>
   <script defer src="config-snapshot.js?v=config-aligned-20260925"></script>
-  <script defer src="workspace-bundle.js?v=contacts-split-20260930"></script>
-  <script defer src="home-sidebar.js?v=text-cleanup-20260930"></script>
-  <script defer src="product-page.js?v=text-cleanup-20260930"></script>
-  <!-- 首次使用引导：依赖 product-page.js 的桥接与错误翻译。 -->
-  <script defer src="setup-guide.js?v=mode-bind-model-fix-20261001"></script>
-  <script defer src="semantic-page.js?v=text-cleanup-20260930"></script>
+  <script defer src="workspace-bundle.js?v=workspace-request-timeout-20261009"></script>
+  <script defer src="home-sidebar.js?v=status-action-20261007"></script>
+  <script defer src="product-page.js?v=migration-request-timeout-20261009"></script>
+  <script defer src="self-relationship.js?v=core-user-profile-20261007"></script>
+  <script defer src="home-environment.js?v=role-time-auto-light-20261004"></script>
+  <!-- 设置与迁移工作区：依赖 product-page.js 的桥接与错误翻译。 -->
+  <script defer src="setup-guide.js?v=migration-timeout-progress-20261009"></script>
+  <script defer src="semantic-page.js?v=learning-semantic-catalog-20261008"></script>
   <script defer src="perception-page.js?v=perception-camera-consent-20261001"></script>
-  <script defer src="perception-native-page.js?v=location-placeholder-generic-20261001"></script>
-  <script defer src="perception-overview.js?v=perception-camera-runtime-20261001"></script>
-  <script defer src="reality-access.js?v=reality-eight-scoped-actions-20261001"></script>
-  <script defer src="screen-access.js?v=screen-native-consent-20261001"></script>
-  <script defer src="room-editor.js?v=room-side-workbench-20261001"></script>
-  <script defer src="memory-page.js?v=text-cleanup-20260930"></script>
-  <script defer src="contact-page.js?v=contact-relationship-link-20261001"></script>
-  <script defer src="learning-page.js?v=text-cleanup-20260930"></script>
-  <script defer src="state-maintenance.js?v=state-config-ux-20261001"></script>
+  <script defer src="perception-native-page.js?v=weather-source-copy-20261007"></script>
+  <script defer src="weather-source-page.js?v=weather-source-config-text-cleanup-20261007"></script>
+  <script defer src="perception-overview.js?v=perception-cards-and-config-20261007-r2"></script>
+  <script defer src="reality-access.js?v=reality-readonly-consent-20261002"></script>
+  <script defer src="screen-access.js?v=screen-readonly-consent-20261002"></script>
+  <script defer src="room-editor.js?v=transient-time-preview-20261004"></script>
+  <script defer src="memory-page.js?v=directory-names-20261002"></script>
+  <script defer src="contact-page.js?v=contact-save-history-fallback-20261008"></script>
+  <script defer src="learning-page.js?v=learning-workbench-20261002"></script>
+  <script defer src="learning-overview.js?v=learning-design-20261008"></script>
+  <script defer src="learning-review-page.js?v=expression-feedback-20261008"></script>
+  <script defer src="expression-signals-page.js?v=expression-samples-20261008"></script>
+  <script defer src="expression-samples-page.js?v=expression-samples-20261008"></script>
+  <script defer src="self-review-page.js?v=learning-workbench-20261002"></script>
+  <script defer src="state-maintenance.js?v=status-settings-text-cleanup-20261007"></script>
   <script defer src="state-contact.js?v=text-cleanup-20260930"></script>
-  <script defer src="calendar-editor.js?v=text-cleanup-20260930"></script>
-  <script defer src="state-editor.js?v=state-config-ux-20261001"></script>
-  <script defer src="state-page.js?v=state-config-ux-20261001"></script>
-  <script defer src="reply-page.js?v=config-ownership-20261001"></script>
+  <script defer src="calendar-editor.js?v=schedule-workspace-20261003-r2"></script>
+  <script defer src="state-editor.js?v=status-settings-20261007"></script>
+  <script defer src="state-page.js?v=state-summary-refresh-20261008"></script>
+  <script defer src="reply-page.js?v=reply-component-placements-20261007"></script>
+  <script defer src="host-options-page.js?v=forward-intake-settings-20261004"></script>
   <!-- 工作台内核必须先于使用它的编辑器加载（config-editor / expression-page
        都依赖 CompanionWorkbench）。 -->
-  <script defer src="workbench-page.js?v=plain-words-20260930"></script>
-  <!-- 记忆策略位于记忆页的独立视图。 -->
+  <script defer src="workbench-page.js?v=workbench-save-receipt-20261007"></script>
+  <!-- 忆忆策略位于忆忆页的独立视图。 -->
   <script defer src="memory-settings-section.js?v=memory-config-ownership-20261001"></script>
-  <script defer src="config-editor.js?v=role-voice-canon-20261001"></script>
-  <script defer src="role-profile-draft.js?v=role-profile-draft-20261001"></script>
-  <script defer src="decision-page.js?v=decision-context-20261001"></script>
-  <script defer src="expression-page.js?v=text-cleanup-20260930"></script>
-  <script defer src="models-page.js?v=native-image-mask-20261001"></script>
-  <script defer src="image-materials-page.js?v=native-image-materials-20261001"></script>
-  <script defer src="maintenance-page.js?v=token-cache-maintenance-20261001-prompt-v2"></script>
-  <script defer src="appearance-page.js?v=theme-material-r2-20261001"></script>
+  <script defer src="config-editor.js?v=config-output-save-20261007"></script>
+  <script defer src="output-page.js?v=output-interactions-20261007"></script>
+  <script defer src="role-profile-draft.js?v=config-receipt-recovery-20261007"></script>
+  <script defer src="decision-page.js?v=decision-no-perception-overview-20261002"></script>
+  <script defer src="expression-page.js?v=expression-completion-20261008"></script>
+  <script defer src="models-page.js?v=response-envelope-shape-20261007"></script>
+  <script defer src="image-materials-page.js?v=reference-usage-persistence-20261007"></script>
+  <script defer src="maintenance-page.js?v=prompt-workspace-redesign-20261010"></script>
+  <script defer src="appearance-page.js?v=appearance-workbench-20261008"></script>
   <!-- 备份与还原：后端 backup_api.py 有六条真实路由，而这一页此前没有任何
        入口加载它——资料与维护页的挂载点永远停在「正在读取快照列表…」。 -->
-  <script defer src="backup-page.js?v=text-cleanup-20260930"></script>
-  <script defer src="app.js?v=qzone-extension-20261001"></script>
+  <script defer src="backup-page.js?v=data-subpages-20261008-r2"></script>
+  <script defer src="storage-page.js?v=data-subpages-20261008-r2"></script>
+  <script defer src="understanding-page.js?v=understanding-figma-layout-20261007"></script>
+  <script defer src="app.js?v=v1-migration-under-data-20261009"></script>
 </head>
 <body>
   <!-- 启动幕：首屏闸门（tokens.css 的 data-room-ready）在体素包解析完之前
@@ -244,24 +264,13 @@
       <div id="shellNav" class="shell-nav"></div>
       <div class="rail-foot">
         <button class="shell-nav-link" id="searchButton" aria-label="搜索功能与内容" title="搜索 · Ctrl / ⌘ K"><i data-lucide="search"></i><span>搜索</span></button>
-        <button class="shell-nav-link" id="appearanceButton" aria-label="外观与设置" title="外观与设置"><i data-lucide="palette"></i><span>外观与设置</span></button>
       </div>
     </nav>
-    <header class="topbar">
-      <div class="breadcrumb" id="breadcrumb"></div>
-      <div class="global-tools">
-        <span class="preview-badge" data-host-badge role="status" aria-live="polite"><span class="host-dot"></span><span class="host-label">正在读取宿主状态…</span></span>
-      </div>
-    </header>
-    <section id="productScope" class="product-scope" aria-label="当前对象与角色" hidden></section>
     <div class="shell-body">
       <section class="stage-region" aria-label="小屋">
-        <div class="stage-bar">
-          <h2><i data-lucide="box"></i>小屋</h2>
-          <span class="stage-spacer"></span>
-          <button id="backHome" class="away-only" data-shell-home title="回到小屋"><i data-lucide="house"></i>回到小屋</button>
-        </div>
+        <div class="home-environment home-only" data-home-environment aria-label="角色地点、天气与当地时间"></div>
         <div class="room-stage" id="stageScene">
+          <div id="stageRole" class="stage-role" aria-live="polite"><h2 class="stage-role-title"><i data-lucide="house" aria-hidden="true"></i><span>陪伴的小屋</span></h2></div>
           <div class="voxel-room" data-voxel-room role="group" aria-label="可旋转、可点选家具的体素小屋"></div>
           <!-- 镜头复位与家具布置常驻场景右上角：它们只作用于小屋本身，
                放进容器才不会在速览条移到下方后显得无处安放。 -->
@@ -269,15 +278,18 @@
             <button class="stage-overlay-button" data-voxel-reset title="镜头复位，回到小屋全景"><i data-lucide="rotate-ccw"></i>重置</button>
             <button class="stage-overlay-button" data-detail="arrange" title="布置房间"><i data-lucide="armchair"></i>布置</button>
           </div>
+          <div class="stage-overlay away-only">
+            <button id="backHome" class="stage-overlay-button" data-shell-home title="回到小屋"><i data-lucide="house"></i>回到小屋</button>
+          </div>
           <div class="voxel-hint home-only"><i data-lucide="mouse"></i>拖动旋转 · 滚轮缩放 · 点击家具查看</div>
         </div>
         <div class="stage-furniture-strip home-only" id="stageFurniture" aria-label="小屋家具"></div>
       </section>
-      <aside class="shell-side" id="shellSide" aria-label="当前状态与日程"></aside>
+      <aside class="shell-side" id="shellSide" aria-label="此刻的状态与今日安排"></aside>
       <section class="shell-panel" id="shellPanel" aria-label="内容面板"></section>
     </div>
   </div>
-  <!-- #main 保留：既有的路由渲染（人物、记忆、专题配置）仍然写进这里，
+  <!-- #main 保留：既有的路由渲染（人物、忆忆、专题配置）仍然写进这里，
        它现在是小屋下方面板区的另一处落点。 -->
   <main id="main" tabindex="-1" hidden></main>  <dialog id="detailDialog" class="detail-dialog" aria-labelledby="dialogTitle"><div id="dialogContent"></div></dialog>
   <dialog id="searchDialog" class="search-dialog" aria-label="搜索功能与内容">

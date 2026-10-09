@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 from tests import test_astrbot_staging_host as support
 from tests.multi_host_support import MultiFixture
@@ -13,11 +14,17 @@ from tests.staging_bootstrap_support import wait_for_batch
 from tests.test_reality_together_native import REALITY
 
 from astrbot.api.web import PluginRequest, bind_request_context
+from astrbot_host.management_identity import dashboard_operator
 from astrbot_host.reality_access_api import CAPABILITY_PATHS, PREFIX
 from astrbot_host.native_perception_api import PREFIX as PERCEPTION_PREFIX
 from companion_v2.capabilities.reality_access import ACTION
 from companion_v2.capabilities.reality_camera import ACTION as CAMERA_ACTION
 from companion_v2.adapters.astrbot.model_wire import tool_alias
+from companion_v2.execution.models import TaskContext
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import AudienceRef
+from companion_v2.identity_policy.models import AuthorizationTier
+from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from starlette.requests import Request
 
 
@@ -199,6 +206,29 @@ class RealityAccessSingleTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(status["data"]["installed"], status)
         self.assertEqual(self.mobile.users, [])
 
+    async def test_view_only_operator_gets_read_only_status_and_cannot_submit_consent(self):
+        await self.start()
+        operator = dashboard_operator(self.controller.runtime, "admin", at=support.NOW)
+        original = self.controller.session.profile.target
+        target = TaskContext(operator, original.role_binding, AudienceRef(original.scope, (operator.subject,)))
+        self.controller.session.profile = NS(target=target)
+        policy = ObjectAccessPolicy(self.controller.runtime)
+        policy.set_tier(operator.subject, AuthorizationTier.IMPORTANT,
+            expected_revision=policy.revision, observed_at=support.NOW)
+
+        with patch.object(self.controller.session.application.tasks, "authorize_context",
+                          return_value=Outcome.success(True)):
+            readonly = await request_api(self.native)
+            self.assertEqual(readonly["status"], "ok", readonly)
+            self.assertFalse(readonly["data"]["can_manage"])
+            for suffix in CAPABILITY_PATHS.values():
+                status = await request_api(self.native, PREFIX + suffix)
+                self.assertEqual(status["status"], "ok", status)
+                self.assertFalse(status["data"]["can_manage"], status)
+            denied = await request_api(self.native, body=command(
+                readonly["data"], True, "read-only-enable"))
+        self.assertEqual(denied["data"]["code"], "core_access_required")
+
     async def test_all_native_actions_have_fixed_scoped_access_routes(self):
         await self.start()
         paths = {action: PREFIX + suffix for action, suffix in CAPABILITY_PATHS.items()}
@@ -210,6 +240,7 @@ class RealityAccessSingleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response["status"], "ok", response)
                 self.assertEqual(response["data"]["action"], action)
                 self.assertFalse(response["data"]["invokable"])
+                self.assertTrue(response["data"]["can_manage"])
                 granted = await request_api(self.native, path, body=command(
                     response["data"], True, f"enable-action-{index}"))
                 self.assertTrue(granted["data"]["status"]["invokable"], granted)

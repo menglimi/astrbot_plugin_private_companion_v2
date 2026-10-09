@@ -12,4 +12,4 @@ tags:
   - 能力整合
 support_platforms:
   - aiocqhttp
-astrbot_version: "==4.27.2"
+astrbot_version: ">=4.27.2,<5"

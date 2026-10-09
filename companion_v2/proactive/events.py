@@ -136,7 +136,7 @@ class ActivityContactEvents:
         return self.runtime.read_one("SELECT 1 FROM execution_tasks WHERE task_id = ?", (identifier,)) or self.runtime.read_one(
             "SELECT 1 FROM proactive_contacts WHERE task_id = ?", (identifier,))
 
-    def select(self, context, preferences, at):
+    def select(self, context, preferences, at, *, purpose=None):
         """Return (candidate, more_pages); scan at most one indexed page per call."""
         token = preferences.snapshot.resolution_token
         state = self._scans.get(context.key)
@@ -167,8 +167,10 @@ class ActivityContactEvents:
             activity = activity_from_json(row["record_json"])
             if activity.state is not RoleActivityState.COMPLETED or activity.work is None:
                 continue
-            purpose = "creation" if activity.work.kind == "reading" else "life"
-            if preferences.reason(purpose):
+            candidate_purpose = "creation" if activity.work.kind == "reading" else "life"
+            if purpose is not None and purpose != candidate_purpose:
+                continue
+            if preferences.reason(candidate_purpose):
                 continue
             opportunity = Opportunity("activity-" + self._event_key(context, activity),
                 context.scope, activity.updated_at, activity.updated_at + lifetime)
@@ -176,17 +178,17 @@ class ActivityContactEvents:
                 continue
             try:
                 operation_id = self._receipt(context, activity, at)
-                purpose, source = self._project(context, activity, operation_id, at)
+                candidate_purpose, source = self._project(context, activity, operation_id, at)
             except (TaskError, KeyError):
                 continue
             marker = {"activity_id": activity.activity_id, "revision": activity.revision,
-                "operation_id": operation_id, "activity_hash": digest(activity), "purpose": purpose,
+                "operation_id": operation_id, "activity_hash": digest(activity), "purpose": candidate_purpose,
                 "expires_at": stamp(opportunity.expires_at)}
-            summary = ("刚完成了一段真实阅读，可以自然地分享一点已读片段和自己的感想；不合适就跳过。" if purpose == "creation" else
+            summary = ("刚完成了一段真实阅读，可以自然地分享一点已读片段和自己的感想；不合适就跳过。" if candidate_purpose == "creation" else
                        "角色的一段睡眠确实结束了，可以看看是否有自然值得分享的近况；不要凭空补出梦或醒后经历。")
             thought = Thought("activity-event-" + digest(marker), opportunity, ThoughtKind.CONVERSATION, summary,
                               EvidenceSnapshot(context.scope, at, (source,)), 1.0)
-            return (opportunity, (ContactIntent(purpose, thought),), marker), True
+            return (opportunity, (ContactIntent(candidate_purpose, thought),), marker), True
         more = len(rows) == PAGE_SIZE
         self._scans[context.key] = (token, cursor if more else None, at if more else at + POLL_INTERVAL)
         return None, more

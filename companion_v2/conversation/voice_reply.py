@@ -1,6 +1,6 @@
 """Validated voice presentation policy and model-authored spoken spans."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 import json
 import math
@@ -11,8 +11,95 @@ from companion_v2.execution.models import digest, stamp
 from companion_v2.foundation.refs import ScopeKind
 
 
-_TAG = re.compile(r"(?is)<pc_tts>(.*?)</pc_tts>")
-_STRAY_TAG = re.compile(r"(?i)</?pc_tts\s*>")
+_PROTOCOL_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
+_PROTOCOL_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
+_TAG = re.compile(
+    rf"(?is){_PROTOCOL_LT}\s*pc_tts\b[^>]*?{_PROTOCOL_GT}(.*?)"
+    rf"{_PROTOCOL_LT}\s*/\s*pc_tts\s*{_PROTOCOL_GT}"
+)
+_STRAY_TAG = re.compile(
+    rf"(?is){_PROTOCOL_LT}\s*/?\s*pc_tts\b[^>]*?{_PROTOCOL_GT}"
+)
+_TURN_LANGUAGE_NAMES = {
+    "ja": r"(?:日语|日語|日文|日本语|日本語|japanese)",
+    "en": r"(?:英语|英語|英文|english)",
+    "zh": r"(?:中文|汉语|漢語|普通话|国语|國語|中国语|中国語|chinese)",
+}
+
+
+def requested_voice_language(input_text):
+    """Recognize a direct, turn-local language request without changing settings."""
+    if not isinstance(input_text, str) or not input_text.strip():
+        return ""
+    text = input_text.strip()
+    text = re.sub(r"^(?:\s*\[At:\d+\]\s*)+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^@\S+\s+", "", text).strip()
+    if re.search(r"(?:是什么意思|怎么理解|如何理解|指什么|含义|语法|词义|单词怎么读|meaning of|what does .{1,48} mean)", text, re.I):
+        return ""
+    if (re.search(r"(?:不要|别|不用|不必|不需要|取消|停止|避免).{0,16}(?:用|说|讲|回复|回答|答复|朗读|念|读)", text)
+            or re.search(r"\b(?:do not|don't|never|stop|avoid)\b.{0,32}\b(?:speak|say|reply|answer|read)\b", text, re.I)):
+        return ""
+    if (re.search(r"(?:翻译|译成|翻成|改写|怎么说|如何表达|翻訳).{0,24}(?:成|为|into|to)?\s*(?:英语|英語|英文|日语|日語|日文|中文|汉语|日本語|english|japanese|chinese)", text, re.I)
+            or re.search(r"\b(?:translate|translation)\b.{0,36}\b(?:into|to)\b", text, re.I)):
+        return ""
+
+    for language, name in _TURN_LANGUAGE_NAMES.items():
+        chinese_request = re.search(
+            rf"(?:请|麻烦|这次|这回|本次|接下来)?\s*(?:用|以)\s*{name}\s*(?:语音)?\s*(?:跟我|对我|给我)?\s*(?:回复|回答|答复|说|讲|朗读|念|读)(?:一句|一段|一下)?",
+            text, re.I,
+        ) or re.search(
+            rf"(?:请|麻烦)?\s*{name}\s*(?:语音)?\s*(?:回复|回答|答复|朗读|念|读)", text, re.I,
+        )
+        if chinese_request:
+            return language
+
+    english_request = re.search(
+        r"\b(?:please\s+)?(?:speak|say|reply|answer|read)(?:\s+(?:to\s+me|it))?\s+in\s+(english|japanese|chinese)\b",
+        text, re.I,
+    )
+    if english_request:
+        language = english_request.group(1).casefold()
+        return {"english": "en", "japanese": "ja", "chinese": "zh"}[language]
+
+    japanese_request = re.search(
+        r"(?:英語|日本語|中国語|中文)で(?:話して|答えて|返事して|返信して|読んで|朗読して)(?:ください|お願い)?",
+        text,
+    )
+    if japanese_request:
+        return "en" if japanese_request.group(0).startswith("英語") else \
+            "ja" if japanese_request.group(0).startswith("日本語") else "zh"
+    return ""
+
+
+def voice_policy_for_turn(policy, input_text):
+    """Apply an explicit request to this turn's copy of the saved voice policy."""
+    if policy is None:
+        return None
+    language = requested_voice_language(input_text)
+    return replace(policy, language=language) if language and language != policy.language else policy
+
+
+def strip_voice_markup(text):
+    """Remove internal voice wrappers while keeping their authored text visible."""
+    if type(text) is not str:
+        return text
+    return _STRAY_TAG.sub("", _TAG.sub(lambda match: match.group(1), text))
+
+
+def _has_chinese_translation(text):
+    visible = _STRAY_TAG.sub("", text)
+    visible = "".join(controlled_parts(visible)[0]).strip()
+    if not visible or re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", visible):
+        return False
+    han = re.findall(r"[\u4e00-\u9fff]", visible)
+    if len(han) >= 4:
+        return True
+    if len(han) < 2:
+        return False
+    markers = ("的", "了", "是", "我", "你", "这", "那", "不", "有", "吗", "呢", "吧",
+               "呀", "啊", "哦", "嘛", "想", "要", "可以", "知道", "今天", "明天", "喜欢", "辛苦")
+    short_phrases = ("你好", "您好", "再见", "谢谢", "晚安", "早安", "拜拜")
+    return any(marker in visible for marker in markers) or any(phrase in visible for phrase in short_phrases)
 
 
 @dataclass(frozen=True)
@@ -69,15 +156,17 @@ class VoiceReplyPolicy:
         prompt = (
             "本轮可自行决定哪些短句适合用语音表达。仅将需要朗读的原文包在 <pc_tts> 与 </pc_tts> 中；"
             "标签内不得放分段标记、代码、链接或图片说明。没有合适内容就不用标签。"
-            "语音标签只是内部格式，不要在普通文字中解释它。"
+            "语音标签只是内部格式；不需要语音时直接写普通正文，不要在正文中解释或复述标签。"
         )
         if self.language != "zh":
             label = "日语" if self.language == "ja" else "英语"
-            prompt += f"标签内用自然{label}，"
-            if self.foreign_text_mode in ("translation", "bilingual"):
-                prompt += "标签外紧接自然中文译文，不加译文标题；译文将作为可见文字。"
+            prompt += f"语音标签内用自然{label}，完整表达标签承载的意思。"
+            if self.foreign_text_mode == "translation":
+                prompt += "每个语音标签后紧接与该片段完整对应的自然中文译文，不加标题、不省略关键信息；译文作为可见文字。"
+            elif self.foreign_text_mode == "bilingual":
+                prompt += "每个语音标签后紧接完整自然中文译文，不加标题；可见文字保留外语原文和中文译文。"
             else:
-                prompt += "标签外可写补充文字，但不要重复朗读原文。"
+                prompt += "标签外保留自然显示文字即可，不必翻译；不要重复朗读原文。"
         if self.extra_prompt.strip():
             prompt += "\n" + self.extra_prompt.strip()
         return prompt
@@ -104,8 +193,8 @@ def capability_instruction(policy):
 
 def separate_spoken(text, policy):
     """Return visible text and (offset, speech) pairs before segmentation."""
-    if policy.generation_mode != "model_tag" and policy.trigger_mode != "adaptive":
-        return text, ()
+    if policy is None or (policy.generation_mode != "model_tag" and policy.trigger_mode != "adaptive"):
+        return strip_voice_markup(text), ()
     translate = policy.language != "zh" and policy.foreign_text_mode == "translation"
     matches = tuple(_TAG.finditer(text))
     visible, spoken, cursor = [], [], 0
@@ -115,7 +204,7 @@ def separate_spoken(text, policy):
         if speech:
             spoken.append((len(_STRAY_TAG.sub("", "".join(visible))), speech))
         following = text[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(text)]
-        translated = translate and bool("".join(controlled_parts(_STRAY_TAG.sub("", following))[0]).strip())
+        translated = translate and _has_chinese_translation(following)
         if not translated:
             visible.append(match.group(1))
         cursor = match.end()

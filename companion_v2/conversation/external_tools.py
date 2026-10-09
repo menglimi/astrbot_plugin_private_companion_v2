@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 import inspect
 import json
+import re
 from types import MappingProxyType
 from typing import Awaitable, Callable
 
@@ -270,15 +271,26 @@ class ExternalToolExecutor:
                        capability_id=descriptor.binding.capability, subject=context.actor.subject, scope=context.scope))
 
     def catalog_for(self, context):
+        return self.catalog_with_diagnostics(context)[0]
+
+    def catalog_with_diagnostics(self, context):
+        """Return this audience's offered tools and bounded omission codes from one check."""
         with self.runtime.read_snapshot():
             available = []
+            filtered = []
             for provider in self.providers.values():
+                action = provider.descriptor.tool.action
                 try:
                     self._admit(provider.descriptor, context, self.tasks.now())
-                except TaskError:
+                except TaskError as error:
+                    reason = ("not_supported_for_group" if context.scope.kind is ScopeKind.GROUP
+                              and action not in GROUP_IMAGE_ACTIONS else error.code)
+                    if type(reason) is not str or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason) is None:
+                        reason = "extension_unavailable_or_not_authorized"
+                    filtered.append({"action": action, "reason": reason})
                     continue
                 available.append(provider.descriptor.tool)
-            return tuple(available)
+            return tuple(available), tuple(filtered)
 
     def _row(self, invocation_id):
         row = self.runtime.read_one("SELECT * FROM extension_tool_invocations WHERE invocation_id = ?", (invocation_id,))

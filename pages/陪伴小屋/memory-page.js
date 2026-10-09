@@ -1,6 +1,6 @@
-/* 陪伴小屋 · 记忆与经历（档案库）
+/* 陪伴小屋 · 事实与经历（档案库）
  *
- * 这一页管记忆正本与记忆策略。档案操作和策略配置使用同一入口、不同视图。
+ * 这一页管事实正本与整理策略。档案操作和策略配置使用同一入口、不同视图。
  *
  * 与旧版的关系：桥接层（whenBridgeReady / api / bounded）、全部 19 条端点的接法、
  * 待确认台账（localStorage 的 pending / pendingMutation）、幂等键与预期版本协议
@@ -28,15 +28,15 @@ window.CompanionMemoryPage = (() => {
   const PRELOAD_PAGES = 4, PAGE_SIZE = 50;
   const errors = {
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开陪伴小屋。",
-    staging_not_initialized: "V2 数据尚未加载。请先在账号与会话中加载已初始化的配置，再刷新。",
-    staging_host_terminated: "V2 宿主已停止，请重新打开拓展页。",
+    staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
+    staging_host_terminated: "插件已停止，请重新打开拓展页。",
     core_access_required: "当前账号没有记忆管理权限。",
     binding_revoked: "管理账号的授权已撤销。", binding_rebound: "管理账号的绑定已变化，请重新进入。",
     memory_reflection_unavailable: "这条整理记录已不在当前授权范围。",
     memory_reflection_uncertain: "原模型调用结果尚未确认。请先核对原任务，不能重复发起。",
     memory_reflection_failed: "本次整理未完成，需要明确发起修复。",
-    memory_reflection_closed: "记忆整理服务尚未运行，请先启动 V2 宿主。",
-    application_not_running: "V2 宿主尚未运行，请先启动后继续。",
+    memory_reflection_closed: "记忆整理服务尚未就绪，请重新读取角色状态。",
+    application_not_running: "角色尚未就绪，请重新读取状态。",
     memory_settings_changed: "记忆设置已变化，需要重新准备材料。",
     memory_reflection_stale: "相关记忆已更新，旧分析不能继续写入。",
     source_revoked: "原来源已撤回。", source_expired: "原来源已过期。",
@@ -69,8 +69,7 @@ window.CompanionMemoryPage = (() => {
     bridge_timeout: "未收到服务确认，请刷新核对。",
     invalid_response: "服务返回的数据不完整，请刷新核对。",
   };
-  /* 判断一个字符串是否形如机器码：后端把码放在信封的 message 上，而 reason
-     里可能是可直接展示的原因句，不能一律替换。 */
+  /* 旧桥接会将机器码放在信封的 message 上。 */
   const CODE = /^[a-z][a-z0-9_]{2,60}$/;
   const stateLabels = {selecting:"正在准备材料", prepared:"待整理", running:"调用结果待核对", received:"已收到，待解析",
     modelled:"待写入", failed:"整理失败", partial:"部分已保存", complete:"整理完成", empty:"没有可整理材料"};
@@ -85,6 +84,8 @@ window.CompanionMemoryPage = (() => {
     {key:"forgotten",  label:"已遗忘", tone:"mem-state-forgotten"},
   ];
   const retentionLabels = {session:"本次会话",short:"短期",durable:"长期",protected:"受保护"};
+  const sourceLabels = {human_message:"对方消息",bot_message:"角色消息",source:"原始资料",observation:"观察记录"};
+  const queryLabels = {fact:"事实",source:"原始来源",experience:"共同经历"};
   /* 整理流程的六个阶段。running 是「在途」，failed/empty 是另一类结局，
      所以它们不进这条线性轨道，而是单独标注。 */
   const STAGES = ["selecting","prepared","running","received","modelled","complete"];
@@ -98,7 +99,7 @@ window.CompanionMemoryPage = (() => {
   const num = value => Number.isFinite(value) && value >= 0 ? String(value) : "—";
   const when = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN", {hour12:false}) : "待定";
   const day = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleDateString("zh-CN") : "待定";
-  const reason = code => errors[code] || (formatErrors.has(code) ? "模型输出有未完成或格式不合规的条目，已有结果保留，可修复剩余项。" : code ? "需要核对：" + code : "暂无具体原因");
+  const reason = code => errors[code] || (formatErrors.has(code) ? "模型输出有未完成或格式不合规的条目，已有结果保留，可修复剩余项。" : code ? "当前状态未能确认，请刷新核对。" : "暂无具体原因");
   const badge = (text, tone="") => `<span class="mem-badge ${tone}">${e(text)}</span>`;
   const button = (id, text, disabled=false, kind="") => `<button type="button" id="${id}" class="mem-btn${kind?" is-"+kind:""}"${disabled?" disabled":""}>${text}</button>`;
   const problem = code => Object.assign(new Error(reason(code)), {code});
@@ -127,7 +128,7 @@ window.CompanionMemoryPage = (() => {
       filter:"all", search:"", selId:null,
       detail:null, detailId:null, factDetail:null, revisions:[], clearPreview:null,
       queryText:"", queryKind:"all", queryResult:null, querySession:null, sourceResult:null,
-      archivePreview:null, archiveIdleDays:180, archiveSelection:null, archivedResult:null,
+      archivePreview:null, archiveIdleDays:180, archivedResult:null,
       exportBundle:null, exportIncludeArchived:true, importPreview:null,
       /* 记忆归属：null = 还没读到；{owner:"self"} 读到但没读全。归属是安装级的事实，
          所以它不进 load() 的轮询——那些轮询只刷数据，不该让这句话闪。 */
@@ -202,7 +203,7 @@ window.CompanionMemoryPage = (() => {
   }
   async function api(method, path, body) {
     const response = await bounded(method === "GET" ? bridge.apiGet(path, body) : bridge.apiPost(path, body));
-    const wrapped = ["ok","error"].includes(response?.status) ? response : ["ok","error"].includes(response?.data?.status) ? response.data : null;
+    const wrapped = ["ok","error"].includes(response?.status) && response?.data !== undefined ? response : ["ok","error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
     /* 后端把机器码放在信封的 message 上（页面桥只转发 message），所以取码要同时
        看 data.code 与 message，不能只认前者。 */
     if (wrapped?.status === "error") throw problem(CODE.test(wrapped.data?.code || wrapped.message || "")
@@ -250,7 +251,8 @@ window.CompanionMemoryPage = (() => {
     if (!value || typeof value.owner !== "string") return errors.memory_ownership_unavailable;
     const name = ownerName(value.display_name, "我会牢牢记住你");
     if (value.owner === "external") {
-      return `长期记忆现在由〈${name}〉提供：每轮注入的记忆，以及模型能调用的记忆工具，都来自它。`
+      return `长期记忆现在由〈${name}〉提供：每轮注入的记忆，以及模型能调用的记忆工具，都来自它——`
+        + "那是外部的记忆插件，与这一页记下的事实和经历不是同一份库，两边各存各的。"
         + "这里的事实、来源和整理记录仍然照常保存，换回 V2 提供时可以直接接着用。";
     }
     const reason = {
@@ -259,8 +261,9 @@ window.CompanionMemoryPage = (() => {
       owner_handle_disabled: "它的记忆桥没有启用，",
       owner_handle_unreadable: "它的记忆句柄当前读不到，",
     }[value.reason] || "它的记忆声明当前不可用，";
-    return `长期记忆现在由 V2 提供：注入与记忆工具都来自本插件。${reason}所以这一页管的是 V2 自己的事实库，`
-      + `与〈${name}〉的库不是同一份。它恢复可用后，注入与工具会立刻回到它那边。`;
+    return `长期记忆现在由 V2 提供：注入与记忆工具都来自本插件。${reason}所以这一页管的是 V2 自己的事实与经历，`
+      + `与〈${name}〉的库不是同一份——那是外部记忆插件，不是这里的记录。`
+      + "它恢复可用后，注入与工具会立刻回到它那边。";
   }
   /* 徽标与面包屑。
    *
@@ -279,8 +282,8 @@ window.CompanionMemoryPage = (() => {
     if (label) label.innerHTML = active ? "<span></span>V2 记忆库读取正常 <b>V2</b>" : "<span></span>V2 记忆库待检查 <b>V2</b>";
     if (active) {
       const breadcrumb = document.querySelector("#breadcrumb strong");
-      if (breadcrumb) breadcrumb.textContent = "记忆与经历";
-      document.title = "记忆与经历 · 陪伴 V2";
+      if (breadcrumb) breadcrumb.textContent = "事实与经历";
+      document.title = "事实与经历 · 陪伴 V2";
     }
   }
 
@@ -323,7 +326,7 @@ window.CompanionMemoryPage = (() => {
   ];
   function railMarkup() {
     const pendingBatches = data.area === "reflections" && data.items.length ? data.items.length : 0;
-    return `<nav class="mem-rail" aria-label="记忆工作区">${AREAS.map(([id,label,icon,hint])=>{
+    return `<nav class="mem-rail" aria-label="事实与经历工作区">${AREAS.map(([id,label,icon,hint])=>{
       const working = id === "reflections" && pendingBatches > 0;
       return `<button id="memory-area-${id}" type="button" title="${e(hint)}"
         aria-pressed="${data.area===id}"${working?' class="is-working"':""}>
@@ -350,10 +353,10 @@ window.CompanionMemoryPage = (() => {
       <div class="mem-head-title"><h2>${e(AREA_TITLE[data.area])}</h2></div>
       <div class="mem-scope">
         <label>会话对象<select id="memory-target" ${!data.catalog?"disabled":""}>${
-          data.catalog?.targets.map((t,i)=>`<option value="${i}" ${i===data.target?"selected":""}>${e((t.scope_kind === "group"?"群聊 ":"私聊 ")+(t.participant_id || t.group_id || t.target_id) + " · " + t.platform_id + " / Bot " + t.account_id)}</option>`).join("") || '<option>尚未读取目标</option>'
+          data.catalog?.targets.map((t,i)=>`<option value="${i}" ${i===data.target?"selected":""}>${e((window.CompanionProduct?.targetLabel?.(t) || (t.scope_kind === "group"?"群聊 ":"私聊 ")+(t.display_name || (/^\d+$/.test(String(t.participant_id || t.group_id || "")) ? t.participant_id || t.group_id : "当前对象"))) + " · " + (window.CompanionProduct?.accountLabel?.(t) || t.account_name || "当前账号"))}</option>`).join("") || '<option>尚未读取目标</option>'
         }</select></label>
         <label>角色<select id="memory-role" ${!target?"disabled":""}>${
-          target?.roles.map((r,i)=>`<option value="${i}" ${i===data.role?"selected":""}>${e(r.role_id)}</option>`).join("") || '<option>尚未选择角色</option>'
+          target?.roles.map((r,i)=>`<option value="${i}" ${i===data.role?"selected":""}>${e(window.CompanionProduct?.roleLabel?.(r,i) || "当前角色")}</option>`).join("") || '<option>尚未选择角色</option>'
         }</select></label>
       </div>
     </header>`;
@@ -451,7 +454,7 @@ window.CompanionMemoryPage = (() => {
     if (!sources?.length) return `<p class="mem-plain">来源不可读取。</p>`;
     return `<div class="mem-results">${sources.map((source,index)=>
       `<button type="button" class="mem-source-link" data-source-handle="${e(source.handle)}" data-source-session="${e(sessionId)}">
-        ${ICON.info}查看来源 ${index+1}${source.source_kind?` · ${e(source.source_kind)}`:""}${source.start!==undefined?` · ${e(source.start)}–${e(source.end)}`:""}
+        ${ICON.info}查看来源 ${index+1}${source.source_kind?` · ${e(sourceLabels[source.source_kind] || "其他来源")}`:""}${source.start!==undefined?` · ${e(source.start)}–${e(source.end)}`:""}
       </button>`).join("")}</div>`;
   }
 
@@ -496,13 +499,10 @@ window.CompanionMemoryPage = (() => {
     ${data.revisions.length?`<h4 class="mem-sub">版本历史<small>最新在上</small></h4>
       <ul class="mem-timeline">${[...data.revisions].reverse().map(row=>`<li>
         <time>第 ${e(row.revision)} 版</time>
-        <p><span class="mem-timeline-op">${e(row.state || "版本")}</span>${e(row.representation || (row.unavailable_reason?reason(row.unavailable_reason):"该版本正文已按遗忘规则清除。"))}</p>
+        <p><span class="mem-timeline-op">${e(LIFECYCLE.find(entry=>entry.key===row.state)?.label || "历史版本")}</span>${e(row.representation || (row.unavailable_reason?reason(row.unavailable_reason):"该版本正文已按遗忘规则清除。"))}</p>
         ${row.object?`<p style="color:var(--t-text-faint);font-size:11px">对象：${e(row.object)}</p>`:""}
       </li>`).join("")}</ul>`:""}
-    <details class="mem-identifiers"><summary>记录标识</summary>
-      <p class="mem-mono">atom_id ${e(value.atom_id)}</p>
-      ${data.factDetail.sources?.length?`<p class="mem-mono">sources ${data.factDetail.sources.length} 个句柄</p>`:""}
-    </details>`;
+    ${data.factDetail.sources?.length?`<p class="mem-plain">关联 ${data.factDetail.sources.length} 份原始来源</p>`:""}`;
   }
 
   function factsMarkup() {
@@ -556,7 +556,7 @@ window.CompanionMemoryPage = (() => {
       ${job.result_code?`<p>${e(reason(job.result_code))}</p>`:""}</div>` : ""}
     ${item.selection?.blocked_code ? `<p class="mem-notice is-error" style="margin-top:15px">${ICON.alert}<span>${e(reason(item.selection.blocked_code))}</span></p>` : ""}
     ${issues.length ? `<h4 class="mem-sub">待处理原因<small>${issues.length} 项</small></h4>
-      <ul class="mem-list">${issues.map(issue=>`<li>${e(reason(issue.code))}${issue.item_id?` <span class="mem-mono">（${e(issue.item_id)}）</span>`:""}</li>`).join("")}</ul>` : ""}
+      <ul class="mem-list">${issues.map((issue, index)=>`<li>待处理项 ${index + 1}：${e(reason(issue.code))}</li>`).join("")}</ul>` : ""}
     <div class="mem-actions">
       ${item.resumable || item.retryable ? button("memory-queue",data.busy?"正在提交…":action,!canQueue || data.busy || data.loading,"primary") : ""}
       ${item.repair_batch?button("memory-repair-link","查看后续修复",data.busy || data.loading):""}
@@ -564,9 +564,8 @@ window.CompanionMemoryPage = (() => {
     </div>
     ${canQueue ? '<p class="mem-plain">继续或修复可能调用已配置的记忆模型；仅处理当前对象与角色的这批材料。</p>' : ""}
     ${receipts.length ? `<h4 class="mem-sub">处理确认<small>${receipts.length} 项</small></h4>
-      <ul class="mem-list mem-mono">${receipts.map(([id,r])=>`<li>${e(id)} — ${e(typeof r === "object" && r ? r.code || r.state || r.status || (r.operation_id?"已保存":"已有确认") : r)}</li>`).join("")}</ul>` : ""}
-    <details class="mem-identifiers"><summary>记录标识</summary><p class="mem-mono">batch_id ${e(item.batch_id)}</p>
-      ${item.retry_of?`<p class="mem-mono">修复来源 ${e(item.retry_of)}</p>`:""}</details>`;
+      <ul class="mem-list">${receipts.map(([,r], index)=>`<li>处理记录 ${index + 1}：${e(typeof r === "object" && r ? (r.code ? reason(r.code) : stateLabels[r.state] || jobLabels[r.state] || "已有确认") : "已有确认")}</li>`).join("")}</ul>` : ""}
+    ${item.retry_of ? '<p class="mem-plain">这批材料来自一次明确的修复操作。</p>' : ""}`;
   }
 
   function reflectionsMarkup() {
@@ -626,11 +625,11 @@ window.CompanionMemoryPage = (() => {
             : (item.sources||[]).map(handle=>({handle}));
           return `<li class="mem-result" style="animation-delay:${Math.min(index*24,180)}ms">
             <div class="mem-result-head">
-              <span class="mem-badge">${e(item.kind||"记录")}</span>
+              <span class="mem-badge">${e(queryLabels[item.kind] || "记录")}</span>
               ${item.revision?`<span class="mem-badge mem-mono">v${e(item.revision)}</span>`:""}
               ${item.message_time?`<span style="font-size:10.5px;color:var(--t-text-faint)">${e(when(item.message_time))}</span>`:""}
             </div>
-            <h4>${e(item.predicate||item.title||item.source_kind||"查询结果")}</h4>
+            <h4>${e(item.predicate||item.title||sourceLabels[item.source_kind]||"查询结果")}</h4>
             <p>${e(item.representation||item.excerpt||item.text||item.statements?.map(s=>s.text).join("；")||"内容不可读取")}</p>
             ${sourceButtons(sources,data.querySession)}
           </li>`;
@@ -647,7 +646,9 @@ window.CompanionMemoryPage = (() => {
 
   function archiveMarkup() {
     const snapshot = data.archivePreview;
-    const selected = data.archiveSelection;
+    const label = (item, index) => item.unavailable_reason ? `记忆记录 ${index + 1}`
+      : item.predicate || data.corpus.find(row=>row.atom_id===item.atom_id)?.predicate || `记忆记录 ${index + 1}`;
+    const archived = snapshot?.archived_items || [];
     return `<section class="mem-block">
       <div class="mem-block-head"><h3>归档预览</h3></div>
       <div class="mem-block-body">
@@ -662,15 +663,13 @@ window.CompanionMemoryPage = (() => {
             <div><dt>已归档</dt><dd>${num(snapshot.counts?.already_archived)}</dd></div>
             <div><dt>保留</dt><dd>${num(snapshot.counts?.retained)}</dd></div>
           </dl>
-          <p class="mem-plain" style="margin:0">范围 ${e(snapshot.scope)} · 闲置 ${e(snapshot.idle_days)} 天 · 擦除：${e(snapshot.erasure==="none"?"不做任何擦除":snapshot.erasure)}</p>
-          ${(snapshot.items||[]).length?`<ul class="mem-pick">${(snapshot.items||[]).map(item=>`
-            <li><label><input type="checkbox" data-archive-tick="${e(item.atom_id)}" ${selected?.has(item.atom_id)?"checked":""}>
-              <span><strong>${e(item.atom_id)}</strong>
-              <small>闲置自 ${e(day(item.idle_since))}${item.predicate?` · ${e(item.predicate)}`:""}</small></span></label></li>`).join("")}</ul>
+          <p class="mem-plain" style="margin:0">当前关系的持久事实 · 闲置 ${e(snapshot.idle_days)} 天 · 保留原始内容</p>
+          ${(snapshot.items||[]).length?`<ul class="mem-list">${(snapshot.items||[]).map((item, index)=>`
+            <li><strong>${e(label(item, index))}</strong>
+              <p>${e(item.representation || (item.unavailable_reason ? reason(item.unavailable_reason) : ""))}</p>
+              <small>闲置自 ${e(day(item.idle_since))}</small></li>`).join("")}</ul>
             <div class="mem-preview-actions">
-              ${button("memory-archive-select-all","全选",data.busy||data.loading)}
-              ${button("memory-archive-clear-selection","清空选择",data.busy||data.loading)}
-              ${button("memory-archive-confirm",selected?.size?`归档选中的 ${selected.size} 条`:"归档全部可归档条目",data.busy||data.loading,"primary")}
+              ${button("memory-archive-confirm","归档全部可归档条目",data.busy||data.loading,"primary")}
             </div>`
           :`<p class="mem-empty">当前条件下无可归档事实。</p>`}
         </div>`:`<p class="mem-empty">尚未预览归档范围。</p>`}
@@ -681,8 +680,11 @@ window.CompanionMemoryPage = (() => {
       <div class="mem-block-head"><h3>移回工作集</h3></div>
       <div class="mem-block-body">
         <form id="memory-archive-restore-form" class="mem-form" style="margin:0;padding:0;border:0">
-          <label>事实标识（每行一个，最多 512 条）<textarea id="memory-archive-restore-ids" rows="3" placeholder="每行一个 atom_id"></textarea></label>
-          <div class="mem-form-actions">${button("memory-archive-restore-submit","移回工作集",data.busy||data.loading,"primary")}</div>
+          ${archived.length?`<ul class="mem-pick">${archived.map((item, index)=>`<li><label>
+            <input type="checkbox" data-archive-restore="${e(item.atom_id)}" ${data.busy||data.loading?"disabled":""}>
+            <span><strong>${e(label(item, index))}</strong><small>${e(item.representation || (item.unavailable_reason ? reason(item.unavailable_reason) : "已归档"))}</small></span>
+          </label></li>`).join("")}</ul>`:`<p class="mem-empty">${snapshot ? "当前没有已归档的事实。" : "正在读取已归档事实…"}</p>`}
+          <div class="mem-form-actions">${button("memory-archive-restore-submit","移回选中记录",data.busy||data.loading||!archived.length,"primary")}</div>
         </form>
       </div>
     </section>`;
@@ -705,7 +707,7 @@ window.CompanionMemoryPage = (() => {
             <div><dt>条目</dt><dd>${num(bundle.atom_count)}</dd></div>
             <div><dt>含归档</dt><dd>${bundle.includes_archived?"是":"否"}</dd></div>
           </dl>
-          <p class="mem-token">格式 ${e(bundle.bundle?.format ?? "未知")} · 导出时间 ${e(when(bundle.bundle?.exported_at))} · 校验 ${e(String(bundle.bundle_hash||"").slice(0,12))}…</p>
+          <p class="mem-plain">导出时间 ${e(when(bundle.bundle?.exported_at))}</p>
           <div class="mem-preview-actions">
             ${button("memory-export-copy","复制 JSON",data.busy||data.loading)}
             ${button("memory-export-download","下载文件",data.busy||data.loading)}
@@ -730,9 +732,9 @@ window.CompanionMemoryPage = (() => {
             <div><dt>将新增</dt><dd>${num(preview.counts?.new)}</dd></div>
             <div><dt>已存在</dt><dd>${num(preview.counts?.already_present)}</dd></div>
           </dl>
-          <p class="mem-plain" style="margin:0">${e(preview.provenance||"每条导入事实都会保留记忆包引用。")}</p>
+          <p class="mem-plain" style="margin:0">每条导入事实都会保留记忆包引用。</p>
           ${(preview.items||[]).length?`<ul class="mem-list" style="max-height:230px;overflow-y:auto">
-            ${(preview.items||[]).slice(0,40).map(item=>`<li>${e(item.decision==="new"?"新增":"已存在")} · ${e(item.predicate||item.atom_id)}</li>`).join("")}
+            ${(preview.items||[]).slice(0,40).map((item, index)=>`<li>${e(item.decision==="new"?"新增":"已存在")} · ${e(item.predicate||`记忆记录 ${index + 1}`)}</li>`).join("")}
             ${(preview.items||[]).length>40?`<li>另有 ${num((preview.items||[]).length-40)} 条未列出</li>`:""}</ul>`:""}
           <div class="mem-preview-actions">
             ${button("memory-import-confirm","确认导入",data.busy||data.loading,"primary")}
@@ -756,7 +758,7 @@ window.CompanionMemoryPage = (() => {
             <div><dt>仍有效</dt><dd>${num(active)}</dd></div>
             <div><dt>已失效</dt><dd>${num(snapshot.counts?.already_inactive)}</dd></div>
           </dl>
-          <p class="mem-plain" style="margin:0">范围 ${e(snapshot.scope)} · 来源原文不会由本操作物理删除。</p>
+          <p class="mem-plain" style="margin:0">当前私聊关系的事实与版本记录 · 来源原文不会由本操作物理删除。</p>
           <p class="mem-token">revision_token ${e(String(snapshot.revision_token||"").slice(0,16))}…</p>
           <div class="mem-preview-actions">
             ${active
@@ -1126,8 +1128,7 @@ window.CompanionMemoryPage = (() => {
       const result = await api("GET",endpoint()+"/archive/preview",{idle_days:days});
       if (!live(ticket)) return;
       if (!result.counts || !result.archive_token) throw problem("invalid_response");
-      /* 换了预览范围就丢掉旧选择：选中的条目可能已经不在可归档集合里。 */
-      data.archivePreview = result; data.archiveSelection = null; data.archivedResult = null;
+      data.archivePreview = result;
       notice("");
     } catch (error) { if (live(ticket)) failure(error); }
     finally { if (live(ticket)) { data.loading = false; render(); } }
@@ -1135,11 +1136,9 @@ window.CompanionMemoryPage = (() => {
   async function commitArchive() {
     const snapshot = data.archivePreview;
     if (!snapshot || data.busy || data.loading) return;
-    const eligible = (snapshot.items||[]).map(item=>item.atom_id);
-    const chosen = data.archiveSelection?.size ? [...data.archiveSelection].filter(id=>eligible.includes(id)) : eligible;
+    const chosen = snapshot.items || [];
     if (!chosen.length) { notice("当前没有可归档的条目。"); render(); return; }
-    /* 后端只归档「重算后仍符合条件」的条目；选中的具体条目不在请求里，
-       选择只用来告诉你会动多少条。所以这里先讲清影响面。 */
+    /* 后端以预览版本核对并归档全部符合条件的条目。 */
     if (!window.confirm(`将归档 ${chosen.length} 条长期闲置的持久事实。它们会移出工作集，但可以随时移回；不会删除任何内容。继续吗？`)) return;
     const restored = data.pendingMutation?.kind === "archive";
     const pending = restored ? data.pendingMutation
@@ -1151,7 +1150,7 @@ window.CompanionMemoryPage = (() => {
       const result = await api("POST",endpoint()+"/archive",payload);
       if (!live(ticket)) return;
       data.pendingMutation = null; saveMutation();
-      data.archivedResult = result; data.archiveSelection = null;
+      data.archivedResult = result;
       notice(`已归档 ${result.archived_count||0} 条；可随时移回工作集。`); data.busy = false;
       await loadArchivePreview();
     } catch (error) {
@@ -1165,9 +1164,8 @@ window.CompanionMemoryPage = (() => {
   }
   async function restoreArchive() {
     if (data.busy || data.loading) return;
-    const raw = root.querySelector("#memory-archive-restore-ids")?.value || "";
-    const ids = [...new Set(raw.split(/[\s,]+/).map(value=>value.trim()).filter(Boolean))];
-    if (!ids.length) { notice("请填入要移回的事实标识。", true); render(); return; }
+    const ids = [...root.querySelectorAll("[data-archive-restore]:checked")].map(item=>item.dataset.archiveRestore);
+    if (!ids.length) { notice("请选择要移回的记忆记录。", true); return; }
     if (ids.length > 512) { notice("一次最多移回 512 条。", true); render(); return; }
     if (!window.confirm(`将 ${ids.length} 条事实移回工作集。它们会重新参与检索。继续吗？`)) return;
     const ticket = ++version; data.busy = true; stopTimer(); render();
@@ -1382,10 +1380,6 @@ window.CompanionMemoryPage = (() => {
     }
     if (el.dataset.batchIndex !== undefined) { selectBatch(data.items[Number(el.dataset.batchIndex)].batch_id); return; }
     if (el.dataset.filter !== undefined) { data.filter = el.dataset.filter; render(); return; }
-    if (id === "memory-archive-select-all") {
-      data.archiveSelection = new Set((data.archivePreview?.items||[]).map(item=>item.atom_id)); render(); return;
-    }
-    if (id === "memory-archive-clear-selection") { data.archiveSelection = null; render(); return; }
     if (id === "memory-archive-confirm") { commitArchive(); return; }
     if (id === "memory-archive-restore-submit") { restoreArchive(); return; }
     if (id === "memory-export-run") { runExport(); return; }
@@ -1405,11 +1399,6 @@ window.CompanionMemoryPage = (() => {
     const el = event.target;
     if (el.id === "memory-target") { changeScope(Number(el.value),0); return; }
     if (el.id === "memory-role") { changeScope(data.target,Number(el.value)); return; }
-    if (el.dataset?.archiveTick) {
-      const set = data.archiveSelection || new Set();
-      if (el.checked) set.add(el.dataset.archiveTick); else set.delete(el.dataset.archiveTick);
-      data.archiveSelection = set; render(); return;
-    }
     if (el.id === "memory-export-include") { data.exportIncludeArchived = el.checked; return; }
   }
 

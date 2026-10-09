@@ -12,10 +12,11 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from astrbot_host.service_balance import ServiceBalancePort, configured_balance_port
-from companion_v2.proactive.balance_events import BalanceObservation, SOURCE_OWNER, balance_level
+from companion_v2.proactive.balance_events import (BalanceObservation, SOURCE_OWNER, balance_level,
+                                                    display_amount)
 from companion_v2.storage.runtime import StorageOpenError, StorageRuntime
 from companion_v2.storage.schema import SCHEMA_VERSION, SCHEMA_VERSION_V36
-from tests.execution_support import remove_v38
+from tests.execution_support import remove_v37
 from tests.contact_schedule_support import ContactScheduleFixture
 
 
@@ -74,7 +75,7 @@ class BalanceContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
         first = self.contact_calls()[0]
         body = json.loads(next(item for item in first.original.context.materials
                                if item.owner == SOURCE_OWNER).payload)
-        self.assertEqual((body["level"], body["amount"], body["currency"]), ("low", "8", "元"))
+        self.assertEqual((body["level"], body["amount"], body["currency"]), ("low", "8.00", "元"))
         await app.close()
         restarted = (await self.start(self.host(runtime=self.open_runtime(), balance_port=port), 1, 1)).application
         restarted.contact_schedule.advance()
@@ -146,6 +147,11 @@ class BalanceContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
 
 
 class BalanceAdapterTests(unittest.TestCase):
+    def test_display_amount_uses_two_decimal_places(self):
+        self.assertEqual(display_amount(Decimal("8")), "8.00")
+        self.assertEqual(display_amount(Decimal("8.5")), "8.50")
+        self.assertEqual(display_amount(Decimal("8.567")), "8.57")
+
     def test_nested_paths_divisor_and_total_used_fallback(self):
         at = datetime.now(timezone.utc)
         port = ServiceBalancePort(url="https://example.com/balance", total_path="data.0.total",
@@ -173,6 +179,101 @@ class BalanceAdapterTests(unittest.TestCase):
             "balance_low_threshold": 10, "balance_critical_percent_threshold": 5,
             "balance_low_percent_threshold": 15}), "critical")
 
+    def test_newapi_preset_reads_user_quota_and_normalizes_the_configured_unit(self):
+        with patch.dict("os.environ", {
+            "COMPANION_V2_BALANCE_PROVIDER": "newapi",
+            "COMPANION_V2_BALANCE_URL": "https://gateway.example.com/proxy/",
+            "COMPANION_V2_BALANCE_API_KEY": "dashboard-access-token",
+            "COMPANION_V2_BALANCE_CURRENCY_LABEL": "USD",
+        }, clear=True):
+            port = configured_balance_port()
+        self.assertEqual(port.url, "https://gateway.example.com/proxy/api/user/self")
+        self.assertEqual(port.headers["Authorization"], "Bearer dashboard-access-token")
+        self.assertEqual((port.provider, port.provider_label, port.currency_label),
+                         ("newapi", "NewAPI", "USD"))
+        observation = port.parse({"success": True, "data": {"quota": 4250000, "used_quota": 250000}},
+                                 datetime.now(timezone.utc))
+        self.assertEqual(observation.balance, Decimal("8.5"))
+        self.assertIsNone(observation.total)
+        with self.assertRaises(ValueError):
+            port.parse({"success": False, "message": "unauthorized"}, datetime.now(timezone.utc))
+
+    def test_newapi_known_aliases_are_fallback_only_for_the_newapi_provider(self):
+        from astrbot_host.service_balance import _newapi_compatible_urls
+
+        self.assertEqual(_newapi_compatible_urls("https://api.syuan.org"), (
+            "https://api.syuan.org/api/user/self", "https://ai.syuan.org/api/user/self"))
+        self.assertEqual(_newapi_compatible_urls("https://ai.syuan.org/api/user/self"), (
+            "https://ai.syuan.org/api/user/self", "https://api.syuan.org/api/user/self"))
+        self.assertEqual(ServiceBalancePort(url="https://api.syuan.org/balance").request_urls,
+                         ("https://api.syuan.org/balance",))
+
+    def test_dashboard_newapi_settings_take_precedence_over_environment(self):
+        with patch.dict("os.environ", {
+            "COMPANION_V2_BALANCE_PROVIDER": "newapi",
+            "COMPANION_V2_BALANCE_URL": "https://environment.example.com",
+            "COMPANION_V2_BALANCE_API_KEY": "environment-token",
+        }, clear=True):
+            port = configured_balance_port({"service_balance": {
+                "url": "https://dashboard.example.com/base",
+                "api_key": "dashboard-token",
+                "user_id": "1234",
+                "value_divisor": "1000000",
+            }})
+
+        self.assertEqual(port.url, "https://dashboard.example.com/base/api/user/self")
+        self.assertEqual(port.headers["Authorization"], "Bearer dashboard-token")
+        self.assertEqual(port.headers["New-Api-User"], "1234")
+        self.assertEqual(port.divisor, Decimal("1000000"))
+        with self.assertRaises(ValueError):
+            configured_balance_port({"service_balance": {"url": "https://dashboard.example.com"}})
+
+
+class BalanceFetchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_newapi_retries_the_known_alias_after_a_failed_first_host(self):
+        calls = []
+
+        class Content:
+            def __init__(self, body):
+                self.body = body
+
+            async def read(self, _limit):
+                return self.body
+
+        class Reply:
+            def __init__(self, status, body):
+                self.status, self.content_length = status, len(body)
+                self.content = Content(body)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+        class Session:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            def get(self, url, **_kwargs):
+                calls.append(url)
+                if url.startswith("https://api.syuan.org"):
+                    return Reply(503, b"unavailable")
+                return Reply(200, b'{"success":true,"data":{"quota":4250000}}')
+
+        port = ServiceBalancePort(url="https://api.syuan.org/api/user/self", provider="newapi",
+                                  balance_path="data.quota", divisor="500000")
+        with patch("astrbot_host.service_balance.aiohttp.ClientSession", Session):
+            observation = await port.fetch()
+        self.assertEqual(calls, ["https://api.syuan.org/api/user/self", "https://ai.syuan.org/api/user/self"])
+        self.assertEqual(observation.balance, Decimal("8.5"))
+
 
 class BalanceStorageTests(unittest.TestCase):
     def test_v36_upgrade_preserves_existing_rows_and_rejects_partial_migration(self):
@@ -184,11 +285,8 @@ class BalanceStorageTests(unittest.TestCase):
             database = runtime.database_path
             runtime.close()
             with closing(sqlite3.connect(database)) as connection:
-                remove_v38(connection)
-                connection.execute('DROP TABLE "proactive_balance_polls"')
-                connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v36-to-v37'")
-                connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
-                                   (SCHEMA_VERSION_V36,))
+                remove_v37(connection)
+                connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'", (SCHEMA_VERSION_V36,))
                 connection.commit()
             upgraded = StorageRuntime.open(data_root=root, installation_id="balance-test")
             self.assertEqual(upgraded.read_one("SELECT value FROM runtime_metadata WHERE key = ?",

@@ -66,6 +66,11 @@
   --t-brand:#a87d52;
   /* 场景联动：界面用晨光时，小屋也走清晨光照 */
   --t-scene-light:dawn;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:linear-gradient(90deg,color-mix(in srgb,var(--t-accent) 8%,transparent) 1px,transparent 1px),
+    repeating-linear-gradient(0deg,transparent 0 31px,color-mix(in srgb,var(--t-accent) 5%,transparent) 31px 32px);
+  --skin-canvas-size:40px 100%,auto;
+  --skin-r-2xs:2px;--skin-r-xs:5px;--skin-r-sm:8px;--skin-r-md:11px;--skin-r-lg:15px;--skin-r-xl:20px;
 }
 
 :root[data-theme="courtyard"],
@@ -105,6 +110,10 @@
   --t-shadow-lift:0 14px 36px rgba(58,80,60,.12);
   --t-brand:#57875d;
   --t-scene-light:day;
+  --skin-heading-font:"MiSans","Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  --skin-canvas-pattern:linear-gradient(90deg,transparent 0 63px,color-mix(in srgb,var(--t-accent) 5%,transparent) 63px 64px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:3px;--skin-r-xs:7px;--skin-r-sm:10px;--skin-r-md:14px;--skin-r-lg:19px;--skin-r-xl:26px;
 }
 
 :root[data-theme="dusk"],
@@ -144,6 +153,10 @@
   --t-shadow-lift:0 14px 36px rgba(110,74,54,.14);
   --t-brand:#c26c4d;
   --t-scene-light:dusk;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(135deg,transparent 0 11px,color-mix(in srgb,var(--t-accent) 4%,transparent) 11px 12px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:2px;--skin-r-xs:4px;--skin-r-sm:7px;--skin-r-md:10px;--skin-r-lg:14px;--skin-r-xl:18px;
 }
 
 :root[data-theme="night"],
@@ -185,6 +198,10 @@
   --t-shadow-lift:0 14px 32px rgba(0,0,0,.46);
   --t-brand:#8b9ed0;
   --t-scene-light:night;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(0deg,transparent 0 35px,color-mix(in srgb,var(--t-accent) 5%,transparent) 35px 36px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:2px;--skin-r-xs:4px;--skin-r-sm:7px;--skin-r-md:10px;--skin-r-lg:14px;--skin-r-xl:18px;
 }
 
 :root[data-theme="walnut"],
@@ -224,6 +241,10 @@
   --t-shadow-lift:0 14px 32px rgba(0,0,0,.48);
   --t-brand:#aa8a63;
   --t-scene-light:dusk;
+  --skin-heading-font:"FangSong","STSong","Songti SC",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(90deg,transparent 0 79px,color-mix(in srgb,var(--t-accent) 5%,transparent) 79px 80px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:1px;--skin-r-xs:3px;--skin-r-sm:5px;--skin-r-md:8px;--skin-r-lg:12px;--skin-r-xl:16px;
 }
 
 :root[data-theme="contrast"],
@@ -263,18 +284,22 @@
   --t-shadow-lift:0 3px 0 rgba(0,0,0,.42);
   --t-brand:#0033cc;
   --t-scene-light:day;
+  --skin-heading-font:"MiSans","Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  --skin-canvas-pattern:none;
+  --skin-canvas-size:auto;
+  --skin-r-2xs:0px;--skin-r-xs:1px;--skin-r-sm:2px;--skin-r-md:3px;--skin-r-lg:4px;--skin-r-xl:6px;
 }
 
 /* === 尺寸：圆角 / 间距 / 字号 === */
 :root{
-  --r-2xs:3px;
-  --r-xs:6px;
-  --r-sm:9px;
-  --r-md:12px;
-  --r-lg:16px;
+  --r-2xs:var(--skin-r-2xs,3px);
+  --r-xs:var(--skin-r-xs,6px);
+  --r-sm:var(--skin-r-sm,9px);
+  --r-md:var(--skin-r-md,12px);
+  --r-lg:var(--skin-r-lg,16px);
   --r-pill:999px;
 
-  --r-xl:22px;
+  --r-xl:var(--skin-r-xl,22px);
 
   --sp-1:4px;
   --sp-2:8px;
@@ -291,12 +316,11 @@
      层级就只剩下噪音。字号收敛成八档之后，"哪一行是标题"由档位回答，
      不再靠 0.5px 的差别暗示。
 
-     小字只留 micro / tiny 两档：曾经还有一档 --fs-small(12.5px)，
-     与 --fs-body(13.5px) 只差 1px，读起来是同一级却各占一档，
-     反而让"标签 vs 正文"的界线变模糊，因此合并进 body。 */
-  --fs-micro:calc(10.5px * var(--font-scale));
-  --fs-tiny:calc(11.5px * var(--font-scale));
-  --fs-body:calc(13.5px * var(--font-scale));
+     辅助信息使用 12 / 13px，正文使用 14px；全部随字号与密度偏好同步。
+     避免大量说明低于 12px，让配置页的次要信息仍然可读。 */
+  --fs-micro:calc(12px * var(--font-scale));
+  --fs-tiny:calc(13px * var(--font-scale));
+  --fs-body:calc(14px * var(--font-scale));
   --fs-lead:calc(15px * var(--font-scale));
   --fs-title:calc(17px * var(--font-scale));
   --fs-head:calc(21px * var(--font-scale));
@@ -333,6 +357,21 @@
 
 /* === 组件级令牌 === */
 :root{
+  --room-swatch-default:linear-gradient(145deg, #c7b79c 0 40%, #768c81 40% 72%, #eee5d4 72%);
+  --room-swatch-house-classic:linear-gradient(145deg, #b78554 0 42%, #6d8a78 42% 72%, #ede2c7 72%);
+  --room-swatch-house-washitsu:linear-gradient(145deg, #b7b185 0 42%, #788369 42% 72%, #e4dfc9 72%);
+  --room-swatch-house-loft:linear-gradient(145deg, #a96e57 0 42%, #596d70 42% 72%, #a7aaa1 72%);
+  --room-swatch-house-french:linear-gradient(145deg, #f2e9da 0 42%, #b8b89e 42% 72%, #d1b18b 72%);
+  --room-swatch-house-coastal:linear-gradient(145deg, #f0f0df 0 42%, #5e8d9b 42% 72%, #e5dfc7 72%);
+  --room-swatch-house-cabin:linear-gradient(145deg, #7e5c3f 0 42%, #799079 42% 72%, #c6a173 72%);
+  --finish-swatch-oak:linear-gradient(145deg, #d0a574 0 42%, #507e7a 42% 72%, #f5ecd9 72%);
+  --finish-swatch-cream:linear-gradient(145deg, #efe2c8 0 42%, #c7b897 42% 72%, #f8f2e8 72%);
+  --finish-swatch-ink:linear-gradient(145deg, #435369 0 42%, #d7b66c 42% 72%, #aebbc0 72%);
+  --finish-swatch-rattan:linear-gradient(145deg, #c6a16a 0 42%, #91a17a 42% 72%, #d6c59c 72%);
+  --finish-swatch-walnut:linear-gradient(145deg, #76503a 0 42%, #986d46 42% 72%, #bc996e 72%);
+  --finish-swatch-loft:linear-gradient(145deg, #38474b 0 42%, #72888a 42% 72%, #b9c4bf 72%);
+  --finish-swatch-blossom:linear-gradient(145deg, #d99fac 0 42%, #9c6c80 42% 72%, #f0c6ca 72%);
+  --finish-swatch-nordic:linear-gradient(145deg, #d0b589 0 42%, #91a899 42% 72%, #e4eadb 72%);
   --card-bg:var(--t-surface);
   --card-border:var(--t-line);
   --card-radius:var(--r-md);
@@ -342,6 +381,9 @@
   --field-border:var(--t-line-firm);
   --field-radius:var(--r-sm);
   --focus-ring:0 0 0 3px var(--t-focus);
+  /* 模态遮罩。由正文色派生而不是写死：写死的深灰在暗色主题里会显得比背景还亮，
+     模态一开反而像页面被"点亮"了一块。派生值随主题自动变深或变浅。 */
+  --scrim:color-mix(in srgb, var(--t-text) 42%, transparent);
   /* 数字一律用等宽字形：额度、权重、时长、上限在本界面出现极频繁，
      对齐后能整列扫读，而不是逐行读。 */
   --numeric-font:"MiSans","SF Mono","Cascadia Mono",Consolas,monospace;
@@ -352,6 +394,7 @@
   --t-danger:var(--t-risk-ink);
   --t-danger-quiet:var(--t-risk-quiet);
   --t-caution:var(--t-warn-ink);
+  --t-line-strong:var(--t-line-firm);
 }
 
 /* === 维度作用到既有排版 === */
@@ -570,6 +613,10 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 .ct-btn.is-primary:hover:not(:disabled){background:var(--t-accent-solid-hover);color:var(--t-on-solid)}
 .ct-btn.is-quiet{border-color:transparent;background:transparent;padding:var(--sp-1) var(--sp-2);color:var(--t-text-faint)}
 .ct-btn.is-quiet:hover{background:var(--t-surface-soft);color:var(--t-text-soft)}
+.ct-head-test{border-color:var(--t-accent);background:var(--t-accent-quiet);color:var(--t-accent-ink);font-weight:650}
+.ct-head-test:hover:not(:disabled),.ct-head-test[aria-pressed="true"]{
+  border-color:var(--t-accent);background:var(--t-accent);color:var(--t-on-solid)
+}
 
 /* ===== 通知 ===== */
 .ct-notice{
@@ -601,6 +648,56 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
   animation:ct-spin .7s linear infinite;
 }
 @keyframes ct-spin{to{transform:rotate(360deg)}}
+
+/* ===== 主动消息测试 ===== */
+.ct-tests{display:flex;flex-direction:column;gap:var(--ct-v-block);min-width:0}
+.ct-test-overview{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2) var(--sp-5);padding-bottom:var(--sp-3);border-bottom:1px solid var(--t-line)}
+.ct-test-overview p{margin:0;color:var(--t-text-soft);font-size:var(--fs-body)}
+.ct-test-coverage-summary{display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-4)}
+.ct-test-coverage-summary span{display:inline-flex;align-items:center;gap:var(--sp-1);font-size:var(--fs-tiny);color:var(--t-text-faint)}
+.ct-test-coverage-summary strong{color:var(--t-text-strong);font-variant-numeric:tabular-nums}
+.ct-test-coverage-summary i{width:8px;height:8px;border-radius:50%;background:var(--t-text-faint)}
+.ct-test-coverage-summary i.is-ready{background:var(--t-ok)}
+.ct-test-coverage-summary i.is-partial{background:var(--t-warn)}
+.ct-test-coverage-summary i.is-missing{background:var(--t-risk)}
+.ct-test-overview .ct-test-boundary{flex-basis:100%;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.ct-test-tools{display:grid;grid-template-columns:minmax(220px,1fr) repeat(2,minmax(140px,190px)) auto;gap:var(--sp-3);align-items:end}
+.ct-test-tools label{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.ct-test-tools input,.ct-test-tools select{
+  width:100%;min-width:0;box-sizing:border-box;padding:var(--sp-2) var(--sp-3);
+  border:1px solid var(--t-line-firm);border-radius:var(--r-xs);background:var(--t-surface-raised);
+  color:var(--t-text);font:inherit;font-size:var(--fs-body)
+}
+.ct-test-tools input:focus,.ct-test-tools select:focus{outline:2px solid var(--t-focus);outline-offset:1px;border-color:var(--t-accent)}
+.ct-test-result-count{padding:var(--sp-2) 0;color:var(--t-text-faint);font-size:var(--fs-tiny);white-space:nowrap;font-variant-numeric:tabular-nums}
+.ct-tests-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(390px,100%),1fr));gap:var(--ct-v-block);align-items:stretch}
+.ct-test-card{
+  display:flex;flex-direction:column;gap:var(--sp-3);min-width:0;padding:var(--sp-4);
+  border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface)
+}
+.ct-test-card:hover{border-color:var(--t-line-firm)}
+.ct-test-card[hidden]{display:none!important}
+.ct-test-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--sp-2);margin:0}
+.ct-test-title{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0}
+.ct-test-title code{flex:none;color:var(--t-accent-ink);font-size:var(--fs-tiny);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ct-test-title h3{min-width:0;margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:650}
+.ct-test-coverage{flex:none;max-width:45%;padding:1px var(--sp-2);border-radius:var(--r-pill);background:var(--t-surface-soft);color:var(--t-text-faint);font-size:var(--fs-micro);text-align:center}
+.ct-test-coverage.is-ready{background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+.ct-test-coverage.is-partial{background:var(--t-warn-quiet);color:var(--t-warn-ink)}
+.ct-test-coverage.is-missing{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.ct-test-details{display:flex;flex-direction:column;gap:var(--sp-2);margin:0}
+.ct-test-details>div{display:grid;grid-template-columns:62px minmax(0,1fr);gap:var(--sp-2);padding-top:var(--sp-2);border-top:1px solid var(--t-line)}
+.ct-test-details dt{color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.ct-test-details dd{min-width:0;margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.55}
+.ct-test-prompt{padding:var(--sp-2) var(--sp-3);border-left:2px solid var(--t-accent);background:var(--t-surface-soft)}
+.ct-test-prompt h4{margin:0 0 var(--sp-1);color:var(--t-accent-ink);font-size:var(--fs-tiny);font-weight:650}
+.ct-test-prompt p,.ct-test-expect{margin:0;color:var(--t-text);font-size:var(--fs-tiny);line-height:1.6}
+.ct-test-expect strong{display:block;margin-bottom:var(--sp-1);color:var(--t-text-faint);font-size:var(--fs-micro);font-weight:650}
+.ct-test-actions{display:flex;justify-content:flex-end;margin-top:auto;padding-top:var(--sp-2);border-top:1px solid var(--t-line)}
+.ct-test-copy{color:var(--t-accent-ink)}
+.ct-test-copy:focus-visible,.ct-head-test:focus-visible{outline:2px solid var(--t-focus);outline-offset:2px}
+.ct-test-empty{margin:0;padding:var(--sp-5);border:1px dashed var(--t-line);border-radius:var(--r-sm);color:var(--t-text-faint);text-align:center}
+.ct-test-empty[hidden]{display:none!important}
 
 /* ===== 节律盘：盘面 + 总开关 + 免打扰同一行 =====
    第一行只放「一改就立刻改变盘面几何」的那几项：盘面、三个总开关、免打扰外圈。
@@ -730,6 +827,14 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 }
 .ct-center-title{font-size:var(--fs-body);font-weight:650;line-height:1.3}
 .ct-center-detail{font-size:var(--fs-tiny);line-height:1.5;color:var(--t-text-faint)}
+.ct-center-action{
+  pointer-events:auto;padding:3px var(--sp-1);border:0;border-radius:var(--r-xs);
+  background:transparent;color:var(--t-accent-ink);font-size:var(--fs-micro);
+  font-weight:650;line-height:1.35;white-space:nowrap;cursor:pointer;
+  transition:background var(--dur-fast) ease,color var(--dur-fast) ease;
+}
+.ct-center-action:hover{background:var(--t-accent-quiet);color:var(--t-accent-solid-hover)}
+.ct-center-action:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
 .ct-center-flag{
   display:inline-flex;align-items:center;gap:var(--sp-1);margin-top:2px;
   font-size:var(--fs-micro);color:var(--t-warn-ink);
@@ -829,7 +934,11 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 /* 整行闪一下，作为「这条刚动过」的回执。两个方向闪同一种色：
    开关往哪边走已经由滑块说清楚了，行闪只负责「我收到了」，不抢占方向信息。 */
 @keyframes ct-row-flash{from{background:var(--t-accent-quiet)}}
-.ct-src-row.is-flip-on,.ct-src-row.is-flip-off{animation:ct-row-flash .5s ease-out}
+/* 两个状态拆成两条规则，而不是写成一条逗号选择器：减弱动效块里它们是两条独立的
+   归零规则，而那边的检查是「按选择器整串比对」。合成一条时语义一样、检查却过不去，
+   报出来的是「动画没登记」——指错了地方。逐条对应，样式与检查就是同一个形状。 */
+.ct-src-row.is-flip-on{animation:ct-row-flash .5s ease-out}
+.ct-src-row.is-flip-off{animation:ct-row-flash .5s ease-out}
 .ct-switch input:checked + .ct-switch-track:hover{background:var(--t-accent-solid-hover)}
 .ct-switch input:focus-visible + .ct-switch-track{outline:2px solid var(--t-focus);outline-offset:2px}
 .ct-switch-text{display:flex;flex-direction:column;gap:1px;min-width:0}
@@ -890,6 +999,13 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 .ct-tier.is-on .ct-tier-bar{opacity:1}
 .ct-tier-label{font-size:var(--fs-body);font-weight:600}
 .ct-tier-meta{font-size:var(--fs-micro);color:var(--t-text-faint);font-variant-numeric:tabular-nums}
+.ct-tier-effective{display:block;font-size:var(--fs-micro);line-height:1.35;color:var(--t-text);font-variant-numeric:tabular-nums;white-space:normal}
+.ct-tier.is-on .ct-tier-effective{color:var(--t-text)}
+.ct-tier-effective[role="status"]{display:grid;grid-template-columns:auto auto auto auto;align-items:baseline;gap:.25rem .55rem;margin:.35rem 0 .65rem;padding:.55rem .7rem;border-left:2px solid var(--t-warn);background:color-mix(in srgb,var(--t-warn) 8%,transparent);font-variant-numeric:tabular-nums}
+.ct-tier-effective[role="status"] span{grid-column:1 / -1;font-size:var(--fs-micro);color:var(--t-text-faint)}
+.ct-tier-effective[role="status"] strong{font-size:var(--fs-body);font-weight:650}
+.ct-tier-effective[role="status"] small{font-size:var(--fs-micro);color:var(--t-text-faint)}
+@media (max-width:680px){.ct-tier-effective[role="status"]{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
 .ct-tier.is-dirty{box-shadow:inset 2px 0 0 var(--t-caution)}
 
 /* ===== 24 小时曲线编辑器 =====
@@ -926,18 +1042,57 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 }
 
 /* ===== 契机矩阵 =====
-   15 类契机 × 三列。权重不是数字输入而是**条形**——权重是相对值，
-   绝对值没有意义，只有一列里并排画出来才知道谁主要。 */
+   先用概况与筛选定位，再在分组里比较权重和服务端状态。 */
 .ct-purposes{display:flex;flex-direction:column;gap:var(--ct-v-block)}
-.ct-purposes-sum{
-  font-size:var(--fs-body);color:var(--t-text-soft);padding:0 2px;
+.ct-purposes-summary{
+  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+  border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);
 }
-.ct-purposes-sum strong{color:var(--t-text-strong);font-size:var(--fs-lead);font-variant-numeric:tabular-nums}
+.ct-purpose-stat{
+  display:flex;align-items:baseline;gap:var(--sp-2);min-width:0;padding:var(--sp-2) var(--sp-3);
+  border-right:1px solid var(--t-line);
+}
+.ct-purpose-stat:last-child{border-right:0}
+.ct-purpose-stat strong{
+  color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:650;
+  font-variant-numeric:tabular-nums;
+}
+.ct-purpose-stat span{min-width:0;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.ct-purpose-tools{
+  display:grid;grid-template-columns:minmax(170px,1fr) minmax(130px,160px) minmax(150px,180px) auto;
+  align-items:end;gap:var(--sp-3);
+}
+.ct-purpose-search,.ct-purpose-filter{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0}
+.ct-purpose-search > span,.ct-purpose-filter > span{
+  color:var(--t-text-faint);font-size:var(--fs-micro);font-weight:600;
+}
+.ct-purpose-search input,.ct-purpose-filter select{
+  width:100%;min-width:0;height:38px;padding:0 var(--sp-2);
+  border:1px solid var(--t-line-firm);border-radius:var(--r-xs);
+  background:var(--t-surface);color:var(--t-text);font:inherit;font-size:var(--fs-body);
+}
+.ct-purpose-search input:focus,.ct-purpose-filter select:focus{
+  outline:2px solid var(--t-focus);outline-offset:1px;border-color:var(--t-accent);
+}
+.ct-purpose-results{
+  align-self:end;padding:0 var(--sp-1) var(--sp-2);color:var(--t-text-faint);
+  font-size:var(--fs-tiny);font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+.ct-purpose-groups{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--ct-v-block);align-items:start;
+}
+.ct-purpose-empty{
+  margin:0;padding:var(--sp-5);text-align:center;color:var(--t-text-faint);
+  border:1px dashed var(--t-line);border-radius:var(--r-sm);
+}
+.ct-purpose-empty[hidden],.ct-purpose[hidden],.ct-bucket[hidden]{display:none!important}
 .ct-bucket{
   display:flex;flex-direction:column;gap:var(--sp-3);
   padding:var(--ct-v-block);border:1px solid var(--t-line);border-radius:var(--r-md);
   background:var(--t-surface);
 }
+.ct-bucket.is-wide{grid-column:1 / -1}
+.ct-bucket.is-wide .ct-purpose-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--ct-v-row) var(--sp-4)}
 .ct-bucket > header{display:flex;align-items:baseline;gap:var(--sp-2);flex-wrap:wrap}
 .ct-bucket > header h3{margin:0;font-size:var(--fs-body);font-weight:650;color:var(--t-text-strong)}
 .ct-bucket > header span{font-size:var(--fs-tiny);color:var(--t-text-faint);flex:1;min-width:0}
@@ -950,14 +1105,9 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
    否则「同一行的三列」和「相邻的两行」在视觉上是同一种距离。 */
 .ct-purpose-list{display:flex;flex-direction:column;gap:var(--ct-v-row)}
 .ct-purpose{
-  display:grid;
-  /* 三段分宽按「谁需要横向空间」：名字列 max-content——它曾用 1fr
-     固定占一份，而最长的名字也只有七个字，于是每行名字右侧都拖着
-     一段谁也不用的空白，权重条却被压在中间；改后名字贴着文字，
-     让出的宽度全给权重条。权重条 1fr：相对长短只有拉开了才读得出。
-     状态列 max-content：所有行按最宽的那枚章对齐，既不裁字也不乱。 */
-  grid-template-columns:max-content minmax(260px,1fr) max-content;
-  align-items:center;gap:var(--sp-4);
+  display:grid;min-width:0;
+  grid-template-columns:minmax(92px,1fr) minmax(100px,1.2fr) minmax(0,168px);
+  align-items:center;gap:var(--sp-3);
   padding:var(--sp-2) var(--sp-3);border-radius:var(--r-xs);
   transition:background .16s ease,opacity .16s ease;
 }
@@ -1014,9 +1164,10 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
   text-align:right;font-variant-numeric:tabular-nums;
 }
 
-.ct-purpose-state{display:flex;justify-content:flex-end}
+.ct-purpose-state{display:flex;justify-content:flex-end;min-width:0}
 .ct-chip{
-  display:inline-block;padding:1px var(--sp-2);border-radius:var(--r-pill);
+  display:inline-block;max-width:100%;min-width:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;
+  padding:1px var(--sp-2);border-radius:var(--r-pill);
   font-size:var(--fs-micro);white-space:nowrap;
   background:var(--t-surface-soft);color:var(--t-text-faint);
 }
@@ -1027,11 +1178,40 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 /* ===== 开口闸门 =====
    后端判定的顺序，一圈一圈往外。逐条入场（--i 是序号），
    让「哪一道先关」这个顺序看得见。 */
-.ct-gates{display:flex;flex-direction:column;gap:var(--sp-4)}
-.ct-gates-sum{margin:0;font-size:var(--fs-body);color:var(--t-text-soft)}
+.ct-gates{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));
+  gap:var(--sp-3);align-items:stretch;
+}
+.ct-gates-sum{
+  grid-column:1 / -1;display:flex;align-items:center;gap:var(--sp-2);
+  margin:0;padding:var(--sp-3) var(--sp-4);
+  border:1px solid var(--t-line);border-left:3px solid var(--t-ok);
+  border-radius:var(--r-sm);background:var(--t-surface-soft);
+  font-size:var(--fs-body);color:var(--t-text-strong);
+}
+.ct-gates-sum::before{
+  content:"";flex:none;width:8px;height:8px;border-radius:50%;background:var(--t-ok);
+}
+.ct-gates-sum.is-shut{border-left-color:var(--t-risk)}
+.ct-gates-sum.is-shut::before{background:var(--t-risk)}
 .ct-gates-sum strong{color:var(--t-risk-ink);font-size:var(--fs-lead);font-variant-numeric:tabular-nums}
+.ct-gate-settings-brief{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--sp-5);
+  padding:var(--sp-4);border:1px solid var(--t-line);border-left:3px solid var(--t-accent);
+  border-radius:var(--r-sm);background:var(--t-surface-soft);
+}
+.ct-gate-settings-brief,.ct-gates > .ct-block{grid-column:1 / -1}
+.ct-gate-settings-copy{min-width:0}
+.ct-gate-settings-eyebrow{
+  display:block;margin-bottom:var(--sp-1);color:var(--t-accent-ink);
+  font-size:var(--fs-micro);font-weight:650;letter-spacing:.04em;
+}
+.ct-gate-settings-copy h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.ct-gate-settings-copy p{margin:var(--sp-1) 0 0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.6}
+.ct-gate-settings-button{flex:none;white-space:nowrap}
 .ct-gate{
   display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:var(--sp-3);
+  min-width:0;min-height:66px;
   padding:var(--sp-3) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);
   background:var(--t-surface);
   animation:ct-gate-in .42s cubic-bezier(.16,1,.3,1) both;
@@ -1049,6 +1229,7 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 .ct-gate-body{display:flex;flex-direction:column;gap:2px;min-width:0}
 .ct-gate-body strong{font-size:var(--fs-body);font-weight:600;color:var(--t-text-strong)}
 .ct-gate-body p{margin:0;font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.5}
+.ct-gate-body small{font-size:var(--fs-tiny);color:var(--t-text-faint);line-height:1.5}
 .ct-gate-body code{
   align-self:flex-start;margin-top:3px;padding:1px var(--sp-1);border-radius:var(--r-xs);
   background:var(--t-surface-sunken);color:var(--t-text-soft);
@@ -1059,6 +1240,8 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 }
 .ct-gate.is-ok .ct-gate-state{color:var(--t-ok-ink)}
 .ct-gate.is-shut .ct-gate-state{color:var(--t-risk-ink)}
+.ct-gate-pause{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+.ct-gate-pause > h3{grid-column:1 / -1}
 
 /* ===== 额度与去重 =====
    额度没有实时读出口，所以画成刻度（两端写 0 与上限），不画进度条。
@@ -1119,6 +1302,11 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 .ct-quota-scale{
   display:flex;justify-content:space-between;
   font-size:var(--fs-micro);color:var(--t-text-faint);font-variant-numeric:tabular-nums;
+}
+
+@media (max-width:1280px){
+  .ct-purpose-groups{grid-template-columns:minmax(0,1fr)}
+  .ct-bucket.is-wide .ct-purpose-list{grid-template-columns:minmax(0,1fr)}
 }
 
 /* ===== 外部触发源 =====
@@ -1248,20 +1436,45 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
   .ct-tier-label{font-size:var(--fs-tiny)}
   .ct-tier-meta{font-size:var(--fs-micro)}
   .ct-purpose{
-    grid-template-columns:minmax(0,1fr) minmax(80px,1fr);
+    grid-template-columns:minmax(0,1fr) minmax(100px,1fr);
     row-gap:var(--sp-1);
   }
   .ct-purpose-state{grid-column:1 / -1;justify-content:flex-start}
+  .ct-purpose-tools{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .ct-purpose-search,.ct-purpose-results{grid-column:1 / -1}
+  .ct-purpose-groups{grid-template-columns:minmax(0,1fr)}
+  .ct-bucket.is-wide{grid-column:auto}
+  .ct-bucket.is-wide .ct-purpose-list{grid-template-columns:minmax(0,1fr)}
   .ct-sources{grid-template-columns:minmax(0,1fr)}
   .ct-budgets{grid-template-columns:minmax(0,1fr)}
   .ct-budgets > .is-wide{grid-template-columns:minmax(0,1fr)}
   .ct-src-group.is-wide .ct-src-rows{grid-template-columns:minmax(0,1fr)}
   .ct-src-row{grid-template-columns:minmax(0,1fr) minmax(0,140px)}
+  .ct-gate-settings-brief{align-items:flex-start;flex-direction:column;gap:var(--sp-3)}
+  .ct-gate-settings-button{width:100%;justify-content:center}
+  .ct-gate-pause{grid-template-columns:minmax(0,1fr)}
   .ct-block{padding:var(--sp-3)}
   .ct-head{align-items:flex-start}
   .ct-head-actions{width:100%}
-  .ct-head-actions .ct-btn{flex:1;justify-content:center}
+  .ct-head-actions{flex-wrap:wrap}
+  .ct-head-actions .ct-btn{flex:1 1 auto;min-width:0;justify-content:center}
+  .ct-head-actions .ct-head-test{flex:1 1 100%}
+  .ct-test-tools{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ct-test-search,.ct-test-result-count{grid-column:1 / -1}
+  .ct-test-result-count{padding:0}
   .ct-curve-plot{height:76px}
+}
+
+@media (max-width:520px){
+  .ct-purposes-summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ct-purpose-stat:nth-child(2){border-right:0}
+  .ct-purpose-stat:nth-child(-n+2){border-bottom:1px solid var(--t-line)}
+  .ct-purpose-tools{gap:var(--sp-2)}
+  .ct-test-tools{grid-template-columns:minmax(0,1fr)}
+  .ct-test-search,.ct-test-result-count{grid-column:auto}
+  .ct-test-card{padding:var(--sp-3)}
+  .ct-test-card-head{align-items:flex-start;flex-direction:column}
+  .ct-test-coverage{max-width:100%}
 }
 
 /* ===== 减弱动效 =====
@@ -1284,6 +1497,8 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
   .ct-dial-stage.is-pulse-tier .ct-dial,
   .ct-switch.is-flip-on .ct-switch-track,.ct-switch.is-flip-off .ct-switch-track,
   .ct-switch.is-flip-on .ct-switch-track i,.ct-switch.is-flip-off .ct-switch-track i,
+  .ct-src-row.is-toggle.is-flip-on .ct-switch-track,
+  .ct-src-row.is-toggle.is-flip-off .ct-switch-track,
   .ct-src-row.is-toggle.is-flip-on .ct-switch-track i,
   .ct-src-row.is-toggle.is-flip-off .ct-switch-track i,
   .ct-src-row.is-flip-on,.ct-src-row.is-flip-off,
@@ -1319,7 +1534,7 @@ body{margin:0;background:var(--t-canvas);color:var(--t-text);
 <script>
 /* 假页面桥。形状照真实 SDK：apiGet / apiPost 返回 Promise，回执是 {status,data} 信封。
    契约要点：路由必须是**插件相对路径**（不带插件目录名），真宿主会自己拼回去。 */
-const REPLY = {"status": {"settings": {"enabled": true, "automatic_enabled": true, "quiet_enabled": true, "quiet_start": "23:00", "quiet_end": "07:00", "quiet_timezone": "Asia/Shanghai", "proactive_intensity_preset": "balanced", "proactive_hour_activity_enabled": true, "proactive_hour_activity_curve": "0.22,0.16,0.12,0.10,0.10,0.14,0.28,0.50,0.66,0.72,0.78,0.92,1.0,0.94,0.82,0.74,0.78,0.92,1.0,0.98,0.88,0.70,0.48,0.32", "interval_seconds": 3600, "idle_seconds": 900, "max_contacts_24h": 3, "max_attempts_24h": 12, "max_relationship_contacts_24h": 9, "max_relationship_attempts_24h": 36, "enable_proactive_burst": true, "proactive_burst_max_messages": 2, "proactive_burst_gap_min_seconds": 45, "proactive_burst_gap_max_seconds": 180, "proactive_closing_grace_minutes": 45, "proactive_closing_contacts_threshold": 3, "proactive_share_probability": 70, "pause_until": "", "note": "", "dedup_enabled": true, "dedup_last_message_enabled": true, "dedup_sent_window_minutes": 240, "dedup_last_message_window_minutes": 240, "dedup_min_shared_tokens": 2, "dedup_min_overlap_ratio": 0.4, "dedup_policies": "semantic,content_fingerprint,life_event,event_revision", "enable_daily_greetings": true, "greeting_morning_window": "07:45-10:20", "greeting_noon_window": "12:05-13:35", "greeting_evening_window": "20:10-21:20", "allow_insomnia_night_message": true, "insomnia_night_start": "23:00", "insomnia_night_end": "06:00", "weather_checkin_enabled": true, "weather_checkin_time": "08:30", "weather_sample_minutes": 60, "weather_change_enabled": true, "dedup_weather_window_minutes": 1080, "official_weather_alert_enabled": false, "official_alert_poll_minutes": 5, "official_alert_min_severity": "severe", "news_share_enabled": true, "news_check_interval_minutes": 180, "news_source_kind": "host", "news_source_uid": "", "news_source_url": "", "news_daily_hot_read_enabled": false, "news_hot_sources": "weibo,hackernews", "meal_checkin_enabled": true, "meal_lunch_time": "12:00", "meal_dinner_time": "18:00", "meal_care_followup_minutes": 45, "date_checkin_enabled": true, "date_checkin_time": "09:00", "important_date_lookahead_days": 7, "web_exploration_enabled": false, "web_exploration_interests": "", "web_exploration_min_interval_hours": 8, "web_exploration_result_count": 8, "external_event_self_link_enabled": true, "screen_glance_enabled": false, "screen_glance_daily_limit": 1, "screen_glance_cooldown_minutes": 240, "screen_glance_goodnight_enabled": false, "screen_glance_goodnight_delay_minutes": 45, "screen_glance_followup_enabled": false, "screen_glance_followup_after_minutes": 45, "screen_glance_followup_cooldown_minutes": 180, "voice_action_enabled": true, "voice_action_max_chars": 30, "voice_action_cooldown_minutes": 60, "poke_action_enabled": true, "poke_action_daily_limit": 1, "poke_action_cooldown_minutes": 30, "appointment_lead_minutes": 30, "appointment_lag_minutes": 0, "appointment_pre_silence_minutes": 20, "enable_llm_proactive_persona_judge": false, "proactive_persona_judge_threshold": 62, "proactive_persona_judge_cache_minutes": 180, "proactive_persona_judge_daily_limit": 12, "generation_history_limit": 8, "history_max_chars": 8192, "balance_awareness_enabled": false, "balance_include_amount_in_message": false, "balance_currency_label": "元", "balance_check_interval_minutes": 60, "balance_low_threshold": 10, "balance_critical_threshold": 3, "balance_low_percent_threshold": 15, "balance_critical_percent_threshold": 5, "balance_message_cooldown_hours": 24, "affection.enabled": true, "affection.weight": 2.4, "affection.pause_until": "", "care.enabled": true, "care.weight": 1.8, "care.pause_until": "", "play.enabled": true, "play.weight": 1.2, "play.pause_until": "", "repair.enabled": true, "repair.weight": 0.6, "repair.pause_until": "", "chat.enabled": true, "chat.weight": 2.0, "chat.pause_until": "", "greeting.enabled": true, "greeting.weight": 1.4, "greeting.pause_until": "", "followup.enabled": true, "followup.weight": 0.8, "followup.pause_until": "", "invitation.enabled": true, "invitation.weight": 1.0, "invitation.pause_until": "", "reminder.enabled": true, "reminder.weight": 1.6, "reminder.pause_until": "", "meal.enabled": true, "meal.weight": 0.5, "meal.pause_until": "2026-10-02T12:00:00+08:00", "life.enabled": true, "life.weight": 1.5, "life.pause_until": "", "creation.enabled": false, "creation.weight": 0.9, "creation.pause_until": "", "news.enabled": true, "news.weight": 0.7, "news.pause_until": "", "environment.enabled": true, "environment.weight": 1.1, "environment.pause_until": "", "screen.enabled": true, "screen.weight": 0.4, "screen.pause_until": ""}, "edit_token": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", "effective": {"allowed": true, "reason": null, "automatic_allowed": true, "automatic_reason": null, "model_registered": true, "readonly_fields": []}, "purposes": {"affection": {"label": "想念与亲近", "allowed": true, "reason": null}, "care": {"label": "情绪关怀", "allowed": true, "reason": null}, "play": {"label": "轻松互动", "allowed": true, "reason": null}, "repair": {"label": "关系修复", "allowed": true, "reason": null}, "chat": {"label": "日常话题", "allowed": true, "reason": null}, "greeting": {"label": "问候与纪念", "allowed": true, "reason": null}, "followup": {"label": "接回旧话题", "allowed": true, "reason": null}, "invitation": {"label": "共同活动邀请", "allowed": true, "reason": null}, "reminder": {"label": "约定与提醒", "allowed": true, "reason": null}, "meal": {"label": "饭点问候", "allowed": true, "reason": null}, "life": {"label": "分享自己的生活", "allowed": true, "reason": null}, "creation": {"label": "作品与阅读", "allowed": true, "reason": null}, "news": {"label": "外部资讯", "allowed": false, "reason": "model_task_unregistered"}, "environment": {"label": "环境与状态变化", "allowed": true, "reason": null}, "screen": {"label": "已授权屏幕观察", "allowed": false, "reason": "authorization_denied"}}, "host_state": "running"}};
+const REPLY = {"status":{"settings":{"enabled":true,"automatic_enabled":true,"quiet_enabled":true,"quiet_start":"23:00","quiet_end":"07:00","quiet_timezone":"Asia/Shanghai","proactive_intensity_preset":"balanced","proactive_hour_activity_enabled":true,"proactive_hour_activity_curve":"0.22,0.16,0.12,0.10,0.10,0.14,0.28,0.50,0.66,0.72,0.78,0.92,1.0,0.94,0.82,0.74,0.78,0.92,1.0,0.98,0.88,0.70,0.48,0.32","interval_seconds":3600,"idle_seconds":900,"max_contacts_24h":3,"max_attempts_24h":12,"max_relationship_contacts_24h":9,"max_relationship_attempts_24h":36,"enable_proactive_burst":true,"proactive_burst_max_messages":2,"proactive_burst_gap_min_seconds":45,"proactive_burst_gap_max_seconds":180,"proactive_closing_grace_minutes":45,"proactive_closing_contacts_threshold":3,"proactive_share_probability":70,"proactive_intensity_body_chars":0,"pause_until":"","note":"","contact_followup_after_minutes":45,"contact_followup_cooldown_minutes":180,"dedup_enabled":true,"dedup_last_message_enabled":true,"dedup_sent_window_minutes":240,"dedup_last_message_window_minutes":240,"dedup_min_shared_tokens":2,"dedup_min_overlap_ratio":0.4,"event_max_age_seconds":3600,"dedup_policies":"semantic,content_fingerprint,life_event,event_revision","enable_daily_greetings":true,"greeting_morning_window":"07:45-10:20","greeting_noon_window":"12:05-13:35","greeting_evening_window":"20:10-21:20","greeting_idle_minutes":30,"allow_insomnia_night_message":true,"insomnia_night_start":"23:00","insomnia_night_end":"06:00","insomnia_night_daily_limit":1,"insomnia_require_sleep_state":false,"weather_checkin_enabled":true,"weather_checkin_time":"08:30","weather_sample_minutes":60,"weather_change_enabled":true,"dedup_weather_window_minutes":1080,"official_weather_alert_enabled":false,"official_alert_poll_minutes":5,"official_alert_min_severity":"severe","news_share_enabled":true,"news_check_interval_minutes":180,"news_source_kind":"host","news_source_uid":"","news_source_url":"","news_daily_hot_read_enabled":false,"news_hot_sources":"weibo,hackernews","news_hot_result_count":10,"meal_checkin_enabled":true,"meal_lunch_time":"12:00","meal_dinner_time":"18:00","meal_care_followup_minutes":45,"date_checkin_enabled":true,"date_checkin_time":"09:00","important_date_lookahead_days":7,"web_exploration_enabled":false,"web_exploration_interests":"","web_exploration_min_interval_hours":8,"web_exploration_result_count":8,"external_event_self_link_enabled":true,"external_event_self_link_cooldown_hours":12,"external_event_self_link_weight":1.5,"screen_glance_enabled":false,"screen_glance_daily_limit":1,"screen_glance_cooldown_minutes":240,"screen_glance_goodnight_enabled":false,"screen_glance_goodnight_delay_minutes":45,"screen_glance_followup_enabled":false,"screen_glance_followup_after_minutes":45,"screen_glance_followup_cooldown_minutes":180,"voice_action_enabled":true,"voice_action_max_chars":30,"voice_action_cooldown_minutes":60,"poke_action_enabled":true,"poke_action_daily_limit":1,"poke_action_cooldown_minutes":30,"appointment_lead_minutes":30,"appointment_lag_minutes":0,"appointment_pre_silence_minutes":20,"enable_llm_proactive_persona_judge":false,"proactive_persona_judge_threshold":62,"proactive_persona_judge_cache_minutes":180,"proactive_persona_judge_daily_limit":12,"proactive_persona_judge_exempt_purposes":"","generation_history_limit":8,"history_max_chars":8192,"important_dates":"[]","style_prompt":"","silence_feedback_penalty":0.2,"silence_min_confidence":0.66,"unanswered_pause_after":0,"unanswered_slowdown_start":1,"unanswered_max_interval_multiplier":2.2,"balance_awareness_enabled":false,"balance_include_amount_in_message":false,"balance_currency_label":"元","balance_check_interval_minutes":60,"balance_low_threshold":10,"balance_critical_threshold":3,"balance_low_percent_threshold":15,"balance_critical_percent_threshold":5,"balance_message_cooldown_hours":24,"affection.enabled":true,"affection.weight":2.4,"affection.pause_until":"","care.enabled":true,"care.weight":1.8,"care.pause_until":"","play.enabled":true,"play.weight":1.2,"play.pause_until":"","repair.enabled":true,"repair.weight":0.6,"repair.pause_until":"","chat.enabled":true,"chat.weight":2.0,"chat.pause_until":"","greeting.enabled":true,"greeting.weight":1.4,"greeting.pause_until":"","followup.enabled":true,"followup.weight":0.8,"followup.pause_until":"","invitation.enabled":true,"invitation.weight":1.0,"invitation.pause_until":"","reminder.enabled":true,"reminder.weight":1.6,"reminder.pause_until":"","meal.enabled":true,"meal.weight":0.5,"meal.pause_until":"2026-10-02T12:00:00+08:00","life.enabled":true,"life.weight":1.5,"life.pause_until":"","creation.enabled":false,"creation.weight":0.9,"creation.pause_until":"","news.enabled":true,"news.weight":0.7,"news.pause_until":"","environment.enabled":true,"environment.weight":1.1,"environment.pause_until":"","screen.enabled":true,"screen.weight":0.4,"screen.pause_until":""},"edit_token":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","effective":{"allowed":true,"reason":null,"automatic_allowed":true,"automatic_reason":null,"model_registered":true,"readonly_fields":[]},"purposes":{"affection":{"label":"想念与亲近","allowed":true,"reason":null},"care":{"label":"情绪关怀","allowed":true,"reason":null},"play":{"label":"轻松互动","allowed":true,"reason":null},"repair":{"label":"关系修复","allowed":true,"reason":null},"chat":{"label":"日常话题","allowed":true,"reason":null},"greeting":{"label":"问候与纪念","allowed":true,"reason":null},"followup":{"label":"接回旧话题","allowed":true,"reason":null},"invitation":{"label":"共同活动邀请","allowed":true,"reason":null},"reminder":{"label":"约定与提醒","allowed":true,"reason":null},"meal":{"label":"饭点问候","allowed":true,"reason":null},"life":{"label":"分享自己的生活","allowed":true,"reason":null},"creation":{"label":"作品与阅读","allowed":true,"reason":null},"news":{"label":"外部资讯","allowed":false,"reason":"model_task_unregistered"},"environment":{"label":"环境与状态变化","allowed":true,"reason":null},"screen":{"label":"已授权屏幕观察","allowed":false,"reason":"authorization_denied"}},"host_state":"running"}};
 window.__requests = [];
 function envelope(value) {
   return new Promise(resolve => setTimeout(() => resolve({status: 'ok', data: value}), 120));
@@ -1330,7 +1545,7 @@ window.AstrBotPluginPage = {
     window.__requests.push('GET ' + route);
     if (route.indexOf('perception-native') === 0) {
       /* 每次读取都深拷一份，草稿不会污染下一次读取。 */
-      return envelope(JSON.parse(JSON.stringify(REPLY.status)));
+      return envelope({contact: JSON.parse(JSON.stringify(REPLY.status))});
     }
     return envelope({sections: {'proactive.contact': {edit_token: 'c'.repeat(64), fields: {}}}});
   },
@@ -1347,7 +1562,8 @@ window.AstrBotPluginPage = {
 window.CompanionProduct = {
   hosted: () => true,
   role: () => ({role_id: 'chengxi',
-    perception_native_api: '/astrbot_plugin_private_companion_v2/perception-native'}),
+    perception_native_api: '/astrbot_plugin_private_companion_v2/perception-native',
+    config_api: '/astrbot_plugin_private_companion_v2/config'}),
   bridgeNow: () => window.AstrBotPluginPage,
   bridgeFor: () => Promise.resolve(window.AstrBotPluginPage),
 };
@@ -1370,8 +1586,8 @@ window.CompanionProduct = {
  *   内圈 · 问候窗口       greeting_morning/noon/evening_window + 失眠窗口
  * 环心是**此刻**：现在处于哪一段、此刻能不能开口、不能的话是哪一条。
  *
- * 读出口只有一个：GET /perception-native（ContactManagement.status）。
- * 它给 158 个 settings、15 个 purposes（各带 allowed + 唯一阻断原因）、
+ * 读出口是角色目录的 perception_native_api，其中 contact 来自 ContactManagement.status。
+ * 它给 160 个 settings、15 个 purposes（各带 allowed + 唯一阻断原因）、
  * 以及 effective 上的四层判定。写出口是另一个：POST /config/configure 的
  * proactive.contact 段（native 那条只放行 6 个 news 字段，写不动其余 152 项）。
  *
@@ -1382,7 +1598,7 @@ window.CompanionProduct = {
  * 动效分三层，都在 prefers-reduced-motion 下压到瞬时终态，信息一条不丢：
  *   ① 开页一次——24 根柱子从 0:00（正上方）向两侧荡开，在 12:00 会合，
  *      约一秒跑完就不再重复（涟漪，见 ct-bar-ripple 与 --i）；
- *   ② 改动回执——改了哪一圈就只闪哪一圈（PULSE_PART → is-pulse-*），
+ *   ② 改动确认——改了哪一圈就只闪哪一圈（PULSE_PART → is-pulse-*），
  *      整盘一起动等于什么都没说清；类由渲染时给出，不是渲染后往节点上加；
  *   ③ 状态常驻——时间游标、「此刻可以开口」的呼吸点。
  */
@@ -1406,6 +1622,87 @@ window.CompanionContactPage = (() => {
       ["environment","环境与状态变化"],["screen","已授权屏幕观察"]]},
   ];
   const ALL_PURPOSES = PURPOSE_BUCKETS.flatMap(b => b.purposes);
+  const PURPOSE_META = Object.fromEntries(PURPOSE_BUCKETS.flatMap(bucket =>
+    bucket.purposes.map(([name, label]) => [name, {label, bucket}])));
+  const TEST_INSTRUCTIONS = [
+    {id:"affection", label:"想念与亲近", bucket:"关系", coverage:"ready",
+      source:"近期双方有来有回、明确表达亲近的私聊",
+      setup:"合成双方近期互相回应并明确表达亲近的对话；另备一组只有单向旧消息的负例。",
+      instruction:"只根据双方真实表达的亲近感，判断是否适合留一句自然、不索取回应的话；不能凭沉默声称想念。",
+      expect:"正文锚定原对话；没有明确亲近证据时选择 skip。"},
+    {id:"care", label:"情绪关怀", bucket:"关系", coverage:"ready",
+      source:"对方明确说出的感受",
+      setup:"合成对方明确表达疲惫或难过的对话；另备普通沉默和情绪不明的负例。",
+      instruction:"回应对方实际说出的感受，不诊断原因，不提供未经请求的方案，也不把沉默解释成低落。",
+      expect:"不夸大情绪、不连续追问；缺少明确感受时选择 skip。"},
+    {id:"play", label:"轻松互动", bucket:"关系", coverage:"ready",
+      source:"双方都参与过的玩笑或共同话题",
+      setup:"合成双方都接受的玩笑或共同梗；另备单方玩笑及严肃语境的负例。",
+      instruction:"只有原语境确实轻松且双方都参与时，才延续一个低压力的小互动；不编造共同梗。",
+      expect:"互动可自然结束；紧张、严肃或单方玩笑素材必须选择 skip。"},
+    {id:"repair", label:"关系修复", bucket:"关系", coverage:"ready",
+      source:"角色可核验的失误及对方指出的不适",
+      setup:"合成角色具体失误和对方明确指出不适的对话；另备没有具体失误的负例。",
+      instruction:"准确承认自己做错的具体部分，简短表达理解；不辩解、不要求原谅、不把修复责任推给对方。",
+      expect:"只回应证据支持的失误；对方要求停止联系时必须选择 skip。"},
+    {id:"chat", label:"日常话题", bucket:"关系", coverage:"ready",
+      source:"已完成的最近一轮私聊与原始消息来源",
+      setup:"构造已完成的真实私聊批次，推进到配置的空闲窗口；另备刚有新输入和重复话题的负例。",
+      instruction:"从最近实际谈过的话题承接一点内容；避免“在吗”、空泛问候和复述刚发过的话。",
+      expect:"授权、空闲、额度、活动曲线和去重按真实配置生效；不合适时选择 skip。"},
+    {id:"greeting", label:"问候与纪念", bucket:"日程", coverage:"ready",
+      source:"本地问候窗口、夜间窗口或管理员配置的纪念日期",
+      setup:"分别构造早/午/晚窗口、夜间窗口和重要日期样例，并验证窗口边界。",
+      instruction:"把日期或时段只当作开口机会；优先承接当前语境，不假设对方刚醒、吃饭、休息或正在等待。",
+      expect:"只在有效窗口、静默和冷却规则允许时进入链路；不得机械套用固定问候。"},
+    {id:"followup", label:"接回旧话题", bucket:"日程", coverage:"ready",
+      source:"已确认投递记录、等待时间及之后是否有新输入",
+      setup:"构造已确认投递、等待期已过且无新输入的记录；另测新输入、屏幕观察和冷却中的对照组。",
+      instruction:"只承接原记录中仍有意义且未被新输入取代的话题，不暗示已读或催回复。",
+      expect:"只在原话仍有效、等待期已过且无新输入时起草；跟进生产器会再次校验原始投递与冷却。"},
+    {id:"invitation", label:"共同活动邀请", bucket:"日程", coverage:"ready",
+      source:"对方明确提出的共同活动邀请与活动素材",
+      setup:"合成包含明确共同活动邀请的私聊；另测只有共同兴趣、空闲未知及已拒绝的样例。",
+      instruction:"把活动说成可商量的邀请，不伪造双方空闲、预约或承诺，不要求接受。",
+      expect:"不把提议说成已预约；明确邀请才产生候选，只有共同兴趣或对方已拒绝时不发送。"},
+    {id:"reminder", label:"约定与提醒", bucket:"日程", coverage:"ready",
+      source:"当前有效、已接受且即将开始的日历约定",
+      setup:"构造已接受且即将开始的约定；对照待确认、取消、过期和修订过的记录。",
+      instruction:"只根据当前有效的已接受约定简短提醒，不说成已经发生，也不声称对方已收到或记得。",
+      expect:"来源回执、版本、发生时间和配置窗口全部匹配才进入模型。"},
+    {id:"meal", label:"饭点问候", bucket:"日程", coverage:"ready",
+      source:"关系时区中的午餐或晚餐时间窗口",
+      setup:"按关系时区构造午餐、晚餐窗口；另测窗口边界、暂停和重复候选。",
+      instruction:"当地饭点只提供时间语境，不推断对方没吃饭、正在吃饭或需要提醒；没有自然话头就选择 skip。",
+      expect:"使用配置时区和原始窗口；不默认盘问饮食或要求报平安。"},
+    {id:"life", label:"分享自己的生活", bucket:"分享", coverage:"ready",
+      source:"仍有效且允许分享的角色活动回执或日记记录",
+      setup:"构造真实活动完成回执或角色日记；另测素材撤回和修订版本变化。",
+      instruction:"只分享已完成且当前仍有效的具体片段；日记和梦境保持主观语境，不扩写成客观事实或对方经历。",
+      expect:"原操作、修订、来源授权和受众复核通过才生成；旧候选在来源变化后失效。"},
+    {id:"creation", label:"作品与阅读", bucket:"分享", coverage:"ready",
+      source:"带有阅读范围的完成回执",
+      setup:"构造完成阅读回执和可引用范围；对照只打开、未完成和范围已变更的记录。",
+      instruction:"只说回执覆盖的阅读片段；个人感想明确是角色感受，不声称读完整本或把书中内容说成现实。",
+      expect:"只有完成且回执有效时触发；不补写未提供的书名、章节或情节。"},
+    {id:"news", label:"外部资讯", bucket:"分享", coverage:"ready",
+      source:"带标题、原链接和发布时间的当前资讯条目",
+      setup:"使用隔离资讯源返回当前条目；另测过期、重复、抓取失败及来源配置变化。",
+      instruction:"只根据给定条目判断是否与关系语境相关；保留原发布时间，不声称亲历、看完全文或独立核实。",
+      expect:"来源不完整或失效时不触发；准确归因由程序追加一次。"},
+    {id:"environment", label:"环境与状态变化", bucket:"分享", coverage:"ready",
+      source:"当前天气、天气变化、官方预警或 Bot 服务余额来源",
+      setup:"分测当前观测、两次观测的变化、官方预警覆盖范围和服务余额；再测过期或范围不明素材。",
+      instruction:"天气观测不等于预报，变化不等于灾害；预警只按官方原文与覆盖范围，余额不是用户欠款，不催充值。",
+      expect:"严格使用来源地点、时效、覆盖范围和金额；依据不足时选择 skip。"},
+    {id:"screen", label:"已授权屏幕观察", bucket:"分享", coverage:"ready",
+      source:"同一私聊中仍有效的授权屏幕分析回执",
+      setup:"构造同一私聊且授权有效的屏幕分析回执；另测撤权、来源撤回和冷却。",
+      instruction:"只提及分析明确支持且适合分享的一点观察；不暴露无关屏幕内容，不推断用户意图或身份。",
+      expect:"授权、来源、窗口和每日上限复核通过才进入模型；撤权或来源变化后立即失效。"},
+  ];
+  const TEST_COVERAGE = {ready:"生产器已接通", partial:"只有资格检查", missing:"尚无独立生产器"};
+  const TEST_BUCKET_IDS = {关系:"bond", 日程:"daily", 分享:"share"};
   /* 强度档位。effects 只是**给界面看的**说明，真值在 configuration.py 的
      INTENSITY_PRESETS 里；这里写死的是「这个档位会怎么变」的文案，
      不参与任何计算。 */
@@ -1428,9 +1725,10 @@ window.CompanionContactPage = (() => {
                    ["evening","evening_greeting","20:10","21:20"]];
   const errors = {
     dashboard_identity_required:"请从已登录的 AstrBot 管理界面打开陪伴小屋。",
-    staging_not_initialized:"V2 数据尚未加载。请先在宿主管理中加载已初始化的配置，再刷新。",
+    staging_not_initialized:"V2 数据尚未加载。请先在账号与会话中加载已初始化的配置，再刷新。",
     staging_host_terminated:"V2 宿主已停止，请重新打开拓展页。",
     core_access_required:"当前账号没有联系设置权限。",
+    authorization_denied:"当前对象尚未授予联系权限。",
     binding_revoked:"管理账号的授权已撤销。", binding_rebound:"管理账号的绑定已变化，请重新进入。",
     proactive_contact_scope_invalid:"主动联系偏好按会话生效，请选择一个已初始化的私聊对象。",
     proactive_contact_target_changed:"当前对象或角色绑定已变化，请重新读取。",
@@ -1446,22 +1744,22 @@ window.CompanionContactPage = (() => {
     proactive_contact_revision_conflict:"设置已有其他更新，已读取最新值。",
     proactive_budget_scope:"这两个额度限制整段关系，只能在安装 / 角色 / 关系层设置。",
     contact_relationship_budget_scope:"这两个额度限制整段关系，只能在安装 / 角色 / 关系层设置。",
-    configuration_relationship_required:"这个对象还没有建立可写入的关系，请先在关系与权限页建立。",
+    configuration_relationship_required:"这个对象还没有建立可写入的关系。",
     contact_recipient_changed:"联系对象已变化，请重新读取。",
     configuration_request_invalid:"请求与当前接口不匹配，请更新页面后重试。",
     configuration_group_unknown:"这个设置分组已不存在，请更新页面。",
     bridge_unavailable:"页面还没有接上 AstrBot。若这是从管理界面打开的插件页，刷新一次通常就好；若反复出现，请确认插件已启用。",
-    bridge_timeout:"未收到服务回执，请刷新核对。",
+    bridge_timeout:"未收到服务确认，请刷新核对。",
     invalid_response:"服务返回的数据不完整，请刷新核对。",
+    proactive_quiet_hours:"当前处于免打扰时段。", proactive_paused:"当前已暂停主动联系。",
+    proactive_disabled:"主动联系总开关已关闭。", contact_automatic_disabled:"后台自动联系未开启。",
+    model_task_unregistered:"请先登记主动联系模型。", host_not_running:"当前运行实例尚未启动。",
   };
-  /* 后端把阻断原因与机器码混在同一个字段上：reason 可能是
-     `proactive_quiet_hours` 这样的码，也可能是一句可直接展示的话。
-     用形状判，不猜词表。 */
   const CODE = /^[a-z][a-z0-9_]{2,60}$/;
   const denied = new Set(["dashboard_identity_required","core_access_required","binding_revoked",
     "binding_rebound","staging_host_terminated","proactive_contact_scope_invalid"]);
   const e = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  const reason = code => errors[code] || (code ? "需要核对：" + code : "暂无具体原因");
+  const reason = code => errors[code] || "联系条件暂时无法核对，请重新读取状态。";
   const problem = code => Object.assign(new Error(reason(code)), {code});
   /* 时刻 HH:MM → 一天中的分钟数。跨午夜的区间靠 from > to 判定，不做取模，
      因为后端明确要求「窗口必须当天内结束」，只有免打扰允许跨午夜。 */
@@ -1506,6 +1804,8 @@ window.CompanionContactPage = (() => {
     seed:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v7"/><path d="M8.5 6.5 12 10l3.5-3.5"/><path d="M5 14h14v6H5z"/></svg>',
     quota:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 19V9M10 19V5M15 19v-6M20 19v-9"/></svg>',
     source:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18.5" cy="18" r="2"/></svg>',
+    test:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.5h6M8.5 10h7M8.5 14h7M8.5 18h4"/><path d="m8.5 8.5 1 1 1.7-2"/></svg>',
+    copy:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h2"/></svg>',
     mute:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9v6h3l4 3V6L9 9z"/><path d="m16 9 4 6M20 9l-4 6"/></svg>',
     refresh:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 4v4h-4"/></svg>',
     alert:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5M12 16h.01"/></svg>',
@@ -1538,7 +1838,8 @@ window.CompanionContactPage = (() => {
   let root = null, bridge = null, version = 0, data = null;
 
   function blank() {
-    return {view:"dial",
+    return {view:"dial", purposeQuery:"", purposeBucket:"all", purposeFilter:"all",
+      testQuery:"", testBucket:"all", testCoverage:"all",
       nativePath:"", configPath:"",
       settings:null, effective:null, purposes:{}, hostState:"",
       editToken:"", configToken:"",
@@ -1597,7 +1898,8 @@ window.CompanionContactPage = (() => {
     const ticket = version;
     data.loading = true; render();
     try {
-      const status = await api("GET", data.nativePath);
+      const payload = await api("GET", data.nativePath);
+      const status = payload.contact;
       if (!live(ticket)) return;
       if (!status?.settings || typeof status.settings !== "object") throw problem("invalid_response");
       data.settings = status.settings;
@@ -1609,8 +1911,8 @@ window.CompanionContactPage = (() => {
     } catch (error) {
       if (!live(ticket)) return;
       data.settings = null; data.effective = null; data.purposes = {}; data.editToken = "";
+      data.ready = false;
       notice(error.code ? reason(error.code) : "连接中断，已清空旧内容。请刷新核对。", true);
-      if (denied.has(error.code)) { data.ready = false; }
     } finally {
       if (live(ticket)) { data.loading = false; data.busy = false; render(); }
     }
@@ -1621,7 +1923,7 @@ window.CompanionContactPage = (() => {
     if (!data.configPath) return;
     const ticket = version;
     try {
-      const payload = await api("GET", data.configPath + "?sections=" + encodeURIComponent(GROUP));
+      const payload = await api("GET", data.configPath, {sections: GROUP});
       if (!live(ticket)) return;
       const section = payload?.sections?.[GROUP];
       if (!section) return;
@@ -1632,7 +1934,7 @@ window.CompanionContactPage = (() => {
   }
   /* ---- 写 -------------------------------------------------------------
      只提交 touched 里的字段。edit_token 必须用**刚刚读到的那一份**：
-     配置页的令牌与 native 的令牌是两个作用域，不能互相顶替
+     配置页的令牌与 native 的令牌是两个生效范围，不能互相顶替
      （native 那条路由只写 news 六个字段，其余交给 config 段）。 */
   async function save() {
     if (!data.configPath || data.busy || !data.touched.size) return;
@@ -1723,6 +2025,9 @@ window.CompanionContactPage = (() => {
      后端说不允许 → 看它给的原因；后端说允许但此刻在免打扰 → 说免打扰；
      曲线权重低 → 说节律；否则说可开口。 */
   function verdict() {
+    if (!data.ready || !data.settings || !data.effective) {
+      return {tone:"blocked", title:"联系状态尚未读取", detail:"读取设置后再判断当前联系条件。", code:"", automatic:false};
+    }
     const minute = currentMinute();
     const blocked = data.effective && data.effective.allowed === false;
     if (blocked) {
@@ -1833,7 +2138,8 @@ window.CompanionContactPage = (() => {
   }
 
   /* ---- 渲染 ------------------------------------------------------------ */
-  const VIEWS = [["dial","节律盘",ICON.dial],["purposes","契机矩阵",ICON.seed],
+  const VIEWS = [["dial","节律盘",ICON.dial],["tests","消息测试",ICON.test],
+                 ["purposes","契机矩阵",ICON.seed],
                  ["gates","开口闸门",ICON.gate],["budgets","额度与去重",ICON.quota],
                  ["sources","外部触发源",ICON.source]];
   function headMarkup() {
@@ -1846,6 +2152,8 @@ window.CompanionContactPage = (() => {
         <span class="ct-verdict is-${v.tone}"><i class="ct-dot"></i>${e(v.title)}</span>
       </div>
       <div class="ct-head-actions">
+        <button type="button" class="ct-btn ct-head-test" data-view="tests" aria-pressed="${data.view === "tests"}"
+          title="打开消息测试">${ICON.test}<span>消息测试</span></button>
         ${dirtyCount ? `<button type="button" class="ct-btn" data-action="reset">${ICON.undo}<span>放弃 ${dirtyCount} 项改动</span></button>
           <button type="button" class="ct-btn is-primary" data-action="save"${data.busy ? " disabled" : ""}>${ICON.save}<span>保存</span></button>`
         : `<button type="button" class="ct-btn" data-action="refresh"${data.loading || data.busy ? " disabled" : ""}>${ICON.refresh}<span>重新读取</span></button>`}
@@ -1866,9 +2174,9 @@ window.CompanionContactPage = (() => {
   function emptyMarkup() {
     if (data.loading) return `<div class="ct-empty"><span class="ct-spinner"></span>正在读取联系设置…</div>`;
     if (!data.nativePath) return `<div class="ct-empty">${ICON.alert}<strong>还没有可管理的私聊对象</strong>
-      <p>主动联系偏好按「谁和谁的这一段关系」保存。请先在上方选择已初始化的私聊对象与角色。</p></div>`;
+      <p>请先选择已初始化的私聊对象与角色。</p></div>`;
     return `<div class="ct-empty">${ICON.alert}<strong>还没有读到设置</strong>
-      <p>${e(data.notice || "请重新读取；若反复失败，先在宿主管理中确认 V2 已启动。")}</p>
+      <p>${e(data.notice || "请重新读取；若反复失败，先在账号与会话中确认 V2 已启动。")}</p>
       <button type="button" class="ct-btn" data-action="refresh">${ICON.refresh}<span>重新读取</span></button></div>`;
   }
 
@@ -1885,6 +2193,10 @@ window.CompanionContactPage = (() => {
     const v = verdict();
     const interval = Number(value("interval_seconds"));
     const idle = Number(value("idle_seconds"));
+    const effectiveInterval = Number.isFinite(interval) && interval > 0
+      ? Math.max(1, Math.round(interval * tier.interval)) : null;
+    const effectiveIdle = Number.isFinite(idle)
+      ? Math.max(0, Math.round(idle * tier.idle)) : null;
     /* 这一帧要闪哪几片盘面。取出来就清空：动效只放一次，
        下一次渲染（哪怕什么都没改）不该重放。 */
     const pulse = data.pulseNow;
@@ -1893,6 +2205,8 @@ window.CompanionContactPage = (() => {
         <div class="ct-center is-${v.tone}">
           <span class="ct-center-title">${e(v.title)}</span>
           <span class="ct-center-detail">${e(v.detail)}</span>
+          ${["authorization_denied", "configuration_relationship_required"].includes(v.code)
+            ? `<button type="button" class="ct-center-action" data-go="manage" data-manage="identity" aria-label="前往关系与权限，核对主动联系授权">前往关系与权限</button>` : ""}
           ${v.automatic ? `<span class="ct-center-flag">${ICON.alert}后台自动联系未开启</span>` : ""}
         </div>
         ${data.scanning ? `<div class="ct-scan-hint">时间游标按 ${e(value("quiet_timezone") || "未设时区")} 走</div>` : ""}
@@ -1915,11 +2229,17 @@ window.CompanionContactPage = (() => {
       ], "is-wide is-ring-curve")}
       ${fieldBlock("强度档位 · 三圈", [
         tierPicker(tier),
-        `<p class="ct-note">档位只缩放下面两个数，不改变权限、额度或投递规则。</p>`,
-        numberRow("interval_seconds", "两次联系至少间隔", "秒", 60, 604800,
-          interval ? "档位换算后约 " + fmtDuration(Math.max(1, Math.round(interval * tier.interval))) : ""),
-        numberRow("idle_seconds", "对话结束后至少等候", "秒", 0, 86400,
-          idle !== undefined && Number.isFinite(idle) ? "档位换算后约 " + fmtDuration(Math.max(0, Math.round(idle * tier.idle))) : ""),
+        `<div class="ct-tier-effective" role="status" aria-live="polite">
+          <span>当前生效</span>
+          <strong>${effectiveInterval === null ? "—" : e(fmtDuration(effectiveInterval))}</strong>
+          <small>两次联系至少间隔</small>
+          <strong>${effectiveIdle === null ? "—" : e(fmtDuration(effectiveIdle))}</strong>
+          <small>对话结束后至少等候</small>
+        </div>`,
+        numberRow("interval_seconds", "两次联系至少间隔（基础值）", "秒", 60, 604800,
+          interval ? "当前档位实际约 " + fmtDuration(effectiveInterval) : ""),
+        numberRow("idle_seconds", "对话结束后至少等候（基础值）", "秒", 0, 86400,
+          idle !== undefined && Number.isFinite(idle) ? "当前档位实际约 " + fmtDuration(effectiveIdle) : ""),
       ], "is-ring-tier")}
       ${fieldBlock("问候窗口 · 内圈", [
         toggle("enable_daily_greetings", "启用每日问候", "三个窗口必须当天内结束，不能跨午夜。"),
@@ -1975,15 +2295,22 @@ window.CompanionContactPage = (() => {
   /* 强度档位是一个**控件**，不是下拉：五档的差别是「更快 / 更多」，而这句话
      只有并排画出来才成立。选中的档位给一条随档位变长的底条。 */
   function tierPicker(tier) {
+    const interval = Number(value("interval_seconds"));
+    const idle = Number(value("idle_seconds"));
     return `<div class="ct-tiers" role="radiogroup" aria-label="强度档位">
       ${TIERS.map(t => {
         const on = t.key === tier.key;
+        const effectiveInterval = Number.isFinite(interval) && interval > 0
+          ? fmtDuration(Math.max(1, Math.round(interval * t.interval))) : "—";
+        const effectiveIdle = Number.isFinite(idle)
+          ? fmtDuration(Math.max(0, Math.round(idle * t.idle))) : "—";
         return `<button type="button" role="radio" aria-checked="${on}" data-tier="${t.key}"
           class="ct-tier${on ? " is-on" : ""}${dirty("proactive_intensity_preset") ? " is-dirty" : ""}"
           title="间隔 ×${t.interval}　等候 ×${t.idle}">
           <span class="ct-tier-bar" style="--fill:${(1 - t.interval) * 100}%"></span>
           <span class="ct-tier-label">${e(t.label)}</span>
           <span class="ct-tier-meta">间隔 ×${t.interval}</span>
+          <span class="ct-tier-effective">约 ${e(effectiveInterval)} · 等候 ${e(effectiveIdle)}</span>
         </button>`;
       }).join("")}
     </div>`;
@@ -2021,22 +2348,152 @@ window.CompanionContactPage = (() => {
   function purposesView() {
     const rows = PURPOSE_BUCKETS.map(bucket => {
       const items = bucket.purposes.map(([name, label]) => purposeRow(name, label));
-      return `<section class="ct-bucket"><header>
+      return `<section class="ct-bucket${bucket.id === "share" ? " is-wide" : ""}" data-purpose-bucket="${bucket.id}"><header>
           <h3>${e(bucket.label)}</h3><span>${e(bucket.hint)}</span>
-          <em>${bucket.purposes.length} 类</em></header>
+          <em data-purpose-bucket-count="${bucket.id}">${bucket.purposes.length}/${bucket.purposes.length} 类</em></header>
         <div class="ct-purpose-list">${items.join("")}</div></section>`;
     }).join("");
-    const allowed = ALL_PURPOSES.filter(([name]) => data.purposes[name]?.allowed).length;
+    const enabled = ALL_PURPOSES.filter(([name]) => value(name + ".enabled") !== false).length;
+    const allowed = ALL_PURPOSES.filter(([name]) => purposeStatus(name) === "available").length;
+    const paused = ALL_PURPOSES.filter(([name]) => purposeStatus(name) === "paused").length;
     return `<div class="ct-purposes">
-      <div class="ct-purposes-sum">${ALL_PURPOSES.length} 类契机中 <strong>${allowed}</strong> 类此刻可开口</div>
-      ${rows}</div>`;
+      <div class="ct-purposes-summary" aria-label="契机概况">
+        <div class="ct-purpose-stat"><strong>${ALL_PURPOSES.length}</strong><span>类契机</span></div>
+        <div class="ct-purpose-stat"><strong>${enabled}</strong><span>单项已开启</span></div>
+        <div class="ct-purpose-stat"><strong>${allowed}</strong><span>当前可开口</span></div>
+        <div class="ct-purpose-stat"><strong>${paused}</strong><span>暂缓中</span></div>
+      </div>
+      <div class="ct-purpose-tools">
+        <label class="ct-purpose-search"><span>查找</span>
+          <input type="search" data-purpose-search aria-label="搜索契机名称或限制原因"
+            value="${e(data.purposeQuery)}" placeholder="名称、类别或限制原因">
+        </label>
+        <label class="ct-purpose-filter"><span>类别</span>
+          <select data-purpose-bucket-filter aria-label="按契机类别筛选">
+            <option value="all"${data.purposeBucket === "all" ? " selected" : ""}>全部类别</option>
+            ${PURPOSE_BUCKETS.map(bucket => `<option value="${bucket.id}"${data.purposeBucket === bucket.id ? " selected" : ""}>${e(bucket.label)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="ct-purpose-filter"><span>当前状态</span>
+          <select data-purpose-filter aria-label="按当前状态筛选">
+            ${[["all","全部状态"],["enabled","单项已开启"],["disabled","单项已关闭"],
+              ["available","当前可开口"],["paused","暂缓中"],["unavailable","当前不可开口"]]
+              .map(([key, label]) => `<option value="${key}"${data.purposeFilter === key ? " selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+        <span class="ct-purpose-results" data-purpose-result-count>${ALL_PURPOSES.length} / ${ALL_PURPOSES.length} 类</span>
+      </div>
+      <div class="ct-purpose-groups">${rows}</div>
+      <p class="ct-purpose-empty" hidden>没有匹配的契机</p>
+    </div>`;
+  }
+  function testInstructionText(item) {
+    return [
+      `这是一条「${item.label}」主动联系候选。`,
+      `素材来源：${item.source}`,
+      `样例准备：${item.setup}`,
+      "只使用本次提供的已核验素材，不把候选摘要当事实，不推断对方情绪、行程或需要。没有自然且值得发送的内容时返回 skip。",
+      `类型要求：${item.instruction}`,
+      "若发送，保持当前角色口吻，正文简短、不索取回复、不提测试或内部流程；严格遵守通用 JSON 合同，并给出 decision_confidence。",
+      `通过条件：${item.expect}`,
+    ].join("\n");
+  }
+  function testsView() {
+    const counts = Object.fromEntries(["ready", "partial", "missing"].map(coverage => [
+      coverage, TEST_INSTRUCTIONS.filter(item => item.coverage === coverage).length,
+    ]));
+    const cards = TEST_INSTRUCTIONS.map(item => `<article class="ct-test-card"
+      data-test-card data-test-id="${e(item.id)}" data-test-bucket="${TEST_BUCKET_IDS[item.bucket]}"
+      data-test-coverage="${e(item.coverage)}">
+      <header class="ct-test-card-head">
+        <div class="ct-test-title"><code>${e(item.id)}</code><h3>${e(item.label)}</h3></div>
+        <span class="ct-test-coverage is-${e(item.coverage)}">${e(TEST_COVERAGE[item.coverage])}</span>
+      </header>
+      <dl class="ct-test-details">
+        <div><dt>测试素材</dt><dd>${e(item.source)}</dd></div>
+        <div><dt>样例准备</dt><dd>${e(item.setup)}</dd></div>
+      </dl>
+      <section class="ct-test-prompt"><h4>类型指令</h4><p>${e(item.instruction)}</p></section>
+      <p class="ct-test-expect"><strong>通过条件</strong>${e(item.expect)}</p>
+      <footer class="ct-test-actions"><button type="button" class="ct-btn ct-test-copy"
+        data-test-copy="${e(item.id)}">${ICON.copy}<span>复制测试指令</span></button></footer>
+    </article>`).join("");
+    return `<div class="ct-tests">
+      <div class="ct-test-overview">
+        <p>15 类主动消息各有独立的素材准备、类型指令和验收条件。</p>
+        <div class="ct-test-coverage-summary" aria-label="生产器覆盖情况">
+          <span><i class="is-ready"></i>生产器已接通 <strong>${counts.ready}</strong></span>
+          <span><i class="is-partial"></i>只有资格检查 <strong>${counts.partial}</strong></span>
+          <span><i class="is-missing"></i>尚无独立生产器 <strong>${counts.missing}</strong></span>
+        </div>
+        <p class="ct-test-boundary">复制只生成测试文本，不调用模型，也不向真实会话投递。</p>
+      </div>
+      <div class="ct-test-tools">
+        <label class="ct-test-search"><span>查找类型</span>
+          <input type="search" data-test-search aria-label="搜索主动消息类型和测试指令"
+            value="${e(data.testQuery)}" placeholder="名称、素材、指令或验收条件">
+        </label>
+        <label><span>消息类别</span><select data-test-bucket-filter aria-label="按消息类别筛选">
+          <option value="all"${data.testBucket === "all" ? " selected" : ""}>全部类别</option>
+          <option value="bond"${data.testBucket === "bond" ? " selected" : ""}>关系</option>
+          <option value="daily"${data.testBucket === "daily" ? " selected" : ""}>日程</option>
+          <option value="share"${data.testBucket === "share" ? " selected" : ""}>分享</option>
+        </select></label>
+        <label><span>生产器状态</span><select data-test-coverage-filter aria-label="按生产器状态筛选">
+          <option value="all"${data.testCoverage === "all" ? " selected" : ""}>全部状态</option>
+          <option value="ready"${data.testCoverage === "ready" ? " selected" : ""}>生产器已接通</option>
+          <option value="partial"${data.testCoverage === "partial" ? " selected" : ""}>只有资格检查</option>
+          <option value="missing"${data.testCoverage === "missing" ? " selected" : ""}>尚无独立生产器</option>
+        </select></label>
+        <span class="ct-test-result-count" data-test-result-count>${TEST_INSTRUCTIONS.length} / ${TEST_INSTRUCTIONS.length} 类</span>
+      </div>
+      <div class="ct-tests-grid">${cards}</div>
+      <p class="ct-test-empty" hidden>没有匹配的消息类型</p>
+    </div>`;
+  }
+  function testMatches(id) {
+    const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === id);
+    if (!item) return false;
+    if (data.testBucket !== "all" && TEST_BUCKET_IDS[item.bucket] !== data.testBucket) return false;
+    if (data.testCoverage !== "all" && item.coverage !== data.testCoverage) return false;
+    const query = data.testQuery.trim().toLocaleLowerCase();
+    if (!query) return true;
+    return [item.id, item.label, item.bucket, item.source, item.setup, item.instruction,
+      item.expect, TEST_COVERAGE[item.coverage]].join(" ").toLocaleLowerCase().includes(query);
+  }
+  function updateTestFilters() {
+    if (!root?.querySelectorAll) return;
+    const cards = Array.from(root.querySelectorAll("[data-test-card]"));
+    if (!cards.length) return;
+    let visible = 0;
+    for (const card of cards) {
+      const show = testMatches(card.dataset.testId);
+      card.hidden = !show;
+      if (show) visible++;
+    }
+    const result = root.querySelector("[data-test-result-count]");
+    if (result) result.textContent = visible + " / " + TEST_INSTRUCTIONS.length + " 类";
+    const empty = root.querySelector(".ct-test-empty");
+    if (empty) empty.hidden = visible > 0;
+  }
+  function purposeStatus(name) {
+    const info = data.purposes[name] || {};
+    if (value(name + ".enabled") === false) return "disabled";
+    if (value("enabled") === false) return "unavailable";
+    if (info.reason === "proactive_paused") return "paused";
+    if (info.allowed === true) return "available";
+    if (info.allowed === false) return "unavailable";
+    return "unknown";
   }
   function purposeRow(name, label) {
     const info = data.purposes[name] || {};
     const enabled = value(name + ".enabled") !== false;
     const weight = Number(value(name + ".weight"));
-    const paused = typeof value(name + ".pause_until") === "string" && value(name + ".pause_until");
-    const blocked = info.allowed === false;
+    const status = purposeStatus(name);
+    const pauseUntil = [value(name + ".pause_until"), value("pause_until")]
+      .filter(until => typeof until === "string" && Date.parse(until) > Date.now())
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+    const blocked = info.allowed === false && status === "unavailable" && info.reason !== "proactive_disabled";
     const scale = Math.max(0, Math.min(5, Number.isFinite(weight) ? weight : 1));
     return `<article class="ct-purpose${blocked ? " is-blocked" : ""}${enabled ? " is-on" : ""}"
       data-purpose="${e(name)}">
@@ -2051,13 +2508,58 @@ window.CompanionContactPage = (() => {
         <em>${Number.isFinite(weight) ? weight.toFixed(1) : "—"}</em>
       </div>
       <div class="ct-purpose-state">
-        ${blocked
+        ${status === "disabled" ? `<span class="ct-chip">已关闭</span>`
+          : status === "paused" ? `<span class="ct-chip is-paused">${pauseUntil ? "暂缓至 " + e(pauseUntil.slice(0, 16).replace("T", " ")) : "暂缓中"}</span>`
+          : status === "unavailable" ? value("enabled") === false
+            ? `<span class="ct-chip is-risk">总开关关闭</span>`
+            : `<span class="ct-chip is-risk" title="${e(reason(info.reason))}">${e(shortReason(info.reason))}</span>`
+          : status === "available" ? `<span class="ct-chip is-ok">可开口</span>`
+          : blocked
           ? `<span class="ct-chip is-risk" title="${e(reason(info.reason))}">${e(shortReason(info.reason))}</span>`
-          : paused ? `<span class="ct-chip is-paused">暂缓至 ${e(paused.slice(0, 16).replace("T", " "))}</span>`
-          : enabled ? `<span class="ct-chip is-ok">可开口</span>`
-          : `<span class="ct-chip">已关闭</span>`}
+          : `<span class="ct-chip">待核对</span>`}
       </div>
     </article>`;
+  }
+  function purposeMatches(name) {
+    const meta = PURPOSE_META[name], info = data.purposes[name] || {};
+    const query = data.purposeQuery.trim().toLocaleLowerCase();
+    if (data.purposeBucket !== "all" && meta.bucket.id !== data.purposeBucket) return false;
+    if (query) {
+      const searchable = [name, meta.label, meta.bucket.label, info.label, info.reason,
+        info.reason ? reason(info.reason) : ""]
+        .filter(Boolean).join(" ").toLocaleLowerCase();
+      if (!searchable.includes(query)) return false;
+    }
+    switch (data.purposeFilter) {
+      case "enabled": return value(name + ".enabled") !== false;
+      case "disabled": return value(name + ".enabled") === false;
+      case "available": return purposeStatus(name) === "available";
+      case "paused": return purposeStatus(name) === "paused";
+      case "unavailable": return purposeStatus(name) === "unavailable";
+      default: return true;
+    }
+  }
+  function updatePurposeFilters() {
+    if (!root?.querySelectorAll) return;
+    const rows = Array.from(root.querySelectorAll(".ct-purpose"));
+    if (!rows.length) return;
+    const visibleByBucket = Object.fromEntries(PURPOSE_BUCKETS.map(bucket => [bucket.id, 0]));
+    let visible = 0;
+    for (const row of rows) {
+      const show = purposeMatches(row.dataset.purpose);
+      row.hidden = !show;
+      if (show) { visible++; visibleByBucket[PURPOSE_META[row.dataset.purpose].bucket.id]++; }
+    }
+    for (const bucket of PURPOSE_BUCKETS) {
+      const section = root.querySelector('[data-purpose-bucket="' + bucket.id + '"]');
+      if (section) section.hidden = visibleByBucket[bucket.id] === 0;
+      const count = root.querySelector('[data-purpose-bucket-count="' + bucket.id + '"]');
+      if (count) count.textContent = visibleByBucket[bucket.id] + "/" + bucket.purposes.length + " 类";
+    }
+    const result = root.querySelector("[data-purpose-result-count]");
+    if (result) result.textContent = visible + " / " + ALL_PURPOSES.length + " 类";
+    const empty = root.querySelector(".ct-purpose-empty");
+    if (empty) empty.hidden = visible > 0;
   }
   function shortReason(code) {
     if (!code) return "受阻";
@@ -2087,18 +2589,28 @@ window.CompanionContactPage = (() => {
     ];
     const blocked = gates.filter(g => !g.ok).length;
     return `<div class="ct-gates">
-      <p class="ct-gates-sum">${blocked ? `有 <strong>${blocked}</strong> 道闸门此刻是关的` : "全部闸门此刻都是开的"}</p>
+      <p class="ct-gates-sum${blocked ? " is-shut" : " is-open"}">${blocked ? `有 <strong>${blocked}</strong> 道闸门此刻是关的` : "全部闸门此刻都是开的"}</p>
       ${gates.map((g, i) => `<article class="ct-gate${g.ok ? " is-ok" : " is-shut"}" style="--i:${i}">
         <span class="ct-gate-mark">${g.ok ? ICON.check : ICON.alert}</span>
-        <div class="ct-gate-body"><strong>${e(g.title)}</strong><p>${e(g.note)}</p>
-          ${g.ok ? "" : `<code>${e(g.code || "—")}</code>`}</div>
+        <div class="ct-gate-body"><strong>${e(g.title)}</strong>
+          ${g.ok ? "" : `<small>${e(g.code ? reason(g.code) : g.note)}</small>`}</div>
         <span class="ct-gate-state">${g.ok ? "开" : "关"}</span></article>`).join("")}
-      <section class="ct-block"><h3>临时暂停</h3>
+      <section class="ct-gate-settings-brief" aria-label="回复与补看设置">
+        <div class="ct-gate-settings-copy">
+          <span class="ct-gate-settings-eyebrow">回复与补看</span>
+          <h3>忙碌延迟、休息判定与醒后补看</h3>
+          <p>这里查看当前判定，下面统一调整对应规则。</p>
+        </div>
+        <button type="button" class="ct-btn is-primary ct-gate-settings-button" data-action="open-gate-settings">
+          ${ICON.gate}<span>调整开口闸门</span>
+        </button>
+      </section>
+      <section class="ct-block ct-gate-pause"><h3>临时暂停</h3>
         <label class="ct-field${dirty("pause_until") ? " is-dirty" : ""}">
           <span class="ct-field-label">暂缓全部联系至<small>留空表示不暂停</small></span>
           <input type="datetime-local" data-field="pause_until"
             value="${e(datetimeLocal(value("pause_until")))}">
-          <small class="ct-field-help">暂停按层继承：本层清空后，角色层或关系层的暂停才会重新生效。</small></label>
+          <small class="ct-field-help">清空后继承上级暂停设置。</small></label>
         <label class="ct-field${dirty("note") ? " is-dirty" : ""}">
           <span class="ct-field-label">补充联系偏好</span>
           <textarea data-field="note" rows="3" placeholder="只是写进提示词的材料，不改变权限、频率或去重">${e(value("note") || "")}</textarea></label>
@@ -2140,6 +2652,7 @@ window.CompanionContactPage = (() => {
     return `<div class="ct-budgets">
       <section class="ct-block"><h3>每日额度</h3>
         <p class="ct-note">这几个数只有上限，没有实时读出口——所以画成刻度，不画成进度条。</p>
+
         ${quota.map(([name, label, unit, max]) => {
           const current = num(name);
           return `<div class="ct-quota${dirty(name) ? " is-dirty" : ""}">
@@ -2148,7 +2661,7 @@ window.CompanionContactPage = (() => {
             <input type="range" min="0" max="${max}" step="1" data-field="${e(name)}"
               value="${current ?? 0}" aria-label="${e(label)}">
             <div class="ct-quota-scale"><span>0</span><span>${max}</span></div>
-            ${(name.startsWith("max_relationship") ? `<small class="ct-field-help">限制整段关系，只能在安装 / 角色 / 关系层设置；窗口层保存会被拒绝。</small>` : "")}
+            ${(name.startsWith("max_relationship") ? `<small class="ct-field-help">关系额度请在安装、角色或关系层设置。</small>` : "")}
           </div>`;
         }).join("")}
       </section>
@@ -2272,8 +2785,7 @@ window.CompanionContactPage = (() => {
     const toggles = (groups.match(/data-kind="toggle"/g) || []).length;
     const on = (groups.match(/data-on="1"/g) || []).length;
     return `<div class="ct-sources">
-      <p class="ct-src-lead">外部触发源回答的是「素材从哪来」：共 ${fields} 项设置，
-        其中 ${toggles} 个开关有 ${on} 个开着。分组按获取方式，不按字段表顺序。</p>
+
       ${groups}</div>`;
   }
   /* 一张触发源卡片。头部那两个数是给用户看的「这一组开了几项」，
@@ -2297,7 +2809,7 @@ window.CompanionContactPage = (() => {
         <h3>${e(group.title)}</h3>
         <em class="ct-src-badge${on ? " is-on" : ""}">${on}/${toggles} 开启</em>
       </header>
-      <p class="ct-src-hint">${e(group.hint)}</p>
+
       <div class="ct-src-rows">${rows}</div></section>`;
   }
   /* 触发源的紧凑行：标签在左、控件在右，一行一件事。
@@ -2344,6 +2856,7 @@ window.CompanionContactPage = (() => {
   }
 
   function body() {
+    if (data.view === "tests") return testsView();
     if (!data.ready) return emptyMarkup();
     return {"dial":dialView, "purposes":purposesView, "gates":gatesView,
       "budgets":budgetsView, "sources":sourcesView}[data.view]();
@@ -2361,7 +2874,7 @@ window.CompanionContactPage = (() => {
   }
   function render() {
     if (!root) return;
-    /* 取这一帧要闪的盘面部分并立刻清空：动效是「刚刚改了什么」的一次回执，
+    /* 取这一帧要闪的盘面部分并立刻清空：动效是「刚刚改了什么」的一次确认，
        不是常驻状态。类由 dialView 写进 HTML，而不是渲染后往节点上加——
        这里是整块 innerHTML 重写，渲染后加类等于加在一个马上被丢弃的节点上。 */
     data.pulseNow = [...data.pulse]; data.pulse.clear();
@@ -2373,6 +2886,10 @@ window.CompanionContactPage = (() => {
     const enter = shift ? (shift > 0 ? " is-from-next" : " is-from-prev") : "";
     root.innerHTML = `<div class="ct-app">${railMarkup()}<div class="ct-main">`
       + `<div class="ct-view${enter}">${headMarkup()}${noticeMarkup()}${body()}</div></div></div>`;
+    const gateSettingsArea = document.getElementById("contact-gate-settings-area");
+    if (gateSettingsArea) gateSettingsArea.hidden = data.view !== "gates";
+    if (data.view === "purposes") updatePurposeFilters();
+    if (data.view === "tests") updateTestFilters();
     if (data.scanning && data.ready) {
       data.scanning = false;
       const dial = root.querySelector(".ct-dial");
@@ -2382,11 +2899,29 @@ window.CompanionContactPage = (() => {
 
   /* ---- 交互 ------------------------------------------------------------ */
   let painting = null;
+  function focusGateSettings() {
+    const target = document.getElementById("contact-gate-settings");
+    if (!target) return false;
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
+      || ["low", "off"].includes(document.documentElement.dataset.motion);
+    target.scrollIntoView({behavior: reduced ? "instant" : "smooth", block: "start"});
+    if (!target.hasAttribute("tabindex")) target.tabIndex = -1;
+    target.focus({preventScroll: true});
+    return true;
+  }
+  function openGateSettingsView() {
+    if (!root || !data) return false;
+    if (data.view !== "gates") { switchView("gates"); render(); }
+    return focusGateSettings();
+  }
   function clicked(event) {
     const view = event.target.closest("[data-view]");
     if (view) { switchView(view.dataset.view); render(); return; }
+    const testCopy = event.target.closest("[data-test-copy]")?.dataset.testCopy;
+    if (testCopy) { copyTestInstruction(testCopy); return; }
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action === "refresh") { data.notice = ""; load(); loadContract(); return; }
+    if (action === "open-gate-settings") { focusGateSettings(); return; }
     if (action === "save") { save(); return; }
     if (action === "reset") { resetDraft(); notice("已放弃未保存的改动。"); render(); return; }
     if (action === "dismiss") { data.notice = ""; render(); return; }
@@ -2413,6 +2948,22 @@ window.CompanionContactPage = (() => {
     }
   }
   function changed(event) {
+    const testBucket = event.target.closest("[data-test-bucket-filter]");
+    if (testBucket) { data.testBucket = testBucket.value; updateTestFilters(); return; }
+    const testCoverage = event.target.closest("[data-test-coverage-filter]");
+    if (testCoverage) { data.testCoverage = testCoverage.value; updateTestFilters(); return; }
+    const bucketFilter = event.target.closest("[data-purpose-bucket-filter]");
+    if (bucketFilter) {
+      data.purposeBucket = bucketFilter.value;
+      updatePurposeFilters();
+      return;
+    }
+    const purposeFilter = event.target.closest("[data-purpose-filter]");
+    if (purposeFilter) {
+      data.purposeFilter = purposeFilter.value;
+      updatePurposeFilters();
+      return;
+    }
     const field = event.target.closest("[data-field]");
     if (!field) return;
     const name = field.dataset.field;
@@ -2448,8 +2999,29 @@ window.CompanionContactPage = (() => {
   }
   function readField(name, value_) { set(name, value_); }
   function input(event) {
+    const testSearch = event.target.closest("[data-test-search]");
+    if (testSearch) { data.testQuery = testSearch.value; updateTestFilters(); return; }
+    const search = event.target.closest("[data-purpose-search]");
+    if (search) {
+      data.purposeQuery = search.value;
+      updatePurposeFilters();
+      return;
+    }
     const field = event.target.closest("[data-field]");
     if (field && field.type === "range") changed(event);
+  }
+  async function copyTestInstruction(id) {
+    const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === id);
+    if (!item) return;
+    try {
+      const clipboard = window.navigator?.clipboard;
+      if (typeof clipboard?.writeText !== "function") throw new Error("clipboard unavailable");
+      await clipboard.writeText(testInstructionText(item));
+      notice(item.id + " 测试指令已复制；当前只复制文本，没有调用模型或真实投递。");
+    } catch {
+      notice("剪贴板权限不可用，请选中当前类型卡片中的指令手动复制。", true);
+    }
+    render();
   }
   /* 曲线拖涂。按下开始，横向移动换算成小时，纵向换算成权重——
      这是这一页唯一一个「直接画数据」的地方，因为 24 个数字确实没人愿意输。 */
@@ -2527,17 +3099,14 @@ window.CompanionContactPage = (() => {
     });
   }
   function addresses() {
-    /* 两个出口的地址来源不同：
-       native 是**角色级**路由（每个角色一套，含 target / bot 段），来自 product.role()；
-       config 是**全局**路由，与角色无关，所以写死在本文件里——
-       不去 product 上找一个不存在的字段（那会静默变成 undefined，
-       然后这一页永远停在「还没有读到设置」）。
-       注意 product 上**没有** catalog()，只有 targets() / target() / role()。 */
-    const CONFIG_PATH = "config";
-    const native = window.CompanionProduct.role?.()?.perception_native_api;
-    if (typeof native !== "string" || !native) throw problem("proactive_contact_scope_invalid");
+    /* 状态与配置都采用目录中当前对象、角色的路径，避免多目标时读写全局路由。 */
+    const role = window.CompanionProduct.role?.();
+    const native = role?.perception_native_api, config = role?.config_api;
+    if (typeof native !== "string" || !native || typeof config !== "string" || !config) {
+      throw problem("proactive_contact_scope_invalid");
+    }
     data.nativePath = rel(native);
-    data.configPath = CONFIG_PATH;
+    data.configPath = rel(config);
   }
   async function mount(host) {
     /* 顺序有讲究：unmount() 会 ++version 并清掉 data，所以
@@ -2568,7 +3137,7 @@ window.CompanionContactPage = (() => {
       if (live(ticket)) render();
     } catch (error) {
       if (!live(ticket)) return;
-      notice(error.code ? reason(error.code) : String(error?.message || "未完成"), true);
+      notice(reason(error.code), true);
       render();
     }
   }
@@ -2587,7 +3156,7 @@ window.CompanionContactPage = (() => {
   }
   /* `state` 只为测试驱动而暴露：这一页的 data 是模块私有的，
      测试要断言环的几何与阈值时没有别的入口。 */
-  return {mount, unmount,
+  return {mount, unmount, openGateSettingsView,
     get state() { return {data}; },
     _internals:{minutes, hm, angle, point, curveOf, curveText, tierOf, arc, quietSpan}};
 })();

@@ -162,6 +162,19 @@ class RoleJournalService:
             next_state=OperationState.COMPLETED, observed_at=at))
         return receipt
 
+    def operation_receipt(self, operation_id, *, owner):
+        """Read a durable write receipt without exposing journal content."""
+        if type(operation_id) is not str or not operation_id or len(operation_id) > 512:
+            raise ValueError("journal operation id must be explicit")
+        row = self.runtime.read_one(
+            "SELECT result_json FROM role_journal_operations WHERE operation_id = ? AND owner_key = ?",
+            (operation_id, self._owner(owner)))
+        return codec.receipt_from_json(row["result_json"]) if row is not None else None
+
+    def has_operation_receipt(self, operation_id, *, owner):
+        """Read whether a durable write receipt exists."""
+        return self.operation_receipt(operation_id, owner=owner) is not None
+
     def save(self, draft, *, expected_revision, operation_id, observed_at=None):
         return self._write(draft.context, draft, "save", expected_revision, operation_id, observed_at)
 

@@ -36,6 +36,8 @@
           <label class="check"><input id="sleep_enabled" type="checkbox">按日程入睡</label>
           <label>入睡时间<input id="sleep_time" type="time" value="00:30" required></label>
           <label>入睡时区<input id="sleep_timezone" type="text" value="Asia/Shanghai" required></label>
+          <label>自然浮动上限（分钟）<input id="sleep_variation_minutes" type="number" min="0" max="120" value="20" required>
+            <small class="muted">实际入睡时刻沿近期趋势逐日平缓变化，同一天保持一致。</small></label>
           <label>睡眠时长（分钟）<input id="sleep_minutes" type="number" min="1" max="1440" value="480" required></label>
           <label class="check"><input id="reading_enabled" type="checkbox">自动阅读书架中的待读片段</label>
           <label class="check"><input id="derive_enabled" type="checkbox">正文保存后提取摘要与梦境碎片</label>
@@ -72,7 +74,7 @@
       <div class="section-head"><div><h2>执行记录</h2></div></div>
       <div id="receipt-list" class="activity-list"></div>
       <form id="retry-form" class="retry-form"><h3>重试已确定失败的书写</h3>
-        <label>原执行编号<input id="retry-id" required autocomplete="off"></label>
+        <label>失败的书写<select id="retry-id" required><option value="">选择失败的书写</option></select></label>
         <label>日记日期<input id="retry-date" type="date" required></label>
         <p class="muted">只可重试已确定失败的日记；梦境请到睡眠记录重试。</p>
         <button class="secondary" type="submit">重试这天的日记</button>
@@ -86,7 +88,7 @@
       <label id="body-field">正文<textarea id="text-body" rows="12"></textarea></label>
       <label id="glow-field">醒后余韵<textarea id="text-glow" rows="3"></textarea></label>
       <label id="minutes-field">睡眠时长（分钟）<input id="minutes" type="number" min="1" max="1440" value="480"></label>
-      <label id="retry-field">原执行编号（首次记录留空）<input id="dream-retry"></label>
+      <label id="retry-field">书写记录<select id="dream-retry"><option value="">首次记录</option></select></label>
       <p id="dialog-error" role="alert" hidden></p>
       <div class="dialog-actions"><button id="dialog-submit" class="primary" type="submit">确认</button></div>
     </form>

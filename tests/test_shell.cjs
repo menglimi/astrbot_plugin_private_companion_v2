@@ -170,27 +170,11 @@ test("机位清单与包完全同集", () => {
     `包里这些机位没进清单，对应家具在小屋里点不到：${missed.join(", ")}`);
 });
 
-test("未开多目标时 multi() 为假", () => {
-  /* 静态预览没有 product 桥接，targetsMode 拿不到 catalog，
-     必须按「未开」处理——否则顶栏会渲染出来，而它正是用户要求删掉的那条。 */
-  const shell = load();
-  assert.strictEqual(shell.multi(), false, "没有桥接时 multi() 应当为假");
-});
-
-test("targetsMode 为 multi 时 multi() 为真", () => {
-  const context = vm.createContext({
-    window: {CompanionProduct: {targetsMode: () => "multi"}},
-    document: {}, console,
-  });
-  vm.runInContext(SOURCE, context);
-  assert.strictEqual(context.window.CompanionShell.multi(), true);
-});
-
 /* === paint()：外壳上的状态属性 ===
    视觉全部由 CSS 依据这些属性决定，所以属性写错不会报错，只是样式不生效。
    data-away 尤其关键：它是「小屋退到背景」的开关，
    错了的表现是小屋既没收起也没缩略，或者反过来在首页就被压成窄条。 */
-function stubDom({mode} = {}) {
+function stubDom() {
   const attrs = new Map();
   const make = (hidden = false) => ({
     hidden,
@@ -203,16 +187,14 @@ function stubDom({mode} = {}) {
     get innerHTML() { return this._html || ""; },
   });
   const shell = make();
-  const bar = make();
-  const scope = make(true);
-  const nodes = {"#homeShell": shell, ".topbar": bar, "#productScope": scope};
+  const nodes = {"#homeShell": shell};
   const context = vm.createContext({
-    window: {CompanionProduct: {targetsMode: () => mode}},
+    window: {},
     document: {querySelector: selector => nodes[selector] || null},
     console,
   });
   vm.runInContext(SOURCE, context);
-  return {shell, bar, scope, api: context.window.CompanionShell};
+  return {shell, api: context.window.CompanionShell};
 }
 
 test("paint 在首页时 data-away 为假", () => {
@@ -247,17 +229,4 @@ test("整页视图不让小屋退场", () => {
   api.selectView("directory");
   api.paint();
   assert.strictEqual(shell.dataset.away, "false", "看家具目录不该把小屋收起来");
-});
-
-test("未开多目标时顶栏与生效范围都隐藏", () => {
-  const {bar, scope, api} = stubDom();
-  api.paint();
-  assert.strictEqual(bar.hidden, true, "未开多 bot / 多人格时顶栏整条不该显示");
-  assert.strictEqual(scope.hidden, true);
-});
-
-test("多目标时顶栏显示", () => {
-  const {bar, api} = stubDom({mode: "multi"});
-  api.paint();
-  assert.strictEqual(bar.hidden, false, "开了多目标时顶栏应当显示");
 });

@@ -19,6 +19,7 @@ from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.conversation.pokes import PokePolicy
+from companion_v2.capabilities.screen_access import PACKAGE_ID as SCREEN_PACKAGE_ID
 from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS
 from .integration_registry import IntegrationRegistry
 from companion_v2.model_gateway.routing import CONSUMER
@@ -27,17 +28,19 @@ from companion_v2.storage.runtime import StorageRuntime
 from .native import NativeProbe, NativeProbeService, installed_native_types
 from .profile_residency import profile_residency
 from .native_extensions import NativeExtensionRegistry, together_execution_binding
+from .native_extensions.builtins import MANAGED_EXTENSIONS, create_bundled_extensions
 from .backup_api import apply_staged_restore
+from .storage_location import selected_backup_directory
 from .binding import (
     describe_pin, event_identity, is_private_message, message_text, parse_bind_command,
     refuse_already_bound,
 )
+from .calendar_command import receive_calendar_command
 from .binding_store import PendingBinding, binding_path, clear_binding, read_binding, write_binding
 from .management_identity import dashboard_operator
 from .settings import HostControlError, HostSettings
 from .voice import NativeVoiceReply
-from .qweather_alerts import configured_qweather_alert_port
-from .qweather_weather import configured_qweather_weather_port
+from .weather_settings import configured_weather_ports
 from .service_balance import configured_balance_port
 from .news import configured_news_port
 from .solar_terms import configured_solar_term_port
@@ -46,6 +49,7 @@ from .qzone_transport import build_qzone_transport
 from .web_api import StagingWebAPI
 from .recalls import is_notice_event, receive_notice
 from .pokes import is_poke_notice, receive_poke
+from .session_topology import SessionTopology
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +106,10 @@ class AstrBotStagingController:
         self.last_restore: dict[str, Any] | None = None
         self._accepting = False
         self._terminated = False
+        # Keep native lifecycle waits separate from the lock shared by data APIs.
         self._control_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self.session_topology = SessionTopology(self)
         self.native_extensions = None
         # The QQ Zone extension only exists once a host transport is attached; it
         # is created lazily so an unused Zone never opens a session or reads a cookie.
@@ -163,7 +170,10 @@ class AstrBotStagingController:
         the delivery path both go through here so they cannot disagree about which
         conversation is bound -- a disagreement would look like a profile conflict.
         """
-        settings = self._parsed_settings()
+        return self._with_bound_identity(self._parsed_settings())
+
+    def _with_bound_identity(self, settings: HostSettings) -> HostSettings:
+        """Resolve the same binding for lifecycle operations and read-only status."""
         if self._multi_host:
             return settings
         pinned = self._read_intent()
@@ -329,6 +339,7 @@ class AstrBotStagingController:
             return Outcome.failed(error.code, str(error))
         if isinstance(error, StagingConfigurationError):
             return Outcome.failed("staging_configuration_invalid", str(error))
+        logger.warning("[CompanionV2] %s", fallback, exc_info=True)
         return Outcome.failed(fallback, "the AstrBot staging control operation failed")
 
     def _record_failure(self, result: Outcome) -> None:
@@ -353,7 +364,7 @@ class AstrBotStagingController:
         return profile_residency(self.data_root, profile_id=settings.profile_id, target=target)
 
     async def probe(self) -> Outcome[dict[str, Any]]:
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 settings = self.resolved_settings()
                 discovery = self.native.discover(settings)
@@ -400,9 +411,15 @@ class AstrBotStagingController:
         # only moment the database file can be replaced without orphaning the live
         # connection that every repository and task borrows. The check reads only
         # files, never a runtime this method has not created yet.
+        storage = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
+        backup_directory = selected_backup_directory(
+            root / "runtime", storage.get("backup_path", "") if isinstance(storage, dict) else "",
+            configuration.scope.installation_id, plugin_root=self.data_root)
         self.last_restore = apply_staged_restore(root / "runtime",
-                                                 installation_id=configuration.scope.installation_id)
+                                                 installation_id=configuration.scope.installation_id,
+                                                 backup_directory=backup_directory)
         runtime = StorageRuntime.open(data_root=root / "runtime", installation_id=configuration.scope.installation_id)
+        runtime.backup_directory = backup_directory
         try:
             bootstrap = AstrBotStagingBootstrap(
                 runtime,
@@ -428,15 +445,21 @@ class AstrBotStagingController:
             raise HostControlError("staging_not_initialized", "initialize the staging profile first")
         if self.native_extensions is not None:
             self.native_extensions.close()
+        bundled_extensions, bundled_issues = create_bundled_extensions(self.runtime.data_root, now=self.now)
         self.native_extensions = NativeExtensionRegistry(self.context, now=self.now,
             together_execution=together_execution_binding(self.settings),
-            image_settings_path=self.data_root / "model_image_routes.json")
+            image_settings_path=self.data_root / "model_image_routes.json",
+            bundled_extensions=bundled_extensions, bundled_issues=bundled_issues,
+            managed_extensions=MANAGED_EXTENSIONS)
+        weather_port, weather_alert_port = configured_weather_ports(self.config)
+        from .model_settings import conversation_provider_resolver
         loaded = self.bootstrap.load(runtime_instance_id="astrbot-staging-" + uuid4().hex,
                                      review_only=review_only,
                                      native_tool_port=self.native_extensions,
-                                     weather_port=configured_qweather_weather_port(),
-                                     weather_alert_port=configured_qweather_alert_port(),
-                                     balance_port=configured_balance_port(),
+                                     default_provider_resolver=conversation_provider_resolver(self.context),
+                                     weather_port=weather_port,
+                                     weather_alert_port=weather_alert_port,
+                                     balance_port=configured_balance_port(self.config),
                                      news_port=configured_news_port(self.config),
                                      qzone_transport=self._qzone_transport(),
                                      solar_term_port=configured_solar_term_port(
@@ -452,14 +475,28 @@ class AstrBotStagingController:
             self.native_extensions.close()
             raise TaskError(loaded.failure.code, loaded.failure.reason)
         self.session = loaded.unwrap()
+        from .knowledge_sources import attach_official_knowledge
+        attach_official_knowledge(self.session.application, self.context)
+        self.session.bridge.forward_intake = self.settings.forward_intake
         from .semantic_models import NativeSemanticModels, configured_slang_search_port
         self.session.application.attach_semantics(NativeSemanticModels(self.context, self.settings.provider_id,
                                                                      configured_slang_search_port()))
+        from companion_v2.decision import LayaDecisionService, LayaSettingsStore
+        def laya_for_context(context):
+            # The single-target model page stores by the pinned profile and
+            # role.  The native participant id is a route fact, not the page's
+            # target key, so it must not be used for this lookup.
+            settings = self.resolved_settings()
+            return LayaDecisionService(LayaSettingsStore(
+                self.data_root, settings.profile_id,
+                getattr(context.role_binding.role, "subject_id", settings.role_id)))
+
+        self.session.application.attach_laya_decision(laya_for_context)
         return self.session
 
     async def load_existing(self) -> Outcome[dict[str, Any]]:
         """Read an existing pinned profile during plugin startup; never initialize or start it."""
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 settings = self._settings()
                 pinned = self._read_intent()
@@ -468,8 +505,9 @@ class AstrBotStagingController:
                 probe = await self._probe_native(valid_from=pinned.valid_from)
                 if not self._same_binding(probe.configuration, pinned):
                     self._check_contract(probe.configuration, pinned)
-                self._ensure_assembly(probe.configuration)
-                self._load_session()
+                async with self._control_lock:
+                    self._ensure_assembly(probe.configuration)
+                    self._load_session()
                 self.last_failure = None
                 return Outcome.success(
                     {
@@ -485,42 +523,52 @@ class AstrBotStagingController:
                 return result
 
     async def initialize_profile(self) -> Outcome[dict[str, Any]]:
-        async with self._control_lock:
-            try:
-                pinned = self._read_intent()
-                parked = self._parked_binding()
-                if pinned is None and parked is not None and not parked.confirmed:
-                    raise HostControlError("setup_binding_confirmation_required",
-                                           "confirm the administrator window in the setup guide first")
-                probe = await self._probe_native(valid_from=pinned.valid_from if pinned else None)
-                configuration = probe.configuration
-                if pinned is not None and not self._same_binding(configuration, pinned):
-                    self._check_contract(configuration, pinned)
+        async with self._lifecycle_lock:
+            return await self._initialize_profile_locked()
+
+    async def _initialize_profile_locked(self) -> Outcome[dict[str, Any]]:
+        try:
+            pinned = self._read_intent()
+            parked = self._parked_binding()
+            if pinned is None and parked is not None and not parked.confirmed:
+                raise HostControlError("setup_binding_confirmation_required",
+                                       "confirm the administrator window in the setup guide first")
+            probe = await self._probe_native(valid_from=pinned.valid_from if pinned else None)
+            configuration = probe.configuration
+            if pinned is not None and not self._same_binding(configuration, pinned):
+                self._check_contract(configuration, pinned)
+            async with self._control_lock:
+                if self._terminated:
+                    raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
                 if pinned is None:
                     self._write_intent(configuration)
                     pinned = configuration
                 self._ensure_assembly(configuration)
-                assert self.bootstrap is not None
-                initialized = await self.bootstrap.initialize()
-                if initialized.failure is not None:
-                    raise TaskError(initialized.failure.code, initialized.failure.reason)
+                bootstrap = self.bootstrap
+            assert bootstrap is not None
+            initialized = await bootstrap.initialize()
+            if initialized.failure is not None:
+                raise TaskError(initialized.failure.code, initialized.failure.reason)
+            async with self._control_lock:
+                if self._terminated:
+                    raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
                 if self.session is None or self.session.application.state == "stopped":
                     self._load_session()
-                receipt = initialized.unwrap()
-                result = Outcome.success(
-                    {
-                        "initialized": True,
-                        "started": False,
-                        "replayed": receipt.replayed,
-                        "operation_id": receipt.operation_id,
-                        "configuration_fingerprint": receipt.configuration_fingerprint,
-                        "probe": probe.report(pinned=True),
-                    }
-                )
-            except Exception as error:
-                result = self._failure(error, "staging_initialize_failed")
-            self._record_failure(result)
-            return result
+            receipt = initialized.unwrap()
+            result = Outcome.success(
+                {
+                    "initialized": True,
+                    "started": False,
+                    "replayed": receipt.replayed,
+                    "operation_id": receipt.operation_id,
+                    "configuration_fingerprint": receipt.configuration_fingerprint,
+                    "probe": probe.report(pinned=True),
+                }
+            )
+        except Exception as error:
+            result = self._failure(error, "staging_initialize_failed")
+        self._record_failure(result)
+        return result
 
     def _generations(self) -> tuple[int, int]:
         if self.runtime is None:
@@ -532,16 +580,25 @@ class AstrBotStagingController:
         return (task["generation"] if task else 0, model["generation"] if model else 0)
 
     async def start(self, *, review_only=False) -> Outcome[dict[str, Any]]:
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 pinned = self._read_intent()
                 if pinned is None:
-                    raise HostControlError("staging_not_initialized", "initialize the staging profile first")
+                    initialized = await self._initialize_profile_locked()
+                    if initialized.failure is not None:
+                        self._accepting = False
+                        return initialized
+                    pinned = self._read_intent()
+                    if pinned is None:
+                        raise HostControlError("staging_not_initialized", "the runtime profile was not created")
                 probe = await self._probe_native(valid_from=pinned.valid_from)
                 if not self._same_binding(probe.configuration, pinned):
                     self._check_contract(probe.configuration, pinned)
-                self._ensure_assembly(probe.configuration)
-                session = self.session
+                async with self._control_lock:
+                    if self._terminated:
+                        raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
+                    self._ensure_assembly(probe.configuration)
+                    session = self.session
                 local_review = bool(review_only)
                 if session is not None and session.review_only != local_review:
                     if session.application.state == "running":
@@ -551,10 +608,16 @@ class AstrBotStagingController:
                     if closed.state != "stopped":
                         raise HostControlError("staging_session_still_stopping",
                                                "wait for the previous session to stop before reconnecting")
-                    self.last_session = session
-                    self.session = session = None
+                    async with self._control_lock:
+                        self.last_session = session
+                        if self.session is session:
+                            self.session = None
+                        session = None
                 if session is None or session.application.state == "stopped":
-                    session = self._load_session(review_only=local_review)
+                    async with self._control_lock:
+                        if self._terminated:
+                            raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
+                        session = self._load_session(review_only=local_review)
                 if session.application.state == "running":
                     session.require_intake_authorization()
                     self._accepting = True
@@ -562,16 +625,20 @@ class AstrBotStagingController:
                         {"started": True, "replayed": True, "state": "running", "report": session.inspect().unwrap()}
                     )
                 else:
-                    task_generation, model_generation = self._generations()
+                    async with self._control_lock:
+                        task_generation, model_generation = self._generations()
                     started = await session.start(
                         expected_task_generation=task_generation,
                         expected_model_generation=model_generation,
                     )
                     if started.failure is not None:
                         raise TaskError(started.failure.code, started.failure.reason)
-                    self._accepting = True
-                    if review_only:
-                        self.latest_batch_id = None
+                    async with self._control_lock:
+                        if self._terminated:
+                            raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
+                        self._accepting = True
+                        if review_only:
+                            self.latest_batch_id = None
                     result = Outcome.success(
                         {
                             "started": True,
@@ -587,6 +654,43 @@ class AstrBotStagingController:
             self._record_failure(result)
             return result
 
+    async def reconnect_native(self) -> Outcome[dict[str, Any]]:
+        """Reassemble the V2 session so newly loaded native tools are discovered."""
+        async with self._lifecycle_lock:
+            try:
+                previous = self.session or self.last_session
+                if previous is None:
+                    raise HostControlError("staging_not_initialized", "load the V2 profile first")
+                self._accepting = False
+                if previous.application.state != "stopped":
+                    report = await previous.close(grace_seconds=0.5)
+                    if report.state != "stopped":
+                        raise HostControlError("staging_session_still_stopping",
+                                               "wait for the current V2 session to stop before reconnecting")
+                async with self._control_lock:
+                    if self._terminated:
+                        raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
+                    self.last_session = previous
+                    if self.session is previous:
+                        self.session = None
+                    session = self._load_session(review_only=previous.review_only)
+                    task_generation, model_generation = self._generations()
+                started = await session.start(expected_task_generation=task_generation,
+                                              expected_model_generation=model_generation)
+                if started.failure is not None:
+                    raise TaskError(started.failure.code, started.failure.reason)
+                async with self._control_lock:
+                    if self._terminated:
+                        raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
+                    self._accepting = True
+                result = Outcome.success({"reconnected": True, "state": session.application.state,
+                                          "report": session.inspect().unwrap()})
+            except Exception as error:
+                self._accepting = False
+                result = self._failure(error, "staging_native_reconnect_failed")
+            self._record_failure(result)
+            return result
+
     async def authorize_delivery(self, *, window: timedelta | None = None) -> Outcome[dict[str, Any]]:
         """Compatibility response for clients from releases that exposed grants."""
         return Outcome.success({"authorized": True, "required": False, "expires_at": None,
@@ -594,7 +698,7 @@ class AstrBotStagingController:
 
     async def prepare_screen(self) -> Outcome[dict[str, Any]]:
         """Prepare one loaded native Screen declaration without starting intake."""
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 settings, descriptor = await self._screen_declaration()
                 assert self.bootstrap is not None
@@ -618,30 +722,33 @@ class AstrBotStagingController:
         probe = await self._probe_native(valid_from=pinned.valid_from)
         if not self._same_binding(probe.configuration, pinned):
             self._check_contract(probe.configuration, pinned)
-        self._ensure_assembly(pinned)
-        if self.session is None or self.session.application.state == "stopped":
-            self._load_session()
-        if self.session.application.state != "new" or self._accepting:
-            raise HostControlError("staging_screen_session_active", "stop intake before changing Screen authority")
-        registry = self.native_extensions
-        declarations = tuple(declaration for declaration in registry.declarations()
-            if declaration.descriptor.tool.action == "screen.capture")
-        if len(declarations) != 1:
-            raise HostControlError("staging_screen_provider_unavailable", "one active native Screen provider is required")
-        declaration = declarations[0]
-        descriptor = declaration.descriptor
-        if (registry.current_declaration(declaration.host_tool_id) != declaration
-                or declaration.host_tool_id != "native:astrbot_plugin_screen_companion:screen.capture"
-                or descriptor.package.extension_id != SCREEN_EXTENSION
-                or descriptor.binding.capability != SCREEN_PROCESS
-                or descriptor.binding.provider != "screen.native"
-                or descriptor.source_owner != "screen"):
-            raise HostControlError("staging_screen_provider_changed", "loaded native Screen declaration changed")
-        return settings, descriptor
+        async with self._control_lock:
+            if self._terminated:
+                raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
+            self._ensure_assembly(pinned)
+            if self.session is None or self.session.application.state == "stopped":
+                self._load_session()
+            if self.session.application.state != "new" or self._accepting:
+                raise HostControlError("staging_screen_session_active", "stop intake before changing Screen authority")
+            registry = self.native_extensions
+            declarations = tuple(declaration for declaration in registry.declarations()
+                if declaration.descriptor.tool.action == "screen.capture")
+            if len(declarations) != 1:
+                raise HostControlError("staging_screen_provider_unavailable", "one active native Screen provider is required")
+            declaration = declarations[0]
+            descriptor = declaration.descriptor
+            if (registry.current_declaration(declaration.host_tool_id) != declaration
+                    or declaration.host_tool_id != f"native:{SCREEN_PACKAGE_ID}:screen.capture"
+                    or descriptor.package.extension_id != SCREEN_EXTENSION
+                    or descriptor.binding.capability != SCREEN_PROCESS
+                    or descriptor.binding.provider != "screen.native"
+                    or descriptor.source_owner != "screen"):
+                raise HostControlError("staging_screen_provider_changed", "loaded native Screen declaration changed")
+            return settings, descriptor
 
     async def upgrade_screen(self, *, username: str, previous_version: str, previous_hash: str,
                              expected_revision: int) -> Outcome[dict[str, Any]]:
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 settings, descriptor = await self._screen_declaration()
                 assert self.bootstrap is not None
@@ -674,17 +781,19 @@ class AstrBotStagingController:
 
     async def stop(self, *, grace_seconds: float = 0.5) -> Outcome[dict[str, Any]]:
         self._accepting = False
-        async with self._control_lock:
-            self._accepting = False
+        async with self._lifecycle_lock:
             try:
-                if self.session is None:
+                async with self._control_lock:
+                    self._accepting = False
+                    session = self.session
+                if session is None:
                     result = Outcome.success({"state": "stopped", "pending_handles": [], "storage_closed": False})
                 else:
-                    session = self.session
                     report = await session.close(grace_seconds=grace_seconds)
-                    if report.state == "stopped":
-                        self.last_session = session
-                        self.session = None
+                    async with self._control_lock:
+                        if report.state == "stopped" and self.session is session:
+                            self.last_session = session
+                            self.session = None
                     result = Outcome.success(report)
             except Exception as error:
                 result = self._failure(error, "staging_stop_failed")
@@ -872,10 +981,13 @@ class AstrBotStagingController:
             return await receive_poke(self, event)
         return await receive_notice(self, event)
 
-    async def receive_claimed(self, event: object) -> Outcome[str]:
+    async def receive_claimed(self, event: object, *, on_refusal=None) -> Outcome[str]:
         session = self.session
         if not self.claims(event) or session is None:
             return Outcome.failed("staging_not_claimed", "the event is outside the active staging target")
+        command_result = await receive_calendar_command(self, event, session)
+        if command_result is not None:
+            return command_result
         result = await session.receive(event)
         if result.is_success:
             self.latest_batch_id = result.unwrap()
@@ -885,7 +997,9 @@ class AstrBotStagingController:
             if result.failure.code == "private_access_dialogue_denied":
                 # 没有对话权限：按配置回一句（真实投递模式才发）。
                 # 发送失败不影响"拒绝"本身，也不把插件标成不可受理。
-                await self._refuse_private(session, event)
+                receipt = await self._refuse_private(session, event)
+                if callable(on_refusal):
+                    on_refusal(receipt)
             elif result.failure.code in (
                 "authorization_denied",
                 "authorization_expired",
@@ -939,16 +1053,36 @@ class AstrBotStagingController:
 
     def status(self) -> dict[str, Any]:
         settings = self.settings
+        settings_error = self.settings_error.code if self.settings_error else None
+        targets = []
+        if settings is not None and settings_error is None:
+            try:
+                bound = self._with_bound_identity(settings)
+                if bound.has_target:
+                    targets = [{
+                        "target_id": bound.profile_id,
+                        "scope_kind": "private",
+                        "platform_id": bound.platform_id,
+                        "account_id": bound.account_id,
+                        "bot_id": bound.bot_id,
+                        "participant_id": bound.participant_id,
+                        "roles": [{"role_id": bound.role_id,
+                                   "persona_ids": [bound.persona_id] if bound.persona_id else []}],
+                    }]
+            except HostControlError as error:
+                settings_error = error.code
         session = self.session or self.last_session
         intent = self.intent_path
         delivery_authorization = {"required": False, "authorized": True,
                                   "state": "not_required", "grant_id": None,
                                   "capability": None, "expires_at": None}
         return {
+            "mode": "single",
             "enabled": bool(settings and settings.enabled),
-            "settings_valid": self.settings_error is None,
-            "settings_error": self.settings_error.code if self.settings_error else None,
+            "settings_valid": settings_error is None,
+            "settings_error": settings_error,
             "profile_id": settings.profile_id if settings else None,
+            "targets": targets,
             "configured": bool(intent and intent.exists()),
             "runtime_open": self.runtime is not None,
             "session_state": session.application.state if session is not None else "unloaded",
@@ -980,13 +1114,13 @@ class AstrBotStagingController:
                     if isinstance(report, dict)
                     else report.state == "stopped"
                 )
-            if self.runtime is not None:
-                if not stopped:
-                    # 卸载时把 SQLite 句柄留在进程里，会让下一次 staged 还原的
-                    # os.replace 在 Windows 上永久失败，所以未达 stopped 也必须关。
-                    logger.warning("[CompanionV2] staging 停机未达 stopped，仍关闭存储 runtime 释放文件句柄")
-                self.runtime.close()
-                self.runtime = None
+            async with self._control_lock:
+                if self.runtime is not None:
+                    if not stopped:
+                        # Release SQLite even after an incomplete drain so a later staged restore can replace it.
+                        logger.warning("[CompanionV2] staging 停机未达 stopped，仍关闭存储 runtime 释放文件句柄")
+                    self.runtime.close()
+                    self.runtime = None
         finally:
             if self.native_extensions is not None:
                 self.native_extensions.close()

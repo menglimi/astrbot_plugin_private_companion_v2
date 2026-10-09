@@ -21,6 +21,7 @@ from companion_v2.legacy.migration import (
     HANDLERS,
     LegacyMigration,
     MigrationState,
+    plugin_data_path,
     read_json,
     sqlite_tables,
 )
@@ -105,16 +106,35 @@ class DiscoveryTests(LegacyMigrationTestCase):
         self.assertEqual(reported,
                          {entry.source_id for entry in LEGACY_COMPATIBILITY_CATALOG.entries})
 
-    def test_read_only_sources_are_not_marked_migratable(self) -> None:
-        self.database("memory_companion.db")
+    def test_separate_memory_database_is_not_assumed_to_exist_under_v1_root(self) -> None:
         findings = {item.source_id: item for item in self.plan().findings}
 
-        # 记忆伴侣的时间线是 COMPAT_READABLE：保留原位，V2 不复制——
-        # 复制会造成两份互相矛盾的真相。
         self.assertEqual(findings["memory.timeline_and_governance"].state,
-                         MigrationState.READ_ONLY.value)
-        self.assertNotIn("memory.timeline_and_governance",
-                         [item.source_id for item in self.plan().migratable])
+                         MigrationState.ABSENT.value)
+
+    def test_global_astrbot_plugin_data_wins_over_stale_embedded_copy(self) -> None:
+        v1_root = self.root / "data" / "plugins" / "astrbot_plugin_private_companion"
+        v1_root.mkdir(parents=True)
+        global_db = self.root / "data" / "plugin_data" / "astrbot_plugin_memory_companion" / "memory_companion.db"
+        global_db.parent.mkdir(parents=True)
+        connection = sqlite3.connect(global_db)
+        connection.execute("CREATE TABLE memories (id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE timeline (id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO memories VALUES ('active-source')")
+        connection.commit()
+        connection.close()
+
+        embedded_db = v1_root / "data" / "plugin_data" / "astrbot_plugin_memory_companion" / "memory_companion.db"
+        embedded_db.parent.mkdir(parents=True)
+        embedded_db.write_bytes(b"stale copy")
+
+        self.assertEqual(plugin_data_path(v1_root,
+            "astrbot_plugin_memory_companion/memory_companion.db"), global_db)
+        finding = {item.source_id: item for item in
+                   LegacyMigration(v1_root=v1_root).discover().unwrap()}[
+                       "memory.timeline_and_governance"]
+        self.assertEqual(finding.state, MigrationState.DATA_READY.value)
+        self.assertEqual(finding.byte_size, global_db.stat().st_size)
 
     def test_external_sources_name_their_owner(self) -> None:
         self.write("image_generation_state.json", {})
@@ -138,14 +158,12 @@ class DiscoveryTests(LegacyMigrationTestCase):
         self.assertEqual(findings["private.core_profiles"].state,
                          MigrationState.UNREADABLE.value)
 
-    def test_sources_without_a_handler_are_named_as_such(self) -> None:
+    def test_profile_data_source_is_reported_as_importable(self) -> None:
         self.write("companions.json", {"roles": []})
         findings = {item.source_id: item for item in self.plan().findings}
 
         marker = findings["private.core_profiles"]
-        # 只有天气那一条转换器写好了；其余 CONVERTED 来源必须报 no_handler，
-        # 这样界面能说「这份的转换器还没写」，而不是给一个空结果。
-        self.assertEqual(marker.state, MigrationState.NO_HANDLER.value)
+        self.assertEqual(marker.state, MigrationState.DATA_READY.value)
         self.assertNotIn(marker.source_id, [item.source_id for item in self.plan().migratable])
 
 
@@ -214,6 +232,39 @@ class ConversionTests(LegacyMigrationTestCase):
         # 所以这里不允许出现「生效范围叫 A、分组叫 B」的映射。
         for scope in scopes:
             self.assertEqual(GROUP_OF_SCOPE[scope], scope)
+
+    def test_weather_source_is_a_global_plugin_configuration_intent(self) -> None:
+        planned = LegacyMigration(
+            v1_root=self.root,
+            v1_configuration={"weather_config": {"weather_source": "qweather"}},
+        ).plan()
+        self.assertTrue(planned.is_success, planned.failure)
+
+        intent = next(item for item in planned.unwrap().intents
+                      if item.target_kind == "plugin_config")
+        self.assertEqual(intent.changes["weather.provider"], "qweather")
+        self.assertEqual(intent.sources["weather.provider"], ("weather_config.weather_source",))
+
+    def test_semantic_catalog_settings_form_a_separate_migration_intent(self) -> None:
+        planned = LegacyMigration(
+            v1_root=self.root,
+            v1_configuration={
+                "experimental_motivation_config": {
+                    "reaction_expression_trigger_probability": 0.65,
+                },
+                "relay_bridge_config": {"group_slang_summary_minutes": 20},
+            },
+        ).plan()
+
+        self.assertTrue(planned.is_success, planned.failure)
+        intent = next(item for item in planned.unwrap().intents
+                      if item.target_kind == "semantic_config")
+        self.assertEqual(intent.scope, "semantic_catalog")
+        self.assertEqual(intent.group_id, "semantic")
+        self.assertEqual(intent.changes, {
+            "reactions_trigger_probability": 0.65,
+            "learning_interval_seconds": 1200,
+        })
 
     def test_every_field_exists_in_the_configuration_registry(self) -> None:
         """转换器产出的每个字段都必须真的注册过。
@@ -331,9 +382,20 @@ class HelperTests(LegacyMigrationTestCase):
         self.assertIsNone(read_json(broken))
         self.assertIsNone(read_json(self.root / "missing.json"))
 
+    def test_read_json_accepts_utf8_bom_configuration_dumps(self) -> None:
+        source = self.root / "configuration.json"
+        source.write_text('\ufeff{"enabled": true}', encoding="utf-8")
+
+        self.assertEqual(read_json(source), {"enabled": True})
+
     def test_handlers_only_names_written_converters(self) -> None:
-        # 这份集合是「域侧已实现」的代码事实；天气是唯一一个。
-        self.assertEqual(HANDLERS, frozenset({"v2.private-config-converter"}))
+        # 这份集合是「域侧已实现」的代码事实，不代表每项都写配置。
+        self.assertEqual(HANDLERS, frozenset({"v2.private-config-converter",
+                                              "v2.role-journal-importer",
+                                              "v2.role-journal-and-worldbook-importer",
+                                              "v2.group-relationship-importer",
+                                              "v2.reaction-asset-importer",
+                                              "v2.memory-snapshot-archive"}))
 
 
 if __name__ == "__main__":

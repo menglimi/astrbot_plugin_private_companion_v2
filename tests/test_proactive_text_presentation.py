@@ -19,6 +19,7 @@ class ProactiveTextPresentationTests(ContactFixture, unittest.IsolatedAsyncioTes
     async def test_contact_seals_text_preferences_and_changes_only_parsed_body(self):
         app = await self.enabled()
         changes = {"content_cleanup_enabled": True, "content_replacement_enabled": True,
+                   "content_cleanup_scope": "all", "content_cleanup_words": '["<newline>"]',
                    "content_replacements": '["hi => 你好", "send => skip"]'}
         self.configure_text(app, changes, "contact-text-first")
 
@@ -61,6 +62,25 @@ class ProactiveTextPresentationTests(ContactFixture, unittest.IsolatedAsyncioTes
         self.assertIn("日常表达要求", instruction)
         self.assertIn("只说短句，别总结我。", instruction)
 
+    async def test_internal_reaction_expression_metadata_never_reaches_contact_delivery(self):
+        app = await self.enabled()
+        metadata = ('<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无奈",'
+                    '"intensity":2}</pc_reaction_expression>')
+
+        async def model(envelope):
+            text = "<pc_tts>在的，刚刚在忙。</pc_tts>\n" + metadata
+            return answered(json.dumps({"decision": "send", "text": text}, ensure_ascii=False))
+
+        self.model_behavior = model
+        task = (await self.contact(app)).unwrap().task
+        self.assertEqual(task.state, "succeeded")
+        await self.delivery_state(app, task.task_id, "delivered")
+        self.assertEqual(self.sent[0].text, "在的，刚刚在忙。\n")
+        self.assertNotIn("pc_reaction_expression", self.sent[0].text)
+        self.assertNotIn("pc_tts", self.sent[0].text)
+        self.assertIn("pc_reaction_expression", self.called[0].original.instruction)
+        self.assertIn("pc_tts", self.called[0].original.instruction)
+
     async def test_cleanup_empty_is_successful_skip_and_restart_never_replays(self):
         app = await self.enabled()
         self.configure_text(app, {"content_cleanup_enabled": True, "content_cleanup_words": '["删"]'},
@@ -77,6 +97,8 @@ class ProactiveTextPresentationTests(ContactFixture, unittest.IsolatedAsyncioTes
         row = self.runtime.read_one("SELECT record_json, body FROM proactive_contacts WHERE task_id = ?", (task.task_id,))
         self.assertEqual(row["body"], "")
         self.assertEqual(json.loads(row["record_json"])["presentation_reason"], "presentation_empty")
+        self.assertEqual(app.proactive.observe(self.contact_context(), task.task_id).unwrap()["skip_reason"],
+                         "presentation_empty")
         self.assertEqual(self.runtime.read_one("SELECT COUNT(*) FROM background_deliveries", ())[0], 0)
         await app.close()
         restarted = (await self.start(self.host(runtime=self.open_runtime()), 1, 1)).application

@@ -8,12 +8,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+import hashlib
 import json
 import math
+from logging import getLogger
 
 from companion_v2.execution.models import QUEUED, TERMINAL, TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import ScopeKind
+from companion_v2.diagnostics.inbound import InboundNoReplyLedger, SUPPRESSED, UNMET
+from companion_v2.model_gateway.failures import ModelFailure
+from .messages import DELIVERY_KIND
+from .media.reply import reply_manifest
 from .busy_gate import deadline_for_deferral, validate_defer_seconds
 from .group_timing import short_input_wait
 from .segmentation import part_gap_seconds
@@ -25,10 +31,20 @@ from .quotes.models import event_images, event_forwards
 from .forwards.models import ForwardDescriptor, fits_forwards
 
 
+logger = getLogger(__name__)
+
+
 ACTIVE = "('collecting', 'generating', 'delivering')"
+STOPPED = ("blocked", "closed")
+_RETAINED_FAILURES = 64
 # Both open reasons extend the same first window: a busy deferral is a debounce
 # that starts later, so a newer message still joins the very same batch.
 COLLECTING_REASONS = ("debounce", "busy_delay")
+
+
+def _elapsed_ms(now, created_at):
+    """Turn duration from the one clock that owns both stamps."""
+    return max(0.0, (now - datetime.fromisoformat(created_at)).total_seconds() * 1000)
 
 
 @dataclass(frozen=True)
@@ -67,6 +83,7 @@ class ConversationFlow:
             raise ValueError("flow must use the original message and delivery owners")
         self.messages, self.delivery, self.policy = messages, delivery, policy
         self.tasks, self.runtime = messages.tasks, messages.runtime
+        self._failures = {}
 
     def row(self, batch_id):
         row = self.runtime.read_one("SELECT * FROM conversation_flows WHERE batch_id = ?", (batch_id,))
@@ -169,24 +186,126 @@ class ConversationFlow:
             connection.execute("""UPDATE conversation_flows SET state = ?, due_at = COALESCE(?, due_at),
                 reason = ? WHERE batch_id = ?""", (state, stamp(due_at) if due_at else None, reason, batch_id))
 
-    def halt(self, batch_id, reason, *, closed=False):
-        """Trusted owner cleanup; only unstarted queue entries can be discarded."""
+    def halt(self, batch_id, reason, *, closed=False, expected=True, part=None, code=None):
+        """Trusted owner cleanup; only unstarted queue entries can be discarded.
+
+        ``expected`` is the reply polarity and travels with the turn: a batch
+        whose reply was genuinely expected and then not produced is recorded as
+        an unmet reply (one line, at the turn's own reference), while a planned
+        cancellation or an internal supersession is resolved as suppressed.
+
+        Repeated halts stay allowed -- another owner may be moving the same turn
+        to its own reason -- but the turn is only ever reported once. ``reason``
+        is the code the flow already uses for this outcome; ``code`` is the most
+        specific code known beside it, and when the caller has none, the stopped
+        worker's own failure is looked up rather than guessed.
+        """
         with self.runtime.transaction():
             require(self.tasks.check_generation())
+            row = self.row(batch_id)
+            previous_state = row["state"]
             self._update(batch_id, state="closed" if closed else "blocked", reason=reason)
+            if previous_state not in STOPPED:
+                logger.warning("[CompanionV2] 对话回复未完成 batch=%s stage=%s reason=%s",
+                               batch_id, previous_state, reason)
             batch = self.messages.batch(batch_id)
             ids = ([batch["generation_task_id"]] if batch["generation_task_id"] else [])
             ids += [r["task_id"] for r in self.runtime.read_all(
                 "SELECT task_id FROM conversation_parts WHERE batch_id = ? AND task_id IS NOT NULL", (batch_id,))]
             for task_id in ids:
                 require(self.tasks.discard_queued(task_id, reason="owner_closed" if closed else "owner_unavailable"))
+        self._resolve(batch_id, reason, expected=expected, part=part, batch=batch,
+                      code=code if code is not None else self._worker_failure(batch_id))
+
+    def _resolve(self, batch_id, reason, *, expected, part=None, code=None, batch=None):
+        """Record the turn's own outcome. A ledger failure never masks a halt."""
+        try:
+            batch = batch or self.messages.batch(batch_id)
+            now = self.tasks.now()
+            if part is None:
+                part = self._last_part(batch_id)
+            InboundNoReplyLedger(self.runtime).emit(
+                expectation=UNMET if expected else SUPPRESSED, stage="flow", turn=batch_id,
+                reason_code=reason, observed_at=now, origin_key=batch["origin_key"],
+                event_ref=hashlib.sha256(batch_id.encode("utf-8")).hexdigest()[:32],
+                part=part, code=code,
+                ms=_elapsed_ms(now, batch["created_at"]))
+        except Exception as error:
+            logger.error("[CompanionV2] 未回复排障记录写入失败 batch=%s error_type=%s",
+                         batch_id, type(error).__name__)
+
+    def _last_part(self, batch_id):
+        """The last part this turn produced, with the state it stopped in."""
+        row = self.runtime.read_one("""SELECT part_id, state FROM conversation_parts
+            WHERE batch_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1""", (batch_id,))
+        return ("%s:%s" % (row["part_id"], row["state"])) if row else None
+
+    def note_failure(self, task_id, code):
+        """Remember why a worker stopped, until its turn reports the outcome.
+
+        The supervisor's generic stop reasons are all a failed worker leaves
+        behind, so the one place that sees the original exception keeps its code
+        bounded by the tasks that are still open.
+        """
+        if not isinstance(code, str) or not code or len(code) > 96:
+            return
+        self._failures.pop(task_id, None)
+        self._failures[task_id] = code
+        while len(self._failures) > _RETAINED_FAILURES:
+            self._failures.pop(next(iter(self._failures)), None)
+
+    def _failed(self, row, reason, *, code=None, part_ref=None):
+        """One generation/delivery failure of an expected reply, with its pointer.
+
+        ``part`` names the part this turn died on and its state, so the reader can
+        tell "generation failed" from "part two never left".
+        """
+        part = self.runtime.read_one("""SELECT part_id, state FROM conversation_parts
+            WHERE batch_id = ? AND part_id = ?""" if part_ref else """SELECT part_id, state FROM conversation_parts
+            WHERE batch_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1""",
+            (row["batch_id"], part_ref) if part_ref else (row["batch_id"],))
+        return self.halt(row["batch_id"], reason, expected=True, code=code,
+                         part=("%s:%s" % (part["part_id"], part["state"])) if part else None)
+
+    def _worker_failure(self, batch_id):
+        """The most specific failure code known for one turn, or ``None``.
+
+        A worker that raised reports only that it stopped. The exception's own
+        code is exact, and the model-call ledger still holds the gateway's
+        classification of a transport failure, which is what the operator needs.
+        """
+        for task_id in self._batch_tasks(batch_id):
+            code = self._failures.pop(task_id, None)
+            if code:
+                return code
+            code = self._model_failure(task_id)
+            if code:
+                return code
+        return None
+
+    def _batch_tasks(self, batch_id):
+        """The tasks this turn owns: its generation, then its parts newest first."""
+        batch = self.messages.batch(batch_id)
+        tasks = ([batch["generation_task_id"]] if batch["generation_task_id"] else [])
+        tasks += [row["task_id"] for row in self.runtime.read_all(
+            "SELECT task_id FROM conversation_parts WHERE batch_id = ? AND task_id IS NOT NULL "
+            "ORDER BY sequence DESC", (batch_id,))]
+        return tuple(tasks)
+
+    def _model_failure(self, task_id):
+        codes = tuple(item.value for item in ModelFailure)
+        row = self.runtime.read_one("""SELECT f.code AS code FROM model_call_failures f
+            JOIN model_calls c ON c.call_id = f.call_id WHERE c.task_id = ? AND f.code IN (%s)
+            ORDER BY f.observed_at DESC, f.rowid DESC LIMIT 1""" % ",".join("?" for _ in codes),
+            (task_id, *codes))
+        return row["code"] if row else None
 
     @outcome
     def cancel(self, context, batch_id):
         with self.runtime.transaction():
             self.row(batch_id)
             require(self.messages.cancel(context, batch_id))
-            self.halt(batch_id, "cancelled", closed=True)
+            self.halt(batch_id, "cancelled", closed=True, expected=False)
             return batch_id
 
     def _heads(self, excluded):
@@ -223,9 +342,11 @@ class ConversationFlow:
                 if error.code in ("supervisor_generation_conflict", "supervisor_fenced"):
                     raise
                 if error.code == "task_queue_full":
+                    # The queue already reports its own capacity; a full queue is
+                    # a bounded wait, not a failed reply.
                     self.defer(batch_id)
                 else:
-                    self.halt(batch_id, error.code)
+                    self.halt(batch_id, error.code, expected=error.code != "message_capacity")
         return tuple(work)
 
     def defer(self, batch_id):
@@ -238,7 +359,7 @@ class ConversationFlow:
         with self.runtime.transaction():
             require(self.tasks.check_generation())
             if result.failure:
-                self.halt(batch_id, result.failure.code)
+                self.halt(batch_id, result.failure.code, expected=True)
             elif result.unwrap().task is None or result.unwrap().task.state in QUEUED:
                 self.defer(batch_id)
             else:
@@ -261,7 +382,7 @@ class ConversationFlow:
         if row["state"] not in ("collecting", "generating", "delivering"):
             return None
         if batch["state"] in ("cancelled", "invalidated"):
-            self.halt(batch_id, batch["state"], closed=True)
+            self.halt(batch_id, batch["state"], closed=True, expected=False)
             return None
         context = TaskContext.restore(json.loads(batch["context_json"]))
         self.messages.authorize(context)
@@ -271,11 +392,28 @@ class ConversationFlow:
         now = self.tasks.now()
         deadline = datetime.fromisoformat(row["deadline_at"])
         if now >= deadline:
-            require(self.messages.cancel(context, batch_id))
+            # The turn ran out of its own budget before any part left. A failed
+            # cancellation still has to be diagnosed as an unmet reply.
+            try:
+                require(self.messages.cancel(context, batch_id))
+            except TaskError as error:
+                self.halt(batch_id, error.code, expected=True)
+                return None
             self.halt(batch_id, "deadline_elapsed", closed=True)
             return None
         if row["state"] == "collecting":
-            task = require(self.messages.seal(context, batch_id, deadline_at=deadline))
+            try:
+                task = require(self.messages.seal(context, batch_id, deadline_at=deadline))
+            except TaskError as error:
+                if error.code != "deadline_elapsed":
+                    raise
+                try:
+                    require(self.messages.cancel(context, batch_id))
+                except TaskError as cancel_error:
+                    self.halt(batch_id, cancel_error.code, expected=True)
+                else:
+                    self.halt(batch_id, "deadline_elapsed", closed=True)
+                return None
             captured = json.loads(self.messages.batch(batch_id)["contributions_json"]).get("reply_settings")
             if captured is not None:
                 policy = replace(ConversationPolicy(**json.loads(row["policy_json"])),
@@ -287,6 +425,13 @@ class ConversationFlow:
         generation = require(self.tasks.read(context, batch["generation_task_id"]))
         if generation.state != "succeeded":
             return self._dispatch(row, context, generation)
+        if batch["presentation_action"] == "silent":
+            if reply_manifest(batch_id, batch["call_id"], (), action="silent") != batch["manifest_hash"]:
+                raise TaskError("message_manifest_changed", "silent reply action changed after generation")
+            self._update(batch_id, state="complete", reason="model_silent")
+            self._resolve(batch_id, "model_silent", expected=False, batch=batch)
+            logger.info("[CompanionV2] 本轮选择沉默 batch=%s", batch_id)
+            return None
         self._update(batch_id, state="delivering")
         parts = self.runtime.read_all("SELECT * FROM conversation_parts WHERE batch_id = ? ORDER BY sequence", (batch_id,))
         captured = json.loads(batch["contributions_json"]).get("reply_settings")
@@ -296,12 +441,17 @@ class ConversationFlow:
         for part in parts:
             if part["state"] == "delivered":
                 if require(self.tasks.read(context, part["task_id"])).state != "succeeded":
-                    raise TaskError("message_delivery_unresolved", "receipt requires reconciliation with a stopped original task")
+                    # Raising keeps this outcome with ``advance``, and
+                    # ``reconcile_delivery`` still owns the resume: it looks for
+                    # exactly this blocked reason and this stopped part.
+                    raise TaskError("message_delivery_unresolved",
+                                    "receipt requires reconciliation with a stopped original task")
                 previous_at = datetime.fromisoformat(part["delivered_at"])
                 previous_text = part["text"]
                 continue
             if part["state"] != "pending":
-                raise TaskError("message_delivery_unresolved", "original dispatch needs an explicit receipt reconciliation")
+                raise TaskError("message_delivery_unresolved",
+                                "original dispatch needs an explicit receipt reconciliation")
             # A group image may not leave before its safety review is decided. The
             # batch keeps its place in the route and is reconsidered on the next
             # bounded poll, while the review runs as its own background task.
@@ -320,13 +470,20 @@ class ConversationFlow:
                        if previous_at and reply_settings else policy.part_gap_seconds)
                 due_at = max(now, previous_at + timedelta(seconds=gap)) if previous_at else now
                 if due_at >= deadline:
-                    raise TaskError("conversation_delivery_deadline", "remaining part spacing exceeds the original deadline")
+                    raise TaskError("conversation_delivery_deadline",
+                                    "remaining part spacing exceeds the original deadline")
                 task = require(self.delivery.queue_next(context, batch_id, deadline_at=deadline, not_before=due_at)).task
             if due_at > now:
                 self._update(batch_id, state="delivering", due_at=due_at, reason="part_spacing")
                 return None
             return self._dispatch(self.row(batch_id), context, task)
         self._update(batch_id, state="complete", reason="confirmed_delivery")
+        participation = getattr(self.messages.tools, "group_participation", None)
+        if participation is not None:
+            participation.log_reply_reason(context, batch_id, stage="delivered")
+        elapsed_ms = round((self.tasks.now() - datetime.fromisoformat(batch["created_at"])).total_seconds() * 1000)
+        logger.info("[CompanionV2] 回复投递已确认 batch=%s parts=%d total_elapsed_ms=%d",
+                    batch_id, sum(part["state"] == "delivered" for part in parts), elapsed_ms)
         return None
 
     @outcome

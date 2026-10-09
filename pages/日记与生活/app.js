@@ -2,8 +2,8 @@
 (() => {
   const $ = id => document.getElementById(id);
   const node = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
-  const names = { planned: "待开始", active: "进行中", paused: "已暂停", completed: "已完成", cancelled: "已取消", deleted: "已删除", written: "正文已保存", succeeded: "成功", failed: "失败", unknown: "结果未知", accepted: "已接纳", uncertain: "结果未知", running: "运行中", new: "尚未启动", stopped: "已停止", draining: "正在停止" };
-  const errors = { dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开本页面。", staging_not_initialized: "请先在插件配置中启用 V2，并加载当前配置。",
+  const names = { planned: "待开始", active: "进行中", paused: "已暂停", completed: "已完成", complete: "已完成", cancelled: "已取消", deleted: "已删除", absent: "尚未书写", written: "正文已保存", succeeded: "成功", failed: "失败", unknown: "结果未知", accepted: "已接纳", uncertain: "结果未知", running: "运行中", new: "尚未启动", stopped: "已停止", draining: "正在停止" };
+  const errors = { dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开本页面。", staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
     host_not_running: "请先启动当前 V2 配置。", life_not_bound: "请先启动当前 V2 配置，以载入原角色。", authorization_revoked: "执行权限已关闭或撤销，请确认生活日程设置。",
     authorization_missing: "请先启用生活日程与执行权限。", life_view_stale: "记录或权限已经变化，请刷新后重新确认。", life_reading_unresolved: "原阅读结果尚未确定，不能重复调用。",
     life_reading_active: "当前片段仍在阅读，请完成或取消后再入睡。", life_sleeping: "角色正在睡眠，请先醒来再阅读。", journal_trigger_unresolved: "原书写仍在进行、结果未知或已经成功，不能重复执行。",
@@ -12,12 +12,23 @@
   let datePages = [null], datePage = 0, activityCursor = null, polling = null;
   const pending = new Map();
   const booleanFields = ["enabled", "diary_enabled", "sleep_enabled", "reading_enabled", "derive_enabled"];
-  const configFields = [...booleanFields, "timezone", "diary_time", "sleep_time", "sleep_timezone", "sleep_minutes"];
+  const configFields = [...booleanFields, "timezone", "diary_time", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes"];
   const date = value => value ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
   const kind = item => item.kind === "dream" ? "梦境" : "日记";
+  const display = () => bridge?.getContext?.()?.display || {};
+  function roleName() {
+    if (display().role_name || state.role_name) return display().role_name || state.role_name;
+    const name = state.role_id;
+    return typeof name === "string" && !/^(?:role[-_:]|staging[-_:]|dashboard:)|^[a-f0-9]{24,}$/i.test(name)
+      ? name : "当前角色";
+  }
+  function localizedError(value) {
+    const code = value?.code || value?.data?.code || value?.response?.data?.code || value?.message;
+    return Object.assign(new Error(errors[code] || "操作未完成，请刷新确认记录状态后重试。"), {code});
+  }
   function unwrap(response) {
-    const wrapped = ["ok", "error"].includes(response?.status) ? response : ["ok", "error"].includes(response?.data?.status) ? response.data : null;
-    if (wrapped?.status === "error") throw new Error(errors[wrapped.data?.code] || wrapped.message || "操作未完成，请刷新确认记录。");
+    const wrapped = ["ok", "error"].includes(response?.status) && response?.data !== undefined ? response : ["ok", "error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
+    if (wrapped?.status === "error") throw localizedError(wrapped);
     // Current AstrBot bridge returns the already-unwrapped data; older bridges return the envelope.
     const data = wrapped ? wrapped.data : response;
     if (!data || typeof data !== "object") throw new Error("未收到执行结果，请刷新确认后重试本次操作。");
@@ -26,7 +37,7 @@
   function notice(text, error = false) { $("notice").textContent = text; $("notice").className = error ? "error" : ""; $("notice").hidden = !text; }
   function controls(value) {
     busy = value;
-    document.querySelectorAll("button").forEach(b => { b.disabled = value; });
+    document.querySelectorAll("button, select").forEach(b => { b.disabled = value; });
     $("close-dialog").disabled = false;
     $("newer").disabled = value || datePage === 0; $("older").disabled = value || !state?.next_date;
     $("more-activities").disabled = value || !state?.next_activity;
@@ -36,8 +47,10 @@
     ["write-diary", "start-sleep"].forEach(id => { $(id).disabled = value || !state?.config.enabled || state?.host_state !== "running"; });
   }
   async function api(method, body) {
-    const response = method === "GET" ? await bridge.apiGet("life", body) : await bridge.apiPost("life/command", body);
-    return unwrap(response);
+    try {
+      const response = method === "GET" ? await bridge.apiGet("life", body) : await bridge.apiPost("life/command", body);
+      return unwrap(response);
+    } catch (error) { throw localizedError(error); }
   }
   async function send(action, args = {}, item = null) {
     if (busy || !state) return;
@@ -101,11 +114,11 @@
       if (!items.length) list.append(node("p", type === "reading" ? "本批暂无阅读片段。" : "本批没有睡眠记录。", "empty"));
       for (const item of items) {
         const card = node("article", undefined, "activity");
-        card.append(node("h3", item.title), node("span", names[item.state] || item.state, "badge"));
+        card.append(node("h3", item.title), node("span", names[item.state] || "状态待核对", "badge"));
         card.append(node("p", `${date(item.started_at)}${item.due_at ? " · 计划醒来 " + date(item.due_at) : ""}`, "muted"));
         if (item.unavailable_reason) card.append(node("p", "原文已不可用，停止后续阅读并隐藏读后感。", "prose"));
         else if (item.reflection) card.append(node("p", item.reflection, "prose"));
-        if (item.task && item.task.state !== "succeeded") card.append(node("p", "阅读执行：" + (names[item.task.state] || item.task.state), "muted"));
+        if (item.task && item.task.state !== "succeeded") card.append(node("p", "阅读执行：" + (names[item.task.state] || "状态待核对"), "muted"));
         const actions = node("div", undefined, "actions");
         if (type === "reading" && ["planned", "paused"].includes(item.state) && !item.unavailable_reason && item.task?.state !== "unknown") actions.append(actionButton(item.state === "paused" ? "重新阅读" : "开始阅读", "read", item, true));
         if (type === "sleep" && item.state === "active") actions.append(actionButton("现在醒来", "wake", item));
@@ -120,7 +133,20 @@
     const list = $("receipt-list"); list.replaceChildren();
     const receipts = [...new Map(state.receipts.map(r => [r.operation_id || r.key, r])).values()].reverse();
     if (!receipts.length) list.append(node("p", "暂无书写执行记录。", "empty"));
-    receipts.forEach(item => { const card = node("article", undefined, "activity"); card.append(node("strong", names[item.state] || item.state), node("p", item.operation_id || item.key, "code")); if (item.code) card.append(node("p", item.code, "muted")); list.append(card); });
+    receipts.forEach((item, index) => {
+      const card = node("article", undefined, "activity");
+      card.append(node("strong", `书写记录 ${index + 1} · ${names[item.state] || "状态待核对"}`));
+      if (item.code) card.append(node("p", errors[item.code] || "本次书写未完成，请核对模型与执行权限后重试。", "muted"));
+      list.append(card);
+    });
+    const failed = receipts.map((item, index) => ({item, index})).filter(({item}) => item.state === "failed" && item.operation_id);
+    for (const id of ["retry-id", "dream-retry"]) {
+      const select = $(id), previous = select.value;
+      select.replaceChildren(new Option(id === "dream-retry" ? "首次记录" : failed.length ? "选择失败的书写" : "暂无已确定失败的书写", ""),
+        ...failed.map(({item, index}) => new Option(`书写记录 ${index + 1} · 失败`, item.operation_id || item.key)));
+      select.value = failed.some(({item}) => (item.operation_id || item.key) === previous) ? previous : "";
+    }
+    $("retry-form").hidden = failed.length === 0;
   }
   function renderSleepPlan() {
     const plan = state.sleep_schedule;
@@ -128,19 +154,19 @@
       $("sleep-scope").textContent = "暂不可用"; $("sleep-executor").textContent = "—";
       $("sleep-next").textContent = "—"; $("sleep-active-wake").textContent = "—"; return;
     }
-    $("sleep-scope").textContent = plan.enabled
-      ? `安装 / ${plan.owner.bot_id} / 角色 ${plan.owner.role_id}` : "未启用 · 安装 / Bot / 角色范围";
-    const executor = plan.executor_window;
+    $("sleep-scope").textContent = plan.enabled ? "当前角色 · 各会话共享" : "未启用";
+    const executorName = plan.executor_is_current ? "当前私聊窗口" : "同一角色的其他私聊窗口";
     $("sleep-executor").textContent = !plan.enabled ? "未安排"
       : plan.executor_state !== "available" ? "暂无有效授权窗口"
-        : `${executor?.label || "有效窗口"}${plan.executor_is_current ? "（本页）" : "（同一角色的另一窗口）"}`;
+        : `${executorName}${plan.executor_is_current ? "（本页）" : ""}`;
     $("sleep-next").textContent = plan.next_sleep_at
       ? `${date(plan.next_sleep_at)} · ${date(plan.next_wake_at)}` : "未安排";
     $("sleep-active-wake").textContent = plan.active_wake_at ? date(plan.active_wake_at) : "当前没有进行中的睡眠";
   }
   function render() {
-    $("role").textContent = state.role_id; $("participant").textContent = state.participant;
-    $("host-state").textContent = names[state.host_state] || state.host_state;
+    $("role").textContent = roleName();
+    $("participant").textContent = display().subject_name || "当前聊天对象";
+    $("host-state").textContent = names[state.host_state] || "状态待核对";
     $("routine-state").textContent = state.config.enabled ? "已启用" : "未启用";
     $("next-routines").textContent = [state.next_diary_at ? "下次日记：" + date(state.next_diary_at) : "", state.next_sleep_at ? "下次入睡：" + date(state.next_sleep_at) : ""].filter(Boolean).join(" · ");
     renderSleepPlan();
@@ -157,7 +183,9 @@
       if (state.running.length || state.activities.some(a => a.state === "active") || state.config.reading_enabled) polling = setTimeout(() => { if (!busy && !document.hidden) load(true); }, 3000);
     } catch (error) {
       state = selected = null;
-      ["journal-list", "journal-detail", "reading-list", "sleep-list", "receipt-list"].forEach(id => $(id).replaceChildren());
+      ["journal-list", "journal-detail", "reading-list", "sleep-list", "receipt-list", "retry-id", "dream-retry"].forEach(id => $(id).replaceChildren());
+      $("retry-form").hidden = true;
+      for (const id of ["role", "participant", "routine-state", "sleep-scope", "sleep-executor", "sleep-next", "sleep-active-wake"]) $(id).textContent = "—";
       $("host-state").textContent = "暂不可用"; $("editor").close(); notice(error.message, true); controls(false);
     }
   }
@@ -180,7 +208,7 @@
     document.querySelectorAll(".tab-panel").forEach(p => { p.hidden = p.id !== tab; }); $("activity-pages").hidden = !["reading", "sleep"].includes(tab);
   }));
   $("config-form").addEventListener("input", () => { dirty = true; });
-  $("config-form").addEventListener("submit", e => { e.preventDefault(); const changes = {}; configFields.forEach(k => { changes[k] = booleanFields.includes(k) ? $(k).checked : k === "sleep_minutes" ? Number($(k).value) : $(k).value; }); send("configure", { changes, edit_token: state.edit_token }); });
+  $("config-form").addEventListener("submit", e => { e.preventDefault(); const changes = {}; configFields.forEach(k => { changes[k] = booleanFields.includes(k) ? $(k).checked : ["sleep_minutes", "sleep_variation_minutes"].includes(k) ? Number($(k).value) : $(k).value; }); send("configure", { changes, edit_token: state.edit_token }); });
   $("editor-form").addEventListener("submit", e => {
     e.preventDefault(); const args = {};
     if (dialogAction === "add_text") { args.title = $("text-title").value; args.text = $("text-body").value; }
@@ -202,7 +230,7 @@
         if (!status.runtime_open) { await call("probe"); await call("initialize"); }
       }
       await call(action); await load();
-    } catch (error) { notice(error.message, true); } finally { controls(false); }
+    } catch (error) { notice(localizedError(error).message, true); } finally { controls(false); }
   }
   $("start-host").addEventListener("click", () => hostControl("start"));
   $("stop-host").addEventListener("click", () => hostControl("stop"));
@@ -214,5 +242,6 @@
   $("more-activities").addEventListener("click", () => { activityCursor = state.next_activity; load(); });
   $("first-activities").addEventListener("click", () => { activityCursor = null; load(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !busy) load(true); });
+  document.addEventListener("companion-mappings-change", () => { if (bridge && !busy) void load(true); });
   (async () => { try { await window.AstrBotPluginPage.ready(); bridge = window.AstrBotPluginPage; await load(); } catch (_) { notice("无法连接管理界面，请从 AstrBot 插件页面重新打开。", true); } })();
 })();

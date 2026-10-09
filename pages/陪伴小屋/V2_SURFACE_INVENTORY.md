@@ -41,7 +41,7 @@
 | `library` | 12 | 0 | 0 | 12 | role | next_task |
 | `expression.learning` | 10 | 0 | 0 | 10 | window | immediate |
 | `role.growth` | 4 | 0 | 0 | 4 | window | immediate |
-| `photo.reference` | 3 | 0 | 0 | 3 | role | next_task |
+| `photo.reference` | 4 | 0 | 0 | 4 | role | next_task |
 | `screen` | 3 | 0 | 0 | 3 | window | next_task |
 | `person` | 2 | 0 | 0 | 2 | installation/role/window | immediate |
 | **合计** | **218** | **92** | **10** | **320** | | |

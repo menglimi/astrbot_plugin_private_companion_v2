@@ -1,34 +1,24 @@
-/* 回复设置适配器：表达页保留预览与诊断，决策页只挂载群聊判断分区。
+/* 回复设置适配器：表达页保留离线预览，决策页只挂载群聊判断分区。
    此前这里自带一整套字段渲染、草稿存储、幂等重试与版本冲突处理；设置部分现在
-   归 workbench-page.js，本文件保留两件工作台不做的事——离线分段预览，以及
-   最近回复诊断的渲染。
+   归 workbench-page.js，本文件保留工作台不做的离线分段预览。
 
    两个视图仍读写同一个 conversation.presentation 配置合同。
    接口为 mount(element, {view}) / unmount()，app.js 负责按页面归属选择视图。
    读取端点走 reply 路由族（{reply_api}），载荷扁平：{settings, edit_token,
-   recent, tts, ...}，不带外层 sections。 */
+   tts, ...}，不带外层 sections。 */
 "use strict";
 window.CompanionReplyPage = (() => {
   const PREFIX = "/astrbot_plugin_private_companion_v2/";
   const GROUP = "conversation.presentation";
 
-  const labels = {collecting: "收集输入", generating: "生成中", delivering: "分段发送中", complete: "已完成",
-    closed: "已关闭", blocked: "已阻断", ready: "待发送", sealed: "已固定", open: "收集输入", cancelled: "已取消",
-    invalidated: "已失效", pending: "待发送", delivered: "已确认发送", unknown: "结果未知", dispatching: "发送中",
-    generated: "生成完成", reserved: "已预留", dispatched: "已请求", not_started: "未发起", discarded: "已丢弃"};
-  const candidateLabels = {planned: "已选为朗读候选", voice_disabled: "语音未开启", trigger_skipped: "本轮未触发语音",
-    segment_skipped: "此段未选中", no_speech: "没有朗读内容", too_long: "超过朗读字数上限", empty_part: "纯媒体段"};
-  const renderLabels = {pending: "尚未完成合成", not_applicable: "无需合成", cooldown: "冷却中，改发图文",
-    unavailable: "TTS 不可用，改发图文", failed: "TTS 合成失败，改发图文", empty: "TTS 未返回音频，改发图文",
-    invalid: "音频组件无效，改发图文", ready: "语音组件已准备"};
-
   /* 枚举选项：注册表里这些字段是 TEXT，约束在 reply_settings.validate 里。
      选项必须与后端常量一致，否则保存会被拒绝。 */
   const choices = {
-      rule_mode: {words: "词列表（默认）", regex: "正则", sentences: "按句子", paragraphs: "按段落"},
+      streaming_mode: {buffered: "收齐后分段发送", incremental: "边生成边分段发送"},
+      rule_mode: {words: "词列表", regex: "正则表达式", sentences: "按句子", paragraphs: "按段落"},
       part_gap_mode: {fixed: "固定", random: "随机", log: "按文本长度"},
     content_cleanup_mode: {words: "按清理词", regex: "按正则"},
-    content_cleanup_scope: {all: "整段回复", trailing: "回复末尾"},
+    content_cleanup_scope: {all: "整段回复", trailing: "仅句尾（每段末尾）"},
     recall_forbidden_scope: {bot_only: "角色自己的回复", group_only: "群聊回复", bot_and_group: "角色回复与群聊"},
     image_position: {after_text: "文字后", before_text: "文字前"},
     voice_trigger_mode: {always: "每轮", request: "按请求", adaptive: "模型择句"},
@@ -38,21 +28,22 @@ window.CompanionReplyPage = (() => {
     voice_position: {before_text: "文字前", after_text: "文字后", after_media: "所有组件后"},
     voice_language: {zh: "中文", ja: "日语", en: "英语"},
     voice_foreign_text_mode: {original: "原文", translation: "中文译文", bilingual: "双语"},
+    file_understanding_formats: {text_only: "纯文本", text_and_documents: "文本与文档"},
   };
 
   const spec = {
     title: "回复表达与投递",
-    note: "按模块编辑；保存后从下一轮生成开始生效，已开始生成的回复保留原配置。",
+    note: "",
     labels: {
-      enabled: "启用分段", streaming: "流式接收模型回复", llm_controlled: "由模型决定边界",
-      rules_enabled: "启用规则补分段", rule_mode: "规则分段方式", threshold: "规则起始字数",
-      min_segment_chars: "最短分段字数", max_segments: "最多消息条数", part_gap_ms: "固定段间隔（毫秒）",
+      enabled: "启用分段", streaming: "启用模型流式传输", streaming_mode: "流式分段发送方式", llm_controlled: "由模型决定边界",
+      rule_mode: "规则分段方式", threshold: "规则分段字数阈值",
+      min_segment_chars: "短段合并参考字数", max_segments: "最多消息条数", part_gap_ms: "固定段间隔（毫秒）",
       part_gap_mode: "分段间隔方式", part_gap_min_ms: "随机间隔下限（毫秒）",
       part_gap_max_ms: "随机间隔上限（毫秒）", part_gap_log_base: "按长度调节强度",
-      image_position: "图片位置", prompt: "分段提示词", split_words: "分段标记列表",
-      match_width_variants: "兼容全角与半角标点", rule_regex: "分句正则",
-      enable_humanized_expression: "启用拟人回复 Prompt",
-      humanized_expression_prompt: "拟人 Prompt 正文",
+      image_position: "图片位置", prompt: "模型分段提示词", split_words: "分段标记词",
+      match_width_variants: "兼容全角与半角标点", rule_regex: "分段正则表达式",
+      enable_humanized_expression: "启用拟人及多样表达 Prompt",
+      humanized_expression_prompt: "拟人及多样表达 Prompt 正文",
       style_prompt: "表达风格提示词",
       content_cleanup_enabled: "启用文字清理",
       content_cleanup_mode: "清理方式", content_cleanup_scope: "清理范围",
@@ -62,6 +53,7 @@ window.CompanionReplyPage = (() => {
       enable_forbidden_word_recall: "启用命中词拦截",
       recall_forbidden_words: "拦截词语列表", recall_forbidden_scope: "拦截范围",
       recall_forbidden_word_case_sensitive: "区分大小写",
+      reply_diagnostic_limit: "近期回复诊断条数",
       group_wakeup_enabled: "启用群聊回应判断",
       group_wakeup_direct_words: "直呼词", group_wakeup_context_words: "上下文关联词",
       group_wakeup_interest_keywords: "兴趣关键词",
@@ -85,15 +77,42 @@ window.CompanionReplyPage = (() => {
       group_wakeup_image_weight: "图片相关性权重",
       group_wakeup_short_text_wait_ms: "短消息合并等待（毫秒）",
       group_wakeup_log_limit: "近期判定记录上限",
-      group_air_guard_enabled: "启用群聊接话节奏参考",
+      group_air_guard_enabled: "启用空气护栏",
       group_air_guard_window_seconds: "接话统计窗口（秒）",
       group_air_guard_max_bot_replies: "窗口内连续回复参考上限",
       group_air_guard_polite_loop_limit: "礼貌收尾参考上限",
       enable_group_injection_guard: "群聊提示注入防护",
       enable_group_privacy_guard: "群聊隐私防护",
       enable_group_reality_promise_guard: "群聊现实承诺防护",
-      enable_context_image_captioning: "为图片补充文字描述",
+      enable_context_image_captioning: "启用上下文图片描述",
       context_image_caption_max_items: "单轮描述图片上限",
+      enable_private_image_self_recognition: "启用当前窗口图片转述增强",
+      image_understanding_private_enabled: "图片理解 · 私聊",
+      image_understanding_group_enabled: "图片理解 · 群聊",
+      enable_private_image_vision_cache: "复用重复图片转述",
+      private_image_vision_cache_max_items: "缓存条目上限",
+      private_image_self_recognition_hint: "角色自我识别线索",
+      private_image_vision_custom_prompt: "转述提示词补充",
+      private_image_vision_max_chars: "单轮转述长度上限",
+      private_image_vision_wait_seconds: "等待识图时间（秒）",
+      private_image_provider_failure_cooldown_seconds: "识图失败冷却（秒）",
+      video_understanding_enabled: "启用视频理解",
+      video_understanding_private_enabled: "视频理解 · 私聊",
+      video_understanding_group_enabled: "视频理解 · 群聊",
+      video_understanding_max_chars: "转述长度上限",
+      video_understanding_wait_seconds: "等待转述时间（秒）",
+      video_self_recognition_hint: "视频中的角色自我识别线索",
+      video_understanding_prompt: "转述提示词补充",
+      file_understanding_enabled: "启用文件理解",
+      file_understanding_private_enabled: "文件理解 · 私聊",
+      file_understanding_group_enabled: "文件理解 · 群聊",
+      file_understanding_formats: "可读取文件类型",
+      file_understanding_format_groups: "可读取文件格式",
+      file_understanding_max_size_mb: "单个文件上限（MB）",
+      file_understanding_max_chars: "本轮正文上限",
+      file_understanding_timeout_seconds: "文件读取超时（秒）",
+      file_understanding_prompt: "文件阅读偏好",
+      forward_message_adaptation_enabled: "合并转发消息改写",
       component_order: "消息组件顺序",
       reply_quote_enabled: "引用触发消息", reply_quote_group_enabled: "群聊中引用",
       reply_quote_first_part_only: "只在第一段引用", reply_quote_skip_chars: "短回复字数门槛",
@@ -109,24 +128,28 @@ window.CompanionReplyPage = (() => {
     },
     helps: {
       enabled: "让一轮回复自然地分成多条消息。",
-      streaming: "完整接收并校验后，再依次发送分段。",
+      streaming: "按片段接收模型响应。",
+      streaming_mode: "收齐后发送，或按分段词与正则边生成边发送；语音和图片组合回复收齐后发送。",
       llm_controlled: "使用独立一行的分段标记，普通换行不会自动拆分。",
-      rules_enabled: "对较长正文按句子或段落拆分，保护代码和 Markdown。",
+      threshold: "规则分段只处理总字数不超过此值的回复；模型明确标出的边界仍会保留。规则补充分段始终开启。",
+      min_segment_chars: "规则拆出的短片段会并入相邻消息；“嗯”“哈哈”等短回应也会合并。",
+      max_segments: "模型边界与规则分段共用此上限；超出时合并相邻消息并保留全部正文。",
       part_gap_mode: "固定间隔沿用当前数值；随机间隔在范围内稳定抽取；按长度调节会让较长段落多停留一会儿。",
       part_gap_ms: "固定模式下每条分段之间等待的时间；0 表示不等待。",
       part_gap_min_ms: "随机模式的最短等待时间。",
       part_gap_max_ms: "随机模式的最长等待时间。",
       part_gap_log_base: "按长度调节的曲线基数；数值越接近 1，长段与短段的间隔差异越明显。",
-      prompt: "最多 4000 字；可用 {{split_marker}} 插入标记。优先用提示词表达分段偏好，不改变事实、引用与来源原意。",
-      rule_mode: "规则补分段的匹配方式；词列表为默认方式。",
-      split_words: "默认词表包含常用标点和换行；命中标记保留在上一段。",
-      match_width_variants: "开启后会把常见全角、半角标点视为同一分句标记。",
-      rule_regex: "仅在“自定义正则”时使用，最多 512 字；请核对表达式语法。",
+      prompt: "模型自主决定边界时使用。最多 4000 字；可用 {{split_marker}} 表示边界。预览不调用模型，可用“模型边界示例”检查标记后的最终分段。",
+      rule_mode: "选择分段词、分段正则或句子/段落规则；规则补充分段始终生效。",
+      split_words: "输入标点或其他分隔词，回车添加；需要按换行切分时使用快捷项。",
+      match_width_variants: "词列表模式下，把常见全角、半角标点视为同一分段标记。",
+      rule_regex: "分段方式选择“正则表达式”时使用；支持服务端正则语法，最多 512 字。",
       style_prompt: "补充此对象的日常表达偏好；留空时不增加额外风格要求。",
-      enable_humanized_expression: "开启后向本轮系统提示注入一份日常说话方式要求：更口语、更短、少服务腔。只影响措辞，不改事实与授权。",
-      humanized_expression_prompt: "最多 4000 字。留空时使用内置默认文本；开关关闭时整段不注入。本对象与群聊各自保存。",
-      content_cleanup_enabled: "默认关闭。需要调整说法时优先补充上方提示词；这里仅在发送前按明确规则整理文字。",
-      content_cleanup_words: "按所选方式移除命中的词条；可单独添加空格、换行或制表符。",
+      enable_humanized_expression: "开启后注入日常说话方式与多样表达提示。合适时可只发已提供的表情图、在群聊中安静旁听或只用已启用的语音；戳一戳只在当前流程开放时考虑。只作自然选择，不改事实与授权。",
+      humanized_expression_prompt: "最多 4000 字。留空使用内置默认文本；自定义内容会替换默认文本。开关关闭时不注入。本对象与群聊各自保存。",
+      content_cleanup_enabled: "关闭时不执行清理。开启后在发送前按所选方式整理文字；需要调整说法时优先补充上方提示词。",
+      content_cleanup_scope: "默认只清理每段消息末尾的词条，保留句中标点；选择整段回复时才会清理整段的匹配项。",
+      content_cleanup_words: "按所选范围逐字清理词条。默认在每段句尾清理“。”和“，”，保留句中的标点；可添加空格、换行或制表符。",
       content_cleanup_rule: "仅在清理方式选为正则时使用；最多 512 字。",
       content_replacements: "逐项填写原词和替换文本。",
       framework_error_guard_enabled: "清理插件与框架内部标记，避免把内部格式带入回复。",
@@ -134,6 +157,8 @@ window.CompanionReplyPage = (() => {
       recall_forbidden_words: "命中后会在发送前拦截整条回复。",
       recall_forbidden_scope: "可只检查私聊、只检查群聊，或两者都检查。",
       recall_forbidden_word_case_sensitive: "关闭时不区分英文字母大小写。",
+      reply_diagnostic_limit: "显示当前窗口最近 10–300 轮回复诊断；每轮注明任务类型和有效输入条数。",
+      forward_message_adaptation_enabled: "关闭后不展开合并转发中的节点内容、媒体和阅读提示。",
       component_order: "用上下箭头调整顺序；留空时使用平台与回复组件的自然顺序。",
       reply_quote_enabled: "仅引用本轮已固定的触发消息；不会搜索或引用其他会话。",
       reply_quote_group_enabled: "关闭后只影响群聊，不改变私聊引用设置。",
@@ -142,6 +167,7 @@ window.CompanionReplyPage = (() => {
       reply_mention_speaker_enabled: "只在群聊中 @ 本轮发言者。",
       voice_trigger_mode: "决定这一轮要不要朗读，以及由谁挑句子。",
       voice_delivery_mode: "仅语音只在语音完整覆盖文字时才会替代文字，否则仍发文字。",
+      voice_language: "明确要求用英语、日语或中文回复时，只覆盖本轮语音语种与对应 TTS Provider；配置页保存值不会改变。翻译请求不会被当成语种切换。",
       voice_probability: "按百分比编辑，后端按 0–1 的小数保存。",
       voice_trigger_keywords: "留空使用默认关键词。",
       voice_extra_prompt: "只补充朗读语气，不改变朗读内容。",
@@ -178,75 +204,129 @@ window.CompanionReplyPage = (() => {
       enable_group_reality_promise_guard: "避免把无法确认的现实行动说成已经完成或必定会做。",
       enable_context_image_captioning: "开启后，为本轮收到的图片生成文字材料，供后续理解使用。",
       context_image_caption_max_items: "每轮最多补充描述的图片数量；0 表示不处理图片。",
+      enable_private_image_self_recognition: "在当前选中的私聊或群聊窗口启用图片转述增强。回复模型与识图模型一致时，增强提示会直接交给主模型；原图仍是主要依据。",
+      image_understanding_private_enabled: "角色级权限，适用于该角色绑定的所有私聊窗口。关闭后不做额外视觉转述或历史图片摘要；本轮原图仍由主回复模型处理。",
+      image_understanding_group_enabled: "角色级权限，适用于该角色绑定的所有群聊窗口。关闭后不做额外视觉转述或历史图片摘要；本轮原图仍由主回复模型处理。",
+      enable_private_image_vision_cache: "相同图片与提示词会复用当前运行进程中的描述，缓存不会写入长期记忆；设为关闭后每轮重新识图。",
+      private_image_vision_cache_max_items: "运行期最多保留的描述数量；设为 0 时不保留条目。",
+      private_image_self_recognition_hint: "最多 1200 字，填写角色的头像、昵称、签名、水印或二创别名等线索；角色外貌优先使用已登记的人格资料。只把线索作为可能匹配，不确认画中人或发送者身份，也不要填写用户资料。",
+      private_image_vision_custom_prompt: "最多 4000 字，只补充图像描述角度；自我识别线索请填写上方专用项。",
+      private_image_vision_max_chars: "限制加入本轮上下文的转述长度，范围 120–4000 字。",
+      private_image_vision_wait_seconds: "转述最多等待时间，范围 1–30 秒；超时后回复继续使用原图。",
+      private_image_provider_failure_cooldown_seconds: "相同图片识图失败后暂缓重试，范围 0–3600 秒；0 表示不冷却。",
+      video_understanding_enabled: "在当前选中的私聊或群聊窗口启用原生视频理解；主回复与视频模型一致且支持视频输入时，直接读取原视频。",
+      video_understanding_private_enabled: "角色级权限，适用于该角色绑定的所有私聊窗口。关闭后不会把私聊视频交给视频理解模型。",
+      video_understanding_group_enabled: "角色级权限，适用于该角色绑定的所有群聊窗口。关闭后不会把群聊视频交给视频理解模型。",
+      video_understanding_max_chars: "限制加入主回复上下文的原生视频转述长度。",
+      video_understanding_wait_seconds: "等待原生视频模型的最长时间；超时后主回复继续并标明视频未读。",
+      video_self_recognition_hint: "最多 1200 字，填写角色的头像、昵称、签名、水印或二创别名等线索；只报告可见线索的可能匹配，不确认画中人或发送者身份，也不要填写用户资料。",
+      video_understanding_prompt: "只补充视频描述角度；自我识别线索请填写上方专用项。",
+      file_understanding_enabled: "开启后读取当前窗口允许格式的正文；附件正文不会写入长期存储。",
+      file_understanding_private_enabled: "角色级权限，适用于该角色绑定的所有私聊窗口。关闭后不读取私聊附件正文。",
+      file_understanding_group_enabled: "角色级权限，适用于该角色绑定的所有群聊窗口。关闭后不读取群聊附件正文。",
+      file_understanding_formats: "旧版兼容项；请使用下方格式类别多选。",
+      file_understanding_format_groups: "可多选。文本包括 .txt、.md、.csv、.json、.log、.py、.js、.ts、.yaml、.yml、.xml、.html、.ini、.toml、.sql；另支持 PDF、DOCX、XLSX、PPTX 的文字提取。扫描件不做 OCR。",
+      file_understanding_max_size_mb: "超过大小限制的文件会标记为未读取。",
+      file_understanding_max_chars: "所有附件共用本轮正文预算；超出部分会标记为部分正文。",
+      file_understanding_timeout_seconds: "超时后继续回复，并注明文件正文未能提取。",
+      file_understanding_prompt: "只补充阅读关注点，不改变文件来源、身份或授权边界。",
     },
     /* 段落只影响阅读顺序：整张卡共用一个编辑令牌、一次保存。 */
     sections: [
-      {id: "segment", title: "分段回复", help: "控制一轮回复的拆分方式与提示词",
-       fields: ["enabled", "streaming", "llm_controlled", "rules_enabled", "rule_mode", "split_words",
-                "match_width_variants", "rule_regex", "threshold", "min_segment_chars", "max_segments", "prompt"]},
-      {id: "style", title: "表达语气", help: "风格提示词优先于确定性的文字替换",
+      {id: "segment", title: "分段回复", help: "",
+       fields: ["enabled", "streaming", "streaming_mode", "llm_controlled", "rule_mode", "split_words",
+                "match_width_variants", "rule_regex", "threshold", "min_segment_chars", "max_segments", "prompt",
+                "part_gap_mode", "part_gap_ms", "part_gap_min_ms", "part_gap_max_ms", "part_gap_log_base"]},
+      {id: "style", title: "说话方式与表达形式", help: "",
        fields: ["style_prompt", "enable_humanized_expression", "humanized_expression_prompt"]},
-      {id: "cleanup", title: "文字整理", help: "默认关闭；仅在明确需要时使用清理或替换规则",
+      {id: "cleanup", title: "文字整理", help: "",
        fields: ["content_cleanup_enabled", "content_cleanup_mode", "content_cleanup_scope",
                 "content_cleanup_rule", "content_cleanup_words", "content_replacement_enabled",
                 "content_replacements"]},
-      {id: "wakeup", title: "群聊回应判断", help: "直呼、提问、兴趣话题与图片相关性只影响群聊参与判断",
+      {id: "wakeup_direct", title: "明确参与信号", help: "",
        fields: ["group_wakeup_enabled", "group_wakeup_direct_words", "group_wakeup_context_words",
-                "group_wakeup_interest_keywords", "group_wakeup_question_enabled",
-                "group_wakeup_question_threshold", "group_wakeup_bot_name_enabled", "group_wakeup_bot_name",
-                "group_wakeup_primary_member_ids", "group_wakeup_owner_direct_words",
-                "group_wakeup_interest_probability", "group_wakeup_image_enabled", "group_wakeup_image_weight"]},
-      {id: "wakeup_timing", title: "群聊参与节奏", help: "冷群、冷却、疲劳与诊断记录参数",
+                "group_wakeup_question_enabled", "group_wakeup_question_threshold"]},
+      {id: "wakeup_interest", title: "兴趣与概率参与", help: "",
+       fields: ["group_wakeup_interest_keywords", "group_wakeup_interest_probability",
+                "group_wakeup_image_enabled", "group_wakeup_image_weight"]},
+      {id: "wakeup_members", title: "直呼与成员", help: "",
+       fields: ["group_wakeup_bot_name_enabled", "group_wakeup_bot_name",
+                "group_wakeup_primary_member_ids", "group_wakeup_owner_direct_words"]},
+      {id: "wakeup_cold_group", title: "冷场与等待", help: "",
        fields: ["group_wakeup_cold_group_enabled", "group_wakeup_cold_group_threshold",
-                "group_wakeup_cold_group_idle_minutes", "group_wakeup_cooldown_seconds",
-                "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes",
-                "group_wakeup_generated_keyword_limit", "group_wakeup_topic_interest_max_boost",
-                "group_wakeup_debounce_pending_penalty", "group_wakeup_short_text_wait_ms",
+                "group_wakeup_cold_group_idle_minutes", "group_wakeup_short_text_wait_ms"]},
+      {id: "wakeup_fatigue", title: "疲劳与冷却", help: "",
+       fields: ["group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes",
+                "group_wakeup_cooldown_seconds", "group_wakeup_generated_keyword_limit",
+                "group_wakeup_topic_interest_max_boost", "group_wakeup_debounce_pending_penalty",
                 "group_wakeup_log_limit"]},
-      {id: "group_safety", title: "群聊安全与接话边界", help: "群安全护栏与接话密度参考值",
+      {id: "group_air_guard", title: "空气护栏 · 挡说太多", help: "",
        fields: ["group_air_guard_enabled", "group_air_guard_window_seconds", "group_air_guard_max_bot_replies",
-                "group_air_guard_polite_loop_limit", "enable_group_injection_guard",
-                "enable_group_privacy_guard", "enable_group_reality_promise_guard"]},
-      {id: "context_image", title: "图片上下文", help: "控制收到的群聊图片是否补充文字描述",
+                "group_air_guard_polite_loop_limit"]},
+      {id: "group_content_safety", title: "内容护栏 · 挡说错话", help: "",
+       fields: ["enable_group_injection_guard", "enable_group_privacy_guard",
+                "enable_group_reality_promise_guard"]},
+      {id: "media_permissions", title: "角色级理解许可", help: "",
+       fields: ["image_understanding_private_enabled", "image_understanding_group_enabled",
+                "video_understanding_private_enabled", "video_understanding_group_enabled",
+                "file_understanding_private_enabled", "file_understanding_group_enabled"]},
+      {id: "context_image", title: "上下文图片描述", help: "",
        fields: ["enable_context_image_captioning", "context_image_caption_max_items"]},
-      {id: "voice", title: "语音与朗读", help: "语种、触发方式、语音扩展与朗读偏好",
+      {id: "image_narration", title: "图片视觉转述", help: "",
+       fields: ["enable_private_image_self_recognition", "enable_private_image_vision_cache",
+                "private_image_vision_cache_max_items", "private_image_self_recognition_hint",
+                "private_image_vision_custom_prompt",
+                "private_image_vision_max_chars", "private_image_vision_wait_seconds",
+                "private_image_provider_failure_cooldown_seconds"]},
+      {id: "video_narration", title: "视频理解", help: "",
+       fields: ["video_understanding_enabled", "video_understanding_max_chars",
+                "video_understanding_wait_seconds", "video_self_recognition_hint",
+                "video_understanding_prompt"]},
+      {id: "file_understanding", title: "文件理解", help: "",
+       fields: ["file_understanding_enabled", "file_understanding_format_groups", "file_understanding_max_size_mb",
+                "file_understanding_max_chars", "file_understanding_timeout_seconds", "file_understanding_prompt"]},
+      {id: "forwards", title: "合并转发理解", help: "",
+       fields: ["forward_message_adaptation_enabled"]},
+      {id: "voice", title: "语音与朗读", help: "",
        fields: ["voice_enabled", "voice_trigger_mode", "voice_generation_mode", "voice_segment_mode",
                 "voice_delivery_mode", "voice_language", "voice_foreign_text_mode",
                 "voice_provider_id", "voice_probability", "voice_cooldown_seconds",
                 "voice_max_speech_chars", "voice_timeout_seconds", "voice_zh_provider_id",
-                "voice_ja_provider_id", "voice_en_provider_id", "voice_trigger_keywords",
+                "voice_ja_provider_id", "voice_en_provider_id", "voice_trigger_keywords", "voice_position",
                 "voice_extra_prompt"]},
-      {id: "components", title: "引用与消息组件", help: "引用范围、@ 发言者，以及文字、图片和语音的位置",
+      {id: "components", title: "引用与消息组件", help: "",
        fields: ["component_order", "reply_quote_enabled", "reply_quote_group_enabled",
-                "reply_quote_first_part_only", "reply_quote_skip_chars", "reply_mention_speaker_enabled",
-                "image_position", "voice_position"]},
-      {id: "checks", title: "发送前检查", help: "框架标记清理与命中词撤回；措辞调整优先使用提示词",
+                 "reply_quote_first_part_only", "reply_quote_skip_chars", "reply_mention_speaker_enabled",
+                 "image_position"]},
+      {id: "checks", title: "发送前检查", help: "",
        fields: ["framework_error_guard_enabled", "enable_forbidden_word_recall", "recall_forbidden_words",
-                "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"]},
-      {id: "timing", title: "消息节奏", help: "分段之间的等待时间",
-       fields: ["part_gap_mode", "part_gap_ms", "part_gap_min_ms", "part_gap_max_ms", "part_gap_log_base"]},
+                "recall_forbidden_scope", "recall_forbidden_word_case_sensitive", "reply_diagnostic_limit"]},
     ],
-    segmentedChoices: ["rule_mode", "part_gap_mode"],
+    segmentedChoices: ["rule_mode", "part_gap_mode", "streaming_mode"],
     inputs: {
       split_words: "word-list", content_cleanup_words: "word-list", recall_forbidden_words: "word-list",
       content_replacements: "replacement-list", component_order: "order-list",
       group_wakeup_direct_words: "word-list", group_wakeup_context_words: "word-list",
       group_wakeup_interest_keywords: "word-list", group_wakeup_primary_member_ids: "word-list",
       group_wakeup_owner_direct_words: "word-list",
+      file_understanding_format_groups: "word-list",
     },
     visibility: {
-      split_words: {rules_enabled: true, rule_mode: "words"},
-      match_width_variants: {rules_enabled: true, rule_mode: "words"},
-      rule_regex: {rules_enabled: true, rule_mode: "regex"},
-      threshold: {rules_enabled: true}, min_segment_chars: {rules_enabled: true},
-      max_segments: {rules_enabled: true},
+      streaming_mode: {streaming: true},
+      prompt: {llm_controlled: true},
+      split_words: {rule_mode: "words"},
+      match_width_variants: {rule_mode: "words"},
+      rule_regex: {rule_mode: "regex"},
+      content_cleanup_rule: {content_cleanup_mode: "regex"},
+      content_cleanup_words: {content_cleanup_mode: "words"},
       part_gap_ms: {part_gap_mode: "fixed"},
       part_gap_min_ms: {part_gap_mode: "random"},
       part_gap_max_ms: {part_gap_mode: "random"},
       part_gap_log_base: {part_gap_mode: "log"},
     },
     listFields: {
-      split_words: {maxItems: 80, maxLength: 40, unique: "exact", specials: ["newline"]},
+      split_words: {maxItems: 80, maxLength: 40, unique: "exact", trim: true,
+        specials: ["newline"], quickAdd: ["。", "！", "？", "…"]},
       content_cleanup_words: {maxItems: 80, maxLength: 200, specials: ["space", "newline", "tab"]},
       recall_forbidden_words: {maxItems: 80, maxLength: 200},
       group_wakeup_direct_words: {maxItems: 24, maxLength: 40, unique: "casefold", trim: true},
@@ -254,14 +334,34 @@ window.CompanionReplyPage = (() => {
       group_wakeup_interest_keywords: {maxItems: 24, maxLength: 40, unique: "casefold", trim: true},
       group_wakeup_primary_member_ids: {maxItems: 16, maxLength: 20, unique: "exact", numericIds: true, trim: true},
       group_wakeup_owner_direct_words: {maxItems: 24, maxLength: 40, unique: "casefold", trim: true},
+      file_understanding_format_groups: {minItems: 1, maxItems: 5, maxLength: 24, unique: "exact", trim: true,
+        quickAddLabel: "支持格式",
+        quickAdd: ["文本", "PDF", "Word（DOCX）", "Excel（XLSX）", "PowerPoint（PPTX）"]},
       content_replacements: {maxItems: 80, fromMaxLength: 200, toMaxLength: 500},
     },
     rows: {prompt: 4, style_prompt: 5, humanized_expression_prompt: 6,
       rule_regex: 3, content_cleanup_rule: 3, content_replacements: 4, component_order: 3,
-      voice_trigger_keywords: 2, voice_extra_prompt: 3},
+      voice_trigger_keywords: 2, voice_extra_prompt: 3,
+      private_image_self_recognition_hint: 3, video_self_recognition_hint: 3},
   };
-  const decisionSectionIds = new Set(["wakeup", "wakeup_timing", "group_safety"]);
-  const perceptionSectionIds = new Set(["context_image"]);
+  const decisionSectionIds = new Set(["wakeup_direct", "wakeup_interest", "wakeup_members",
+    "wakeup_cold_group", "wakeup_fatigue", "group_air_guard", "group_content_safety"]);
+  const decisionViewSections = {
+    response: ["wakeup_direct", "wakeup_interest", "wakeup_members"],
+    tempo: ["wakeup_cold_group", "wakeup_fatigue"],
+    safety: ["group_air_guard", "group_content_safety"],
+  };
+  const decisionSectionViews = Object.fromEntries(Object.entries(decisionViewSections)
+    .flatMap(([view, sections]) => sections.map(section => [section, view])));
+  const perceptionSectionIds = new Set(["media_permissions", "context_image", "image_narration",
+    "video_narration", "file_understanding", "forwards"]);
+  const perceptionModuleSections = {
+    overview: ["media_permissions"],
+    image: ["context_image", "image_narration"],
+    video: ["video_narration"],
+    file: ["file_understanding"],
+    forwards: ["forwards"],
+  };
   function specFor(view) {
     const sections = spec.sections.filter(section => {
       if (view === "decision") return decisionSectionIds.has(section.id);
@@ -269,28 +369,30 @@ window.CompanionReplyPage = (() => {
       return !decisionSectionIds.has(section.id) && !perceptionSectionIds.has(section.id);
     });
     const title = view === "decision" ? "群聊回应决策"
-      : view === "perception" ? "图片上下文理解" : spec.title;
+      : view === "perception" ? "图片、视频与文件理解" : spec.title;
     return {...spec,
       title,
       note: view === "decision"
-        ? "这些设置决定群聊中何时回应、参与节奏与安全边界；保存后用于之后开始的判断。"
+        ? ""
         : view === "perception"
-          ? "控制群聊图片是否补充文字描述，作为本轮理解材料。"
+          ? ""
           : spec.note,
+      helps: view === "perception"
+        ? {...spec.helps, ...Object.fromEntries(sections.flatMap(section => section.fields).map(field => [field, ""]))}
+        : spec.helps,
       sections,
       order: sections.flatMap(section => section.fields),
     };
   }
 
-  /* 后端把机器码放在信封的 message 上（页面桥只转发 message），所以取码要同时
-     看 data.code 与 message；reason 里是可直接展示的原因句，遇到人话就原样保留。 */
+  /* The bridge may carry the error code in either code or message. */
   const errors = {
     reply_configuration_invalid: "请核对参数范围和提示词长度。",
     reply_preview_invalid: "请填写 1–65536 字的有效正文。",
     reply_request_invalid: "请求格式有误，请刷新后核对。",
     reply_images_changed: "图片与当前草稿不再一致，请刷新后重新预览。",
-    staging_not_initialized: "请先在账号与会话中加载 V2 运行实例，再回到本页。",
-    staging_host_terminated: "V2 宿主已停止，请重新打开插件页面。",
+    staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
+    staging_host_terminated: "插件已停止，请重新打开插件页面。",
     dashboard_identity_required: "请从已登录的 AstrBot 管理页面打开陪伴小屋。",
     core_access_required: "当前管理账号没有陪伴小屋的查看权限。",
     recall_request_invalid: "撤回请求格式有误，请刷新后重试。",
@@ -299,34 +401,101 @@ window.CompanionReplyPage = (() => {
   };
   const isCode = value => typeof value === "string" && /^[a-z][a-z0-9_]{2,60}$/.test(value);
   const localized = (problem, fallback) => errors[problem?.code]
-    || (isCode(problem?.message) ? errors[problem.message] : problem?.message)
+    || errors[problem?.message]
     || fallback;
-
   const e = v => String(v ?? "").replace(/[&<>"']/g, c =>
     ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+  const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
   const error = (code, confirmed = false) => Object.assign(new Error(code), {code, confirmed});
   const imageLabel = v => (v === "before_text" ? "图片在文字前" : "图片在文字后");
   const choiceText = (name, value) => choices[name]?.[value] || value;
 
-  const sample = "刚刚看到一片很好看的云。\n<<PRIVATE_COMPANION_SPLIT>>\n想慢慢讲给你听。";
+  const examples = {
+    simple: "我刚才在窗边看了一会儿雨，玻璃上都是细细的水线。\n你之前说今天会很忙，所以我来轻轻报个到。",
+    complex: "刚看到一段关于新工具的介绍，里面提到“整理资料。对照来源。再写结论”几个步骤。\n链接和标点之间不要误拆：https://example.com/notes?id=42\n还有（括号里的句号。和补充说明。都应该留在一起），我晚点再整理成几句自己的想法。",
+    marker: "我刚才整理了一下今天的安排。\n<<PRIVATE_COMPANION_SPLIT>>\n有一件小事想先和你说。\n<<PRIVATE_COMPANION_SPLIT>>\n剩下的我们可以慢慢聊。",
+  };
 
+  const expressionModuleSections = {
+    "expression-text": ["segment", "style", "cleanup"],
+    "expression-voice": ["voice"],
+    "expression-platform": ["components", "checks"],
+  };
+  const expressionModuleDefaults = {
+    "expression-text": "segment",
+    "expression-voice": "voice",
+    "expression-platform": "components",
+  };
   let root = null, instance = null, version = 0, route = null, activeSections = spec.sections;
-  const state = {example: sample, imageCount: 0, preview: null, status: null,
+  let activeDecisionView = "overview";
+  let previewTimer = null, previewTicket = 0;
+  const state = {example: examples.simple, examplePreset: "simple", imageCount: 0, preview: null, previewError: "",
+    previewConfigOpen: false, previewSession: "private", previewProtection: true,
+    previewPositions: {voice: "request", image: "last", mention: "first", reaction: "first", media: "single"},
     busy: false, loading: false, denied: false, notice: "", bad: false};
 
   const live = ticket => ticket === version && root?.isConnected;
   const anchor = name => root?.querySelector(`[data-reply-part="${name}"]`);
 
-  /* 设置卡片的挂载点，以及它下方的预览与诊断。 */
+  /* 设置卡片的挂载点，以及它下方的离线预览。 */
   const parts = () => ({
     settings: root?.querySelector('[data-reply-part="settings"]'),
     preview: root?.querySelector('[data-reply-part="preview"]'),
     diagnostics: root?.querySelector('[data-reply-part="diagnostics"]'),
   });
 
+  function renderDiagnostics() {
+    const host = parts().diagnostics;
+    if (!host) return;
+    const recent = Array.isArray(state.status?.recent) ? state.status.recent : [];
+    const stateLabels = {complete: "已完成", blocked: "受阻", closed: "已关闭", ready: "待投递",
+      sealed: "已封存", collecting: "收集中", generating: "生成中", delivering: "投递中"};
+    const responseLabels = {no_reply: "未发送", image_only: "仅图片", text_or_mixed: "文字或混合内容"};
+    const parseLabels = {not_received: "未收到完整响应", raw_observed: "已收到原始响应",
+      native_parsed: "宿主已解析", native_rejected: "宿主解析失败", stream_rejected: "流式校验失败",
+      contract_rejected: "回复格式校验失败", validated: "回复已通过校验", tools: "工具请求已通过校验",
+      captured: "已交给记忆解析", refusal: "模型拒绝"};
+    const shapeLabels = {empty: "空文本", text: "文本", json_object: "JSON 对象", json_array: "JSON 数组", json_scalar: "JSON 值"};
+    const textSummary = (label, value) => value && typeof value === "object"
+      ? `<span>${label} ${Number(value.chars) || 0} 字 · ${e(shapeLabels[value.shape] || "类型未知")}`
+        + `${value.has_internal_markers ? " · 含标签样式标记" : ""}</span>`
+      : `<span>${label}未取得文本</span>`;
+    const actionList = values => Array.isArray(values) && values.length
+      ? values.map(value => e(typeof value === "string" ? value : value?.action || "未知工具")).join("、") : "无";
+    const html = recent.length ? recent.map(item => {
+      const rounds = Array.isArray(item.rounds) ? item.rounds : [];
+      const materials = Array.isArray(item.injected_materials) ? item.injected_materials : [];
+      const tools = Array.isArray(item.tool_calls) ? item.tool_calls : [];
+      const filtered = Array.isArray(item.filtered_tools) ? item.filtered_tools : [];
+      const failures = (Array.isArray(item.calls) ? item.calls : []).filter(call => call.failure_code);
+      const responses = (Array.isArray(item.calls) ? item.calls : []).filter(call => call.response_diagnostics);
+      const when = item.created_at ? e(String(item.created_at).replace("T", " ").slice(0, 19)) : "时间未知";
+      return `<details class="reply-record"><summary><span>${e(stateLabels[item.state] || "状态未知")}</span>`
+        + `<span>${e(responseLabels[item.response_type] || "回应类型未知")}</span><time>${when}</time></summary>`
+        + `<p>任务 ${e(item.turn_type || "conversation.reply")} · 有效输入 ${Number(item.current_inputs) || 0} 条 · 轮次 ${rounds.length} · 群历史 ${Number(item.group_history_items) || 0} 条 · 注入材料 ${materials.length} 项</p>`
+        + `<p>提供工具：${actionList(item.offered_tools)}</p>`
+        + (filtered.length ? `<p>未提供：${filtered.map(tool => `${e(tool.action || "未知工具")} · ${e(tool.reason || "原因未知")}`).join("；")}</p>` : "")
+        + (rounds.length ? `<ul>${rounds.map(round => `<li>第 ${Number(round.round_no) + 1} 轮 · ${e(round.state || "状态未知")} · 请求 ${actionList(round.tool_actions)}</li>`).join("")}</ul>` : "")
+        + (tools.length ? `<ul>${tools.map(tool => `<li>${e(tool.action || "未知工具")} · ${e(tool.state || "状态未知")} · ${e(tool.effect || "效果未知")}</li>`).join("")}</ul>` : "")
+        + (materials.length ? `<p>材料：${materials.map(item => `${e(item.owner || "未知来源")} / ${e(item.purpose || "未分类")} · ${e(item.state || "状态未知")}`).join("；")}</p>` : "")
+        + (failures.length ? `<p>模型失败分类：${failures.map(call => e(call.failure_code)).join("、")}</p>` : "")
+        + (responses.length ? `<ul>${responses.map(call => {
+          const diagnostic = call.response_diagnostics;
+          const hashes = ["raw", "parsed", "visible"].map((name, index) => diagnostic[name]?.sha256
+            ? `${["原始", "宿主解析", "待呈现"][index]} ${e(diagnostic[name].sha256)}` : "").filter(Boolean);
+          return `<li>第 ${Math.floor((Number(call.position) || 0) / 2) + 1} 轮 · ${e(parseLabels[diagnostic.parse_state] || "解析状态未知")}`
+            + ` · 完整响应${diagnostic.completion_present ? "已收到" : "未收到"} · 结束原因 ${e(diagnostic.finish_reason || "未知")}`
+            + `<p>${textSummary("原始", diagnostic.raw)} → ${textSummary("宿主解析", diagnostic.parsed)} → ${textSummary("待呈现", diagnostic.visible)}</p>`
+            + (hashes.length ? `<details><summary>内容指纹</summary><p>${hashes.join("<br>")}</p></details>` : "") + "</li>";
+        }).join("")}</ul>` : "")
+        + `<p>分段 ${Array.isArray(item.parts) ? item.parts.length : 0} 条 · 不含提示词正文与消息原文</p></details>`;
+    }).join("") : '<p class="reply-empty">暂无近期回复记录。</p>';
+    host.innerHTML = `<section class="reply-diagnostics"><header><h3>回复诊断</h3><span>${recent.length} 轮</span></header>${html}</section>`;
+  }
+
   function summary(v) {
-    return `${v.streaming ? "流式接收" : "完整响应"} · `
-      + (v.enabled ? `${v.llm_controlled ? "模型分段" : "规则分段"}，最多 ${v.max_segments} 条` : "单条回复")
+    return `${v.streaming ? (v.streaming_mode === "incremental" ? "边生成边分段发送" : "收齐后分段发送") : "完整响应"} · `
+      + (v.enabled ? `${v.llm_controlled ? "模型 + 规则分段" : "规则分段"}，最多 ${v.max_segments} 条` : "单条回复")
       + ` · 段间 ${v.part_gap_ms / 1000} 秒 · ${imageLabel(v.image_position)} · `
       + `${v.enable_humanized_expression ? "拟人 Prompt 已开启" : "拟人 Prompt 关闭"} · `
       + (v.voice_enabled
@@ -346,8 +515,8 @@ window.CompanionReplyPage = (() => {
         method === "GET" ? bridge.apiGet(endpoint) : bridge.apiPost(endpoint, body),
         new Promise((_, reject) => {timer = setTimeout(() => reject(error("bridge_timeout")), 15000);}),
       ]);
-      const wrapped = ["ok", "error"].includes(response?.status) ? response
-        : ["ok", "error"].includes(response?.data?.status) ? response.data : null;
+      const wrapped = ["ok", "error"].includes(response?.status) && response?.data !== undefined ? response
+        : ["ok", "error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
       if (wrapped?.status === "error") throw error(wrapped.data?.code || (isCode(wrapped.message) ? wrapped.message : "") || "invalid_response", true);
       const value = wrapped ? wrapped.data : response;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw error("invalid_response");
@@ -355,110 +524,319 @@ window.CompanionReplyPage = (() => {
     } finally { clearTimeout(timer); }
   }
 
-  /* 读取由工作台负责；这里只订阅它的结果，用来渲染预览、诊断与保存摘要。 */
+  /* 读取由工作台负责；这里只订阅它的结果，用来渲染预览与保存摘要。 */
   function adopt(status) {
+    const previousToken = state.status?.edit_token;
+    /* ``rules_enabled`` is a compatibility value returned by older snapshots.
+       The control is gone from this page, and the backend treats it as always
+       on; normalize the workbench copy too so a stale false cannot look like a
+       meaningful draft difference. */
+    if (status?.settings && Object.hasOwn(status.settings, "rules_enabled")) {
+      status.settings.rules_enabled = true;
+      if (instance?.state?.draft) instance.state.draft.rules_enabled = true;
+      if (instance?.state?.base) instance.state.base.rules_enabled = true;
+    }
     state.status = status || null;
+    notifyStatus();
     if (!status) return;
-    /* 预览用的草稿设置取自工作台当前草稿，保证「预览当前草稿」名副其实。 */
-    renderPreview();
     renderDiagnostics();
+    if (root?.dataset?.expressionModule) setExpressionModule(root.dataset.expressionModule);
+    /* 预览用的草稿设置取自工作台当前草稿，保证「预览当前草稿」名副其实。 */
+    if (!root?.querySelector('[data-reply-part-input="example"]')) renderPreview();
+    if (previousToken !== status.edit_token) schedulePreview(220);
+    if(initialSection&&selectSection(initialSection,{scroll:false}))initialSection=null;
   }
 
   function draftSettings() {
     return instance?.state?.draft || state.status?.settings || null;
   }
 
-  function previewMarkup(p) {
-    const order = items => items.map(k => ({text: "文字", image: "图片", voice: "语音"}[k])).join(" → ");
-    return `<p class="reply-preview-meta">离线预览 · ${p.count} 条消息 · ${p.characters} 字 · `
-      + `段间等待至少 ${p.minimum_spacing_ms / 1000} 秒 · ${imageLabel(p.image_position)}</p><ol>`
+  function notifyStatus() {
+    if (typeof statusListener !== "function") return;
+    statusListener(state.status ? {...state.status, settings: draftSettings()} : null);
+  }
+
+  const ruleModeLabel = mode => ({words: "词列表", regex: "正则表达式",
+    sentences: "按句子", paragraphs: "按段落"}[mode] || "未知规则");
+
+  function spacingLabel(settings) {
+    if (settings.part_gap_mode === "random") {
+      return `随机 ${Number(settings.part_gap_min_ms || 0) / 1000}–${Number(settings.part_gap_max_ms || 0) / 1000} 秒`;
+    }
+    if (settings.part_gap_mode === "log") {
+      return `按文本长度调节 · 基数 ${Number(settings.part_gap_log_base || 2.1)}`;
+    }
+    return `固定 ${Number(settings.part_gap_ms || 0) / 1000} 秒`;
+  }
+
+  function splitPathLabel(settings) {
+    if (!settings.enabled) return "分段总开关关闭，按单条回复发送";
+    const path = [];
+    if (settings.llm_controlled) path.push("模型边界");
+    path.push("规则补充");
+    return path.join(" + ");
+  }
+
+  function positionTarget(mode, index, count) {
+    return mode === "each" || (mode === "first" && index === 0)
+      || (mode === "last" && index === count - 1);
+  }
+
+  function positionLabel(mode) {
+    return ({first: "跟随第一段", last: "跟随末段", each: "每一段"})[mode] || "未知位置";
+  }
+
+  function moveComponents(items, kind, position) {
+    const selected = items.filter(item => item === kind);
+    if (!selected.length || position === "request") return [...items];
+    const remaining = items.filter(item => item !== kind);
+    const textIndex = remaining.indexOf("text");
+    const insertion = position === "before" ? Math.max(0, textIndex)
+      : position === "after" && textIndex >= 0 ? textIndex + 1
+        : remaining.length;
+    return [...remaining.slice(0, insertion), ...selected, ...remaining.slice(insertion)];
+  }
+
+  function previewComponentOrder(items, {index, p, count}) {
+    let result = items.filter(item => item !== "image");
+    const voicePosition = state.previewPositions.voice;
+    result = moveComponents(result, "voice", voicePosition);
+
+    const imageCount = Number.isInteger(p.image_count) ? p.image_count : 0;
+    if (!imageCount) return result;
+    const imageMode = state.previewPositions.image;
+    const imageIndex = imageMode === "first" ? 0 : count - 1;
+    if (index !== imageIndex) return result;
+    const imagePosition = imageMode === "before" ? "before"
+      : imageMode === "after" ? "after"
+        : p.image_position === "before_text" ? "before" : "after";
+    const remaining = result;
+    const textIndex = remaining.indexOf("text");
+    const insertion = imagePosition === "before" ? Math.max(0, textIndex)
+      : textIndex >= 0 ? textIndex + 1 : remaining.length;
+    return [...remaining.slice(0, insertion), ...Array(imageCount).fill("image"),
+      ...remaining.slice(insertion)];
+  }
+
+  function previewSummaryMarkup(p, settings) {
+    const quote = p.quote || {};
+    const quoteEnabled = quote.enabled ?? settings.reply_quote_enabled;
+    const quoteGroupEnabled = quote.group_enabled ?? settings.reply_quote_group_enabled;
+    const quoteFirstOnly = quote.first_part_only ?? settings.reply_quote_first_part_only;
+    const mentionSpeaker = quote.mention_speaker ?? settings.reply_mention_speaker_enabled;
+    const imageCount = Number.isInteger(p.image_count) ? p.image_count : 0;
+    const imageMode = state.previewPositions.image;
+    const imageTarget = imageMode === "first" ? "首段" : imageMode === "last" ? "末段" : "末段";
+    const imageSide = imageMode === "before" ? "文字前" : imageMode === "after" ? "文字后"
+      : p.image_position === "before_text" ? "文字前" : "文字后";
+    const voiceLabel = ({before: "文字前", request: "按请求插入", after: "文字后", last: "所有组件后"})
+      [state.previewPositions.voice] || "未知位置";
+    const session = state.previewSession === "group" ? "群聊" : "私聊";
+    const componentPolicy = [
+      `图片：${imageCount ? `${imageCount} 张 · ` : "无样本 · "}${imageTarget}${imageSide}`,
+      `语音位置：${p.voice?.enabled ? voiceLabel : `未启用 · ${voiceLabel}`}`,
+      quoteEnabled ? `引用：${quoteGroupEnabled ? `群聊${quoteFirstOnly ? "首段" : "每段"}` : "群聊关闭"}` : "引用关闭",
+      mentionSpeaker ? `@：${session === "group" ? positionLabel(state.previewPositions.mention) : "仅群聊"}` : "不添加 @",
+      `平台表情：${positionLabel(state.previewPositions.reaction)}`,
+      `表情包/附件：${state.previewPositions.media === "single" ? "独立消息" : positionLabel(state.previewPositions.media)}`,
+    ].join(" · ");
+    return `<dl class="reply-preview-summary">`
+      + `<div><dt>预览结果</dt><dd>${p.count} 条消息 · ${p.characters} 字</dd></div>`
+      + `<div><dt>分段路径</dt><dd>${e(splitPathLabel(settings))}</dd></div>`
+      + `<div><dt>接收与节奏</dt><dd>${settings.streaming ? (settings.streaming_mode === "incremental" ? "边生成边分段发送" : "收齐后分段发送") : "完整响应"} · ${e(spacingLabel(settings))}</dd></div>`
+      + `<div><dt>组件挂载 · 预览模拟</dt><dd>${e(componentPolicy)} · 间隔 ${Number(p.planned_spacing_ms || 0) / 1000} 秒</dd></div>`
+      + `</dl>`;
+  }
+
+  function previewMarkup(p, settings = draftSettings() || {}) {
+    const labels = {text: "文字", image: "图片", voice: "语音"};
+    const componentBadges = items => items.map(kind => labels[kind]
+      ? `<span class="reply-preview-component-tag is-${e(kind)}">${labels[kind]}</span>` : "").join("")
+      || `<span class="reply-preview-component-empty">无组件</span>`;
+    const planRow = (title, items, note = "") => `<div class="reply-preview-component-row">`
+      + `<small>${title}</small><div class="reply-preview-component-tags">${componentBadges(items)}`
+      + (note ? `<span class="reply-preview-component-note">${e(note)}</span>` : "")
+      + `</div></div>`;
+    const quote = p.quote || {};
+    const quoteEnabled = quote.enabled ?? settings.reply_quote_enabled;
+    const quoteFirstOnly = quote.first_part_only ?? settings.reply_quote_first_part_only;
+    const quoteGroupEnabled = quote.group_enabled ?? settings.reply_quote_group_enabled;
+    const quoteSkipChars = quote.skip_chars ?? settings.reply_quote_skip_chars ?? 0;
+    const mentionSpeaker = quote.mention_speaker ?? settings.reply_mention_speaker_enabled;
+    const imageCount = Number.isInteger(p.image_count) ? p.image_count : 0;
+    const faceOrder = Array.isArray(p.component_order) && p.component_order.includes("face");
+    return previewSummaryMarkup(p, settings)
+      + `<div class="reply-preview-list" aria-label="分段结果">`
       + p.parts.map((text, index) => {
         const c = p.components[index];
-        return `<li><pre>${e(text)}</pre>`
-          + (c.speech
-            ? `<div class="reply-speech"><small>候选朗读</small><pre>${e(c.speech)}</pre>`
-              + `<small>触发并合成成功：${e(order(c.success_order))}</small>`
-              + `<small>未触发或合成失败：${e(order(c.fallback_order))}</small></div>`
-            : `<p class="reply-preview-meta">${e(order(c.fallback_order))}</p>`)
-          + `</li>`;
-      }).join("") + `</ol>`
+        const partCount = p.parts.length;
+        const quoteAvailable = state.previewSession === "group" && quoteEnabled && quoteGroupEnabled
+          && (!quoteSkipChars || Array.from(text.replace(/\s/g, "")).length > quoteSkipChars);
+        const quoteApplies = quoteAvailable && (!quoteFirstOnly || index === 0);
+        const mentionApplies = state.previewSession === "group" && mentionSpeaker
+          && positionTarget(state.previewPositions.mention, index, partCount);
+        const reactionApplies = faceOrder && positionTarget(state.previewPositions.reaction, index, partCount);
+        const imageMode = state.previewPositions.image;
+        const imageTargetIndex = imageMode === "first" ? 0 : partCount - 1;
+        const partImages = index === imageTargetIndex ? imageCount : 0;
+        const mediaMode = state.previewPositions.media;
+        const mediaTargetIndex = mediaMode === "first" ? 0 : partCount - 1;
+        const mediaApplies = mediaMode !== "single" && index === mediaTargetIndex;
+        const imageSide = imageMode === "before" ? "文字前" : imageMode === "after" ? "文字后"
+          : p.image_position === "before_text" ? "文字前" : "文字后";
+        const voiceApplies = Boolean(p.voice?.enabled && c.speech);
+        const voiceLabel = ({before: "文字前", request: "按请求插入", after: "文字后", last: "所有组件后"})
+          [state.previewPositions.voice] || "未知位置";
+        const protectedUrl = state.previewProtection
+          ? (text.match(/https?:\/\/[^\s<>]+/g) || []).find(url => p.parts.some(part => part.includes(url)))
+          : "";
+        const placements = [];
+        if (quoteApplies) placements.push(`<span class="reply-preview-position-tag is-quote">${quoteFirstOnly ? "引用 · 固定第一段" : "引用 · 每一段"}</span>`);
+        if (mentionApplies) placements.push(`<span class="reply-preview-position-tag is-mention">@ · ${e(positionLabel(state.previewPositions.mention))}</span>`);
+        if (reactionApplies) placements.push(`<span class="reply-preview-position-tag is-reaction">平台表情 · ${e(positionLabel(state.previewPositions.reaction))}</span>`);
+        if (partImages) placements.push(`<span class="reply-preview-position-tag is-image">${partImages} 张图片 · ${imageSide}</span>`);
+        if (mediaApplies) placements.push(`<span class="reply-preview-position-tag is-media">表情包/附件 · ${e(positionLabel(mediaMode))}</span>`);
+        if (voiceApplies) placements.push(`<span class="reply-preview-position-tag is-voice">语音 · ${e(voiceLabel)}</span>`);
+        if (protectedUrl) placements.push(`<span class="reply-preview-position-tag is-protection">网址保护 · 链接整段保留</span>`);
+        const successOrder = previewComponentOrder(c.success_order, {index, p, count: partCount});
+        const fallbackOrder = previewComponentOrder(c.fallback_order, {index, p, count: partCount});
+        const placementMarkup = placements.length
+          ? `<div class="reply-preview-placements" aria-label="组件位置">${placements.join("")}</div>` : "";
+        return `<article class="reply-preview-part">`
+          + `<header><strong>第 ${index + 1} 条</strong><span>${Array.from(text).length} 字</span></header>`
+          + `<pre>${e(text)}</pre>`
+          + placementMarkup
+          + `<div class="reply-preview-component-plan">`
+          + (p.voice?.enabled && c.speech
+            ? planRow("朗读成功", successOrder, c.text_hidden ? "文字由语音替代" : "")
+              + planRow("未触发或合成失败", fallbackOrder)
+            : planRow("发送组件", fallbackOrder))
+          + (partImages && c.text_hidden ? `<p class="reply-preview-component-context">无语音时：文字 + 图片</p>` : "")
+          + `</div>`
+          + (p.voice?.enabled && c.speech
+            ? `<details class="reply-preview-speech"><summary>查看候选朗读文本</summary><pre>${e(c.speech)}</pre></details>` : "")
+          + `</article>`;
+      }).join("") + `</div>`
+      + (state.previewPositions.media === "single"
+        ? `<div class="reply-preview-independent-component"><span class="reply-preview-position-tag is-media">表情包/附件</span><span>分段回复后单独发送 · 预览模拟</span></div>` : "")
       + (p.voice.enabled ? `<p class="reply-preview-meta">TTS 扩展：${e(p.voice.provider_id || "跟随 AstrBot")}</p>` : "")
-      + `<details><summary>本次表达提示词</summary><pre>`
+      + `<details class="reply-preview-instructions"><summary>查看本次提示词</summary><pre>`
       + e([p.instruction, p.voice.instruction].filter(Boolean).join("\n\n") || "无附加提示词")
       + `</pre></details>`;
+  }
+
+  function previewFailureMarkup(message) {
+    return `<div class="reply-preview-error" role="alert"><strong>预览失败</strong>`
+      + `<p>${e(message)}</p></div>`;
+  }
+
+  function previewModalMarkup() {
+    const option = (key, name, value, options) => `<label class="reply-preview-option"><span>${name}</span><select data-reply-preview-option="${key}">${options.map(([optionKey, label]) => `<option value="${optionKey}"${value === optionKey ? " selected" : ""}>${label}</option>`).join("")}</select></label>`;
+    return `<div class="reply-preview-modal" data-reply-preview-modal${state.previewConfigOpen ? "" : " hidden"} role="dialog" aria-modal="true" aria-labelledby="reply-preview-modal-title">`
+      + `<div class="reply-preview-modal-scrim" data-reply-action="preview-modal-close"></div><div class="reply-preview-modal-card">`
+      + `<header><h3 id="reply-preview-modal-title">预览配置</h3><button type="button" class="icon-button" data-reply-action="preview-modal-close" aria-label="关闭预览配置">${icon("x")}</button></header>`
+      + `<div class="reply-preview-modal-body"><fieldset><legend>示例预设</legend><div class="reply-preview-modal-segmented">${["simple","complex","custom"].map(key => `<button type="button" class="${state.examplePreset === key ? "is-selected" : ""}" data-reply-example="${key}">${key === "simple" ? "简单示例" : key === "complex" ? "复杂示例" : "自定义"}</button>`).join("")}</div></fieldset>`
+      + `<fieldset><legend>预览会话</legend><div class="reply-preview-modal-segmented"><button type="button" class="${state.previewSession === "private" ? "is-selected" : ""}" data-reply-preview-session="private">私聊</button><button type="button" class="${state.previewSession === "group" ? "is-selected" : ""}" data-reply-preview-session="group">群聊</button></div></fieldset>`
+      + `<fieldset><legend>组件位置策略</legend>${option("voice","语音位置",state.previewPositions.voice,[["before","文字前"],["request","按请求插入"],["after","文字后"],["last","所有组件后"]])}${option("image","图片位置",state.previewPositions.image,[["first","跟随首段"],["last","跟随末段"],["before","文字前"],["after","文字后"]])}${option("mention","@ 位置",state.previewPositions.mention,[["first","跟随第一段"],["last","跟随末段"],["each","每一段"]])}${option("reaction","平台表情位置",state.previewPositions.reaction,[["first","跟随第一段"],["last","跟随末段"],["each","每一段"]])}${option("media","表情包与附件位置",state.previewPositions.media,[["single","单独一条"],["first","跟随首段"],["last","跟随末段"]])}</fieldset><small class="reply-preview-modal-note">位置选项只影响预览模拟；实际发送仍使用已保存的设置。</small>`
+      + `<p class="reply-preview-modal-lock">${icon("lock-keyhole")} 引用位置由回复分段设置决定</p><label class="reply-preview-modal-switch"><input type="checkbox" data-reply-preview-protection ${state.previewProtection ? "checked" : ""}><span>高亮保护范围</span></label>`
+      + `</div></div></div>`;
   }
 
   function renderPreview() {
     const host = anchor("preview");
     if (!host) return;
-    const locked = state.busy || state.loading || state.denied || !state.status;
-    host.innerHTML = `<section class="reply-preview"><h3>消息预览</h3>`
-      + `<label>示例正文<textarea data-reply-part-input="example" rows="7" ${state.busy ? "disabled" : ""}>${e(state.example)}</textarea></label>`
-      + `<label class="reply-image-count">末段图片数<input data-reply-part-input="image-count" type="number" min="0" max="8" step="1" value="${e(state.imageCount)}" ${state.busy ? "disabled" : ""}></label>`
-      + `<button class="button" data-reply-action="preview" ${locked || state.busy ? "disabled" : ""}>预览当前草稿</button>`
-      + `<div id="reply-preview-result" aria-live="polite">`
-      + (state.preview ? previewMarkup(state.preview) : '<p class="reply-muted">暂无预览</p>') + `</div></section>`;
+    const locked = state.loading || state.denied || !state.status;
+    const module = root?.dataset?.expressionModule || "expression-text";
+    const title = module === "expression-voice" ? "朗读位置预览" : module === "expression-platform" ? "组件顺序预览" : "分段效果预览";
+    host.innerHTML = `<section class="reply-preview" aria-labelledby="reply-preview-title">`
+      + `<header class="reply-preview-head"><h3 id="reply-preview-title">${title}<span class="reply-preview-live">实时</span></h3><div class="reply-preview-head-actions"><button type="button" class="button small" data-reply-action="preview-config">${icon("sliders-horizontal")}预览配置</button><button type="button" class="button small" data-reply-action="preview" ${locked || state.busy ? "disabled" : ""}>立即预览</button></div></header>`
+      + `<div class="reply-preview-state-grid"><article class="reply-preview-state${state.busy ? " is-active" : ""}"><strong>${icon("loader-circle")}计算中</strong></article><article class="reply-preview-state${state.preview && !state.previewError && !state.busy ? " is-active is-ok" : ""}"><strong>${icon("check-circle-2")}已更新</strong></article><article class="reply-preview-state${state.previewError ? " is-active is-error" : ""}"><strong>${icon("triangle-alert")}预览失败</strong></article></div>`
+      + `<div class="reply-preview-grid"><div class="reply-preview-inputs">`
+      + `<div class="reply-preview-examples" aria-label="示例正文">`
+      + `<button type="button" class="button${state.examplePreset === "simple" ? " is-selected" : ""}" data-reply-example="simple" aria-pressed="${state.examplePreset === "simple"}">简单示例</button>`
+      + `<button type="button" class="button${state.examplePreset === "complex" ? " is-selected" : ""}" data-reply-example="complex" aria-pressed="${state.examplePreset === "complex"}">复杂示例</button>`
+      + `<button type="button" class="button${state.examplePreset === "marker" ? " is-selected" : ""}" data-reply-example="marker" aria-pressed="${state.examplePreset === "marker"}">模型边界示例</button></div>`
+      + `<label class="reply-preview-label">测试正文<textarea data-reply-part-input="example" rows="7">${e(state.example)}</textarea></label>`
+      + `<label class="reply-image-count">示例图片数<input data-reply-part-input="image-count" type="number" min="0" max="8" step="1" value="${e(state.imageCount)}"></label>`
+      + `</div><div class="reply-preview-output-wrap">`
+      + `<p class="reply-preview-status" id="reply-preview-status" role="status" aria-live="polite">${state.busy ? "正在计算预览…" : state.previewError ? e(state.previewError) : "等待预览"}</p>`
+      + `<div id="reply-preview-result" class="reply-preview-result" aria-live="polite">`
+      + (state.preview ? previewMarkup(state.preview) : '<p class="reply-muted">等待首次预览</p>')
+      + `</div></div></div></section>${previewModalMarkup()}`;
   }
 
-  function diagnosticMarkup(item, token) {
-    const c = item.captured, stream = c?.settings?.streaming;
-    const collecting = ["collecting", "open"].includes(item.state);
-    const partMarkup = part => {
-      const recorded = part.candidate_reason !== null && part.candidate_reason !== undefined;
-      const candidate = recorded ? candidateLabels[part.candidate_reason] || "语音状态未知" : "语音诊断未记录";
-      const render = recorded ? ` · ${renderLabels[part.render_state] || "合成状态未知"}` : "";
-      const order = Array.isArray(part.component_order) && part.component_order.length
-        ? ` · 组件：${part.component_order.map(k => ({text: "文字", image: "图片", voice: "语音"}[k] || "未知")).join(" → ")}` : "";
-      const hidden = part.text_hidden === 1 ? " · 文字已隐藏" : "";
-      return `<li>第 ${e(part.sequence)} 段 · ${e(part.chars)} 字 · ${e(labels[part.state] || part.state)}`
-        + `<small class="reply-part-detail">${e(candidate + render + order + hidden)}`
-        + `${part.speech_chars ? ` · 候选 ${e(part.speech_chars)} 字` : ""}</small></li>`;
-    };
-    return `<details class="reply-record"><summary><span>${e(labels[item.state] || item.state)}</span>`
-      + `<span>${c ? (stream ? "流式接收" : "完整响应") : collecting ? "尚未固定配置" : "旧记录 · 接收模式未记录"}</span>`
-      + `<time>${e(item.created_at)}</time></summary>`
-      + `<p>${c ? `${e(summary(c.settings))} · ${c.configuration_token === token ? "与当前配置一致" : "采用此前配置"}`
-        : collecting ? "输入仍在收集中，配置尚未固定。" : "旧记录未保存回复配置快照。"}</p>`
-      + `<p>${e(item.reason || "")}</p><ul>`
-      + item.calls.map(call => `<li>模型：${e(labels[call.state] || call.state)}`
-        + `${call.failure_code ? ` · ${e(call.failure_code)}` : ""} · 用量 `
-        + `${call.actual_tokens === null ? "未知" : e(call.actual_tokens) + " tokens"}`
-        + `${call.latency_ms === null ? "" : ` · ${Math.round(call.latency_ms)} ms`}</li>`).join("")
-      + item.parts.map(partMarkup).join("") + `</ul><small>记录编号：${e(item.batch_id)}</small></details>`;
+  function previewStatus(message) {
+    const node = root?.querySelector("#reply-preview-status");
+    if (node) node.textContent = message;
   }
 
-  function renderDiagnostics() {
-    const host = anchor("diagnostics");
+  function previewResult(markup) {
+    const node = root?.querySelector("#reply-preview-result");
+    if (node) node.innerHTML = markup;
+  }
+
+  function previewBusy(busy) {
+    const host = anchor("preview");
     if (!host) return;
-    const status = state.status;
-    host.innerHTML = `<section class="reply-diagnostics"><header><h3>最近回复诊断</h3>`
-      + `<span>当前对象与角色 · 最近 10 轮</span></header>`
-      + ``
-      + (status?.recent?.length
-        ? status.recent.map(item => diagnosticMarkup(item, status.configuration_token)).join("")
-        : `<div class="reply-empty">${status ? "还没有本轮上下文的回复记录。开始一次对话后，点击读取当前状态查看。" : "连接已初始化的 V2 运行实例后可查看。"}</div>`)
-      + `</section>`;
+    host.classList?.toggle?.("is-refreshing", busy);
+    const button = host.querySelector?.('[data-reply-action="preview"]');
+    if (button) button.disabled = busy || state.loading || state.denied || !state.status;
+    const result = host.querySelector?.("#reply-preview-result");
+    result?.setAttribute?.("aria-busy", String(busy));
   }
 
-  async function preview() {
-    const ticket = version;
-    if (state.busy || state.loading || state.denied || !state.status) return;
+  function updateExampleButtons() {
+    root?.querySelectorAll("[data-reply-example]")?.forEach(button => {
+      const selected = button.dataset.replyExample === state.examplePreset;
+      button.classList?.toggle?.("is-selected", selected);
+      button.setAttribute?.("aria-pressed", String(selected));
+    });
+  }
+
+  function schedulePreview(delay = 260) {
+    clearTimeout(previewTimer);
+    previewTimer = null;
+    const ticket = ++previewTicket;
+    if (!anchor("preview")) return;
+    state.busy = false;
+    state.previewError = "";
+    previewBusy(false);
+    previewStatus("示例或设置已改变，正在更新预览…");
+    /* 保留上一版结果，避免输入时整张卡闪空、尺寸跳动。新结果回来后再原位替换。 */
+    if (!state.preview) previewResult('<p class="reply-muted">正在按当前窗口草稿计算。</p>');
+    if (state.loading || state.denied || !state.status) return;
+    previewTimer = setTimeout(() => {
+      previewTimer = null;
+      void preview(ticket);
+    }, delay);
+  }
+
+  async function preview(ticket) {
+    if (ticket === undefined) {
+      clearTimeout(previewTimer);
+      previewTimer = null;
+      ticket = ++previewTicket;
+    }
+    const pageTicket = version;
+    if (state.loading || state.denied || !state.status) return;
     if (instance?.state?.pending) {
-      state.notice = "先核对上次未确认的保存结果，再预览。";
-      state.bad = true;
-      renderPreview();
+      if (ticket === previewTicket) state.busy = false;
+      previewStatus("先核对上次未确认的保存结果，再预览。");
+      previewResult('<p class="reply-muted">配置保存结果尚未确认。</p>');
       return;
     }
     const settings = draftSettings();
     if (!settings || !Number.isInteger(state.imageCount) || state.imageCount < 0 || state.imageCount > 8) {
-      state.notice = errors.reply_preview_invalid;
-      state.bad = true;
-      renderPreview();
+      if (ticket === previewTicket) state.busy = false;
+      state.previewError = errors.reply_preview_invalid;
+      previewStatus(state.previewError);
+      previewResult(state.preview ? previewMarkup(state.preview) + previewFailureMarkup(state.previewError) : previewFailureMarkup(state.previewError));
       return;
     }
     state.busy = true;
-    state.notice = "正在计算预览…";
-    renderPreview();
+    state.previewError = "";
+    previewBusy(true);
+    previewStatus("正在使用 V2 当前窗口配置计算离线预览…");
     try {
       const p = await api("POST", route + "/preview",
         {settings: {...settings}, text: state.example, image_count: state.imageCount});
@@ -470,58 +848,168 @@ window.CompanionReplyPage = (() => {
               || order.some(k => !["text", "image", "voice"].includes(k))))) {
         throw error("invalid_response");
       }
-      if (!live(ticket)) return;
+      if (!live(pageTicket) || ticket !== previewTicket) return;
       state.preview = p;
-      state.notice = "预览已更新，使用当前草稿。";
-      state.bad = false;
+      state.previewError = "";
+      previewStatus("预览已更新，使用当前窗口的设置草稿；没有调用模型或发送消息。");
+      previewResult(previewMarkup(p));
     } catch (problem) {
-      if (!live(ticket)) return;
-      state.preview = null;
-      state.notice = localized(problem, "预览失败，请重试。");
-      state.bad = true;
+      if (!live(pageTicket) || ticket !== previewTicket) return;
+      state.previewError = localized(problem, "预览失败，请重试。");
+      previewStatus(state.previewError);
+      previewResult(state.preview ? previewMarkup(state.preview) + previewFailureMarkup(state.previewError) : previewFailureMarkup(state.previewError));
     } finally {
-      state.busy = false;
-      if (live(ticket)) renderPreview();
+      if (live(pageTicket) && ticket === previewTicket) {
+        state.busy = false;
+        previewBusy(false);
+      }
     }
   }
 
   function onInput(event) {
     const el = event.target;
     const name = el?.dataset?.replyPartInput;
-    if (!name) return;
-    if (name === "example") state.example = el.value;
-    else state.imageCount = el.valueAsNumber;
-    state.preview = null;
-    const result = root?.querySelector("#reply-preview-result");
-    if (result) result.textContent = "示例已改变，请重新预览。";
+    if (name === "example") {
+      state.example = el.value;
+      state.examplePreset = "custom";
+      updateExampleButtons();
+      schedulePreview();
+    } else if (name === "image-count") {
+      state.imageCount = el.valueAsNumber;
+      schedulePreview();
+    } else if (el?.dataset?.replyPreviewOption) {
+      state.previewPositions[el.dataset.replyPreviewOption] = el.value;
+      renderPreview();
+    } else if (el?.dataset?.replyPreviewSession) {
+      state.previewSession = el.dataset.replyPreviewSession;
+      renderPreview();
+    } else if (el?.dataset?.replyPreviewProtection !== undefined) {
+      state.previewProtection = Boolean(el.checked);
+      renderPreview();
+    } else if (el?.dataset?.wbField) {
+      schedulePreview();
+      notifyStatus();
+    }
   }
 
   function onClick(event) {
-    const action = event.target.closest("[data-reply-action]")?.dataset.replyAction;
-    if (action === "preview") void preview();
+    const example = event.target.closest("[data-reply-example]")?.dataset.replyExample;
+    if (example === "custom") {
+      state.examplePreset = "custom";
+      updateExampleButtons();
+      renderPreview();
+      return;
+    }
+    if (example && examples[example]) {
+      state.example = examples[example];
+      state.examplePreset = example;
+      const input = root?.querySelector('[data-reply-part-input="example"]');
+      if (input) input.value = state.example;
+      updateExampleButtons();
+      schedulePreview();
+      return;
+    }
+    const previewSession = event.target.closest("[data-reply-preview-session]")?.dataset.replyPreviewSession;
+    if (previewSession) {
+      state.previewSession = previewSession;
+      renderPreview();
+      return;
+    }
+    const previewAction = event.target.closest("[data-reply-action]")?.dataset.replyAction;
+    if (previewAction === "preview-config") {
+      state.previewConfigOpen = true;
+      renderPreview();
+      root?.querySelector?.('[data-reply-action="preview-modal-close"]')?.focus?.();
+      return;
+    }
+    if (previewAction === "preview-modal-close") {
+      state.previewConfigOpen = false;
+      renderPreview();
+      return;
+    }
+    const target = event.target.closest("[data-wb-word-add], [data-wb-word-remove], [data-wb-replacement-add], [data-wb-replacement-remove], [data-wb-order-start], [data-wb-order-move], [data-wb-order-remove], [data-wb-order-add], [data-wb-order-natural], [data-wb-reset]");
+    if (target) schedulePreview();
+    if (previewAction === "preview") void preview();
   }
 
+  let initialSection=null;
+  let statusListener=null;
   function unmount() {
     version++;
+    previewTicket++;
+    clearTimeout(previewTimer);
+    previewTimer = null;
     if (instance) instance.unmount();
     if (root) {
       root.removeEventListener("input", onInput);
+      root.removeEventListener("change", onInput);
       root.removeEventListener("click", onClick);
       root.textContent = "";
     }
     instance = null; root = null; route = null; activeSections = spec.sections;
-    state.status = null; state.preview = null; state.notice = ""; state.bad = false;
+    initialSection=null;
+    statusListener=null;
+    state.status = null; state.preview = null; state.notice = ""; state.bad = false; state.busy = false;
+    state.previewError = ""; state.previewConfigOpen = false; state.previewSession = "private";
+    state.previewProtection = true;
   }
 
   function selectSection(id, {scroll = true} = {}) {
+    if (!root) return false;
+    if (root.dataset?.replyView === "perception") {
+      const module = {media_permissions: "overview", context_image: "image", image_narration: "image",
+        video_narration: "video", file_understanding: "file", forwards: "forwards"}[id];
+      if (module) return setPerceptionModule(module);
+    }
+    if (root.dataset?.replyView === "decision" && decisionSectionViews[id]) {
+      setDecisionView(decisionSectionViews[id]);
+      return true;
+    }
+    const requestedId = id;
+    if (id === "timing" && activeSections.some(section => section.id === "segment")) id = "segment";
+    const moduleSections = expressionModuleSections[root.dataset?.expressionModule];
+    if (moduleSections && !moduleSections.includes(id)) return false;
     if (!activeSections.some(section => section.id === id)) return false;
     const target = [...(root?.querySelectorAll?.("[data-wb-section]") || [])]
       .find(tab => tab.dataset.wbSection === id);
-    if (!target) return false;
+    if (!instance?.state?.container || !target) {
+      initialSection = id;
+      return true;
+    }
     target.click();
+    initialSection = null;
     if (scroll) {
       const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-      root?.scrollIntoView?.({behavior: reduced ? "instant" : "smooth", block: "start"});
+      const timingField = requestedId === "timing" ? root?.querySelector?.('[data-wb-row="part_gap_mode"]') : null;
+      (timingField || root)?.scrollIntoView?.({behavior: reduced ? "instant" : "smooth", block: timingField ? "center" : "start"});
+    }
+    return true;
+  }
+
+  /* 表达页的外层模块是唯一入口。回复工作台仍共用一份草稿和编辑令牌，
+     但只把当前模块所属的分区交给用户看，避免「文字页里又有语音页」的双重入口。 */
+  function setExpressionModule(module) {
+    if (!root || !instance) return false;
+    const allowed = expressionModuleSections[module] || activeSections.map(section => section.id);
+    instance.setVisibleGroups?.(allowed, expressionModuleDefaults[module] || allowed[0] || "");
+    root.dataset.expressionModule = module || "";
+    return true;
+  }
+
+  function setPerceptionModule(module) {
+    if (!root || !instance || root.dataset?.replyView !== "perception") return false;
+    const sections = perceptionModuleSections[module] || perceptionModuleSections.overview;
+    instance.setVisibleGroups?.(sections, sections[0] || "");
+    root.dataset.perceptionModule = module in perceptionModuleSections ? module : "overview";
+    return true;
+  }
+
+  function setDecisionView(view) {
+    if (!Object.hasOwn(decisionViewSections, view) && view !== "overview" && view !== "group") return false;
+    activeDecisionView = view;
+    if (root?.dataset?.replyView === "decision" && instance) {
+      const sections = decisionViewSections[view] || [];
+      instance.setVisibleGroups?.(sections, sections[0] || "");
     }
     return true;
   }
@@ -533,6 +1021,10 @@ window.CompanionReplyPage = (() => {
     if (!host) return;
     root = host;
     activeSections = pageSpec.sections;
+    statusListener = options.onStatus || null;
+    const requestedSection = options.section === "timing" && activeSections.some(section => section.id === "segment")
+      ? "segment" : options.section;
+    initialSection=activeSections.some(section=>section.id===requestedSection)?requestedSection:null;
     if (!pageSpec.sections.length) {
       root.innerHTML = '<div class="reply-empty">当前视图没有可编辑的回复设置。</div>';
       return;
@@ -540,7 +1032,7 @@ window.CompanionReplyPage = (() => {
     const product = window.CompanionProduct;
     if (!product?.hosted?.()) {
       root.innerHTML = `<div class="reply-empty"><h2>${e(pageSpec.title)}</h2>`
-        + '<p>请从 AstrBot 打开陪伴小屋，连接 V2 运行实例后调整分段并预览。</p></div>';
+        + '<p>请从 AstrBot 打开陪伴小屋并连接 V2 运行实例，以加载和保存回复与语音配置。</p></div>';
       return;
     }
     const endpoint = product.role()?.reply_api;
@@ -563,20 +1055,31 @@ window.CompanionReplyPage = (() => {
     }
     /* 桥只接受插件相对路径；工作台入口则保留完整路径做自身校验。 */
     route = endpoint.slice(PREFIX.length);
+    const moduleTitle = options.expressionModule === "expression-voice" ? "语音朗读"
+      : options.expressionModule === "expression-platform" ? "平台动作"
+        : "分段回复";
+    if (options.expressionModule) root.dataset.expressionModule = options.expressionModule;
+    else if (root.dataset) delete root.dataset.expressionModule;
+    if (options.view === "perception") root.dataset.replyView = "perception";
+    else if (options.view === "decision") root.dataset.replyView = "decision";
+    else if (root.dataset) delete root.dataset.replyView;
+    const diagnostics = [undefined, "expression", "decision"].includes(options.view)
+      ? '<div data-reply-part="diagnostics"></div>' : "";
     root.innerHTML = '<div data-reply-part="settings"></div>'
       + (options.view === "expression" || !options.view
-        ? '<div data-reply-part="preview"></div><div data-reply-part="diagnostics"></div>' : "");
+        ? '<div data-reply-part="preview"></div>' : "") + diagnostics;
     root.addEventListener("input", onInput);
+    root.addEventListener("change", onInput);
     root.addEventListener("click", onClick);
     instance = window.CompanionWorkbench.create({
       group: GROUP,
-      title: pageSpec.title,
-      note: pageSpec.note,
+      title: options.expressionModule ? moduleTitle : pageSpec.title,
+      note: options.expressionModule ? "" : pageSpec.note,
       labels: pageSpec.labels,
       helps: pageSpec.helps,
       choices,
       sections: pageSpec.sections,
-      navigationLimit: pageSpec.sections.length,
+      navigationLimit: options.view === "perception" || options.view === "decision" ? 0 : pageSpec.sections.length,
       rows: pageSpec.rows,
       segmentedChoices: spec.segmentedChoices,
       inputs: spec.inputs,
@@ -592,13 +1095,15 @@ window.CompanionReplyPage = (() => {
         voice_en_provider_id: () => providerOptions("使用通用扩展"),
       },
       mount: () => parts().settings,
-      /* 工作台拿到新快照后，预览与诊断跟着重画。 */
+      /* 工作台拿到新快照后，预览跟着重画。 */
       onStatus: adopt,
     });
     instance.mount();
+    if (options.expressionModule) setExpressionModule(options.expressionModule);
+    if (options.view === "perception") setPerceptionModule(options.perceptionModule || "overview");
+    if (options.view === "decision") setDecisionView(options.decisionView || activeDecisionView);
     if (options.view !== "decision") {
       renderPreview();
-      renderDiagnostics();
     }
   }
 
@@ -612,7 +1117,17 @@ window.CompanionReplyPage = (() => {
     return options;
   }
 
-  return {mount, unmount, choices, selectSection,
+  function searchEntries() {
+    return spec.sections.flatMap(section => (section.fields || []).map(field => ({
+      group: GROUP, groupTitle: "回复与表达", field,
+      label: spec.labels[field] || field, help: spec.helps[field] || "",
+      section: section.id, sectionTitle: section.title, sectionCount: spec.sections.length,
+      aliases: spec.searchAliases?.[field] || [],
+    })));
+  }
+
+  return {mount, unmount, choices, selectSection, setExpressionModule, setPerceptionModule, setDecisionView,
+    searchEntries,
     get state() { return {instance, example: state.example, imageCount: state.imageCount,
-      preview: state.preview, notice: state.notice, bad: state.bad}; }};
+      status: state.status, preview: state.preview, notice: state.notice, bad: state.bad}; }};
 })();

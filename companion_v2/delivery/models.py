@@ -32,12 +32,15 @@ class DeliveryEnvelope:
     # owner's sealed record and never invalidate the sealed text.
     voice: VoicePlan | None = field(default=None, compare=False, kw_only=True)
     poke: PokePlan | None = field(default=None, compare=False, kw_only=True)
+    voice_required: bool = field(default=False, compare=False, kw_only=True)
 
     def __post_init__(self):
         for name, kind in (("plan", OutboundPlan), ("voice", VoicePlan), ("poke", PokePlan)):
             value = getattr(self, name)
             if value is not None and not isinstance(value, kind):
                 raise ValueError(f"delivery envelope {name} must be a validated plan")
+        if type(self.voice_required) is not bool:
+            raise ValueError("delivery envelope voice requirement must be explicit")
 
 
 @dataclass(frozen=True)
@@ -72,8 +75,9 @@ class LocalSender:
     binding: ProviderBinding
     send: Callable[[DeliveryEnvelope], Awaitable[DeliveryReceipt]]
     supports_images: bool = False
+    supports_poke: bool = False
 
     def __post_init__(self):
         if (not isinstance(self.binding, ProviderBinding) or not inspect.iscoroutinefunction(self.send)
-                or type(self.supports_images) is not bool):
+                or type(self.supports_images) is not bool or type(self.supports_poke) is not bool):
             raise ValueError("local senders require a complete binding and cooperative async function")

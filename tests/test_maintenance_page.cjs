@@ -5,6 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/maintenance-page.js'), 'utf8');
+const styles = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/maintenance-page.css'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const localDay = value => {
   const date = value || new Date();
@@ -28,11 +29,23 @@ function harness(responses) {
   const csvExports = [];
   const downloads = [];
   const confirmations = [];
+  const audioPreviews = [], revokedAudioUrls = [];
+  const timers = new Map();
+  let nextTimerId = 1;
   let modelReads = 0;
   const bridge = {
     apiGet: async route => {
       requests.push(['GET', route]);
+      if (route.endsWith('/memory')) {
+        const value = responses.memory;
+        return typeof value === 'function' ? value(requests) : value || {rss_bytes: 64 * 1024 * 1024,
+          rss_source: 'test', python_tracing_active: false, python_heap_current_bytes: null};
+      }
       if (route.endsWith('/maintenance')) return responses.maintenance;
+      if (route.endsWith('/balance')) return responses.balance || {
+        configured: false, available: false, provider: 'newapi', provider_label: 'NewAPI',
+        currency_label: '额度', state: 'not_configured',
+      };
       if (route.endsWith('/voice')) return responses.voice || {providers: []};
       if (route.endsWith('/image')) return responses.image || {actions: []};
       if (route === '/model') {
@@ -81,16 +94,527 @@ function harness(responses) {
         matches: candidate => candidate === selector,
       }});
     },
+    pointer(type, target, relatedTarget = null) {
+      listeners[type]?.({type, target, relatedTarget});
+    },
   };
-  window.setTimeout = callback => callback();
-  window.clearTimeout = () => {};
+  window.setTimeout = (callback, delay = 0) => {
+    if (!delay) { callback(); return 0; }
+    const id = nextTimerId++;
+    timers.set(id, {callback, delay});
+    return id;
+  };
+  window.clearTimeout = id => timers.delete(id);
   const document = {createElement: () => ({click() { downloads.push(this.download); }})};
-  const url = {createObjectURL: blob => { csvExports.push(blob.parts.join('')); return 'blob:maintenance'; }, revokeObjectURL() {}};
-  class BlobMock { constructor(parts) { this.parts = parts; } }
+  const url = {createObjectURL: blob => {
+    if (blob.type.startsWith('audio/')) { audioPreviews.push(blob); return 'blob:maintenance-audio'; }
+    csvExports.push(blob.parts.join(''));
+    return 'blob:maintenance';
+  }, revokeObjectURL: value => revokedAudioUrls.push(value)};
+  class BlobMock { constructor(parts, options = {}) { this.parts = parts; this.type = options.type || ''; } }
+  window.URL = url;
+  window.Blob = BlobMock;
+  window.atob = value => Buffer.from(value, 'base64').toString('binary');
   vm.runInNewContext(source, {window, document, URL: url, Blob: BlobMock, Intl, Date, Number, Object, String, Math,
     Array, Set, Promise});
-  return {page: window.CompanionMaintenancePage, requests, root, exports: csvExports, downloads, confirmations};
+  return {
+    page: window.CompanionMaintenancePage, requests, root, exports: csvExports, downloads, confirmations, audioPreviews, revokedAudioUrls,
+    advanceTimers: elapsed => {
+      for (const [id, timer] of [...timers]) {
+        if (timer.delay <= elapsed) { timers.delete(id); timer.callback(); }
+      }
+    },
+  };
 }
+
+test('reply efficiency shows a chronological timeline and separates cumulative latency', async () => {
+  const received = localStamp(new Date(Date.now() - 8000));
+  const lastInput = localStamp(new Date(Date.now() - 7000));
+  const modelStarted = localStamp(new Date(Date.now() - 6000));
+  const modelFinished = localStamp(new Date(Date.now() - 4000));
+  const pluginStarted = localStamp(new Date(Date.now() - 4700));
+  const pluginFinished = localStamp(new Date(Date.now() - 4200));
+  const secondModelStarted = localStamp(new Date(Date.now() - 4100));
+  const dispatched = localStamp(new Date(Date.now() - 3000));
+  const firstDelivered = localStamp(new Date(Date.now() - 2000));
+  const delivered = localStamp(new Date(Date.now() - 1000));
+  const h = harness({maintenance: {
+    generated_at: localStamp(), summary: {}, totals: {}, daily: [], history: [], recent: [],
+    reply_efficiency: {
+      generated_at: localStamp(), window_days: 7,
+      summary: {samples: 3, completed: 1, partial: 1, median_end_to_end_ms: 7000,
+        p95_end_to_end_ms: 7000, median_first_reply_ms: 6000, median_pre_model_ms: 2000,
+        median_last_input_to_model_ms: 1000, median_model_ms: 2000, median_post_model_ms: 1000,
+        median_delivery_ms: 2000},
+      coverage: {received: 3, model_started: 2, model_finished: 2, first_dispatched: 2,
+        first_delivered: 2, final_delivered: 1},
+      daily: [{day: localDay(), samples: 1, completed: 1, median_end_to_end_ms: 7000}],
+      recent: [
+        {received_at: received, received_time_source: 'input_event', outcome: 'completed', input_count: 3, part_count: 2, delivered_parts: 2,
+          model_calls: 2, timestamps: {received_at: received, flow_due_at: localStamp(new Date(Date.now() - 6500)),
+            generation_started_at: localStamp(new Date(Date.now() - 6300)), first_model_started_at: modelStarted,
+            last_input_received_at: lastInput, last_model_finished_at: modelFinished,
+            first_dispatched_at: dispatched, first_delivered_at: firstDelivered, last_delivered_at: delivered},
+          stages: {pre_model_ms: 2000, last_input_to_model_ms: 1000, model_ms: 2000,
+            post_model_ms: 1000, first_reply_ms: 6000, delivery_ms: 2000, end_to_end_ms: 7000},
+          trace: {input_wait_ms: 500, queue_wait_ms: 200, preparation_ms: 300,
+            materials: [{owner: 'memory.recall', purpose: 'recent_memory', state: 'ready', payload: 'private body'}],
+            offered_tool_count: 1, offered_tools: ['calendar.query'],
+            model_calls: [{position: 0, state: 'generated', started_at: modelStarted, elapsed_ms: 1250},
+              {position: 1, state: 'generated', started_at: secondModelStarted, elapsed_ms: 100}],
+            tool_calls: [{sequence: 1, action: 'calendar.query', kind: 'extension', state: 'succeeded',
+              started_at: pluginStarted, finished_at: pluginFinished, elapsed_ms: 600,
+              extension_started_at: pluginStarted, extension_finished_at: pluginFinished, extension_elapsed_ms: 500}]}},
+        {received_at: received, received_time_source: 'input_event', outcome: 'partial', input_count: 2, part_count: 3,
+          delivered_parts: 1, failed_parts: 1, unknown_parts: 1,
+          model_calls: 1, timestamps: {received_at: received, last_input_received_at: lastInput,
+            first_model_started_at: modelStarted, last_model_finished_at: modelFinished,
+            first_dispatched_at: dispatched, first_delivered_at: firstDelivered},
+          stages: {pre_model_ms: 2000, last_input_to_model_ms: 1000, model_ms: 2000,
+            post_model_ms: 1000, first_reply_ms: 6000, delivery_ms: null, end_to_end_ms: null}},
+        {received_at: received, received_time_source: 'batch_created', outcome: 'unknown', input_count: 1, part_count: 1, delivered_parts: 0,
+          model_calls: 1, active_model_calls: 1, timestamps: {received_at: received},
+          stages: {pre_model_ms: null, model_ms: 1000, post_model_ms: null, first_reply_ms: null,
+            delivery_ms: null, end_to_end_ms: null}},
+      ],
+    },
+  }, voice: {providers: []}, image: {actions: []}});
+  const changedViews = [];
+  h.page.mount(h.root, {activeView: 'efficiency', onViewChange: view => changedViews.push(view)});
+  await flush();
+  assert.match(h.root.innerHTML, /data-maint-nav="efficiency" aria-current="page">回复效率/);
+  assert.match(h.root.innerHTML, /<h2>近期回复效率<\/h2>/);
+  assert.doesNotMatch(h.root.innerHTML, /data-export-tokens/);
+  assert.doesNotMatch(h.root.innerHTML, /时间缺失时显示/);
+  const page = h.root.innerHTML.split('data-maint-view="efficiency"')[1].split('data-maint-view="recent"')[0];
+  assert.match(page, /P50 端到端/);
+  assert.match(page, /P50 末条消息至模型/);
+  assert.match(page, /P50 模型往返区间/);
+  assert.match(page, /首段响应/);
+  assert.match(page, /完整送达/);
+  assert.match(page, /3 条输入 · 2 \/ 2 段送达 · 模型 2 次 · 插件 1 次/);
+  assert.match(page, /末条消息/);
+  assert.match(page, /7\.0 秒/);
+  assert.match(page, /起点累计/);
+  assert.match(page, /从首条消息起算/);
+  assert.match(page, /从批次创建起算/);
+  assert.match(page, /data-stage="input_wait" data-observed="true"/);
+  assert.match(page, /data-stage="queue_wait" data-observed="true"/);
+  assert.match(page, /data-stage="preparation" data-observed="true"/);
+  assert.match(page, /失败 1 段 · 回执未知 1 段/);
+  assert.match(page, /data-stage="model"/);
+  assert.match(page, /data-stage="delivery"/);
+  assert.match(page, /data-event="first_delivered_at"/);
+  assert.match(page, /首段回执/);
+  assert.match(page, /末次成功回执/);
+  assert.match(page, /完整回执/);
+  assert.match(page, /部分送达/);
+  assert.match(page, /调用中 · 1 次活跃/);
+  assert.match(page, /上下文与工具注入/);
+  assert.match(page, /memory\.recall \/ recent_memory/);
+  assert.match(page, /calendar\.query/);
+  assert.match(page, /扩展插件 · calendar\.query/);
+  assert.match(page, /data-kind="extension"/);
+  assert.match(page, /宿主其他插件钩子未采集/);
+  assert.match(page, /data-observed="false"/);
+  assert.match(page, /未观测/);
+  assert.doesNotMatch(page, /消息正文|private body/);
+  const timelineStart = page.indexOf('<ol class="maint-efficiency-timeline">');
+  const timelineEnd = page.indexOf('</ol>', timelineStart);
+  const timeline = page.slice(timelineStart, timelineEnd);
+  let previousEvent = -1;
+  for (const event of ['received_at', 'last_input_received_at', 'first_model_started_at',
+    'last_model_finished_at', 'first_dispatched_at', 'first_delivered_at', 'last_delivered_at']) {
+    const position = timeline.indexOf(`data-event="${event}"`);
+    assert.ok(position > previousEvent, `${event} should follow the previous timeline event`);
+    previousEvent = position;
+  }
+  h.root.click('[data-maint-nav]', {maintNav: 'recent'});
+  assert.deepEqual(changedViews, ['efficiency', 'recent']);
+});
+
+test('dialogue and plugin views switch totals, rankings, cache, history, traces and CSV together', async () => {
+  const today = localDay(), previous = localDay(new Date(Date.now() - 86400000));
+  const report = (kind, provider, current, prior, cacheCalls) => {
+    const usage = tokens => ({calls: 1, tokens, cost_microusd: tokens * 10, input_tokens: tokens - 100,
+      output_tokens: 100, cache_reported_calls: 1, cache_telemetry_calls: 1,
+      cache_input_tokens: tokens - 100, cached_input_tokens: 100});
+    const day = (key, tokens) => daily(key, {...usage(tokens), key,
+      providers: [{key: provider, ...usage(tokens)}], tasks: [{key: kind, ...usage(tokens)}]});
+    const total = {...usage(current + prior), calls: 2,
+      providers: [{key: provider, ...usage(current + prior)}], tasks: [{key: kind, ...usage(current + prior)}]};
+    return {summary: total, totals: total, daily: [day(previous, prior), day(today, current)],
+      history: [day(previous, prior), day(today, current)],
+      windows: Object.fromEntries(['7d', '30d'].map(period => [period, {start_day: previous, end_day: today,
+        totals: total, providers: total.providers, tasks: total.tasks}])),
+      hourly: [{day: today, hour: '08', calls: 1, tokens: current}],
+      recent: [{at: today + 'T08:00:00', kind, provider, state: 'generated', tokens: current,
+        input_tokens: current - 100, output_tokens: 100, cached_input_tokens: 100}],
+      cache_diagnostics: {daily: [{day: today, signature_calls: cacheCalls, baseline_calls: cacheCalls}], recent_events: []}};
+  };
+  const dialogue = report('conversation.reply', 'dialogue-provider', 11000, 2000, 3);
+  const plugin = report('proactive.compose', 'plugin-provider', 1300, 500, 1);
+  const totals = {...daily(today, {tokens: 12300, calls: 2}), providers: [], tasks: []};
+  const h = harness({maintenance: {generated_at: today + 'T09:00:00', summary: totals, totals,
+    daily: [totals], history: [totals], recent: [...dialogue.recent, ...plugin.recent], budget: {spent_tokens: 1300},
+    usage_sources: {conversation: dialogue, plugin}}});
+  h.page.mount(h.root);
+  await flush();
+  assert.match(h.root.innerHTML, /角色总用量 = 对话主链 \+ 插件附加任务/);
+  assert.doesNotMatch(h.root.innerHTML, /陪伴插件 · 当前角色/);
+
+  h.root.click('[data-token-source]', {tokenSource: 'plugin'});
+  const overview = () => h.root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="prompts"')[0];
+  assert.match(overview(), /Provider 已确认 Token<\/span><strong>1,300<\/strong>/);
+  assert.match(overview(), /US\$0\.013000 已确认本地计价/);
+  assert.match(overview(), /data-rank-key="proactive\.compose"/);
+  assert.doesNotMatch(overview(), /data-task-settings-kind="conversation\.reply"|dialogue-provider/);
+  assert.match(overview(), /插件任务预算/);
+  assert.match(overview(), /仅插件任务/);
+  assert.match(overview(), /已入账 <b>1,300<\/b>/);
+  // Comparison rows always use their own source, even when the detail view changes.
+  const comparison = overview().split('maint-source-compare-list')[1].split('maint-source-compare-note')[0];
+  assert.match(comparison, /data-token-source="conversation"[\s\S]*?<b>11,000<\/b>/);
+  assert.match(comparison, /data-token-source="companion"[\s\S]*?<b>12,300<\/b>/);
+  h.root.click('[data-maint-nav]', {maintNav: 'recent'});
+  const recent = h.root.innerHTML.split('data-maint-view="recent"')[1];
+  assert.match(recent, /插件附加任务 · 1 \/ 1 条/);
+  assert.match(recent, /plugin-provider/);
+  assert.doesNotMatch(recent, /dialogue-provider/);
+  h.root.click('[data-export-tokens]');
+  assert.match(h.exports[0], /插件附加任务/);
+  assert.match(h.exports[0], /proactive\.compose/);
+  assert.doesNotMatch(h.exports[0], /conversation\.reply|dialogue-provider/);
+  assert.match(h.exports[0], /"每日","[^"]+","1300"/);
+  assert.match(h.downloads[0], /tokens-plugin-/);
+  h.root.click('[data-period]', {period: 'total'});
+  assert.match(overview(), /Provider 已确认 Token<\/span><strong>1,800<\/strong>/);
+  h.root.click('[data-period]', {period: '7d'});
+  assert.match(overview(), /Provider 已确认 Token<\/span><strong>1,800<\/strong>/);
+  h.root.click('[data-select-day]', {selectDay: previous});
+  assert.match(overview(), /Provider 已确认 Token<\/span><strong>500<\/strong>/);
+  h.root.click('[data-period]', {period: 'today'});
+  h.root.click('[data-rank-kind]', {rankKind: 'tasks', rankKey: 'proactive.compose'});
+  h.root.click('[data-token-source]', {tokenSource: 'conversation'});
+  assert.match(overview(), /Provider 已确认 Token<\/span><strong>11,000<\/strong>/);
+  assert.match(overview(), /data-rank-key="conversation\.reply"/);
+  assert.doesNotMatch(overview(), /data-task-settings-kind="proactive\.compose"|plugin-provider/);
+  const dialogueRecent = h.root.innerHTML.split('data-maint-view="recent"')[1];
+  assert.match(dialogueRecent, /对话主链 · V2 接管 · 1 \/ 1 条/);
+  assert.doesNotMatch(dialogueRecent, /已按排行筛选|plugin-provider/);
+  h.root.click('[data-maint-nav]', {maintNav: 'cache'});
+  const cache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
+  assert.match(cache, /请求前缀签名/);
+  assert.match(cache, /已采集 3 次 · 等待可比调用/);
+  assert.doesNotMatch(cache, /已采集 1 次/);
+  assert.match(cache, /aria-label="缓存诊断来源"/);
+  assert.match(cache, /data-token-source="conversation" aria-pressed="true"/);
+  assert.match(cache, /aria-label="缓存诊断时间范围"/);
+  h.root.click('[data-token-source]', {tokenSource: 'plugin'});
+  const pluginCache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
+  assert.match(pluginCache, /data-token-source="plugin" aria-pressed="true"/);
+  assert.match(pluginCache, /已采集 1 次 · 等待可比调用/);
+  assert.doesNotMatch(pluginCache, /已采集 3 次/);
+  h.page.unmount();
+});
+
+test('cache tables retain real provider receipts and exclude missing hit rates from low samples', async () => {
+  const today = localDay();
+  const provider = {...daily(today, {calls: 2, cache_reported_calls: 1, cache_telemetry_calls: 1,
+    cache_input_tokens: 2000, cached_input_tokens: 200, cache_other_input_tokens: 1800}), key: 'provider <test>'};
+  const totals = {...provider, providers: [provider], cache_low_calls: 1};
+  const h = harness({maintenance: {generated_at: localStamp(), summary: totals, totals, daily: [totals],
+    history: [totals], budget: {}, providers: [], recent: [
+      {at: localStamp(), kind: 'conversation.reply', provider: provider.key, input_tokens: 2000,
+        cached_input_tokens: 200, cache_hit_rate: 10, state: 'generated'},
+      {at: localStamp(), kind: 'conversation.reply', provider: 'unknown-receipt', input_tokens: 2500,
+        cached_input_tokens: 0, cache_hit_rate: null, state: 'generated'},
+    ]}});
+  h.page.mount(h.root, {activeView: 'cache'});
+  await flush();
+  const cache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
+  assert.match(cache, /class="maint-cache-table maint-cache-provider-table"/);
+  assert.match(cache, /class="maint-cache-table maint-cache-low-table"/);
+  assert.match(cache, /provider &lt;test&gt;/);
+  assert.doesNotMatch(cache, /provider <test>|unknown-receipt/);
+  assert.match(cache, /data-series="coverage"><span>确认覆盖<\/span><strong>50\.0%<\/strong>/);
+  assert.match(cache, /<td>2,000<\/td>/);
+  assert.equal((cache.match(/data-set-call-filter="cache-low"/g) || []).length, 1);
+  h.root.click('[data-set-call-filter]', {setCallFilter: 'cache-low'});
+  assert.match(h.root.innerHTML, /data-maint-nav="recent" aria-current="page"/);
+  h.page.unmount();
+});
+
+test('cache hit comparisons use the preceding whole seven- or thirty-day window', async () => {
+  const today = localDay();
+  for (const [period, days] of [['7d', 7], ['30d', 30]]) {
+    const history = Array.from({length: days * 2}, (_, offset) => {
+      const date = new Date(today + 'T12:00:00');
+      date.setDate(date.getDate() - offset);
+      return daily(localDay(date), {calls: 1, cache_reported_calls: 1, cache_telemetry_calls: 1,
+        cache_input_tokens: 100, cached_input_tokens: offset < days ? 80 : 20,
+        cache_other_input_tokens: offset < days ? 20 : 80});
+    });
+    const totals = daily(today, {calls: days, cache_reported_calls: days, cache_telemetry_calls: days,
+      cache_input_tokens: days * 100, cached_input_tokens: days * 80, cache_other_input_tokens: days * 20});
+    const h = harness({maintenance: {generated_at: localStamp(), summary: totals, totals,
+      daily: history, history, windows: {[period]: {totals, providers: [], tasks: []}}, recent: [], budget: {}, providers: []}});
+    h.page.mount(h.root, {activeView: 'cache'});
+    await flush();
+    h.root.click('[data-period]', {period});
+    const cache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
+    assert.match(cache, new RegExp('较前 ' + days + ' 日 \\+60\\.0 个百分点 · 前期 20\\.0%'));
+    h.page.unmount();
+  }
+});
+
+test('cache diagnostics summarize request context and show event snapshots', async () => {
+  const today = localDay();
+  const yesterdayDate = new Date(today + 'T00:00:00');
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = localDay(yesterdayDate);
+  const totals = daily(today, {calls: 1, tokens: 100, input_tokens: 80, output_tokens: 20,
+    cache_reported_calls: 1, cache_telemetry_calls: 1, cache_input_tokens: 80,
+    cached_input_tokens: 10, cache_other_input_tokens: 70});
+  const previousDay = daily(yesterday, {calls: 1, cache_input_tokens: 100, cached_input_tokens: 40});
+  const event = {at: localStamp(), session_ref: 'a1b2c3d4', severity: 'high',
+    previous_provider: 'provider-b', provider: 'provider-a',
+    changes: ['provider_change', 'model_change', 'context_reset', 'context_availability_change'],
+    cache_hit_rate: 0, cache_hit_delta: null,
+    before: {context_materials: 4, context_chars: 800, context_bytes: 1638,
+      context_est_tokens: 400, system_est_tokens: 1000, tool_est_tokens: 250,
+      message_est_tokens: 500, message_chars: 300, message_bytes: 600, request_est_tokens: 2150,
+      deferred_materials: 1, unavailable_materials: 2, messages: 6, images: 1, audio: 0, video: 0,
+      tools_fingerprint: '11111111'},
+    after: {context_materials: 0, context_chars: 0, context_bytes: 0,
+      context_est_tokens: 0, system_est_tokens: 1200, tool_est_tokens: 300,
+      message_est_tokens: 1100, message_chars: 400, message_bytes: 800, request_est_tokens: 2600,
+      deferred_materials: 0, unavailable_materials: 1, messages: 6, images: 0, audio: 0, video: 0,
+      tools_fingerprint: '22222222'}};
+  const h = harness({maintenance: {generated_at: localStamp(), summary: totals, totals, daily: [totals],
+    history: [previousDay, totals], hourly: [], recent: [], budget: {}, providers: [], runtime: {},
+    cache_diagnostics: {daily: [{day: today, signature_calls: 2, compared_calls: 1,
+      baseline_calls: 1, changed_calls: 1, high_severity_events: 1, medium_severity_events: 0,
+      low_severity_events: 0, context_resets: 1, model_changes: 1,
+      provider_changes: 1, context_availability_changes: 1,
+      cache_hit_comparable_changes: 0, cache_hit_drop_after_change_calls: 0, cache_hit_delta_points_total: 0,
+      route_compared_calls: 1, route_stable_calls: 0, route_cache_calls: 0,
+      system_compared_calls: 1, system_stable_calls: 1, system_cache_calls: 1,
+      system_cache_input_tokens_total: 1000, system_cached_input_tokens_total: 300,
+      context_stats_calls: 2, context_text_stats_calls: 2, request_stats_calls: 2,
+      context_availability_calls: 2,
+      context_estimate_calls: 2, system_estimate_calls: 2, tool_estimate_calls: 2,
+      message_estimate_calls: 2, request_estimate_calls: 2,
+      context_est_tokens_total: 1200, system_est_tokens_total: 2000, tool_est_tokens_total: 600,
+      message_est_tokens_total: 1000, request_est_tokens_total: 4800,
+      request_profile_calls: 2, profile_context_est_tokens_total: 1200,
+      profile_message_est_tokens_total: 1000, profile_system_est_tokens_total: 2000,
+      profile_tool_est_tokens_total: 600, profile_request_est_tokens_total: 4800,
+      context_materials_total: 8, context_chars_total: 1600, context_bytes_total: 3276,
+      message_chars_total: 800, message_bytes_total: 1600,
+      deferred_materials_total: 2, unavailable_materials_total: 1,
+      messages_total: 12, system_messages_total: 4, system_bytes_total: 6000,
+      tools_total: 6, tool_bytes_total: 4096, images_total: 2, audio_total: 0, video_total: 0}],
+      recent_events: Array.from({length: 22}, () => event), event_sample_limit: 80}}});
+  h.page.mount(h.root);
+  await flush();
+  h.root.click('[data-maint-nav]', {maintNav: 'cache'});
+  const cache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
+  assert.match(cache, /模型切换/);
+  assert.match(cache, /参考材料 \/ 请求/);
+  assert.match(cache, /约 600 Token/);
+  assert.match(cache, /约 1,000 Token/);
+  assert.match(cache, /约 300 Token/);
+  assert.match(cache, /消息上下文/);
+  assert.match(cache, /完整请求/);
+  assert.match(cache, /Provider 切换/);
+  assert.match(cache, /服务路由/);
+  assert.match(cache, /完整前缀/);
+  assert.match(cache, /本期结构变化/);
+  assert.match(cache, /高 1/);
+  assert.match(cache, /常见变化标签/);
+  assert.ok(cache.indexOf('缓存结构变化事件') < cache.indexOf('请求上下文统计'));
+  assert.match(cache, /稳定 1 \/ 可判定 1 · 命中回执 1 次/);
+  assert.match(cache, /稳定命中率/);
+  assert.match(cache, /较前一日 -27\.5 个百分点 · 前期 40\.0%/);
+  assert.equal((cache.match(/class="maint-cache-metric"/g) || []).length, 4);
+  assert.match(cache, /缓存命中率 12\.5%/);
+  assert.match(cache, /pathLength="100" stroke="url\(#maint-cache-rate-gradient\)" stroke-dasharray="12\.5 100" style="--cache-rate:12\.5" stroke-linecap="round"/);
+  const zipBands = [...cache.matchAll(/<div class="maint-cache-zip" data-facets="28">[\s\S]*?<\/div>/g)]
+    .map(match => match[0]);
+  assert.equal(zipBands.length, 2);
+  for (const band of zipBands) assert.equal((band.match(/<polygon\b/g) || []).length, 28);
+  assert.match(cache, /animation-delay:24ms/);
+  assert.match(cache, /animation-delay:672ms/);
+  assert.match(styles, /\.maint-cache-zip polygon\s*\{[^}]*stroke-width:4/);
+  assert.match(styles, /@keyframes maint-cache-zip-pop/);
+  assert.match(styles, /\.maint-cache-mini-meter > i\s*\{[^}]*transition:width 500ms/);
+  assert.match(styles, /\.maint-token-redesign,\s*\.maint-cache-panel\s*\{[^}]*--maint-token-series-1:#A17BFF;[^}]*--maint-token-series-2:#3FE0A6;[^}]*--maint-token-series-3:#FFC258;/s);
+  assert.match(styles, /\.maint-cache-panel \[data-part="hit"\][^}]*--cache-part:var\(--maint-token-series-2\)/);
+  assert.match(styles, /\.maint-cache-panel \[data-part="write"\] \{ --cache-part:#3EE0D0; \}/);
+  assert.match(styles, /\.maint-cache-panel \[data-part="miss"\][^}]*--cache-part:var\(--maint-token-series-1\)/);
+  assert.match(styles, /\.maint-cache-panel \[data-part="output"\],[^}]*--cache-part:#FFC258/);
+  assert.match(styles, /#maint-cache-rate-gradient stop:nth-of-type\(1\) \{ stop-color:#A17BFF; \}/);
+  assert.match(styles, /#maint-cache-rate-gradient stop:nth-of-type\(2\) \{ stop-color:#6FA2FF; \}/);
+  assert.match(styles, /#maint-cache-rate-gradient stop:nth-of-type\(3\) \{ stop-color:#3EE0D0; \}/);
+  assert.match(styles, /\.maint-chart-legend > \[data-series="cached"\]::before \{ background:var\(--maint-token-series-2\); \}/);
+  assert.match(styles, /\.maint-chart-legend > \[data-series="input"\]::before \{ background:var\(--maint-token-series-1\); \}/);
+  assert.match(styles, /@media \(prefers-reduced-motion:reduce\)\s*\{[^}]*\.maint-cache-ring-fill/s);
+  assert.match(styles, /\.maint-cache-composition-section\[data-active-part="hit"\]/);
+  assert.match(styles, /\.maint-cache-context-section\[data-active-part="materials"\]/);
+  const compositionSection = {dataset: {}};
+  const contextSection = {dataset: {}};
+  const partTarget = (section, part) => ({
+    dataset: {part},
+    closest(selector) {
+      if (selector === "[data-part]") return this;
+      if (selector === ".maint-cache-composition-section, .maint-cache-context-section") return section;
+      return null;
+    },
+  });
+  const hitPart = partTarget(compositionSection, "hit");
+  const writePart = partTarget(compositionSection, "write");
+  h.root.pointer("pointerover", hitPart);
+  assert.equal(compositionSection.dataset.activePart, "hit");
+  h.root.pointer("pointerout", hitPart, writePart);
+  assert.equal(compositionSection.dataset.activePart, "write");
+  h.root.pointer("pointerout", writePart, {closest: () => null});
+  assert.equal(compositionSection.dataset.activePart, undefined);
+  const materialPart = partTarget(contextSection, "materials");
+  h.root.pointer("pointerover", materialPart);
+  assert.equal(contextSection.dataset.activePart, "materials");
+  h.root.pointer("pointerout", materialPart, {closest: () => null});
+  assert.equal(contextSection.dataset.activePart, undefined);
+  assert.match(cache, /data-series="coverage"><span>确认覆盖<\/span><strong>100\.0%<\/strong>/);
+  assert.match(cache, /Token 构成拉链图：缓存命中 10 Token（10\.0%），缓存写入 0 Token（0\.0%），普通输入 70 Token（70\.0%），输出 20 Token（20\.0%）/);
+  assert.match(cache, /请求上下文拉链图：参考材料 600 Token（25\.0%），消息上下文 500 Token（20\.8%），system 消息 1,000 Token（41\.7%），工具定义 300 Token（12\.5%）/);
+  assert.match(cache, /完整采集 2 次 · 单次请求均值/);
+  assert.equal((cache.match(/class="maint-cache-stability"/g) || []).length, 6);
+  assert.match(cache, /class="maint-cache-table maint-cache-event-table"/);
+  assert.equal((cache.match(/<details class="maint-cache-event-detail">/g) || []).length, 20);
+  assert.match(cache, /缓存结构变化事件/);
+  assert.match(cache, /最近显示 20 条 · 样本池 80 条/);
+  assert.equal((cache.match(/maint-cache-signature-event/g) || []).length, 20);
+  assert.match(cache, /变化后命中率/);
+  assert.match(cache, /约 2,400 Token/);
+  assert.match(cache, /4 条/);
+  assert.match(cache, /800 字 · 1\.6 KiB/);
+  assert.match(cache, /请求消息 6 条/);
+  assert.match(cache, /Provider 切换/);
+  assert.match(cache, /模型切换/);
+  assert.match(cache, /data-severity="high"/);
+  assert.match(cache, /会话 a1b2c3d4/);
+  assert.match(cache, /tools 11111111 → 22222222/);
+  assert.match(cache, /provider-b → provider-a/);
+  assert.match(cache, /Provider 已切换 · 不跨 Provider 比较 · 本次命中 0%/);
+  assert.match(cache, /前 材料 4 条 · 800 字 · 1\.6 KiB · 约 400 Token · 延后 1 · 不可用 2 → 后 材料 0 条 · 0 字 · 0 B · 约 0 Token · 延后 0 · 不可用 1/);
+  assert.match(cache, /前 消息正文（不含参考材料） 约 500 Token · 完整请求 约 2,150 Token · system 约 1,000 Token · 工具 约 250 Token/);
+  h.page.unmount();
+  h.root.pointer("pointerover", hitPart);
+  assert.equal(compositionSection.dataset.activePart, undefined);
+});
+
+test('missing usage breakdown never substitutes role totals for plugin or dialogue', async () => {
+  const today = localDay();
+  const h = harness({maintenance: {generated_at: localStamp(), summary: {tokens: 5000, calls: 1},
+    daily: [daily(today, {tokens: 5000, calls: 1})], recent: [{at: localStamp(), kind: 'conversation.reply',
+      provider: 'dialogue-provider', tokens: 5000, state: 'generated'}]}});
+  h.page.mount(h.root);
+  await flush();
+  for (const tokenSource of ['plugin', 'conversation']) {
+    h.root.click('[data-token-source]', {tokenSource});
+    assert.match(h.root.innerHTML, /分项统计尚未同步/);
+    assert.doesNotMatch(h.root.innerHTML, /class="maint-token-hero maint-token-summary"/);
+    const recent = h.root.innerHTML.split('data-maint-view="recent"')[1];
+    assert.doesNotMatch(recent, /dialogue-provider/);
+    h.root.click('[data-export-tokens]');
+  }
+  assert.equal(h.exports.length, 0);
+  h.root.click('[data-token-source]', {tokenSource: 'main'});
+  assert.match(h.root.innerHTML, /AstrBot 默认回复流程的统计未接入/);
+  h.page.unmount();
+});
+
+test('recent calls show response stages and missing parsed text from body-free metadata', async () => {
+  const h = harness({maintenance: {generated_at: localStamp(), summary: {calls: 1, tokens: 0},
+    daily: [], recent: [{at: localStamp(),
+    kind: 'conversation.reply', provider: 'dialogue-provider', tokens: null, state: 'unknown',
+    failure: 'native_response_parse_failed', response_diagnostics: {parse_state: 'native_rejected',
+      finish_reason: 'stop', raw: {chars: 2, has_internal_markers: true}, parsed: null, visible: null}}]}});
+  h.page.mount(h.root);
+  await flush();
+  h.root.click('[data-maint-nav]', {maintNav: 'recent'});
+  assert.match(h.root.innerHTML, /宿主解析失败/);
+  assert.match(h.root.innerHTML, /原始 2 字 · 含标签样式标记/);
+  assert.match(h.root.innerHTML, /宿主解析未取得文本/);
+  h.page.unmount();
+});
+
+test('maintenance TTS diagnostics play the generated audio and release old preview URLs', async () => {
+  const audioBase64 = Buffer.from('RIFF0000WAVE').toString('base64');
+  const h = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: [{id: 'voice-a'}]}, image: {actions: []}, model: {tasks: [], providers: []},
+    posts: {'/model/voice/test': {provider_id: 'voice-a', status: 'ok', latency_ms: 22,
+      audio_base64: audioBase64, audio_mime_type: 'audio/wav'}},
+  });
+  h.page.mount(h.root, {activeView: 'diagnostics'});
+  await flush();
+  h.root.click('[data-voice-test]');
+  await flush();
+  assert.match(h.root.innerHTML, /本次结果 · 试听/);
+  assert.match(h.root.innerHTML, /<audio controls preload="none" src="blob:maintenance-audio"/);
+  assert.equal(h.audioPreviews[0].type, 'audio/wav');
+
+  h.root.change('[data-voice-language]', 'ja');
+  assert.doesNotMatch(h.root.innerHTML, /blob:maintenance-audio|TTS 合成通过/);
+  assert.deepEqual(h.revokedAudioUrls, ['blob:maintenance-audio']);
+  h.root.click('[data-voice-test]');
+  await flush();
+  h.page.unmount();
+  assert.deepEqual(h.revokedAudioUrls, ['blob:maintenance-audio', 'blob:maintenance-audio']);
+});
+
+test('maintenance groups troubleshooting content by workflow and uses responsive test layouts', async () => {
+  const h = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+  });
+  h.page.mount(h.root, {activeView: 'diagnostics'});
+  await flush();
+
+  const groups = ['maint-diagnostic-overview', 'maint-diagnostic-signals', 'maint-diagnostic-checks',
+    'maint-diagnostic-evidence', 'maint-faq'].map(name => h.root.innerHTML.indexOf('class="' + name + '"'));
+  assert.ok(groups.every(index => index >= 0));
+  assert.deepEqual(groups, [...groups].sort((left, right) => left - right));
+  assert.match(h.root.innerHTML, /class="maint-diagnostic-checks"[\s\S]*class="maint-proactive-test"[\s\S]*class="maint-memory-diagnostic"[\s\S]*class="maint-test-zone"/);
+  assert.match(h.root.innerHTML, /class="maint-test-row maint-test-row--provider"/);
+  assert.match(h.root.innerHTML, /class="maint-test-row maint-test-row--voice"/);
+  assert.match(h.root.innerHTML, /class="maint-test-row maint-test-row--image"/);
+  assert.match(styles, /container-name:maint-diagnostics/);
+  assert.match(styles, /@container maint-diagnostics \(max-width: 960px\)/);
+  assert.match(styles, /@container maint-diagnostics \(max-width: 760px\)/);
+  h.page.unmount();
+});
+
+test('prompt route opens the editor directly and internal tabs update the route state', async () => {
+  const h = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+  });
+  const changedViews = [];
+  h.page.mount(h.root, {activeView: 'prompts', onViewChange: view => changedViews.push(view)});
+  await flush();
+
+  assert.match(h.root.innerHTML, /data-maint-nav="prompts" aria-current="page"/);
+  assert.match(h.root.innerHTML, /data-maint-view="prompts"><section class="maint-prompt-section"/);
+  h.root.click('[data-maint-nav]', {maintNav: 'cache'});
+  assert.deepEqual(changedViews, ['prompts', 'cache']);
+  assert.match(h.root.innerHTML, /data-maint-nav="cache" aria-current="page"/);
+});
 
 test('maintenance offers today, total, date drilldown, ranked detail, cache and diagnostic filters', async () => {
   const today = localDay(new Date());
@@ -128,7 +652,13 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
       budget: {limit_tokens: 1000, spent_tokens: 100, held_tokens: 20, soft_limit_enabled: true, soft_limit_tokens: 500},
       providers: [{id: '<main>', model: 'model-a'}],
       runtime: {
-        storage: {journal_mode: 'wal', synchronous: 2, busy_timeout_ms: 5000, foreign_keys: true, page_count: 88, freelist_count: 2, schema_version: 46},
+        storage: {journal_mode: 'wal', synchronous: 2, busy_timeout_ms: 5000, foreign_keys: true, page_count: 88, freelist_count: 2, schema_version: 49},
+        inbound_no_replies: [
+          {event_ref: '1234567890abcdef1234567890abcdef', channel: 'private',
+            reason_code: 'staging_not_accepting', observed_at: localStamp(), scope: 'current_role'},
+          {event_ref: 'fedcba0987654321fedcba0987654321', channel: 'private',
+            reason_code: 'conversation_task_failed', code: 'model_budget_exhausted', observed_at: localStamp(), scope: 'current_role'},
+        ],
         conversation: [{created_at: localStamp(), batch_state: 'closed', flow_state: 'blocked', flow_reason: 'provider_failure',
           input_count: 2, part_count: 2, delivered_parts: 1, failed_parts: 1, unknown_parts: 0, pending_parts: 0}],
         identity_scope: {dashboard_operator: 'verified', role_access: 'verified', token_ledger: 'current_role'},
@@ -140,29 +670,47 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
     },
     voice: {providers: [{id: 'voice-a'}]},
     image: {actions: [{action: 'image.generate', registered: true, current: true}]},
+    balance: {configured: true, available: true, provider: 'newapi', provider_label: 'NewAPI',
+      currency_label: 'USD', amount: '12.5', observed_at: new Date().toISOString(), state: 'available'},
     posts: {
       '/model/test': {provider_id: '<main>', status: 'ok', latency_ms: 41},
-      '/model/voice/test': {provider_id: 'voice-a', status: 'ok', latency_ms: 55},
+      '/model/voice/test': {provider_id: 'voice-a', status: 'ok', latency_ms: 55,
+        audio_base64: Buffer.from('RIFF0000WAVE').toString('base64'), audio_mime_type: 'audio/wav'},
       '/model/image/test': {action: 'image.generate', registered: true, current: true},
       '/model/test/storage': {status: 'ok', integrity: ['ok'], foreign_key_issues: 0, elapsed_ms: 9},
+      '/setup/proactive-diagnostic': {state: 'failed', purpose: 'affection', purpose_label: '想念与亲近',
+        variant: null, recipient: 'core_administrator', stage: 'purpose', code: 'contact_purpose_paused',
+        error: 'the selected proactive purpose is not currently authorized', suggestion: '检查所选目的的暂停状态和恢复时间。',
+        stages: [{stage: 'authorization', state: 'passed'}, {stage: 'purpose', state: 'failed'}]},
     },
     model: {tasks: [{kind: 'conversation.reply', capabilities: [], fields: {provider: {value: '<main>'}, fallback: {value: ''}, max_output_tokens: {value: 1024}}, application_state: 'applied'}],
       providers: [{id: '<main>', capabilities: [], max_output_tokens: 4096}]},
   };
-  const {page, requests, root, exports, downloads} = harness(responses);
+  const {page, requests, root, exports, downloads, confirmations} = harness(responses);
   page.mount(root);
   await flush();
 
   assert.deepEqual(requests.slice(0, 4).map(item => item[0]), ['GET', 'GET', 'GET', 'GET']);
   assert.match(root.innerHTML, /运行态势/);
   assert.match(root.innerHTML, /Token 统计管理/);
+  assert.match(root.innerHTML, /V2 当前没有接收入站消息/);
+  assert.match(root.innerHTML, /当前角色 · 私聊/);
   assert.match(root.innerHTML, /120/);
   assert.match(root.innerHTML, /周期对比/);
   assert.match(root.innerHTML, /40\.0% 命中/);
   assert.match(root.innerHTML, /Provider 消耗排行/);
   assert.match(root.innerHTML, /任务消耗排行/);
+  assert.match(root.innerHTML, /class="maint-ranking-feature" data-task-settings-kind="conversation\.reply"/);
+  assert.match(root.innerHTML, /class="maint-ranking-filter" data-rank-kind="tasks" data-rank-key="conversation\.reply"/);
+  assert.match(styles, /\.maint-ranking-feature:focus-visible/);
   assert.match(root.innerHTML, /每日明细/);
   assert.match(root.innerHTML, /后台软限额/);
+  assert.match(root.innerHTML, /maint-budget-meterline/);
+  assert.match(root.innerHTML, /软限额 500/);
+  assert.match(root.innerHTML, /硬限额 1,000/);
+  assert.match(root.innerHTML, /maint-budget-tick[^>]*--limit-pos:50%/);
+  assert.match(styles, /\.maint-budget-limits/);
+  assert.match(styles, /\.maint-budget-meterline \.maint-budget-tick/);
   assert.match(root.innerHTML, /统计口径/);
   assert.match(root.innerHTML, /当前角色的 V2 模型任务/);
   assert.match(root.innerHTML, /模型任务路由/);
@@ -175,21 +723,80 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(root.innerHTML, /原生图片工具/);
   assert.match(root.innerHTML, /服务商可能计费/);
   assert.match(root.innerHTML, /data-token-source="memory"/);
-  assert.match(root.innerHTML, /Provider 余额 · 未接入/);
-  assert.match(root.innerHTML, /role="img" aria-label="缓存命中、缓存写入、普通输入与输出 Token 构成"/);
-  assert.match(root.innerHTML, /缓存前缀诊断/);
+  assert.match(root.innerHTML, /NewAPI 账户余额/);
+  assert.match(root.innerHTML, /12\.5 USD/);
+  assert.match(root.innerHTML, /aria-label="治理与维护二级导航"/);
+  assert.match(root.innerHTML, /data-maint-nav="overview" aria-current="page"/);
+  assert.match(root.innerHTML, /data-maint-view="diagnostics" hidden/);
+  assert.match(root.innerHTML, /data-maint-view="cache" hidden/);
+  assert.match(root.innerHTML, /data-maint-view="prompts" hidden/);
+  assert.match(root.innerHTML, /data-slots="14"/);
+  assert.match(root.innerHTML, /data-slots="48"/);
+  assert.match(root.innerHTML, /class="maint-token-hero maint-token-summary maint-token-dashboard-summary"/);
+  assert.match(root.innerHTML, /已确认 \d+ 次/);
+  assert.match(root.innerHTML, /未确认 \d+ 次/);
+  const summaryStart = root.innerHTML.indexOf('<div class="maint-token-hero maint-token-summary maint-token-dashboard-summary">');
+  const balanceCard = root.innerHTML.indexOf('<div class="maint-balance-availability"', summaryStart);
+  const usageCard = root.innerHTML.indexOf('<div class="maint-usage-total maint-token-summary-card">', summaryStart);
+  const budgetCard = root.innerHTML.indexOf('<div class="maint-budget-block maint-token-summary-card"', summaryStart);
+  assert.ok(summaryStart >= 0 && balanceCard < usageCard && usageCard < budgetCard);
+  assert.match(root.innerHTML, /data-token-detail="daily" aria-selected="true"/);
+  assert.match(root.innerHTML, /data-token-breakdown="providers" aria-pressed="true"/);
+  root.click('[data-trend-mode]', {trendMode: 'hourly'});
+  assert.match(root.innerHTML, /data-trend-mode="hourly" aria-pressed="true"/);
+  assert.match(root.innerHTML, /data-trend-panel="daily" hidden/);
+  root.click('[data-token-breakdown]', {tokenBreakdown: 'tasks'});
+  assert.match(root.innerHTML, /data-token-breakdown="tasks" aria-pressed="true"/);
+  assert.match(root.innerHTML, /data-token-breakdown-panel="providers" hidden/);
+  root.click('[data-token-detail]', {tokenDetail: 'providers'});
+  assert.match(root.innerHTML, /data-token-detail="providers" aria-selected="true"/);
+  assert.match(root.innerHTML, /data-token-detail-panel="daily" hidden/);
+  root.click('[data-trend-mode]', {trendMode: 'daily'});
+  root.click('[data-token-breakdown]', {tokenBreakdown: 'providers'});
+  root.click('[data-token-detail]', {tokenDetail: 'daily'});
+  assert.match(root.innerHTML, /估算 Token/);
+  assert.match(root.innerHTML, /调用确认率/);
+  assert.match(root.innerHTML, /maint-th-pair"><span>缓存命中<\/span><span>缓存写入<\/span>/);
+  assert.ok(requests.some(item => item[0] === 'GET' && item[1].endsWith('/balance')));
+  assert.match(styles, /\.maint-hour-chart\.maint-hour-chart-48\s*\{[^}]*grid-template-columns:\s*repeat\(48, minmax\(9px, 1fr\)\)/s);
+  assert.match(styles, /\.maint-token-hero\.maint-token-summary\.maint-token-dashboard-summary\s*\{[^}]*grid-template-columns:/s);
+  assert.doesNotMatch(styles, /\.maint-token-hero\.maint-token-summary\s*>\s*\.maint-budget-block\s*\{/);
+  assert.match(styles, /\.maint-token-source-control \.maint-source-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit/s);
+  assert.match(styles, /--maint-token-series-1:#A17BFF/);
+  assert.match(styles, /--maint-token-series-2:#3FE0A6/);
+  assert.match(styles, /--maint-token-series-3:#FFC258/);
+  root.click('[data-maint-nav]', {maintNav: 'cache'});
+  assert.match(root.innerHTML, /data-maint-nav="cache" aria-current="page"/);
+  assert.match(root.innerHTML, /data-maint-view="overview" hidden/);
+  assert.match(root.innerHTML, /data-maint-view="cache"><section class="maint-cache-panel"/);
+  assert.match(root.innerHTML, /data-maint-view="diagnostics" hidden/);
+  root.click('[data-maint-nav]', {maintNav: 'diagnostics'});
+  assert.match(root.innerHTML, /data-maint-nav="diagnostics" aria-current="page"/);
+  assert.match(root.innerHTML, /data-maint-view="diagnostics"><section class="maint-diagnostics-panel"/);
+  assert.match(root.innerHTML, /data-maint-view="cache" hidden/);
+  root.click('[data-maint-nav]', {maintNav: 'prompts'});
+  assert.match(root.innerHTML, /data-maint-view="prompts"><section class="maint-prompt-section"/);
+  assert.match(root.innerHTML, /data-maint-view="diagnostics" hidden/);
+  root.click('[data-maint-nav]', {maintNav: 'overview'});
+  assert.match(root.innerHTML, /role="img" aria-label="Token 构成拉链图：缓存命中 40 Token/);
+  assert.match(root.innerHTML, /请求前缀签名/);
   assert.match(root.innerHTML, /来源同周期对照/);
   assert.match(root.innerHTML, /各账本独立统计/);
   assert.match(root.innerHTML, /回执覆盖/);
   assert.match(root.innerHTML, /上下文重置/);
-  assert.match(root.innerHTML, /system prompt/);
+  assert.match(root.innerHTML, /system 前缀/);
   assert.match(root.innerHTML, /工具定义/);
-  assert.match(root.innerHTML, /顺序漂移/);
-  assert.match(root.innerHTML, /签名状态 · 未采集/);
+  assert.match(root.innerHTML, /材料前缀/);
+  assert.match(root.innerHTML, /升级后尚未采集/);
+  assert.match(root.innerHTML, /请求前缀签名/);
   assert.match(root.innerHTML, /运行证据台/);
   assert.match(root.innerHTML, /V2 SQLite 存储/);
   assert.match(root.innerHTML, /REQ-041/);
   assert.match(root.innerHTML, /统一身份与隔离/);
+  const balanceReads = requests.filter(item => item[0] === 'GET' && item[1].endsWith('/balance')).length;
+  root.click('[data-balance-refresh]');
+  await flush();
+  assert.equal(requests.filter(item => item[0] === 'GET' && item[1].endsWith('/balance')).length, balanceReads + 1);
   assert.match(root.innerHTML, /消息聚合与防抖追踪/);
   assert.match(root.innerHTML, /安静窗 600 ms/);
   assert.match(root.innerHTML, /memory\.recall/);
@@ -204,14 +811,14 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.doesNotMatch(root.innerHTML, /class="maint-token-hero"/);
   assert.match(root.innerHTML, /当前角色数据不会替代它/);
   root.click('[data-token-source]', {tokenSource: 'companion'});
-  assert.match(root.innerHTML, /class="maint-token-hero"/);
+  assert.match(root.innerHTML, /class="maint-token-hero(?: |")/);
 
   root.click('[data-period]', {period: 'total'});
   assert.match(root.innerHTML, /aria-pressed=\"true\" class=\"is-active\">总计/);
   assert.match(root.innerHTML, /200/);
   root.click('[data-period]', {period: '7d'});
   assert.match(root.innerHTML, /aria-pressed="true" class="is-active">7 日/);
-  assert.match(root.innerHTML, /近 7 日 · Token 总量/);
+  assert.match(root.innerHTML, /近 7 日 · Provider 已确认 Token/);
   root.click('[data-period]', {period: '30d'});
   assert.match(root.innerHTML, /aria-pressed="true" class="is-active">30 日/);
   root.click('[data-period]', {period: 'today'});
@@ -251,8 +858,39 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(root.innerHTML, /REQ-041 结果为什么只显示状态/);
   root.click('[data-diagnostic-category]', {diagnosticCategory: 'all'});
   root.click('[data-diagnostic-severity]', {diagnosticSeverity: 'all'});
+  assert.match(root.innerHTML, /模型预算额度不足/);
+  assert.match(root.innerHTML, /model_budget_exhausted/);
+  assert.match(root.innerHTML, /主动消息链路测试/);
+  assert.match(root.innerHTML, /作品与阅读/);
+  assert.match(root.innerHTML, /外部资讯/);
+  assert.match(root.innerHTML, /只复用当前用途已经产生的真实来源/);
+  assert.doesNotMatch(root.innerHTML, /当前没有安全的主动消息测试接口/);
+  assert.match(root.innerHTML, /data-focus-target="proactive-test"/);
+  assert.match(root.innerHTML, /其他运行诊断/);
+  assert.match(root.innerHTML, /以下信号独立于上方主动消息测试/);
+  root.change('[data-proactive-purpose]', 'affection');
+  root.click('[data-proactive-test]');
+  assert.match(root.innerHTML, /确认真实投递/);
+  assert.match(root.innerHTML, /确认并开始投递/);
+  assert.equal(requests.some(item => item[0] === 'POST' && item[1] === '/setup/proactive-diagnostic'), false);
+  root.click('[data-proactive-cancel]');
+  assert.match(root.innerHTML, /已取消，本次未调用模型，也未发送消息/);
+  assert.equal(requests.some(item => item[0] === 'POST' && item[1] === '/setup/proactive-diagnostic'), false);
+  root.click('[data-proactive-test]');
+  root.click('[data-proactive-confirm]');
+  await flush();
+  const proactiveCall = requests.find(item => item[0] === 'POST' && item[1] === '/setup/proactive-diagnostic');
+  assert.deepEqual(JSON.parse(JSON.stringify(proactiveCall[2])), {purpose: 'affection', confirm_delivery: true});
+  assert.match(root.innerHTML, /the selected proactive purpose is not currently authorized/);
+  assert.match(root.innerHTML, /所选联系目的当前已暂停/);
+  assert.match(root.innerHTML, /展开技术详情/);
+  assert.match(root.innerHTML, /核心管理员/);
+  assert.match(root.innerHTML, /目的开关/);
+  assert.equal(confirmations.length, 0);
   root.click('[data-rank-kind]', {rankKind: 'providers', rankKey: '<main>'});
   assert.match(root.innerHTML, /已按排行筛选：&lt;main&gt;/);
+  root.click('[data-rank-kind]', {rankKind: 'tasks', rankKey: 'conversation.reply'});
+  assert.match(root.innerHTML, /已按排行筛选：对话回复/);
 
   root.click('[data-period]', {period: 'today'});
   root.click('[data-storage-test]');
@@ -271,9 +909,335 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   root.click('[data-image-test]');
   await flush();
   assert.deepEqual(requests.filter(item => item[0] === 'POST').map(item => item[1]),
-    ['/model/test/storage', '/model/test', '/model/voice/test', '/model/image/test']);
+    ['/setup/proactive-diagnostic', '/model/test/storage', '/model/test', '/model/voice/test', '/model/image/test']);
   assert.match(root.innerHTML, /注册检查通过/);
   page.unmount();
+});
+
+test('empty today rankings identify their scope and link to seven-day rankings', async () => {
+  const today = localDay(new Date());
+  const previous = localDay(new Date(Date.now() - 86400000));
+  const provider = {key: 'provider-a', calls: 2, tokens: 120, input_tokens: 100, output_tokens: 20};
+  const task = {...provider, key: 'conversation.reply'};
+  const prior = daily(previous, {calls: 2, tokens: 120, providers: [provider], tasks: [task]});
+  const current = daily(today);
+  const {page, root} = harness({
+    maintenance: {
+      generated_at: localStamp(), summary: {calls: 2, tokens: 120}, totals: {calls: 2, tokens: 120,
+        providers: [provider], tasks: [task]},
+      daily: [prior, current], history: [prior, current],
+      windows: {'7d': {totals: {calls: 2, tokens: 120}, providers: [provider], tasks: [task]},
+        '30d': {totals: {calls: 2, tokens: 120}, providers: [provider], tasks: [task]}},
+      hourly: [], recent: [], budget: {}, providers: [], runtime: {},
+    },
+  });
+  page.mount(root);
+  await flush();
+
+  assert.equal((root.innerHTML.match(/今日 · 0 项/g) || []).length, 2);
+  assert.match(root.innerHTML, /当前无硬上限/);
+  assert.doesNotMatch(root.innerHTML, /aria-valuemax="0"/);
+  assert.equal((root.innerHTML.match(/查看近 7 日排行/g) || []).length, 2);
+  root.click('[data-period]', {period: '7d'});
+  assert.equal((root.innerHTML.match(/近 7 日 · 1 项/g) || []).length, 2);
+  assert.match(root.innerHTML, /120/);
+  assert.doesNotMatch(root.innerHTML, /查看近 7 日排行/);
+  page.unmount();
+});
+
+test('image diagnostics use the namespaced native action id returned by the host', async () => {
+  const {page, requests, root} = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []},
+    image: {actions: [{action: 'image.generate', enabled: true, loaded: true, current: true, registered: true, state: 'ready'}]},
+    model: {tasks: [], providers: []},
+    posts: {'/model/image/test': {action: 'image.generate', enabled: true, loaded: true, current: true,
+      registered: true, state: 'ready', check: 'registration_only'}},
+  });
+  page.mount(root, {activeView: 'diagnostics'});
+  await flush();
+
+  root.click('[data-diagnostic-category]', {diagnosticCategory: 'image_generation'});
+  assert.match(root.innerHTML, /data-image-action[^>]*>[\s\S]*?<option value="image\.generate" selected>image\.generate<\/option>/);
+  assert.match(root.innerHTML, /工具已注册/);
+  assert.doesNotMatch(root.innerHTML, /没有当前注册的生图工具/);
+  assert.doesNotMatch(root.innerHTML, /识图工具|没有当前注册的识图工具/);
+
+  root.click('[data-image-test]');
+  await flush();
+  const imageTest = requests.find(([method, route]) => method === 'POST' && route === '/model/image/test');
+  assert.ok(imageTest);
+  assert.deepEqual(JSON.parse(JSON.stringify(imageTest[2])), {action: 'image.generate'});
+  assert.match(root.innerHTML, /注册检查通过/);
+  page.unmount();
+});
+
+test('memory diagnostics sample real host RSS on demand and stop polling when requested', async () => {
+  let sampleIndex = 0;
+  const {page, requests, root, advanceTimers} = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+    memory: () => ({rss_bytes: (100 + sampleIndex++ * 8) * 1024 * 1024, rss_source: 'windows_working_set',
+      python_tracing_active: false, python_heap_current_bytes: null}),
+  });
+  page.mount(root);
+  await flush();
+  assert.equal(requests.some(item => item[0] === 'GET' && item[1].endsWith('/memory')), false);
+  root.click('[data-maint-nav]', {maintNav: 'diagnostics'});
+  assert.match(root.innerHTML, /内存增长检测/);
+  assert.match(root.innerHTML, /不能单独归因到 V2/);
+  assert.match(root.innerHTML, /本功能不会启动全局堆追踪/);
+
+  root.click('[data-memory-start]');
+  await flush();
+  for (let index = 0; index < 3; index += 1) {
+    advanceTimers(10000);
+    await flush();
+  }
+  assert.equal(requests.filter(item => item[0] === 'GET' && item[1].endsWith('/memory')).length, 4);
+  assert.match(root.innerHTML, /正在采样/);
+  root.click('[data-memory-stop]');
+  assert.match(root.innerHTML, /出现增长嫌疑/);
+  assert.match(root.innerHTML, /进程工作集在本窗口净增 24\.0 MiB/);
+  assert.match(root.innerHTML, /已手动停止/);
+  advanceTimers(60000);
+  await flush();
+  assert.equal(requests.filter(item => item[0] === 'GET' && item[1].endsWith('/memory')).length, 4);
+  page.unmount();
+});
+
+test('leaving the diagnostics view stops memory sampling', async () => {
+  const {page, requests, root, advanceTimers} = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+  });
+  page.mount(root, {activeView: 'diagnostics'});
+  await flush();
+  root.click('[data-memory-start]');
+  await flush();
+  root.click('[data-maint-nav]', {maintNav: 'overview'});
+  advanceTimers(60000);
+  await flush();
+  assert.equal(requests.filter(item => item[0] === 'GET' && item[1].endsWith('/memory')).length, 1);
+  assert.match(root.innerHTML, /已离开排障页，采样已停止/);
+  page.unmount();
+});
+
+test('proactive diagnostic shows an in-page confirmation, running state and request failure', async () => {
+  let rejectRequest;
+  const pendingRequest = new Promise((_, reject) => { rejectRequest = reject; });
+  const {page, requests, root, confirmations} = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+    posts: {'/setup/proactive-diagnostic': () => pendingRequest},
+  });
+  page.mount(root);
+  await flush();
+
+  root.click('[data-proactive-test]');
+  assert.match(root.innerHTML, /确认真实投递/);
+  assert.equal(requests.some(item => item[0] === 'POST' && item[1] === '/setup/proactive-diagnostic'), false);
+  root.click('[data-proactive-confirm]');
+  assert.match(root.innerHTML, /正在运行完整主动消息链路/);
+  assert.ok(requests.some(item => item[0] === 'POST' && item[1] === '/setup/proactive-diagnostic'));
+  assert.equal(confirmations.length, 0);
+
+  rejectRequest(new Error('gateway timeout'));
+  await flush();
+  assert.match(root.innerHTML, /gateway timeout/);
+  assert.match(root.innerHTML, /确认没有送达前不要再次启动/);
+  page.unmount();
+});
+
+test('proactive binding failure explains the separate administrator permission and window confirmation', async () => {
+  const {page, root} = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+    posts: {'/setup/proactive-diagnostic': {state: 'failed', purpose: 'affection',
+      code: 'setup_binding_confirmation_required', stage: 'binding',
+      error: 'confirm the core administrator private window first', stages: [
+        {stage: 'authorization', state: 'passed'}, {stage: 'binding', state: 'failed'},
+      ]}},
+  });
+  page.mount(root);
+  await flush();
+  root.click('[data-proactive-test]');
+  root.click('[data-proactive-confirm]');
+  await flush();
+  assert.match(root.innerHTML, /核心管理员窗口尚未绑定确认/);
+  assert.match(root.innerHTML, /用户页的“管理员权限”决定谁是核心管理员/);
+  assert.match(root.innerHTML, /开始使用.*确认同一私聊窗口/);
+  page.unmount();
+});
+
+test('proactive diagnostic explains model skip and shows generation as completed', async () => {
+  const {page, root} = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+    posts: {'/setup/proactive-diagnostic': {state: 'skipped', purpose: 'care', purpose_label: '情绪关怀',
+      skip_reason: 'model_decision', model_skip_reason: 'no_natural_opening', stages: [
+        {stage: 'trusted_candidate', state: 'passed'}, {stage: 'model_generation', state: 'passed'},
+        {stage: 'persona_review', state: 'skipped'}, {stage: 'delivery', state: 'skipped'},
+      ]}},
+  });
+  page.mount(root);
+  await flush();
+  assert.match(root.innerHTML, /手动测试不占日常联系额度/);
+  root.click('[data-proactive-test]');
+  root.click('[data-proactive-confirm]');
+  await flush();
+  assert.match(root.innerHTML, /本次未投递 · 模型判断当前不适合发送/);
+  assert.match(root.innerHTML, /原因：当前没有自然的开口点/);
+  assert.match(root.innerHTML, /模型生成<\/span><strong>通过/);
+  assert.match(root.innerHTML, /人格复核<\/span><strong>未执行/);
+  assert.doesNotMatch(root.innerHTML, /模型选择跳过/);
+  page.unmount();
+});
+
+test('proactive diagnostic localizes exhausted attempt budget and identifies the admission stage', async () => {
+  const {page, root} = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+    posts: {'/setup/proactive-diagnostic': {state: 'failed', purpose: 'care', purpose_label: '情绪关怀',
+      stage: 'attempt_budget', code: 'contact_attempt_budget',
+      failure_title: '本私聊的24小时尝试额度已用完',
+      explanation: '决策尝试次数已经达到本私聊的上限；模型跳过或最终未投递的尝试也会计入。',
+      budget_usage: {used: 12, limit: 12, window_hours: 24},
+      suggestion: '到「主动联系 → 额度与去重」查看或调整“24 小时内最多尝试”。',
+      error: 'contact decision allowance is exhausted', stages: [
+        {stage: 'authorization', state: 'passed'}, {stage: 'settings', state: 'passed'},
+        {stage: 'purpose', state: 'passed'}, {stage: 'trusted_candidate', state: 'passed'},
+        {stage: 'attempt_budget', state: 'failed'},
+      ]}},
+  });
+  page.mount(root);
+  await flush();
+  root.click('[data-proactive-test]');
+  root.click('[data-proactive-confirm]');
+  await flush();
+  assert.match(root.innerHTML, /测试未通过 · 本私聊的24小时尝试额度已用完/);
+  assert.match(root.innerHTML, /模型跳过或最终未投递的尝试也会计入/);
+  assert.match(root.innerHTML, /已用 12 \/ 12 次（滚动 24 小时）/);
+  assert.match(root.innerHTML, /本私聊24小时尝试额度<\/span><strong>失败/);
+  assert.match(root.innerHTML, /展开技术详情/);
+  page.unmount();
+});
+
+test('maintenance manually clears transient diagnostic results without touching the ledger', async () => {
+  const h = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 1, tokens: 12}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [{id: '<main>', model: 'model-a'}], recent: [], budget: {}, runtime: {}},
+    voice: {providers: [{id: 'voice-a'}]}, image: {actions: [{action: 'image.generate', registered: true, current: true}]},
+    model: {tasks: [], providers: [{id: '<main>', capabilities: []}]},
+    posts: {
+      '/model/test': {provider_id: '<main>', status: 'ok', latency_ms: 18},
+      '/model/voice/test': {provider_id: 'voice-a', status: 'ok', latency_ms: 19,
+        audio_base64: Buffer.from('RIFF0000WAVE').toString('base64'), audio_mime_type: 'audio/wav'},
+      '/model/image/test': {action: 'image.generate', registered: true, current: true},
+      '/model/test/storage': {status: 'ok', integrity: ['ok'], foreign_key_issues: 0, elapsed_ms: 7},
+    },
+  });
+  h.page.mount(h.root, {activeView: 'diagnostics'});
+  await flush();
+  h.root.click('[data-provider-probe]');
+  await flush();
+  assert.match(h.root.innerHTML, /文本 Provider 探测通过/);
+  h.root.click('[data-voice-test]');
+  await flush();
+  h.root.click('[data-image-test]');
+  await flush();
+  h.root.click('[data-storage-test]');
+  await flush();
+  assert.match(h.root.innerHTML, /TTS 合成通过/);
+  assert.match(h.root.innerHTML, /注册检查通过/);
+  assert.match(h.root.innerHTML, /SQLite 完整性检查通过/);
+  const requestCount = h.requests.length;
+  h.root.click('[data-clear-diagnostic-results]');
+  assert.doesNotMatch(h.root.innerHTML, /文本 Provider 探测通过/);
+  assert.doesNotMatch(h.root.innerHTML, /TTS 合成通过|注册检查通过|SQLite 完整性检查通过/);
+  assert.match(h.root.innerHTML, /本页测试结果已清除；运行账本没有改动/);
+  assert.deepEqual(h.revokedAudioUrls, ['blob:maintenance-audio']);
+  assert.equal(h.requests.length, requestCount);
+  h.page.unmount();
+});
+
+test('maintenance automatically clears transient diagnostic results after fifteen minutes', async () => {
+  const h = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 1, tokens: 12}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [{id: '<main>', model: 'model-a'}], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: [{id: '<main>', capabilities: []}]},
+    posts: {'/model/test': {provider_id: '<main>', status: 'ok', latency_ms: 18}},
+  });
+  h.page.mount(h.root, {activeView: 'diagnostics'});
+  await flush();
+  h.root.click('[data-provider-probe]');
+  await flush();
+  assert.match(h.root.innerHTML, /文本 Provider 探测通过/);
+  h.advanceTimers(15 * 60 * 1000);
+  assert.doesNotMatch(h.root.innerHTML, /文本 Provider 探测通过/);
+  assert.match(h.root.innerHTML, /本页测试结果已自动清除（15 分钟）；运行账本没有改动/);
+  h.page.unmount();
+});
+
+test('diagnostic results survive leaving and reopening the maintenance route', async () => {
+  const h = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [{id: '<main>', model: 'model-a'}], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: [{id: '<main>', capabilities: []}]},
+    posts: {'/model/test': {provider_id: '<main>', status: 'ok', latency_ms: 18}},
+  });
+  h.page.mount(h.root, {activeView: 'diagnostics'});
+  await flush();
+  h.root.click('[data-provider-probe]');
+  await flush();
+  assert.match(h.root.innerHTML, /文本 Provider 探测通过/);
+
+  h.page.unmount();
+  h.page.mount(h.root, {activeView: 'diagnostics'});
+  assert.match(h.root.innerHTML, /文本 Provider 探测通过/);
+  await flush();
+  assert.match(h.root.innerHTML, /文本 Provider 探测通过/);
+  h.page.unmount();
+});
+
+test('successful account balance stays visible when maintenance route remounts', async () => {
+  const h = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+    balance: {configured: true, available: true, provider: 'newapi', provider_label: 'NewAPI',
+      currency_label: 'USD', amount: '12.50', observed_at: new Date().toISOString(), state: 'available'},
+  });
+  h.page.mount(h.root);
+  await flush();
+  assert.match(h.root.innerHTML, /NewAPI 账户余额/);
+  assert.match(h.root.innerHTML, /12\.5 USD/);
+
+  h.page.unmount();
+  h.page.mount(h.root);
+  assert.match(h.root.innerHTML, /NewAPI 账户余额/);
+  assert.match(h.root.innerHTML, /12\.5 USD/);
+  h.page.unmount();
+
+  const missingAmount = harness({
+    maintenance: {generated_at: localStamp(), summary: {calls: 0, tokens: 0}, totals: {}, daily: [], history: [],
+      windows: {}, providers: [], recent: [], budget: {}, runtime: {}},
+    voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
+    balance: {configured: true, available: true, provider: 'newapi', provider_label: 'NewAPI',
+      currency_label: 'USD', amount: null, observed_at: new Date().toISOString(), state: 'available'},
+  });
+  missingAmount.page.mount(missingAmount.root);
+  await flush();
+  assert.match(missingAmount.root.innerHTML, /未提供余额/);
+  assert.doesNotMatch(missingAmount.root.innerHTML, /<b>0 USD<\/b>/);
+  missingAmount.page.unmount();
 });
 
 test('maintenance shows connected external token ledgers without mixing their budgets', async () => {
@@ -286,7 +1250,8 @@ test('maintenance shows connected external token ledgers without mixing their bu
   const responses = {
     maintenance: {
       generated_at: new Date().toISOString(), summary: {calls: 0, tokens: 0}, totals: {calls: 0, tokens: 0},
-      daily: [daily(today)], history: [], recent: [], budget: {}, providers: [],
+      daily: [daily(today)], history: [], recent: [{at: today + 'T08:00:00', kind: 'conversation.reply',
+        provider: 'v2-role-provider', tokens: 999, input_tokens: 800, output_tokens: 199}], budget: {}, providers: [],
       external_token_sources: {memory: {
         available: true, installed: true, display_name: '记忆伴侣', updated_at: new Date().toISOString(),
         totals: {calls: 2, tokens: 115, reported_tokens: 70, estimated_tokens: 45, input_tokens: 85,
@@ -309,6 +1274,19 @@ test('maintenance shows connected external token ledgers without mixing their bu
   assert.match(root.innerHTML, /50/);
   assert.match(root.innerHTML, /25/);
   assert.match(root.innerHTML, /V2 角色预算保持独立|不计入 V2 角色预算/);
+  const externalOverview = root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="prompts"')[0];
+  assert.match(externalOverview, /已确认 Token/);
+  assert.doesNotMatch(externalOverview, /后台插件任务硬预算|ACCOUNT BALANCE|data-balance-refresh/);
+  root.click('[data-maint-nav]', {maintNav: 'recent'});
+  const externalRecent = root.innerHTML.split('data-maint-view="recent"')[1];
+  assert.match(externalRecent, /记忆伴侣 · 1 \/ 1 条/);
+  assert.match(externalRecent, /memory-model/);
+  assert.doesNotMatch(externalRecent, /v2-role-provider/);
+  assert.match(externalRecent, /数据源：记忆伴侣独立账本/);
+  root.click('[data-maint-nav]', {maintNav: 'cache'});
+  const externalCache = root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
+  assert.match(externalCache, /该来源没有提供请求前缀签名和完整缓存诊断数据/);
+  assert.doesNotMatch(externalCache, /请求前缀签名<\/span><strong>/);
   root.click('[data-period]', {period: '7d'});
   assert.match(root.innerHTML, /115/);
   assert.match(root.innerHTML, /70/);
@@ -329,6 +1307,10 @@ test('maintenance distinguishes empty usage from cache receipts without computab
   await flush();
   assert.match(empty.root.innerHTML, /这个范围没有模型调用/);
   assert.match(empty.root.innerHTML, /没有已加载的 V2 文本 Provider/);
+  assert.match(empty.root.innerHTML, /暂无可计算命中率/);
+  assert.match(empty.root.innerHTML, /收到用量后显示 Token 构成/);
+  assert.match(empty.root.innerHTML, /等待完整采集的请求剖面/);
+  assert.match(empty.root.innerHTML, /data-series="coverage"><span>确认覆盖<\/span><strong>—<\/strong>/);
   empty.page.unmount();
 
   response.summary.calls = 1;
@@ -358,11 +1340,21 @@ test('maintenance completes the V1 task prompt workspace on the V2 model contrac
         source: explicit ? 'window' : 'default', inherited_source: 'default', explicit},
     },
   });
+  const diary = task('role.journal.diary', '日记整理规则：{{persona_context}}', 'c'.repeat(64));
+  diary.fields.prompt = {value: '角色级日记提示', inherited_value: '角色级日记提示',
+    source: 'role', inherited_source: 'role', explicit: false};
+  const dream = task('role.journal.dream', '', 'g'.repeat(64));
+  dream.fields.prompt = {value: '角色级梦境提示', inherited_value: '角色级梦境提示',
+    source: 'role', inherited_source: 'role', explicit: false};
+  const imageReview = task('image_review', '图片审核规则：{{image_observations}}', 'f'.repeat(64));
+  delete imageReview.default_prompt;
   const initial = {
     tasks: [
       task('conversation.reply', '回复规则：{{task_input}}\n{{role_instruction}}', 'a'.repeat(64)),
       task('proactive.compose', '主动联系规则：{{recent_history}}', 'b'.repeat(64), true),
-      task('role.journal.diary', '日记整理规则：{{persona_context}}', 'c'.repeat(64)),
+      diary,
+      dream,
+      imageReview,
     ],
     providers: [{id: '<main>', capabilities: ['text'], max_output_tokens: 4096}],
   };
@@ -392,16 +1384,25 @@ test('maintenance completes the V1 task prompt workspace on the V2 model contrac
     },
   };
   const {page, requests, root, confirmations} = harness(responses);
-  page.mount(root);
+  page.mount(root, {activeView: 'prompts'});
   await flush();
 
-  assert.match(root.innerHTML, /完整内置任务提示词/);
+  assert.match(root.innerHTML, /模型任务内置默认提示/);
+  assert.match(root.innerHTML, /运行时提示组成/);
+  assert.match(root.innerHTML, /业务任务指令/);
+  assert.match(root.innerHTML, /本页可编辑/);
+  assert.match(root.innerHTML, /恢复角色级继承值/);
   assert.match(root.innerHTML, /回复规则：\{\{task_input\}\}/);
   assert.match(root.innerHTML, /内置版本/);
   assert.match(root.innerHTML, /v7/);
   assert.match(root.innerHTML, /动态字段/);
   assert.match(root.innerHTML, /本次任务的结构化输入/);
   assert.match(root.innerHTML, /当前角色的角色指令/);
+  assert.match(root.innerHTML, /data-prompt-task="image_review"/);
+  assert.match(root.innerHTML, /data-prompt-group="视觉与媒体"/);
+  assert.doesNotMatch(root.innerHTML, /完整内置任务提示词|完整有效提示词/);
+  root.click('[data-prompt-task]', {promptTask: 'image_review'});
+  assert.match(root.innerHTML, /（内置提示未返回）/);
 
   root.input('日记', '[data-prompt-search]');
   assert.match(root.innerHTML, /data-prompt-task="role\.journal\.diary"/);
@@ -409,11 +1410,16 @@ test('maintenance completes the V1 task prompt workspace on the V2 model contrac
   root.input('', '[data-prompt-search]');
   root.click('[data-prompt-mode]', {promptMode: 'customized'});
   assert.match(root.innerHTML, /data-prompt-task="proactive\.compose"/);
+  assert.match(root.innerHTML, /data-prompt-task="role\.journal\.diary"/);
   assert.doesNotMatch(root.innerHTML, /data-prompt-task="conversation\.reply"/);
+  root.click('[data-prompt-task]', {promptTask: 'role.journal.dream'});
+  assert.match(root.innerHTML, /（内置任务提示为空）/);
+  assert.match(root.innerHTML, /角色级梦境提示/);
   root.click('[data-prompt-mode]', {promptMode: 'all'});
   root.click('[data-prompt-group]', {promptGroup: '对话'});
   assert.match(root.innerHTML, /data-prompt-task="conversation\.reply"/);
   assert.doesNotMatch(root.innerHTML, /data-prompt-task="role\.journal\.diary"/);
+  root.click('[data-prompt-task]', {promptTask: 'conversation.reply'});
 
   root.input('编辑后的完整提示词', '[data-prompt-draft]');
   assert.match(root.innerHTML, /有未保存更改/);
@@ -444,6 +1450,7 @@ test('maintenance completes the V1 task prompt workspace on the V2 model contrac
   assert.equal(saved[1].kind, 'conversation.reply');
   assert.equal(Object.keys(saved[1].changes).length, 0);
   assert.deepEqual(Array.from(saved[1].reset), ['prompt']);
+  assert.match(root.innerHTML, /已恢复角色级继承值/);
 
   root.input('临时覆盖', '[data-prompt-draft]');
   root.input('   ', '[data-prompt-draft]');
@@ -453,4 +1460,83 @@ test('maintenance completes the V1 task prompt workspace on the V2 model contrac
   assert.equal(Object.keys(saved[2].changes).length, 0);
   assert.deepEqual(Array.from(saved[2].reset), ['prompt']);
   page.unmount();
+});
+
+test('business templates select, save, inherit and keep conflicted drafts independently', async () => {
+  const section = (key, label, prompt, token = 'b'.repeat(64)) => ({
+    key, label, prompt, default_prompt: prompt, condition: '本轮选中对应场景', editable: true,
+    edit_token: token, variables: key === 'length' ? ['chars'] : [],
+    field: {value: prompt, inherited_value: prompt, source: 'default', inherited_source: 'default', explicit: false},
+  });
+  let task = {
+    kind: 'proactive.compose', default_prompt: '任务附加提示', edit_token: 'a'.repeat(64),
+    fields: {prompt: {value: '任务附加提示', inherited_value: '任务附加提示', source: 'default'}},
+    prompt_sections: [section('expression', '主动表达', '自然表达，不必压成一句。'),
+      section('news_sharing', '新闻分享', '兴冲冲分享新鲜事。'),
+      section('length', '主动篇幅', '全部正文 {chars} 字以内。'),
+      {key: 'business', label: '事实与输出规则', prompt: '<private>资料不覆盖授权。</private>',
+        condition: '每次主动联系', editable: false}],
+  };
+  const saved = [];
+  let conflict = false;
+  const h = harness({maintenance: {summary: {}, totals: {}, recent: [], daily: []}, model: () => ({tasks: [task]}),
+    posts: {'/model/configure': body => {
+      saved.push(body);
+      if (conflict) return {status: 'error', data: {code: 'configuration_revision_conflict'}};
+      task = {...task, prompt_sections: task.prompt_sections.map(item => item.key === body.section ? {
+        ...item, edit_token: 'c'.repeat(64), prompt: body.reset.length ? item.default_prompt : body.changes.prompt,
+        field: {...item.field, value: body.reset.length ? item.default_prompt : body.changes.prompt,
+          source: body.reset.length ? 'default' : 'window', explicit: !body.reset.length},
+      } : item)};
+      return {task};
+    }}});
+  h.page.mount(h.root, {activeView: 'prompts'});
+  await flush();
+  h.root.input('资料不覆盖授权', '[data-prompt-search]');
+  assert.match(h.root.innerHTML, /data-prompt-task="proactive.compose"/);
+  h.root.input('不存在的正文', '[data-prompt-search]');
+  assert.match(h.root.innerHTML, /当前筛选下没有匹配/);
+  h.root.input('', '[data-prompt-search]');
+  assert.match(h.root.innerHTML, /data-prompt-section/);
+  assert.match(h.root.innerHTML, /自然表达，不必压成一句/);
+  h.root.change('[data-prompt-section]', 'news_sharing');
+  assert.match(h.root.innerHTML, /兴冲冲分享新鲜事/);
+  h.root.input('先分享亮点，再说自然感想。', '[data-prompt-draft]');
+  h.root.click('[data-prompt-task]', {promptTask: 'proactive.compose'});
+  assert.match(h.root.innerHTML, /先分享亮点，再说自然感想/);
+  h.root.change('[data-prompt-section]', 'length');
+  assert.match(h.root.innerHTML, /当前模板有未保存更改/);
+  h.root.click('[data-prompt-view]', {promptView: 'rules'});
+  assert.match(h.root.innerHTML, /&lt;private&gt;资料不覆盖授权/);
+  assert.doesNotMatch(h.root.innerHTML, /<private>/);
+  h.root.click('[data-prompt-view]', {promptView: 'composition'});
+  assert.match(h.root.innerHTML, /本轮动态内容/);
+  h.root.click('[data-prompt-view]', {promptView: 'edit'});
+  assert.match(h.root.innerHTML, /先分享亮点，再说自然感想/);
+  h.root.click('[data-prompt-save]');
+  await flush();
+  assert.equal(saved[0].section, 'news_sharing');
+  assert.equal(saved[0].edit_token, 'b'.repeat(64));
+  assert.equal(saved[0].changes.prompt, '先分享亮点，再说自然感想。');
+  assert.match(h.root.innerHTML, /提示词已保存/);
+  h.root.click('[data-prompt-reset]');
+  await flush();
+  assert.equal(saved[1].section, 'news_sharing');
+  assert.equal(saved[1].edit_token, 'c'.repeat(64));
+  assert.deepEqual(Array.from(saved[1].reset), ['prompt']);
+  assert.match(h.root.innerHTML, /已恢复上级继承值/);
+  assert.match(h.root.innerHTML, /兴冲冲分享新鲜事/);
+  h.root.change('[data-prompt-section]', 'length');
+  assert.match(h.root.innerHTML, /当前强度档位的总字数/);
+  conflict = true;
+  h.root.input('全部正文 {chars} 字以内，保持自然段落。', '[data-prompt-draft]');
+  h.root.click('[data-prompt-save]');
+  await flush();
+  assert.equal(saved[2].section, 'length');
+  assert.match(h.root.innerHTML, /保存时发现版本冲突/);
+  assert.match(h.root.innerHTML, /保持自然段落/);
+  h.root.click('[data-prompt-reset]');
+  await flush();
+  assert.equal(saved.length, 3);
+  h.page.unmount();
 });

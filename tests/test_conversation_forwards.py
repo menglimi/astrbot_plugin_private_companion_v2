@@ -27,6 +27,23 @@ from tests.test_conversation_quotes import FakeReply
 
 
 class ConversationForwardTests(ForwardFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_forward_reading_can_be_disabled_in_the_sealed_reply_snapshot(self):
+        host = await self.quiet_host()
+        batch = host.receive(await self.capture(self.forward_event())).unwrap()
+        app = host.application
+        row = app.messages.batch(batch)
+        context = self.context(app, batch)
+        reply_snapshot = app.reply_settings.capture(context, self.clock.now())
+        reply_snapshot["settings"]["forward_message_adaptation_enabled"] = False
+        saved = {"reply_settings": reply_snapshot}
+        with app.runtime.transaction() as connection:
+            connection.execute("UPDATE conversation_batches SET contributions_json = ? WHERE batch_id = ?",
+                               (json.dumps(saved, ensure_ascii=False), batch))
+        with patch.object(app.messages.forwards, "read_all", side_effect=AssertionError("disabled forwards were read")):
+            request = self.request(app, batch)
+        self.assertFalse(any(material.owner == NODE_OWNER for material in request.context.materials))
+        self.assertNotIn("显示身份未经认证", request.instruction)
+
     async def test_node_bodies_attribution_and_audience_are_separate_from_current_user(self):
         self.forward_raw = {"messages": [node_raw("这是记录中的承诺", sender="200"), node_raw(sender="100", at=None)]}
         host = await self.quiet_host()

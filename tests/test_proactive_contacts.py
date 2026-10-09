@@ -6,6 +6,9 @@ import unittest
 from unittest.mock import patch
 
 from companion_v2.agenda.models import AgendaTarget, Schedule
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.conversation.reply_settings import GROUP as PRESENTATION_GROUP
+from companion_v2.conversation.text_processing import TEXT_DEFAULTS
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.delivery.service import DeliveryRequest
 from companion_v2.execution.models import TaskError
@@ -22,6 +25,181 @@ from tests.test_role_tool_loop import answered
 
 
 class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
+    def presentation_settings(self, app, changes):
+        context = self.contact_context()
+        target = ConfigTarget(INSTALLATION, ConfigLayer.WINDOW, ROLE, context.scope)
+        snapshot = app.configuration.read(self.important, target=target, group_id=PRESENTATION_GROUP,
+                                          observed_at=self.clock.now()).unwrap()
+        return app.configuration.patch(self.important, target=target, group_id=PRESENTATION_GROUP,
+            expected_edit_token=snapshot.edit_token,
+            changes={PRESENTATION_GROUP + "." + key: value for key, value in changes.items()},
+            operation=self.operation(context.scope, owner=PRESENTATION_GROUP), observed_at=self.clock.now())
+
+    async def test_proactive_contact_uses_saved_segmentation_and_delivers_ordered_parts(self):
+        app = await self.enabled()
+        self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+            "rules_enabled": False, "part_gap_ms": 0, **TEXT_DEFAULTS,
+            "content_cleanup_enabled": True, "content_cleanup_words": json.dumps(["\n"], ensure_ascii=False)}).unwrap()
+        marker = "<<PRIVATE_COMPANION_SPLIT>>"
+        async def segmented(envelope):
+            return answered(json.dumps({"decision": "send", "text": f"第一句。\n{marker}\n第二句。"},
+                                       ensure_ascii=False))
+        self.model_behavior = segmented
+
+        task = (await self.contact(app)).unwrap().task
+        await self.until(lambda: len(self.sent) == 2)
+
+        self.assertIn(marker, self.called[0].original.instruction)
+        self.assertEqual([message.text for message in self.sent], ["第一句。", "第二句。"])
+        self.assertEqual([message.sequence for message in self.sent], [0, 1])
+        rows = app.proactive._delivery_rows(task.task_id)
+        requests = [DeliveryRequest.restore(row["request_json"]) for row in rows]
+        self.assertEqual([(request.sequence, request.part_count) for request in requests], [(0, 2), (1, 2)])
+        self.assertEqual([row["state"] for row in rows], ["delivered", "delivered"])
+        self.assertEqual(app.proactive.observe(self.contact_context(), task.task_id).unwrap()["delivery"], "delivered")
+        self.assertEqual(app.background_history.interaction(self.contact_context(), self.clock.now())[
+            "contacts_since_last_input"], 1)
+
+    async def test_proactive_split_trims_blank_edges_when_cleanup_is_disabled(self):
+        app = await self.enabled()
+        self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+            "part_gap_mode": "fixed", "part_gap_ms": 0, "content_cleanup_enabled": False}).unwrap()
+        marker = "<<PRIVATE_COMPANION_SPLIT>>"
+
+        async def segmented(_envelope):
+            return answered(json.dumps({"decision": "send", "text":
+                f"\n怎么会不理你呢。\n\n{marker}\n\n下午好呀～\n\n"}, ensure_ascii=False))
+
+        self.model_behavior = segmented
+        task = (await self.contact(app)).unwrap().task
+        await self.until(lambda: len(self.sent) == 2)
+        self.assertEqual([message.text for message in self.sent], ["怎么会不理你呢。", "下午好呀～"])
+        rows = app.proactive._delivery_rows(task.task_id)
+        requests = [DeliveryRequest.restore(row["request_json"]) for row in rows]
+        for request, message in zip(requests, self.sent):
+            self.assertEqual(app.proactive.delivery_text(request, self.clock.now()).unwrap(), message.text)
+
+    async def test_future_segment_is_queued_before_its_spacing_window_and_delivered_once_due(self):
+        app = await self.enabled()
+        self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+            "rules_enabled": False, "part_gap_mode": "fixed", "part_gap_ms": 1000,
+            **TEXT_DEFAULTS, "content_cleanup_enabled": True,
+            "content_cleanup_words": json.dumps(["\n"], ensure_ascii=False)}).unwrap()
+        marker = "<<PRIVATE_COMPANION_SPLIT>>"
+
+        async def segmented(_envelope):
+            return answered(json.dumps({"decision": "send", "text": f"第一句。\n{marker}\n第二句。"},
+                                       ensure_ascii=False))
+
+        self.model_behavior = segmented
+        task = (await self.contact(app)).unwrap().task
+        await self.until(lambda: len(app.proactive._delivery_rows(task.task_id)) >= 1
+                         and app.proactive._delivery_rows(task.task_id)[0]["state"] == "delivered")
+
+        rows = app.proactive._delivery_rows(task.task_id)
+        self.assertEqual(len(rows), 2)
+        second = DeliveryRequest.restore(rows[1]["request_json"])
+        self.assertEqual(second.sequence, 1)
+        self.assertGreater(second.not_before, self.clock.now())
+        self.assertEqual(app.proactive.delivery_text(second, self.clock.now()).unwrap(), "第二句。")
+
+        self.clock.advance(timedelta(seconds=1))
+        await self.until(lambda: len(self.sent) == 2)
+        self.assertEqual([message.sequence for message in self.sent], [0, 1])
+        self.assertEqual(app.proactive.observe(self.contact_context(), task.task_id).unwrap()["delivery"],
+                         "delivered")
+
+    async def test_legacy_single_part_receipt_keeps_the_original_hash_without_queuing_again(self):
+        app = await self.enabled()
+        task = (await self.contact(app)).unwrap().task
+        delivered = await self.delivery_state(app, task.task_id, "delivered")
+        request = DeliveryRequest.restore(delivered["request_json"])
+        row = app.runtime.read_one("SELECT * FROM proactive_contacts WHERE contact_id = ?", (request.source_ref,))
+        data = json.loads(row["record_json"])
+        self.assertEqual(len(data["parts"]), 1)
+        del data["parts"]
+        with app.runtime.transaction() as connection:
+            connection.execute("UPDATE proactive_contacts SET record_json = ? WHERE contact_id = ?",
+                               (json.dumps(data, ensure_ascii=False), row["contact_id"]))
+        restored = app.proactive._part_request(request.source_ref, request.context, data, 0, request.not_before)
+        self.assertEqual(restored, request)
+        with patch("companion_v2.proactive.service.logger.warning") as warning:
+            self.assertFalse(app.proactive.delivery_confirmed(request.delivery_id))
+        warning.assert_not_called()
+        self.assertEqual(len(app.proactive._delivery_rows(task.task_id)), 1)
+        self.assertEqual(len(self.sent), 1)
+        data["expires_at"] = request.deadline_at.isoformat()
+        other = self.other_window_context("legacy-other-window")
+        with self.assertRaises(TaskError):
+            app.proactive._part_request(request.source_ref, other, data, 0, request.not_before)
+
+    async def test_expired_segmented_contacts_are_not_scanned_or_replayed(self):
+        app = await self.enabled()
+        self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+            "rules_enabled": False, "part_gap_ms": 0}).unwrap()
+        async def segmented(envelope):
+            return answered(json.dumps({"decision": "send", "text":
+                "第一句话。<<PRIVATE_COMPANION_SPLIT>>第二句话。"}, ensure_ascii=False))
+        self.model_behavior = segmented
+        with patch.object(app.proactive, "delivery_confirmed", return_value=False):
+            task = (await self.contact(app)).unwrap().task
+            await self.delivery_state(app, task.task_id, "delivered")
+            self.clock.advance(timedelta(minutes=6))
+            self.assertEqual(app.proactive.advance_deliveries(), 0)
+        row = app.proactive._delivery_rows(task.task_id)[0]
+        self.assertFalse(app.proactive.delivery_confirmed(row["delivery_id"]))
+        self.assertEqual(len(app.proactive._delivery_rows(task.task_id)), 1)
+        self.assertEqual(len(self.sent), 1)
+
+    async def test_restart_queues_next_contact_part_after_confirmed_first_receipt(self):
+        app = await self.enabled()
+        self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+            "rules_enabled": False, "part_gap_ms": 0}).unwrap()
+        marker = "<<PRIVATE_COMPANION_SPLIT>>"
+        async def segmented(envelope):
+            return answered(json.dumps({"decision": "send", "text": f"第一句。\n{marker}\n第二句。"},
+                                       ensure_ascii=False))
+        self.model_behavior = segmented
+        app.proactive.delivery_confirmed = lambda _: False
+
+        task = (await self.contact(app)).unwrap().task
+        await self.until(lambda: len(self.sent) == 1 and app.proactive._delivery_rows(task.task_id)[0]["state"] == "delivered")
+        await app.close()
+
+        restarted = (await self.start(self.host(runtime=self.open_runtime()), task_generation=1,
+                                      model_generation=1)).application
+        await self.until(lambda: len(self.sent) == 2)
+        self.assertEqual((len(self.called), len(restarted.proactive._delivery_rows(task.task_id))), (1, 2))
+        self.assertEqual([message.text for message in self.sent], ["第一句。", "第二句。"])
+
+    async def test_full_delivery_queue_retries_the_next_part_without_replaying_the_first(self):
+        from companion_v2.foundation.outcome import Outcome
+
+        app = await self.enabled()
+        self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+            "rules_enabled": False, "part_gap_ms": 0}).unwrap()
+        marker = "<<PRIVATE_COMPANION_SPLIT>>"
+        async def segmented(envelope):
+            return answered(json.dumps({"decision": "send", "text": f"第一句。\n{marker}\n第二句。"},
+                                       ensure_ascii=False))
+        self.model_behavior = segmented
+        queue = app.outbound.queue
+        attempted = []
+
+        def temporarily_full(request):
+            attempted.append(request.sequence)
+            if request.sequence == 1 and attempted.count(1) == 1:
+                return Outcome.failed("task_queue_full", "temporary capacity limit")
+            return queue(request)
+
+        with patch.object(app.outbound, "queue", side_effect=temporarily_full):
+            task = (await self.contact(app)).unwrap().task
+            await self.until(lambda: len(self.sent) == 2)
+
+        self.assertGreaterEqual(attempted.count(1), 2)
+        self.assertEqual([message.text for message in self.sent], ["第一句。", "第二句。"])
+        self.assertEqual(len(app.proactive._delivery_rows(task.task_id)), 2)
+
     async def test_contact_uses_persona_evidence_shared_model_delivery_and_independent_receipts(self):
         app = await self.enabled()
         source = self.source(app)
@@ -69,11 +247,14 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
     async def test_skip_is_successful_model_decision_without_draft_or_delivery(self):
         app = await self.enabled()
         async def skip(envelope):
-            return answered('{"decision":"skip","text":""}')
+            return answered('{"decision":"skip","text":"","skip_reason":"no_natural_opening"}')
         self.model_behavior = skip
         task = (await self.contact(app)).unwrap().task
         self.assertEqual(task.state, "succeeded")
-        self.assertTrue(app.proactive.observe(self.contact_context(), task.task_id).unwrap()["skipped"])
+        observation = app.proactive.observe(self.contact_context(), task.task_id).unwrap()
+        self.assertTrue(observation["skipped"])
+        self.assertEqual((observation["skip_reason"], observation["model_skip_reason"]),
+                         ("model_decision", "no_natural_opening"))
         record = self.runtime.read_one("SELECT record_json, body FROM proactive_contacts", ())
         self.assertEqual((json.loads(record["record_json"])["decision"], record["body"]), ("skip", ""))
         self.assertEqual(self.runtime.read_one("SELECT COUNT(*) FROM background_deliveries", ())[0], 0)
@@ -94,6 +275,8 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["decision"], "skip")
         self.assertEqual(record["decision_confidence"], 0.62)
         self.assertEqual(record["silence_reason"], "below_confidence_threshold")
+        self.assertEqual(app.proactive.observe(self.contact_context(), task.task_id).unwrap()["skip_reason"],
+                         "low_confidence")
         self.assertEqual(self.runtime.read_one("SELECT COUNT(*) FROM background_deliveries", ())[0], 0)
         self.assertEqual(self.sent, [])
 
@@ -104,6 +287,15 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
                     contact_output(json.dumps({
                         "decision": "send", "text": "正文", "decision_confidence": confidence
                     }))
+
+    def test_contact_output_accepts_only_bounded_skip_reason_categories(self):
+        valid = '{"decision":"skip","text":"","skip_reason":"insufficient_context"}'
+        self.assertEqual(contact_output(valid), (None, None))
+        for value in ("private explanation", [], 4):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                contact_output(json.dumps({"decision": "skip", "text": "", "skip_reason": value}))
+        with self.assertRaises(ValueError):
+            contact_output('{"decision":"send","text":"正文","skip_reason":"other"}')
 
     async def test_replay_keeps_original_and_changed_opportunity_inputs_are_rejected(self):
         app = await self.enabled()
@@ -366,6 +558,72 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         task = (await self.contact(app)).unwrap().task
         self.assertNotEqual(task.state, "succeeded")
         self.assertEqual((self.called, self.sent), ([], []))
+
+    async def test_administrator_delivery_tests_bypass_contact_windows_and_do_not_consume_daily_limits(self):
+        app = await self.enabled()
+        self.settings(app, {"max_attempts_24h": 0, "max_contacts_24h": 0,
+            "pause_until": (NOW + timedelta(hours=1)).isoformat(), "quiet_enabled": True,
+            "quiet_start": "00:00", "quiet_end": "00:00"}).unwrap()
+
+        first = (await self.contact(app, self.opportunity("diagnostic-first"), administrator_test=True)).unwrap().task
+        await self.delivery_state(app, first.task_id, "delivered")
+        self.assertEqual(len(self.sent), 1)
+
+        preferences = self.preferences(app)
+        self.assertTrue(app.proactive._duplicate(self.contact_context(), self.sent[0].text, preferences,
+            self.clock.now(), purpose="chat", contact_id="ordinary-probe"))
+        self.assertFalse(app.proactive._duplicate(self.contact_context(), self.sent[0].text, preferences,
+            self.clock.now(), purpose="chat", contact_id="test-probe", administrator_test=True))
+        usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
+        self.assertEqual(usage["session"], {"used": 0, "limit": 0, "window_hours": 24})
+        self.assertEqual(usage["relationship"]["used"], 0)
+        self.assertEqual(preferences.reason("chat"), "proactive_paused")
+
+        self.settings(app, {"max_attempts_24h": 1, "max_contacts_24h": 1}).unwrap()
+        ordinary = await self.contact(app, self.opportunity("ordinary-during-pause"))
+        self.assertEqual(ordinary.failure.code, "no_feasible_thought")
+
+        self.settings(app, {"pause_until": "", "quiet_enabled": False}).unwrap()
+        preferences = self.preferences(app)
+        app.proactive.budget.attempts(self.contact_context(), preferences, self.clock.now())
+        app.proactive.budget.contacts(self.contact_context(), preferences, self.clock.now())
+        usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
+        self.assertEqual(usage["session"], {"used": 0, "limit": 1, "window_hours": 24})
+
+    async def test_administrator_delivery_test_omits_history_memory_and_repeat_guidance(self):
+        app = await self.enabled()
+        self.settings(app, {"play.enabled": True}).unwrap()
+
+        class HistoryProbe:
+            def capture(self, *_args, **_kwargs):
+                raise AssertionError("a manual diagnostic must not read private conversation history")
+
+            def interaction(self, *_args, **_kwargs):
+                raise AssertionError("a manual diagnostic must not read private interaction state")
+
+            def latest_reply(self, *_args, **_kwargs):
+                raise AssertionError("a manual diagnostic must not read the last reply")
+
+        class MemoryProbe:
+            def contact_capture(self, *_args, **_kwargs):
+                raise AssertionError("a manual diagnostic must not recall private memory")
+
+        app.proactive.history = HistoryProbe()
+        app.proactive.memory_context = MemoryProbe()
+        opportunity = self.opportunity("diagnostic-isolated")
+        intent = self.intent(opportunity, purpose="play", summary="一次轻松互动测试")
+        task = (await self.contact(app, opportunity, (intent,), administrator_test=True)).unwrap().task
+
+        self.assertEqual(task.state, "succeeded")
+        prompt = self.called[0].original
+        self.assertEqual(intent.purpose, "play")
+        purposes = {item.purpose for item in prompt.context.materials}
+        self.assertNotIn("communication_state", purposes)
+        self.assertNotIn("dedup_candidate", purposes)
+        self.assertNotIn("last_confirmed_reply", purposes)
+        self.assertNotIn("只用标为 dedup_candidate", prompt.instruction)
+        self.assertIn("不要把缺少这些材料判为重复", prompt.instruction)
+        self.assertIn("除程序负责的授权和安全检查外，请选择 send", prompt.instruction)
 
     async def test_accepted_receipt_is_not_reported_as_delivered(self):
         app = await self.enabled()

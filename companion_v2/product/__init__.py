@@ -23,7 +23,7 @@ CORE_COMPONENTS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "memory",
-        "label": "记忆与经历",
+        "label": "事实与经历",
         "description": "有来源的事实、经历、检索、反思、修订和遗忘边界。",
         "routes": ("memory.read", "memory.propose", "memory.reflect"),
     },

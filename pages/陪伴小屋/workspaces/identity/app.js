@@ -2,29 +2,29 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const endpoint = "acquaintance";
-  const authorizationEndpoint = endpoint + "/authorization";
-  const adminNameEndpoint = endpoint + "/admin-name";
-  const CAPABILITY_LABELS = {
-    text: "接收消息",
-    "conversation.reply": "对话回复",
-    "message.delivery": "主动投递",
-    "proactive.contact": "主动联系",
-    "configuration.read": "读取配置",
-    "extension.tool.invoke": "调用拓展工具",
-    "screen.read": "读取屏幕",
-    "screen.process": "处理屏幕",
-  };
-  const STATE_LABELS = { active: "已生效", off: "未授权", revoked: "已撤销", expired: "已过期", pending: "尚未生效" };
+  const TIER_LABELS = {standard: "普通用户", important: "重要用户", core: "核心用户"};
   const errors = {
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开本页面。",
-    staging_not_initialized: "页面已连接 AstrBot，但 V2 运行实例尚未加载。请先在宿主管理中加载运行实例，再重新读取。",
+    staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
     staging_host_terminated: "插件已经停止，请重新打开管理页面。",
     core_access_required: "当前管理账号没有相识目录查看权限。",
     acquaintance_request_invalid: "目录请求不合法，请刷新页面重试。",
+    account_config_running: "请先停止 V2，再修改群聊接入状态。",
+    account_group_target_account_required: "请先在账号与会话中绑定这个 Bot 账号和人格。",
+    account_group_target_route_unresolved: "AstrBot 还无法确定该群对应的 Bot 账号。先让目标 Bot 在该群产生一次会话记录，再重新读取群聊目录。",
+    account_group_target_unavailable: "这个群当前不在 AstrBot 会话目录中，请刷新后重试。",
+    account_group_target_apply_failed: "群聊接入写入遇到未预期错误；页面会重读群聊目录核对当前状态。请根据后端原因检查账号与会话配置后重试。",
+    acquaintance_native_directory_unavailable: "AstrBot 原生群聊目录读取失败。请检查会话目录与插件日志后重新读取。",
+    acquaintance_directory_read_failed: "群聊目录读取遇到未预期错误。请检查插件日志后重新读取。",
+    setup_targets_unavailable: "AstrBot 会话目录暂不可读。请检查账号连接与插件日志，再重新读取群聊目录。",
+    host_mappings_conflict: "当前 Bot 账号与人格映射有冲突，请先在账号与会话中校正映射后重试。",
+    host_mappings_required: "共享运行配置至少需要一个会话目标和人格，请先在账号与会话中补齐。",
+    account_config_save_failed: "群聊接入状态没有保存，请检查配置目录权限后重试。",
+    host_mappings_required: "至少保留一个 V2 会话目标，无法移除最后一个群聊目标。",
     acquaintance_subject_required: "请先选择一位成员。",
     acquaintance_subject_unknown: "这个人不在当前运行实例的相识目录里，请刷新后重试。",
     authorization_command_invalid: "这次授权变更缺少必要信息，请刷新页面重试。",
-    authorization_capability_configured: "这项能力由运行实例配置签发，请到宿主管理的能力配置中调整。",
+    authorization_capability_configured: "这项能力由运行实例配置签发，请到对应功能页调整。",
     authorization_capability_not_managed: "这项能力当前没有本页可以撤销的授权，请刷新后重试。",
     authorization_revision_conflict: "授权刚刚被改过，页面已读回最新状态，请再确认一次。",
     authorization_operation_unresolved: "上一次授权变更没有走完，请刷新核对后再试。",
@@ -36,10 +36,8 @@
     person_nickname_operation_conflict: "这次称呼操作键已用于另一项修改，请重新保存。",
     person_nickname_operation_unresolved: "上一次称呼修改尚未完成，请刷新核对后重试。",
   };
-  let bridge, data = null, filter = "all", selected = null, selectedGroupId = "", activeView = "network";
-  let graphScope = "all", searchTerm = "", requestSequence = 0, authSequence = 0;
-  let authorization = {}, authServer = "", authBusy = false, nicknameBusy = false;
-  let pendingNicknameOperation = null;
+  let bridge, data = null, filter = "stable", selected = null, selectedGroupId = "", activeView = "network", noticeView = "";
+  let graphScope = "all", searchTerm = "", graphExpandedCluster = "", requestSequence = 0, hideIdleUsers = true, groupStatusFilter = "all";
 
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
@@ -62,15 +60,170 @@
     if (!Number.isFinite(date.getTime())) return "—";
     return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(date);
   };
+  const dateTime = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "—";
+    return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  };
   const nameOf = (person) => person.display_name || `未命名成员 ${person.native_account_id ?? ""}`.trim();
+  const personFilter = (person) => person?.private_chat || person?.private_target ? "stable"
+    : person?.group_member ? "temporary" : person ? "stable" : null;
+  const accountLabel = (item) => item.account_name || (/^\d+$/.test(String(item.account_id || ""))
+    ? `QQ ${item.account_id}` : "当前 Bot 账号");
   const groupsOf = (person) => person.groups && typeof person.groups === "object" ? person.groups : {};
   const groupIdsOf = (person) => Object.keys(groupsOf(person));
+  const personaIdsOf = (person) => {
+    const ids = Array.isArray(person?.persona_ids) ? person.persona_ids
+      .map(value => value === "[%None]" ? "" : String(value ?? "").trim()) : [];
+    return [...new Set(ids)].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  };
+  const personaGroupKey = (person) => Array.isArray(person?.persona_ids) && person.persona_ids.length
+    ? JSON.stringify([person.platform, person.bot_id, person.account_id,
+      [...new Set(personaIdsOf(person))].sort((a, b) => a.localeCompare(b, "zh-CN"))])
+    : JSON.stringify([person.platform, person.bot_id, person.account_id, ["role", person?.role_id || ""]]);
+  const personaDisplayLabel = (person) => personaIdsOf(person).map(value => value || "默认人格").join("、")
+    || person?.role_name || "当前人格";
+  const routeSnapshot = (person) => Object.fromEntries(["platform", "bot_id", "account_id", "role_id", "persona_ids",
+    "revision", "settings_available", "private_target", "private_chat", "admin_nickname", "identity_tier",
+    "display_name", "native_account_id", "role_name", "private", "groups", "total"]
+    .filter(key => person?.[key] !== undefined).map(key => [key, Array.isArray(person[key]) ? [...person[key]] : person[key]]));
+  const displayPersonKey = (person) => JSON.stringify([person.subject_id, personaGroupKey(person)]);
+  const activeDisplayRoute = (person) => person.private_target === true && person.settings_available === true;
+  const mergeTime = (left, right, pickMax) => {
+    const values = [left, right].filter(Boolean).sort((a, b) => String(a).localeCompare(String(b)));
+    return values.length ? values[pickMax ? values.length - 1 : 0] : null;
+  };
+  const mergeContext = (left, right) => {
+    if (!left && !right) return null;
+    return {msg_count: Math.max(number(left?.msg_count), number(right?.msg_count)),
+      active_days: Math.max(number(left?.active_days), number(right?.active_days)),
+      first_seen: mergeTime(left?.first_seen, right?.first_seen, false),
+      last_seen: mergeTime(left?.last_seen, right?.last_seen, true)};
+  };
+  function mergeDirectoryPeople(rows) {
+    const merged = new Map();
+    for (const source of rows || []) {
+      const key = displayPersonKey(source);
+      const snapshot = routeSnapshot(source);
+      if (!merged.has(key)) {
+        const activeRoutes = activeDisplayRoute(source) ? [snapshot] : [];
+        merged.set(key, {...source, persona_ids: personaIdsOf(source), persona_role_ids: [source.role_id].filter(Boolean),
+          private_target: Boolean(source.private_target), settings_available: activeRoutes.length > 0,
+          display_routes: activeRoutes, display_route_count: activeRoutes.length});
+        continue;
+      }
+      const target = merged.get(key);
+      const routeKey = JSON.stringify([snapshot.platform, snapshot.bot_id, snapshot.account_id, snapshot.role_id]);
+      if (activeDisplayRoute(source) && !target.display_routes.some(route => JSON.stringify([route.platform, route.bot_id, route.account_id, route.role_id]) === routeKey)) {
+        target.display_routes.push(snapshot);
+      }
+      target.persona_role_ids = [...new Set([...(target.persona_role_ids || []), source.role_id].filter(Boolean))];
+      target.display_route_count = target.display_routes.length;
+      target.persona_ids = [...new Set([...(target.persona_ids || []), ...personaIdsOf(source)])];
+      target.private_chat ||= Boolean(source.private_chat);
+      target.private_target ||= Boolean(source.private_target);
+      target.group_member ||= Boolean(source.group_member);
+      target.settings_available = target.display_route_count > 0;
+      if (source.admin_nickname && !target.admin_nickname) target.admin_nickname = source.admin_nickname;
+      if (source.revision > number(target.revision)) target.revision = source.revision;
+      target.private = mergeContext(target.private, source.private);
+      const groups = {...groupsOf(target)};
+      for (const [id, value] of Object.entries(groupsOf(source))) groups[id] = mergeContext(groups[id], value);
+      target.groups = groups;
+      target.total = mergeContext(target.total, source.total);
+      target.role_name = personaDisplayLabel(target);
+    }
+    return [...merged.values()];
+  }
   const groupKey = (group) => String(group.group_id ?? "");
+  const groupBaseKey = (group) => JSON.stringify([group.platform_id || group.platform || "",
+    group.bot_id || "", group.account_id || "", groupKey(group)]);
+  const groupTargetRouteReady = (group) => [group.platform_id, group.account_id, group.bot_id, groupKey(group)]
+    .every(value => typeof value === "string" && value.trim());
+  function groupTargetBlock(group) {
+    const access = data?.group_access;
+    if (!access) return {message: "暂时无法确认自动接入状态，请先重新读取目录。", tab: "host", label: "账号与会话"};
+    if (!groupTargetRouteReady(group)) return {message: "AstrBot 还没有为这个群确定唯一的 Bot 账号。"};
+    const accounts = Array.isArray(access.accounts) ? access.accounts : [];
+    if (!accounts.some(item => item.platform_id === group.platform_id
+        && item.account_id === group.account_id && item.bot_id === group.bot_id)) {
+      return {message: "这个 Bot 账号尚未归入角色，请在账号与会话中完成角色映射。",
+        tab: "host", label: "账号与会话"};
+    }
+    if (!Array.isArray(access.persona_bots) || !access.persona_bots.includes(group.bot_id)) {
+      return {message: "这个 Bot 账号还没有归入角色，请在账号与会话中完成映射。",
+        tab: "host", label: "账号与会话"};
+    }
+    return null;
+  }
+  function managementButton(tab, label) {
+    const button = node("button", label, "secondary group-access-button");
+    button.type = "button";
+    button.addEventListener("click", () => window.parent?.postMessage?.({
+      channel: "companion-workspace", kind: "navigate", target: {tab},
+    }, "*"));
+    return button;
+  }
+  const groupRouteKey = (group) => JSON.stringify([groupBaseKey(group), personaIdsOf(group).length
+    ? ["persona", personaIdsOf(group)] : ["role", group.role_id || ""]]);
+  const groupName = (group) => group.display_name || group.group_name || `群 ${groupKey(group)}`;
+  const groupLabel = (group) => group.display_name || group.group_name
+    ? `${groupName(group)}（${groupKey(group)}）` : groupName(group);
+  const groupListStatus = (group) => group.configured ? "已自动接入"
+    : group.discovered ? groupTargetRouteReady(group) ? "AstrBot 已发现，待角色映射" : "AstrBot 已发现，账号待确认"
+      : "历史往来";
+  const groupStatusKey = (group) => group.configured ? "configured" : group.discovered ? "pending" : "history";
+  const groupStatusLabel = (group) => group.configured ? "已接入"
+    : group.discovered ? "待处理" : "历史往来";
+  const groupDetailStatus = (group) => group.configured ? "已按角色映射自动接入"
+    : group.discovered ? groupTargetRouteReady(group) ? "AstrBot 已发现该群会话；等待角色映射。"
+      : "AstrBot 已发现该群会话；对应 Bot 账号尚未确认。"
+      : "历史群内往来记录";
+  const groupGraphStatus = (group) => group.configured ? "已自动接入"
+    : group.discovered ? groupTargetRouteReady(group) ? "已发现 · 待角色映射" : "已发现 · 账号待确认" : "历史群内记录";
+  const groupById = (id) => data?.groups.find((group) => groupKey(group) === id) || { group_id: id };
+  const groupSearchText = (group) => [groupName(group), groupKey(group)].join(" ").toLocaleLowerCase();
+  const graphLabel = (value, limit) => Array.from(value).length > limit
+    ? Array.from(value).slice(0, limit - 1).join("") + "…" : value;
+
+  function readDirectoryPreferences() {
+    const toggle = $("hide-idle-users");
+    if (!toggle) return;
+    let stored = null;
+    try { stored = window.localStorage?.getItem("companion-v2.hide-idle-users"); } catch (_) { stored = null; }
+    hideIdleUsers = stored === null ? true : stored !== "false";
+    toggle.checked = hideIdleUsers;
+  }
+  function saveDirectoryPreference() {
+    try { window.localStorage?.setItem("companion-v2.hide-idle-users", String(hideIdleUsers)); } catch (_) { /* 页面桥可能禁用存储 */ }
+  }
+  function hasInteraction(person) {
+    return Boolean(person?.private_chat || person?.group_member
+      || number(person?.total?.msg_count) > 0
+      || number(person?.private?.msg_count) > 0
+      || Object.values(groupsOf(person)).some((item) => number(item?.msg_count) > 0));
+  }
+  function isIdleOrdinaryUser(person) {
+    return String(person?.identity_tier || "standard") === "standard" && !hasInteraction(person);
+  }
+  function peopleForCurrentFilter({includeHidden = false} = {}) {
+    if (!data) return [];
+    return data.persons.filter((person) => {
+      if (!matchesSearch(person)) return false;
+      if (filter === "stable" && personFilter(person) !== "stable") return false;
+      if (filter === "temporary" && personFilter(person) !== "temporary") return false;
+      if (!includeHidden && hideIdleUsers && isIdleOrdinaryUser(person)) return false;
+      return true;
+    });
+  }
 
   function notice(message, error = false) {
     const target = $("notice");
     target.textContent = message;
     target.className = "notice" + (error ? " error" : "");
+    noticeView = message ? activeView : "";
     target.hidden = !message;
   }
   function setSyncState(state, message) {
@@ -79,8 +232,8 @@
     target.textContent = message;
   }
   function unwrap(response) {
-    const wrapped = ["ok", "error"].includes(response?.status) ? response
-      : ["ok", "error"].includes(response?.data?.status) ? response.data : null;
+    const wrapped = ["ok", "error"].includes(response?.status) && response?.data !== undefined ? response
+      : ["ok", "error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
     if (wrapped?.status === "error") throw Object.assign(
       new Error(wrapped.reason || wrapped.error?.reason || wrapped.message || "读取失败"),
       { code: wrapped.data?.code || wrapped.error?.code || wrapped.message });
@@ -88,31 +241,44 @@
     if (!content || typeof content !== "object") throw new Error("未收到服务结果。");
     return content;
   }
-  function localized(error) {
+  function localized(error, fallback = "操作未完成，请重新读取当前页面数据后重试。") {
     if (errors[error?.code]) return new Error(errors[error.code]);
     const message = [error?.message, error?.reason].find((item) => typeof item === "string" && item) || "";
     if (/initialized v2 profile|staging profile|staging profile first/i.test(message)) return new Error(errors.staging_not_initialized);
     if (/dashboard|sign in/i.test(message)) return new Error(errors.dashboard_identity_required);
-    return new Error(message || "暂时无法读取相识目录，请刷新重试。");
+    return new Error(fallback);
+  }
+  function groupTargetFailure(error) {
+    const code = typeof error?.code === "string" ? error.code : "";
+    const reason = [error?.reason, error?.message].find((item) => typeof item === "string" && item) || "";
+    const localizedReason = code ? errors[code] : "";
+    const plainReason = reason.replace(/[。.!?]+$/, "");
+    if (!code && /^(请求未完成，请刷新核对当前状态后重试|未收到执行结果，请核对后重试本次操作)[。.!?]*$/.test(reason)) {
+      return new Error("没有收到 AstrBot 对群聊接入操作的明确回执，当前状态可能已变化；正在重读群聊目录核对结果。");
+    }
+    if (!code && !reason) {
+      return new Error("没有收到 AstrBot 对群聊接入操作的明确回执，当前状态可能已变化；正在重读群聊目录核对结果。");
+    }
+    if (code || reason) return new Error(`${(localizedReason || "群聊接入失败").replace(/[。.!?]+$/, "")}`
+      + `${code ? `（${code}）` : ""}`
+      + `${reason && reason !== localizedReason ? `：${plainReason}` : ""}`
+      + "。正在重读群聊目录核对当前状态。");
+    return localized(error, "群聊接入状态未完成，请重新读取群聊目录后重试。");
   }
   function searchText(person) {
-    return [nameOf(person), person.native_account_id, person.subject_id, ...groupIdsOf(person)].join(" ").toLocaleLowerCase();
+    return [nameOf(person), person.native_account_id, person.subject_id,
+      personaDisplayLabel(person),
+      ...groupIdsOf(person).map((id) => groupLabel(groupById(id)))].join(" ").toLocaleLowerCase();
   }
   function matchesSearch(person) { return !searchTerm || searchText(person).includes(searchTerm); }
   function visiblePeople() {
-    if (!data) return [];
-    return data.persons.filter((person) => {
-      if (!matchesSearch(person)) return false;
-      if (filter === "private") return person.private_chat;
-      if (filter === "group") return person.group_member;
-      if (filter === "both") return person.private_chat && person.group_member;
-      return true;
-    });
+    return peopleForCurrentFilter();
   }
   function graphPeople() {
     if (!data) return [];
     return data.persons.filter((person) => {
       if (!matchesSearch(person)) return false;
+      if (hideIdleUsers && isIdleOrdinaryUser(person)) return false;
       if (graphScope === "private") return person.private_chat;
       if (graphScope === "group") return person.group_member;
       return true;
@@ -120,42 +286,180 @@
   }
   function allGroups() {
     if (!data) return [];
-    const groups = new Map();
+    const groups = new Map(), peopleByBase = new Map();
+    const add = (item, {supplied = false} = {}) => {
+      const id = groupKey(item);
+      if (!id) return null;
+      const key = groupBaseKey(item);
+      const previous = groups.get(key);
+      if (!previous) {
+        groups.set(key, { ...item, group_id: id, configured: supplied ? item.configured !== false : Boolean(item.configured),
+          member_count: number(item.member_count), msg_count: number(item.msg_count), supplied,
+          people: [] });
+      } else {
+        previous.configured ||= Boolean(item.configured);
+        previous.discovered ||= Boolean(item.discovered);
+        previous.display_name ||= item.display_name || item.group_name;
+        if (supplied) {
+          previous.supplied = true;
+          previous.member_count = Math.max(previous.member_count, number(item.member_count));
+          previous.msg_count = Math.max(previous.msg_count, number(item.msg_count));
+        }
+      }
+      return groups.get(key);
+    };
     for (const group of data.groups || []) {
-      const id = groupKey(group);
-      if (!id) continue;
-      groups.set(id, { ...group, group_id: id, configured: true,
-        member_count: number(group.member_count), msg_count: number(group.msg_count) });
+      let source = group;
+      if (!group.platform_id && !group.bot_id && !group.account_id) {
+        const candidates = (data.persons || []).filter((person) => groupsOf(person)[groupKey(group)]);
+        const routes = new Map(candidates.map((person) => [groupRouteKey({
+          group_id: groupKey(group), platform_id: person.platform, bot_id: person.bot_id,
+          account_id: person.account_id, role_id: person.role_id, persona_ids: person.persona_ids,
+        }), person]));
+        if (routes.size === 1) {
+          const person = routes.values().next().value;
+          source = {...group, platform_id: person.platform, bot_id: person.bot_id,
+            account_id: person.account_id, role_id: person.role_id};
+        }
+      }
+      add(source, {supplied: true});
     }
     for (const person of data.persons || []) {
       for (const [id, item] of Object.entries(groupsOf(person))) {
         if (!id) continue;
-        if (!groups.has(id)) groups.set(id, { group_id: id, configured: false, member_count: 0, msg_count: 0,
-          account_id: "", bot_id: "" });
-        const group = groups.get(id);
-        if (!group.configured) {
-          group.member_count += 1;
+        const group = add({group_id: id, configured: false, platform_id: person.platform,
+          bot_id: person.bot_id, account_id: person.account_id, role_id: person.role_id});
+        const people = peopleByBase.get(groupBaseKey(group)) || [];
+        if (!people.some((value) => personRouteKey(value) === personRouteKey(person))) people.push(person);
+        peopleByBase.set(groupBaseKey(group), people);
+        if (!group.supplied && !group.configured) {
+          group.member_count = people.length;
           group.msg_count += number(item?.msg_count);
         }
       }
     }
-    return [...groups.values()].sort((a, b) => Number(b.configured) - Number(a.configured)
-      || number(b.msg_count) - number(a.msg_count) || groupKey(a).localeCompare(groupKey(b), "zh-CN"));
+    const networks = new Map();
+    for (const network of data.group_networks || []) {
+      const base = groupBaseKey({ ...network, group_id: network.group_id });
+      const entries = networks.get(base) || [];
+      entries.push(network);
+      networks.set(base, entries);
+      if (!groups.has(base)) add({...network, configured: Boolean(network.configured)});
+    }
+    const expanded = [];
+    for (const group of groups.values()) {
+      const groupNetworks = networks.get(groupBaseKey(group)) || [];
+      const people = peopleByBase.get(groupBaseKey(group)) || [];
+      if (groupNetworks.length) {
+        const byPersona = new Map();
+        for (const network of groupNetworks) {
+          const key = personaIdsOf(network).length ? JSON.stringify(["persona", personaIdsOf(network)])
+            : JSON.stringify(["role", network.role_id || ""]);
+          const entries = byPersona.get(key) || [];
+          entries.push(network);
+          byPersona.set(key, entries);
+        }
+        for (const entries of byPersona.values()) {
+          const network = mergeGroupNetworks(entries);
+          expanded.push({...group, role_id: network.role_id, role_ids: network.role_ids,
+            persona_ids: network.persona_ids, role_name: network.role_name, network,
+            member_count: number(network.member_count), people});
+        }
+      } else {
+        const byPersona = new Map();
+        for (const person of people) {
+          const key = personaGroupKey(person);
+          const entries = byPersona.get(key) || [];
+          entries.push(person);
+          byPersona.set(key, entries);
+        }
+        if (byPersona.size > 1) for (const entries of byPersona.values()) {
+          const roleIds = [...new Set(entries.flatMap(person => person.persona_role_ids || [person.role_id]).filter(Boolean))];
+          expanded.push({...group, role_id: roleIds[0] || "", role_ids: roleIds,
+            persona_ids: personaIdsOf(entries[0]), role_name: personaDisplayLabel(entries[0]), people: entries});
+        } else {
+          const entries = [...byPersona.values()][0] || people;
+          const roleIds = [...new Set(entries.flatMap(person => person.persona_role_ids || [person.role_id]).filter(Boolean))];
+          expanded.push({...group, role_id: roleIds[0] || group.role_id || "", role_ids: roleIds,
+            persona_ids: personaIdsOf(entries[0] || group),
+            role_name: entries.length ? personaDisplayLabel(entries[0]) : group.role_name || "", people: entries});
+        }
+      }
+    }
+    return expanded.sort((a, b) => Number(b.configured) - Number(a.configured)
+      || number(b.msg_count) - number(a.msg_count) || groupKey(a).localeCompare(groupKey(b), "zh-CN")
+      || groupRouteKey(a).localeCompare(groupRouteKey(b), "zh-CN"));
   }
   function searchedGroups() {
-    const people = graphPeople();
     return allGroups().filter((group) => {
       if (graphScope === "private") return false;
       if (!searchTerm) return true;
-      const idMatch = groupKey(group).toLocaleLowerCase().includes(searchTerm);
-      return idMatch || people.some((person) => groupsOf(person)[groupKey(group)]);
+      const idMatch = groupSearchText(group).includes(searchTerm);
+      return idMatch || peopleInGroup(group, {honorSearch: false}).some(matchesSearch);
     });
   }
   function peopleInGroup(group, { honorSearch = true } = {}) {
     if (!data) return [];
+    if (group.discovered && (!group.bot_id || !group.account_id)) return [];
     const id = groupKey(group);
-    return data.persons.filter((person) => groupsOf(person)[id]
-      && (!honorSearch || !searchTerm || id.toLocaleLowerCase().includes(searchTerm) || matchesSearch(person)));
+    const candidates = data.persons.filter((person) => groupsOf(person)[id]);
+    const matchesRoute = (person) => (!group.platform_id || person.platform === group.platform_id)
+      && (!group.bot_id || person.bot_id === group.bot_id)
+      && (!group.account_id || person.account_id === group.account_id)
+      && (group.persona_ids?.length
+        ? JSON.stringify(personaIdsOf(person)) === JSON.stringify(personaIdsOf(group))
+        : (group.role_ids?.length ? group.role_ids.some(role => (person.persona_role_ids || [person.role_id]).includes(role))
+          : !group.role_id || person.role_id === group.role_id));
+    let members = candidates.filter(matchesRoute);
+    // Older directory payloads did not carry a complete route on group rows.
+    // A single unambiguous candidate remains usable during that transition.
+    if (!members.length && !group.platform_id && !group.bot_id && !group.account_id && candidates.length === 1) {
+      members = candidates;
+    }
+    return members.filter((person) => !honorSearch || !searchTerm
+      || groupSearchText(group).includes(searchTerm) || matchesSearch(person));
+  }
+  function mergeGroupNetworks(items) {
+    const first = items[0];
+    const roleIds = [...new Set(items.map(item => item.role_id).filter(Boolean))].sort();
+    const personaIds = [...new Set(items.flatMap(personaIdsOf))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+    const members = new Map();
+    for (const network of items) for (const member of network.members || []) {
+      const account = String(member.native_account_id || "");
+      if (!account) continue;
+      const previous = members.get(account);
+      if (!previous) {members.set(account, {...member}); continue;}
+      const left = previous.group_observation || {}, right = member.group_observation || {};
+      previous.group_observation = {...left,
+        message_count: Math.max(number(left.message_count), number(right.message_count)),
+        active_days: Math.max(number(left.active_days), number(right.active_days)),
+        last_seen: mergeTime(left.last_seen, right.last_seen, true),
+        recent: [...(left.recent || []), ...(right.recent || [])].filter((item, index, all) =>
+          all.findIndex(other => JSON.stringify(other) === JSON.stringify(item)) === index).slice(-8)};
+      const a = previous.acquaintance || {}, b = member.acquaintance || {};
+      previous.acquaintance = {...a, message_count: Math.max(number(a.message_count), number(b.message_count)),
+        private_chat: Boolean(a.private_chat || b.private_chat)};
+      const clues = new Map([...(previous.clues || []), ...(member.clues || [])].map(item => [item.entry_id || JSON.stringify(item), item]));
+      if (clues.size) previous.clues = [...clues.values()];
+    }
+    const edges = new Map();
+    for (const network of items) for (const edge of network.edges || []) {
+      const pair = [String(edge.a), String(edge.b)].sort();
+      const key = JSON.stringify(pair), old = edges.get(key);
+      if (!old || number(edge.count) > number(old.count)) edges.set(key, {...edge, a: pair[0], b: pair[1]});
+      else if (edge.last_seen && (!old.last_seen || edge.last_seen > old.last_seen)) {
+        edges.set(key, {...old, ...edge, a: pair[0], b: pair[1], count: old.count});
+      }
+    }
+    const clues = new Map();
+    for (const network of items) for (const clue of network.unmatched_clues || []) {
+      clues.set(clue.entry_id || JSON.stringify(clue), clue);
+    }
+    return {...first, role_id: roleIds[0] || "", role_ids: roleIds, persona_ids: personaIds,
+      role_name: personaIds.map(value => value || "默认人格").join("、") || first.role_name,
+      configured: items.some(item => item.configured), member_count: members.size, members: [...members.values()],
+      edges: [...edges.values()], interaction_count: [...edges.values()].reduce((sum, edge) => sum + number(edge.count), 0),
+      unmatched_clues: [...clues.values()]};
   }
   function avatar(person, className = "avatar") {
     const wrapper = node("span", undefined, className);
@@ -171,26 +475,31 @@
     const card = node("button", undefined, "person-card");
     card.type = "button";
     card.style.setProperty("--i", String(index));
-    card.setAttribute("aria-pressed", String(selected?.subject_id === person.subject_id));
+    card.dataset.userId = String(person.subject_id || person.native_account_id || "");
+    card.setAttribute("aria-label", `打开 ${nameOf(person)} 的用户资料`);
+    card.setAttribute("aria-pressed", String(selected && personRouteKey(selected) === personRouteKey(person)));
     const head = node("span", undefined, "card-head");
     head.append(avatar(person));
     const title = node("span", undefined, "card-title");
     title.append(node("strong", nameOf(person)));
+    title.title = `${nameOf(person)} · ${person.native_account_id ?? ""}`;
     const badges = node("span", undefined, "card-badges");
     if (person.private_chat) badges.append(badge("私聊", "private"));
-    if (person.group_member) badges.append(badge(`群聊 ${groupIdsOf(person).length}`, "group"));
-    if (!person.private_chat && !person.group_member) badges.append(badge("暂无往来"));
-    if (authorization[person.subject_id]?.companion === true) badges.append(badge("陪伴对象", "companion"));
-    title.append(badges);
+     if (person.group_member) badges.append(badge(`群聊 ${groupIdsOf(person).length}`, "group"));
+     if (!person.private_chat && !person.group_member) badges.append(badge("暂无往来"));
+     badges.append(badge(TIER_LABELS[person.identity_tier] || "普通用户", person.identity_tier === "core" ? "companion" : ""));
+     if (person.identity_tier === "core") badges.append(badge("管理员", "administrator"));
+     title.append(badges);
     head.append(title);
     const meta = node("span", undefined, "card-meta");
-    meta.append(node("span", `${number(person.total?.msg_count)} 条消息`),
-      node("span", `${number(person.total?.active_days)} 活跃天`),
-      node("span", `最近 ${shortTime(person.total?.last_seen)}`));
+    meta.append(node("span", `QQ ${person.native_account_id || "未知"}`),
+      node("span", personaDisplayLabel(person)),
+      node("span", accountLabel(person)));
+    if (person.display_route_count > 1) meta.append(node("span", `${person.display_route_count} 个内部归属`, "route-count"));
     const contexts = node("span", undefined, "card-contexts");
-    if (person.private_chat) contexts.append(contextBadge(`私聊 ${number(person.private?.msg_count)} 条`, "private"));
-    groupIdsOf(person).slice(0, 3).forEach((id) => contexts.append(contextBadge(`群 ${id}`)));
-    if (groupIdsOf(person).length > 3) contexts.append(contextBadge(`另有 ${groupIdsOf(person).length - 3} 个群`));
+    const totalMessages = number(person.total?.msg_count);
+    contexts.append(contextBadge(`${totalMessages} 条消息 · 最近 ${shortTime(person.total?.last_seen)}`,
+      totalMessages ? "private" : "idle"));
     card.append(head, meta, contexts);
     card.addEventListener("click", () => select(person));
     return card;
@@ -200,81 +509,330 @@
     grid.replaceChildren();
     const people = visiblePeople();
     $("people-result-count").textContent = `${people.length} 人`;
+    const visibilitySummary = $("people-visibility-summary");
+    if (visibilitySummary) {
+      const hidden = data ? peopleForCurrentFilter({includeHidden: true}).length - people.length : 0;
+      visibilitySummary.textContent = hideIdleUsers
+        ? hidden ? `已隐藏 ${hidden} 位无交往普通用户` : "默认隐藏无交往普通用户"
+        : "已显示全部用户";
+    }
+    const toggle = $("hide-idle-users");
+    if (toggle) toggle.checked = hideIdleUsers;
     if (!people.length) {
       const empty = node("div", undefined, "empty-state");
-      empty.append(node("strong", data ? searchTerm ? "沒有符合的往来成员" : "这里还没有符合的相识" : "正在读取相识目录…"));
+      const hidden = data ? peopleForCurrentFilter({includeHidden: true}).length : 0;
+      const title = data ? searchTerm ? "没有符合的往来用户"
+        : hideIdleUsers && hidden ? "无交往普通用户已隐藏" : "这里还没有符合的用户" : "正在读取用户目录…";
+      empty.append(node("strong", title), node("p", data && hideIdleUsers && hidden
+        ? "关闭“隐藏无交往的普通用户”后可查看完整目录。" : "收到私聊或群聊记录后，用户会出现在这里。"));
       grid.append(empty);
       return;
     }
     people.forEach((person, index) => grid.append(personCard(person, index)));
   }
 
-  function svgPerson(person, y) {
-    const id = esc(person.subject_id);
-    const name = esc(nameOf(person));
-    const privateCount = number(person.private?.msg_count);
-    const groupCount = groupIdsOf(person).length;
-    const meta = [person.private_chat ? `私聊 ${privateCount} 条` : "",
-      groupCount ? `群聊 ${groupCount} 个` : ""].filter(Boolean).join(" · ") || "往来已记录";
-    const selectedClass = selected?.subject_id === person.subject_id ? " selected" : "";
-    return `<g class="graph-person${selectedClass}" data-person-id="${id}" tabindex="0" role="button" aria-label="打开 ${name} 的私聊详情">
-      <title>${name} · ${esc(meta)}</title><rect x="790" y="${y - 23}" width="224" height="46" rx="7"></rect>
-      <circle class="graph-avatar" cx="812" cy="${y}" r="13" fill="hsl(${hue(person.subject_id)} 42% 43%)"></circle>
-      <text class="graph-avatar-letter" x="812" y="${y + 4}">${esc((nameOf(person)[0] ?? "？").toUpperCase())}</text>
-      <text class="graph-node-title" x="834" y="${y - 2}">${name}</text>
-      <text class="graph-node-meta" x="834" y="${y + 14}">${esc(meta)}</text></g>`;
+  const GRAPH_PERSON_LIMIT = 48;
+  const GRAPH_FEATURE_LIMIT = 34;
+  const graphRoleName = (people) => {
+    const names = [...new Set(people.map(personaDisplayLabel).filter(Boolean))];
+    const contextName = bridge?.getContext?.()?.display?.role_name;
+    return names.length === 1 ? names[0] : contextName || "当前角色";
+  };
+  const graphChannels = (person) => {
+    const channels = [];
+    if (person.private_chat) channels.push("私聊");
+    if (person.group_member) channels.push(String(groupIdsOf(person).length || 1) + " 个群");
+    return channels.length ? channels.join(" · ") : "连接已记录";
+  };
+  const graphMemoryHint = (person) => {
+    const profile = person.relationship_profile || person.profile || {};
+    const nickname = person.admin_nickname || profile.default_nickname;
+    const relation = profile.role_relation || person.relationship || "";
+    if (nickname && relation) return String(nickname) + " · " + String(relation);
+    if (nickname) return "称呼：" + String(nickname);
+    if (relation) return String(relation);
+    const groups = groupIdsOf(person).map(id => groupName(groupById(id))).filter(Boolean);
+    return groups.length ? "出现于 " + graphLabel(groups[0], 16) : "等待更多共同片段";
+  };
+  const graphPersonMeta = (person) => graphChannels(person) + " · 最近 " + shortTime(person.total?.last_seen);
+  const graphPriority = (person) => String(person.total?.last_seen || "") + "|" + String(number(person.total?.msg_count)).padStart(9, "0");
+
+  // 雷达距离只使用已经记录的互动信号，不把身份等级或权限当作亲密度。
+  const radarDaysSince = (value) => {
+    const timestamp = Date.parse(value || "");
+    return Number.isFinite(timestamp) ? Math.max(0, (Date.now() - timestamp) / 86400000) : Infinity;
+  };
+  const radarLogScore = (value, ceiling) => Math.min(1, Math.log1p(number(value)) / Math.log1p(ceiling));
+  const radarCloseness = (person) => {
+    const messages = number(person.total?.msg_count)
+      + number(person.private?.msg_count) * .65
+      + Object.values(groupsOf(person)).reduce((sum, item) => sum + number(item?.msg_count) * .35, 0);
+    const activeDays = number(person.total?.active_days)
+      + number(person.private?.active_days) * .5;
+    const days = radarDaysSince(person.total?.last_seen);
+    const recent = Number.isFinite(days) ? Math.exp(-days / 45) : 0;
+    return Math.max(.06, Math.min(1, radarLogScore(messages, 160) * .5
+      + Math.min(1, activeDays / 45) * .25 + recent * .25));
+  };
+  function graphClusters(people) {
+    const buckets = new Map([
+      ["private", {id: "private", label: "私聊关系", detail: "内圈候选", people: []}],
+      ["both", {id: "both", label: "私聊 + 群聊", detail: "双重连接", people: []}],
+      ["group", {id: "group", label: "群聊相识", detail: "外圈用户", people: []}],
+      ["other", {id: "other", label: "待补充连接", detail: "尚无稳定窗口", people: []}],
+    ]);
+    for (const person of people) {
+      const id = person.private_chat && person.group_member ? "both"
+        : person.private_chat ? "private" : person.group_member ? "group" : "other";
+      buckets.get(id).people.push(person);
+    }
+    return [...buckets.values()].filter(item => item.people.length);
   }
-  function svgGroup(group, y) {
-    const id = groupKey(group), configured = group.configured;
-    return `<g class="graph-group${selectedGroupId === id ? " selected" : ""}" data-group-id="${esc(id)}" tabindex="0" role="button" aria-label="打开群 ${esc(id)} 的详情">
-      <title>群 ${esc(id)} · ${configured ? "已配置群目标" : "历史群内记录"}</title>
-      <rect x="408" y="${y - 25}" width="190" height="50" rx="7"></rect>
-      <rect class="group-icon" x="421" y="${y - 11}" width="22" height="22" rx="5"></rect>
-      <text class="graph-node-title" x="452" y="${y - 2}">群 ${esc(id)}</text>
-      <text class="graph-node-meta" x="452" y="${y + 14}">${configured ? "已配置群目标" : "历史群内记录"} · ${number(group.member_count)} 人</text></g>`;
+  function graphVisiblePeople(people) {
+    if (people.length <= GRAPH_PERSON_LIMIT) return {visible: people, hidden: [], expanded: false};
+    const ranked = [...people].sort((a, b) => graphPriority(b).localeCompare(graphPriority(a)));
+    const clusters = graphClusters(people);
+    const expanded = clusters.find(item => item.id === graphExpandedCluster);
+    if (expanded) {
+      const selectedKey = selected && personRouteKey(selected);
+      const keep = ranked.filter(person => personRouteKey(person) !== selectedKey).slice(0, 6);
+      const expandedPeople = expanded.people.slice().sort((a, b) => graphPriority(b).localeCompare(graphPriority(a)))
+        .slice(0, GRAPH_FEATURE_LIMIT - keep.length);
+      const merged = [...keep, ...expandedPeople];
+      if (selected && people.includes(selected) && !merged.includes(selected)) merged.unshift(selected);
+      return {visible: [...new Map(merged.map(person => [personRouteKey(person), person])).values()], hidden: [], expanded: true};
+    }
+    const visible = ranked.slice(0, GRAPH_FEATURE_LIMIT);
+    if (selected && people.includes(selected) && !visible.includes(selected)) visible[visible.length - 1] = selected;
+    return {visible: [...new Map(visible.map(person => [personRouteKey(person), person])).values()], hidden: people.filter(person => !visible.includes(person)), expanded: false};
+  }
+  function radarLayout(people, centerX, centerY) {
+    const place = (list, minRadius, maxRadius, zone) => {
+      const ordered = list.slice().sort((a, b) => hue(personRouteKey(a)) - hue(personRouteKey(b))
+        || personRouteKey(a).localeCompare(personRouteKey(b)));
+      return ordered.map((person, index) => {
+        const score = radarCloseness(person);
+        const angle = -Math.PI / 2 + (index + .5) / Math.max(1, ordered.length) * Math.PI * 2
+          + (zone === "private" ? .08 : -.04);
+        const radius = maxRadius - score * (maxRadius - minRadius);
+        return {person, score, angle, zone, x: centerX + Math.cos(angle) * radius, y: centerY + Math.sin(angle) * radius};
+      });
+    };
+    const privatePeople = people.filter(person => person.private_chat);
+    const groupPeople = people.filter(person => !person.private_chat && person.group_member);
+    const unlinkedPeople = people.filter(person => !person.private_chat && !person.group_member);
+    return [
+      // 中心角色卡占据核心区，私聊光点停在它外侧；越活跃越靠近中心。
+      ...place(privatePeople, 106, 148, "private"),
+      ...place(groupPeople, 202, 278, "group"),
+      ...place(unlinkedPeople, 286, 300, "other"),
+    ];
+  }
+  function svgRadarPerson(item, visibleCount) {
+    const {person, score, angle, zone, x, y} = item;
+    const id = esc(personRouteKey(person));
+    const name = esc(nameOf(person));
+    const selectedClass = selected && personRouteKey(selected) === personRouteKey(person) ? " selected" : "";
+    const direction = Math.cos(angle) >= 0 ? 1 : -1;
+    const labelY = Math.sin(angle) > .58 ? 25 : Math.sin(angle) < -.58 ? -18 : 4;
+    const labelAnchor = direction > 0 ? "start" : "end";
+    const labelX = direction * 14;
+    const showLabel = visibleCount <= 18 || selectedClass || score >= .72;
+    const channelDots = [
+      person.private_chat ? '<circle class="radar-channel-dot private" cx="8" cy="-8" r="3"><title>私聊连接</title></circle>' : "",
+      person.group_member ? '<circle class="radar-channel-dot group" cx="15" cy="-4" r="3"><title>'
+        + (groupIdsOf(person).length || 1) + ' 个群聊连接</title></circle>' : "",
+    ].join("");
+    return [
+      '<g class="graph-person radar-person ', zone, selectedClass, '" data-person-id="', id,
+      '" data-radar-zone="', zone, '" transform="translate(', x, " ", y,
+      ')" tabindex="0" role="button" aria-label="打开 ', name, ' 的用户资料">',
+      '<title>', name, " · ", esc(graphPersonMeta(person)), " · 靠近度 ", Math.round(score * 100), "</title>",
+      '<circle class="radar-dot-halo" r="', zone === "private" ? 13 : 11,
+      '"></circle><circle class="radar-dot" r="', zone === "private" ? 6 : 5, '"></circle>',
+      channelDots,
+      showLabel ? '<text class="radar-person-label" x="' + labelX + '" y="' + labelY
+        + '" text-anchor="' + labelAnchor + '">' + esc(graphLabel(nameOf(person), 11)) + "</text>" : "",
+      "</g>",
+    ].join("");
+  }
+  function svgCluster(cluster, x, y) {
+    const expanded = graphExpandedCluster === cluster.id;
+    const count = cluster.people.length;
+    return [
+      '<g class="graph-cluster radar-cluster', expanded ? " selected" : "",
+      '" data-graph-cluster="', esc(cluster.id), '" transform="translate(', x, " ", y,
+      ')" tabindex="0" role="button" aria-expanded="', expanded,
+      '" aria-label="', esc(cluster.label), "，", count, " 人，点击", expanded ? "收起" : "展开", '">',
+      '<circle class="radar-cluster-orb" r="24"></circle><text class="radar-cluster-count" y="5">',
+      count, '</text><text class="radar-cluster-label" y="40">', esc(cluster.label), "</text></g>",
+    ].join("");
+  }
+  function svgGroupSource(group, x, y) {
+    const id = groupKey(group), route = groupRouteKey(group);
+    return [
+      '<g class="graph-group-source', selectedGroupId === route ? " selected" : "",
+      '" data-group-id="', esc(id), '" data-group-route="', esc(route),
+      '" transform="translate(', x, " ", y, ')" tabindex="0" role="button" aria-label="打开',
+      esc(groupLabel(group)), '的详情"><title>', esc(groupLabel(group)), " · ", esc(groupGraphStatus(group)),
+      '</title><rect width="236" height="46" rx="13"></rect><circle class="graph-source-orb" cx="17" cy="23" r="6"></circle>',
+      '<text class="graph-source-title" x="32" y="21">', esc(graphLabel(groupName(group), 14)),
+      '</text><text class="graph-source-meta" x="32" y="36">', esc(groupGraphStatus(group)),
+      " · ", number(group.member_count), " 人</text></g>",
+    ].join("");
   }
   function graphMarkup() {
     if (!data) return "";
     const people = graphPeople();
     const groups = searchedGroups();
-    const personStep = 58, groupStep = 72;
-    const height = Math.max(390, 96 + people.length * personStep, 96 + groups.length * groupStep);
-    const hubY = height / 2, personStart = Math.max(52, (height - (people.length - 1) * personStep) / 2);
-    const groupStart = Math.max(52, (height - (groups.length - 1) * groupStep) / 2);
-    const personY = new Map(people.map((person, index) => [person.subject_id, personStart + index * personStep]));
-    const groupY = new Map(groups.map((group, index) => [groupKey(group), groupStart + index * groupStep]));
+    const {visible, hidden, expanded} = graphVisiblePeople(people);
+    const roleName = graphRoleName(people);
+    const centerX = 560, centerY = 320, innerRadius = 154, outerRadius = 276;
+    const sourceGroups = groups.slice(0, 8);
+    const sourceRows = sourceGroups.length ? Math.ceil(sourceGroups.length / 4) : 0;
+    const sourceTop = 650;
+    const height = sourceGroups.length ? sourceTop + sourceRows * 56 + 30 : 650;
+    const layout = radarLayout(visible, centerX, centerY);
     const edges = [];
-    for (const group of groups) {
-      const y = groupY.get(groupKey(group));
-      const kind = group.configured ? "target" : "group";
-      edges.push(`<path class="graph-edge ${kind}" d="M 226 ${hubY} C 292 ${hubY}, 342 ${y}, 408 ${y}"></path>`);
+    for (const item of layout) {
+      const d = "M " + centerX + " " + centerY + " L " + item.x.toFixed(1) + " " + item.y.toFixed(1);
+      if (item.person.private_chat) edges.push('<path class="graph-edge private" d="' + d + '"></path>');
+      if (item.person.group_member) edges.push('<path class="graph-edge group" d="' + d + '"></path>');
     }
-    for (const person of people) {
-      const y = personY.get(person.subject_id);
-      if (person.private_chat) edges.push(`<path class="graph-edge private" d="M 226 ${hubY} C 418 ${hubY}, 602 ${y}, 790 ${y}"></path>`);
-      for (const id of groupIdsOf(person)) {
-        const targetY = groupY.get(id);
-        if (targetY === undefined) continue;
-        edges.push(`<path class="graph-edge group" d="M 598 ${targetY} C 666 ${targetY}, 718 ${y}, 790 ${y}"></path>`);
-      }
+    const personNodes = layout.map(item => svgRadarPerson(item, layout.length)).join("");
+    const clusters = expanded
+      ? graphClusters(people).filter(cluster => cluster.id === graphExpandedCluster)
+      : graphClusters(hidden);
+    const clusterNodes = clusters.map((cluster, index) => {
+      const ring = cluster.id === "private" || cluster.id === "both" ? innerRadius + 20 : outerRadius - 8;
+      const angle = -Math.PI / 2 + (index + 1) / (clusters.length + 1) * Math.PI * 2;
+      return svgCluster(cluster, centerX + Math.cos(angle) * ring, centerY + Math.sin(angle) * ring);
+    }).join("");
+    const sourceNodes = sourceGroups.map((group, index) => svgGroupSource(group,
+      18 + (index % 4) * 270, sourceTop + Math.floor(index / 4) * 56)).join("");
+    if (hidden.length > 0 && !expanded) {
+      edges.push('<text class="graph-fold-note" x="' + centerX + '" y="' + (outerRadius + centerY + 42)
+        + '">' + hidden.length + " 位用户已收进关系簇，点击光团展开</text>");
     }
-    const groupNodes = groups.map((group) => svgGroup(group, groupY.get(groupKey(group)))).join("");
-    const personNodes = people.map((person) => svgPerson(person, personY.get(person.subject_id))).join("");
-    const profile = esc(data.profile_id || "当前运行实例");
-    const summary = `${people.length} 位成员 · ${groups.length} 个群聊节点 · 按 V2 往来记录绘制`;
+    const summary = searchTerm
+      ? people.length + " 位符合搜索的用户 · "
+        + (hidden.length ? "显示 " + visible.length + " 人 + " + clusters.length + " 个关系簇" : "已显示靠近度与连接")
+      : people.length + " 位用户 · "
+        + (hidden.length && !expanded ? "显示 " + visible.length + " 人 + " + clusters.length + " 个关系簇" : "内圈私聊 · 外圈群聊");
     $("graph-summary").textContent = summary;
     $("graph-empty").hidden = people.length > 0 || groups.length > 0;
-    $("graph-empty").replaceChildren(node("strong", searchTerm ? "图谱中没有符合的往来" : "还没有可展示的关系记录"),
-      node("p", searchTerm ? "试试成员名称、平台账号或群号。" : "当 V2 记录到私聊或群内互动后，成员节点会出现在这里。"));
+    $("graph-empty").replaceChildren(node("strong", searchTerm ? "没有符合的关系" : "还没有认识的人"),
+      node("p", searchTerm ? "试试用户名称、账号或群名。" : "发生私聊或群聊互动后，用户会出现在关系雷达中。"));
     if (!people.length && !groups.length) return "";
-    return `<svg class="relationship-graph-svg" viewBox="0 0 1040 ${height}" role="group" aria-label="${esc(summary)}">
-      <desc>连线仅表示运行实例私聊往来、已配置群目标或群成员记录，不推断成员彼此关系。</desc>
-      <text class="graph-column-label" x="44" y="27">运行实例</text><text class="graph-column-label" x="408" y="27">群聊空间</text><text class="graph-column-label" x="790" y="27">相识成员</text>
-      ${edges.join("")}
-      <g class="graph-hub"><rect x="44" y="${hubY - 31}" width="182" height="62" rx="7"></rect>
-        <text class="hub-label" x="61" y="${hubY - 3}">V2 运行实例</text><text class="hub-sub" x="61" y="${hubY + 16}">${profile}</text></g>
-      ${groupNodes}${personNodes}
-    </svg>`;
+    const sourceHeight = sourceGroups.length ? sourceTop - 16 : height;
+    return [
+      '<svg class="relationship-graph-svg radar-graph" viewBox="0 0 1120 ', height,
+      '" role="group" aria-label="', esc(summary), '"><desc>关系雷达以当前角色为中心；内圈表示私聊用户，外圈表示群聊用户，光点越靠近中心代表已有互动信号越集中；群内相邻接话仅在群聊详情中查看，不推断成员彼此关系。</desc>',
+      '<defs><radialGradient id="radar-backdrop" cx="50%" cy="48%"><stop offset="0" stop-color="var(--teal)" stop-opacity=".13"></stop><stop offset=".62" stop-color="var(--blue)" stop-opacity=".04"></stop><stop offset="1" stop-color="var(--surface-soft)" stop-opacity="0"></stop></radialGradient></defs>',
+      '<rect class="radar-backdrop" x="0" y="0" width="1120" height="', sourceHeight, '" rx="18"></rect>',
+      '<circle class="radar-ring radar-ring-outer" cx="', centerX, '" cy="', centerY, '" r="', outerRadius, '"></circle>',
+      '<circle class="radar-ring radar-ring-inner" cx="', centerX, '" cy="', centerY, '" r="', innerRadius, '"></circle>',
+      '<circle class="radar-ring radar-ring-core" cx="', centerX, '" cy="', centerY, '" r="62"></circle>',
+      '<path class="radar-crosshair horizontal" d="M ', centerX - outerRadius, " ", centerY,
+      " H ", centerX + outerRadius, '"></path><path class="radar-crosshair vertical" d="M ', centerX,
+      " ", centerY - outerRadius, " V ", centerY + outerRadius, '"></path>',
+      '<g class="radar-sweep"><path d="M ', centerX, " ", centerY, " L ", centerX, " ",
+      centerY - outerRadius, '"></path></g>',
+      '<text class="radar-zone-label radar-zone-private" x="', centerX - innerRadius + 4,
+      '" y="', centerY - innerRadius - 13, '">INNER · 私聊</text>',
+      '<text class="radar-zone-label radar-zone-group" x="', centerX + outerRadius - 82,
+      '" y="', centerY - 8, '">OUTER · 群聊</text>',
+      '<text class="radar-scale-label" x="', centerX, '" y="', centerY + outerRadius + 25,
+      '">靠近度 · 近期与高频互动信号</text>',
+      edges.join(""),
+      '<g class="graph-hub graph-role-hub" transform="translate(', centerX - 96, " ", centerY - 43,
+      ')"><rect width="192" height="86" rx="28"></rect><circle class="graph-hub-star" cx="31" cy="43" r="16"></circle>',
+      '<text class="hub-label" x="57" y="38">', esc(graphLabel(roleName, 13)),
+      '</text><text class="hub-sub" x="57" y="58">关系雷达中心</text></g>',
+      personNodes, clusterNodes,
+      sourceNodes ? '<g class="graph-source-strip"><text class="graph-strip-title" x="18" y="'
+        + (sourceTop - 12) + '">GROUP SOURCES · 群聊入口</text>' + sourceNodes + "</g>" : "",
+      "</svg>",
+    ].join("");
+  }
+  function renderNetworkOverview() {
+    const people = data ? data.persons.filter(matchesSearch) : [];
+    const visibleGroups = allGroups().filter(group => !searchTerm
+      || groupSearchText(group).includes(searchTerm)
+      || peopleInGroup(group, {honorSearch: false}).some(matchesSearch));
+    const kinds = [
+      {key: "both", match: person => person.private_chat && person.group_member},
+      {key: "private", match: person => person.private_chat && !person.group_member},
+      {key: "group", match: person => !person.private_chat && person.group_member},
+      {key: "idle", match: person => !person.private_chat && !person.group_member},
+    ];
+    const maxMessages = Math.max(1, ...people.map(person => number(person.total?.msg_count)));
+    const counts = {};
+    for (const {key, match} of kinds) {
+      const list = $("network-" + key + "-list");
+      const tier = list.closest(".network-tier");
+      const members = people.filter(match).sort((left, right) =>
+        number(right.total?.msg_count) - number(left.total?.msg_count)
+        || nameOf(left).localeCompare(nameOf(right), "zh-CN"));
+      counts[key] = members.length;
+      tier.hidden = key === "idle" && members.length === 0;
+      const legendItem = document.querySelector(`.network-legend [data-kind="${key}"]`);
+      if (legendItem) legendItem.hidden = key === "idle" && members.length === 0;
+      $("network-" + key + "-count").textContent = `${members.length} 人`;
+      list.replaceChildren();
+      if (!members.length) {
+        list.append(node("p", data ? "暂无成员" : "正在读取…", "network-empty"));
+        continue;
+      }
+      members.forEach(person => {
+        const card = node("button", undefined, "network-person-card");
+        card.type = "button";
+        card.setAttribute("aria-label", `查看 ${nameOf(person)} 的用户资料`);
+        const stats = person.total || {};
+        const details = node("span", undefined, "network-person-meta");
+        details.append(node("span", `${number(stats.msg_count)} 条`),
+          node("span", `${number(stats.active_days)} 天`),
+          node("span", `最近 ${shortTime(stats.last_seen)}`));
+        const groupCount = groupIdsOf(person).length;
+        if (groupCount) details.append(node("span", `共 ${groupCount} 群`));
+        const meter = node("span", undefined, "network-person-meter");
+        const fill = node("span");
+        fill.style.width = `${Math.max(0, Math.min(100, number(stats.msg_count) / maxMessages * 100))}%`;
+        meter.append(fill);
+        card.append(node("strong", nameOf(person), "network-person-name"), details, meter);
+        card.addEventListener("click", () => navigateToPerson(personRouteKey(person)));
+        list.append(card);
+      });
+    }
+    const total = people.length;
+    $("nav-network-count").textContent = counts.idle ? "4 层" : "3 层";
+    $("network-layer-summary").textContent = data ? `${total} 位用户` : "正在读取";
+    $("network-summary-label").textContent = data
+      ? `${total} 位用户 · ${counts.both} / ${counts.private} / ${counts.group}${counts.idle ? ` / ${counts.idle}` : ""}`
+      : "正在读取用户目录";
+    const groupTarget = $("network-groups");
+    groupTarget.replaceChildren();
+    $("network-groups-count").textContent = `${visibleGroups.length} 个群`;
+    if (!visibleGroups.length) {
+      groupTarget.append(node("p", data ? "暂无群聊记录" : "正在读取…", "network-empty"));
+      return;
+    }
+    visibleGroups.forEach(group => {
+      const card = node("button", undefined, "network-group-card");
+      card.type = "button";
+      card.setAttribute("aria-label", `查看 ${groupName(group)} 的群聊详情`);
+      const head = node("span", undefined, "network-group-head");
+      head.append(node("strong", groupName(group)), badge(groupStatusLabel(group),
+        group.configured ? "group" : group.discovered ? "pending" : "history"));
+      const details = node("span", undefined, "network-group-meta");
+      const memberCount = group.network?.member_count ?? group.member_count;
+      details.append(node("span", `群号 ${groupKey(group)}`),
+        node("span", `${number(memberCount)} 人`),
+        node("span", `${number(group.network?.interaction_count) || number(group.msg_count)} 条`));
+      card.append(head, details);
+      card.addEventListener("click", () => navigateToGroup(groupKey(group), groupRouteKey(group)));
+      groupTarget.append(card);
+    });
   }
   function renderGraph() {
     $("relationship-graph").innerHTML = graphMarkup();
@@ -286,42 +844,81 @@
       button.setAttribute("aria-pressed", String(active));
     });
   }
+  function updateGroupFilters() {
+    document.querySelectorAll(".group-status-filter").forEach((button) => {
+      const active = button.dataset.groupFilter === groupStatusFilter;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  }
+  function updateGroupOverview(groups) {
+    const list = Array.isArray(groups) ? groups : [];
+    const count = (key) => list.filter((group) => groupStatusKey(group) === key).length;
+    const messages = list.reduce((sum, group) => sum + number(group.network?.interaction_count)
+      + number(group.msg_count), 0);
+    const values = {
+      "group-summary-total": list.length,
+      "group-summary-configured": count("configured"),
+      "group-summary-pending": count("pending"),
+      "group-summary-history": count("history"),
+      "group-summary-messages": messages,
+    };
+    Object.entries(values).forEach(([id, value]) => { const target = $(id); if (target) target.textContent = String(value); });
+  }
 
   function renderGroups() {
     const list = $("groups-list");
     list.replaceChildren();
     const groups = allGroups().filter((group) => {
+      if (groupStatusFilter !== "all" && groupStatusKey(group) !== groupStatusFilter) return false;
       if (!searchTerm) return true;
-      return groupKey(group).toLocaleLowerCase().includes(searchTerm)
+      return groupSearchText(group).includes(searchTerm)
         || peopleInGroup(group, { honorSearch: false }).some(matchesSearch);
     });
     $("groups-result-count").textContent = `${groups.length} 个群`;
+    updateGroupOverview(allGroups());
+    updateGroupFilters();
     if (!groups.length) {
       const empty = node("div", undefined, "empty-state");
-      empty.append(node("strong", data ? searchTerm ? "没有符合的群聊记录" : "当前没有群聊目标或历史往来" : "正在读取群聊目录…"),
-        node("p", data ? "群聊目标由运行实例配置；历史群内往来来自 V2 已记录的相识资料。" : ""));
+      const title = data ? searchTerm ? "没有符合的群聊记录"
+        : groupStatusFilter === "configured" ? "当前没有已接入群聊"
+        : groupStatusFilter === "pending" ? "当前没有待处理群聊"
+        : groupStatusFilter === "history" ? "当前没有历史群聊" : "当前没有可显示的群聊" : "正在读取群聊目录…";
+      empty.append(node("strong", title),
+        node("p", data ? "目录显示当前目标、AstrBot 已发现会话和 V2 历史往来。" : ""));
       list.append(empty);
       renderGroupDetail(null);
       return;
     }
     groups.forEach((group) => {
       const id = groupKey(group);
+      const route = groupRouteKey(group);
       const card = node("button", undefined, "group-card");
       card.type = "button";
-      card.setAttribute("aria-pressed", String(selectedGroupId === id));
+      card.dataset.groupId = id;
+      card.dataset.groupStatus = groupStatusKey(group);
+      card.setAttribute("aria-pressed", String(selectedGroupId === route));
       const info = node("span", undefined, "group-info");
-      info.append(node("strong", `群 ${id}`),
-        node("small", `${group.configured ? "当前目标" : "历史往来"}${group.account_id ? ` · 账号 ${group.account_id}` : ""}${group.bot_id ? ` · Bot ${group.bot_id}` : ""}`));
+      card.title = groupLabel(group);
+      const nameLine = node("span", undefined, "group-name-line");
+      nameLine.append(node("strong", groupName(group)), badge(groupStatusLabel(group), group.configured ? "group" : group.discovered ? "pending" : "history"));
+      info.append(nameLine,
+        node("small", `群号 ${id} · ${groupListStatus(group)}${group.account_name || group.account_id ? ` · ${accountLabel(group)}` : ""}${group.role_id ? ` · ${group.role_name || "人格分线"}` : ""}`));
       const stats = node("span", undefined, "group-stats");
-      stats.append(node("span", `${number(group.member_count)} 位相识成员`), node("span", `${number(group.msg_count)} 条消息`));
+      const rosterCount = group.network?.member_count ?? group.member_count;
+      const unconfiguredSession = group.discovered && !group.configured;
+      stats.append(node("span", `${number(rosterCount)} 位${unconfiguredSession ? "已记录成员" : "群成员"}`),
+        node("span", `${number(group.msg_count)} 条${unconfiguredSession ? " V2 记录" : "消息"}`),
+        node("span", group.network?.updated_at ? `最近 ${shortTime(group.network.updated_at)}` : "尚无最近观察", "group-last-seen"));
       card.append(info, stats);
       card.addEventListener("click", () => selectGroup(group));
       list.append(card);
     });
-    const selectedGroup = groups.find((group) => groupKey(group) === selectedGroupId) || null;
+    const selectedGroup = groups.find((group) => groupRouteKey(group) === selectedGroupId) || null;
     if (!selectedGroup) selectedGroupId = "";
     renderGroupDetail(selectedGroup);
   }
+
   function renderGroupDetail(group) {
     const panel = $("group-detail");
     panel.replaceChildren();
@@ -333,61 +930,312 @@
       return;
     }
     const id = groupKey(group);
-    const members = peopleInGroup(group);
+    const members = groupRoster(group);
+    const network = group.network || null;
+    const edges = Array.isArray(network?.edges) ? network.edges : [];
+    const unmatchedClues = Array.isArray(network?.unmatched_clues) ? network.unmatched_clues : [];
+    const observedMessages = (network?.members || []).reduce((sum, member) =>
+      sum + number(member.group_observation?.message_count), 0);
+    const activeMembers = members.filter(({member}) => number(member.group_observation?.message_count) > 0);
     const detail = node("div", undefined, "group-detail-inner");
-    const head = node("header", undefined, "group-detail-head");
+    const head = node("header", undefined, "group-detail-head group-detail-hero");
     const title = node("div");
-    title.append(node("span", "GROUP SPACE", "eyebrow"), node("h3", `群 ${id}`),
-      node("small", group.configured ? "群目标已在当前运行实例配置" : "历史群内往来记录；此群不是当前配置目标", "detail-subtitle"));
-    head.append(title, badge(group.configured ? "当前目标" : "历史记录", group.configured ? "group" : ""));
+    title.append(node("span", "GROUP SPACE", "eyebrow"), node("h3", groupName(group)), node("small", `群号 ${id}`),
+      node("small", `${groupDetailStatus(group)}${group.role_id ? ` · ${group.role_name || "人格分线"}` : ""}`, "detail-subtitle"));
+    const routeFacts = node("div", undefined, "group-route-facts");
+    routeFacts.append(node("span", group.platform_id || group.platform || "平台待确认"),
+      node("span", group.account_name || group.account_id || "账号待确认"),
+      node("span", group.role_name || (group.role_id ? "人格分线" : "角色待映射")));
+    const stateBadge = badge(groupStatusLabel(group), group.configured ? "group" : group.discovered ? "pending" : "history");
+    const statusStack = node("div", undefined, "group-detail-status-stack");
+    statusStack.append(stateBadge, routeFacts);
+    head.append(title, statusStack);
     const metrics = node("div", undefined, "group-detail-metrics");
     const metric = (label, value) => { const cell = node("div"); cell.append(node("span", label), node("strong", value)); metrics.append(cell); };
-    metric("相识成员", `${number(group.member_count)} 人`);
-    metric("已记录消息", `${number(group.msg_count)} 条`);
-    metric("账号 / Bot", group.account_id || group.bot_id ? `${group.account_id || "—"} / ${group.bot_id || "—"}` : "—");
+    metric(group.discovered && !group.configured ? "V2 成员记录" : "群聊成员", `${members.length} 人`);
+    metric("已观察发言", `${observedMessages} 条`);
+    metric("互动边", `${edges.length} 条`);
+    metric("短时接话", `${number(network?.interaction_count)} 次`);
+
+    detail.append(head, metrics);
+    const access = node("section", undefined, "detail-section group-access-section");
+      const accessHead = node("div", undefined, "group-members-head");
+      accessHead.append(node("h4", "V2 群聊接入"), badge(group.configured ? "已接入" : "未接入",
+        group.configured ? "group" : ""));
+    access.append(accessHead, node("p", group.configured
+      ? "这个群已随账号下的角色映射自动接入。"
+      : group.discovered ? "AstrBot 已发现这个群会话；账号下的人格归入角色后会自动接入。"
+        : "这是历史往来记录，等待 AstrBot 再次发现这个群会话。",
+    "auth-empty"), node("p", "成员线索和熟人卡只用于认识群友，不决定群聊是否接入，也不会逐个授予权限。",
+    "auth-empty"));
+    const actions = node("div", undefined, "group-access-actions");
+    const block = groupTargetBlock(group);
+    if (block) {
+      actions.append(node("p", block.message, "auth-empty"));
+      if (block.tab) actions.append(managementButton(block.tab, block.label));
+    } else if (group.discovered && !group.configured) {
+      actions.append(node("p", "请在“账号与会话”中把该账号的人格归入角色；保存后这里会自动更新。", "auth-empty"));
+      actions.append(managementButton("host", "账号与会话"));
+    }
+    if (group.configured && group.role_id) {
+      const replySettings = node("button", "本群回应设置", "secondary group-access-button");
+      replySettings.type = "button";
+      replySettings.addEventListener("click", () => window.parent?.postMessage?.({
+        channel: "companion-workspace", kind: "navigate",
+        target: {tab: "group-reply", platform_id: group.platform_id, bot_id: group.bot_id,
+          account_id: group.account_id, group_id: id, role_id: group.role_id},
+      }, "*"));
+      actions.append(replySettings);
+      const groupArchive = node("button", "群公共档案", "secondary group-access-button");
+      groupArchive.type = "button";
+      groupArchive.addEventListener("click", () => window.parent?.postMessage?.({
+        channel: "companion-workspace", kind: "navigate",
+        target: {tab: "group-memory", platform_id: group.platform_id, bot_id: group.bot_id,
+          account_id: group.account_id, group_id: id, role_id: group.role_id},
+      }, "*"));
+      actions.append(groupArchive);
+    }
+    access.append(actions);
+    detail.append(access);
+    if (network || group.configured) {
+      const activitySection = node("section", undefined, "detail-section group-activity-section");
+      const activityHead = node("div", undefined, "group-members-head");
+      activityHead.append(node("h4", "群聊近况"),
+        node("span", network?.updated_at ? `最近观察 ${dateTime(network.updated_at)}` : "尚无观察时间"));
+      activitySection.append(activityHead);
+      const recent = groupRecentActivity(network);
+      if (recent.length) {
+        const list = node("div", undefined, "group-activity-list");
+        recent.forEach((item) => {
+          const row = node("article", undefined, "group-activity-item");
+          const meta = node("div", undefined, "group-activity-meta");
+          meta.append(node("strong", item.name), node("time", dateTime(item.at)));
+          row.append(meta, node("p", item.text));
+          list.append(row);
+        });
+        activitySection.append(list);
+        activitySection.append(node("p", "摘录来自 V2 已记录的群聊发言，不代表完整消息流。", "group-activity-note"));
+      } else {
+        activitySection.append(node("p", group.configured
+          ? "V2 尚未记录到近期群聊发言。收到群消息后，这里会显示近期活动。"
+          : "该群尚未接入 V2，目前没有可展示的群聊活动。", "group-activity-empty"));
+      }
+      if (activeMembers.length) {
+        const activeSection = node("section", undefined, "group-active-section");
+        const activeHead = node("div", undefined, "group-members-head");
+        activeHead.append(node("h4", "活跃群友"), node("span", `按已观察发言排序 · ${activeMembers.length} 人`));
+        const rows = node("div", undefined, "group-active-list");
+        activeMembers.slice(0, 6).forEach(({member}) => {
+          const row = node("div", undefined, "group-active-row");
+          const name = member.display_name || `成员 ${member.native_account_id}`;
+          row.append(node("strong", name), node("small",
+            `${number(member.group_observation?.message_count)} 条 · ${number(member.group_observation?.active_days)} 天 · 最近 ${dateTime(member.group_observation?.last_seen)}`));
+          rows.append(row);
+        });
+        activeSection.append(activeHead, rows);
+        activitySection.append(activeSection);
+      }
+      detail.append(activitySection);
+    }
+    if (network && members.length) {
+      const networkSection = node("section", undefined, "detail-section member-network-section");
+      const networkHead = node("div", undefined, "group-members-head");
+      networkHead.append(node("h4", "成员互动"), node("span", `${edges.length} 条边`));
+      const viewport = node("div", undefined, "member-network-viewport");
+      viewport.innerHTML = memberNetworkMarkup(network, members);
+      viewport.addEventListener("click", (event) => {
+        const target = event.target?.closest?.("[data-member-account]");
+        if (target) openGroupMember(group, target.dataset.memberAccount);
+      });
+      viewport.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const target = event.target?.closest?.("[data-member-account]");
+        if (!target || target.getAttribute("role") !== "button") return;
+        event.preventDefault();
+        openGroupMember(group, target.dataset.memberAccount);
+      });
+      networkSection.append(networkHead, viewport,
+        node("p", "边只记录 180 秒内相邻成员发言的次数、最近时间和表达氛围，不代表现实关系。", "group-network-caveat"));
+      const edgeList = interactionRows(network, members);
+      if (edgeList) networkSection.append(edgeList);
+      detail.append(networkSection);
+    }
+
     const memberSection = node("section", undefined, "detail-section");
     const memberHead = node("div", undefined, "group-members-head");
-    memberHead.append(node("h4", "群内相识"), node("span", `${members.length} 人 · 点击成员看私聊权限`));
+    memberHead.append(node("h4", "成员与熟人卡"), node("span", `${members.length} 位 V2 已记录成员`));
     const roster = node("div", undefined, "group-members");
     if (!members.length) {
-      const empty = node("p", group.configured ? "当前没有可关联到目录的群成员记录。" : "当前目录中没有该群的成员明细。", "auth-empty");
+      const emptyText = group.discovered && !group.configured
+        ? "AstrBot 已发现该群会话；V2 尚无群成员记录。"
+        : group.configured ? "当前没有群内成员记录。" : "当前目录中没有该群的成员明细。";
+      const empty = node("p", emptyText, "auth-empty");
       roster.append(empty);
     }
-    members.forEach((person) => {
-      const record = groupsOf(person)[id] || {};
-      const button = node("button", undefined, "member-chip");
-      button.type = "button";
-      button.append(avatar(person), node("span", nameOf(person)),
-        node("small", `${number(record.msg_count)} 条 · ${number(record.active_days)} 天`));
-      button.addEventListener("click", () => {
-        filter = "all";
-        searchTerm = "";
-        $("directory-search").value = "";
-        $("clear-search").hidden = true;
-        updateFilterButtons();
-        switchTab("people");
-        select(person);
-      });
-      roster.append(button);
+    members.forEach(({member, person}) => {
+      const name = person ? nameOf(person) : member.display_name || `未命名成员 ${member.native_account_id}`;
+      const row = node(person ? "button" : "div", undefined, "member-chip" + (person ? "" : " is-readonly"));
+      if (person) row.type = "button";
+      const initial = node("span", Array.from(name)[0] || "？", "member-avatar");
+      initial.style.setProperty("--hue", String(hue(member.native_account_id)));
+      const copy = node("span", undefined, "member-copy");
+      copy.append(node("strong", name));
+      const observation = member.group_observation || {};
+      const sourceLabel = observation.basis === "acquaintance_card" ? "熟人卡群内记录" : "关系网观察";
+      copy.append(node("small", `${sourceLabel} ${number(observation.message_count)} 条 · ${number(observation.active_days)} 天`));
+      const clues = (member.clues || []).slice(0, 6);
+      if (clues.length) {
+        const clueSummary = clues.map((clue) => `${clue.name || "未命名"} · ${clue.basis === "declared_account" ? "账号声明" : "名称唯一匹配"}`);
+        copy.append(node("small", `成员线索：${clueSummary.join("；")}`, "member-clue-label"));
+      }
+      const acquaintance = member.acquaintance || {};
+      const cardMeta = `熟人卡 ${number(acquaintance.message_count)} 条${acquaintance.private_chat ? " · 有私聊" : ""}`;
+      row.append(initial, copy, node("small", cardMeta));
+      if (person) row.addEventListener("click", () => openPerson(person));
+      roster.append(row);
     });
     memberSection.append(memberHead, roster);
-    detail.append(head, metrics, memberSection);
+    detail.append(memberSection);
+    if (unmatchedClues.length) {
+      const clueSection = node("section", undefined, "detail-section unresolved-clues");
+      const clueHead = node("div", undefined, "group-members-head");
+      clueHead.append(node("h4", "待确认成员线索"), node("span", `${unmatchedClues.length} 条`));
+      clueSection.append(clueHead);
+      unmatchedClues.forEach((clue) => {
+        const row = node("div", undefined, "unresolved-clue");
+        const explanation = clue.basis === "ambiguous_display_label"
+          ? `名称对应多位成员：${(clue.candidate_account_ids || []).join("、")}` : "尚未对应到群内账号";
+        const declared = (clue.declared_account_ids || []).join("、");
+        const attribution = clue.basis === "unmatched" && declared ? ` · 线索声明账号 ${declared}` : "";
+        row.append(node("strong", clue.name || "未命名线索"), node("small", explanation + attribution));
+        if (clue.content) row.append(node("p", clue.content));
+        clueSection.append(row);
+      });
+      detail.append(clueSection);
+    }
     panel.append(detail);
+  }
+
+  function groupRoster(group) {
+    const rows = new Map();
+    const people = peopleInGroup(group);
+    const personFor = (account) => people.find((person) => String(person.native_account_id) === String(account));
+    for (const member of group.network?.members || []) {
+      if (!member?.native_account_id) continue;
+      rows.set(String(member.native_account_id), {member, person: personFor(member.native_account_id) || null});
+    }
+    for (const person of people) {
+      const account = String(person.native_account_id || "");
+      if (!account || rows.has(account)) continue;
+      const record = groupsOf(person)[groupKey(group)] || {};
+      rows.set(account, {member: {native_account_id: account, display_name: nameOf(person), clues: [],
+        group_observation: {basis: "acquaintance_card", message_count: record.msg_count,
+          active_days: record.active_days},
+        acquaintance: {message_count: person.total?.msg_count, private_chat: person.private_chat}}, person});
+    }
+    return [...rows.values()].sort((a, b) => number(b.member.group_observation?.message_count)
+      - number(a.member.group_observation?.message_count)
+      || String(a.member.display_name || "").localeCompare(String(b.member.display_name || ""), "zh-CN"));
+  }
+
+  function memberNetworkMarkup(network, roster) {
+    const members = roster.slice(0, 20);
+    const columns = [members.filter((_, index) => index % 2 === 0), members.filter((_, index) => index % 2 === 1)];
+    const positions = new Map();
+    columns.forEach((items, column) => items.forEach((item, index) => positions.set(
+      String(item.member.native_account_id), {x: column ? 452 : 28, y: 42 + index * 66, item})));
+    const height = Math.max(144, 78 + Math.max(...columns.map((items) => items.length), 0) * 66);
+    const edges = (network.edges || []).filter((edge) => positions.has(String(edge.a)) && positions.has(String(edge.b)));
+    const paths = edges.slice(0, 4).map((edge) => {
+      const a = positions.get(String(edge.a)), b = positions.get(String(edge.b));
+      const first = a.x < b.x ? a : b, second = a.x < b.x ? b : a;
+      const width = Math.min(5, 1 + Math.log2(Math.max(1, number(edge.count))));
+      return `<path class="member-network-edge tone-${esc(edge.tone || "ordinary")}" d="M ${first.x + 204} ${first.y} C 296 ${first.y}, 384 ${second.y}, ${second.x} ${second.y}" style="stroke-width:${width}"><title>${esc(edge.summary || "近期连续接话")} · ${number(edge.count)} 次 · ${esc(shortTime(edge.last_seen))}</title></path>`;
+    }).join("");
+    const nodes = [...positions.values()].map(({x, y, item}) => {
+      const member = item.member, account = String(member.native_account_id);
+      const name = member.display_name || `成员 ${account}`;
+      const recent = member.group_observation?.last_seen ? `最近 ${shortTime(member.group_observation.last_seen)}` : "群内记录";
+      return `<g class="member-network-node${item.person ? " is-openable" : ""}" data-member-account="${esc(account)}" tabindex="${item.person ? "0" : "-1"}" role="${item.person ? "button" : "img"}" aria-label="${esc(name)} · ${number(member.group_observation?.message_count)} 条群内记录">
+        <rect x="${x}" y="${y - 22}" width="204" height="44" rx="5"></rect><circle cx="${x + 17}" cy="${y}" r="11" fill="hsl(${hue(account)} 42% 43%)"></circle>
+        <text class="member-network-initial" x="${x + 17}" y="${y + 4}">${esc(Array.from(name)[0] || "？")}</text>
+        <text class="member-network-name" x="${x + 34}" y="${y - 2}">${esc(graphLabel(name, 15))}</text>
+        <text class="member-network-meta" x="${x + 34}" y="${y + 14}">${number(member.group_observation?.message_count)} 条 · ${esc(recent)}</text></g>`;
+    }).join("");
+    return `<svg class="member-network-svg" viewBox="0 0 684 ${height}" role="group" aria-label="群内成员互动图"><desc>连线仅表示短时相邻接话，不推断现实关系。</desc>${paths}${nodes}</svg>`;
+  }
+
+  function interactionRows(network, roster) {
+    const byAccount = new Map(roster.map(({member}) => [String(member.native_account_id),
+      member.display_name || `成员 ${member.native_account_id}`]));
+    const edges = (network.edges || []).slice(0, 80);
+    if (!edges.length) return null;
+    const renderRows = (items) => {
+      const list = node("div", undefined, "interaction-rows");
+      items.forEach((edge) => {
+        const tone = {ordinary: "接话", banter: "玩笑", tension: "紧绷"}[edge.tone] || "接话";
+        const row = node("div", undefined, "interaction-row tone-" + (edge.tone || "ordinary"));
+        row.append(node("strong", `${byAccount.get(String(edge.a)) || edge.a} ↔ ${byAccount.get(String(edge.b)) || edge.b}`),
+          node("small", `${number(edge.count)} 次 · ${tone} · 最近 ${shortTime(edge.last_seen)}`));
+        list.append(row);
+      });
+      return list;
+    };
+    const section = node("div", undefined, "interaction-list");
+    section.append(renderRows(edges.slice(0, 4)));
+    if (edges.length > 4) {
+      const details = node("details", undefined, "interaction-more");
+      details.append(node("summary", `其余 ${edges.length - 4} 条互动`), renderRows(edges.slice(4)));
+      section.append(details);
+    }
+    return section;
+  }
+
+  function groupRecentActivity(network) {
+    const entries = [];
+    for (const member of network?.members || []) {
+      const name = member.display_name || `成员 ${member.native_account_id || ""}`;
+      for (const item of member.group_observation?.recent || []) {
+        const text = typeof item?.text === "string" ? item.text.trim() : "";
+        if (text) entries.push({name, text, at: item.at || member.group_observation?.last_seen || ""});
+      }
+    }
+    return entries.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0)).slice(0, 8);
+  }
+
+  function openGroupMember(group, account) {
+    const person = groupRoster(group).find((row) => String(row.member.native_account_id) === String(account))?.person;
+    if (person) {
+      openPerson(person);
+      window.CompanionPrivateMembers?.selectPane("relationship");
+    }
+  }
+
+  function openPerson(person) {
+    filter = personFilter(person) || "stable";
+    searchTerm = "";
+    $("directory-search").value = "";
+    $("clear-search").hidden = true;
+    updateFilterButtons();
+    switchTab("people");
+    select(person);
   }
 
   function renderCounts() {
     const counts = data?.counts;
     $("count-total").textContent = counts ? String(number(counts.total)) : "—";
+    const stableCount = data?.persons.filter(person => personFilter(person) === "stable").length;
+    const temporaryCount = data?.persons.filter(person => personFilter(person) === "temporary").length;
     $("count-private").textContent = counts ? String(number(counts.private_chat)) : "—";
     $("count-group").textContent = counts ? String(number(counts.group_member)) : "—";
     $("count-both").textContent = counts ? String(number(counts.both)) : "—";
     $("count-split").textContent = counts ? `${number(counts.private_chat)} · ${number(counts.group_member)} · ${number(counts.both)}` : "—";
-    $("profile").textContent = data?.profile_id ?? "—";
+    $("profile").textContent = data ? (data.profile_id || "当前陪伴记录") : "—";
     $("operator").textContent = data?.operator_name ?? "—";
-    $("chip-all").textContent = String(number(counts?.total));
-    $("chip-private").textContent = String(number(counts?.private_chat));
-    $("chip-group").textContent = String(number(counts?.group_member));
-    $("chip-both").textContent = String(number(counts?.both));
+    $("chip-stable").textContent = String(stableCount || 0);
+    $("chip-temporary").textContent = String(temporaryCount || 0);
+    $("nav-people-count").textContent = `${number(counts?.total)} 位`;
+    $("nav-groups-count").textContent = `${allGroups().length} 个`;
   }
   function updateFilterButtons() {
     document.querySelectorAll(".chip").forEach((button) => {
@@ -398,6 +1246,7 @@
   }
   function renderAll() {
     renderCounts();
+    renderNetworkOverview();
     renderGraph();
     renderPeople();
     renderGroups();
@@ -405,230 +1254,75 @@
     updateGraphFilters();
     updateFilterButtons();
   }
-  function renderDetail() {
-    const panel = $("person-detail");
-    panel.replaceChildren();
-    if (!selected) {
-      const empty = node("div", undefined, "placeholder");
-      empty.append(node("span", "01", "placeholder-mark"), node("h3", "选择一位成员"),
-        node("p", "查看往来详情、当前能力授权和可在本页调整的授权。"));
-      panel.append(empty);
-      return;
-    }
-    const person = selected;
-    const card = node("div", undefined, "detail-card");
-    const head = node("header", undefined, "detail-head");
-    head.append(avatar(person));
-    const title = node("div", undefined, "detail-title");
-    const nameSource = person.name_basis === "administrator" ? "管理员称呼"
-      : person.name_basis === "platform" ? "平台称呼" : "未设置称呼";
-    title.append(node("h3", nameOf(person)), node("small", `账号 ${person.native_account_id ?? "未知"} · ${nameSource}`));
-    head.append(title);
-    const facts = node("dl", undefined, "detail-facts");
-    const row = (label, value) => { const pair = node("div"); pair.append(node("dt", label), node("dd", value)); facts.append(pair); };
-    row("往来类型", person.private_chat && person.group_member ? `私聊 · 群聊 ${groupIdsOf(person).length}`
-      : person.private_chat ? "私聊" : person.group_member ? `群聊 ${groupIdsOf(person).length}` : "暂无记录");
-    row("累计消息", `${number(person.total?.msg_count)} 条`);
-    row("活跃天数", `${number(person.total?.active_days)} 天`);
-    row("首次出现", shortTime(person.total?.first_seen));
-    row("最近出现", shortTime(person.total?.last_seen));
-    if (person.private_chat) row("私聊互动", `${number(person.private?.msg_count)} 条 / ${number(person.private?.active_days)} 天`);
-    const contexts = node("section", undefined, "detail-section detail-contexts");
-    const contextHead = node("div", undefined, "detail-section-head");
-    contextHead.append(node("h4", "出现过的窗口"), node("small", "V2 相识目录记录"));
-    const contextRows = node("div", undefined, "context-rows");
-    if (person.private_chat) contextRows.append(contextBadge(`私聊 · ${number(person.private?.msg_count)} 条`, "private"));
-    groupIdsOf(person).forEach((id) => {
-      const button = node("button", `群 ${id}`, "context-group");
-      button.type = "button";
-      button.addEventListener("click", () => {
-        const group = allGroups().find((item) => groupKey(item) === id);
-        if (group) { switchTab("groups"); selectGroup(group); }
-      });
-      contextRows.append(button);
-    });
-    if (!contextRows.children.length) contextRows.append(contextBadge("还没有窗口记录"));
-    contexts.append(contextHead, contextRows);
-    card.append(head, facts, adminNameEditor(person), contexts, authorizationPanel(person));
-    panel.append(card);
-  }
   function personRouteKey(person) {
     return JSON.stringify([person.subject_id, person.platform, person.bot_id, person.account_id, person.role_id]);
   }
-  function adminNameEditor(person) {
-    const section = node("section", undefined, "detail-name-editor detail-section");
-    const heading = node("div", undefined, "detail-section-head");
-    heading.append(node("h4", "管理员称呼"));
-    if (person.admin_nickname_updated_at) {
-      heading.append(node("small", `更新于 ${shortTime(person.admin_nickname_updated_at)}`));
+  function renderDetail() {
+    const panel = $("person-detail");
+    if (!selected) {
+      panel.replaceChildren(node("div", "选择一位成员", "placeholder"));
+      return;
     }
-    const label = node("label", undefined, "admin-name-field");
-    const input = node("input", undefined, "admin-nickname-input");
-    input.type = "text";
-    input.maxLength = 64;
-    input.value = person.admin_nickname || "";
-    input.disabled = nicknameBusy;
-    input.placeholder = "留空则使用平台称呼";
-    input.setAttribute("aria-label", "管理员称呼");
-    label.append(input);
-    const save = node("button", nicknameBusy ? "保存中" : "保存称呼", "secondary admin-name-save");
-    save.type = "button";
-    save.disabled = nicknameBusy;
-    save.addEventListener("click", () => setAdminName(person, input.value));
-    section.append(heading, label, node("small", "留空后保存会清除管理员称呼，并恢复平台资料显示。", "admin-name-help"), save);
-    return section;
-  }
-  async function setAdminName(person, nickname) {
-    if (nicknameBusy) return;
-    const routeKey = personRouteKey(person);
-    const value = String(nickname);
-    if (!pendingNicknameOperation || pendingNicknameOperation.routeKey !== routeKey
-        || pendingNicknameOperation.value !== value) {
-      pendingNicknameOperation = { routeKey, value,
-        key: [person.subject_id, "name", Date.now().toString(36), Math.random().toString(36).slice(2, 8)].join(":") };
+    if (!window.CompanionPrivateMembers) {
+      panel.replaceChildren(node("p", "成员编辑器未加载，请刷新页面。", "notice error"));
+      return;
     }
-    nicknameBusy = true;
-    renderDetail();
-    try {
-      const result = unwrap(await bridge.apiPost(adminNameEndpoint, {
-        operation_key: pendingNicknameOperation.key,
-        subject_id: person.subject_id, platform: person.platform,
-        bot_id: person.bot_id, account_id: person.account_id, role_id: person.role_id,
-        native_account_id: person.native_account_id, admin_nickname: value,
-        expected_revision: person.revision,
-      }));
-      const updated = { ...person, ...result };
-      data.persons = data.persons.map((item) => personRouteKey(item) === routeKey ? updated : item);
-      selected = updated;
-      pendingNicknameOperation = null;
-      notice(result.changed ? "管理员称呼已更新。" : "管理员称呼没有变化。");
-      renderAll();
-    } catch (error) {
-      notice(localized(error).message, true);
-      if (error?.code === "person_nickname_revision_conflict" && selected
-          && personRouteKey(selected) === routeKey) {
-        pendingNicknameOperation = null;
-        await load();
-      }
-    }
-    nicknameBusy = false;
-    renderDetail();
-  }
-  function capabilityLabel(capability) { return CAPABILITY_LABELS[capability] || capability; }
-  function scopeText(item) {
-    if (!item.scope) return "—";
-    const parts = [item.scope.native_scope_id ?? item.scope.kind];
-    if (item.scope.account_id) parts.push(`账号 ${item.scope.account_id}`);
-    return parts.join(" · ");
-  }
-  function authorizationRow(person, item) {
-    const row = node("div", undefined, "auth-row");
-    row.dataset.capability = item.capability;
-    row.dataset.state = item.state;
-    row.dataset.managedBy = item.managed_by;
-    const head = node("div", undefined, "auth-head");
-    head.append(node("strong", capabilityLabel(item.capability), "auth-name"),
-      node("small", item.capability, "auth-code"),
-      node("span", STATE_LABELS[item.state] || item.state, "auth-state state-" + item.state));
-    const facts = [];
-    if (item.tier) facts.push(`档位 ${item.tier}`);
-    if (item.expires_at) facts.push(`到期 ${shortTime(item.expires_at)}`);
-    else if (item.state === "active") facts.push("无期限");
-    facts.push(`生效范围 ${scopeText(item)}`);
-    row.append(head, node("small", facts.join(" · "), "auth-meta"));
-    if (item.managed_by === "configuration") {
-      row.append(node("p", "由运行实例配置签发：每次加载都会按配置重新写入；需在「宿主管理」的能力配置中调整。", "auth-origin configuration"));
-    } else {
-      const enabled = item.state !== "active";
-      const control = node("button", enabled ? "重新授权" : "撤销授权", "secondary auth-toggle" + (enabled ? "" : " is-revoke"));
-      control.type = "button";
-      control.disabled = authBusy || !item.revocable;
-      control.setAttribute("aria-label", `${enabled ? "重新授权" : "撤销授权"}：${capabilityLabel(item.capability)}，${nameOf(person)}`);
-      control.addEventListener("click", () => configure(person, item, enabled));
-      row.append(control);
-    }
-    return row;
-  }
-  function authorizationPanel(person) {
-    const wrap = node("section", undefined, "detail-authorization");
-    const heading = node("header");
-    heading.append(node("h4", "能力授权"));
-    const loaded = authorization[person.subject_id];
-    if (authServer === "error") heading.append(node("span", "读取失败", "auth-load-state error"));
-    else if (authServer === "loading" && !loaded) heading.append(node("span", "读取中", "auth-load-state"));
-    wrap.append(heading);
-    if (!loaded) {
-      wrap.append(node("p", authServer === "error" ? "暂时读不到授权状态；目录往来资料仍可查看。" : "正在读取这个人的当前授权…", "muted auth-pending"));
-      return wrap;
-    }
-    if (!loaded.items.length) {
-      wrap.append(node("p", "这个人还没有单独签发或撤销过能力。实际准入还取决于运行实例默认值和角色配置。", "muted auth-empty"));
-      return wrap;
-    }
-    wrap.append(node("p", loaded.companion ? "陪伴对象：对话回复与主动投递都生效。"
-      : "授权按能力分别生效；对话回复与主动投递的状态互不替代。", "auth-summary"));
-    const list = node("div", undefined, "auth-rows");
-    loaded.items.forEach((item) => list.append(authorizationRow(person, item)));
-    wrap.append(list);
-    return wrap;
-  }
-  async function loadAuthorization(person) {
-    const sequence = ++authSequence;
-    authServer = "loading";
-    renderDetail();
-    try {
-      const result = unwrap(await bridge.apiGet(authorizationEndpoint, { subject_id: person.subject_id }));
-      if (sequence !== authSequence || selected?.subject_id !== person.subject_id) return;
-      authorization = { ...authorization, [person.subject_id]: result };
-      authServer = "ok";
-    } catch (error) {
-      if (sequence !== authSequence) return;
-      authServer = "error";
-      notice(localized(error).message, true);
-    }
-    renderPeople();
-    renderDetail();
-  }
-  async function configure(person, item, enabled) {
-    if (authBusy) return;
-    authBusy = true;
-    renderDetail();
-    const operationKey = [person.subject_id, item.capability, enabled ? "on" : "off",
-      Date.now().toString(36), Math.random().toString(36).slice(2, 8)].join(":");
-    try {
-      const result = unwrap(await bridge.apiPost(authorizationEndpoint, {
-        operation_key: operationKey, subject_id: person.subject_id, capability: item.capability,
-        enabled, expected_revision: item.policy_revision,
-      }));
-      authorization = { ...authorization, [person.subject_id]: result.status };
-      authServer = "ok";
-      notice(enabled ? "已重新读取并开启这项能力。" : "已撤销这项能力。");
-    } catch (error) {
-      notice(localized(error).message, true);
-      if (error?.code === "authorization_revision_conflict" && selected?.subject_id === person.subject_id) {
-        authBusy = false;
-        await loadAuthorization(person);
-      }
-    }
-    authBusy = false;
-    renderPeople();
-    renderDetail();
+    window.CompanionPrivateMembers.mount(panel, selected, {
+      bridge, groupLabel: id => groupLabel(groupById(id)),
+      openGroup: id => navigateToGroup(id),
+      onChanged(person, patch, {identity = false} = {}) {
+        if (!data) return;
+        const key = displayPersonKey(person);
+        const routeIdentity = route => JSON.stringify([route.platform, route.bot_id, route.account_id, route.role_id]);
+        const updateDisplay = item => {
+          const updated = {...item, ...patch};
+          if (identity || !Array.isArray(item.display_routes)) return updated;
+          const selectedRoute = routeIdentity(person);
+          updated.display_routes = item.display_routes.map(route => routeIdentity(route) === selectedRoute
+            ? {...route, ...patch} : route);
+          if (patch.revision !== undefined) {
+            updated.revision = Math.max(0, ...updated.display_routes.map(route => number(route.revision)));
+          }
+          return updated;
+        };
+        data.persons = data.persons.map(item => identity && item.subject_id === person.subject_id
+          ? {...item, identity_tier: patch.identity_tier}
+          : displayPersonKey(item) === key ? updateDisplay(item) : item);
+        if (selected && displayPersonKey(selected) === key) {
+          Object.assign(selected, updateDisplay(selected));
+        }
+        renderPeople();
+      },
+    });
   }
   function select(person) {
     selected = person;
-    authServer = "";
     renderPeople();
     renderDetail();
-    if (person) loadAuthorization(person);
-    else authSequence++;
   }
   function selectGroup(group) {
-    selectedGroupId = groupKey(group);
+    selectedGroupId = groupRouteKey(group);
     renderGroups();
   }
   function switchTab(next) {
     if (!["network", "people", "groups"].includes(next)) return;
     activeView = next;
+    document.querySelector(".relationship-app").dataset.view = next;
+    const pageMeta = {
+      network: {name: "关系网", description: "私聊与群聊往来总览", refresh: "重新读取关系网"},
+      people: {name: "用户", description: "用户资料与联系权限", refresh: "重新读取用户目录"},
+      groups: {name: "群聊", description: "群聊接入与成员往来", refresh: "重新读取群聊目录"},
+    }[next];
+    const pageTitle = $("page-title");
+    if (pageTitle) pageTitle.textContent = pageMeta.name;
+    const pageDescription = $("page-description");
+    if (pageDescription) pageDescription.textContent = pageMeta.description;
+    const documentTitle = $("document-title");
+    if (documentTitle) documentTitle.textContent = `${pageMeta.name} · 陪伴`;
+    const refresh = $("refresh");
+    if (refresh) refresh.title = pageMeta.refresh;
+    const currentNotice = $("notice");
+    currentNotice.hidden = !currentNotice.textContent || Boolean(noticeView && noticeView !== next);
     document.querySelectorAll(".tab").forEach((item) => {
       const active = item.dataset.tab === next;
       item.classList.toggle("active", active);
@@ -643,15 +1337,17 @@
     });
   }
   function navigateToPerson(id) {
-    const person = data?.persons.find((item) => item.subject_id === id);
+    const person = data?.persons.find((item) => personRouteKey(item) === id || item.subject_id === id);
     if (!person) return;
-    filter = "all";
+    filter = personFilter(person) || "stable";
     updateFilterButtons();
     switchTab("people");
     select(person);
   }
-  function navigateToGroup(id) {
-    const group = allGroups().find((item) => groupKey(item) === id);
+  function navigateToGroup(id, route = "") {
+    const groups = allGroups();
+    const group = groups.find((item) => route && groupRouteKey(item) === route)
+      || groups.find((item) => groupKey(item) === id);
     if (!group) return;
     switchTab("groups");
     selectGroup(group);
@@ -659,10 +1355,16 @@
   function activateGraphNode(target) {
     const person = target?.closest?.("[data-person-id]");
     if (person) { navigateToPerson(person.dataset.personId); return; }
+    const cluster = target?.closest?.("[data-graph-cluster]");
+    if (cluster) {
+      graphExpandedCluster = graphExpandedCluster === cluster.dataset.graphCluster ? "" : cluster.dataset.graphCluster;
+      renderGraph();
+      return;
+    }
     const group = target?.closest?.("[data-group-id]");
-    if (group) navigateToGroup(group.dataset.groupId);
+    if (group) navigateToGroup(group.dataset.groupId, group.dataset.groupRoute);
   }
-  async function load() {
+  async function load({preserveNotice = false} = {}) {
     const sequence = ++requestSequence;
     const refresh = $("refresh");
     refresh.disabled = true;
@@ -671,28 +1373,38 @@
     try {
       const result = unwrap(await bridge.apiGet(endpoint, {}));
       if (sequence !== requestSequence) return;
-      data = { ...result, persons: Array.isArray(result.persons) ? result.persons : [], groups: Array.isArray(result.groups) ? result.groups : [] };
+      const persons = mergeDirectoryPeople(Array.isArray(result.persons) ? result.persons : []);
+      const privateCount = persons.filter(item => item.private_chat).length;
+      const groupCount = persons.filter(item => item.group_member).length;
+      const bothCount = persons.filter(item => item.private_chat && item.group_member).length;
+      data = { ...result, persons, groups: Array.isArray(result.groups) ? result.groups : [],
+        counts: {...(result.counts || {}), total: persons.length, private_chat: privateCount,
+          group_member: groupCount, both: bothCount, private_only: privateCount - bothCount,
+          group_only: groupCount - bothCount} };
       setSyncState("ready", "V2 数据已同步");
-      notice("");
-      selected = selected ? data.persons.find((person) => person.subject_id === selected.subject_id) || null : null;
-      if (selected) {
-        authorization = {};
-        authServer = "loading";
-      }
-      const foundGroup = selectedGroupId && allGroups().some((group) => groupKey(group) === selectedGroupId);
+      if (!preserveNotice) notice("");
+      const previous = selected ? displayPersonKey(selected) : null;
+      selected = data.persons.find(person => displayPersonKey(person) === previous) || visiblePeople()[0] || null;
+      window.CompanionPrivateMembers?.refresh();
+      const foundGroup = selectedGroupId && allGroups().some((group) => groupRouteKey(group) === selectedGroupId);
       if (!foundGroup) selectedGroupId = "";
       renderAll();
-      if (selected) loadAuthorization(selected);
+      return true;
     } catch (error) {
       if (sequence !== requestSequence) return;
       const failure = localized(error);
-      data = null;
-      selected = null;
-      selectedGroupId = "";
-      authorization = {};
       setSyncState("error", "读取未完成");
-      renderAll();
-      notice(failure.message, true);
+      if (preserveNotice) {
+        const previous = $("notice").textContent.replace(/[。.!?]+$/, "");
+        notice(`${previous}；目录重读失败：${failure.message}`, true);
+      } else {
+        data = null;
+        selected = null;
+        selectedGroupId = "";
+        renderAll();
+        notice(failure.message, true);
+      }
+      return false;
     } finally {
       if (sequence === requestSequence) {
         refresh.disabled = false;
@@ -701,40 +1413,73 @@
     }
   }
 
-  document.querySelectorAll(".tab").forEach((item) => item.addEventListener("click", () => switchTab(item.dataset.tab)));
+  document.querySelectorAll(".tab").forEach((item) => {
+    item.addEventListener("click", () => switchTab(item.dataset.tab));
+    item.addEventListener("keydown", (event) => {
+      const tabs = [...document.querySelectorAll(".tab")];
+      const index = tabs.indexOf(item);
+      const next = event.key === "ArrowRight" ? (index + 1) % tabs.length
+        : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length
+        : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
+      if (next < 0) return;
+      event.preventDefault();
+      switchTab(tabs[next].dataset.tab);
+      tabs[next].focus();
+    });
+  });
   document.querySelectorAll(".chip").forEach((item) => item.addEventListener("click", () => {
     filter = item.dataset.filter;
     updateFilterButtons();
-    if (selected && !visiblePeople().some((person) => person.subject_id === selected.subject_id)) select(null);
+    if (selected && !visiblePeople().some((person) => personRouteKey(person) === personRouteKey(selected))) select(null);
     renderPeople();
+  }));
+  const idleToggle = $("hide-idle-users");
+  if (idleToggle) idleToggle.addEventListener("change", () => {
+    hideIdleUsers = Boolean(idleToggle.checked);
+    saveDirectoryPreference();
+    if (selected && !visiblePeople().some((person) => personRouteKey(person) === personRouteKey(selected))) selected = null;
+    renderPeople();
+    renderDetail();
+  });
+  document.querySelectorAll(".group-status-filter").forEach((item) => item.addEventListener("click", () => {
+    groupStatusFilter = item.dataset.groupFilter || "all";
+    updateGroupFilters();
+    renderGroups();
   }));
   document.querySelectorAll(".graph-filter").forEach((item) => item.addEventListener("click", () => {
     graphScope = item.dataset.graphScope;
+    graphExpandedCluster = "";
     updateGraphFilters();
     renderGraph();
   }));
   $("directory-search").addEventListener("input", (event) => {
     searchTerm = String(event.target.value || "").trim().toLocaleLowerCase();
+    graphExpandedCluster = "";
     $("clear-search").hidden = !searchTerm;
-    renderGraph(); renderPeople(); renderGroups();
-    if (selected && !visiblePeople().some((person) => person.subject_id === selected.subject_id)) select(null);
+    renderNetworkOverview(); renderGraph(); renderPeople(); renderGroups();
+    if (selected && !visiblePeople().some((person) => personRouteKey(person) === personRouteKey(selected))) select(null);
   });
   $("clear-search").addEventListener("click", () => {
     $("directory-search").value = "";
     searchTerm = "";
+    graphExpandedCluster = "";
     $("clear-search").hidden = true;
-    renderGraph(); renderPeople(); renderGroups();
+    renderNetworkOverview(); renderGraph(); renderPeople(); renderGroups();
   });
   $("relationship-graph").addEventListener("click", (event) => activateGraphNode(event.target));
   $("relationship-graph").addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") return;
-    const target = event.target?.closest?.("[data-person-id], [data-group-id]");
+    const target = event.target?.closest?.("[data-person-id], [data-graph-cluster], [data-group-id]");
     if (!target) return;
     event.preventDefault();
     activateGraphNode(target);
   });
   $("refresh").addEventListener("click", () => { notice(""); load(); });
+  document.addEventListener("companion-mappings-change", () => { if (bridge) void load(); });
   (async function start() {
+    window.lucide?.createIcons();
+    readDirectoryPreferences();
+    switchTab(activeView);
     bridge = window.AstrBotPluginPage;
     if (!bridge) { setSyncState("error", "页面桥未连接"); notice(errors.dashboard_identity_required, true); return; }
     try { await bridge.ready(); await load(); }

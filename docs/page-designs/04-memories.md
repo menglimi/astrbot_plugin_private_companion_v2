@@ -1,4 +1,4 @@
-# 04 · 记忆与经历（`memories` 整页 + `manage/memory`）
+# 04 · 事实与经历（`memories` 整页 + `manage/memory`）
 
 代码位置：`manage/memory` 页签 `renderMemoryPage`（`pages/陪伴小屋/app.js:1196-1198`）；`memories` 整页路由复用同一 `renderMemories()`（`app.js:613` 的 `fullPage` 分支，`#main` 承载）；挂载点 `#memoryWorkspace`（`app.js:893` 产出，`app.js:466,618` 挂 `CompanionMemoryPage`）。核心模块：`memory-page.js`（769 行，记忆治理工作台）、`memory-settings-section.js`（决策 B1 的策略编辑器，见 [07-decision.md](07-decision.md)）。
 

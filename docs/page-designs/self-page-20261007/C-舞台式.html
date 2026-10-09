@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="courtyard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自我页 · 方向C 角色舞台（静态预览）</title>
+<!--
+  自我页重设计 · 方向 C「角色舞台」 docs/page-designs/self-page-20261007/C-舞台式.html
+  ═══════════════════════════════════════════════════════════════════════════
+  设计目标（用户四条要求）：
+  1. 配置项单独优化：右列编辑卡的紧凑属性格——生日=日期+农历+年份可选，
+     性别/种族/自称/关系=词条，长文本=计字段落，世界观适配=分段条。
+  2. 适应页面大小：1366 / 900 / 650 / 390 / 320；900 以下舞台收成顶部横条。
+  3. 切换不跳（本版最彻底）：整页只有一个恒定高度的舞台工作区——
+     编辑列内部滚动，段落/工作区切换只换内层内容，页面滚动条永远不动。
+  4. 创意表达：「台词即设定」——舞台上的台词直接取自口吻示例，点一下就
+     原位编辑并写回 voice_examples；每段右上有「即兴题」；底部「自述整理」
+     接既有整理资料管线。
+
+  移植映射（预览 → 真页）：
+  · 舞台列 ← self-atlas 的信号/进度语义收进恒定列；台词轮播读 voice_examples 草稿
+  · 编辑列页签 ← 4 个 self-workspace-tab；段落词条 ← wb-section（复用工作台内核）
+  · 字段控件 ← workbench-page.js inputs 扩展（date / chips / quotes / tags / segmented）
+  · 高度锁定是移植关键：容器用 calc(100dvh - 页头) 而不是预览里的固定值
+-->
+<style>
+/* ===== tokens（与真页 tokens.css 同源，庭院 + 夜读两套） ===== */
+[data-theme="courtyard"]{
+  --t-canvas:#eef3ec;--t-surface:#fdfefb;--t-surface-soft:#f5f9f3;--t-surface-raised:#ffffff;
+  --t-surface-sunken:#e3ebe0;--t-veil:rgba(253,254,251,.72);
+  --t-text:#333a33;--t-text-strong:#212822;--t-text-soft:#616b60;--t-text-faint:#828c80;--t-text-invert:#fdfefb;
+  --t-accent:#4a7c50;--t-accent-hover:#3a6540;--t-accent-quiet:#e6efe4;--t-accent-ink:#3b6541;
+  --t-accent-solid:#46754c;--t-on-solid:#fdfefb;
+  --t-line:rgba(74,90,74,.14);--t-line-firm:rgba(74,90,74,.26);
+  --t-ok:#4a7c50;--t-ok-quiet:#e4efe2;--t-ok-ink:#3b6541;
+  --t-warn:#9c7422;--t-warn-quiet:#f7f0dc;--t-warn-ink:#7d5c17;
+  --t-risk:#a5524a;--t-risk-quiet:#f7e9e6;--t-risk-ink:#874139;
+  --t-focus:rgba(74,124,80,.24);--t-shadow:0 8px 28px rgba(58,80,60,.06);
+  --t-shadow-lift:0 14px 36px rgba(58,80,60,.12);
+}
+[data-theme="night"]{
+  --t-canvas:#15171f;--t-surface:#22252f;--t-surface-soft:#1c1f28;--t-surface-raised:#282c38;
+  --t-surface-sunken:#181a22;--t-veil:rgba(28,30,39,.82);
+  --t-text:#e5e6ec;--t-text-strong:#f5f5f9;--t-text-soft:#a5a8b8;--t-text-faint:#7b7f90;--t-text-invert:#171920;
+  --t-accent:#93a8d8;--t-accent-hover:#7b92c8;--t-accent-quiet:#252a3a;--t-accent-ink:#b3c3e8;
+  --t-accent-solid:#61749f;--t-on-solid:#12141b;
+  --t-line:rgba(255,255,255,.10);--t-line-firm:rgba(255,255,255,.20);
+  --t-ok:#6fbf9a;--t-ok-quiet:#1c3029;--t-ok-ink:#87d0ad;
+  --t-warn:#d9ae6d;--t-warn-quiet:#312818;--t-warn-ink:#e6c287;
+  --t-risk:#d18f98;--t-risk-quiet:#301f23;--t-risk-ink:#dda1aa;
+  --t-focus:rgba(147,168,216,.30);--t-shadow:0 10px 26px rgba(0,0,0,.32);
+  --t-shadow-lift:0 14px 32px rgba(0,0,0,.46);
+}
+:root{
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:24px;--sp-6:32px;
+  --fs-micro:11px;--fs-tiny:12px;--fs-body:14px;--fs-lead:16px;--fs-title:19px;--fs-head:22px;--fs-hero:26px;
+  --r-2xs:4px;--r-xs:6px;--r-sm:9px;--r-md:12px;--r-lg:16px;
+  --numeric-font:ui-monospace,"SF Mono",Consolas,monospace;
+  --dur-fast:.16s;--dur:.28s;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--t-canvas);color:var(--t-text);
+  font:14px/1.7 MiSans,"Microsoft YaHei","PingFang SC",system-ui,sans-serif;padding:20px;
+  transition:background .3s,color .3s}
+
+/* ===== 预览工具条（不属于页面本体） ===== */
+.bar{display:flex;align-items:center;gap:10px;margin:0 auto 14px;flex-wrap:wrap;max-width:1240px}
+.bar h1{font-size:14px;font-weight:600;margin:0 auto 0 0;color:var(--t-text-strong)}
+.bar button{font:inherit;font-size:12px;padding:6px 11px;border-radius:6px;cursor:pointer;
+  color:var(--t-text);background:var(--t-surface);border:1px solid var(--t-line-firm)}
+.bar button:hover{background:var(--t-surface-soft)}
+.bar .hint{width:100%;margin:0;font-size:11px;color:var(--t-text-faint)}
+#viewportWrap{max-width:1240px;margin:0 auto;transition:max-width .3s ease}
+#viewportWrap[data-w="1366"]{max-width:1366px}
+#viewportWrap[data-w="900"]{max-width:900px}
+#viewportWrap[data-w="650"]{max-width:650px}
+#viewportWrap[data-w="390"]{max-width:390px}
+#viewportWrap[data-w="320"]{max-width:320px}
+.bar button.active{border-color:var(--t-accent);color:var(--t-accent-ink);background:var(--t-accent-quiet)}
+#selfPage{border:1px dashed var(--t-line-firm);border-radius:var(--r-md);padding:var(--sp-5);
+  background:var(--t-canvas)}
+
+/* ══════════ 页面本体 ══════════ */
+.self-page{display:grid;gap:var(--sp-5);max-width:1120px;margin:0 auto;min-width:0}
+.page-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-3)}
+.page-head small{color:var(--t-accent-ink);font-size:var(--fs-micro);font-weight:750;letter-spacing:.04em}
+.page-head h1{margin:0;color:var(--t-text-strong);font-size:var(--fs-title);font-weight:650}
+
+/* ---- 舞台工作区：恒定高度，内部滚动 ---- */
+.studio{display:grid;grid-template-columns:296px minmax(0,1fr);gap:0;min-width:0;
+  height:660px;border:1px solid var(--t-line);border-radius:var(--r-lg);
+  background:var(--t-surface);box-shadow:var(--t-shadow);overflow:hidden}
+/* 舞台列 */
+.stage{display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;gap:var(--sp-4);min-width:0;
+  padding:var(--sp-5);border-right:1px solid var(--t-line);
+  background:
+    radial-gradient(120% 60% at 20% 0%,color-mix(in srgb,var(--t-accent-quiet) 62%,transparent),transparent 60%),
+    var(--t-surface-soft)}
+.stage-identity{display:grid;gap:var(--sp-2);justify-items:center;text-align:center}
+.stage-emblem{position:relative;display:grid;place-items:center;width:104px;aspect-ratio:1;border-radius:50%;
+  border:1px solid var(--t-line-firm);background:var(--t-surface-raised);color:var(--t-accent-ink);
+  font-size:var(--fs-hero);font-weight:650;box-shadow:0 0 0 10px var(--t-accent-quiet)}
+.stage-emblem::after{content:"";position:absolute;inset:-13px;border:1px dashed var(--t-line-firm);border-radius:50%}
+.stage-identity h2{margin:var(--sp-1) 0 0;color:var(--t-text-strong);font-size:var(--fs-head);font-weight:650}
+.stage-identity p{margin:0;color:var(--t-text-faint);font-size:var(--fs-micro)}
+/* 台词即设定：气泡可原位编辑 */
+.stage-quote{display:grid;gap:var(--sp-2);padding:var(--sp-4);border:1px solid var(--t-line);
+  border-radius:var(--r-md);background:var(--t-surface);box-shadow:var(--t-shadow)}
+.stage-quote .who{display:flex;justify-content:space-between;align-items:center;gap:6px;
+  color:var(--t-text-faint);font-size:var(--fs-micro)}
+.stage-quote .who b{color:var(--t-accent-ink)}
+.stage-quote blockquote{margin:0;color:var(--t-text-strong);font-size:var(--fs-body);line-height:1.65;
+  border:1px dashed transparent;border-radius:var(--r-xs);padding:2px 4px;cursor:text}
+.stage-quote blockquote:hover{border-color:var(--t-line-firm)}
+.stage-quote blockquote:focus{outline:none;border-color:var(--t-accent);background:var(--t-surface-soft)}
+.stage-quote .ops{display:flex;justify-content:space-between;align-items:center;gap:6px}
+.stage-quote .ops small{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.stage-quote .ops div{display:flex;gap:4px}
+.stage-quote .ops button{border:1px solid var(--t-line-firm);border-radius:99px;background:var(--t-surface);
+  color:var(--t-text-faint);font:inherit;font-size:10px;padding:2px 9px;cursor:pointer;white-space:nowrap}
+.stage-quote .ops button:hover{color:var(--t-accent-ink);border-color:var(--t-accent)}
+/* 速览信号 */
+.stage-signals{display:grid;gap:2px;align-self:start;overflow:auto;min-height:0}
+.stage-signals button{display:grid;grid-template-columns:52px minmax(0,1fr);gap:var(--sp-2);align-items:baseline;
+  padding:7px 8px;border:0;border-radius:var(--r-xs);background:transparent;color:var(--t-text-soft);
+  font:inherit;text-align:left;cursor:pointer;transition:background var(--dur-fast) ease}
+.stage-signals button:hover{background:var(--t-surface);color:var(--t-accent-ink)}
+.stage-signals small{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.stage-signals strong{min-width:0;font-size:var(--fs-tiny);font-weight:600;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+/* 底部：完成环 + 即兴题 */
+.stage-foot{display:grid;gap:var(--sp-2)}
+.improv{display:grid;gap:4px;padding:var(--sp-3);border:1px dashed color-mix(in srgb,var(--t-accent) 45%,var(--t-line-firm));
+  border-radius:var(--r-sm);background:var(--t-surface)}
+.improv small{color:var(--t-accent-ink);font-size:var(--fs-micro);font-weight:700}
+.improv p{margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.55}
+.improv button{justify-self:start;border:0;background:transparent;color:var(--t-text-faint);
+  font:inherit;font-size:var(--fs-micro);cursor:pointer;padding:0}
+.improv button:hover{color:var(--t-accent-ink)}
+.stage-meter{display:flex;align-items:center;gap:var(--sp-3)}
+.stage-meter .track{flex:1;height:4px;border-radius:99px;background:var(--t-line-firm);overflow:hidden}
+.stage-meter .track i{display:block;height:100%;width:62%;background:linear-gradient(90deg,var(--t-accent),var(--t-ok))}
+.stage-meter small{color:var(--t-text-faint);font-size:var(--fs-micro);white-space:nowrap}
+.stage-meter small b{color:var(--t-accent-ink);font-family:var(--numeric-font)}
+
+/* 编辑列 */
+.desk{display:grid;grid-template-rows:auto auto minmax(0,1fr);min-width:0}
+.desk-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-1);padding:var(--sp-3) var(--sp-3) 0}
+.desk-tabs button{min-height:36px;border:1px solid transparent;border-radius:var(--r-xs) var(--r-xs) 0 0;
+  background:transparent;color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);font-weight:600;cursor:pointer}
+.desk-tabs button:hover{color:var(--t-accent-ink)}
+.desk-tabs button.active{border-color:var(--t-line);border-bottom-color:transparent;background:var(--t-surface-soft);
+  color:var(--t-accent-ink)}
+.desk-chips{display:flex;gap:6px;overflow-x:auto;padding:var(--sp-2) var(--sp-3);border-top:1px solid var(--t-line);
+  border-bottom:1px solid var(--t-line);background:var(--t-surface-soft);scrollbar-width:none}
+.desk-chips::-webkit-scrollbar{display:none}
+.desk-chips button{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:0 var(--sp-3);
+  border:1px solid transparent;border-radius:99px;background:transparent;color:var(--t-text-soft);
+  font:inherit;font-size:var(--fs-tiny);cursor:pointer}
+.desk-chips button:hover{border-color:var(--t-line-firm);color:var(--t-accent-ink)}
+.desk-chips button.active{border-color:color-mix(in srgb,var(--t-accent) 55%,var(--t-line));
+  background:var(--t-surface);color:var(--t-accent-ink)}
+.desk-chips button .no{font-family:var(--numeric-font);font-size:var(--fs-micro);color:var(--t-text-faint)}
+.desk-chips button .dot{width:6px;height:6px;border-radius:50%;background:var(--t-line-firm)}
+.desk-chips button .dot.done{background:var(--t-ok);box-shadow:0 0 0 2px var(--t-ok-quiet)}
+/* 编辑滚动区：所有切换都发生在这里面 */
+.desk-scroll{min-height:0;overflow:auto;overscroll-behavior:contain;padding:var(--sp-4) var(--sp-5);
+  background:var(--t-surface)}
+.edit-card{display:grid;gap:var(--sp-3);animation:card-in .26s cubic-bezier(.16,1,.3,1) both}
+@keyframes card-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+.edit-card[hidden]{display:none}
+.edit-head{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--sp-3)}
+.edit-head>div:first-child{display:grid;gap:2px}
+.edit-head small{color:var(--t-accent-ink);font-size:var(--fs-micro);font-weight:750;font-variant-numeric:tabular-nums}
+.edit-head h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:650}
+.edit-head p{margin:0;color:var(--t-text-faint);font-size:var(--fs-micro)}
+/* 属性格：紧凑两列 */
+.props{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-3)}
+.prop{display:grid;gap:5px;align-content:start;min-width:0;padding:var(--sp-3);border:1px solid var(--t-line);
+  border-radius:var(--r-sm);background:var(--t-surface-soft)}
+.prop.wide{grid-column:1 / -1}
+.prop>label{display:flex;align-items:baseline;gap:6px;color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:650}
+.prop>label small{color:var(--t-text-faint);font-weight:400;font-size:var(--fs-micro)}
+.prop .help{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.prop :is(input,textarea){width:100%;min-width:0;border:1px solid var(--t-line-firm);border-radius:var(--r-xs);
+  background:var(--t-surface);color:var(--t-text);font:inherit;font-size:var(--fs-tiny);padding:7px 10px;
+  transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease}
+.prop textarea{resize:vertical;min-height:54px;line-height:1.6}
+.prop :is(input,textarea):focus{outline:none;border-color:var(--t-accent);box-shadow:0 0 0 3px var(--t-focus)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;min-height:28px;padding:3px 12px;border:1px solid var(--t-line-firm);
+  border-radius:99px;background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);
+  cursor:pointer;transition:all var(--dur-fast) ease}
+.chip:hover{border-color:var(--t-accent);color:var(--t-accent-ink)}
+.chip.on{border-color:var(--t-accent);background:var(--t-accent-quiet);color:var(--t-accent-ink);font-weight:600}
+.chip-input{flex:1 1 90px;min-width:88px;min-height:28px;border:1px dashed var(--t-line-firm);border-radius:99px;
+  background:transparent;color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);padding:3px 12px}
+.chip-input:focus{outline:none;border-color:var(--t-accent);border-style:solid;color:var(--t-text)}
+.date-row{display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center}
+.date-row input[type=date]{flex:1 1 130px;min-height:32px;border:1px solid var(--t-line-firm);border-radius:var(--r-xs);
+  background:var(--t-surface);color:var(--t-text);font:inherit;font-size:var(--fs-tiny);padding:4px 10px}
+.mini-toggle{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;padding:5px 10px;border:1px solid var(--t-line-firm);
+  border-radius:var(--r-xs);background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);
+  cursor:pointer;user-select:none}
+.mini-toggle input{accent-color:var(--t-accent);margin:0}
+.quote-list{display:grid;gap:var(--sp-2)}
+.quote{position:relative;max-width:92%;padding:8px 12px;border:1px solid var(--t-line);border-radius:var(--r-sm);
+  border-bottom-left-radius:3px;background:var(--t-surface);box-shadow:var(--t-shadow)}
+.quote p{margin:0;font-size:var(--fs-tiny);line-height:1.6}
+.quote .who{display:flex;gap:6px;color:var(--t-text-faint);font-size:var(--fs-micro);margin-bottom:2px}
+.quote .who b{color:var(--t-accent-ink)}
+.quote .ops{position:absolute;top:-9px;right:8px;display:none;gap:4px}
+.quote:hover .ops{display:flex}
+.quote .ops button{border:1px solid var(--t-line-firm);border-radius:99px;background:var(--t-surface);
+  color:var(--t-text-faint);font-size:10px;padding:1px 8px;cursor:pointer;white-space:nowrap}
+.quote.add{max-width:none;border-style:dashed;background:transparent;color:var(--t-text-faint);display:flex;
+  align-items:center;justify-content:center;min-height:38px;cursor:pointer;font-size:var(--fs-tiny)}
+.quote.add:hover{border-color:var(--t-accent);color:var(--t-accent-ink)}
+/* 自述整理（卷末卡，放编辑流最后一段） */
+.selfwrite{display:grid;gap:var(--sp-3);padding:var(--sp-4);border:1px dashed
+  color-mix(in srgb,var(--t-accent) 45%,var(--t-line-firm));border-radius:var(--r-sm);background:var(--t-surface-soft)}
+.selfwrite h4{margin:0;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.selfwrite p{margin:0;color:var(--t-text-faint);font-size:var(--fs-micro)}
+.selfwrite textarea{width:100%;min-width:0;min-height:110px;resize:vertical;border:1px solid var(--t-line-firm);
+  border-radius:var(--r-xs);background:var(--t-surface);color:var(--t-text);font:inherit;font-size:var(--fs-tiny);
+  line-height:1.7;padding:var(--sp-2) var(--sp-3)}
+.selfwrite-foot{display:flex;justify-content:space-between;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.selfwrite-foot .button{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:0 var(--sp-4);
+  border:0;border-radius:99px;background:var(--t-accent-solid);color:var(--t-on-solid);font:inherit;
+  font-size:var(--fs-tiny);font-weight:650;cursor:pointer}
+.slot-note{display:grid;gap:6px;padding:var(--sp-4);border:1px solid var(--t-warn-quiet);border-left:3px solid var(--t-warn);
+  border-radius:var(--r-sm);background:var(--t-surface)}
+.slot-note strong{font-size:var(--fs-tiny);color:var(--t-text-strong)}
+.slot-note span{font-size:var(--fs-micro);color:var(--t-text-faint);line-height:1.55}
+.iframe-slot{display:grid;place-items:center;height:100%;min-height:320px;border:1px dashed var(--t-line-firm);
+  border-radius:var(--r-md);background:var(--t-surface-soft);color:var(--t-text-faint);font-size:var(--fs-tiny)}
+
+/* ---- 响应式 ---- */
+@media(max-width:900px){
+  .studio{grid-template-columns:minmax(0,1fr);height:auto;min-height:640px}
+  .stage{grid-template-rows:auto;grid-template-columns:1fr;border-right:0;border-bottom:1px solid var(--t-line)}
+  .stage-signals{grid-template-columns:repeat(2,minmax(0,1fr));display:grid;overflow:visible}
+  .stage-quote{max-width:520px}
+  .desk-scroll{height:560px}
+}
+@media(max-width:650px){
+  #selfPage{padding:var(--sp-3)}
+  .self-page{gap:var(--sp-4)}
+  .studio{border-radius:var(--r-md)}
+  .stage{padding:var(--sp-4)}
+  .stage-emblem{width:76px;font-size:var(--fs-head);box-shadow:0 0 0 7px var(--t-accent-quiet)}
+  .stage-emblem::after{inset:-10px}
+  .stage-signals{grid-template-columns:minmax(0,1fr)}
+  .desk-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .desk-tabs button span{display:none}
+  .desk-scroll{padding:var(--sp-3);height:520px}
+  .props{grid-template-columns:minmax(0,1fr)}
+  .edit-head{flex-direction:column}
+}
+@media(max-width:380px){
+  .desk-tabs button{min-height:44px}
+  .desk-tabs button span{display:inline;font-size:var(--fs-micro)}
+  .quote{max-width:100%}
+}
+@media(prefers-reduced-motion:reduce){.edit-card{animation:none}}
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>自我页 · 方向C 角色舞台 — 静态预览（示例数据：澄汐）</h1>
+  <button id="themeBtn">夜读</button>
+  <span style="width:1px;height:18px;background:var(--t-line-firm)"></span>
+  <button data-w="1366" class="active">1366</button>
+  <button data-w="900">900</button>
+  <button data-w="650">650</button>
+  <button data-w="390">390</button>
+  <button data-w="320">320</button>
+  <p class="hint">切换宽度模拟页面尺寸；舞台高度恒定，所有切换都发生在编辑列内部，页面滚动条不动。虚线框内为页面本体。</p>
+</div>
+<div id="viewportWrap" data-w="1366">
+<div id="selfPage">
+<div class="self-page">
+
+  <div class="page-head">
+    <div><small>SELF / STUDIO</small><h1>角色舞台</h1></div>
+    <span style="color:var(--t-text-faint);font-size:var(--fs-micro)">人格 chengxi_v3 · 已连接</span>
+  </div>
+
+  <!-- ═══ 舞台工作区（恒定高度） ═══ -->
+  <section class="studio" aria-label="角色舞台工作区">
+
+    <!-- 舞台列 -->
+    <aside class="stage">
+      <div class="stage-identity">
+        <span class="stage-emblem" aria-hidden="true">澄</span>
+        <h2>澄汐</h2>
+        <p>海雾小城 · 旧书店店员</p>
+      </div>
+      <div class="stage-quote" aria-label="台词即设定">
+        <span class="who"><b>澄汐</b><span>口吻示例 · 1/3</span></span>
+        <blockquote contenteditable="true" spellcheck="false">今天的风有点像海边的。</blockquote>
+        <div class="ops">
+          <small>点台词直接改，写回口吻示例</small>
+          <div><button type="button">试听</button><button type="button">换一句</button></div>
+        </div>
+      </div>
+      <div class="stage-signals" aria-label="角色速览">
+        <button data-goto="identity" data-tab="profile"><small>身份</small><strong>旧书店店员</strong></button>
+        <button data-goto="appearance" data-tab="profile"><small>识别点</small><strong>耳后的月形痣</strong></button>
+        <button data-goto="personality" data-tab="profile"><small>性格</small><strong>安静、慢热</strong></button>
+        <button data-goto="voice" data-tab="profile"><small>口吻</small><strong>句子短，尾音轻</strong></button>
+        <button data-goto="world" data-tab="profile"><small>世界</small><strong>海雾小城</strong></button>
+        <button data-goto="rel" data-tab="relationship"><small>相处</small><strong>私聊 · 小航</strong></button>
+      </div>
+      <div class="stage-foot">
+        <div class="improv">
+          <small>即兴题</small>
+          <p>如果她的书架只能留一本书，会是哪本？为什么？</p>
+          <button type="button">换一题</button>
+        </div>
+        <div class="stage-meter">
+          <span class="track"><i></i></span>
+          <small><b>27</b> / 44 项</small>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 编辑列 -->
+    <div class="desk">
+      <nav class="desk-tabs" role="tablist" aria-label="自我设定分区">
+        <button role="tab" class="active" data-pane="profile">角色档案</button>
+        <button role="tab" data-pane="relationship">相处资料</button>
+        <button role="tab" data-pane="questionnaire">人格底稿</button>
+        <button role="tab" data-pane="knowledge">世界知识</button>
+      </nav>
+      <nav class="desk-chips" aria-label="档案章节">
+        <button class="active" data-chapter="identity"><span class="no">01</span>身份<span class="dot done"></span></button>
+        <button data-chapter="appearance"><span class="no">02</span>外貌<span class="dot done"></span></button>
+        <button data-chapter="personality"><span class="no">03</span>性格<span class="dot"></span></button>
+        <button data-chapter="voice"><span class="no">04</span>口吻<span class="dot done"></span></button>
+        <button data-chapter="motivation"><span class="no">05</span>动机<span class="dot"></span></button>
+        <button data-chapter="boundary"><span class="no">06</span>边界<span class="dot done"></span></button>
+        <button data-chapter="world"><span class="no">07</span>世界<span class="dot done"></span></button>
+        <button data-chapter="platform"><span class="no">08</span>称呼<span class="dot"></span></button>
+        <button data-chapter="selfwrite"><span class="no">✦</span>自述整理</button>
+      </nav>
+      <div class="desk-scroll">
+
+        <!-- 01 身份 -->
+        <section class="edit-card" data-chapter-panel="identity">
+          <div class="edit-head"><div><small>01 / IDENTITY</small><h3>基础身份</h3>
+            <p>姓名、种族、生日、年龄感、职业、关键经历与补充。</p></div></div>
+          <div class="props">
+            <div class="prop"><label>姓名 <small>封面会同步显示</small></label><input type="text" value="澄汐"></div>
+            <div class="prop"><label>职业 / 身份</label><input type="text" value="旧书店店员 / 陪伴者"></div>
+            <div class="prop"><label>生日 <small>出生日期或纪念日</small></label>
+              <div class="date-row">
+                <input type="date" value="2007-04-17" aria-label="生日日期">
+                <label class="mini-toggle"><input type="checkbox">农历</label>
+                <label class="mini-toggle"><input type="checkbox" checked>不确定年份</label>
+              </div>
+              <span class="help">勾选「不确定年份」时保存为“4月17日”。</span></div>
+            <div class="prop"><label>性别 <small>角色自我认同</small></label>
+              <div class="chips">
+                <button class="chip on">女</button><button class="chip">男</button>
+                <button class="chip">非二元</button><button class="chip">留空</button>
+                <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义性别">
+              </div></div>
+            <div class="prop"><label>种族 <small>没有特殊种族可留空</small></label>
+              <div class="chips">
+                <button class="chip on">人类</button><button class="chip">精灵</button>
+                <button class="chip">仿生人</button>
+                <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义种族">
+              </div></div>
+            <div class="prop"><label>年龄感 / 旧版生日</label><input type="text" value="看起来二十出头"></div>
+            <div class="prop wide"><label>关键设定 <small>对身份、关系、能力或经历有持续影响的事实</small></label>
+              <textarea>生日「4月17日」其实是书店进货的日期，她把那天当作自己的生日；这件事只有店长知道。</textarea></div>
+            <div class="prop wide"><label>身份经历补充（原有设定）</label>
+              <textarea>在城市海边经营一间旧书店，习惯把客人的故事记在便签上，夹进对应的书里。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 02 外貌 -->
+        <section class="edit-card" data-chapter-panel="appearance" hidden>
+          <div class="edit-head"><div><small>02 / APPEARANCE</small><h3>外貌与识别</h3>
+            <p>发型、瞳色、服饰和能稳定辨认角色的线索。</p></div></div>
+          <div class="props">
+            <div class="prop"><label>外貌识别点</label><input type="text" value="耳后的月形痣，低头看书时露出来"></div>
+            <div class="prop"><label>发型 / 发色</label><input type="text" value="过肩黑发，工作日松松挽起"></div>
+            <div class="prop"><label>瞳色</label><input type="text" value="深褐，灯光下偏琥珀"></div>
+            <div class="prop"><label>服饰风格</label><input type="text" value="亚麻围裙 + 灰蓝针织衫"></div>
+            <div class="prop wide"><label>头像与图像识别线索</label>
+              <input type="text" value="OC 别名“汐”；截图里常带一杯海水蓝的马克杯"></div>
+          </div>
+        </section>
+
+        <!-- 03 性格 -->
+        <section class="edit-card" data-chapter-panel="personality" hidden>
+          <div class="edit-head"><div><small>03 / PERSONALITY</small><h3>性格与日常</h3>
+            <p>性格底色、日常习惯和角色做事的稳定倾向。</p></div></div>
+          <div class="props">
+            <div class="prop wide"><label>性格描述（原有设定）</label>
+              <textarea>安静、慢热，熟人面前话会变多。观察力好，先听再说；不擅长被打断。</textarea></div>
+            <div class="prop"><label>日常习惯</label>
+              <textarea>打烊后留一盏灯整理书；雨天把椅子搬到窗边。</textarea></div>
+            <div class="prop"><label>情绪表达 <small>写成倾向，不是固定台词</small></label>
+              <textarea>开心时尾音上扬；担心不直说，会变成“记得吃饭”。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 04 口吻 -->
+        <section class="edit-card" data-chapter-panel="voice" hidden>
+          <div class="edit-head"><div><small>04 / VOICE</small><h3>口吻与反应</h3>
+            <p>左列舞台上的台词就取自这里的示例。</p></div></div>
+          <div class="props">
+            <div class="prop wide"><label>口吻示例 <small>气泡即台词</small></label>
+              <div class="quote-list">
+                <div class="quote"><span class="ops"><button>试听</button><button>删除</button></span>
+                  <span class="who"><b>澄汐</b>日常</span><p>今天的风有点像海边的。</p></div>
+                <div class="quote"><span class="ops"><button>试听</button><button>删除</button></span>
+                  <span class="who"><b>澄汐</b>答应事情</span><p>嗯…让我想想——好，就这么定了。</p></div>
+                <div class="quote add">＋ 新增一句台词</div>
+              </div></div>
+            <div class="prop"><label>标志性表达</label>
+              <div class="chips">
+                <button class="chip on">慢慢来</button><button class="chip on">我在呢</button>
+                <button class="chip on">先把杯子放好</button>
+                <input class="chip-input" type="text" placeholder="＋ 添加…" aria-label="添加标志性表达">
+              </div></div>
+            <div class="prop"><label>自称与代词</label>
+              <div class="chips">
+                <button class="chip on">我</button><button class="chip">人家</button><button class="chip">吾</button>
+                <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义自称">
+              </div></div>
+            <div class="prop"><label>说话方式</label>
+              <textarea>语速平缓，句子短；玩笑偏冷，先愣一拍再笑。</textarea></div>
+            <div class="prop"><label>社交距离与熟悉后的变化</label>
+              <textarea>对陌生人客气但保持一段距离；熟了之后会先开口，也会主动分享书里的话。</textarea></div>
+            <div class="prop wide"><label>典型反应倾向</label>
+              <textarea>被夸：把书挡住半张脸。冷场：不救场，陪着安静。意见不合：先复述对方的意思。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 05 动机 -->
+        <section class="edit-card" data-chapter-panel="motivation" hidden>
+          <div class="edit-head"><div><small>05 / MOTIVATION</small><h3>价值与目标</h3>
+            <p>做选择的原则、长期目标与兴趣。</p></div></div>
+          <div class="props">
+            <div class="prop"><label>重视的事</label>
+              <textarea>把合适的话递给合适的人；不催促任何事。</textarea></div>
+            <div class="prop"><label>核心欲望 / 长期目标</label>
+              <textarea>攒够钱把书店的阁楼修好，做成雨天的读书角。</textarea></div>
+            <div class="prop wide"><label>爱好</label>
+              <div class="chips">
+                <button class="chip on">植物随笔</button><button class="chip on">手冲茶</button>
+                <button class="chip on">听雨</button>
+                <input class="chip-input" type="text" placeholder="＋ 添加…" aria-label="添加爱好">
+              </div></div>
+          </div>
+        </section>
+
+        <!-- 06 边界 -->
+        <section class="edit-card" data-chapter-panel="boundary" hidden>
+          <div class="edit-head"><div><small>06 / BOUNDARY</small><h3>相处边界</h3>
+            <p>互动偏好、禁忌与关系资料入口。</p></div></div>
+          <div class="props">
+            <div class="prop wide"><label>互动边界（原有设定）</label>
+              <textarea>不代替用户做重大决定；被要求“必须同意”时会先说明自己的看法。</textarea></div>
+            <div class="prop wide"><label>禁忌</label>
+              <textarea>不评价他人的身体与家境；不参与网络骂战。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 07 世界 -->
+        <section class="edit-card" data-chapter-panel="world" hidden>
+          <div class="edit-head"><div><small>07 / WORLD</small><h3>世界蓝图</h3>
+            <p>世界、时代、规则、场景与人物网络。</p></div></div>
+          <div class="props">
+            <div class="prop"><label>所处世界</label><input type="text" value="海雾小城"></div>
+            <div class="prop"><label>时代背景</label><input type="text" value="现代 · 近未来"></div>
+            <div class="prop wide"><label>基本法则 / 基调</label>
+              <input type="text" value="温暖、安静，带一点潮湿的海雾感"></div>
+            <div class="prop"><label>主要活动场景</label>
+              <textarea>旧书店「汐屋」、海边堤岸、傍晚的菜市场。</textarea></div>
+            <div class="prop"><label>世界观关系网</label>
+              <textarea>店长是唯一知道她生日来历的人；邮差每周三来一次。</textarea></div>
+            <div class="prop wide"><label>世界观适配模式</label>
+              <div class="chips">
+                <button class="chip on">自动</button><button class="chip">现代日常</button>
+                <button class="chip">幻想世界</button><button class="chip">科幻世界</button>
+                <button class="chip">自定义</button><button class="chip">关闭</button>
+              </div></div>
+          </div>
+        </section>
+
+        <!-- 08 称呼 -->
+        <section class="edit-card" data-chapter-panel="platform" hidden>
+          <div class="edit-head"><div><small>08 / PLATFORM</small><h3>平台称呼与世界观适配</h3>
+            <p>角色世界里的平台叫什么。</p></div></div>
+          <div class="props">
+            <div class="prop"><label>群聊</label><input type="text" value="茶话会"></div>
+            <div class="prop"><label>识屏</label><input type="text" value="水镜"></div>
+            <div class="prop"><label>B站</label><input type="text" value="映像馆"></div>
+            <div class="prop"><label>QQ空间</label><input type="text" value="留言墙"></div>
+            <div class="prop"><label>资料柜</label><input type="text" value="书架"></div>
+          </div>
+        </section>
+
+        <!-- 自述整理 -->
+        <section class="edit-card" data-chapter-panel="selfwrite" hidden>
+          <div class="edit-head"><div><small>CREATE / SELFWRITE</small><h3>自述整理</h3>
+            <p>用任何方式写她；整理只补充空白字段，不覆盖已确认内容。</p></div></div>
+          <div class="selfwrite">
+            <h4>角色自述</h4>
+            <textarea placeholder="我是澄汐，在汐屋看店。要说我最喜欢什么，大概是雨声——不对，也许是雨天来店里躲雨的人……"></textarea>
+            <div class="selfwrite-foot">
+              <span style="color:var(--t-text-faint);font-size:var(--fs-micro)">整理只读人格底稿、当前档案与范围内资料；草稿会先给你过目。</span>
+              <button class="button" type="button">✦ 交给整理资料</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 相处资料 -->
+        <section class="edit-card" data-pane-panel="relationship" hidden>
+          <div class="slot-note" role="status">
+            <strong>关系资料只对私聊用户生效</strong>
+            <span>当前对象：私聊 · 小航。称呼、关系与相处方式按“当前角色 × 当前用户”保存，不会带到其他用户或群聊。</span>
+          </div>
+          <div class="props" style="margin-top:var(--sp-3)">
+            <div class="prop"><label>对用户的称呼</label><input type="text" value="小航"></div>
+            <div class="prop"><label>用户性别 <small>只记录明确告知的内容</small></label>
+              <div class="chips">
+                <button class="chip">女</button><button class="chip">男</button>
+                <button class="chip on">未说明</button>
+                <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义用户性别">
+              </div></div>
+            <div class="prop"><label>用户生日</label>
+              <div class="date-row">
+                <input type="date" aria-label="用户生日">
+                <label class="mini-toggle"><input type="checkbox">农历</label>
+                <label class="mini-toggle"><input type="checkbox">不确定年份</label>
+              </div></div>
+            <div class="prop"><label>用户职业</label><input type="text" value="在读研究生"></div>
+            <div class="prop wide"><label>用户与角色的关系</label>
+              <div class="chips">
+                <button class="chip on">朋友</button><button class="chip">搭档</button>
+                <button class="chip">家人</button><button class="chip">恋人</button>
+                <input class="chip-input" type="text" value="书店常客" aria-label="自定义关系">
+              </div></div>
+            <div class="prop"><label>相处方式</label>
+              <textarea>每周来店里两三次，聊聊最近读的书；不追问工作上的压力。</textarea></div>
+            <div class="prop"><label>其他补充 <small>只对当前用户有效</small></label>
+              <textarea>对薄荷过敏，推荐饮料时要避开。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 人格底稿 -->
+        <section class="edit-card" data-pane-panel="questionnaire" hidden>
+          <div class="slot-note" style="margin-bottom:var(--sp-3)">
+            <strong>人格底稿保持现有「人物设定工坊」工作区</strong>
+            <span>版本历史、草稿与恢复都在嵌入的工作区里完成。</span>
+          </div>
+          <div class="iframe-slot">人物设定工坊工作区（嵌入 iframe，移植时保持 product.workspace("persona") 挂载点）</div>
+        </section>
+
+        <!-- 世界知识 -->
+        <section class="edit-card" data-pane-panel="knowledge" hidden>
+          <div class="edit-head"><div><small>KNOWLEDGE</small><h3>世界知识与来源</h3>
+            <p>导入只做增量，不覆盖已有条目；关闭导入总闸时下面几项不起作用。</p></div></div>
+          <div class="props">
+            <div class="prop"><label>允许导入本机知识来源</label>
+              <div class="chips"><button class="chip on">开启</button><button class="chip">关闭</button></div></div>
+            <div class="prop"><label>允许在对话中引用知识</label>
+              <div class="chips"><button class="chip on">开启</button><button class="chip">关闭</button></div></div>
+            <div class="prop"><label>世界书文件路径 <small>换行或逗号分隔</small></label>
+              <textarea>data/world_book/haiwu.txt</textarea></div>
+            <div class="prop"><label>知识库 / 文档标识</label>
+              <textarea>kb:haiwu-lore</textarea></div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </section>
+
+</div>
+</div>
+</div>
+
+<script>
+"use strict";
+/* 预览行为：主题、宽度模拟、页签与章节（全部在编辑列内部切换）、台词编辑、即兴题轮换。 */
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+$("#themeBtn").addEventListener("click",()=>{
+  const html=document.documentElement;
+  html.dataset.theme=html.dataset.theme==="courtyard"?"night":"courtyard";
+  $("#themeBtn").textContent=html.dataset.theme==="courtyard"?"夜读":"庭院";
+});
+$$("[data-w]").forEach(b=>b.addEventListener("click",()=>{
+  $$("[data-w]").forEach(x=>x.classList.toggle("active",x===b));
+  $("#viewportWrap").dataset.w=b.dataset.w;
+}));
+function showPane(name){
+  $$(".desk-tabs [data-pane]").forEach(x=>x.classList.toggle("active",x.dataset.pane===name));
+  $$(".desk-scroll [data-pane-panel]").forEach(p=>p.hidden=p.dataset.panePanel!==name);
+  const chips=name==="profile";
+  $(".desk-chips").style.display=chips?"":"none";
+  if(chips){
+    const active=$(".desk-chips .active")?.dataset.chapter||"identity";
+    showChapter(active);
+  }
+}
+function showChapter(id){
+  $$(".desk-chips [data-chapter]").forEach(x=>x.classList.toggle("active",x.dataset.chapter===id));
+  $$(".desk-scroll [data-chapter-panel]").forEach(p=>p.hidden=p.dataset.chapterPanel!==id);
+}
+$$(".desk-tabs [data-pane]").forEach(btn=>btn.addEventListener("click",()=>showPane(btn.dataset.pane)));
+$$(".desk-chips [data-chapter]").forEach(btn=>btn.addEventListener("click",()=>showChapter(btn.dataset.chapter)));
+/* 速览信号：跨页签直达段落，全部发生在内部滚动区。 */
+$$("[data-goto]").forEach(btn=>btn.addEventListener("click",()=>{
+  showPane(btn.dataset.tab);
+  if(btn.dataset.tab==="profile")showChapter(btn.dataset.goto);
+  $(".desk-scroll").scrollTo({top:0,behavior:"smooth"});
+}));
+/* 台词即设定：原位编辑 + 换一句轮播。 */
+const quotes=["今天的风有点像海边的。","嗯…让我想想——好，就这么定了。","你先说，我听着。"];
+let qi=0;
+$$(".stage-quote .ops button").forEach(btn=>btn.addEventListener("click",()=>{
+  if(btn.textContent==="换一句"){qi=(qi+1)%quotes.length;
+    $(".stage-quote blockquote").textContent=quotes[qi];
+    $(".stage-quote .who span").textContent=`口吻示例 · ${qi+1}/3`;}
+}));
+$$(".chip").forEach(c=>c.addEventListener("click",()=>{
+  if(c.parentElement.querySelector("input"))c.classList.toggle("on");
+}));
+/* 即兴题轮换（仅预览）。 */
+const improv=["如果她的书架只能留一本书，会是哪本？为什么？","用她的口吻写一句“今晚的雨”。","她今天会怎么跟熟客打招呼？","下雨天打烊后，她一个人在店里做什么？"];
+let ii=0;
+$(".improv button").addEventListener("click",()=>{
+  ii=(ii+1)%improv.length;$(".improv p").textContent=improv[ii];
+});
+</script>
+</body>
+</html>

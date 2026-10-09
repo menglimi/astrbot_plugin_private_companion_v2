@@ -1,23 +1,4 @@
-"""Per-person capability authorization for the acquaintance page.
-
-Where grants come from, and why that decides what this module may do to them:
-
-* ``staging_bootstrap.initialize`` writes one grant per configured capability and
-  ``prepare_screen`` writes one per Screen action, both under deterministic ids.
-  The next load re-issues them, and Screen preparation *refuses* if the existing
-  one was altered. A page that revoked one would therefore show "已撤销" while
-  the capability keeps working -- a lying UI, which is worse than no button.
-* ``ContactManagement._grants`` writes a ``proactive-managed:`` grant for the
-  contact-rhythm switch, and this module writes ``acquaintance-grant:`` ones.
-
-So a grant is either **configuration-derived** (the profile document owns its
-lifecycle; this page must show its real state and say where it is changed) or
-**page-managed** (this page owns it, so it may be turned off and on here).
-
-Grant state is ``identity_grants`` and nothing else: no flag, table or config
-field here mirrors it. What the page reads is a projection recomputed from the
-current rows, and what it writes goes through the ledgered operation below.
-"""
+"""Ledgered person permissions and management tiers on the existing policy store."""
 
 from __future__ import annotations
 
@@ -25,38 +6,30 @@ from datetime import datetime
 
 from companion_v2.execution.models import TaskError, digest, encode, require
 from companion_v2.execution.service import outcome
-from companion_v2.foundation.refs import OperationRef, ScopeKind, ScopeRef, SubjectKind, SubjectRef, VersionRef
-from companion_v2.identity_policy.grants import CONFIGURATION_GRANT_PREFIXES
+from companion_v2.foundation.refs import OperationRef, ScopeKind, ScopeRef, VersionRef
+from companion_v2.identity_policy.grants import CONFIGURATION_GRANT_PREFIXES, PERSON_PERMISSION_GRANT_PREFIX
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
+from companion_v2.relationships.private_access import REVOCABLE_CAPABILITIES
 
 
 # This page's lineage. Its presence is what makes a capability retractable here.
-GRANT_PREFIX = "acquaintance-grant:"
+GRANT_PREFIX = PERSON_PERMISSION_GRANT_PREFIX
 OPERATION_OWNER = "identity.authorization.manage"
-# "陪伴对象" means both halves are active: text alone only receives, delivery
-# alone only pushes. Both together is the state the operator is looking for.
-COMPANION_CAPABILITIES = ("conversation.reply", "message.delivery")
+# Private delivery is host-managed; dialogue permission defines a companion member.
+COMPANION_CAPABILITIES = ("conversation.reply",)
 # The capabilities this page can always reach, even when the person holds no grant
 # for them: an operator has to be able to switch one back on without first
 # writing a row for it somewhere else.
-PAGE_MANAGED_CAPABILITIES = ("conversation.reply", "message.delivery", "proactive.contact")
+PAGE_MANAGED_CAPABILITIES = ("conversation.reply", "proactive.contact")
 MAX_OPERATION_KEY = 128
 MANAGED_BY_PAGE = "page"
 MANAGED_BY_CONFIGURATION = "configuration"
-# Which scope keys decide "this grant is about this person's own window".
-#
-# ``conversation_id`` and ``session_id`` are deliberately excluded, for the same
-# reason ``staging_config.SCOPE_IDENTITY_KEYS`` excludes them: they are read live
-# from the host and change when the platform opens another conversation. A grant
-# issued at bootstrap carries them; the settings the page reads do not. Matching
-# on all eight keys would therefore hide every real grant -- the page would report
-# "no authorization" for a capability that is working, which is the same lie in
-# the other direction.
-PERSON_SCOPE_KEYS = ("installation_id", "platform", "kind", "native_scope_id", "bot_id", "account_id")
+# Page requests name the registered route; permission writes use its exact scope.
+PERSON_ROUTE_KEYS = ("platform", "bot_id", "account_id", "role_id")
 
 
 class PersonAuthorizationManagement:
@@ -76,7 +49,7 @@ class PersonAuthorizationManagement:
         self.policy = ObjectAccessPolicy(runtime)
         self.identity = PersistentIdentityDirectory(runtime)
         self.operations = OperationRepository(runtime)
-        self.subjects, self.scopes = {}, {}
+        self.subjects, self.participants = {}, []
         for entry in participants:
             subject, scope = entry.get("subject"), entry.get("scope")
             if subject is None or subject.installation_id != runtime.installation_id:
@@ -85,7 +58,7 @@ class PersonAuthorizationManagement:
             # the refusal say "no window yet" instead of "not in the directory".
             self.subjects.setdefault(subject.subject_id, subject)
             if scope is not None and scope.installation_id == runtime.installation_id and scope.is_resolved:
-                self.scopes.setdefault(subject.subject_id, scope)
+                self.participants.append(entry)
 
     def _authorize(self, operator, at: datetime) -> None:
         # Same gate as the directory itself: an operator who may not read the
@@ -94,13 +67,26 @@ class PersonAuthorizationManagement:
             scope=ScopeRef(self.runtime.installation_id, "companion", ScopeKind.SYSTEM, "page.management"),
             action="memory.manage", observed_at=at))
 
-    def _person(self, subject_id):
+    def _person(self, subject_id, route=None):
         if not isinstance(subject_id, str) or not subject_id:
             raise TaskError("acquaintance_subject_required", "name one person from the acquaintance directory")
         subject = self.subjects.get(subject_id)
         if subject is None:
             raise TaskError("acquaintance_subject_unknown", "this person is not in the authorized acquaintance directory")
-        scope = self.scopes.get(subject_id)
+        candidates = [entry for entry in self.participants if entry["subject"] == subject]
+        if route is not None:
+            if (type(route) is not dict or set(route) != set(PERSON_ROUTE_KEYS)
+                    or any(type(value) is not str or not value for value in route.values())):
+                raise TaskError("acquaintance_route_invalid", "select one complete Bot, account and role route")
+            candidates = [entry for entry in candidates if
+                (entry["scope"].platform, entry["scope"].bot_id, entry["scope"].account_id,
+                 entry.get("role_id")) == tuple(route[key] for key in PERSON_ROUTE_KEYS)]
+            if not candidates:
+                raise TaskError("acquaintance_route_unknown", "this person is not registered on the selected route")
+        scopes = {entry["scope"] for entry in candidates}
+        if len(scopes) > 1:
+            raise TaskError("acquaintance_route_required", "select this person's Bot, account and role")
+        scope = next(iter(scopes), None)
         if scope is None:
             # Refusing beats inventing a window: a grant written against a guessed
             # scope would not be the one the reply path checks.
@@ -109,6 +95,8 @@ class PersonAuthorizationManagement:
         return subject, scope
 
     def _classification(self, grant):
+        if grant.capability in REVOCABLE_CAPABILITIES:
+            return MANAGED_BY_PAGE
         for prefix in self.prefixes:
             if grant.grant_id.startswith(prefix):
                 return MANAGED_BY_CONFIGURATION
@@ -141,8 +129,7 @@ class PersonAuthorizationManagement:
 
     @staticmethod
     def _same_window(grant_scope, scope) -> bool:
-        mine, theirs = grant_scope.document(), scope.document()
-        return all(mine.get(key) == theirs.get(key) for key in PERSON_SCOPE_KEYS)
+        return grant_scope == scope
 
     def _row(self, capability, grants, at: datetime):
         """One row per capability, spoken from the newest record of that capability.
@@ -153,8 +140,9 @@ class PersonAuthorizationManagement:
         switched back on. The newest record decides, which is also what the
         authorization rule does -- ``authorize`` only needs *one* active grant.
         """
-        grant = max(grants, key=lambda item: (item.valid_from, item.grant_id))
-        derived = self._classification(grant) is MANAGED_BY_CONFIGURATION
+        active = [item for item in grants if self._state(item, at) == "active"]
+        grant = max(active or grants, key=lambda item: (item.valid_from, item.grant_id))
+        derived = self._classification(grant) == MANAGED_BY_CONFIGURATION
         return {"capability": capability, "state": self._state(grant, at),
                 "managed_by": MANAGED_BY_CONFIGURATION if derived else MANAGED_BY_PAGE,
                 "revocable": not derived,
@@ -167,28 +155,40 @@ class PersonAuthorizationManagement:
         by_capability = {}
         for grant in grants:
             by_capability.setdefault(grant.capability, []).append(grant)
-        # A capability this page switched off stays listed: "off" is a decision that
-        # was taken, and hiding the row would also hide the way back on. A row is
-        # never invented for a capability nobody ever decided on.
+        # Missing permissions remain configurable, with their actual absence explicit.
         for capability in PAGE_MANAGED_CAPABILITIES:
-            if any(grant.grant_id.startswith(GRANT_PREFIX) for grant in by_capability.get(capability, ())):
-                by_capability.setdefault(capability, [])
+            by_capability.setdefault(capability, [])
         items = [self._row(capability, by_capability[capability], at) if by_capability[capability]
                  else {"capability": capability, "state": "off", "managed_by": MANAGED_BY_PAGE,
                        "revocable": True, "tier": None, "expires_at": None, "valid_from": None,
-                       "grant_id": None, "grant_revision": 0, "scope": None,
+                       "grant_id": None, "grant_revision": 0, "scope": scope.document() if scope else None,
                        "policy_revision": self.identity.revision}
                  for capability in sorted(by_capability)]
         active = {item["capability"] for item in items if item["state"] == "active"}
+        row = self.runtime.read_one("SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
+                                    (subject.kind.value, subject.subject_id))
+        tier = row["tier"] if row else AuthorizationTier.STANDARD.value
+        for item in items:
+            item["effective_state"] = ("active" if tier != AuthorizationTier.STANDARD.value
+                and item["capability"] in REVOCABLE_CAPABILITIES else item["state"])
+            item["identity_override"] = tier != AuthorizationTier.STANDARD.value and item["capability"] in REVOCABLE_CAPABILITIES
         return {"subject_id": subject.subject_id, "items": items,
-                "companion": all(name in active for name in COMPANION_CAPABILITIES),
+                "identity_tier": tier, "identity_revision": self.policy.revision,
+                # 管理员权限不是一条可单独签发的成员 grant，而是 CORE 身份的明确投影。
+                # Dashboard 可以直接呈现这项权限，实际生效仍只由 set_tier /
+                # ObjectAccessPolicy 决定，避免页面另造一套旁路授权。
+                "administrator": {"enabled": tier == AuthorizationTier.CORE.value,
+                                  "state": ("active" if tier == AuthorizationTier.CORE.value else "off"),
+                                  "label": ("核心管理员" if tier == AuthorizationTier.CORE.value else "未开启")},
+                "policy_revision": self.identity.revision,
+                "companion": tier != AuthorizationTier.STANDARD.value or all(name in active for name in COMPANION_CAPABILITIES),
                 "counts": {state: sum(1 for item in items if item["state"] == state)
                            for state in ("active", "off", "revoked", "expired", "pending")}}
 
     @outcome
-    def status(self, operator, subject_id, *, observed_at: datetime):
+    def status(self, operator, subject_id, *, observed_at: datetime, route=None):
         self._authorize(operator, observed_at)
-        subject, scope = self._person(subject_id)
+        subject, scope = self._person(subject_id, route)
         with self.runtime.read_snapshot():
             return self._status(subject, observed_at, scope=scope)
 
@@ -215,7 +215,8 @@ class PersonAuthorizationManagement:
         retry return the original result instead of a second grant.
         """
         if (type(command) is not dict
-                or set(command) != {"operation_key", "subject_id", "capability", "enabled", "expected_revision"}
+                or set(command) not in ({"operation_key", "subject_id", "capability", "enabled", "expected_revision"},
+                                       {"operation_key", "subject_id", "route", "capability", "enabled", "expected_revision"})
                 or type(command["operation_key"]) is not str or not command["operation_key"].strip()
                 or len(command["operation_key"]) > MAX_OPERATION_KEY
                 or type(command["enabled"]) is not bool
@@ -226,15 +227,15 @@ class PersonAuthorizationManagement:
                             "provide a person, a capability, a switch, the revision it was read at "
                             "and a stable operation key")
         self._authorize(operator, observed_at)
-        subject, scope = self._person(command["subject_id"])
+        subject, scope = self._person(command["subject_id"], command.get("route"))
         capability, enabled = command["capability"], command["enabled"]
         # The idempotency key names the *decision* being taken (this person, this
         # capability, this click), never the value it is set to: that is what makes
         # reusing one key for the opposite change a conflict instead of a second
         # authority. The operation id does carry the value, so an inverted retry
         # cannot collide with the original operation's identifier.
-        token = digest([self.runtime.installation_id, subject.subject_id, capability, command["operation_key"]])
-        operation = OperationRef(operation_id=GRANT_PREFIX + digest([subject.subject_id, capability, str(enabled), command["operation_key"]]),
+        token = digest([self.runtime.installation_id, subject.subject_id, scope.document(), capability, command["operation_key"]])
+        operation = OperationRef(operation_id=GRANT_PREFIX + digest([token, str(enabled)]),
                                  owner=OPERATION_OWNER, scope=scope,
                                  version=VersionRef(f"identity-authorization:{token}", 1),
                                  idempotency_key=f"identity-authorization:{token}")
@@ -259,10 +260,7 @@ class PersonAuthorizationManagement:
     def _apply(self, subject, scope, capability, enabled, at: datetime, *, expected_revision, operation_id):
         grants = self._relevant(subject, scope)
         for grant in grants:
-            if self._classification(grant) is MANAGED_BY_CONFIGURATION and grant.capability == capability:
-                # Name the actual reason per row: this lineage is re-issued from
-                # the profile document, so revoking it here would be undone (and
-                # Screen preparation would refuse the tampered grant outright).
+            if self._classification(grant) == MANAGED_BY_CONFIGURATION and grant.capability == capability:
                 raise TaskError("authorization_capability_configured",
                                 "this capability is issued from the profile configuration, "
                                 "so it is changed there and not on this page")
@@ -283,13 +281,51 @@ class PersonAuthorizationManagement:
         else:
             mine = [grant for grant in grants if grant.capability == capability
                     and self._same_window(grant.scope, scope) and grant.state is GrantState.ACTIVE
-                    and self._classification(grant) is MANAGED_BY_PAGE]
-            if not mine:
+                    and self._classification(grant) == MANAGED_BY_PAGE]
+            if not mine and capability not in REVOCABLE_CAPABILITIES:
                 raise TaskError("authorization_capability_not_managed",
                                 "this capability has no active grant this page owns")
             self._retract(subject, scope, capability, at)
+            if capability in REVOCABLE_CAPABILITIES:
+                identifier = GRANT_PREFIX + digest([subject.subject_id, capability, operation_id])
+                self.identity.issue_grant(grant_id=identifier, subject=subject, scope=scope,
+                    capability=capability, tier=AuthorizationTier.STANDARD, valid_from=at,
+                    expected_revision=self.identity.revision)
+                self.identity.revoke_grant(identifier, revoked_at=at, expected_revision=self.identity.revision)
         if self.identity.revision == before:
             # A mutation that moved nothing is a bug, not a save. Fail loudly rather
             # than report a change the next read will not show.
             raise TaskError("authorization_change_not_applied",
                             "the authorization change did not reach the grant record")
+
+    @outcome
+    def set_identity(self, operator, command, *, observed_at: datetime):
+        self._authorize(operator, observed_at)
+        if (type(command) is not dict or set(command) != {
+                "operation_key", "subject_id", "route", "tier", "expected_revision"}
+                or type(command["operation_key"]) is not str or not command["operation_key"].strip()
+                or len(command["operation_key"]) > MAX_OPERATION_KEY
+                or type(command["tier"]) is not str
+                or command["tier"] not in {item.value for item in AuthorizationTier}
+                or type(command["expected_revision"]) is not int):
+            raise TaskError("identity_command_invalid", "provide a tier, current policy revision and stable operation key")
+        subject, scope = self._person(command["subject_id"], command["route"])
+        token = digest([self.runtime.installation_id, subject, command["operation_key"]])
+        op_id = "person-identity:" + token
+        operation = OperationRef(op_id, OPERATION_OWNER, scope, VersionRef(op_id, 1), op_id)
+        with self.runtime.transaction():
+            receipt = require(self.operations.reserve(operation,
+                parameter_hash=digest([operator.principal, operator.subject, operator.binding_id,
+                    operator.binding_revision, subject, scope.document(), command["tier"]]), observed_at=observed_at))
+            if receipt.replayed:
+                if receipt.state is not OperationState.COMPLETED:
+                    raise TaskError("authorization_operation_unresolved", "the identity change is unresolved")
+            else:
+                if command["expected_revision"] != self.policy.revision:
+                    raise TaskError("identity_revision_conflict", "identity policy changed; read it again")
+                self.policy.set_tier(subject, AuthorizationTier(command["tier"]),
+                    expected_revision=self.policy.revision, observed_at=observed_at)
+                require(self.operations.transition(op_id, expected_state=OperationState.ACCEPTED,
+                    next_state=OperationState.COMPLETED, observed_at=observed_at))
+            return {"operation_id": op_id, "replayed": receipt.replayed,
+                    "status": self._status(subject, observed_at, scope=scope)}

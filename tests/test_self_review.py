@@ -195,7 +195,8 @@ class SelfReviewStorageTests(unittest.TestCase):
         from tempfile import TemporaryDirectory
 
         from companion_v2.storage.runtime import StorageOpenError, StorageRuntime
-        from companion_v2.storage.schema import SCHEMA_VERSION_V38
+        from companion_v2.storage.schema import (REQUIRED_TABLES, SCHEMA_VERSION_V38,
+            V38_REQUIRED_TABLES)
         from tests.execution_support import remove_v39
 
         with TemporaryDirectory(prefix="companion-v2-self-review-") as temporary:
@@ -207,10 +208,15 @@ class SelfReviewStorageTests(unittest.TestCase):
             runtime.close()
 
             with closing(sqlite3.connect(database)) as connection:
+                connection.execute("PRAGMA foreign_keys=OFF")
                 self.assertIsNotNone(connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'role_self_review_runs'"
                 ).fetchone())
                 remove_v39(connection)
+                for table in sorted(REQUIRED_TABLES - V38_REQUIRED_TABLES):
+                    connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+                connection.execute("DELETE FROM schema_migrations WHERE "
+                                   "CAST(substr(from_version, length('companion-v2.storage.v') + 1) AS INTEGER) >= 38")
                 connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
                                    (SCHEMA_VERSION_V38,))
                 connection.commit()

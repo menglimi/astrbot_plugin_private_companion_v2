@@ -24,6 +24,12 @@ const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
 const HOST = 'astrbot_plugin_private_companion_v2';
 const NATIVE = '/' + HOST + '/perception-native';
 const CONFIG = '/' + HOST + '/config';
+const activeHarnesses = new Set();
+
+test.afterEach(() => {
+  for (const fixture of activeHarnesses) fixture.page.unmount();
+  activeHarnesses.clear();
+});
 
 /* 后端 status 的 contact 分区（照 native_perception_api._status）。
    注意 effective 上四个字段与 purposes 上每项 allowed/reason 都是页面的判据来源。 */
@@ -52,9 +58,14 @@ const baseSettings = () => ({
 });
 
 /* 上界：只保留后面两条通用断言用得到的字段。 */
-function harness({nativeApi = NATIVE, configApi = CONFIG} = {}) {
+function harness({nativeApi = NATIVE, configApi = CONFIG, sessionStore = new Map(), sessionStorageBlocked = false,
+  localStorageBlocked = false, historyBlocked = false, historyEntry = {current: null}} = {}) {
   const requests = [];
+  const clipboardWrites = [];
+  let gateSettingsTarget = null;
+  let gateSettingsArea = null;
   const window = {
+    navigator: {clipboard: {writeText: async text => clipboardWrites.push(text)}},
     CompanionProduct: {
       hosted: () => true,
       role: () => ({role_id: 'role-1', perception_native_api: nativeApi, config_api: configApi}),
@@ -70,18 +81,32 @@ function harness({nativeApi = NATIVE, configApi = CONFIG} = {}) {
       addEventListener: () => {},
       querySelector: () => null,
       querySelectorAll: () => [],
+      getElementById: id => id === 'contact-gate-settings' ? gateSettingsTarget
+        : id === 'contact-gate-settings-area' ? gateSettingsArea : null,
+      documentElement: {dataset: {}},
       body: {classList: {add: () => {}, remove: () => {}, toggle: () => {}}},
       title: '',
+    },
+    history: {
+      get state() { return historyEntry.current; },
+      replaceState(state) { if (historyBlocked) throw new Error('SecurityError'); historyEntry.current = state; },
     },
     matchMedia: () => ({matches: false}),
     console, Intl, Date, JSON, Math, Number, Object, Array, String, Set, Map, Boolean, Error, Promise,
     localStorage: (() => { const store = new Map(); return {
-      getItem: k => (store.has(k) ? store.get(k) : null),
-      setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k)}; })(),
+      getItem: k => { if (localStorageBlocked) throw new Error('SecurityError'); return store.has(k) ? store.get(k) : null; },
+      setItem: (k, v) => { if (localStorageBlocked) throw new Error('SecurityError'); store.set(k, String(v)); },
+      removeItem: k => { if (localStorageBlocked) throw new Error('SecurityError'); store.delete(k); }, _store:store}; })(),
+  };
+  const sessionStorage = {
+    getItem: key => { if (sessionStorageBlocked) throw new Error('SecurityError'); return sessionStore.has(key) ? sessionStore.get(key) : null; },
+    setItem: (key, value) => { if (sessionStorageBlocked) throw new Error('SecurityError'); sessionStore.set(key, String(value)); },
+    removeItem: key => { if (sessionStorageBlocked) throw new Error('SecurityError'); sessionStore.delete(key); },
   };
   vm.runInNewContext(source, {
-    window, document: window.document, console, Intl, Date, JSON, Math, Number, Object, Array,
-    String, Set, Map, Boolean, Error, Promise, localStorage: window.localStorage, URL,
+    window, document: window.document, navigator: window.navigator, console, Intl, Date, JSON, Math, Number, Object, Array,
+    String, Set, Map, Boolean, Error, Promise, localStorage: window.localStorage, sessionStorage, URL,
+    matchMedia: () => ({matches: true}),
     /* 计时器必须给：页面里 bounded() 用 Promise.race 把每个请求包了一层 15 秒超时。
        少了 setTimeout/clearTimeout 的话第一个请求在发出之前就抛
        「clearTimeout is not defined」，整页停在初始状态——
@@ -108,10 +133,14 @@ function harness({nativeApi = NATIVE, configApi = CONFIG} = {}) {
   }
   const page = window.CompanionContactPage;
   const element = root();
-  return {page, element, requests, window,
+  const fixture = {page, element, requests, clipboardWrites, window, sessionStore, historyEntry, localStore:window.localStorage._store,
+    setGateSettingsTarget: target => {gateSettingsTarget = target;},
+    setGateSettingsArea: target => {gateSettingsArea = target;},
     reply: (request, payload) => request.resolve({status: 'ok', data: payload}),
     fail: (request, code) => request.resolve({status: 'error', message: code, data: {code}}),
     settle};
+  activeHarnesses.add(fixture);
+  return fixture;
 }
 
 /* 页面挂载后要串行走三步：桥就绪 → 目标目录 → native 状态 + config 契约。
@@ -156,6 +185,38 @@ test('挂载后先读角色级状态，再读同一角色的配置契约', async
   assert.equal(h.page.state.data.configToken, 'c'.repeat(64));
 });
 
+test('从状态入口进入后切到开口闸门并聚焦设置区', async () => {
+  const h = harness();
+  await boot(h);
+  const target = {tabIndex: 0, hasAttribute: () => false,
+    scrollIntoView(options) { this.scrolled = options.block === 'start'; },
+    focus(options) { this.focused = options.preventScroll; }};
+  h.setGateSettingsTarget(target);
+  assert.equal(h.page.state.data.view, 'dial');
+  assert.equal(h.page.openGateSettingsView(), true);
+  assert.equal(h.page.state.data.view, 'gates');
+  assert.match(h.element.innerHTML, /开口闸门/);
+  assert.equal(target.scrolled, true);
+  assert.equal(target.focused, true);
+  h.page.unmount();
+});
+
+test('开口闸门设置只在开口闸门视图展示', async () => {
+  const h = harness();
+  await boot(h);
+  const area = {hidden: false};
+  h.setGateSettingsArea(area);
+
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'tests'}} : null}});
+  assert.equal(area.hidden, true, '消息测试视图不能把回复闸门显示在测试内容下方');
+
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'gates'}} : null}});
+  assert.equal(area.hidden, false, '选中开口闸门后才显示对应配置');
+
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'tests'}} : null}});
+  assert.equal(area.hidden, true, '离开开口闸门视图后配置随之隐藏');
+});
+
 test('路径是插件相对路径：切掉插件目录名，否则宿主会拼两次', async () => {
   const h = harness();
   await boot(h);
@@ -179,6 +240,44 @@ test('多目标的状态与字段契约采用同一对象角色的目录路径',
   h.reply(h.requests[1], {sections: {'proactive.contact': {edit_token: 'c'.repeat(64)}}});
   await mounted;
   assert.equal(h.page.state.data.ready, true);
+  h.page.unmount();
+});
+
+test('联系状态已读到但配置契约失败时分开展示，保留草稿并允许单独重试', async () => {
+  const h = harness();
+  const mounted = h.page.mount(h.element);
+  await h.settle();
+  h.reply(h.requests[0], status(baseSettings(), {effective: {
+    allowed: false, reason: 'authorization_denied', automatic_allowed: false,
+    automatic_reason: 'authorization_denied', model_registered: true,
+  }}));
+  await h.settle();
+  h.fail(h.requests[1], 'configuration_scope_denied');
+  await mounted;
+
+  assert.equal(h.page.state.data.ready, true, '运行状态已成功读取');
+  assert.equal(h.page.state.data.effective.reason, 'authorization_denied');
+  assert.match(h.element.innerHTML, /当前对象尚未授予联系权限/);
+  assert.match(h.element.innerHTML, /联系状态已读取；配置编辑信息未读到，保存暂不可用/);
+  assert.doesNotMatch(h.element.innerHTML, /联系条件暂时无法核对/);
+
+  h.element.dispatch('change', {target: {closest: selector => selector === '[data-field]'
+    ? {dataset: {field: 'quiet_enabled'}, type: 'checkbox', checked: false} : null}});
+  assert.equal(h.page.state.data.touched.size, 1, '契约失败时草稿仍然可编辑');
+  assert.match(h.element.innerHTML, /data-action="save" disabled/, '没有配置令牌不能提交草稿');
+
+  h.element.dispatch('click', {target: {closest: selector => selector === '[data-action]'
+    ? {dataset: {action: 'retry-contract'}} : null}});
+  await h.settle();
+  const retry = h.requests.at(-1);
+  assert.equal(retry.method, 'GET');
+  assert.equal(retry.route, 'config');
+  h.reply(retry, {sections: {'proactive.contact': {edit_token: 'r'.repeat(64)}}});
+  await h.settle();
+  assert.equal(h.page.state.data.touched.size, 1, '重新读取契约不应丢弃草稿');
+  assert.equal(h.page.state.data.configToken, 'r'.repeat(64));
+  assert.doesNotMatch(h.element.innerHTML, /配置编辑信息未能读取/);
+  assert.match(h.element.innerHTML, /data-action="save"(?! disabled)/);
   h.page.unmount();
 });
 
@@ -323,6 +422,39 @@ test('环心那句话与后端同源：后端说不允许就照实说，不自�
   assert.ok(!html.includes('此刻可以开口'), '不能同时说可以开口');
 });
 
+test('主动联系与后台自动联系关闭时显示具体原因，不回退到无法核对', async () => {
+  const disabled = harness();
+  await boot(disabled, {...baseSettings(), enabled:false, automatic_enabled:false}, {
+    effective: {allowed:false, reason:'proactive_disabled', automatic_allowed:false,
+      automatic_reason:'proactive_disabled', model_registered:true},
+  });
+  assert.match(disabled.element.innerHTML, /主动联系总开关已关闭/);
+  assert.doesNotMatch(disabled.element.innerHTML, /联系条件暂时无法核对/);
+
+  const automaticOff = harness();
+  await boot(automaticOff, {...baseSettings(), automatic_enabled:false}, {
+    effective: {allowed:true, reason:null, automatic_allowed:false,
+      automatic_reason:'contact_automatic_disabled', model_registered:true},
+  });
+  automaticOff.page.openGateSettingsView();
+  assert.match(automaticOff.element.innerHTML, /后台自动联系未开启/);
+  assert.doesNotMatch(automaticOff.element.innerHTML, /联系条件暂时无法核对/);
+});
+
+test('授权阻断时不把后台自动联系误报成开关关闭', async () => {
+  const h = harness();
+  await boot(h, baseSettings(), {
+    effective: {allowed: false, reason: 'authorization_denied', automatic_allowed: false,
+      automatic_reason: 'authorization_denied', model_registered: true},
+  });
+  assert.match(h.element.innerHTML, /当前对象尚未授予联系权限/);
+  assert.doesNotMatch(h.element.innerHTML, /后台自动联系未开启/);
+  /* 两个开关是设置意图，授权是另一道 effective 闸门；授权被拒时仍应保持
+     已保存的开关状态可见，用户才能知道该去关系与权限处理。 */
+  assert.match(h.element.innerHTML, /data-field="enabled"[^>]* checked/);
+  assert.match(h.element.innerHTML, /data-field="automatic_enabled"[^>]* checked/);
+});
+
 test('联系授权阻断提供关系与权限直达入口，普通暂停不显示该入口', async () => {
   const denied = harness();
   await boot(denied, baseSettings(), {
@@ -426,7 +558,7 @@ const CONTACT_FIELDS = {
   ],
 };
 
-test('五个视图渲染出的字段清单与本页写出口完全一致', async () => {
+test('五个设置视图渲染出的字段清单与本页写出口完全一致', async () => {
   const h = harness();
   await boot(h);
   const seen = new Set();
@@ -443,7 +575,7 @@ test('五个视图渲染出的字段清单与本页写出口完全一致', async
     assert.deepEqual(names.slice().sort(), expected.slice(),
       view + ' 的字段清单变了。加字段要连这份清单一起改；少字段说明有控件没接上。');
   }
-  assert.equal(seen.size, 124, '五个视图合起来必须是 124 个 data-field 绑定');
+  assert.equal(seen.size, 124, '五个设置视图合起来必须是 124 个 data-field 绑定');
   /* 强度档位是五档共用一个字段，走 data-tier 而不是 data-field：
      只数 data-field 会把它整个漏掉。三个问候锚点同理（它们不是控件，是环上的热点）。 */
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'dial'}} : null}});
@@ -451,6 +583,23 @@ test('五个视图渲染出的字段清单与本页写出口完全一致', async
   assert.equal((dial.match(/data-tier="/g) || []).length, 5, '强度档位五档都要在');
   assert.ok(dial.includes('data-tier="balanced"'), '当前档位要有对应的按钮可点');
   assert.equal((dial.match(/data-anchor="/g) || []).length, 3, '三个问候锚点要画在环上');
+});
+
+test('触发源仍可在主动联系页直接配置，并提供到感知分区的辅助跳转', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'sources'}} : null}});
+  const html = h.element.innerHTML;
+  assert.equal((html.match(/class="ct-src-group/g) || []).length, 8, '八组触发源都应保留');
+  for (const name of ['weather_checkin_enabled', 'news_share_enabled', 'meal_checkin_enabled',
+    'web_exploration_enabled', 'screen_glance_enabled', 'enable_llm_proactive_persona_judge',
+    'balance_awareness_enabled']) {
+    assert.match(html, new RegExp(`data-field="${name}"`), `${name} 必须能在主动联系页直接编辑`);
+  }
+  assert.equal((html.match(/data-perception-tab-target="/g) || []).length, 5,
+    '触发源卡片应提供五个感知分区辅助跳转');
+  assert.doesNotMatch(html, /唯一的感知配置入口|感知来源统一在感知页维护/,
+    '不能把感知页描述成唯一可写入口');
 });
 
 /* ---- 版式与盘面动效 ---------------------------------------------------
@@ -500,6 +649,23 @@ test('盘面变化只闪改动的那一圈，而且只闪一次', async () => {
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-tier]' ? {dataset: {tier: 'live'}} : null}});
   assert.ok(stage().includes('is-pulse-tier'), '换强度档位要闪三圈');
   assert.equal(h.page.state.data.draft.proactive_intensity_preset, 'live', '档位仍要进草稿');
+});
+
+test('切换强度档位立即更新卡片与当前生效的换算数字', async () => {
+  const h = harness();
+  await boot(h);
+  const effective = () => {
+    const match = /class="ct-tier-effective" role="status"[^>]*>[\s\S]*?<strong>([^<]+)<\/strong>[\s\S]*?<strong>([^<]+)<\/strong>/.exec(
+      h.element.innerHTML);
+    return match ? match.slice(1) : [];
+  };
+  assert.deepEqual(effective(), ['48 分钟', '10.5 分钟'], '均衡档位的生效数字应来自当前基准值');
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-tier]' ? {dataset: {tier: 'live'}} : null}});
+  assert.deepEqual(effective(), ['12 分钟', '1.5 分钟'], '切到实时档位后生效数字必须立即变化');
+  assert.ok(h.element.innerHTML.includes('data-field="interval_seconds" value="3600"'),
+    '基础间隔仍保留为可编辑的原始值');
+  assert.ok(h.element.innerHTML.includes('data-field="idle_seconds" value="900"'),
+    '基础等候仍保留为可编辑的原始值');
 });
 
 test('触发源卡片头部的「n/m 开启」和卡片里真实的开关一致', async () => {
@@ -654,11 +820,253 @@ test('保存成功后清空草稿并重新读取状态', async () => {
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
   await h.settle();
   const post = h.requests.find(r => r.method === 'POST');
-  h.reply(post, {result: {}, status: {sections: {['proactive.contact']: {edit_token: 'c2'.repeat(32)}}}});
+  h.reply(post, {result: {operation_id: 'contact-op-1', replayed: false},
+    status: {sections: {['proactive.contact']: {edit_token: 'c2'.repeat(32)}}}});
   await h.settle();
   assert.equal(h.page.state.data.touched.size, 0, '保存成功后草稿要清空');
   assert.equal(h.page.state.data.configToken, 'c2'.repeat(32), '要用确认里的新令牌');
   assert.ok(h.page.state.data.notice.includes('已保存'), '要有确认');
+});
+
+test('写入回执已确认但没有状态快照时，单独刷新联系配置令牌', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  h.reply(post, {result: {operation_id: 'contact-op-without-status', replayed: false}, status: null});
+  await h.settle();
+  assert.equal(h.page.state.data.pendingWrite, null, '持久回执足以确认写入');
+  assert.equal(h.page.state.data.touched.size, 0);
+  const reread = h.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
+  h.reply(reread, status(baseSettings()));
+  await h.settle();
+  const contract = h.requests.filter(r => r.method === 'GET' && r.route === 'config').at(-1);
+  assert.ok(contract, '联系状态刷新后还要单独刷新配置令牌');
+  h.reply(contract, {sections: {['proactive.contact']: {edit_token: 'c7'.repeat(32), fields: {}}}});
+  await h.settle();
+  assert.equal(h.page.state.data.configToken, 'c7'.repeat(32));
+  assert.match(h.page.state.data.notice, /已保存/);
+  assert.doesNotMatch(h.element.innerHTML, /保存结果尚未确认/);
+});
+
+test('a saved receipt stays confirmed when the follow-up status read fails', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  h.reply(post, {result: {operation_id: 'contact-op-2', replayed: false}, status: {sections: {
+    ['proactive.contact']: {edit_token: 'c2'.repeat(32)},
+  }}});
+  await h.settle();
+  const reread = h.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
+  reread.reject(new Error('connection reset'));
+  await h.settle();
+  assert.equal(h.page.state.data.pendingWrite, null);
+  assert.match(h.page.state.data.notice, /已保存 1 项，但当前状态未能刷新/);
+  assert.doesNotMatch(h.page.state.data.notice, /保存结果尚未确认|未收到服务确认/);
+});
+
+test('blocked sessionStorage falls back to durable localStorage before submitting', async () => {
+  const h = harness({sessionStorageBlocked: true});
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  assert.ok(post, 'storage fallback should allow the request after recording it');
+  assert.equal(h.localStore.size, 1, 'the exact request must be durable before it is sent');
+  const saved = JSON.parse([...h.localStore.values()][0]);
+  assert.equal(JSON.stringify(saved.body), JSON.stringify(post.values));
+  post.reject(new Error('connection reset'));
+  await h.settle();
+  assert.equal(h.page.state.data.pendingWrite.body.operation_key, saved.body.operation_key);
+  assert.equal(h.localStore.size, 1, 'an unknown outcome must retain the same operation for verification');
+  h.page.unmount();
+});
+
+test('sandboxed storage and history keep an unknown save in the page session with the same operation', async () => {
+  const h = harness({sessionStorageBlocked: true, localStorageBlocked: true, historyBlocked: true});
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  const save = () => h.element.dispatch('click', {target: {closest: selector =>
+    selector === '[data-action]' ? {dataset: {action: 'save'}} : null}});
+  save();
+  await h.settle();
+  const original = h.requests.find(request => request.method === 'POST');
+  assert.ok(original);
+  original.reject(new Error('connection reset'));
+  await h.settle();
+  save();
+  await h.settle();
+  const resumed = h.requests.filter(request => request.method === 'POST').at(-1);
+  assert.notEqual(resumed, original);
+  assert.equal(JSON.stringify(resumed.values), JSON.stringify(original.values));
+  h.reply(resumed, {result: {operation_id: 'contact-sandbox', replayed: true}, status: {sections: {
+    ['proactive.contact']: {edit_token: 'c2'.repeat(32)},
+  }}});
+  await h.settle();
+  assert.equal(h.page.state.data.pendingWrite, null);
+});
+
+test('blocked browser storage records an unknown save in history and restores the same operation after reload', async () => {
+  const historyEntry = {current: {router: {index: 3}}};
+  const first = harness({sessionStorageBlocked: true, localStorageBlocked: true, historyEntry});
+  await boot(first);
+  first.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  first.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
+  await first.settle();
+  const originalPost = first.requests.find(r => r.method === 'POST');
+  assert.ok(originalPost, 'history state should allow submit after both browser storage APIs fail');
+  const originalBody = JSON.parse(JSON.stringify(originalPost.values));
+  assert.deepEqual(historyEntry.current.router, {index: 3}, 'the host history state must be preserved');
+  originalPost.reject(new Error('connection reset'));
+  await first.settle();
+  first.page.unmount();
+
+  const reloaded = harness({sessionStorageBlocked: true, localStorageBlocked: true, historyEntry});
+  await boot(reloaded);
+  assert.deepEqual(JSON.parse(JSON.stringify(reloaded.page.state.data.pendingWrite.body)), originalBody);
+  await new Promise(resolve => setTimeout(resolve, 450));
+  const retryPost = reloaded.requests.filter(r => r.method === 'POST').at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(retryPost.values)), originalBody);
+  reloaded.reply(retryPost, {result: {operation_id: 'contact-op-4', replayed: true}, status: {sections: {
+    ['proactive.contact']: {edit_token: 'c4'.repeat(32)},
+  }}});
+  await reloaded.settle();
+  const refreshed = reloaded.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
+  reloaded.reply(refreshed, status(baseSettings()));
+  await reloaded.settle();
+  assert.equal(reloaded.page.state.data.pendingWrite, null);
+  assert.equal(JSON.stringify(historyEntry.current), JSON.stringify({router: {index: 3}}),
+    'confirmation should remove only the contact record');
+});
+
+test('an unknown contact save is restored after reload and retried with the identical request', async () => {
+  const sessionStore = new Map();
+  const first = harness({sessionStore});
+  await boot(first);
+  first.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  first.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
+  await first.settle();
+  const originalPost = first.requests.find(r => r.method === 'POST');
+  const originalBody = JSON.parse(JSON.stringify(originalPost.values));
+  originalPost.reject(new Error('connection reset'));
+  await first.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(first.page.state.data.pendingWrite.body)), originalBody);
+  first.page.unmount();
+
+  const reloaded = harness({sessionStore});
+  await boot(reloaded);
+  assert.deepEqual(JSON.parse(JSON.stringify(reloaded.page.state.data.pendingWrite.body)), originalBody);
+  assert.match(reloaded.element.innerHTML, /data-action="retry-pending"/);
+  assert.match(reloaded.element.innerHTML, /立即核对/);
+  assert.equal((reloaded.element.innerHTML.match(/data-action="retry-pending"/g) || []).length, 1);
+  await new Promise(resolve => setTimeout(resolve, 450));
+  const retryPost = reloaded.requests.filter(r => r.method === 'POST').at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(retryPost.values)), originalBody);
+  reloaded.reply(retryPost, {result: {operation_id: 'contact-op-3', replayed: true}, status: {sections: {
+    ['proactive.contact']: {edit_token: 'c3'.repeat(32)},
+  }}});
+  await reloaded.settle();
+  const refreshed = reloaded.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
+  reloaded.reply(refreshed, status(baseSettings()));
+  await reloaded.settle();
+  assert.equal(reloaded.page.state.data.pendingWrite, null);
+  assert.equal(sessionStore.size, 0);
+  assert.match(reloaded.page.state.data.notice, /已保存/);
+});
+
+test('the single pending notice action immediately checks the original save', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: selector => selector === '[data-action]'
+    ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+  const original = h.requests.filter(request => request.method === 'POST').at(-1);
+  const originalBody = JSON.parse(JSON.stringify(original.values));
+  original.reject(new Error('connection reset'));
+  await h.settle();
+
+  h.element.dispatch('click', {target: {closest: selector => selector === '[data-action]'
+    ? {dataset: {action: 'retry-pending'}} : null}});
+  await h.settle();
+  const retry = h.requests.filter(request => request.method === 'POST').at(-1);
+  assert.notEqual(retry, original);
+  assert.deepEqual(JSON.parse(JSON.stringify(retry.values)), originalBody);
+  h.reply(retry, {result: {operation_id: 'contact-manual-check', replayed: true}, status: {sections: {
+    ['proactive.contact']: {edit_token: 'c6'.repeat(32)},
+  }}});
+  await h.settle();
+  const refreshed = h.requests.filter(request => request.method === 'GET' && request.route === 'perception-native').at(-1);
+  h.reply(refreshed, status(baseSettings()));
+  await h.settle();
+  assert.equal(h.page.state.data.pendingWrite, null);
+  assert.match(h.page.state.data.notice, /已保存/);
+});
+
+test('a pending save keeps retrying automatically with one notice and the same operation', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: selector => selector === '[data-action]'
+    ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+
+  const original = h.requests.filter(request => request.method === 'POST').at(-1);
+  const originalBody = JSON.parse(JSON.stringify(original.values));
+  original.reject(Object.assign(new Error('connection reset'), {code: 'bridge_timeout'}));
+  await h.settle();
+
+  for (const delay of [450, 850, 1650]) {
+    await new Promise(resolve => setTimeout(resolve, delay));
+    const retry = h.requests.filter(request => request.method === 'POST').at(-1);
+    assert.notEqual(retry, original);
+    assert.deepEqual(JSON.parse(JSON.stringify(retry.values)), originalBody,
+      'every automatic verification must preserve the exact operation and body');
+    retry.reject(Object.assign(new Error('route response unavailable'), {code: 'dashboard_bridge_not_ready'}));
+    await h.settle();
+  }
+
+  assert.ok(h.page.state.data.pendingWrite, 'unconfirmed requests remain available for manual verification');
+  assert.equal((h.element.innerHTML.match(/class="ct-notice is-error"/g) || []).length, 1,
+    'save uncertainty and retry failure appear in one notice');
+  assert.match(h.element.innerHTML, /核对请求未收到确认（错误码：dashboard_bridge_not_ready）/);
+  assert.match(h.element.innerHTML, /系统会持续沿用同一操作标识核对/,
+    'automatic verification continues after transient failures');
+  assert.doesNotMatch(h.element.innerHTML, /联系条件暂时无法核对/,
+    'a save transport error must not be presented as a contact-condition read failure');
+  assert.match(h.element.innerHTML, /data-action="retry-pending"/);
+  assert.equal((h.element.innerHTML.match(/data-action="retry-pending"/g) || []).length, 1,
+    'the pending write has one immediate retry action');
+  assert.doesNotMatch(h.element.innerHTML, /核对原保存结果/,
+    'the header must not duplicate the in-context retry button');
+
+  await new Promise(resolve => setTimeout(resolve, 3250));
+  const automatic = h.requests.filter(request => request.method === 'POST').at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(automatic.values)), originalBody,
+    'automatic verification must continue to use the original operation after repeated failures');
+  h.reply(automatic, {result: {operation_id: 'contact-op-auto', replayed: true}, status: {sections: {
+    ['proactive.contact']: {edit_token: 'c5'.repeat(32)},
+  }}});
+  await h.settle();
+  const refreshed = h.requests.filter(request => request.method === 'GET' && request.route === 'perception-native').at(-1);
+  h.reply(refreshed, status(baseSettings()));
+  await h.settle();
+  assert.equal(h.page.state.data.pendingWrite, null);
+  assert.doesNotMatch(h.element.innerHTML, /保存结果尚未确认/);
 });
 
 test('保存失败时报错并保留草稿，除非是版本冲突', async () => {
@@ -673,6 +1081,23 @@ test('保存失败时报错并保留草稿，除非是版本冲突', async () =>
   assert.equal(h.page.state.data.error, true);
   assert.ok(h.page.state.data.notice.includes('整段关系'), '关系级额度的专用文案要接上');
   assert.equal(h.page.state.data.touched.size, 1, '非冲突失败要保留草稿，用户不必重填');
+  assert.equal(h.page.state.data.pendingWrite, null, '明确拒绝后不应保留待核对请求');
+  assert.match(h.element.innerHTML, /整段关系/, '保存失败必须立即在页面给出反馈');
+});
+
+test('后端联系配置错误使用可理解的文案并立即反馈', async () => {
+  const h = harness();
+  await boot(h);
+  const box = fakeInput({type: 'checkbox', checked: false, dataset: {field: 'news.enabled'}});
+  h.element.dispatch('change', fieldEvent(box, 'change'));
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+  const post = h.requests.find(r => r.method === 'POST');
+  h.fail(post, 'contact_configuration_invalid');
+  await h.settle();
+  assert.equal(h.page.state.data.touched.size, 1, '普通配置错误要保留草稿');
+  assert.match(h.element.innerHTML, /提交的字段或操作不完整/);
+  assert.doesNotMatch(h.element.innerHTML, /联系条件暂时无法核对/);
 });
 
 test('切换视图不丢草稿', async () => {
@@ -680,19 +1105,50 @@ test('切换视图不丢草稿', async () => {
   await boot(h);
   const box = fakeInput({type: 'checkbox', checked: false, dataset: {field: 'news.enabled'}});
   h.element.dispatch('change', fieldEvent(box, 'change'));
-  for (const view of ['purposes', 'gates', 'budgets', 'sources', 'dial']) {
+  for (const view of ['tests', 'purposes', 'gates', 'budgets', 'sources', 'dial']) {
     h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view}} : null}});
     assert.equal(h.page.state.data.touched.size, 1, '切视图不能把未保存的改动丢掉：' + view);
   }
 });
 
-test('五个视图都能渲染出内容', async () => {
+test('消息测试是一级视图，未读到设置时也可以打开', async () => {
   const h = harness();
   await boot(h);
-  const markers = {purposes: 'ct-purposes', gates: 'ct-gates', budgets: 'ct-budgets',
-    sources: 'ct-sources', dial: 'ct-dial'};
+  h.page.state.data.ready = false;
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  assert.equal(h.page.state.data.view, 'tests');
+  assert.ok(h.element.innerHTML.includes('ct-tests'), '静态测试指令不应依赖后端设置状态');
+  assert.ok(h.element.innerHTML.includes('ct-head-test'), '页头应保留消息测试直达入口');
+  assert.equal((h.element.innerHTML.match(/data-test-id="/g) || []).length, 15);
+  assert.equal((h.element.innerHTML.match(/data-test-coverage="ready"/g) || []).length, 15);
+  assert.equal((h.element.innerHTML.match(/data-test-coverage="partial"/g) || []).length, 0);
+  assert.equal((h.element.innerHTML.match(/data-test-coverage="missing"/g) || []).length, 0);
+  assert.match(h.element.innerHTML, /生产器已接通 <strong>15<\/strong>/);
+  assert.ok(!h.element.innerHTML.includes('当前没有独立 invitation 生产器'));
+  for (const purpose of ['affection','care','play','repair','invitation']) {
+    const start = h.element.innerHTML.indexOf(`data-test-id="${purpose}"`);
+    const end = h.element.innerHTML.indexOf('</article>', start);
+    assert.ok(start >= 0 && end > start, `${purpose} 测试卡片应存在`);
+    assert.ok(h.element.innerHTML.slice(start, end).includes('data-test-coverage="ready"'),
+      `${purpose} 已有生产器，应显示为已接通`);
+  }
+});
+
+test('七个视图都能渲染出内容', async () => {
+  const h = harness();
+  await boot(h);
+  const markers = {tests: 'ct-tests', purposes: 'ct-purposes', gates: 'ct-gates',
+    budgets: 'ct-budgets', sources: 'ct-sources', materials: 'ct-materials', dial: 'ct-dial'};
   for (const [view, marker] of Object.entries(markers)) {
     h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view}} : null}});
+    if (view === 'materials') {
+      await h.settle();
+      const request = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
+      assert.ok(request, '打开素材池时读取当前作用域的真实素材');
+      h.reply(request, {observed_at: '2026-10-07T00:00:00+00:00', count: 0, items: []});
+      await h.settle();
+    }
     assert.ok(h.element.innerHTML.includes(marker), view + ' 视图渲染为空');
   }
   /* 契机矩阵必须是 15 行——15 是 PURPOSES 的真实条数（账本曾记 12，实测 15）。 */
@@ -702,6 +1158,215 @@ test('五个视图都能渲染出内容', async () => {
      模式要排除装饰用的 ct-gate-mark / ct-gate-body / ct-gate-state。 */
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'gates'}} : null}});
   assert.equal((h.element.innerHTML.match(/class="ct-gate( is-\w+)?"/g) || []).length, 7);
+});
+
+test('素材池按需读取真实数据、展示来源与有效期，并支持筛选', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'materials'}} : null}});
+  await h.settle();
+  const request = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
+  assert.ok(request, '素材池应从当前私聊角色的只读端点加载');
+  h.reply(request, {observed_at: '2026-10-07T00:00:00+00:00', count: 2, items: [
+    {id: 'dialog-1', category: '对话', purpose: '日常承接、关系表达', title: '最近私聊内容',
+      detail: '我最近在准备周末的旅行', source: '当前私聊', captured_at: '2026-10-07T00:00:00+00:00',
+      expires_at: '2026-10-07T01:00:00+00:00'},
+    {id: 'news-1', category: '资讯', purpose: '外部资讯', title: '<新闻标题>',
+      detail: '一条有来源的摘要', note: '资讯源', source: '资讯源', captured_at: '2026-10-06T23:00:00+00:00',
+      expires_at: '2026-10-07T00:30:00+00:00'},
+  ]});
+  await h.settle();
+  assert.equal(h.page.state.data.materialsLoaded, true);
+  assert.equal(h.page.state.data.materialItems.length, 2);
+  assert.match(h.element.innerHTML, /最近私聊内容/);
+  assert.match(h.element.innerHTML, /&lt;新闻标题&gt;/, '素材正文必须按文本转义');
+  assert.match(h.element.innerHTML, /有效至/);
+  assert.match(h.element.innerHTML, /2 项素材/);
+
+  const cards = [
+    {dataset: {category: '对话', search: '对话 日常承接 最近私聊内容 周末旅行'}, hidden: false},
+    {dataset: {category: '资讯', search: '资讯 外部资讯 新闻标题 摘要'}, hidden: false},
+  ];
+  const count = {textContent: ''}, empty = {hidden: true};
+  h.element.querySelectorAll = selector => selector === '[data-material-card]' ? cards : [];
+  h.element.querySelector = selector => selector === '[data-material-result-count]' ? count
+    : selector === '.ct-material-filter-empty' ? empty : null;
+  const filter = {value: '资讯', closest: sel => sel === '[data-material-category]' ? filter : null};
+  h.element.dispatch('change', {target: filter});
+  assert.deepEqual(cards.map(card => card.hidden), [true, false]);
+  const search = {value: '沒有', closest: sel => sel === '[data-material-search]' ? search : null};
+  h.element.dispatch('input', {target: search});
+  assert.deepEqual(cards.map(card => card.hidden), [true, true]);
+  assert.equal(empty.hidden, false);
+  assert.equal(h.page.state.data.touched.size, 0, '素材篩選不應觸碰配置草稿');
+  assert.equal(h.requests.filter(r => r.method === 'POST').length, 0, '素材池只能讀取');
+});
+
+test('消息测试支持按类别、覆盖状态和内容筛选', async () => {
+  const h = harness();
+  await boot(h);
+  const ids = ['affection','care','play','repair','chat','greeting','followup','invitation',
+    'reminder','meal','life','creation','news','environment','screen'];
+  const cards = ids.map(testId => ({dataset: {testId}, hidden: false}));
+  const count = {textContent: ''}, empty = {hidden: true};
+  h.element.querySelectorAll = selector => selector === '[data-test-card]' ? cards : [];
+  h.element.querySelector = selector => selector === '[data-test-result-count]' ? count
+    : selector === '.ct-test-empty' ? empty : null;
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  const html = h.element.innerHTML;
+  assert.ok(html.includes('data-test-search'));
+  assert.ok(html.includes('data-test-bucket-filter'));
+  assert.ok(html.includes('data-test-coverage-filter'));
+  assert.match(html, /data-test-copy="affection"><svg viewBox="0 0 24 24"[^>]*><rect x="8" y="8"/,
+    '复制指令按钮使用复制图标');
+  assert.ok(html.includes('尚无独立生产器'));
+  assert.equal(count.textContent, '15 / 15 类');
+
+  const bucket = {value: 'daily', closest: selector => selector === '[data-test-bucket-filter]' ? bucket : null};
+  h.element.dispatch('change', {target: bucket});
+  assert.deepEqual(cards.filter(card => !card.hidden).map(card => card.dataset.testId),
+    ['greeting','followup','invitation','reminder','meal']);
+  assert.equal(count.textContent, '5 / 15 类');
+
+  const coverage = {value: 'ready', closest: selector => selector === '[data-test-coverage-filter]' ? coverage : null};
+  h.element.dispatch('change', {target: coverage});
+  assert.deepEqual(cards.filter(card => !card.hidden).map(card => card.dataset.testId),
+    ['greeting','followup','invitation','reminder','meal']);
+  assert.equal(count.textContent, '5 / 15 类');
+
+  const search = {value: '撤权', closest: selector => selector === '[data-test-search]' ? search : null};
+  h.element.dispatch('input', {target: search});
+  assert.equal(count.textContent, '0 / 15 类');
+  assert.equal(empty.hidden, false, '无匹配时显示空状态');
+  assert.equal(h.page.state.data.touched.size, 0, '筛选不能修改配置');
+});
+
+test('复制主动消息测试指令只写入剪贴板，不调用模型或发送接口', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  const requestCount = h.requests.length;
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-copy]'
+    ? {dataset: {testCopy: 'news'}} : null}});
+  await h.settle();
+  assert.equal(h.clipboardWrites.length, 1);
+  assert.match(h.clipboardWrites[0], /这是一条「外部资讯」主动联系候选/);
+  assert.match(h.clipboardWrites[0], /素材来源：带标题、原链接和发布时间的当前资讯条目/);
+  assert.match(h.clipboardWrites[0], /严格遵守通用 JSON 合同，并给出 decision_confidence/);
+  assert.match(h.clipboardWrites[0], /通过条件：来源不完整或失效时不触发/);
+  assert.equal(h.requests.length, requestCount, '复制不能新增任何 API 请求');
+  assert.ok(h.element.innerHTML.includes('没有调用模型或真实投递'));
+});
+
+test('消息测试入口在窄屏保留直达性，列表具备响应式和键盘焦点样式', () => {
+  assert.match(style, /\.ct-head-test\{[^}]*border-color:var\(--t-accent\)/,
+    '页头直达入口要有稳定的视觉强调');
+  assert.match(style, /\.ct-tests-grid\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(min\(390px,100%\),1fr\)\)/,
+    '类型卡片应根据工作区宽度排布');
+  assert.match(style, /\.ct-test-card\[hidden\]\{display:none!important\}/);
+  assert.match(style, /\.ct-test-copy:focus-visible,[\s\S]*?outline:2px solid var\(--t-focus\)/);
+  assert.match(style, /@media \(max-width:880px\)[\s\S]*?\.ct-head-actions \.ct-head-test\{flex:1 1 100%\}/,
+    '窄屏页头中测试入口应单独占一行，避免挤进次要操作');
+  assert.match(style, /@media \(max-width:520px\)[\s\S]*?\.ct-test-tools\{grid-template-columns:minmax\(0,1fr\)\}/,
+    '窄屏筛选器应回到单列');
+});
+
+test('契机矩阵提供搜索、类别和状态筛选，筛选不写入配置草稿', async () => {
+  const h = harness();
+  const names = ['affection','care','play','repair','chat','greeting','followup','invitation',
+    'reminder','meal','life','creation','news','environment','screen'];
+  const purposes = Object.fromEntries(names.map(name => [name, {label: name, allowed: true, reason: null}]));
+  purposes.meal = {label: '饭点问候', allowed: false, reason: 'proactive_paused'};
+  await boot(h, baseSettings(), {purposes});
+  const rows = names.map(purpose => ({dataset: {purpose}, hidden: false}));
+  const buckets = Object.fromEntries(['bond','daily','share'].map(id => [id, {hidden: false}]));
+  const bucketCounts = Object.fromEntries(['bond','daily','share'].map(id => [id, {textContent: ''}]));
+  const resultCount = {textContent: ''}, empty = {hidden: true};
+  h.element.querySelectorAll = selector => selector === '.ct-purpose' ? rows : [];
+  h.element.querySelector = selector => {
+    const group = /^\[data-purpose-bucket="([^"]+)"\]$/.exec(selector);
+    if (group) return buckets[group[1]];
+    const count = /^\[data-purpose-bucket-count="([^"]+)"\]$/.exec(selector);
+    if (count) return bucketCounts[count[1]];
+    if (selector === '[data-purpose-result-count]') return resultCount;
+    if (selector === '.ct-purpose-empty') return empty;
+    return null;
+  };
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'purposes'}} : null}});
+  const html = h.element.innerHTML;
+  assert.ok(html.includes('data-purpose-search'), '要能按名称和限制原因搜索');
+  assert.ok(html.includes('data-purpose-bucket-filter'), '要能按关系、日程、分享分组筛选');
+  assert.ok(html.includes('data-purpose-filter'), '要能按配置和当前状态筛选');
+  assert.ok(html.includes('data-purpose-result-count'), '要显示匹配数量');
+  assert.ok(html.includes('ct-purpose-groups'), '分组容器要供响应式矩阵布局使用');
+  assert.equal(resultCount.textContent, '15 / 15 类');
+  assert.ok(rows.every(row => !row.hidden), '初始状态要显示全部契机');
+
+  const bucket = {value: 'daily', closest: sel => sel === '[data-purpose-bucket-filter]' ? bucket : null};
+  h.element.dispatch('change', fieldEvent(bucket, 'change'));
+  assert.equal(h.page.state.data.purposeBucket, 'daily');
+  assert.deepEqual(rows.filter(row => !row.hidden).map(row => row.dataset.purpose),
+    ['greeting','followup','invitation','reminder','meal']);
+  assert.equal(resultCount.textContent, '5 / 15 类');
+  assert.equal(buckets.bond.hidden, true);
+  assert.equal(buckets.daily.hidden, false);
+  const filter = {value: 'paused', closest: sel => sel === '[data-purpose-filter]' ? filter : null};
+  h.element.dispatch('change', fieldEvent(filter, 'change'));
+  assert.equal(h.page.state.data.purposeFilter, 'paused');
+  assert.deepEqual(rows.filter(row => !row.hidden).map(row => row.dataset.purpose), ['meal']);
+  assert.equal(bucketCounts.daily.textContent, '1/5 类');
+  const search = {value: '饭点', closest: sel => sel === '[data-purpose-search]' ? search : null};
+  h.element.dispatch('input', fieldEvent(search, 'input'));
+  assert.equal(h.page.state.data.purposeQuery, '饭点');
+  assert.deepEqual(rows.filter(row => !row.hidden).map(row => row.dataset.purpose), ['meal']);
+  assert.equal(h.page.state.data.touched.size, 0, '筛选条件不能进入待保存配置');
+  search.value = '没有这类契机';
+  h.element.dispatch('input', fieldEvent(search, 'input'));
+  assert.equal(resultCount.textContent, '0 / 15 类');
+  assert.equal(empty.hidden, false, '无结果时要显示明确空态');
+});
+
+test('当前暂缓优先显示暂缓状态，不折叠成通用受阻原因', async () => {
+  const h = harness();
+  const settings = {...baseSettings(), 'meal.pause_until': '2099-01-01T12:00:00+08:00'};
+  await boot(h, settings, {purposes: {meal: {label: '饭点问候', allowed: false, reason: 'proactive_paused'}}});
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'purposes'}} : null}});
+  const row = h.element.innerHTML.split('data-purpose="meal"')[1].split('</article>')[0];
+  assert.ok(row.includes('ct-chip is-paused'), '暂停原因应显示为暂缓状态');
+  assert.ok(row.includes('暂缓至 2099-01-01 12:00'), '应显示暂停截止时间');
+  assert.ok(!row.includes('ct-chip is-risk'), '暂停不应伪装成授权或运行故障');
+});
+
+test('契机矩阵桌面分列、窄屏回单列并保留可见焦点', () => {
+  assert.match(style, /\.ct-purpose-groups\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(style, /\.ct-purpose\{[^}]*display:grid;min-width:0/,
+    '分享分栏中的行必须允许收缩，不能被网格子项撑出卡片');
+  assert.match(style, /grid-template-columns:minmax\(92px,1fr\) minmax\(100px,1\.2fr\) minmax\(0,168px\)/,
+    '名称、权重和状态列需统一对齐，同时给状态文案留出可收缩空间');
+  assert.match(style, /\.ct-purpose-state\{[^}]*min-width:0/);
+  assert.match(style, /\.ct-chip\{[^}]*max-width:100%;min-width:0/,
+    '长状态提示应在行内截断，不能溢出卡片');
+  assert.match(style, /@media \(max-width:1280px\)[\s\S]*?\.ct-purpose-groups\{grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(style, /grid-template-columns:minmax\(0,1fr\) minmax\(100px,1fr\)/,
+    '窄屏下权重列也应对齐');
+  assert.match(style, /\.ct-purpose-search input:focus,[\s\S]*?outline:2px solid var\(--t-focus\)/);
+  assert.match(style, /\.ct-purpose\[hidden\][^}]*display:none!important/);
+});
+
+test('开口闸门按容器宽度排布，摘要和设置区保持通栏', () => {
+  assert.match(style, /\.ct-gates\{[^}]*repeat\(auto-fit,minmax\(min\(340px,100%\),1fr\)\)/,
+    '闸门卡片应随可用宽度自动排成多列');
+  assert.match(style, /\.ct-gates-sum\{[^}]*grid-column:1 \/ -1/,
+    '此刻总状态应独占一行，先于各道闸门被看到');
+  assert.match(style, /\.ct-gate-settings-brief,\.ct-gates > \.ct-block\{grid-column:1 \/ -1\}/,
+    '设置入口和补充偏好应在卡片网格后通栏展示');
+  assert.match(style, /\.ct-gate-pause\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/,
+    '宽屏下暂停时间与联系偏好并排');
+  assert.match(style, /@media \(max-width:880px\)[\s\S]*?\.ct-gate-pause\{grid-template-columns:minmax\(0,1fr\)\}/,
+    '窄屏下补充设置回到单列');
 });
 
 test('打开问候窗口的提示，而不是静默忽略点击', async () => {

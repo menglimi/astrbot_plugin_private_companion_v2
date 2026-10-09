@@ -21,6 +21,15 @@ _LITERALS = re.compile(
     r"|<(?:image|img|video|audio|voice|record|file|pc_tts|tts)\b[^>]*>",
     re.IGNORECASE | re.DOTALL,
 )
+_PROTOCOL_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
+_PROTOCOL_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
+_REACTION_EXPRESSION_BLOCK = re.compile(
+    rf"(?is){_PROTOCOL_LT}\s*pc_reaction_expression\b[^>]*?{_PROTOCOL_GT}.*?"
+    rf"(?:{_PROTOCOL_LT}\s*/\s*pc_reaction_expression\s*{_PROTOCOL_GT}|\Z)"
+)
+_REACTION_EXPRESSION_TAG = re.compile(
+    rf"(?is){_PROTOCOL_LT}\s*/?\s*pc_reaction_expression\b[^>]*?{_PROTOCOL_GT}"
+)
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 
@@ -145,6 +154,14 @@ def _strip_identity_anchors(text):
     for pattern in _IDENTITY_ANCHORS:
         text = pattern.sub("", text)
     return text
+
+
+def strip_internal_expression_protocol(text):
+    """Remove the legacy reaction metadata block before text can be shown or sent."""
+    if type(text) is not str:
+        return text
+    text = _REACTION_EXPRESSION_BLOCK.sub("", text)
+    return _REACTION_EXPRESSION_TAG.sub("", text)
 
 
 @dataclass(frozen=True)

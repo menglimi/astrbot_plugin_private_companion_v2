@@ -11,9 +11,11 @@ from companion_v2.delivery.components import build_component_plan
 from companion_v2.foundation.refs import OperationRef, ScopeKind, VersionRef
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.role_work.life.management import RoleLifeManagement
+from companion_v2.model_gateway.response_diagnostics import checked_response_diagnostics
 
 from .media.models import MAX_INPUT_IMAGES
-from .reply_settings import GROUP, OWNER, group_wakeup_settings, target_for, validate, voice_policy
+from .media.understanding import SCOPE_PERMISSION_FIELDS
+from .reply_settings import DIAGNOSTIC_DEFAULTS, GROUP, OWNER, group_wakeup_settings, target_for, validate, voice_policy
 from .outbound_plan import component_order
 from .segmentation import minimum_part_gap_seconds, part_gap_seconds
 from .segmentation import DEFAULT_PROMPT, LLM_SEGMENT_MARKER
@@ -46,21 +48,38 @@ class ReplyManagement:
         with self.app.runtime.read_snapshot():
             snapshot = self._snapshot(operator)
             settings = {key.removeprefix(GROUP + "."): value for key, value in snapshot.values.items()}
+            recent_limit = settings.get("reply_diagnostic_limit", DIAGNOSTIC_DEFAULTS["reply_diagnostic_limit"])
             participation = {}
             if self.target.scope.kind is ScopeKind.GROUP:
                 limit = group_wakeup_settings(settings)["group_wakeup_log_limit"]
                 participation = {"participation_recent": self.app.tools.group_participation.diagnostics(
                     self.target.scope, self.target.role, limit), "participation_limit": limit,
                     "timing_apply_mode": "next_accepted_input"}
-            batches = self.app.runtime.read_all("""SELECT b.batch_id, b.state, b.created_at, b.contributions_json,
-                b.generation_task_id, b.part_count, f.state AS flow_state, f.reason
-                FROM conversation_batches b LEFT JOIN conversation_flows f ON f.batch_id = b.batch_id
-                WHERE b.origin_key = ? ORDER BY b.created_at DESC, b.rowid DESC LIMIT 10""",
-                (self.context.key,)) if self.context is not None else ()
+            batch_select = """SELECT b.batch_id, b.state, b.created_at, b.context_json, b.contributions_json,
+                b.generation_task_id, b.part_count, f.state AS flow_state, f.reason,
+                (SELECT COUNT(*) FROM conversation_inputs i WHERE i.batch_id = b.batch_id AND i.withdrawn = 0)
+                    AS current_inputs
+                FROM conversation_batches b LEFT JOIN conversation_flows f ON f.batch_id = b.batch_id WHERE """
+            if self.context is not None:
+                batches = self.app.runtime.read_all(batch_select + """b.origin_key = ?
+                    ORDER BY b.created_at DESC, b.rowid DESC LIMIT ?""", (self.context.key, recent_limit))
+            elif self.target.scope.kind is ScopeKind.GROUP:
+                scope = self.target.scope
+                batches = self.app.runtime.read_all(batch_select + """
+                    json_extract(b.context_json, '$.role_binding.scope.installation_id') = ?
+                    AND json_extract(b.context_json, '$.role_binding.scope.platform') = ?
+                    AND json_extract(b.context_json, '$.role_binding.scope.native_scope_id') = ?
+                    AND json_extract(b.context_json, '$.role_binding.scope.bot_id') = ?
+                    AND json_extract(b.context_json, '$.role_binding.scope.account_id') = ?
+                    AND json_extract(b.context_json, '$.role_binding.role.subject_id') = ?
+                    ORDER BY b.created_at DESC, b.rowid DESC LIMIT ?""",
+                    (scope.installation_id, scope.platform, scope.native_scope_id, scope.bot_id,
+                     scope.account_id, self.target.role.subject_id, recent_limit))
+            else:
+                batches = ()
             recent = []
             for batch in batches:
                 contributions = json.loads(batch["contributions_json"])
-                captured = contributions.get("reply_settings") if isinstance(contributions, dict) else None
                 parts = self.app.runtime.read_all("""SELECT p.sequence, p.state, LENGTH(p.text) AS chars,
                     d.candidate_reason, d.render_state, d.component_order_json, d.text_hidden,
                     LENGTH(v.speech) AS speech_chars
@@ -68,25 +87,61 @@ class ReplyManagement:
                     LEFT JOIN conversation_voice_diagnostics d ON d.part_id = p.part_id
                     LEFT JOIN conversation_voice_parts v ON v.part_id = p.part_id
                     WHERE p.batch_id = ? ORDER BY p.sequence""", (batch["batch_id"],))
-                calls = self.app.runtime.read_all("""SELECT c.state, c.actual_tokens, c.latency_ms, f.code AS failure_code
+                calls = self.app.runtime.read_all("""SELECT c.position, c.state, c.actual_tokens, c.latency_ms,
+                        f.code AS failure_code, d.summary_json AS response_summary_json
                     FROM model_calls c LEFT JOIN model_call_failures f ON f.call_id = c.call_id
+                    LEFT JOIN model_call_diagnostics d ON d.call_id = c.call_id
                     WHERE c.task_id = ? ORDER BY c.position LIMIT 18""", (batch["generation_task_id"],))
+                request = self.app.runtime.read_one("SELECT plan_json FROM model_requests WHERE task_id = ?",
+                                                    (batch["generation_task_id"],))
+                plan = json.loads(request["plan_json"]) if request else {}
+                rounds = self.app.runtime.read_all(
+                    "SELECT round_no, state, tool_calls_json FROM model_rounds WHERE task_id = ? ORDER BY round_no",
+                    (batch["generation_task_id"],))
+                round_details = [{"round_no": item["round_no"], "state": item["state"],
+                    "tool_actions": [call.get("action", "") for call in json.loads(item["tool_calls_json"])]}
+                    for item in rounds]
+                tools = self.app.runtime.read_all("""SELECT action, state, effect FROM conversation_tool_calls
+                    WHERE batch_id = ? ORDER BY sequence LIMIT 32""", (batch["batch_id"],))
+                materials = contributions.get("materials", []) if isinstance(contributions, dict) else []
+                material_summary = [{"owner": item.get("owner", ""), "purpose": item.get("purpose", ""),
+                                     "state": item.get("state", "")}
+                                    for item in materials if isinstance(item, dict)]
+                group_snapshot = contributions.get("group_context", {}) if isinstance(contributions, dict) else {}
+                response_type = ("no_reply" if not batch["part_count"] else
+                    "image_only" if parts and all(item["chars"] == 0 for item in parts) else "text_or_mixed")
                 recent.append({"batch_id": batch["batch_id"], "created_at": batch["created_at"],
                     "state": batch["flow_state"] or batch["state"], "reason": batch["reason"],
-                    "captured": captured, "parts": [{**dict(p),
+                    "turn_type": plan.get("profile", {}).get("kind", "conversation.reply"),
+                    "current_inputs": batch["current_inputs"],
+                    "parts": [{**dict(p),
                         "component_order": json.loads(p["component_order_json"])
                             if p["component_order_json"] is not None else None}
-                        for p in parts], "calls": [dict(c) for c in calls]})
+                        for p in parts], "calls": [{key: call[key] for key in
+                            ("position", "state", "actual_tokens", "latency_ms", "failure_code")} | {
+                            "response_diagnostics": checked_response_diagnostics(call["response_summary_json"])}
+                            for call in calls],
+                    "response_type": response_type,
+                    "injected_materials": material_summary,
+                    "group_history_items": len(group_snapshot.get("references", []))
+                        if isinstance(group_snapshot, dict) else 0,
+                    "offered_tools": plan.get("tool_actions", []),
+                    "filtered_tools": plan.get("tool_filters", []),
+                    "rounds": round_details,
+                    "tool_calls": [dict(call) for call in tools]})
+            fields = contract_of(self.app.configuration.registry, GROUP)
+            for name in SCOPE_PERMISSION_FIELDS:
+                fields[name]["editable_layers"] = ["role", "window"]
             return {"settings": settings, "edit_token": snapshot.edit_token, "revision": snapshot.revision,
                 "configuration_token": snapshot.resolution_token, "apply_mode": "next_sealed_reply",
-                "host_state": self.app.state, "recent": recent, "marker": LLM_SEGMENT_MARKER,
+                "host_state": self.app.state, "recent": recent, "recent_limit": recent_limit, "marker": LLM_SEGMENT_MARKER,
                 "default_prompt": DEFAULT_PROMPT,
                 # The same three extras every config section publishes, so the shared
                 # workbench can draw its layer rail without a page-local copy of
                 # GROUP limits. ``conversation.presentation`` is window-scoped.
                 "scope": "window", "layers": layers_of(self.target),
                 "provenance": provenance_of(snapshot, GROUP),
-                "fields": contract_of(self.app.configuration.registry, GROUP), **participation}
+                "fields": fields, **participation}
 
     @outcome
     def preview(self, operator, settings, text, image_count=0):

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 
 from companion_v2.execution.models import digest, encode, stamp
-from companion_v2.foundation.refs import ScopeKind
+from companion_v2.foundation.refs import ScopeKind, ScopeRef
 
 from .retrieval import KnowledgeCandidate
 
@@ -77,10 +77,11 @@ class SourceBinding:
     binding means installation-wide reference material.
     """
 
-    __slots__ = ("installation_id", "role_id", "persona_id", "native_scope_ids", "scope_kind")
+    __slots__ = ("installation_id", "role_id", "persona_id", "native_scope_ids", "scope_kind",
+                 "scope_route")
 
     def __init__(self, installation_id, *, role_id=None, persona_id=None,
-                 native_scope_ids=(), scope_kind=None):
+                 native_scope_ids=(), scope_kind=None, scope_route=None):
         self.installation_id = _text(installation_id, "installation_id")
         self.role_id = _text(role_id, "role_id", empty=True)
         self.persona_id = _text(persona_id, "persona_id", empty=True)
@@ -90,12 +91,23 @@ class SourceBinding:
         if scope_kind is not None and not isinstance(scope_kind, ScopeKind):
             raise ValueError("scope_kind must be a ScopeKind")
         self.scope_kind = scope_kind
+        if scope_route is None:
+            self.scope_route = None
+        else:
+            if (not isinstance(scope_route, (list, tuple)) or len(scope_route) != 3
+                    or not all(type(value) is str and value.strip() for value in scope_route)
+                    or not self.native_scope_ids or not isinstance(scope_kind, ScopeKind)):
+                raise ValueError("scope_route requires a bounded native scope and explicit scope kind")
+            self.scope_route = tuple(value.strip() for value in scope_route)
 
     @property
     def document(self) -> dict:
-        return {"installation_id": self.installation_id, "role_id": self.role_id,
-                "persona_id": self.persona_id, "native_scope_ids": list(self.native_scope_ids),
-                "scope_kind": self.scope_kind.value if self.scope_kind else None}
+        result = {"installation_id": self.installation_id, "role_id": self.role_id,
+                  "persona_id": self.persona_id, "native_scope_ids": list(self.native_scope_ids),
+                  "scope_kind": self.scope_kind.value if self.scope_kind else None}
+        if self.scope_route:
+            result["scope_route"] = list(self.scope_route)
+        return result
 
     @property
     def key(self) -> str:
@@ -109,7 +121,8 @@ class SourceBinding:
         return cls(document.get("installation_id"), role_id=document.get("role_id"),
                    persona_id=document.get("persona_id"),
                    native_scope_ids=document.get("native_scope_ids") or (),
-                   scope_kind=ScopeKind(kind) if kind else None)
+                   scope_kind=ScopeKind(kind) if kind else None,
+                   scope_route=document.get("scope_route"))
 
     def __eq__(self, other) -> bool:
         return isinstance(other, SourceBinding) and self.document == other.document
@@ -366,7 +379,7 @@ class KnowledgeCatalog:
 
     # -- projections ---------------------------------------------------------
 
-    def _matching(self, version: SourceVersion, *, role_id, scope_ids, scope_kind) -> bool:
+    def _matching(self, version: SourceVersion, *, role_id, scope_ids, scope_kind, scope) -> bool:
         """Pre-filter with caller hints only; the retriever stays the authority.
 
         A hint never removes a row the retriever would have authorized, so a
@@ -374,12 +387,20 @@ class KnowledgeCatalog:
         boundary check remains in one place.
         """
         binding = version.binding
+        if (version.code == "legacy_v1_imported" and binding.scope_kind is ScopeKind.GROUP
+                and binding.native_scope_ids and binding.scope_route is None):
+            return False
         if role_id is not None and binding.role_id is not None and binding.role_id != role_id:
             return False
         if scope_ids and binding.native_scope_ids:
             if binding.scope_kind is not scope_kind:
                 return False
             if not set(binding.native_scope_ids) & set(scope_ids):
+                return False
+        if binding.scope_route:
+            if not isinstance(scope, ScopeRef) or scope.kind is not binding.scope_kind:
+                return False
+            if (scope.platform, scope.bot_id, scope.account_id) != binding.scope_route:
                 return False
         return True
 
@@ -408,11 +429,11 @@ class KnowledgeCatalog:
         return tuple(candidates)
 
     def member_entries(self, *, installation_id, source_limit, role_id=None, scope_ids=(),
-                       scope_kind=None) -> tuple[MemberEntry, ...]:
+                       scope_kind=None, scope=None) -> tuple[MemberEntry, ...]:
         entries = []
         for version in self.list(installation_id, limit=source_limit):
             if not version.active or not self._matching(version, role_id=role_id, scope_ids=scope_ids,
-                                                         scope_kind=scope_kind):
+                                                         scope_kind=scope_kind, scope=scope):
                 continue
             entries.extend(version.members)
         return tuple(entries)
@@ -423,12 +444,16 @@ class KnowledgeCatalog:
             return None
         scope_ids = entry.native_scope_ids or version.binding.native_scope_ids
         scope_kind = ScopeKind.GROUP if entry.native_scope_ids else version.binding.scope_kind
+        if (version.code == "legacy_v1_imported" and scope_kind is ScopeKind.GROUP
+                and scope_ids and version.binding.scope_route is None):
+            return None
         return KnowledgeCandidate(
             entry.entry_id, entry.content, scope_kind=scope_kind,
             role_id=version.binding.role_id, persona_id=version.binding.persona_id,
             enabled=entry.enabled, priority=entry.priority, name=entry.name,
             keywords=entry.keywords, aliases=entry.aliases, template=entry.template,
-            native_scope_ids=scope_ids, knowledge_base_id=entry.knowledge_base_id,
+            native_scope_ids=scope_ids, scope_route=version.binding.scope_route,
+            knowledge_base_id=entry.knowledge_base_id,
             document_id=entry.document_id, document_name=entry.document_name,
             chunk_index=entry.chunk_index)
 

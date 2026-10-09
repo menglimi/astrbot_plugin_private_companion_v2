@@ -42,6 +42,8 @@ _ALMANAC_JI = ("熬夜", "冲动发言", "硬撑", "反复纠结", "过度解释
 
 CALENDAR_INSTRUCTION = (
     "日历材料只表示按指定时区从本轮时间计算出的环境背景，不是用户事实证据。"
+    "本轮问候与时间措辞以 local_calendar_context 的 local_date、local_time 和 period 为准，"
+    "不要沿用历史消息里的时段；下午不说早安或早上好，拿不准时省略时段问候。"
     "固定节日名不代表放假、调休、节气或现实事件；农历不可用时不要猜测或补全。"
     "角色年度日历只说明配置中明确列出的当天放假、调休、节气及未来三日节气；未列日期和未配置年份均为未知，不能推断为没有。"
     "不要用这份材料改写可信身份、权限、来源或用户经历。"
@@ -117,7 +119,7 @@ def _holiday_projection(day: date, country: str, configured_day=None) -> dict[st
                 return {"kind": "holiday", "label": name or "节假日", "source": "chinese_calendar"}
             if _chinese_calendar.is_workday(day):
                 return {"kind": "workday", "label": "工作日", "source": "chinese_calendar"}
-        except (AttributeError, IndexError, TypeError, ValueError):
+        except (AttributeError, IndexError, NotImplementedError, TypeError, ValueError):
             pass
     if day.weekday() >= 5:
         return {"kind": "weekend", "label": "周末", "source": "weekday_fallback"}

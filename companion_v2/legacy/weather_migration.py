@@ -1,16 +1,16 @@
-"""Convert the V1 weather configuration into V2 role settings.
+"""Convert the V1 weather configuration into V2 installation, role and contact settings.
 
 V1 stored weather as a flat group of 24 keys: a source selector, five location fields,
 credentials, an alert family, and five "link it to a proactive message" switches. V2
-splits the same concern across two scopes -- the role's own observation settings live in
-``role.state``, the contact behaviour that reacts to them lives in ``proactive.contact``
--- and it does not store credentials at all (see ``astrbot_host/qweather_credentials``).
+splits the same concern across three scopes: source and cache settings live in the
+installation's plugin configuration, role observation settings in ``role.state``, and
+contact behaviour in ``proactive.contact``. Host credentials are applied through the
+V2 host-only weather settings service and never enter role settings or migration receipts.
 
-Three of V1's settings cannot survive the move unchanged, and silently translating them
+Two of V1's settings cannot survive the move unchanged, and silently translating them
 would leave an operator with a bot that behaves differently for reasons they cannot see:
 
 * the refresh interval has a structural 120-minute ceiling in V2,
-* the data source is inferred from credentials rather than chosen,
 * the environment-change cooldown becomes a de-duplication window.
 
 So this module returns both the converted values and a list of differences. The caller
@@ -244,25 +244,19 @@ def convert_weather_config(config) -> Outcome[WeatherMigration]:
             "按原数值迁入。默认的去重策略已包含 event_revision，因此天气突变与官方预警都会受此窗口抑制。",
             str(cooldown), str(window)))
 
-    # Deliberately not migrated, and named so the operator can tell the difference
-    # between "V2 has no equivalent" and "the converter forgot it".
-    #
-    # The third element says whether the value is secret. A credential must be reported
-    # as *present* without being reproduced: writing it into the differences would put
-    # the token back into a stored document that the surrounding design keeps it out of,
-    # which is the whole point of moving credentials to the environment.
+    # Host credentials have dedicated plugin-config rules and are applied by the host
+    # weather settings service. Keep only fields that have no V2 migration destination.
     for key, why, secret in (
-        ("weather_source", "V2 的数据源由凭据推断：配置了和风凭据用和风，否则用 Open-Meteo，"
-                           "没有显式选源项。", False),
-        ("weather_api_host", "凭据改为从环境变量读取，不写入角色设置（角色配置可导出，令牌不可导出）。", True),
-        ("weather_token", "同上。", True),
-        ("weather_api_key", "同上。", True),
+        ("weather_api_key", "V2 不再使用 OpenWeatherMap 源，该专用密钥没有对应设置。", True),
         ("weather_amap_api_key", "V2 没有高德数据源。", True),
         ("weather_amap_city", "V2 没有高德数据源。", False),
-        ("weather_alert_api_host", "凭据改为从环境变量读取。", True),
-        ("weather_alert_token", "凭据改为从环境变量读取。", True),
-        ("enable_yesterday_screen_diary_context", "属于屏幕观察域，不在天气迁移范围内。", False),
-        ("screen_diary_context_max_chars", "属于屏幕观察域，不在天气迁移范围内。", False),
+        ("weather_alert_api_host", "V1 兼容别名；生效 Host 由 weather_api_host 映射。", True),
+        ("weather_alert_token", "V1 兼容别名；生效凭据由 weather_token 映射。", True),
+        # V1 允许用这个键代替 weather_alert_token 存预警凭据（plugin_bootstrap 把它
+        # 当作预警令牌的兼容来源），漏报它就等于悄悄丢一份凭据。
+        ("weather_alert_api_key", "凭据改为从环境变量读取。", True),
+        ("mobile_location_weather_sensitivity",
+         "V2 的天气绑定角色设置的固定地点，不跟随移动位置，没有这项。", False),
     ):
         if key in config and _text(config.get(key)):
             skipped.append(key)

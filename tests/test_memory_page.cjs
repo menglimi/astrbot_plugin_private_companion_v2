@@ -1,4 +1,4 @@
-/* 记忆与经历页（档案库）测试。
+/* 事实与经历页（档案库）测试。
  *
  * 这一页的行动逻辑、幂等键与待确认台账都跑在模块私有状态上，
  * 只能靠 vm 跑真实文件 + 假桥来驱动。夹具的职责是让「第一个请求真的发出去」，
@@ -281,7 +281,8 @@ test('选中事实会读详情，并顺手带出版本历史', async () => {
   assert.ok(detail, '点开事实后必须请求详情');
   assert.equal(detail.values.atom_id, 'a-1');
   assert.equal(detail.values.revision, 3);
-  h.reply(detail, {item: {atom_id: 'a-1', revision: 3, state: 'active', representation: '展示表述', object: '某个对象'}, sources: [], session_id: 's-1'});
+  h.reply(detail, {item: {atom_id: 'a-1', revision: 3, state: 'active', representation: '展示表述', object: '某个对象'},
+    sources: [{handle: 'internal-source', source_kind: 'human_message'}], session_id: 's-1'});
   await h.settle();
 
   /* 版本历史是这一页的核心信息，打开一条事实就该带出来，不该再点一次。 */
@@ -296,6 +297,44 @@ test('选中事实会读详情，并顺手带出版本历史', async () => {
   assert.equal(h.page.state.data.factDetail.item.context_mode, 'pinned');
   assert.match(h.element.innerHTML, /核心记忆/);
   assert.match(h.element.innerHTML, /第三版/);
+  assert.match(h.element.innerHTML, /对方消息/);
+  assert.doesNotMatch(h.element.innerHTML.replace(/<[^>]*>/g, ''), /human_message|internal-source/);
+  assert.match(h.element.innerHTML, /data-source-handle="internal-source"/);
+});
+
+test('归档恢复显示可读记录并提交原始标识', async () => {
+  const h = harness();
+  await boot(h, []);
+  h.window.confirm = () => true;
+  const area = {disabled: false, id: 'memory-area-archive', dataset: {}};
+  area.closest = () => area;
+  h.element.__inside.add(area);
+  h.element.dispatch('click', {target: area});
+  await h.settle();
+  const preview = {counts: {eligible: 1, already_archived: 1, retained: 1}, idle_days: 180,
+    archive_token: 'internal-token', scope: 'durable_relationship_facts', erasure: 'none',
+    items: [{atom_id: 'internal-eligible', predicate: '饮用偏好', representation: '喜欢茶', idle_since: '2026-01-01T00:00:00Z'}],
+    archived_items: [{atom_id: 'internal-archived', predicate: '阅读偏好', representation: '喜欢诗歌'}]};
+  h.reply(h.requests.find(request => request.route === 'memory/archive/preview'), preview);
+  await h.settle();
+  const visible = h.element.innerHTML.replace(/<[^>]*>/g, '');
+  assert.match(visible, /饮用偏好|喜欢诗歌/);
+  assert.doesNotMatch(visible, /internal-|atom_id|durable_relationship_facts/);
+  assert.match(h.element.innerHTML, /data-archive-restore="internal-archived"/);
+  h.element.querySelectorAll = selector => selector === '[data-archive-restore]:checked'
+    ? [{dataset: {archiveRestore: 'internal-archived'}}] : [];
+  const restore = {disabled: false, id: 'memory-archive-restore-submit', dataset: {}};
+  restore.closest = () => restore;
+  h.element.__inside.add(restore);
+  h.element.dispatch('click', {target: restore});
+  await h.settle();
+  const request = h.requests.find(item => item.route === 'memory/archive/restore');
+  assert.equal(request.values.atom_ids.join(','), 'internal-archived');
+  h.reply(request, {items: [{atom_id: 'internal-archived'}]});
+  await h.settle();
+  h.reply(h.requests.filter(item => item.route === 'memory/archive/preview').at(-1), {...preview, archived_items: []});
+  await h.settle();
+  assert.match(h.element.innerHTML, /当前没有已归档的事实/);
 });
 
 test('群聊目标不给 memory_api 时，整页给一条说明而不是空表', async () => {

@@ -12,11 +12,14 @@ leaves through the ordinary authorized delivery chain.
 """
 
 from dataclasses import replace
+from datetime import datetime
 import json
+import logging
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
+from companion_v2.diagnostics.inbound import InboundNoReplyLedger, UNMET
 from companion_v2.execution.models import TaskError, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.memory.group.access import owner_key
@@ -25,7 +28,8 @@ from .group_interjection import (INTERJECTION, REPEAT_FOLLOW, REPEAT_INTERRUPT, 
                                  InterjectionPolicy, addresses_role, best_burst, day_key, interjection_state,
                                  openings, repeat_state)
 from .group_observation import GroupPresenceStore, history_items, observe
-from .group_timing import RepeatPolicy
+from .group_admission import GroupReplyAdmission, REASONS
+from .group_timing import ADDRESS_MARKER, RepeatPolicy, clean_group_text
 from .participation_prompts import (group_hints, interjection_instruction, observation_instruction,
                                     repeat_instruction)
 from .reply_settings import group_safety_settings, group_wakeup_settings, validate as validate_reply_settings
@@ -34,15 +38,20 @@ from .reply_settings import group_safety_settings, group_wakeup_settings, valida
 ACTION = "group.participation.choose"
 VERSION = "conversation.group_participation.v1"
 SKIPPED = "group_participation_skipped"
+logger = logging.getLogger(__name__)
 INSTRUCTION = (
     "你正在以原人格旁听群聊。收到一条群消息不等于有人正在向你提问，也不要求每条都接话。"
     "结合各人的话题、上下文、已经说过的话和原人格，自己判断此刻参与是否自然、有帮助；"
     "他人之间的对话可以安静听着，被邀请时也按具体语境回应，不依赖固定关键词或回复配额。"
+    "未被点名而当前话题接不住、专名含义不明或缺少媒体内容时，可以 skip；"
+    "若本轮已有合适的可发送表情图且足以表达即时态度，也可先选择 reply，再仅发送该图，不必补文字。"
+    "表情不代替问题答案；明确向你求助但材料不足时，简短说明缺口或询问，不从群名、旧记忆补猜。"
     "如果此刻无需说话，单独调用 group.participation.choose，mode=skip；系统会保留已授权发言供后续理解，"
     "本轮到此结束，不发送空消息、占位回复或‘我选择不回复’。不要先调用业务工具再选择旁听。"
-    "如果决定接话，可直接正常回复，或先使用本群可用业务工具；这都会固定为本轮参与。"
-    "也可以显式选择 mode=reply，再继续本轮工具与回复。已经开始参与后不能用 skip 撤销已发生的操作。"
-    "reason 可省略，或只写一句简短缘由，不写推理过程；该控制结果不会作为群消息发送。"
+    "被明确 @ 时可以直接正常回复；未被明确 @ 而决定接话时，先调用 group.participation.choose，"
+    "mode=reply，reason 用一句话说明为什么此刻接话，例如回应称呼、引用、补话、求助或相关话题。"
+    "理由只说明参与原因，不写推理过程，不向群里发送。然后继续本轮工具与回复。"
+    "已经开始参与后不能用 skip 撤销已发生的操作；旁听 reason 可省略。"
     "旁听决定只针对本轮，不代表拒绝某成员或建立长期规则，不会在没有新消息时自行发起对话。"
 )
 
@@ -73,12 +82,14 @@ CONFIG_DEFAULTS = {
     "group_repeat_interrupt_probability_step": 0.12,
     "group_repeat_interrupt_text": "禁止复读",
     "group_repeat_window_seconds": 120,
+    "group_context_max_age_hours": 12,
 }
 CONFIG_LIMITS = {"group_interject_min_interval_minutes": (0, 1440),
                  "group_interject_max_daily": (0, 20),
                  "group_interject_feedback_window_seconds": (60, 86400),
                  "group_repeat_trigger_threshold": (3, 20),
-                 "group_repeat_window_seconds": (10, 600)}
+                 "group_repeat_window_seconds": (10, 600),
+                 "group_context_max_age_hours": (1, 168)}
 CONFIG_SWITCHES = tuple(key for key, value in CONFIG_DEFAULTS.items() if type(value) is bool)
 CONFIG_COUNTS = tuple(key for key, value in CONFIG_DEFAULTS.items() if type(value) is int)
 CONFIG_PROBABILITIES = tuple(key for key, value in CONFIG_DEFAULTS.items() if type(value) is float)
@@ -183,7 +194,20 @@ class GroupParticipation:
         self.messages, self.runtime, self.tasks = messages, messages.runtime, messages.tasks
         self.records = GroupPresenceStore(self.runtime)
         self.speech = GroupSpeechLedger(self.runtime)
+        self.admission = GroupReplyAdmission(messages)
         self._frozen_turns = {}
+        self._reflection_day = ""
+
+    def advance_reflection(self):
+        """Clean recoverable placeholder artifacts once per group-local day."""
+        day = day_key(self.tasks.now(), self.messages.timezone_name)
+        if day == self._reflection_day:
+            return 0
+        self._reflection_day = day
+        try:
+            return self.records.clean_media_placeholders()
+        except Exception:
+            return 0
 
     def catalog_for(self, context):
         if context.scope.kind is not ScopeKind.GROUP:
@@ -194,6 +218,13 @@ class GroupParticipation:
     def augment(self, batch, context, request, at):
         self.messages.group_context.authorize(context, at)
         instruction = request.instruction + "\n" + INSTRUCTION
+        admission = self.admission.recorded(context, batch["batch_id"])
+        if (admission is not None and not admission["mentioned"]
+                and any(reason != "role_choice" for reason in admission["reasons"])):
+            reasons = "、".join(REASONS[reason] for reason in admission["reasons"] if reason in REASONS)
+            instruction += ("\n本轮没有明确 @，入站候选依据是：" + reasons
+                            + "。候选只表示可以考虑参与；仍须按当前语境判断，不适合就 skip，"
+                            "决定接话时先记录 mode=reply 和简短 reason。")
         saved = json.loads(batch["contributions_json"])
         captured = saved.get("reply_settings") if isinstance(saved, dict) else None
         if captured is not None:
@@ -238,7 +269,7 @@ class GroupParticipation:
         repeat_policy = self._repeat_policy(values)
         owner = owner_key(context)
         speaker = context.actor.principal.native_account_id
-        texts = [str(material.payload) for material in request.context.materials
+        texts = [clean_group_text(material.payload) for material in request.context.materials
                  if material.purpose == "current_source" or material.purpose.startswith("merged_input:")]
         visible = (*history_items(recent),
                    *({"kind": "member", "speaker_id": speaker, "received_at": at.isoformat(), "text": text}
@@ -252,7 +283,8 @@ class GroupParticipation:
                                        timezone_name=self.messages.timezone_name)
         current = " ".join(texts)
         mood = (observation["facts"].get("mood") or {}).get("top_mood", "")
-        facts = interjection_state(interjection, resolved["record"], at=at, initiative=not addresses_role(current, self._address_words(settings)),
+        facts = interjection_state(interjection, resolved["record"], at=at,
+                                   initiative=bool(current) and not addresses_role(current, self._address_words(settings)),
                                    reasons=openings(current, mood_top=mood),
                                    interest_probability=group_wakeup_settings(settings)["group_wakeup_interest_probability"])
         hints += interjection_instruction(facts)
@@ -261,7 +293,53 @@ class GroupParticipation:
         hints += repeat_instruction(repeat)
         act, signature = self._act_for(repeat, facts)
         return {"hints": hints, "owner": owner, "observation": observation["records"], "speech": resolved["record"],
+                "mentioned": any(ADDRESS_MARKER in text for text in texts),
                 "day": day_key(at, self.messages.timezone_name), "act": act, "act_signature": signature}
+
+    def observe_early(self, context, *, text, speaker_id, received_at):
+        """Fold one authenticated group message before reply admission.
+
+        V1's observation hook ran even when its later reply path chose to stay
+        quiet or could not prepare an optional attachment.  V2 used to defer
+        this fold until ``_record`` after a generation turn, which meant a
+        failed reply made the group invisible to the next turn.  This method is
+        intentionally model-free and send-free: it only writes the bounded
+        observation records that are enabled for this group window.
+        """
+        if context.scope.kind is not ScopeKind.GROUP:
+            return False
+        text = clean_group_text(text)
+        if not text or type(speaker_id) is not str or not speaker_id.strip():
+            return False
+        if not isinstance(received_at, datetime) or received_at.tzinfo is None:
+            return False
+        from .reset import boundary
+        reset = boundary(self.runtime, context.scope)
+        if reset is not None and stamp(received_at) <= reset["reset_at"]:
+            return False
+        self.admission.observe(context, text=text, speaker_id=speaker_id, received_at=received_at)
+        try:
+            settings = group_participation_settings(self.runtime, context)
+            item = history_items(({
+                "type": "group_member_message",
+                "speaker_id": speaker_id,
+                "received_at": stamp(received_at),
+                "text": text,
+            },))[0]
+            observation = observe(self.records, owner=owner_key(context), settings=settings,
+                                  items=(item,), at=received_at, current_speaker=speaker_id)
+            records = observation["records"]
+            if not records:
+                return False
+            with self.runtime.transaction() as connection:
+                for kind, document in records.items():
+                    self.records.write(connection, owner_key(context), kind, document)
+            return True
+        except Exception:
+            # Observation is an additive reference. A malformed optional setting
+            # or a transient metadata write must never reject the authenticated
+            # group route or change the reply decision.
+            return False
 
     @staticmethod
     def _address_words(settings):
@@ -441,7 +519,8 @@ class GroupParticipation:
         if context.scope.kind is not ScopeKind.GROUP:
             return False
         with self.runtime.transaction() as connection:
-            if self.decision(context, batch_id)["mode"] != "skip":
+            decision = self.decision(context, batch_id)
+            if decision["mode"] != "skip":
                 return False
             require(self.tasks.check_generation())
             batch = self.messages.owned(context, batch_id)
@@ -455,9 +534,62 @@ class GroupParticipation:
                 WHERE batch_id = ? AND state IN ('collecting', 'generating', 'delivering')""",
                 (SKIPPED, stamp(self.tasks.now()), batch_id))
         self._record(context, batch_id, replied=False)
+        self._resolve_silence(batch, context, batch_id, decision)
         return True
+
+    def _resolve_silence(self, batch, context, batch_id, decision):
+        """Report the role's own decision to keep listening, and nothing else.
+
+        This is a legitimate decision, so it is logged as information with the
+        evidence that produced it: which control path proved the choice, the
+        bounded reason the model itself wrote, and how long the turn took.
+        """
+        try:
+            reason = self._silence_reason(context, batch_id)
+            at = self.tasks.now()
+            started_at = datetime.fromisoformat(batch["created_at"])
+            InboundNoReplyLedger(self.runtime).emit(
+                expectation=UNMET, stage="silence", turn=batch_id, reason_code="silence",
+                observed_at=at, origin_key=batch["origin_key"], level="info",
+                code="basis_" + str(decision["basis"]),
+                ms=max(0.0, (at - started_at).total_seconds() * 1000))
+        except Exception:
+            return  # diagnosis is additive: a silent turn is already complete
+
+    def _silence_reason(self, context, batch_id):
+        """The model's own bounded skip reason, or ``None`` when it wrote none."""
+        row = self.runtime.read_one("""SELECT result_json FROM conversation_tool_calls
+            WHERE batch_id = ? AND action = ? AND state = 'succeeded'
+            ORDER BY sequence LIMIT 1""", (batch_id, ACTION))
+        document = json.loads(row["result_json"]) if row is not None else {}
+        reason = document.get("payload", {}).get("reason") if isinstance(document, dict) else None
+        return " ".join(reason.split())[:64] if isinstance(reason, str) else None
 
     def allow_reply(self, context, batch_id):
         if context.scope.kind is ScopeKind.GROUP and self.decision(context, batch_id)["mode"] == "skip":
             raise TaskError("group_participation_fixed", "a skipped group turn cannot produce a reply")
+        self.log_reply_reason(context, batch_id, stage="decision")
         self._record(context, batch_id, replied=True)
+
+    def log_reply_reason(self, context, batch_id, *, stage):
+        if context.scope.kind is not ScopeKind.GROUP:
+            return
+        saved = self.admission.recorded(context, batch_id)
+        if saved is None:
+            frozen = self._frozen_turns.get(batch_id, {})
+            self.admission.record(context, batch_id, reason="role_choice", mentioned=frozen.get("mentioned", False))
+            saved = self.admission.recorded(context, batch_id)
+        if saved["mentioned"]:
+            return
+        choice = self.runtime.read_one("""SELECT result_json FROM conversation_tool_calls
+            WHERE batch_id = ? AND action = ? AND state = 'succeeded'
+              AND json_extract(result_json, '$.payload.mode') = 'reply'
+              AND trim(json_extract(result_json, '$.payload.reason')) != ''
+            ORDER BY sequence LIMIT 1""", (batch_id, ACTION))
+        model_reason = json.loads(choice["result_json"])["payload"]["reason"] if choice else ""
+        policy_reason = "、".join(REASONS[reason] for reason in saved["reasons"] if reason in REASONS)
+        reason = " ".join((model_reason or policy_reason or REASONS["role_choice"]).split())[:256]
+        if self.admission.mark_logged(context, batch_id, stage):
+            logger.info("[CompanionV2] 非@群回复原因 batch_ref=%s stage=%s trigger=%s reason=%s reason_source=%s",
+                        batch_id, stage, ",".join(saved["reasons"]), json.dumps(reason, ensure_ascii=False),
+                        "model" if model_reason else "policy")

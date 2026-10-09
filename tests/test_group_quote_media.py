@@ -21,8 +21,8 @@ from tests.video_support import video_bytes
 
 class GroupQuoteMediaTests(GroupQuoteMediaFixture, unittest.IsolatedAsyncioTestCase):
     async def test_known_quote_tool_continuation_restart_and_later_metadata_history(self):
-        # Eight frames plus both original and quoted metadata require a larger
-        # explicitly declared synthetic provider profile than the default.
+        # Without a native video profile, keep video bytes and frames out of the
+        # reply model and expose the explicit unavailable status instead.
         self.config = group_config(group_delivery_mode="onebot_group")
         self.config["model"]["maximum_input_estimate"] = 500000
         self.config["runtime"]["budget_tokens"] = 10000000
@@ -38,6 +38,9 @@ class GroupQuoteMediaTests(GroupQuoteMediaFixture, unittest.IsolatedAsyncioTestC
             content = next(m["content"] for m in payload["messages"] if m["role"] == "user")
             views.append(content)
             materials = json.loads(content[0]["text"])["materials"]
+            video_status = [m for m in materials if m["owner"] == "conversation.video_narration"]
+            self.assertEqual(len(video_status), 2)
+            self.assertTrue(all("没有可用的原生视频理解模型" in m["text"] for m in video_status))
             if len(views) == 1:
                 return completion(tools=[NS(id="quoted-query", type="function", function=NS(
                     name=tool_alias("group.memory.query"), arguments="{}"))])
@@ -53,7 +56,7 @@ class GroupQuoteMediaTests(GroupQuoteMediaFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(len(views), 2)
         self.assertEqual(views[0][1:], views[1][1:])
         self.assertEqual(sum(p["type"] == "input_audio" for p in views[0]), 2)
-        self.assertEqual(sum(p["type"] == "image_url" for p in views[0]), 8)
+        self.assertFalse(any(p["type"] in ("image_url", "video_data") for p in views[0]))
         evidence = [[m for m in json.loads(view[0]["text"])["materials"] if m["evidence"]] for view in views]
         self.assertEqual(evidence[0], evidence[1])
         materials = request.context.materials

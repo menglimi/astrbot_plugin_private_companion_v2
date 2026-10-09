@@ -17,7 +17,7 @@ from datetime import datetime
 
 from companion_v2.execution.models import TaskContext, TaskError, require
 from companion_v2.execution.service import outcome
-from companion_v2.foundation.refs import RoleOwnerRef, normalize_utc
+from companion_v2.foundation.refs import RoleOwnerRef, ScopeKind, normalize_utc
 from companion_v2.storage.runtime import StorageRuntime
 
 from .models import (ContentDigest, ReferenceAsset, ReferenceKind, ReferenceRole,
@@ -67,7 +67,7 @@ class ReferenceAssetService:
         isolation without pretending a switch was consulted when it was not.
         """
         if self.settings is None:
-            return {"enabled": True, "daily_outfit_enabled": True,
+            return {"enabled": True, "group_enabled": False, "daily_outfit_enabled": True,
                     "daily_outfit_rotation_days": 14}
         return self.settings.read(context, now)
 
@@ -76,10 +76,6 @@ class ReferenceAssetService:
             raise ValueError("reference material requires its task context")
         self._running()
         now = normalize_utc(self.tasks.now(), field="reference observed time")
-        options = self._options(context, now)
-        if require_enabled and not options["enabled"]:
-            raise TaskError("photo_reference_disabled",
-                            "reference material is off for this role")
         # Reading role-owned material is part of the explicitly authorized Image
         # tool call. It is not a second user-facing capability or an implicit grant.
         policy_action = "extension.tool.invoke" if action == USE_ACTION else action
@@ -93,6 +89,14 @@ class ReferenceAssetService:
                 raise TaskError("reference_authority_revoked", "this context may not use reference material")
         else:
             require(decision)
+        options = self._options(context, now)
+        if require_enabled and not options["enabled"]:
+            raise TaskError("photo_reference_disabled",
+                            "reference material is off for this role")
+        if (action == USE_ACTION and context.scope.kind is ScopeKind.GROUP
+                and not options["group_enabled"]):
+            raise TaskError("photo_reference_group_disabled",
+                            "group use of this role's reference images is off")
         return now, options
 
     def owner(self, context):
@@ -299,7 +303,10 @@ class ReferenceAssetService:
             if not asset.media_ref.startswith(OWNED_REFERENCE_PREFIX):
                 continue
             roles = self.assets.roles_of(self.owner(context), asset.asset_id)
-            references.append({"id": asset.asset_id, "label": asset.label, "roles": roles})
+            references.append({"id": asset.asset_id, "label": asset.label, "roles": roles,
+                               "usage": self.assets.usage_of(self.owner(context), asset.asset_id)})
+        if context.scope.kind is ScopeKind.GROUP:
+            return {"references": tuple(references), "wardrobe": None, "daily_outfit": None}
         wardrobe_options = self.wardrobe_options(context)
         if not wardrobe_options["enabled"] or not wardrobe_options["prompt_enabled"]:
             return {"references": tuple(references), "wardrobe": None, "daily_outfit": None}

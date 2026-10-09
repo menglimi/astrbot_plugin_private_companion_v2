@@ -34,7 +34,7 @@ window.CompanionStateContact = (() => {
   const reasons={proactive_disabled:"联系或对应目的尚未开启",proactive_paused:"当前仍在暂停期",proactive_quiet_hours:"当前处于免打扰时段",
     automatic_contact_disabled:"后台自动联系尚未开启",proactive_automatic_disabled:"后台自动联系尚未开启",contact_automatic_disabled:"后台自动联系尚未开启",
     model_task_unregistered:"主动联系模型尚未就绪",authorization_denied:"当前对象尚未获得联系授权",
-    binding_revoked:"当前身份授权已撤销",role_binding_changed:"当前角色绑定已变化",host_not_running:"宿主尚未运行"};
+    binding_revoked:"当前身份授权已撤销",role_binding_changed:"当前角色绑定已变化",host_not_running:"角色尚未运行"};
   const purposes=value=>value?.purposes&&typeof value.purposes==="object"&&!Array.isArray(value.purposes)
     ?Object.entries(value.purposes).filter(([key,item])=>purposeKey.test(key)&&item&&typeof item.label==="string"):[];
   const fields=value=>[...Object.keys(definitions),...purposes(value).flatMap(([key])=>Object.keys(purposeDefinitions).map(suffix=>key+"."+suffix))];
@@ -116,10 +116,10 @@ window.CompanionStateContact = (() => {
       <p class="state-edit-help">预警需要城市、区域和数据源凭据；在「感知」中检查。</p>
       <h4 class="state-form-section">表达与边界</h4>${field("note",values,e)}<p class="state-edit-help">最多 8192 字</p>`;
   }
-  const reason=code=>reasons[code]||(code?"需要核对："+code:"尚未提供运行条件");
+  const reason=code=>reasons[code]||(code?"当前联系条件未满足，请重新读取或检查联系设置。":"尚未提供运行条件");
   const when=value=>value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString("zh-CN",{hour12:false}):"未设置";
   function summary(value,e) {
-    if(!supported(value))return `<header><h3>主动联系偏好</h3><p>当前宿主尚未提供完整的联系设置，请刷新或更新宿主后再查看。</p></header>`;
+    if(!supported(value))return `<header><h3>主动联系偏好</h3><p>联系设置暂未完整读到，请重新读取状态后再查看。</p></header>`;
     const settings=value.settings,effective=value.effective||{};
     const allowance=effective.allowed===true?"当前授权通过":effective.allowed===false?reason(effective.reason):"当前授权尚未提供";
     const automatic=effective.automatic_allowed===true?"自动联系条件已满足":effective.automatic_allowed===false?reason(effective.automatic_reason):"自动联系条件尚未提供";
@@ -131,7 +131,7 @@ window.CompanionStateContact = (() => {
       <div><dt>联系间隔与额度</dt><dd>至少间隔 ${e(settings.interval_seconds)} 秒 · 24 小时最多 ${e(settings.max_contacts_24h)} 次</dd></div>
       <div><dt>行为规划与沉默</dt><dd>开口门槛 ${e(settings.silence_min_confidence)} · 沉默降权 ${e(settings.silence_feedback_penalty)}</dd></div>
       <div><dt>免打扰</dt><dd>${settings.quiet_enabled?`${e(settings.quiet_start)}–${e(settings.quiet_end)} · ${e(settings.quiet_timezone)}`:"未启用"}</dd></div>
-      <div><dt>暂停截止（本地时间）</dt><dd>${e(when(settings.pause_until))}</dd></div><div><dt>运行与模型</dt><dd>${e(({running:"宿主运行中",new:"宿主尚未启动",stopped:"宿主已停止",closed:"宿主已关闭",faulted:"宿主运行异常"})[value.host_state]||"宿主状态待核对")} · ${effective.model_registered===true?"联系模型已登记":effective.model_registered===false?"联系模型尚未就绪":"模型状态待核对"}</dd></div></dl>${relation}
+      <div><dt>暂停截止（本地时间）</dt><dd>${e(when(settings.pause_until))}</dd></div><div><dt>运行与模型</dt><dd>${e(({running:"运行中",new:"角色正在准备",stopped:"插件已停止",closed:"已关闭",faulted:"运行异常"})[value.host_state]||"运行状态待核对")} · ${effective.model_registered===true?"联系模型已登记":effective.model_registered===false?"联系模型尚未就绪":"模型状态待核对"}</dd></div></dl>${relation}
       <details class="state-receipt-reference" data-receipt="contact-purposes"><summary id="state-contact-purpose-summary">查看各类联系的当前条件</summary><ul class="state-contact-status">${purposes(value).map(([key,item])=>`<li><strong>${e(item.label)}</strong><span>${item.allowed===true?"当前允许":item.allowed===false?e(reason(item.reason)):"条件待核对"} · 权重 ${e(settings[key+".weight"])}</span></li>`).join("")}</ul></details>`;
   }
   return {fields,purposes,label,validField,supported,normalized,form,summary};

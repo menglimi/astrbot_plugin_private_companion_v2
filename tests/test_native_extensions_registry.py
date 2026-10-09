@@ -93,6 +93,14 @@ class Context:
         return (self.star,)
 
 
+class NativeImageManagementApiTests(unittest.TestCase):
+    def test_management_api_requires_a_live_v2_native_image_declaration(self):
+        registry = NativeExtensionRegistry(Context(Star(None)))
+        self.addCleanup(registry.close)
+
+        self.assertIsNone(registry.image_extension_api())
+
+
 class LiveReadTests(unittest.IsolatedAsyncioTestCase):
     """A read-only provider result is checked by the domain reader, then sealed."""
 

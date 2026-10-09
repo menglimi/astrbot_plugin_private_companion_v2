@@ -37,11 +37,13 @@ class MultiHostSettings:
     installation_key: str
     targets: tuple[PrivateTarget, ...]
     personas: tuple[PersonaMapping, ...]
+    account_bindings: tuple[HostAccount, ...]
     capabilities: tuple[str, ...]
     common: HostSettings
     group_targets: tuple[GroupTarget, ...] = ()
     group_delivery_mode: str = "onebot_group"
     _legacy_group_delivery_shape: bool = field(default=False, compare=False, repr=False)
+    _storage_installation_id: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def all_targets(self):
@@ -49,7 +51,7 @@ class MultiHostSettings:
 
     @property
     def installation_id(self):
-        return "astrbot-private-companion-v2:multi:" + self.installation_key
+        return self._storage_installation_id or "astrbot-private-companion-v2:multi:" + self.installation_key
 
     @property
     def profile_id(self):
@@ -57,8 +59,7 @@ class MultiHostSettings:
 
     @property
     def accounts(self):
-        return tuple(sorted({HostAccount(t.platform_id, t.account_id, t.bot_id) for t in self.all_targets},
-                            key=lambda a: (a.platform_id, a.self_id)))
+        return self.account_bindings
 
     @property
     def fingerprint(self):
@@ -79,6 +80,7 @@ class MultiHostSettings:
         if not self.group_targets:
             data.pop("group_targets")  # Preserve already initialized private-only installations.
         data.pop("_legacy_group_delivery_shape")
+        data.pop("_storage_installation_id")
         if self._legacy_group_delivery_shape:
             data.pop("group_delivery_mode")  # Reproduce manifests pinned before group delivery was fixed.
         return digest(data)
@@ -109,8 +111,6 @@ class MultiHostSettings:
     def parse(cls, config):
         section = _section(config, "multi_host")
         enabled = _boolean(section.get("enabled", False))
-        if enabled and _section(config, "staging").get("enabled", False):
-            raise HostControlError("host_mode_conflict", "select one host mode for the plugin")
         key = _text(section.get("installation_id", "main"), required=True)
         if not PROFILE_PATTERN.fullmatch(key):
             raise HostControlError("host_installation_invalid", "installation ID must be a stable lowercase identifier")
@@ -134,18 +134,44 @@ class MultiHostSettings:
                     raise HostControlError("host_mappings_invalid", "host mapping fields are incomplete or unknown")
                 result.append(kind(**{field: _text(value[field], required=True) for field in names}))
         groups = parse_group_targets(section.get("group_targets", []))
+        raw_accounts = section.get("accounts")
+        if raw_accounts is not None and type(raw_accounts) is not list:
+            raise HostControlError("host_mappings_invalid", "Bot accounts must be a list")
+        account_by_route = {}
         legacy_group_delivery_shape = "group_delivery_mode" not in section
         raw_group_mode = ("onebot_group" if legacy_group_delivery_shape
                           else _text(section.get("group_delivery_mode"), required=True))
         if raw_group_mode not in ("preview", "onebot_group"):
             raise HostControlError("host_group_delivery_invalid", "group delivery must be preview or onebot_group")
-        if not (targets or groups) or not personas:
-            raise HostControlError("host_mappings_required", "configure conversation targets and their persona mappings")
-        accounts, routes, ids, roles = {}, set(), set(), {}
+        try:
+            for row in raw_accounts or ():
+                if type(row) is not dict or set(row) != {"platform_id", "account_id", "bot_id"}:
+                    raise ValueError()
+                account = HostAccount(_text(row["platform_id"], required=True),
+                    account_number(_text(row["account_id"], required=True)),
+                    _text(row["bot_id"], required=True))
+                route = account.platform_id, account.self_id
+                if route in account_by_route:
+                    raise ValueError()
+                account_by_route[route] = account
+            for target in (*targets, *groups):
+                account = HostAccount(target.platform_id, account_number(target.account_id), target.bot_id)
+                route = account.platform_id, account.self_id
+                previous = account_by_route.setdefault(route, account)
+                if previous != account:
+                    raise ValueError()
+        except ValueError:
+            raise HostControlError("host_mappings_conflict", "registered Bot accounts must be unique and match legacy windows") from None
+        account_bindings = tuple(sorted(account_by_route.values(), key=lambda a: (a.platform_id, a.self_id)))
+        if not account_bindings or not personas:
+            raise HostControlError("host_mappings_required", "register at least one Bot account and persona")
+        accounts = {(item.platform_id, item.self_id): item.bot_id for item in account_bindings}
+        routes, ids, roles = set(), set(), {}
         try:
             for target in targets:
                 HostAccount(target.platform_id, account_number(target.account_id), target.bot_id)
-                account_number(target.participant_id)
+                if target.participant_id != "*":
+                    account_number(target.participant_id)
                 if not PROFILE_PATTERN.fullmatch(target.target_id) or target.target_id in ids or target.route_key in routes:
                     raise ValueError()
                 ids.add(target.target_id)
@@ -165,7 +191,7 @@ class MultiHostSettings:
                 if mapping in roles or persona.bot_id not in accounts.values():
                     raise ValueError()
                 roles[mapping] = persona.role_id
-            if set(accounts.values()) != {p.bot_id for p in personas}:
+            if not {p.bot_id for p in personas}.issubset(set(accounts.values())):
                 raise ValueError()
         except ValueError:
             raise HostControlError("host_mappings_conflict", "accounts, target routes and native persona mappings must be unambiguous") from None
@@ -176,7 +202,7 @@ class MultiHostSettings:
                 or not REQUIRED_CAPABILITIES.issubset(capabilities) or not set(capabilities).issubset(ALLOWED_CAPABILITIES)):
             raise HostControlError("host_capabilities_invalid", "configure registered non-core capabilities including reply prerequisites")
         return cls(enabled, key, tuple(sorted(targets, key=lambda t: t.target_id)),
-                   tuple(sorted(personas, key=lambda p: (p.bot_id, p.persona_id))), tuple(sorted(capabilities)),
+                   tuple(sorted(personas, key=lambda p: (p.bot_id, p.persona_id))), account_bindings, tuple(sorted(capabilities)),
                    common, groups, "onebot_group", legacy_group_delivery_shape or raw_group_mode == "preview")
 
     def require_ready(self):
@@ -190,3 +216,48 @@ class MultiHostSettings:
         if found is None:
             raise HostControlError("host_target_unavailable", "the conversation target is not configured")
         return found
+
+    def private_target(self, platform_id, account_id, participant_id):
+        exact = next((item for item in self.targets if item.route_key ==
+                      (platform_id, account_id, participant_id)), None)
+        if exact is not None:
+            return exact
+        template = next((item for item in self.targets if item.route_key ==
+                         (platform_id, account_id, "*")), None)
+        if template is None:
+            return None
+        account = next((item for item in self.accounts if
+                        (item.platform_id, item.self_id) == (platform_id, account_id)), None)
+        if account is None or account.bot_id != template.bot_id:
+            return None
+        identifier = "private-" + digest([platform_id, account_id, participant_id])[:24]
+        return PrivateTarget(identifier, platform_id, account_id, template.bot_id, participant_id)
+
+    def group_target(self, platform_id, account_id, group_id):
+        exact = next((item for item in self.group_targets if item.route_key ==
+                      (platform_id, account_id, group_id)), None)
+        if exact is not None:
+            return exact
+        template = next((item for item in self.group_targets if item.route_key ==
+                         (platform_id, account_id, "*")), None)
+        if template is None:
+            return None
+        account = next((item for item in self.accounts if
+                        (item.platform_id, item.self_id) == (platform_id, account_id)), None)
+        if account is None or account.bot_id != template.bot_id:
+            return None
+        identifier = "group-" + digest([platform_id, account_id, group_id])[:24]
+        return GroupTarget(identifier, platform_id, account_id, template.bot_id, group_id)
+
+    def template_for(self, target):
+        rows = self.group_targets if isinstance(target, GroupTarget) else self.targets
+        peer = target.group_id if isinstance(target, GroupTarget) else target.participant_id
+        field = "group_id" if isinstance(target, GroupTarget) else "participant_id"
+        account_rows = (item for item in rows if item.platform_id == target.platform_id
+                        and item.account_id == target.account_id and item.bot_id == target.bot_id)
+        exact = next((item for item in account_rows if getattr(item, field) == peer), None)
+        if exact is not None:
+            return exact
+        return next((item for item in rows if getattr(item, field) == "*"
+                     and item.platform_id == target.platform_id and item.account_id == target.account_id
+                     and item.bot_id == target.bot_id), None)

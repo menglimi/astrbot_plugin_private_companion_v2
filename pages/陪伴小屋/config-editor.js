@@ -9,7 +9,7 @@ window.CompanionConfigEditors = (() => {
   const PREFIX = "/astrbot_plugin_private_companion_v2/";
 
   /* 主动联系偏好（proactive.contact）是唯一一个四层组：安装 → 角色 → 关系 → 窗口。
-     158 个字段平铺成一张卡没法用，所以按「一条链一段」拆成 22 段：
+     160 个字段平铺成一张卡没法用，所以按「一条链一段」拆成 23 段：
      总闸 → 节奏与额度 → 强度与连发 → 关系级配额 → 免打扰 → 重复抑制 → 开口判定，
      然后是三类契机，最后是各契机自己的触发源（问候、三餐、纪念日、天气、资讯、
      网络探索、自关联、余额、屏幕、语音与戳戳、约定、生成上下文）。
@@ -61,9 +61,9 @@ window.CompanionConfigEditors = (() => {
            + "祖先层更晚的到期时间仍然生效。",
      fields: ["quiet_enabled", "quiet_start", "quiet_end", "quiet_timezone", "pause_until"]},
     {id: "dedup", title: "重复与抑制",
-     help: "关闭总闸后不再做任何内容去重；三条窗口分别管「刚说过的话」「已经发过的同类内容」与天气预警。",
+     help: "关闭总闸后不再做任何内容去重；这里管理最近回复与已发同类内容的窗口。",
      fields: ["dedup_enabled", "dedup_last_message_enabled", "dedup_last_message_window_minutes",
-              "dedup_sent_window_minutes", "dedup_weather_window_minutes", "dedup_min_shared_tokens",
+              "dedup_sent_window_minutes", "dedup_min_shared_tokens",
               "dedup_min_overlap_ratio", "dedup_policies"]},
     {id: "judgement", title: "开口判定与人格复核",
      help: "两道判定都在草稿写好之后：先看置信度门槛，再由模型复核是否符合人格；任何一道不通过都只丢弃这条草稿，不产生消息。",
@@ -77,6 +77,9 @@ window.CompanionConfigEditors = (() => {
     {id: "daily", title: "契机：日常与约定",
      help: "问候、接回旧话题、共同活动、约定与饭点：这些契机依赖日程与已登记的约定，权重同样只在候选之间做选择。",
      fields: purposeFields("daily")},
+    {id: "followup", title: "接回旧话题时机",
+     help: "只在上一条主动消息已确认送达、之后没有新输入且原话仍有效时接回；等待时间与冷却都从已送达的记录计算。",
+     fields: ["contact_followup_after_minutes", "contact_followup_cooldown_minutes"]},
     {id: "share", title: "契机：分享与外部",
      help: "分享自己的生活与作品、外部资讯、环境变化与屏幕观察：外部来源还要各自打开下面触发源里的总闸，这里只决定这一类契机是否参与。",
      fields: purposeFields("share")},
@@ -95,9 +98,9 @@ window.CompanionConfigEditors = (() => {
      fields: ["date_checkin_enabled", "date_checkin_time", "important_dates",
               "important_date_lookahead_days"]},
     {id: "weather", title: "天气与预警",
-     help: "定时问候与突变联系是两条独立链路；官方预警只转发不低于所选级别的消息，数据源凭据由宿主环境变量提供。",
+     help: "定时问候与突变联系是两条独立链路；天气问候、突变与官方预警共用天气去重窗口。数据源与和风凭据在感知页配置。",
      fields: ["weather_checkin_enabled", "weather_checkin_time", "weather_change_enabled",
-              "weather_sample_minutes", "official_weather_alert_enabled",
+              "weather_sample_minutes", "dedup_weather_window_minutes", "official_weather_alert_enabled",
               "official_alert_poll_minutes", "official_alert_min_severity"]},
     {id: "news", title: "外部资讯源",
      help: "三个来源总闸与来源类型配合：搜索走网络探索、热榜走每日热榜、其余走分享新闻；"
@@ -136,6 +139,8 @@ window.CompanionConfigEditors = (() => {
     {id: "context", title: "生成上下文",
      help: "只影响起草时能看到多少历史与多长的材料，以及说话风格的补充；不改动权限、频率或投递规则。",
      fields: ["generation_history_limit", "history_max_chars", "style_prompt"]},
+    {id: "prompts", title: "主动表达模板",
+     fields: ["expression_prompt", "news_sharing_prompt", "length_prompt", "news_length_prompt"]},
   ];
   /* 注册表只给 kind 与数值范围：HH:MM、HH:MM-HH:MM、IANA 时区、暂停时间点、
      24 小时曲线与三个逗号清单的形状都要由页面兜住，否则值会走到后端才被拒
@@ -225,20 +230,30 @@ window.CompanionConfigEditors = (() => {
     const count = document.querySelector("[data-profile-count]");
     const progress = document.querySelector("[data-profile-progress]");
     const fill = document.querySelector("[data-profile-fill]");
-    const label = document.querySelector("[data-profile-status]");
     if (count) count.textContent = `${filled} / ${total}`;
     if (progress) {
       progress.setAttribute("aria-valuemax", String(total));
       progress.setAttribute("aria-valuenow", String(filled));
     }
-    if (fill) fill.style.width = `${total ? filled / total * 100 : 0}%`;
-    if (label) label.textContent = `已有资料项 · ${buttons.length} 个设定分区`;
+    if (fill) {
+      /* 完成度既支持旧的横向进度条（style.width），也支持自我页的环形进度
+         （stroke-dasharray）；两者都由 data-profile-fill 承载。 */
+      const ratio = total ? filled / total : 0;
+      if (fill.style && "strokeDasharray" in fill.style) {
+        const circumference = 2 * Math.PI * 15.5;
+        fill.style.strokeDasharray =
+          `${(circumference * ratio).toFixed(2)} ${circumference.toFixed(2)}`;
+      } else {
+        fill.style.width = `${ratio * 100}%`;
+      }
+    }
 
     const name = String(settings.name || "").trim();
     const title = document.querySelector("[data-profile-name]");
     if (title) title.textContent = name || title.dataset.profileFallback || "当前角色";
-    const emblem = document.querySelector("[data-profile-emblem]");
-    if (emblem) emblem.textContent = Array.from(name)[0] || emblem.dataset.profileFallback || "设";
+    document.querySelectorAll("[data-profile-emblem]").forEach(emblem => {
+      emblem.textContent = Array.from(name)[0] || emblem.dataset.profileFallback || "设";
+    });
     const first = (...keys) => keys.map(key => String(settings[key] || "").trim()).find(Boolean) || "待补充";
     const identity = document.querySelector('[data-profile-signal="identity"]');
     const appearance = document.querySelector('[data-profile-signal="appearance"]');
@@ -248,7 +263,7 @@ window.CompanionConfigEditors = (() => {
     if (identity) identity.textContent = first("occupation", "species", "identity");
     if (appearance) appearance.textContent = first("appearance_points", "hair", "appearance");
     if (personality) personality.textContent = first("personality", "reaction_patterns", "speech_style");
-    if (world) world.textContent = first("world_name", "tone", "world");
+    if (world) world.textContent = [settings.world_name, settings.era].filter(Boolean).join(" · ") || first("tone", "world");
     if (voice) voice.textContent = first("speech_style", "first_person", "reaction_patterns");
   }
 
@@ -271,41 +286,72 @@ window.CompanionConfigEditors = (() => {
     },
     image_review: {
       title: "群图成图审核",
-      note: "只作用于群受众的成图；审核不通过时可丢弃或改走私聊投递。",
+      note: "启用后，群内成图须经审核才会带图发送；关闭会跳过审核，图片按原流程进入群聊。",
       labels: {
-        enable_group_nsfw_private_fallback: "审核不通过时降级私聊投递",
+        enable_group_nsfw_private_fallback: "启用群聊成图审核",
         group_nsfw_image_review_mode: "审核方式",
         group_nsfw_image_review_sensitivity: "判定尺度",
         group_nsfw_image_review_min_confidence: "判定置信度下限",
         group_nsfw_image_review_timeout_seconds: "单次审核超时（秒）",
         group_nsfw_image_review_max_dimension: "送审图片最长边像素",
         group_nsfw_image_review_max_images: "单次送审图片张数",
-        group_nsfw_image_review_failure_action: "审核失败时",
+        group_nsfw_image_review_failure_action: "审核未得到有效结论时",
         group_nsfw_image_review_custom_prompt: "审核提示词补充",
         review_provider: "审核模型扩展",
         review_dual_provider: "第二审核模型",
       },
       helps: {
-        enable_group_nsfw_private_fallback: "该成员本身是已授权的私聊对象时才会改发私聊；否则保持阻止。",
+        enable_group_nsfw_private_fallback: "这是审核总开关：关闭时跳过审核并按原流程发送群图；开启后只有判定安全的图片才会留在群内。明确判定不适合群聊时，会移除群内图片，并在请求者有已授权私聊通道时尝试私聊投递。",
         group_nsfw_image_review_mode: "选择具体的审核模型扩展后才会真正调用。",
         group_nsfw_image_review_max_dimension: "0 表示按原尺寸送审。",
-        group_nsfw_image_review_failure_action: "审核失败与判定不通过是两件事，这里只决定失败时的动作。",
+        group_nsfw_image_review_failure_action: "处理超时、模型不可用或无法判定：私聊选项会保留群聊文字，并在请求者私聊已授权时尝试投递原图；仅文字选项不会私聊投递。明确判定不适合群聊时的私聊回退不受此项影响。",
         group_nsfw_image_review_custom_prompt: "留空使用内置提示词；只补充判定尺度，不能放宽既有边界。",
       },
       /* 这些字段在注册表里是 TEXT，取值约束在 review_settings 的校验器里；
          选项必须与后端常量保持一致，否则保存会被拒绝。 */
       choices: {
         group_nsfw_image_review_mode: {single: "单模型", dual: "双模型复核"},
-        group_nsfw_image_review_sensitivity: {lenient: "宽松", balanced: "标准", strict: "严格"},
-        group_nsfw_image_review_failure_action: {private: "改走私聊投递", withhold: "暂不投递", block: "整条阻止"},
-        review_provider: {"": "跟随任务路由"},
-        review_dual_provider: {"": "不使用"},
+        group_nsfw_image_review_sensitivity: {relaxed: "宽松", balanced: "标准", strict: "严格"},
+        group_nsfw_image_review_failure_action: {private: "尝试私聊投递原图", block: "群聊仅发送文字"},
+      },
+      catalogs: {
+        review_provider: () => window.CompanionImageReviewModelChoices || {"": "跟随任务路由"},
+        review_dual_provider: () => ({...(window.CompanionImageReviewModelChoices || {}), "": "不使用"}),
       },
       order: ["enable_group_nsfw_private_fallback", "group_nsfw_image_review_mode",
               "group_nsfw_image_review_sensitivity", "group_nsfw_image_review_min_confidence",
               "group_nsfw_image_review_timeout_seconds", "group_nsfw_image_review_max_dimension",
               "group_nsfw_image_review_max_images", "group_nsfw_image_review_failure_action",
               "group_nsfw_image_review_custom_prompt", "review_provider", "review_dual_provider"],
+    },
+    "image.output": {
+      title: "生图偏好", note: "", scopeNote: "按角色生效",
+      labels: {trigger_mode:"非指令生图", allow_user_requests:"允许用户请求生图",
+        rule_max_daily:"规则快判每日上限", proactive_probability:"主动带图概率",
+        proactive_max_daily:"主动带图每日上限", prompt_format:"表达方式", style:"画面风格",
+        style_prompt:"自定义风格", negative_mode:"负面策略", negative_prompt:"自定义负面提示词",
+        text2img_fixed_prompt:"文生图 · 固定提示词", text2img_negative_prompt:"文生图 · 负面提示词",
+        selfie_fixed_prompt:"自拍 / 人像 · 固定提示词", selfie_negative_prompt:"自拍 / 人像 · 负面提示词",
+        edit_fixed_prompt:"改图 · 固定提示词", edit_negative_prompt:"改图 · 负面提示词",
+        scene_presets_json:"场景预设（JSON）"},
+      choices:{trigger_mode:{tool:"工具优先",rules:"规则快判",off:"关闭"},
+        prompt_format:{traditional:"传统标签",natural:"自然语言",nai:"NAI 联动"},
+        style:{realistic:"真实",anime:"二次元",custom:"其他"},
+        negative_mode:{safe_default:"安全默认",merge:"合并自定义",replace:"完全替换"}},
+      segmentedChoices:["trigger_mode","prompt_format","style","negative_mode"],
+      rows:{style_prompt:2,negative_prompt:2,text2img_fixed_prompt:2,text2img_negative_prompt:2,
+        selfie_fixed_prompt:2,selfie_negative_prompt:2,edit_fixed_prompt:2,edit_negative_prompt:2,
+        scene_presets_json:7},
+      order:["trigger_mode","allow_user_requests","rule_max_daily","proactive_probability","proactive_max_daily",
+        "prompt_format","style","style_prompt","negative_mode","negative_prompt",
+        "text2img_fixed_prompt","text2img_negative_prompt","selfie_fixed_prompt","selfie_negative_prompt",
+        "edit_fixed_prompt","edit_negative_prompt","scene_presets_json"],
+      sections:[{id:"triggers",title:"生图触发",fields:["trigger_mode","allow_user_requests","rule_max_daily",
+        "proactive_probability","proactive_max_daily"]},
+        {id:"style",title:"风格与策略",fields:["prompt_format","style","style_prompt","negative_mode","negative_prompt"]},
+        {id:"prompts",title:"各类画面提示词",fields:["text2img_fixed_prompt","text2img_negative_prompt",
+          "selfie_fixed_prompt","selfie_negative_prompt","edit_fixed_prompt","edit_negative_prompt"]},
+        {id:"scenes",title:"场景预设",fields:["scene_presets_json"]}],
     },
     reaction: {
       title: "表情检索",
@@ -356,6 +402,13 @@ window.CompanionConfigEditors = (() => {
       order: ["busy_reply_gate_enabled", "busy_reply_min_delay_seconds",
               "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes",
               "busy_activity_keywords", "busy_exclude_keywords", "busy_urgent_keywords"],
+      sections: [
+        {id: "reply", title: "私聊回复延迟", help: "这组只影响已经收到的私聊：忙碌时把本轮回复放进等待窗口，紧急关键词仍然立即通过。",
+         fields: ["busy_reply_gate_enabled", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds"]},
+        {id: "contact", title: "主动联系恢复", help: "这组只影响普通主动联系：忙碌结束后再等一段缓冲，并用关键词识别哪些日程算忙碌。",
+         fields: ["busy_reply_proactive_resume_buffer_minutes", "busy_activity_keywords",
+                  "busy_exclude_keywords", "busy_urgent_keywords"]},
+      ],
     },
     budget: {
       title: "每日 Token 软限额",
@@ -454,22 +507,24 @@ window.CompanionConfigEditors = (() => {
     },
     "role.growth.skills": {
       title: "技能领域",
-      note: "技能属于角色本身，不随会话改变：在任意一个会话里设置后，角色与其他会话也保持同一套技能领域。个别会话可以单独覆盖，不影响角色级的值。",
+      note: "证据驱动的技能成长设置。技能属于角色本身，不随会话改变；个别会话可以单独覆盖，不影响角色级的值。",
       labels: {
+        enabled: "启用技能成长",
         custom_skills: "自定义技能领域",
         schedule_influence_strength: "影响日程的强度",
       },
       helps: {
+        enabled: "关闭后暂停技能进展提案和自动日程、生活状态参考；已有记录保留，仍可管理。",
         custom_skills: "用逗号、换行分隔，也可以直接写 JSON 数组；最多 8 项，每项取前 24 字。第一次设置会把这份清单记为角色级，之后其他会话都继承它。",
         schedule_influence_strength: "0 不影响日程；数值越大，安排越倾向于为练习留出时间。同样按角色共享，可在本会话单独覆盖。",
       },
       choices: {schedule_influence_strength: {0: "不影响", 1: "轻微参考", 2: "留出练习时间",
                                               3: "优先安排相关活动"}},
-      order: ["custom_skills", "schedule_influence_strength"],
+      order: ["enabled", "custom_skills", "schedule_influence_strength"],
       /* 保存层级必须说清：这个组的默认落点是角色级，只有本会话覆盖才写会话层。 */
       sections: [
         {id: "shared", title: "角色级技能领域", help: "这一组按角色保存，会话之间共享。",
-         fields: ["custom_skills", "schedule_influence_strength"]},
+         fields: ["enabled", "custom_skills", "schedule_influence_strength"]},
       ],
     },
     role_profile: {
@@ -479,17 +534,17 @@ window.CompanionConfigEditors = (() => {
         name: "姓名",
         species: "种族",
         birthday: "生日",
-        age: "年龄感 / 旧版生日",
+        age: "年龄感",
         gender: "性别",
-        occupation: "职业 / 身份",
-        identity: "身份经历补充（原有设定）",
+        occupation: "职业",
+        identity: "身份经历补充",
         appearance_points: "外貌识别点",
         hair: "发型 / 发色",
         eyes: "瞳色",
         clothing: "服饰风格",
         image_identity_hint: "头像与图像识别线索",
-        appearance: "外貌补充（原有设定）",
-        personality: "性格描述（原有设定）",
+        appearance: "外貌补充",
+        personality: "性格描述",
         first_person: "自称与代词",
         speech_style: "说话方式",
         emotional_style: "情绪表达",
@@ -500,11 +555,11 @@ window.CompanionConfigEditors = (() => {
         daily_habits: "日常习惯",
         key_lore: "关键设定",
         character_extra: "其他角色补充",
-        motivations: "价值与目标补充（原有设定）",
+        motivations: "价值与目标补充",
         core_values: "重视的事",
         desire: "核心欲望 / 长期目标",
         hobbies: "爱好",
-        boundaries: "互动边界（原有设定）",
+        boundaries: "互动边界",
         taboos: "禁忌",
         world_name: "所处世界",
         era: "时代背景",
@@ -513,20 +568,20 @@ window.CompanionConfigEditors = (() => {
         scenes: "主要活动场景",
         network: "世界观关系网",
         world_extra: "其他世界补充",
-        world: "世界设定补充（原有设定）",
+        world: "世界设定补充",
         platform_group_chat: "群聊",
         platform_screen: "识屏",
         platform_bilibili: "B站",
         platform_qzone: "QQ空间",
         platform_library: "资料柜",
-        platform_names: "平台称呼补充（原有设定）",
+        platform_names: "平台称呼补充",
         world_adaptation_mode: "世界观适配模式",
         world_adaptation: "世界观适配指引",
       },
       helps: {
         name: "角色在设定中的姓名；上方角色展示会优先显示这里。",
         species: "人类、精灵、仿生人等；没有特殊种族时可留空。",
-        birthday: "角色的出生日期或纪念日；不确定时可留空。",
+        birthday: "角色的出生日期或纪念日；勾选「不确定年份」保存为“4月17日”，勾选「农历」按农历纪日。不确定时可留空。",
         age: "填写年龄感或保留原有生日设定；新的明确生日也可填入“生日”字段。",
         gender: "角色自我认同的性别；不需要的设定可留空。",
         occupation: "职业、身份、所属组织或社会位置。",
@@ -577,6 +632,23 @@ window.CompanionConfigEditors = (() => {
              world: 5, platform_names: 4, world_adaptation: 4, image_identity_hint: 3, network: 3, world_extra: 3,
              key_lore: 3, character_extra: 3, emotional_style: 3, social_distance: 3,
              reaction_patterns: 4, voice_examples: 5},
+      /* 控件形态：这些字段的值全部仍是 TEXT 字符串，只是把「往 textarea 里
+         写约定格式」换成对应的专门控件（date/chips/quotes/tags，见内核）；
+         姓名、外貌、时代这类一行放得下的事实字段声明为单行输入，
+         避免默认 textarea 把两列排布顶成通栏。 */
+      inputs: {birthday: "date", gender: "chips", species: "chips", first_person: "chips",
+        voice_examples: "quotes", signature_phrases: "tags", hobbies: "tags",
+        name: "line", age: "line", occupation: "line", appearance_points: "line",
+        hair: "line", eyes: "line", clothing: "line", image_identity_hint: "line",
+        world_name: "line", era: "line", tone: "line",
+        platform_group_chat: "line", platform_screen: "line", platform_bilibili: "line",
+        platform_qzone: "line", platform_library: "line"},
+      chipOptions: {
+        gender: {mode: "single", options: ["女", "男", "无性别"]},
+        species: {mode: "single", options: ["人类", "精灵", "仿生人", "AI", "兽人"]},
+        first_person: {mode: "single", options: ["我", "人家", "吾", "本座"]},
+      },
+      segmentedChoices: ["world_adaptation_mode"],
       order: ["name", "species", "birthday", "age", "gender", "occupation", "identity", "key_lore", "character_extra", "appearance_points", "hair", "eyes",
         "clothing", "image_identity_hint", "appearance", "personality", "first_person", "speech_style", "emotional_style", "social_distance",
         "reaction_patterns", "voice_examples", "signature_phrases", "daily_habits", "motivations",
@@ -587,11 +659,11 @@ window.CompanionConfigEditors = (() => {
       scopeNote: "当前角色 · 所有会话共享",
       onStatus: updateRoleProfileSummary,
       sections: [
-        {id: "identity", title: "基础身份", help: "姓名、种族、生日、年龄感、职业、关键经历与补充。", fields: ["name", "species", "birthday", "age", "gender", "occupation", "identity", "key_lore", "character_extra"]},
+        {id: "identity", title: "基础身份", help: "姓名、种族、生日、年龄感、职业、关键经历与补充。", fields: ["name", "gender", "birthday", "age", "species", "occupation", "key_lore", "identity", "character_extra"]},
         {id: "appearance", title: "外貌与识别", help: "发型、瞳色、服饰和能稳定辨认角色的线索。", fields: ["appearance_points", "hair", "eyes", "clothing", "image_identity_hint", "appearance"]},
         {id: "personality", title: "性格与日常", help: "性格底色、日常习惯和角色做事的稳定倾向。", fields: ["personality", "daily_habits"]},
-        {id: "voice", title: "口吻与反应", help: "用自称、情绪表达、典型反应和示例台词写出角色说话的感觉。", fields: ["first_person", "speech_style", "emotional_style", "social_distance", "reaction_patterns", "voice_examples", "signature_phrases"]},
-        {id: "motivations", title: "价值与目标", help: "做选择的原则、长期目标与兴趣。", fields: ["motivations", "core_values", "desire", "hobbies"]},
+        {id: "voice", title: "口吻与反应", help: "用自称、情绪表达、典型反应和示例台词写出角色说话的感觉。", fields: ["voice_examples", "signature_phrases", "first_person", "speech_style", "emotional_style", "social_distance", "reaction_patterns"]},
+        {id: "motivations", title: "价值与目标", help: "做选择的原则、长期目标与兴趣。", fields: ["core_values", "desire", "hobbies", "motivations"]},
         {id: "boundaries", title: "相处边界", help: "互动偏好、禁忌与关系资料入口。", fields: ["boundaries", "taboos"]},
         {id: "world", title: "世界蓝图", help: "世界、时代、规则、场景与人物网络。", fields: ["world_name", "era", "tone", "rules", "scenes", "network", "world_extra", "world"]},
         {id: "platform_names", title: "平台称呼与世界观适配", help: "选择转写模式，填写平台称呼与自定义规则。", fields: ["platform_group_chat", "platform_screen", "platform_bilibili", "platform_qzone", "platform_library", "platform_names", "world_adaptation_mode", "world_adaptation"]},
@@ -612,7 +684,7 @@ window.CompanionConfigEditors = (() => {
       helps: {
         default_nickname: "角色平时如何称呼当前这位用户；没有固定称呼时留空。",
         user_gender: "只记录对方明确告诉你的内容；不确定时留空。",
-        user_birthday: "生日或纪念日；不确定时留空。",
+        user_birthday: "生日或纪念日；勾选「不确定年份」保存为“4月17日”，勾选「农历」按农历纪日。不确定时留空。",
         user_occupation: "当前用户明确提供的职业；避免猜测。",
         role_relation: "例如朋友、搭档、家人；按你确认的关系填写。",
         interaction: "你们熟悉的相处节奏、互动习惯或需要留意的关系背景。",
@@ -620,6 +692,12 @@ window.CompanionConfigEditors = (() => {
       },
       rows: {default_nickname: 2, user_gender: 2, user_birthday: 2, user_occupation: 2,
              role_relation: 3, interaction: 4, extra: 4},
+      inputs: {user_birthday: "date", user_gender: "chips", role_relation: "chips",
+        default_nickname: "line", user_occupation: "line"},
+      chipOptions: {
+        user_gender: {mode: "single", options: ["女", "男", "未说明"]},
+        role_relation: {mode: "single", options: ["朋友", "搭档", "家人", "恋人", "同事", "同学"]},
+      },
       order: ["default_nickname", "user_gender", "user_birthday", "user_occupation",
         "role_relation", "interaction", "extra"],
       scopeNote: "当前角色 × 当前私聊用户 · 跨窗口共享该关系",
@@ -632,16 +710,14 @@ window.CompanionConfigEditors = (() => {
     },
     knowledge: {
       title: "世界知识与来源",
-      note: "把本机世界书与知识库作为角色可引用的背景资料；导入只做增量，不覆盖已有条目。",
+      note: "",
       labels: {
-        import_enabled: "允许导入本机知识来源",
-        import_paths: "世界书文件路径",
-        source_ids: "知识库 / 文档标识",
-        entry_limit: "单次导入条目上限",
-        entry_char_limit: "单条素材最长字数",
-        source_limit: "来源数量上限",
+        source_ids: "AstrBot 知识库与文档",
+        entry_limit: "最多读取片段数",
+        entry_char_limit: "单条片段字数上限",
+        source_limit: "最多读取来源数",
         candidate_char_budget: "单轮候选字符预算",
-        inject_enabled: "允许在对话中引用知识",
+        inject_enabled: "在对话中引用所选资料",
         inject_max_entries: "每轮最多引用条数",
         inject_max_chars: "每轮引用字符上限",
         member_recognition_enabled: "启用成员线索",
@@ -649,29 +725,19 @@ window.CompanionConfigEditors = (() => {
         member_inject_limit: "每轮成员线索条数",
         member_clue_chars: "单条成员线索字数",
       },
-      helps: {
-        import_enabled: "关闭时不会读取任何知识来源；已有的导入结果仍然保留。",
-        import_paths: "相对 AstrBot 数据根解析，也可写绝对路径；留空时按 AstrBot 的常规位置（如 data/world_book）查找。分隔用换行、逗号、分号或全角逗号/分号。",
-        source_ids: "只接受本机确实存在的标识，形如 kb:<知识库 ID> 或 doc:<知识库 ID>:<文档 ID>；写错的项会被静默跳过。分隔用换行、逗号、分号或全角逗号/分号——注意顿号不算分隔符。",
-        candidate_char_budget: "检索阶段可扫描的字符总量，不是最终注入量；调小会让命中变少。",
-        inject_enabled: "只决定是否把已导入的知识作为背景材料；不会让知识变成事实来源。",
-        member_recognition_enabled: "成员线索只用于显示归因，不会写成成员事实，也不改变权限。",
-        member_match_aliases: "允许用别名匹配到同一成员；关闭后只按准确名字匹配。",
-      },
-      order: ["import_enabled", "import_paths", "source_ids", "entry_limit", "entry_char_limit",
-              "source_limit", "candidate_char_budget", "inject_enabled", "inject_max_entries",
+      helps: {},
+      inputs: {source_ids: "source-checklist"},
+      catalogs: {source_ids: (status) => status?.knowledge_sources || []},
+      order: ["source_ids", "entry_limit", "entry_char_limit", "source_limit",
+              "candidate_char_budget", "inject_enabled", "inject_max_entries",
               "inject_max_chars", "member_recognition_enabled", "member_match_aliases",
               "member_inject_limit", "member_clue_chars"],
-      /* 导入侧与引用侧是两条独立的链：导入总闸关着时，导入参数不起作用；
-         引用总闸关着时，引用参数不起作用。分组让页面直接说明这件事，
-         而不是把十四个控件一视同仁地铺开。 */
       sections: [
-        {id: "import", title: "世界书与资料来源", help: "只做增量导入，不覆盖已有条目；关闭导入总闸时，下面几项不起作用。",
-         fields: ["import_enabled", "import_paths", "source_ids", "entry_limit", "entry_char_limit",
+        {id: "import", title: "AstrBot 官方知识库", fields: ["source_ids", "entry_limit", "entry_char_limit",
                   "source_limit", "candidate_char_budget"]},
-        {id: "inject", title: "在对话中引用", help: "只决定是否把已导入的知识作为背景材料；关闭时下面几项不起作用，已导入的内容仍然保留。",
-         fields: ["inject_enabled", "inject_max_entries", "inject_max_chars"]},
-        {id: "members", title: "群聊成员线索", help: "只用于群聊中的显示归因，不会写成成员事实，也不改变权限。",
+        {id: "inject", title: "在对话中引用", fields: [
+          "inject_enabled", "inject_max_entries", "inject_max_chars"]},
+        {id: "members", title: "群聊成员线索",
          fields: ["member_recognition_enabled", "member_match_aliases", "member_inject_limit",
                   "member_clue_chars"]},
       ],
@@ -687,6 +753,7 @@ window.CompanionConfigEditors = (() => {
         sleep_enabled: "按作息自动进入睡眠",
         sleep_time: "入睡时刻（HH:MM）",
         sleep_timezone: "作息时区",
+        sleep_variation_minutes: "自然浮动上限（分钟）",
         sleep_minutes: "睡眠时长（分钟）",
         reading_enabled: "启用阅读角",
         derive_enabled: "从日记提取衍生材料",
@@ -710,8 +777,9 @@ window.CompanionConfigEditors = (() => {
         diary_time: "按下面的时区解释，24 小时制，形如 23:50。",
         timezone: "日记日程使用的 IANA 时区，如 Asia/Shanghai。",
         sleep_enabled: "开启后按入睡时刻自动进入睡眠，醒来时间由睡眠时长算出。",
-        sleep_time: "按作息时区解释，24 小时制，形如 00:30。可以跨零点。",
+        sleep_time: "这是入睡时间的中心点；实际时间会在浮动上限内缓慢提前或延后，连续几天变化不会突然跳动。按作息时区解释，24 小时制。",
         sleep_timezone: "作息可以独立于日记时区，例如角色作息按另一个城市算。",
+        sleep_variation_minutes: "这是节律自然变化的最大范围，不是每天重新抽取一次。偏移会沿用前几天的趋势并逐步变化；同一角色、同一天在重启和窗口切换后保持一致。设为 0 即固定，最多 ±120 分钟。",
         reading_enabled: "只登记阅读角是否可用；读了什么、读到哪由角色记录。",
         derive_enabled: "从日记正文提取摘要、梦境一类衍生材料；关闭时只保存原正文。",
         diary_style_prompt: "补充日记的写法偏好；留空使用默认风格。",
@@ -734,7 +802,7 @@ window.CompanionConfigEditors = (() => {
       inputs: {diary_time: "time", sleep_time: "time", timezone: "line", sleep_timezone: "line"},
       audit: lifeAudit,
       order: ["enabled", "diary_enabled", "diary_time", "timezone",
-              "sleep_enabled", "sleep_time", "sleep_timezone", "sleep_minutes",
+              "sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes",
               "reading_enabled", "derive_enabled",
               "diary_style_prompt", "dream_theme_candidates", "dream_mixed_themes_enabled",
               "dream_intimate_theme_enabled", "dream_afterglow_mode",
@@ -748,7 +816,7 @@ window.CompanionConfigEditors = (() => {
         {id: "routine", title: "生活例程", help: "关闭总闸时，日记、睡眠与阅读的日程都不再登记，下面各项都不起作用。",
          fields: ["enabled", "diary_enabled", "diary_time", "timezone", "reading_enabled", "derive_enabled"]},
         {id: "sleep", title: "睡眠作息", help: "人格共享作息；执行会选择已授权的有效窗口。",
-         fields: ["sleep_enabled", "sleep_time", "sleep_timezone", "sleep_minutes"]},
+         fields: ["sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes"]},
         {id: "writing", title: "日记与梦境", help: "写作偏好，只影响日记与梦境的文本，不改变任何权限或事实。",
          fields: ["diary_style_prompt", "dream_theme_candidates", "dream_mixed_themes_enabled",
                   "dream_intimate_theme_enabled", "dream_afterglow_mode"]},
@@ -863,22 +931,24 @@ window.CompanionConfigEditors = (() => {
     },
     "photo.reference": {
       title: "参考图",
-      note: "按角色生效。参考素材按登记条目保存在资产表里，配置里不存文件路径；每张图都要带校验摘要，改动过的素材在使用时会被拒绝。",
+      note: "按角色生效。启用参考图后私聊可用；只有打开「允许群聊使用参考图」才会向群聊提供该角色的素材。参考素材按登记条目保存在资产表里，配置里不存文件路径；改动过的素材在使用时会被拒绝。",
       labels: {
         enabled: "启用参考图",
+        group_enabled: "允许群聊使用参考图",
         daily_outfit_enabled: "启用每日穿搭",
         daily_outfit_rotation_days: "同一套穿搭的轮换间隔（天）",
       },
       helps: {
         enabled: "关闭后参考图既不能读取也不能新登记；已登记的素材保留，撤回仍然可用。",
+        group_enabled: "单独控制本角色的已登记参考图能否用于群聊；默认关闭，私聊使用不受它影响。",
         daily_outfit_enabled: "同意使用参考图，不等于同意每天都出一张穿搭图，所以这里是独立开关。",
         daily_outfit_rotation_days: "同一套衣服再次出现前至少要间隔多少天。",
       },
       choices: {},
-      order: ["enabled", "daily_outfit_enabled", "daily_outfit_rotation_days"],
+      order: ["enabled", "group_enabled", "daily_outfit_enabled", "daily_outfit_rotation_days"],
       sections: [
-        {id: "switches", title: "能力开关", help: "两个开关互相独立：先允许参考图，再决定是否每天出穿搭。",
-         fields: ["enabled", "daily_outfit_enabled"]},
+        {id: "switches", title: "能力开关", help: "参考图总闸、群聊使用和每日穿搭分别控制；群聊默认不读取角色参考素材。",
+         fields: ["enabled", "group_enabled", "daily_outfit_enabled"]},
         {id: "rotation", title: "轮换", help: "只影响同款出现的间隔，不改变已登记素材。",
          fields: ["daily_outfit_rotation_days"]},
       ],
@@ -907,6 +977,7 @@ window.CompanionConfigEditors = (() => {
         group_repeat_interrupt_probability_step: "打断概率每次递增",
         group_repeat_interrupt_text: "打断复读时说的话",
         group_repeat_window_seconds: "统计重复的时间窗（秒）",
+        group_context_max_age_hours: "群聊历史回看时长（小时）",
       },
       helps: {
         enable_group_social_context: "关闭时下面五项氛围参考都不起作用，角色只按对话本身理解群聊。",
@@ -928,6 +999,7 @@ window.CompanionConfigEditors = (() => {
         group_repeat_interrupt_probability_step: "复读持续越久、打断概率越高，每一次按这个幅度累加。",
         group_repeat_interrupt_text: "不打字时用的一句短语，最多 80 个字，只能是一行。",
         group_repeat_window_seconds: "在这段时间内的重复才计入次数；调大更容易触发。",
+        group_context_max_age_hours: "只把这段时间内已验证的群友发言和已送达回复纳入历史；更早内容不会参与本轮上下文。",
       },
       order: ["enable_group_social_context", "enable_group_mood_detection",
               "enable_group_roleplay_strength", "enable_group_moments",
@@ -939,28 +1011,33 @@ window.CompanionConfigEditors = (() => {
               "enable_group_repeat_follow", "group_repeat_count_distinct_users_only",
               "group_repeat_trigger_threshold", "group_repeat_follow_probability",
               "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step",
-              "group_repeat_interrupt_text", "group_repeat_window_seconds"],
+              "group_repeat_interrupt_text", "group_repeat_window_seconds",
+              "group_context_max_age_hours"],
       /* 三条链各自独立：氛围参考有一层总闸，插话与跟读各有自己的总闸与预算。
          不分组的话，关掉总闸后调下面的数字会毫无反应，看着像坏了。 */
       sections: [
-        {id: "atmosphere", title: "群聊氛围参考", help: "关闭这一项时，下面五项都不起作用，角色只按对话本身理解群聊。",
+        {id: "atmosphere", title: "群聊氛围参考", help: "",
          fields: ["enable_group_social_context", "enable_group_mood_detection",
                   "enable_group_roleplay_strength", "enable_group_moments",
-                  "enable_group_moment_portrait", "enable_group_joke_guard"]},
+                  "enable_group_moment_portrait"]},
+        {id: "joke_guard", title: "玩笑护栏", help: "",
+         fields: ["enable_group_joke_guard"]},
         {id: "denoise", title: "表达去噪", help: "只影响说话的腔调，不改变原人格、身份与授权。",
          fields: ["enable_group_persona_denoise"]},
-        {id: "interjection", title: "主动插话", help: "关闭总闸时下面四项不起作用；开启也只是允许，仍受间隔与每日上限限制。",
+        {id: "interjection", title: "主动插话", help: "",
          fields: ["enable_group_interjection", "group_interject_min_interval_minutes",
                   "group_interject_max_daily", "enable_group_interjection_feedback",
                   "group_interject_feedback_window_seconds"]},
-        {id: "repeat", title: "复读跟读", help: "关闭总闸时下面七项都不起作用；跟读与打断二选一，按概率判定。",
+        {id: "repeat", title: "复读跟读", help: "",
          fields: ["enable_group_repeat_follow", "group_repeat_count_distinct_users_only",
                   "group_repeat_trigger_threshold", "group_repeat_follow_probability",
                   "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step",
                   "group_repeat_interrupt_text", "group_repeat_window_seconds"]},
+        {id: "history", title: "群聊上下文", help: "按消息到达或回复送达时间过滤历史；不改变当前消息准入。",
+         fields: ["group_context_max_age_hours"]},
       ],
     },
-    /* 主动联系偏好：唯一一个四层组，也是最长的一个分区（158 项 / 22 段）。
+    /* 主动联系偏好：唯一一个四层组，也是最长的一个分区（160 项 / 23 段）。
        它此前四个触点全缺，92 个字段在任何页面上都点不到；段落声明在这里，
        段落之外的字段会被内核悄悄附到最后一段，所以 order 由段落拼出来。 */
     "proactive.contact": {
@@ -1081,9 +1158,15 @@ window.CompanionConfigEditors = (() => {
         appointment_lead_minutes: "约定前多久开口（分钟）",
         appointment_lag_minutes: "约定到点后仍可补说（分钟）",
         appointment_pre_silence_minutes: "约定前的静默时长（分钟）",
+        contact_followup_after_minutes: "接回旧话题前的等待时间（分钟）",
+        contact_followup_cooldown_minutes: "接回旧话题的冷却时间（分钟）",
         generation_history_limit: "起草时参考的历史联系条数",
         history_max_chars: "历史材料最长字数",
         style_prompt: "主动开口的风格补充",
+        expression_prompt: "主动表达模板",
+        news_sharing_prompt: "新闻分享模板",
+        length_prompt: "主动篇幅模板",
+        news_length_prompt: "新闻篇幅模板",
       },
       /* 只写「这一项为什么重要」和它跟别项的关系；单位已在标签里。 */
       helps: {
@@ -1156,7 +1239,7 @@ window.CompanionConfigEditors = (() => {
         weather_change_enabled: "在两次采样之间天气变化明显时才有机会开口。",
         weather_sample_minutes: "采样越密越容易发现突变，但也会更频繁地读取天气。",
         official_weather_alert_enabled: "只转发角色地点所属区域的官方预警；需要先在感知页设置角色的预警城市与区域。",
-        official_alert_poll_minutes: "轮询间隔；数据源凭据由宿主环境变量提供，没配好时预警源不会就绪。",
+        official_alert_poll_minutes: "轮询间隔；数据源凭据由插件环境配置提供，没配好时预警源不会就绪。",
         official_alert_min_severity: "低于所选级别的预警不转发；「不限制」表示全部转发。",
         news_share_enabled: "只有来源类型不是搜索或热榜时，这个总闸才决定资讯契机是否开启。",
         news_source_kind: "类型与下面的 UID / 地址必须匹配：B 站动态要 UID，RSS 与 HTTPS JSON 要地址。",
@@ -1199,16 +1282,22 @@ window.CompanionConfigEditors = (() => {
         appointment_lead_minutes: "约定开始前多久开口；0 表示到点才说。",
         appointment_lag_minutes: "约定开始后仍可补说的时长；超出后这次机会直接作废，不会翻旧账。",
         appointment_pre_silence_minutes: "约定前的这段时间里不发别的主动消息，避免刚提醒完又被别的话题盖过；0 表示不静默。",
+        contact_followup_after_minutes: "原主动消息确认送达后，至少等候多久才考虑接回；新消息到达或原话失效时不会触发。",
+        contact_followup_cooldown_minutes: "两次接回旧话题之间的最短间隔；从最近一次接回记录计算。",
         generation_history_limit: "起草时最多参考几条已经发出的主动消息；0 表示不参考历史。",
         history_max_chars: "这些历史材料的总字数上限，防止挤占本轮上下文。",
         style_prompt: "用你自己的话补充主动开口的风格；留空使用默认。",
+        expression_prompt: "主动联系的表达方式；保存后替换该段模板。",
+        news_sharing_prompt: "新闻分享时使用的表达模板；保存后替换该段模板。",
+        length_prompt: "篇幅模板需保留 {chars}，它会替换为当前总字数。",
+        news_length_prompt: "新闻篇幅模板需保留 {chars}，所有气泡合计使用该字数。",
       },
       /* 枚举字段在注册表里都是 TEXT，取值合法性由 ContactField / NewsSource 校验；
          选项必须与后端常量一致，否则保存会被拒。 */
       choices: {
         proactive_intensity_preset: {off: "不调整", balanced: "均衡", high_private: "私聊更主动",
                                      high_group: "群聊更主动", live: "高频"},
-        news_source_kind: {host: "宿主默认来源", disabled: "停用资讯源", bilibili: "B 站动态",
+        news_source_kind: {host: "默认数据源", disabled: "停用资讯源", bilibili: "B 站动态",
                            rss: "RSS / Atom", json: "HTTPS JSON", search: "网络搜索",
                            hot: "热榜"},
         official_alert_min_severity: {"": "不限制（全部转发）", minor: "蓝色 · 一般",
@@ -1233,7 +1322,7 @@ window.CompanionConfigEditors = (() => {
          真正管着这一段关系的那一层。 */
       scopeNote: "安装 / 角色 / 关系共享 · 本会话可覆盖",
       sections: CONTACT_SECTIONS,
-      /* order 由段落拼出来：手写一份 158 项的 order 只会与段落声明漂移，
+      /* order 由段落拼出来：手写一份 160 项的 order 只会与段落声明漂移，
          而漂移的表现是「字段没有控件」或「同一个字段出现两次」，都不报错。 */
       order: CONTACT_SECTIONS.flatMap(section => section.fields),
     },
@@ -1317,6 +1406,8 @@ window.CompanionConfigEditors = (() => {
       if (typeof values[name]==="string" && !CLOCK.test(values[name])) return "life_clock_invalid";
     for (const name of ["timezone","sleep_timezone"])
       if (typeof values[name]==="string" && !isZone(values[name])) return "life_timezone_invalid";
+    if (!Number.isInteger(values.sleep_variation_minutes) || values.sleep_variation_minutes < 0 || values.sleep_variation_minutes > 120)
+      return "life_sleep_variation_invalid";
     return null;
   }
 
@@ -1431,6 +1522,7 @@ window.CompanionConfigEditors = (() => {
     rest_gate_settings_invalid: "休息判定设置不合法：判定方式只能选概率或模型，时段格式形如 23:00-08:30。",
     life_timezone_invalid: "请填写有效的 IANA 时区，例如 Asia/Shanghai。",
     life_clock_invalid: "请填写二十四小时制的时刻，形如 23:50 或 00:30。",
+    life_sleep_variation_invalid: "入睡浮动需为 0 到 120 分钟之间的整数。",
     group_participation_scope_invalid: "群聊参与按会话生效，请选择一个已初始化的私聊对象。",
     group_participation_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     group_participation_configuration_invalid: "请核对群聊参与设置：概率需在 0 到 1 之间，数字项需在各自范围内；打断语只能是一行、不超过 80 字。",
@@ -1451,8 +1543,8 @@ window.CompanionConfigEditors = (() => {
     proactive_contact_source_invalid: "资讯来源类型与 UID / 地址不匹配：B 站动态要十进制 UID，RSS 与 HTTPS JSON 要 https 地址。",
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开小屋。",
     core_access_required: "当前账号没有管理权限。",
-    staging_not_initialized: "请先在账号与会话中加载 V2 运行实例。",
-    staging_host_terminated: "宿主已停止，请重新进入插件。",
+    staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
+    staging_host_terminated: "插件已停止，请重新进入插件。",
     bridge_timeout: "连接超时，请核对连接后重试。",
     invalid_response: "返回数据不完整，请刷新核对。",
   };
@@ -1467,7 +1559,9 @@ window.CompanionConfigEditors = (() => {
    * 一次抛错会让**整条面板挂载链**中断：这一页的配置分区没有，后面所有
    * 工作区也全都不会挂上。用户看到的就是「这些页面完全无法使用」。
    * 读不到就返回 null，由调用方渲染等待态，而不是把整页一起带走。 */
-  function endpointFor(product) {
+  function endpointFor(product, override = "") {
+    if (override) return typeof override === "string" && override.startsWith(PREFIX)
+      && override.endsWith("/config") ? override : null;
     if (!product || typeof product.role !== "function") return null;
     const fromManifest = product.role()?.config_api;
     if (typeof fromManifest === "string" && fromManifest.startsWith(PREFIX)) return fromManifest;
@@ -1480,9 +1574,9 @@ window.CompanionConfigEditors = (() => {
 
   /* 一个挂载点承载多个分区；每个分区各持一个工作台实例，
      草稿互不共享，与后端「每分区独立 edit_token」的生效范围保持一致。 */
-  function create(kinds, rootProvider, views = {}) {
+  function create(kinds, rootProvider, views = {}, endpointOverride = "") {
     const product = window.CompanionProduct;
-    const endpoint = endpointFor(product);
+    const endpoint = endpointFor(product, endpointOverride);
     const names = (kinds || []).filter(kind => Object.hasOwn(spec, kind));
     if (!names.length || !endpoint) return null;
     if (!window.CompanionWorkbench?.create) return null;
@@ -1498,10 +1592,21 @@ window.CompanionConfigEditors = (() => {
         current = {...base, title:view.title || base.title, note:view.note ?? base.note,
           sections, order:sections.flatMap(section => section.fields || [])};
       }
+      if (view) {
+        for (const key of ["title", "note", "scopeNote", "navigationLimit", "segmentedChoices", "onStatus", "presentation", "sectionTabPrefix", "initialSection"]) {
+          if (Object.hasOwn(view, key)) current = {...current, [key]:view[key]};
+        }
+        for (const key of ["labels", "helps", "rows", "inputs", "catalogs"]) {
+          if (view[key]) current = {...current, [key]:{...current[key], ...view[key]}};
+        }
+      }
       return window.CompanionWorkbench.create({
       group: kind,
+      /* 配置总线复用一条 /config/configure 路由，必须在写请求中带分区名；
+         其他工作台走各自的路径，不应收到这个额外字段。 */
+      requestSection: kind,
       title: current.title,
-      note: current.note || (kind === "quota" ? "−1 不限 · 0 禁止 · 按会话时区每日归零" : ""),
+      note: current.note ?? "",
       labels: current.labels,
       helps: current.helps,
       /* 枚举选项必须转交内核：注册表里这些字段是 TEXT，
@@ -1514,8 +1619,17 @@ window.CompanionConfigEditors = (() => {
       /* 段落声明同样必须转交：漏传时内核退回单段渲染，分组与依赖说明
          会被静默丢掉——看起来一切正常，只是少了几段。 */
       sections: current.sections || null,
+      navigationLimit: current.navigationLimit ?? 8,
+      presentation: current.presentation || "",
+      sectionTabPrefix: current.sectionTabPrefix || "",
+      initialSection: current.initialSection || null,
       /* time 控件（值仍是字符串）与跨字段校验同样要转交内核。 */
       inputs: current.inputs || {},
+      catalogs: current.catalogs || {},
+      rows: current.rows || {},
+      /* 分段条、词条快选同样由 spec 声明；漏传时内核退回普通文本框。 */
+      segmentedChoices: current.segmentedChoices || [],
+      chipOptions: current.chipOptions || {},
       audit: current.audit || null,
       onStatus: current.onStatus || null,
       endpoint,
@@ -1544,12 +1658,43 @@ window.CompanionConfigEditors = (() => {
         }
         for (const instance of instances) instance.mount();
       },
-      read() { for (const instance of instances) void instance.refresh(); },
+      read(kind) { return Promise.all(instances.filter(instance => !kind || instance.group === kind).map(instance => instance.refresh())); },
+      selectSection(id) { for (const instance of instances) instance.selectSection(id); },
+      saveField(kind, field, value) {
+        const instance = instances.find(item => item.group === kind);
+        return instance ? instance.saveField(field, value) : Promise.resolve({state: "unavailable"});
+      },
       stop() { for (const instance of instances) instance.stop(); },
       start() { for (const instance of instances) instance.start(); },
       get state() { return {instances}; },
     };
   }
 
-  return {create, spec, errors, endpointFor};
+  function searchEntries() {
+    return Object.entries(spec).flatMap(([group, definition]) => {
+      const sections = Array.isArray(definition.sections) && definition.sections.length
+        ? definition.sections : [{id: "", title: definition.title || group,
+          fields: definition.order || Object.keys(definition.labels || {})}];
+      const names = new Set([...(definition.order || []), ...sections.flatMap(section => section.fields || [])]);
+      const sectionByField = new Map();
+      for (const section of sections) {
+        for (const field of section.fields || []) {
+          if (!sectionByField.has(field)) sectionByField.set(field, section);
+        }
+      }
+      return [...names].map(field => {
+        const section = sectionByField.get(field) || sections[sections.length - 1];
+        return {
+          group, groupTitle: definition.title || group, field,
+          label: definition.labels?.[field] || field,
+          help: definition.helps?.[field] || "",
+          section: section?.id || "", sectionTitle: section?.title || definition.title || group,
+          sectionCount: definition.sections?.length || 0,
+          aliases: definition.searchAliases?.[field] || [],
+        };
+      });
+    });
+  }
+
+  return {create, spec, searchEntries, errors, endpointFor};
 })();

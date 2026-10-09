@@ -112,10 +112,26 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sockets["qq-second"]["100"].frames, [])
         self.assertEqual(ResultStore._futures, {})
 
+    async def test_native_image_only_reply_omits_the_text_component(self):
+        async def sticker_only(payload, _):
+            wire = " ".join(str(message.get("content", "")) for message in payload["messages"])
+            self.assertIn("图片本身足以回应", wire)
+            return image_reply(payload, text="")
+
+        self.native.provider.client.state.behavior = sticker_only
+        await self.start_host()
+        (await self.controller.authorize_delivery("first")).unwrap()
+        report = await self.reply(identifier="450")
+
+        self.assertTrue(report["sent"], report)
+        self.assertEqual(report["parts"][0]["text"], "")
+        self.assertEqual(len(report["parts"][0]["images"]), 1)
+        self.assertEqual([item["type"] for item in self.sends()[0]["params"]["message"]], ["image"])
+
     async def test_voice_follows_each_segment_and_last_image_on_each_target(self):
         self.config = multi_config(delivery_mode="onebot_private")
         self.config["voice_reply"] = {"enabled": True}
-        self.config["segmentation"] = {"enabled": True}
+        self.config["segmentation"] = {"enabled": True, "llm_controlled": True}
         self.controller = self.make_controller(self.config)
         audio_root = self.root / "native-temp"
         audio_root.mkdir()
@@ -157,7 +173,7 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_model_tag_translation_seals_each_voice_plan_and_delivers_ordered_components(self):
         self.config = multi_config(delivery_mode="onebot_private")
-        self.config["segmentation"] = {"enabled": True}
+        self.config["segmentation"] = {"enabled": True, "llm_controlled": True}
         self.config["voice_reply"] = {"enabled": True, "generation_mode": "model_tag", "language": "en",
             "foreign_text_mode": "translation", "en_provider_id": "english-tts",
             "position": "before_text", "cooldown_seconds": 90}
@@ -225,7 +241,7 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def test_unknown_first_voice_segment_does_not_send_following_image(self):
         self.config = multi_config(delivery_mode="onebot_private")
         self.config["voice_reply"] = {"enabled": True}
-        self.config["segmentation"] = {"enabled": True}
+        self.config["segmentation"] = {"enabled": True, "llm_controlled": True}
         self.controller = self.make_controller(self.config)
         audio_root = self.root / "unknown-voice-temp"
         audio_root.mkdir()

@@ -20,6 +20,7 @@ from companion_v2.configuration.registry import FieldDefinition, ValueKind
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.identity_policy.group_audience import group_audience
+from companion_v2.conversation.reset import batch_current
 
 from .group.access import owner_key as group_owner_key
 
@@ -108,7 +109,7 @@ def recent_group_lines(runtime, context, manifest, *, limit=MAX_SOURCE_LINES):
     if context.audience != group_audience(context.scope, context.actor.subject):
         raise TaskError("episode_group_audience_required",
                         "group episode material needs that group's collective audience")
-    rows = runtime.read_all("""SELECT p.text, p.delivered_at
+    rows = runtime.read_all("""SELECT p.batch_id, p.text, p.delivered_at
         FROM conversation_parts p
         JOIN conversation_batches b ON b.batch_id = p.batch_id
         JOIN conversation_delivery_receipts r ON r.part_id = p.part_id AND r.receipt_ref = p.receipt_ref
@@ -116,11 +117,19 @@ def recent_group_lines(runtime, context, manifest, *, limit=MAX_SOURCE_LINES):
         AND json_extract(b.context_json, '$.audience.scope.account_id') = ?
         AND json_extract(b.context_json, '$.audience.scope.bot_id') = ?
         AND json_extract(b.context_json, '$.role_binding.role.subject_id') = ?
+        AND json_extract(b.context_json, '$.audience.scope.installation_id') = ?
+        AND json_extract(b.context_json, '$.audience.scope.platform') = ?
+        AND json_extract(b.context_json, '$.audience.scope.kind') = 'group'
+        AND json_extract(b.context_json, '$.audience.scope.native_scope_id') = ?
+        AND json_extract(b.context_json, '$.audience.scope.session_id') = ?
         ORDER BY p.delivered_at DESC LIMIT ?""",
         (manifest["start"], manifest["end"], context.scope.account_id, context.scope.bot_id,
-         context.role_binding.role.subject_id, limit))
+         context.role_binding.role.subject_id, context.scope.installation_id, context.scope.platform,
+         context.scope.native_scope_id, context.scope.session_id, limit))
     lines = []
     for row in reversed(rows):
+        if not batch_current(runtime, row["batch_id"]):
+            continue
         text = " ".join(str(row["text"] or "").split())
         if text:
             lines.append(text[:200])

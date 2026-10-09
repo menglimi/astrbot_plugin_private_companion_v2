@@ -12,6 +12,8 @@ def configuration_fields():
     return (
         FieldDefinition("person.acquaintance_enabled", GROUP, "person", ValueKind.BOOLEAN, True,
                         apply_mode=ApplyMode.IMMEDIATE, core_only=True),
+        FieldDefinition("person.acquaintance_learning_enabled", GROUP, "person", ValueKind.BOOLEAN, True,
+                        apply_mode=ApplyMode.IMMEDIATE, core_only=True),
         FieldDefinition("person.acquaintance_card_chars", GROUP, "person", ValueKind.INTEGER, 1024,
                         minimum=256, maximum=4096, apply_mode=ApplyMode.IMMEDIATE, core_only=True),
     )

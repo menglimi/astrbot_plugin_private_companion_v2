@@ -1,25 +1,24 @@
-/* Screen and reality settings remain owned by their respective plugins. */
+/* V2 owns native Screen settings and access; Reality retains its own provider settings. */
 "use strict";
 window.CompanionPerceptionPage = (() => {
   const product = window.CompanionProduct;
   const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
   /* 后端把机器码放在信封的 message 上（页面桥只转发 message、丢掉其余字段），
      共享的 CompanionProduct.labels 表也不含 perception 域的码，所以这一页要
-     自带一张表；reason 里若是可直接展示的原因句则原样保留。 */
+     自带一张表。未知原因使用当前操作的提示。 */
   const errors = {
-    perception_provider_unavailable:"对应的扩展插件当前不可用，请确认已安装并启用。",
+    perception_provider_unavailable:"现实触及提供方当前不可用，请确认已安装并启用。",
     perception_request_invalid:"请求格式有误，请刷新后重试。",
     perception_save_failed:"保存未通过，请核对后重试。",
-    staging_not_initialized:"请先在账号与会话中加载 V2 运行实例，再回到本页。",
-    staging_host_terminated:"V2 宿主已停止，请重新打开插件页面。",
+    staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
+    staging_host_terminated:"插件已停止，请重新打开插件页面。",
     dashboard_identity_required:"请从已登录的 AstrBot 管理页面打开陪伴小屋。",
     core_access_required:"当前管理账号没有陪伴小屋的查看权限。",
     bridge_timeout:"连接超时，请核对连接后重试。",
     invalid_response:"配置数据不完整，请刷新核对。",
   };
-  const isCode = value => typeof value === "string" && /^[a-z][a-z0-9_]{2,60}$/.test(value);
   const localized = (failure, fallback) => errors[failure?.code]
-    || (isCode(failure?.message) ? errors[failure.message] : failure?.message)
+    || errors[failure?.message]
     || fallback;
   const realitySections = {
     global: {title:"运行与模型", fields:[
@@ -69,16 +68,7 @@ window.CompanionPerceptionPage = (() => {
   }
 
   function form(provider, section, group, title, description, fields, values) {
-    const owner = provider === "screen" ? "屏幕陪伴" : "现实触及";
     return `<form class="perception-settings-form" data-perception-form="${provider}" data-perception-section="${section}" data-perception-group="${escape(group)}"><div class="perception-settings-heading"><div><h4>${escape(title)}</h4></div><button class="button small" type="submit">保存本组</button></div><div class="perception-settings-grid">${fields.map(([key, meta]) => field(key, meta, values[key], `perception-${provider}-${group}`)).join("")}</div><p class="perception-save-status" role="status" aria-live="polite"></p></form>`;
-  }
-
-  function screenForms(settings) {
-    if (settings.mode === "native_v2" && settings.read_only === true) {
-      return `<p class="memory-notice" role="status">${settings.runtime_ready === true ? "V2 原生截图已就绪" : "V2 原生截图待配置"}。请到屏幕陪伴配置中修改。</p>`;
-    }
-    return (settings.groups || []).filter(group => group.fields?.length).map(group => form("screen", "settings", group.id, group.title, group.description,
-      group.fields.map(key => [key, settings.fields[key]]).filter(([, meta]) => meta), settings.values || {})).join("");
   }
 
   function realityForms(settings) {
@@ -92,7 +82,7 @@ window.CompanionPerceptionPage = (() => {
 
   function render() {
     if (!root) return;
-    for (const id of ["screen", "reality"]) {
+    for (const id of ["reality"]) {
       const node = root.querySelector(`[data-perception-provider="${id}"]`);
       if (!node) continue;
       if (!providers) {
@@ -100,12 +90,12 @@ window.CompanionPerceptionPage = (() => {
            这时不能断言「连不上」——给一个重新读取的入口就够了。 */
         node.innerHTML = product.hosted()
           ? '<p class="memory-notice" role="status">正在读取实际配置…</p>'
-          : '<p class="memory-notice" role="status">尚未读到宿主目录。</p><div class="dialog-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button></div>';
+          : '<p class="memory-notice" role="status">角色与会话目录暂未读到。</p><div class="dialog-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button></div>';
         continue;
       }
       const entry = providers[id];
       node.innerHTML = entry?.available && entry.settings
-        ? (id === "screen" ? screenForms(entry.settings) : realityForms(entry.settings))
+        ? realityForms(entry.settings)
         : `<p class="memory-notice" role="status">${escape(entry?.reason || "配置暂不可读取，请确认插件已启用并更新。")}</p>`;
     }
   }
@@ -132,7 +122,7 @@ window.CompanionPerceptionPage = (() => {
       if (current(ticket)) { providers = data.providers || {}; render(); }
     } catch (error) {
       if (current(ticket)) {
-        providers = Object.fromEntries(["screen", "reality"].map(id => [id, {available:false, reason:localized(error, "读取失败")}]));
+        providers = {reality:{available:false, reason:localized(error, "读取失败")}};
         render();
       }
     }
@@ -143,7 +133,7 @@ window.CompanionPerceptionPage = (() => {
     const group = formNode.dataset.perceptionGroup;
     const settings = providers?.[provider]?.settings;
     if (!settings || !formNode.reportValidity()) return;
-    const original = provider === "screen" ? settings.values : settings[section];
+    const original = settings[section];
     const updates = {};
     for (const input of formNode.querySelectorAll("[data-perception-field]")) {
       const key = input.dataset.perceptionField;
@@ -162,7 +152,7 @@ window.CompanionPerceptionPage = (() => {
       if (!current(ticket)) return;
       const drafts = [...root.querySelectorAll("[data-perception-form]")].filter(node => node !== formNode).map(node => {
         const owner = node.dataset.perceptionForm, sectionId = node.dataset.perceptionSection;
-        const previous = owner === "screen" ? providers?.screen?.settings?.values : providers?.reality?.settings?.[sectionId];
+        const previous = providers?.reality?.settings?.[sectionId];
         return {owner, sectionId, groupId:node.dataset.perceptionGroup,
           fields:[...node.querySelectorAll("[data-perception-field]")].filter(input => {
             const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
@@ -186,7 +176,7 @@ window.CompanionPerceptionPage = (() => {
       }
       const saved = [...root.querySelectorAll(`[data-perception-provider="${provider}"] [data-perception-group]`)]
         .find(item => item.dataset.perceptionGroup === group)?.querySelector("[role=status]");
-      if (saved) saved.textContent = "已保存到" + (provider === "screen" ? "屏幕陪伴" : "现实触及");
+      if (saved) saved.textContent = "已保存到现实触及";
     } catch (error) {
       if (current(ticket)) { button.disabled = false; status.textContent = localized(error, "保存失败，请重试。"); }
     }

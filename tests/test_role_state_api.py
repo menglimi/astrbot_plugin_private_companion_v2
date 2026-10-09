@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+from datetime import timedelta
 
 from tests import test_role_growth_api as support
 from astrbot.api.web import PluginRequest, bind_request_context
@@ -11,6 +12,7 @@ from astrbot_host.state_api import PREFIX
 from astrbot_host.management_identity import dashboard_operator
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+from companion_v2.proactive.external_materials import WeatherSnapshot
 from tests.test_management_access import NOW
 from tests.test_role_state import state_data, calendar_data
 from tests.native_adapter_support import completion
@@ -30,11 +32,56 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         with bind_request_context(PluginRequest(native, username=username)):
             return await self.routes[path]()
 
+    async def weather(self, *, username="admin"):
+        path = PREFIX + "/weather"
+        async def receive():
+            return {"type":"http.request", "body":b"", "more_body":False}
+        native = Request({"type":"http", "method":"GET", "path":path,
+            "headers":[], "query_string":b""}, receive=receive)
+        with bind_request_context(PluginRequest(native, username=username)):
+            return await self.routes[path]()
+
+    async def test_weather_reads_only_the_configured_role_location_and_reports_live_snapshot(self):
+        session = await self.initialize()
+        calls = []
+        location = {"name":"角色所在城市", "latitude":31.23, "longitude":121.47}
+
+        class WeatherPort:
+            async def fetch(self, requested):
+                calls.append(requested)
+                return WeatherSnapshot("open-meteo", requested.name, NOW - timedelta(minutes=8),
+                                       22.4, "小雨", 75, 12, ())
+
+        session.application.calendar_planning.weather_port = WeatherPort()
+        disabled = await self.weather()
+        self.assertEqual((disabled["status"], disabled["data"]["state"]), ("ok", "disabled"))
+        self.assertEqual(calls, [])
+
+        before = (await self.request())["data"]
+        configured = await self.request(data={"action":"configure", "operation_key":"weather-enabled",
+            "edit_token":before["edit_token"], "changes":{"planning_weather_enabled":True,
+                "planning_weather_location":json.dumps(location, ensure_ascii=False)}})
+        self.assertEqual(configured["status"], "ok", configured)
+        current = await self.weather()
+        self.assertEqual(current["status"], "ok", current)
+        self.assertEqual(current["data"]["state"], "live")
+        self.assertEqual(current["data"]["location"], location["name"])
+        self.assertEqual(current["data"]["condition"], "小雨")
+        self.assertEqual(current["data"]["temperature_c"], 22.4)
+        self.assertEqual([(item.name, item.latitude, item.longitude) for item in calls],
+                         [(location["name"], location["latitude"], location["longitude"])])
+        self.assertEqual((await self.weather())["data"], current["data"])
+        self.assertEqual(len(calls), 1, "repeated page reads reuse the observation")
+        self.assertEqual((await self.weather(username=None))["data"]["code"], "dashboard_identity_required")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.native.provider.client.state.calls, [])
+        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
     async def test_configuration_and_human_edit_with_cas_and_idempotency(self):
         session = await self.initialize()
         status = await self.request()
         self.assertEqual(status["status"], "ok", status)
-        self.assertEqual(status["data"]["presentation_diagnostics"]["port"], "preview")
+        self.assertEqual(status["data"]["presentation_diagnostics"]["port"], "installed")
         self.assertIn("sleep_schedule", status["data"])
         self.assertTrue(status["data"]["sleep_schedule"]["shared"])
         self.assertEqual(status["data"]["sleep_schedule"]["owner"]["role_id"], self.target.role_binding.role.subject_id)
@@ -45,7 +92,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changed["status"], "ok", changed)
         self.assertTrue((await self.request(data=body))["data"]["replayed"])
         diagnostic = (await self.request())["data"]["presentation_diagnostics"]["typing"]
-        self.assertEqual((diagnostic["state"], diagnostic["reason"]), ("unavailable", "presence_port_missing"))
+        self.assertEqual((diagnostic["state"], diagnostic["reason"]), ("paused", "host_not_running"))
         current = (await self.request())["data"]["state"]
         body = dict(action="state.write", operation_key="edit", view_token=current["view_token"],
                     expected_revision=0, data=state_data(hunger="有些饿", sleep="还没准备睡"))
@@ -53,7 +100,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.request(data=body))["data"]["replayed"])
         self.assertEqual((await self.request(data=body | {"operation_key": "stale"}))["data"]["code"], "record_revision_conflict")
         self.assertEqual((await self.request())["data"]["state"]["values"]["hunger"], "有些饿")
-        self.assertIsNone(session.application.presence)  # Preview never installs a QQ port.
+        self.assertIsNotNone(session.application.presence)
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
 
@@ -65,6 +112,9 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         created = await self.request(data=body)
         self.assertEqual(created["status"], "ok", created)
         self.assertEqual(created["data"]["state"], "proposed")
+        daily = (await self.request())["data"]["occurrences"]["items"]
+        self.assertTrue(any(item["id"] == "appointment" for item in daily),
+                        "当天日程应由主页状态接口返回")
         current = (await self.request())["data"]["calendar"]["items"][0]
         accepted = await self.request(data=dict(action="calendar.accept", operation_key="accept", id="appointment",
             expected_revision=current["revision"], view_token=current["view_token"]))
@@ -136,8 +186,11 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         await revision(2)
         self.assertTrue((await self.request(data=body))["data"]["replayed"])
         self.assertEqual(len(self.native.provider.client.state.calls), 2)
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
-        self.assertIsNone(session.application.presence)
+        self.assertEqual(len(self.native.platform.client._api._wsr_api.calls), 1)
+        action, parameters = self.native.platform.client._api._wsr_api.calls[0]
+        self.assertEqual(action, "set_diy_online_status")
+        self.assertEqual(parameters["wording"], "休息中")
+        self.assertIsNotNone(session.application.presence)
 
     async def test_operator_view_token_and_shutdown_routes(self):
         await self.initialize()
@@ -213,7 +266,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         next_state = (await self.request())["data"]["state"]["cycle_timeline"]
         self.assertEqual(next_state["phase_plan"], timeline["phase_plan"])
         self.assertFalse(next_state["pending_plan"]["variation_enabled"])
-        self.assertIsNone(session.application.presence)
+        self.assertIsNotNone(session.application.presence)
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
 
@@ -241,7 +294,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
             edit_token=result["edit_token"], changes={"cycle_enabled": False}))
         self.assertEqual(disabled["status"], "ok", disabled)
         self.assertNotIn("cycle_timeline", (await self.request())["data"]["state"])
-        self.assertIsNone(session.application.presence)
+        self.assertIsNotNone(session.application.presence)
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
 

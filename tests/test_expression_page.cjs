@@ -14,18 +14,24 @@ const TOKEN = 'a'.repeat(64);
 const PREFIX = '/astrbot_plugin_private_companion_v2/';
 const plain = value => JSON.parse(JSON.stringify(value));
 const DEFAULTS = {
-  group_learning_enabled: false, window_hours: 168, sample_limit: 24, min_samples: 4, sample_chars: 800,
+  private_learning_enabled: true, group_learning_enabled: false, window_hours: 168,
+  sample_limit: 24, min_samples: 5, group_min_samples: 20, sample_chars: 800, active_signal_limit: 60,
   rules_per_turn: 8, payload_chars: 4000, rotation_candidate_limit: 24, rotation_decay_hours: 336,
   scan_interval_minutes: 1440,
+  learning_mode: 'balanced', private_application_enabled: true, group_application_enabled: true,
+  sample_review_enabled: false, style_review_enabled: true, group_daily_batch_limit: 6,
+  group_new_messages: 20, group_member_mode: 'all', group_member_ids: '',
 };
 /* The registered contract: kinds and bounds mirror expression/configuration.py. */
 const LIMITS = {
-  window_hours: [1, 720], sample_limit: [4, 64], min_samples: [1, 16], sample_chars: [40, 4000],
+  window_hours: [1, 720], sample_limit: [4, 64], min_samples: [1, 16], group_min_samples: [5, 64],
+  sample_chars: [40, 4000], active_signal_limit: [12, 240],
   rules_per_turn: [1, 16], payload_chars: [500, 16000], rotation_candidate_limit: [1, 64],
   rotation_decay_hours: [1, 8760], scan_interval_minutes: [5, 10080],
+  group_daily_batch_limit: [1, 50], group_new_messages: [5, 80],
 };
 const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) => {
-  const entry = {kind: name === 'group_learning_enabled' ? 'boolean' : 'integer', default: value,
+  const entry = {kind: typeof value === 'boolean' ? 'boolean' : typeof value === 'string' ? 'text' : 'integer', default: value,
     apply_mode: 'immediate', editable_layers: ['installation', 'role', 'window']};
   if (LIMITS[name]) [entry.minimum, entry.maximum] = LIMITS[name];
   return [name, entry];
@@ -64,6 +70,7 @@ function harness({hosted = true, replyApi = PREFIX + 'reply'} = {}) {
   const sessionStorage = {getItem: key => store.get(key) || null,
     setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key)};
   const window = {
+    addEventListener() {}, removeEventListener() {},
     CompanionProduct: {
       hosted: () => hosted, role: () => (replyApi ? {reply_api: replyApi} : {}),
       identity: () => ({installation_id: 'inst', operator_id: 'admin'}),
@@ -129,6 +136,7 @@ test('bounds come from the published contract, not a page-local copy', async () 
   assert.equal(live.state.container.fields.window_hours.maximum, 720);
   assert.equal(live.state.container.fields.window_hours.minimum, 1);
   assert.equal(live.state.container.fields.group_learning_enabled.kind, 'bool');
+  assert.equal(live.state.container.fields.private_learning_enabled.kind, 'bool');
   assert.deepEqual(plain(live.state.container.layers), ['installation', 'role', 'window']);
   assert.equal(live.state.container.writeLayer, 'window');
   assert.equal(live.state.status.provenance.scan_interval_minutes.layer, 'window');
@@ -220,5 +228,5 @@ test('a host without the reply route refuses instead of showing an empty editor'
   const offline = harness({hosted: false});
   offline.page.mount(offline.node);
   assert.equal(offline.requests.length, 0);
-  assert.match(offline.html, /请从 AstrBot 打开陪伴小屋/);
+  assert.match(offline.html, /角色数据尚未加载/);
 });

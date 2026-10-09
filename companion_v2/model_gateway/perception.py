@@ -63,7 +63,7 @@ def capability_instruction(envelope, *, model_name=""):
     if "image.generate" in actions:
         lines.append("生成图片需调用 image.generate，以成功结果为准。")
     if "image.edit" in actions:
-        lines.append("需要修改图片时调用 image.edit；当前私聊附图可按顺序指定 reference_roles（identity、outfit、pose、style、background、continuity），用途不明确时省略并按普通改图参考处理。若用户明确提供底图与蒙版，才调用 image.mask_edit。以工具回执为准。")
+        lines.append("需要修改图片时调用 image.edit。若用户指定了本轮多张附图中的某一张，必须用 reference_indices 精确选择；省略时后端会收到全部本轮附图，不要把未选图片混入结果。reference_roles 可按所选图片顺序指定用途（identity、outfit、pose、scene、style、background、continuity），用途不清时先澄清。需要使用角色参考目录时，只填已明确选择的 reference_ids。若用户明确提供底图与蒙版，才调用 image.mask_edit。以工具回执为准。")
     if "image.mask_edit" in actions:
         lines.append("image.mask_edit 的当前私聊输入图片按 0 起始顺序编号，需指定不同的底图与蒙版序号；不能把普通参考图猜作蒙版。")
     return "\n".join(lines)

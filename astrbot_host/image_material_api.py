@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 
 from astrbot.api.web import request
@@ -18,6 +20,8 @@ from .management_identity import dashboard_operator
 
 PREFIX = "/astrbot_plugin_private_companion_v2/image-materials"
 MAX_BODY = 8192
+MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_UPLOAD_BODY = ((MAX_UPLOAD_BYTES + 2) // 3) * 4 + 16 * 1024
 
 
 class ImageMaterialsWebAPI:
@@ -28,7 +32,10 @@ class ImageMaterialsWebAPI:
         return [
             (PREFIX, self.inventory, ["GET"], "Read one role's native image materials"),
             (PREFIX + "/album", self.album, ["GET"], "Read the role-scoped generated image album"),
+            (PREFIX + "/references/upload", self.upload_reference, ["POST"], "Upload one role-owned reference image"),
             (PREFIX + "/references", self.register_reference, ["POST"], "Register one explicit album image reference"),
+            (PREFIX + "/references/update", self.update_reference, ["POST"], "Update one role image reference"),
+            (PREFIX + "/references/order", self.reorder_references, ["POST"], "Save one role's reference gallery order"),
             (PREFIX + "/references/withdraw", self.withdraw_reference, ["POST"], "Withdraw one role image reference"),
             (PREFIX + "/wardrobe", self.register_wardrobe, ["POST"], "Add one role wardrobe item"),
             (PREFIX + "/wardrobe/withdraw", self.withdraw_wardrobe, ["POST"], "Withdraw one role wardrobe item"),
@@ -40,8 +47,10 @@ class ImageMaterialsWebAPI:
         username = request.username
         if type(username) is not str or not username.strip() or username.startswith("api_key:"):
             raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
-        if set(request.query) - ({"cursor"} if allow_cursor else set()) or any(
-                len(request.query.getlist(key)) != 1 for key in request.query):
+        query = request.query
+        query_keys = tuple(query.keys())
+        if set(query_keys) - ({"cursor"} if allow_cursor else set()) or any(
+                len(query.getlist(key)) != 1 for key in query_keys):
             raise TaskError("image_material_request_invalid", "unexpected query fields")
         if controller._terminated:
             raise TaskError("staging_host_terminated", "the plugin has stopped")
@@ -64,7 +73,7 @@ class ImageMaterialsWebAPI:
         return operator, context, at, ReferenceMaterialManagement(session.application)
 
     @staticmethod
-    def _document(raw, expected):
+    def _document(raw, expected, optional=()):
         def unique(pairs):
             result = {}
             for key, value in pairs:
@@ -75,7 +84,8 @@ class ImageMaterialsWebAPI:
 
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite value")))
-        if type(value) is not dict or set(value) != set(expected):
+        if (type(value) is not dict or not set(expected).issubset(value)
+                or set(value).difference(set(expected).union(optional))):
             raise ValueError("unexpected or missing fields")
         return value
 
@@ -92,8 +102,22 @@ class ImageMaterialsWebAPI:
                     value = manager.album(operator, context, at=at, cursor=query.get("cursor"))
                 elif action == "register_reference":
                     value = manager.register_from_album(operator, context, at=at, **body)
+                elif action == "upload_reference":
+                    payload, mime_type = self._decode_upload(body["data_url"])
+                    value = manager.register_uploaded_reference(
+                        operator, context, at=at, payload=payload, mime_type=mime_type,
+                        label=body["label"], roles=body["roles"], operation_key=body["operation_key"])
+                elif action == "update_reference":
+                    value = manager.update_reference(operator, context, body["asset_id"], at=at,
+                                                     label=body["label"], roles=body["roles"],
+                                                     expected_revision=body["expected_revision"], usage=body.get("usage"))
+                elif action == "reorder_references":
+                    value = manager.reorder_references(
+                        operator, context, expected_asset_ids=body["expected_asset_ids"],
+                        asset_ids=body["asset_ids"], at=at)
                 elif action == "withdraw_reference":
-                    value = manager.withdraw_reference(operator, context, body["asset_id"], at=at)
+                    value = manager.withdraw_reference(operator, context, body["asset_id"], at=at,
+                                                       expected_revision=body["expected_revision"])
                 elif action == "register_wardrobe":
                     value = manager.register_wardrobe_item(operator, context, at=at, **body)
                 elif action == "withdraw_wardrobe":
@@ -119,7 +143,8 @@ class ImageMaterialsWebAPI:
         from .web_api import outcome_response
 
         query = request.query
-        if set(query) - {"cursor"} or any(len(query.getlist(key)) != 1 for key in query):
+        query_keys = tuple(query.keys())
+        if set(query_keys) - {"cursor"} or any(len(query.getlist(key)) != 1 for key in query_keys):
             return outcome_response(Outcome.failed("image_material_request_invalid", "unknown or repeated album query fields"))
         cursor = query.get("cursor")
         if cursor is not None and (type(cursor) is not str or not 8 <= len(cursor) <= 1024):
@@ -133,14 +158,33 @@ class ImageMaterialsWebAPI:
         except (TaskError, ConfigurationError) as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
 
-    async def _post(self, action, expected):
+    @staticmethod
+    def _decode_upload(data_url):
+        if type(data_url) is not str or not data_url.startswith("data:"):
+            raise TaskError("reference_image_invalid", "select a PNG, JPEG or WebP image")
+        header, separator, encoded = data_url.partition(",")
+        mime_type = header[5:].removesuffix(";base64").lower()
+        if (not separator or not header.endswith(";base64")
+                or mime_type not in {"image/png", "image/jpeg", "image/webp"}):
+            raise TaskError("reference_image_type_invalid", "reference images support PNG, JPEG and WebP")
+        if not encoded or len(encoded) > ((MAX_UPLOAD_BYTES + 2) // 3) * 4:
+            raise TaskError("reference_upload_too_large", "reference images must be 12 MiB or smaller")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise TaskError("reference_image_invalid", "the uploaded image data is incomplete") from error
+        if not payload or len(payload) > MAX_UPLOAD_BYTES:
+            raise TaskError("reference_upload_too_large", "reference images must be 12 MiB or smaller")
+        return payload, mime_type
+
+    async def _post(self, action, expected, *, max_body=MAX_BODY, optional=()):
         from .web_api import outcome_response
 
         try:
             raw = await request.body()
-            if len(raw) > MAX_BODY or request.query:
+            if len(raw) > max_body or request.query:
                 raise ValueError("request is too large or has query fields")
-            body = self._document(raw, expected)
+            body = self._document(raw, expected, optional)
         except (ValueError, TypeError, UnicodeError, RecursionError):
             return outcome_response(Outcome.failed("image_material_request_invalid", "invalid UTF-8 image material request"))
         return await self._run(action, body=body)
@@ -148,8 +192,18 @@ class ImageMaterialsWebAPI:
     async def register_reference(self):
         return await self._post("register_reference", {"image_id", "label", "roles", "operation_key"})
 
+    async def upload_reference(self):
+        return await self._post("upload_reference", {"data_url", "label", "roles", "operation_key"},
+                                max_body=MAX_UPLOAD_BODY)
+
+    async def update_reference(self):
+        return await self._post("update_reference", {"asset_id", "label", "roles", "expected_revision"}, optional={"usage"})
+
+    async def reorder_references(self):
+        return await self._post("reorder_references", {"expected_asset_ids", "asset_ids"})
+
     async def withdraw_reference(self):
-        return await self._post("withdraw_reference", {"asset_id"})
+        return await self._post("withdraw_reference", {"asset_id", "expected_revision"})
 
     async def register_wardrobe(self):
         return await self._post("register_wardrobe", {"operation_key", "name", "description", "tags", "asset_id"})

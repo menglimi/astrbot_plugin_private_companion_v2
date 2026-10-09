@@ -20,6 +20,7 @@ from ..conversation.media.quota import (GROUP as QUOTA_GROUP, OWNER as QUOTA_OWN
     configuration_fields as quota_fields)
 from ..conversation.media.review import (GROUP as REVIEW_GROUP, OWNER as REVIEW_OWNER,
     configuration_fields as review_fields)
+from ..conversation.media.output_settings import (GROUP as IMAGE_OUTPUT_GROUP, OWNER as IMAGE_OUTPUT_OWNER)
 from ..conversation.busy_gate import (GROUP as BUSY_GROUP, OWNER as BUSY_OWNER,
     configuration_fields as busy_fields)
 from ..conversation.participation import (CONFIG_GROUP as PARTICIPATION_GROUP,
@@ -29,7 +30,7 @@ from ..conversation.recall_settings import (GROUP as RECALL_GROUP, OWNER as RECA
 from ..expression.reaction_configuration import (GROUP as REACTION_GROUP, OWNER as REACTION_OWNER,
     configuration_fields as reaction_fields)
 from ..memory.person.configuration import (GROUP as PERSON_GROUP,
-    configuration_fields as person_fields)
+    configuration_fields as person_fields, target_for as person_target_for)
 from ..relationships.private_access import (GROUP as PRIVATE_ACCESS_GROUP,
     configuration_fields as private_access_fields)
 from ..knowledge.configuration import (GROUP as KNOWLEDGE_GROUP, OWNER as KNOWLEDGE_OWNER,
@@ -184,8 +185,14 @@ class GroupEditor:
                     observed_at=self.app.now()))
             except ConfigurationError as error:
                 raise TaskError(error.code, str(error)) from error
-            return {"replayed": receipt.replayed, "operation_id": op_id,
-                    "status": require(self.status(operator))}
+            return {"replayed": receipt.replayed, "operation_id": op_id}
+
+
+class ImageOutputManagement(GroupEditor):
+    group = IMAGE_OUTPUT_GROUP
+    owner = IMAGE_OUTPUT_OWNER
+    layers = (ConfigLayer.INSTALLATION, ConfigLayer.ROLE)
+    error_prefix = "image_output"
 
 
 class ImageQuotaManagement(GroupEditor):
@@ -282,6 +289,9 @@ class AcquaintanceManagement(GroupEditor):
     owner = ConfigurationService.OWNER
     layers = person_fields()[0].layers
     error_prefix = "person"
+
+    def _target(self):
+        return person_target_for(self.context)
 
 
 class PrivateAccessManagement(GroupEditor):

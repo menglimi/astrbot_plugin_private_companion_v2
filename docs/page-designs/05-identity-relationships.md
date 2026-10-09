@@ -1,6 +1,20 @@
-# 11 · 关系与权限（`manage/identity`，含关系与情感）
+# 11 · 关系网与关系记忆（`manage/identity`）
 
-代码位置：`renderIdentityPage`（`pages/陪伴小屋/app.js:1173-1176`）：分区一「关系与权限」= `renderIdentity()`（`product.identityMarkup()` 身份与范围卡 + identity 工作区 iframe）；分区二「关系与情感」= `product.workspace('relationships')`（关系与记忆工作区 iframe）。首页快捷项「人物与关系」也跳到本页（`app.js:1486`），没有独立的 people 路由。
+## 当前实现（2026-10-05）
+
+本节对应当前源码，是本文件旧审计快照的更新版本。公开导航名称为「关系网」。
+
+- 关系网工作区默认打开关系图，人物目录和群聊目录是同一工作区的明细视图；图谱节点可进入对应人物或群聊详情。
+- 人物详情的「熟人卡」页签统一编辑称呼、相处资料、熟人卡启用状态、持续学习和字数上限。主动联系偏好只保留联系节奏与免打扰设置。
+- 群详情合并成员发言观察、互动边、熟人卡摘要、已匹配成员线索及待确认线索。短时互动边只描述相邻接话；成员线索不构成身份认证或授权。
+- 关系网顶部的「关系网设置」收纳熟人卡默认设置和群聊成员线索策略。线索内容来自已配置的知识来源；这里管理识别开关、别名匹配及注入上限，不伪装成逐人线索编辑器。全局搜索定位这些设置时会自动展开该区域。
+- 私聊默认访问规则在「访问规则」分区；成员级权限仍在人物详情里。关系理解与情感审阅由独立的关系记忆工作区处理。
+
+构建源：`pages/陪伴小屋/app.js`、`pages/陪伴小屋/semantic-page.css`、`pages/关系与权限/workspace.html`、`pages/关系与权限/app.js`、`pages/关系与权限/member-editor.js`。嵌入副本由 `tools/sync_framework_page.py` 生成。
+
+## 历史审计快照（已被上文取代）
+
+代码位置：`renderIdentityPage`（`pages/陪伴小屋/app.js`）：分区一「关系与权限」= `renderIdentity()`（identity 工作区 iframe）；分区二「关系与情感」= `product.workspace('relationships')`（关系与记忆工作区 iframe）。页面不展示安装 ID、操作者摘要或内部角色 ID；这些标识仅供请求隔离与权限校验使用。首页快捷项「人物与关系」也跳到本页，没有独立的 people 路由。
 
 构建源：`pages/关系与权限/workspace.html`（→ `workspaces/identity`）与 `pages/关系与记忆/workspace.html`（→ `workspaces/relationships`），嵌入机制见 [README.md](README.md) 第二节。
 

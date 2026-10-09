@@ -13,6 +13,7 @@ from companion_v2.foundation.outcome import Outcome
 from companion_v2.storage.backup import (
     BACKUP_FORMAT, PENDING_FILENAME, InstallationBackup, apply_pending, current_schema_version,
 )
+from companion_v2.storage.management import retention_policy
 
 from .management_identity import dashboard_operator
 
@@ -69,7 +70,8 @@ class BackupWebAPI:
                 if session is None or controller.runtime is None:
                     raise TaskError("staging_not_initialized", "load the explicit V2 profile before managing backups")
                 dashboard_operator(controller.runtime, username, at=controller.now())
-                backup = InstallationBackup(controller.runtime, now=controller.now)
+                backup = InstallationBackup(controller.runtime, now=controller.now,
+                                            **retention_policy(controller.config))
                 result = getattr(backup, method)(**arguments)
                 # 还原预览与执行都带上「这一步会影响谁」。还原是整根替换，
                 # 多目标下同时替换该安装下所有目标的资料；用户最容易误以为
@@ -158,7 +160,7 @@ class BackupWebAPI:
         return await self._run("restore", arguments)
 
 
-def apply_staged_restore(data_root, *, installation_id: str) -> dict:
+def apply_staged_restore(data_root, *, installation_id: str, backup_directory=None) -> dict:
     """Apply a staged restore before the store is opened. No live connection exists.
 
     This is called from the host's assembly path before ``StorageRuntime.open``,
@@ -175,4 +177,5 @@ def apply_staged_restore(data_root, *, installation_id: str) -> dict:
     schema_version = current_schema_version(root)
     if schema_version is None:
         return {"applied": False, "reason": "backup_store_unreadable"}
-    return apply_pending(root, installation_id=installation_id, schema_version=schema_version)
+    return apply_pending(root, installation_id=installation_id, schema_version=schema_version,
+                         backup_directory=backup_directory)

@@ -53,7 +53,7 @@ async def run_core(plugin_root, root, guard):
     async def receive(identifier):
         event = Event(context, event_id=identifier)
         await plugin.receive_companion_message(event)
-        assert event.stopped
+        assert not getattr(event, "stopped", False) and event.call_llm
         return ctrl.runtime.read_all("SELECT batch_id FROM conversation_batches ORDER BY rowid", ())[-1][0]
 
     try:
@@ -64,11 +64,9 @@ async def run_core(plugin_root, root, guard):
         assert not any(p["installed"] for p in manifest["providers"])
         checks.append("entry_loaded_without_legacy_or_registered_optional_providers_and_without_auto_start")
         (await ctrl.initialize_profile()).unwrap()
-        assert (await ctrl.start()).failure.code == "authorization_denied"
-        assert context.provider.client.state.calls == [] and context.platform.client._api._wsr_api.calls == []
-        checks.append("unauthorized_start_has_no_model_or_platform_effect")
-        (await ctrl.authorize_delivery()).unwrap()
         (await ctrl.start()).unwrap()
+        assert context.provider.client.state.calls == [] and context.platform.client._api._wsr_api.calls == []
+        checks.append("configured_start_has_no_model_or_platform_effect")
         batch = await receive("native-first")
         await wait_for_batch(ctrl.session, batch, timeout_seconds=10)
         assert (await ctrl.inspect(batch)).unwrap()["confirmed_delivery"]
@@ -82,18 +80,28 @@ async def run_core(plugin_root, root, guard):
         context.provider.client.state.behavior = delayed
         delayed_batch = await receive("native-revoked")
         await asyncio.wait_for(entered.wait(), 10)
-        (await ctrl.revoke_delivery()).unwrap()
-        assert not ctrl.status()["accepting"]
-        assert not ctrl.claims(Event(context, event_id="native-after-revoke"))
+        identity = ctrl.bootstrap.identity
+        identity.revoke_grant(ctrl.bootstrap.grant_id("conversation.reply"),
+                              revoked_at=NOW, expected_revision=identity.revision)
+        assert ctrl.status()["accepting"]
         release.set()
         await wait_for_batch(ctrl.session, delayed_batch, timeout_seconds=10)
         assert len(context.platform.client._api._wsr_api.calls) == 1
-        assert (await ctrl.inspect(delayed_batch)).unwrap()["delivery_authorization"]["state"] == "authorization_revoked"
-        checks.append("revocation_during_generation_blocks_late_send_and_further_intake")
+        before = len(context.provider.client.state.calls)
+        refused = await ctrl.session.receive(Event(context, event_id="native-after-revoke"))
+        assert refused.failure is not None and refused.failure.code == "private_access_dialogue_denied"
+        assert len(context.provider.client.state.calls) == before
+        assert len(context.platform.client._api._wsr_api.calls) == 1
+        checks.append("person_revocation_during_generation_blocks_late_send_and_further_model_calls")
         stopped = (await ctrl.stop()).unwrap()
         assert stopped.state == "stopped" and not stopped.pending_handles
-        assert (await ctrl.start()).failure.code == "authorization_revoked"
-        checks.append("stop_and_restart_do_not_restore_revoked_delivery")
+        restarted = await ctrl.start()
+        assert restarted.failure is not None and restarted.failure.code == "private_access_dialogue_denied"
+        target = ctrl.bootstrap._target(NOW)
+        access = identity.authorize(target.actor, scope=target.scope,
+                                    capability="conversation.reply", observed_at=NOW)
+        assert access.failure is not None and access.failure.code == "authorization_revoked"
+        checks.append("stop_and_restart_do_not_restore_revoked_person_permission")
     finally:
         release.set()
         await plugin.terminate()

@@ -1,6 +1,7 @@
 """Bounded group conversation views with immutable references and speaker attribution."""
 
 import json
+from datetime import timedelta
 
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind
@@ -8,6 +9,7 @@ from companion_v2.identity_policy.group_audience import group_audience
 from .foreground import ContextContribution, ContributionState
 from .group_history import GroupReplyHistory
 from .addressing import ADDRESSING_INSTRUCTION
+from .reset import boundary, require_current_batch
 
 
 VERSION = "conversation.group_context.v1"
@@ -17,6 +19,9 @@ SCAN_LIMIT = 64
 INSTRUCTION = (
     "当前是群聊，回复面向本群受众。current_group_speaker 标明本轮当前消息及合并消息的发言账号；"
     "group_conversation_history 中的成员发言保留各自账号和时间，不是当前用户的新消息。"
+    "本轮输入里的[图片不可用]、[语音不可用]、[视频不可用]、[合并转发不可用]、[引用消息不可用]、"
+    "[文件附件，正文尚未读取]等占位只说明附件存在或未读到载荷，不是附件内容；只有本轮实际提供的图像、"
+    "音频、视频画面或已读取文件正文才可作为内容依据。缺少对应材料时不要猜，简短说明当前看不到或听不到并请对方补充。"
     "发言者仅代表本人，不代表全群；账号归因只证明该账号发送了这些文字，不证明其自称身份或内容为真。"
     "已确认的机器人历史回复只证明当时发出过这些话，不是新的事实依据，也不表示成员已读、同意或回应。"
     "历史回复的图片元数据只证明当时附过这些原图，不证明机器人创作或拍摄，也不代表本轮重新看到了图片。"
@@ -28,6 +33,9 @@ INSTRUCTION = (
     "只描述本轮实际提供的可听内容和可见画面，不根据历史附件占位或元数据补造细节。"
     "current_person_card 是本角色对当前发言者的相识记录：display_name 只是称呼参考，来自管理员设定、"
     "本人陈述或平台资料，不证明对方自称的身份；计数只是观察统计，不代表亲疏、权限或私聊关系。"
+    "group_relationship_network 是本群成员资料的合并投影：熟人卡是长期观察统计，成员线索是弱显示参考，"
+    "互动边只表示近期在有限时间窗内连续接话，不代表现实关系、亲疏、立场或授权；平台账号优先于名称，"
+    "无法唯一对应时保持不确定。"
     + ADDRESSING_INSTRUCTION
 )
 
@@ -101,7 +109,7 @@ class GroupConversationContext:
             raise TaskError("group_input_changed", "history must retain the authenticated text input and its sender")
         record = self.messages._read_source(event.source, original, event.capability, at)
         if (record.content_hash != event.input_hash
-                or record.audience != group_audience(context.scope, original.actor.subject)):
+                or record.audience != group_audience(original.scope, original.actor.subject)):
             raise TaskError("group_input_audience", "history input is not available to this collective group")
         from .group_media import input_media
         media, sources = input_media(self.messages, original, event, record, at)
@@ -110,7 +118,9 @@ class GroupConversationContext:
         return {"type": "group_member_message", "speaker_id": original.actor.principal.native_account_id,
                 "received_at": stamp(event.received_at), "text": record.payload, **media}, record.reference
 
-    def read(self, snapshot, context, batch_id, at):
+    def read(self, snapshot, context, batch_id, at, *, historical=False):
+        if not historical:
+            require_current_batch(self.runtime, batch_id, context.scope)
         self.authorize(context, at)
         self.validate_snapshot(snapshot, context, batch_id)
         row, _ = self.original(batch_id, context, self.messages.batch(batch_id)["role_instruction"], at)
@@ -123,29 +133,38 @@ class GroupConversationContext:
             raise TaskError("group_context_budget", "the original group history exceeds its bounded context budget")
         return items
 
-    def capture(self, context, batch_id, at):
+    def capture(self, context, batch_id, at, *, max_age_hours=12):
+        require_current_batch(self.runtime, batch_id, context.scope)
         self.authorize(context, at)
+        if type(max_age_hours) is not int or not 1 <= max_age_hours <= 168:
+            raise TaskError("group_context_age_invalid", "group history age must be between one hour and seven days")
         current = self.messages.batch(batch_id)
         if current["origin_key"] != context.key:
             raise TaskError("group_context_invalid", "history must belong to the original consuming batch")
         before = self.cutoff(batch_id)
+        oldest = stamp(at - timedelta(hours=max_age_hours))
         snapshot = {"version": VERSION, "context_key": context.key, "batch_id": batch_id, "references": []}
-        # The complete role binding includes every route dimension and its revision.
-        # Per-member native sessions never merge just because their group ID matches.
+        # The complete binding includes conversation and native session. Keep
+        # per-member sessions isolated even when they point at the same group.
         binding = encode(context.role_binding)
+        reset = boundary(self.runtime, context.scope)
+        sequence = reset["batch_sequence"] if reset is not None else 0
         inputs = self.runtime.read_all("""SELECT i.*, i.rowid AS input_sequence FROM conversation_inputs i
             JOIN conversation_batches b ON b.batch_id = i.batch_id
-            WHERE i.rowid < ? AND i.withdrawn = 0 AND json_extract(b.context_json, '$.role_binding') = ?
-            AND b.role_instruction = ? ORDER BY i.rowid DESC LIMIT ?""",
-            (before, binding, current["role_instruction"], SCAN_LIMIT))
+            WHERE i.rowid < ? AND i.withdrawn = 0
+            AND json_extract(i.event_json, '$.received_at') >= ?
+            AND json_extract(b.context_json, '$.role_binding') = ?
+            AND b.role_instruction = ? AND b.rowid > ? ORDER BY i.rowid DESC LIMIT ?""",
+            (before, oldest, binding, current["role_instruction"], sequence, SCAN_LIMIT))
         replies = self.runtime.read_all("""SELECT p.*, (SELECT MAX(i.rowid) FROM conversation_inputs i
             WHERE i.batch_id = p.batch_id) AS input_sequence FROM conversation_parts p
             JOIN conversation_sent_history h ON h.part_id = p.part_id
             JOIN conversation_batches b ON b.batch_id = p.batch_id
             WHERE p.state = 'delivered' AND p.delivered_at <= ? AND b.batch_id != ?
-            AND json_extract(b.context_json, '$.role_binding') = ? AND b.role_instruction = ?
+            AND p.delivered_at >= ?
+            AND json_extract(b.context_json, '$.role_binding') = ? AND b.role_instruction = ? AND b.rowid > ?
             ORDER BY h.history_sequence DESC LIMIT ?""",
-            (stamp(at), batch_id, binding, current["role_instruction"], SCAN_LIMIT))
+            (stamp(at), batch_id, oldest, binding, current["role_instruction"], sequence, SCAN_LIMIT))
         candidates = [(json.loads(row["event_json"])["received_at"], row["input_sequence"], 0, 0, self.input_ref(row)) for row in inputs]
         candidates.extend((row["delivered_at"], row["input_sequence"], 1, row["sequence"], self.reply_ref(row)) for row in replies)
         candidates.sort(key=lambda item: item[:4], reverse=True)
@@ -165,10 +184,10 @@ class GroupConversationContext:
         snapshot["references"].reverse()
         return snapshot
 
-    def contributions(self, snapshot, context, batch_id, at):
+    def contributions(self, snapshot, context, batch_id, at, *, historical=False):
         return tuple(ContextContribution("group-history:" + str(index), "conversation.group_context",
             "group_conversation_history", ContributionState.READY, encode(item), source, source is not None)
-            for index, (item, source) in enumerate(self.read(snapshot, context, batch_id, at)))
+            for index, (item, source) in enumerate(self.read(snapshot, context, batch_id, at, historical=historical)))
 
     @staticmethod
     def speaker(context, events):

@@ -3,14 +3,147 @@ window.CompanionPerceptionOverviewPage = (() => {
   const product = window.CompanionProduct;
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
   const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
+  const modelAvailabilityLabel = value => ({ready:"已就绪",disabled:"已关闭",missing:"尚未配置",unavailable:"暂不可用",
+    unknown:"状态待核对",invalid:"配置待核对",failed:"读取失败",unsupported:"暂不支持"})[value] || "状态待核对";
   let root = null, scope = "", snapshot = null, runtimeSnapshot = null, runtimeState = "loading";
   let modelStatus = null, modelState = "loading", voiceStatus = null, voiceState = "loading";
   let imageStatus = null, imageState = "loading", semanticStatus = null, semanticState = "loading";
   let recallStatus = null, recallState = "loading", mihomeStatus = null, mihomeState = "loading";
+  let balanceConfig = null, balanceDraft = null, balanceExpanded = false, balanceConfigLoading = false;
+  let balanceWorkspace = null, balanceMarkup = "", selectedDestination = "", selectedModelTab = "";
+  let balanceSaving = false, balanceTesting = false, balanceTestResult = null;
+  let balanceResultScope = "", balanceResultConfigToken = "", balanceResultConfigKey = "", balanceResultIsDraft = false;
+  let balanceMessage = "", balanceError = "", balanceTestError = "";
   let unsubscribe = null, clockTimer = null, abort = null, generation = 0, lastDay = "";
+  /* 感知页每次换路由都会重新挂载。最近一次成功快照只在当前页面内存中
+     按角色/会话和宿主路由保留，返回时先展示它，再异步核对最新状态。 */
+  const overviewCache = new Map();
+  /* 余额属于当前角色/会话，但不属于某个具体的感知路由。单独存一份，
+     这样从仪表盘切到配置、再切回时不会因为下方配置工作区被卸载而丢掉
+     最近成功读数。只挑选可安全展示的字段；API 令牌和 edit token 永不缓存。 */
+  const balanceCache = new Map();
+  let overviewRouteKey = "";
+  function activeScopeKey() {
+    try {
+      const scoped = product.scopeKey?.();
+      if (scoped != null && String(scoped).trim()) return String(scoped);
+      const role = product.role?.() || {};
+      const selection = product.selection?.() || {};
+      const fallback = [selection.installation_id, selection.target_id, role.installation_id,
+        role.target_id, role.role_id, role.model_api].filter(value => value != null && String(value).trim());
+      return fallback.length ? fallback.join(":") : "default";
+    } catch (_) { return "default"; }
+  }
+  function routeKey() {
+    try {
+      const role = product.role?.() || {};
+      return [role.model_api, role.perception_native_api, role.screen_access_api, role.reality_access_api].join("|");
+    } catch (_) { return ""; }
+  }
+  function overviewCacheEntry() {
+    const key = `${scope}:${overviewRouteKey}`;
+    let entry = overviewCache.get(key);
+    if (!entry) { entry = {}; overviewCache.set(key, entry); }
+    return entry;
+  }
+  function rememberOverview(name, value, stateName, stateValue) {
+    const entry = overviewCacheEntry();
+    if (value != null) entry[name] = value;
+    if (stateName) entry[stateName] = stateValue;
+  }
+  function forgetOverview(name, stateName) {
+    const entry = overviewCacheEntry();
+    delete entry[name];
+    if (stateName) delete entry[stateName];
+  }
+
+  function safeBalanceConfig(value) {
+    if (!value || typeof value !== "object") return null;
+    return {
+      source: value.source || "none",
+      source_state: value.source_state || "not_configured",
+      provider: value.provider || "newapi",
+      url: typeof value.url === "string" ? value.url : "",
+      user_id: typeof value.user_id === "string" ? value.user_id : "",
+      value_divisor: String(value.value_divisor || "500000"),
+      has_api_key: value.has_api_key === true,
+    };
+  }
+
+  function safeBalanceDraft(value) {
+    if (!value || typeof value !== "object") return null;
+    return {
+      url: typeof value.url === "string" ? value.url : "",
+      user_id: typeof value.user_id === "string" ? value.user_id : "",
+      value_divisor: String(value.value_divisor || "500000"),
+      /* A typed nap_ token is deliberately discarded on route changes. */
+      api_key: "",
+      clear_configuration: value.clear_configuration === true,
+    };
+  }
+
+  function safeBalanceObservation(value) {
+    if (!value || typeof value !== "object") return null;
+    const amount = Number(value.amount);
+    if (value.available !== true || !Number.isFinite(amount) || amount < 0) return null;
+    return {
+      tested: value.tested === true,
+      available: true,
+      provider: typeof value.provider === "string" ? value.provider : "newapi",
+      provider_label: typeof value.provider_label === "string" ? value.provider_label : "NewAPI",
+      currency_label: typeof value.currency_label === "string" ? value.currency_label : "额度",
+      amount: formatBalanceAmount(amount),
+      observed_at: typeof value.observed_at === "string" ? value.observed_at : "",
+    };
+  }
+
+  function balanceConfigKey(value) {
+    const config = safeBalanceConfig(value);
+    return config ? JSON.stringify(config) : "";
+  }
+
+  function rememberBalanceCache() {
+    if (!scope) return;
+    const entry = {};
+    const config = safeBalanceConfig(balanceConfig);
+    const draft = safeBalanceDraft(balanceDraft);
+    const observation = safeBalanceObservation(balanceTestResult);
+    if (config) entry.config = config;
+    if (draft) entry.draft = draft;
+    if (observation) {
+      entry.observation = observation;
+      entry.observationIsDraft = balanceResultIsDraft === true;
+      entry.observationConfigKey = balanceResultConfigKey || "";
+    }
+    if (Object.keys(entry).length) balanceCache.set(scope, entry);
+    else balanceCache.delete(scope);
+  }
+
+  function restoreBalanceCache(nextScope) {
+    const entry = balanceCache.get(nextScope) || {};
+    balanceConfig = entry.config ? {...entry.config} : null;
+    balanceDraft = entry.draft ? {...entry.draft, api_key: ""} : null;
+    balanceTestResult = entry.observation ? {...entry.observation} : null;
+    balanceResultScope = balanceTestResult ? nextScope : "";
+    balanceResultConfigToken = "";
+    balanceResultConfigKey = entry.observationConfigKey || "";
+    balanceResultIsDraft = entry.observationIsDraft === true;
+  }
+
+  function formatBalanceAmount(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric.toFixed(2) : String(value ?? "");
+  }
+  function clearBalanceResult() {
+    balanceTestResult = null;
+    balanceResultConfigToken = "";
+    balanceResultConfigKey = "";
+    balanceResultIsDraft = false;
+    rememberBalanceCache();
+  }
 
   function validRoot(ticket) {
-    return ticket === generation && !!root?.isConnected && scope === product.scopeKey();
+    return ticket === generation && !!root?.isConnected && scope === activeScopeKey();
   }
   function localParts(date, timezone) {
     const parts = new Intl.DateTimeFormat("en-CA-u-nu-latn", {timeZone:timezone, year:"numeric", month:"2-digit", day:"2-digit"})
@@ -108,6 +241,8 @@ window.CompanionPerceptionOverviewPage = (() => {
       capability_role_disabled:"此角色未启用手机读取", reality_provider_unavailable:"Reality 扩展未就绪",
       reality_tool_unavailable:"手机读取工具暂不可用", no_recent_snapshot:"授权已就绪，尚无最近快照",
       no_recent_observation:"摄像头授权已就绪，尚无最近单帧结果",
+      reality_private_required:"仅在当前私聊中读取", screen_repository_unavailable:"屏幕解读服务未就绪",
+      screen_consent_missing:"等待此私聊屏幕授权", screen_consent_revoked:"此私聊已撤回屏幕授权",
       capability_not_installed:"Reality 能力尚未登记", capability_not_active:"Reality 能力已停用"})[code]
       || "当前没有可显示的数据";
   }
@@ -127,51 +262,198 @@ window.CompanionPerceptionOverviewPage = (() => {
     const provider = product.provider(id);
     if (!provider) return {state:"unknown", title:"尚未读取扩展", detail:"能力目录尚未提供状态"};
     const names = {connected:"已连接", installed:"已安装", missing:"未安装", disabled:"已停用",
-      waiting:"等待就绪", degraded:"状态待检查", conflict:"重复安装", stopped:"宿主已停止"};
+      waiting:"等待就绪", degraded:"状态待检查", conflict:"重复安装", stopped:"插件已停止"};
     let state = provider.integration_state || "unknown";
     let title = names[state] || "状态未知";
     if (state === "connected" && provider.runtime_ready === false) { state = "waiting"; title = "运行未就绪"; }
     const detail = provider.reason || (provider.runtime_ready === true ? "扩展报告运行就绪" : "设备工作区负责确认采集授权");
     return {state:state === "connected" ? "ready" : state === "missing" || state === "disabled" ? "off" : "pending", title, detail};
   }
+  /* === 服务端日历是日期语义的唯一基准 ===
+     公历、星期、农历、节假日与节气都由服务端 project_local_date 按角色时区算出，
+     随 /runtime 快照下发（页面从来没有自己算这些的权限）。
+     只有"秒"必须本地走：用服务端给的时区推进，跨日则重新拉取服务端日历，
+     因为农历与节假日跨日会变，本地推算会给出错误的一天。 */
+  function calendarContext() {
+    const value = runtimeSnapshot?.calendar;
+    if (!value || typeof value !== "object") return null;
+    if (value.status === "disabled" || typeof value.local_date !== "string") return null;
+    return value;
+  }
+  function calendarTags(value) {
+    const tags = [];
+    const add = item => { if (typeof item === "string" && item && tags.indexOf(item) < 0) tags.push(item); };
+    const configured = value.configured_annual_calendar?.listed_today;
+    if (configured && typeof configured === "object") {
+      add(configured.holiday);
+      (Array.isArray(configured.solar_terms) ? configured.solar_terms : []).forEach(add);
+    }
+    if (value.holiday?.status === "available" && value.holiday?.kind === "holiday") add(value.holiday.label);
+    add(value.fixed_gregorian_holiday);
+    return tags.slice(0, 2);
+  }
+  function serverDateLabel() {
+    const value = calendarContext();
+    if (!value) return "";
+    const bits = [];
+    const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.local_date);
+    if (parts) bits.push(`${Number(parts[2])} 月 ${Number(parts[3])} 日`);
+    if (typeof value.weekday === "string" && value.weekday) bits.push(value.weekday);
+    if (value.lunar_status === "available" && typeof value.lunar_date === "string" && value.lunar_date)
+      bits.push(value.lunar_date.startsWith("农历") ? value.lunar_date : `农历${value.lunar_date}`);
+    return bits.join(" · ");
+  }
   function clockZone() {
-    return snapshot?.model?.timezone || snapshot?.environment?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    return calendarContext()?.timezone || snapshot?.model?.timezone || snapshot?.environment?.timezone
+      || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   }
   function updateClock() {
     if (!root?.isConnected) return;
+    const calendar = calendarContext();
     const timezone = clockZone(), now = new Date();
+    const write = (selector, text) => {
+      const node = root.querySelector(selector);
+      if (node) node.textContent = text;
+      return node;
+    };
     try {
-      const time = root.querySelector("[data-context-clock-time]");
-      const date = root.querySelector("[data-context-clock-date]");
-      const zone = root.querySelector("[data-context-clock-zone]");
       const formatter = new Intl.DateTimeFormat("zh-CN", {timeZone:timezone, hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23"});
       const dateFormatter = new Intl.DateTimeFormat("zh-CN", {timeZone:timezone, year:"numeric", month:"long", day:"numeric"});
       const weekdayFormatter = new Intl.DateTimeFormat("zh-CN", {timeZone:timezone, weekday:"long"});
-      if (time) time.textContent = formatter.format(now);
-      if (date) date.textContent = dateFormatter.format(now);
-      const weekday = root.querySelector("[data-context-clock-weekday]");
-      if (weekday) weekday.textContent = weekdayFormatter.format(now);
-      if (zone) zone.textContent = timezone;
+      write("[data-context-clock-time]", formatter.format(now));
+      write("[data-context-clock-zone]", timezone);
+      /* 服务端日历在手就用它的农历与节假日；读不到才退回本机推算，且不再假装有农历。 */
+      const serverLabel = serverDateLabel();
+      write("[data-context-clock-date]", serverLabel || dateFormatter.format(now));
+      write("[data-context-clock-lunar]", serverLabel ? "" : weekdayFormatter.format(now));
+      const today = calendar ? calendarTags(calendar)[0] || "" : "";
+      const tag = write("[data-context-clock-tag]", today);
+      if (tag) tag.hidden = !today;
       const parts = localParts(now, timezone), day = `${parts.year}-${parts.month}-${parts.day}`;
-      if (lastDay && day !== lastDay) render();
+      /* 跨日不能本地推算：重新拉取 /runtime，让服务端按新的一天算农历与节假日。 */
+      if (lastDay && day !== lastDay) { lastDay = day; refreshRuntime(); return; }
       lastDay = day;
     } catch (_) {
-      const time = root.querySelector("[data-context-clock-time]");
-      const zone = root.querySelector("[data-context-clock-zone]");
-      if (time) time.textContent = now.toLocaleTimeString("zh-CN", {hour12:false});
-      if (zone) zone.textContent = "本机时区";
+      write("[data-context-clock-time]", now.toLocaleTimeString("zh-CN", {hour12:false}));
+      write("[data-context-clock-zone]", "本机时区");
     }
   }
-  function streamRow({tab, iconName, title, value, detail, state="pending", tag="待读取"}) {
-    return `<button type="button" class="perception-stream-row state-${state}" data-perception-focus="${tab}" aria-label="${esc(title)}：${esc(value)}。打开对应配置">
-      <span class="perception-stream-node">${icon(iconName)}</span>
-      <span class="perception-stream-copy"><strong>${title}</strong><span class="perception-stream-value">${esc(value)}</span><small>${esc(detail)}</small></span>
-      <span class="perception-stream-tag">${esc(tag)}</span><span class="perception-stream-arrow">${icon("arrow-up-right")}</span>
-    </button>`;
+  function emptyBalanceDraft(config) {
+    return {url:config?.url || "", user_id:config?.user_id || "",
+      value_divisor:config?.value_divisor || "500000", api_key:"", clear_configuration:false};
   }
-  function render() {
+  function rememberBalanceDraft(form) {
+    const field = name => form.querySelector(`[name="${name}"]`);
+    balanceDraft = {
+      url:String(field("url")?.value || "").trim(),
+      user_id:String(field("user_id")?.value || "").trim(),
+      value_divisor:String(field("value_divisor")?.value || "").trim(),
+      api_key:String(field("api_key")?.value || ""),
+      clear_configuration:field("clear_configuration")?.checked === true,
+    };
+    return balanceDraft;
+  }
+  function balanceDraftIsCurrent() {
+    return !!balanceConfig && !!balanceDraft && !balanceDraft.clear_configuration
+      && balanceConfig.source_state === "configured"
+      && balanceDraft.url === (balanceConfig.url || "")
+      && balanceDraft.user_id === (balanceConfig.user_id || "")
+      && balanceDraft.value_divisor === (balanceConfig.value_divisor || "500000")
+      && !balanceDraft.api_key;
+  }
+  function balanceConfigMarkup() {
+    if (!balanceExpanded) return "";
+    if (balanceConfigLoading) return '<div id="perception-balance-source" class="perception-balance-config" role="status">正在读取余额数据源…</div>';
+    if (!balanceConfig) return `<div id="perception-balance-source" class="perception-balance-config" role="status">
+      <p>${esc(balanceError || "余额数据源配置暂不可读。")}</p><button type="button" data-balance-reload ${balanceSaving || balanceTesting ? "disabled" : ""}>重新读取</button></div>`;
+    const draft = balanceDraft || emptyBalanceDraft(balanceConfig);
+    const busy = balanceConfigLoading || balanceSaving || balanceTesting;
+    const testable = !draft.clear_configuration && (balanceDraftIsCurrent()
+      || (draft.url && (draft.api_key || balanceConfig.has_api_key)));
+    const sourceMessage = balanceConfig.source === "plugin" ? "本页保存的 NewAPI 数据源优先用于查询与主动联系。"
+      : balanceConfig.source === "environment" ? "当前数据源来自插件环境配置；在这里保存后将优先使用本页配置。"
+        : balanceConfig.source_state === "invalid" ? "检测到数据源配置，但读取失败；请检查地址、令牌和环境变量。"
+          : "填写 NewAPI 地址和管理令牌后，插件即可查询服务额度。";
+    const sourceState = balanceConfig.source_state === "invalid" ? "数据源配置无效"
+      : balanceConfig.source === "plugin" ? balanceConfig.has_api_key ? "NewAPI 数据源已配置" : "NewAPI 令牌缺失"
+      : balanceConfig.source === "environment" ? "正在使用插件环境配置"
+        : "尚未配置数据源";
+    return `<form id="perception-balance-source" class="perception-balance-config" data-balance-form novalidate aria-label="余额感知数据源配置">
+      <div class="perception-balance-config-head"><span>${icon("wallet-cards")}</span><div><strong>余额数据源</strong><small>${esc(sourceState)} · ${esc(sourceMessage)}</small></div></div>
+      <label class="perception-balance-field"><span>NewAPI 地址</span><input name="url" data-balance-field="url" type="url" inputmode="url" autocomplete="url" maxlength="2048"
+        placeholder="https://newapi.example.com" value="${esc(draft.url)}" ${busy || draft.clear_configuration ? "disabled" : ""} required></label>
+      <label class="perception-balance-field"><span>NewAPI 用户 ID（可选）</span><input name="user_id" data-balance-field="user_id" type="text" inputmode="numeric" autocomplete="off" maxlength="19"
+        pattern="[1-9][0-9]{0,18}" placeholder="默认使用令牌所属账号" value="${esc(draft.user_id)}" ${busy || draft.clear_configuration ? "disabled" : ""}></label>
+      <label class="perception-balance-field"><span>额度单位除数</span><input name="value_divisor" data-balance-field="value_divisor" type="text" inputmode="decimal" autocomplete="off" maxlength="64"
+        value="${esc(draft.value_divisor)}" ${busy || draft.clear_configuration ? "disabled" : ""} required></label>
+      <label class="perception-balance-field"><span>NewAPI 管理令牌（nap_）</span><input name="api_key" data-balance-field="api_key" type="password" autocomplete="new-password" maxlength="4096"
+        value="${esc(draft.api_key)}" placeholder="${balanceConfig.has_api_key ? "已保存；留空保留当前令牌，输入新令牌可更换" : "输入带 profile:read 权限的个人访问令牌"}"
+        ${busy || draft.clear_configuration ? "disabled" : ""}></label>
+      <p class="perception-balance-note">查询使用个人访问令牌（需 profile:read），不是模型调用用的 sk- Key。额度按 NewAPI 的 QuotaPerUnit 换算；留空时使用 500000。</p>
+      ${balanceConfig.source === "plugin" ? `<label class="perception-balance-clear"><input type="checkbox" name="clear_configuration" data-balance-field="clear_configuration" ${draft.clear_configuration ? "checked" : ""} ${busy ? "disabled" : ""}><span>移除本页保存的数据源</span><small>移除后会继续使用插件环境配置（如果已设置）。</small></label>` : ""}
+      <p class="perception-balance-message" role="status" aria-live="polite" ${balanceMessage ? "" : "hidden"}>${esc(balanceMessage)}</p>
+      <p class="perception-balance-message is-error" role="alert" ${balanceError ? "" : "hidden"}>${esc(balanceError)}</p>
+      <p class="perception-balance-message" data-balance-test-result role="status" aria-live="polite" ${balanceTestResult ? "" : "hidden"}>${balanceTestResult ? `连接成功：当前余额 ${esc(formatBalanceAmount(balanceTestResult.amount))} ${esc(balanceTestResult.currency_label)} · ${esc(balanceTestResult.observed_at)}` : ""}</p>
+      <p class="perception-balance-message is-error" role="alert" ${balanceTestError ? "" : "hidden"}>${esc(balanceTestError)}</p>
+      <footer class="perception-balance-actions">
+        <button type="button" class="perception-balance-contact" data-go="manage" data-manage="contact" data-contact-view="sources">${icon("settings-2")}<span>前往主动联系 · 外部触发源</span></button>
+        <span class="perception-balance-buttons">
+          <button type="button" class="perception-balance-test" data-balance-test ${busy || !testable ? "disabled" : ""}>${balanceTesting ? "正在测试…" : "测试连接"}</button>
+          <button type="submit" class="perception-balance-save" ${busy ? "disabled" : ""}>${balanceSaving ? "正在保存…" : draft.clear_configuration ? "移除数据源" : "保存数据源"}</button>
+        </span>
+      </footer>
+    </form>`;
+  }
+  function balanceFocus(form, active = window.document?.activeElement) {
+    if (!active || !form?.contains?.(active)) return null;
+    return {toggle:false, focus:active.getAttribute?.("name")
+      || (active.matches?.('button[type="submit"]') ? "__submit" : active.matches?.("[data-balance-test]") ? "__test" : ""),
+      selectionStart:active.selectionStart, selectionEnd:active.selectionEnd};
+  }
+  function restoreBalanceFocus(saved) {
+    const form = balanceWorkspace?.querySelector("[data-balance-form]");
+    const focus = saved?.focus === "__submit" ? form?.querySelector('button[type="submit"]')
+      : saved?.focus === "__test" ? form?.querySelector("[data-balance-test]")
+        : saved?.focus ? form?.querySelector(`[name="${saved.focus}"]`) : null;
+    focus?.focus({preventScroll:true});
+    if (focus && Number.isInteger(saved.selectionStart) && Number.isInteger(saved.selectionEnd))
+      focus.setSelectionRange?.(saved.selectionStart, saved.selectionEnd);
+  }
+  function renderBalanceSource() {
+    if (!balanceWorkspace || !balanceExpanded) return;
+    const markup = balanceConfigMarkup();
+    if (markup === balanceMarkup) return;
+    const savedFocus = balanceFocus(balanceWorkspace.querySelector("[data-balance-form]"));
+    balanceWorkspace.innerHTML = markup;
+    balanceMarkup = markup;
+    if (savedFocus) restoreBalanceFocus(savedFocus);
+  }
+  function syncSelection() {
+    for (const card of root?.querySelectorAll?.(".perception-board-card") || []) card.classList.remove("is-selected");
+    for (const button of root?.querySelectorAll?.("[data-board-goto]") || []) {
+      const active = button.dataset.boardGoto === selectedDestination
+        && (!button.dataset.boardModelTab || button.dataset.boardModelTab === selectedModelTab);
+      button.setAttribute("aria-expanded", String(active));
+      button.classList.toggle("is-selected", active);
+      if (active) button.closest(".perception-board-card")?.classList.add("is-selected");
+    }
+  }
+  function select(destination, {modelTab=""} = {}) {
     if (!root?.isConnected) return;
+    selectedDestination = destination;
+    selectedModelTab = modelTab;
+    syncSelection();
+    balanceExpanded = ["config-news","config-balance","config-recall"].includes(destination.split(":")[0]);
+    renderBalanceSource();
+    if (balanceExpanded && !balanceConfig && !balanceConfigLoading) void readBalanceConfig(generation);
+  }
+  function render({balanceSource=true} = {}) {
+    if (!root?.isConnected) return;
+    const active = window.document?.activeElement;
+    const focusedId = active && root.contains?.(active) ? active.id : "";
     const ready = snapshot?.ready === true;
+    const configurationFailed = !ready && (!!snapshot?.error || snapshot?.loading === false);
+    const configurationState = configurationFailed ? "读取失败" : "正在读取";
     const environment = snapshot?.environment || {}, model = snapshot?.model || {};
     const calendar = runtimeSnapshot?.calendar || {};
     const weather = runtimeSnapshot?.weather || {}, screenResult = runtimeSnapshot?.screen || {};
@@ -181,20 +463,47 @@ window.CompanionPerceptionOverviewPage = (() => {
     const modelStateLabel = modelInfo ? "路由已读取" : modelState === "loading" ? "正在读取模型路由" : "模型路由暂不可读";
     const news = snapshot?.news || {};
     const locationName = environment.locationName || "";
+    const balanceEnabled = snapshot?.contact?.balanceAwarenessEnabled;
+    const balanceAllowed = snapshot?.contact?.automaticAllowed;
+    const balanceSourceConfigured = balanceConfig?.source_state === "configured";
+    const balanceSourceInvalid = balanceConfig?.source_state === "invalid";
+    const balanceObservation = balanceTestResult?.available === true ? balanceTestResult : null;
+    const balanceValue = !ready ? `${balanceSourceConfigured ? "数据源已配置；" : ""}余额联系设置${configurationState === "读取失败" ? "读取失败" : "正在读取"}` : balanceEnabled === true
+      ? balanceAllowed === true ? "服务余额联系已启用" : "余额契机已开，但后台自动联系未开启"
+      : balanceSourceConfigured ? "数据源已配置，余额联系未开启"
+        : balanceSourceInvalid ? "余额数据源配置无效，联系未开启"
+          : "服务余额联系契机未启用";
+    const balanceTag = !ready ? configurationFailed ? "读取失败" : "读取中" : balanceEnabled === true
+      ? balanceAllowed === true ? "主动联系" : "总开关受限"
+      : balanceSourceConfigured ? "数据源已配置" : balanceSourceInvalid ? "待修复" : ready ? "未启用" : "待读取";
+    const balanceDetail = !ready ? "余额联系条件尚未核对；可展开配置数据源，或重新读取状态。"
+      : balanceSourceConfigured && balanceEnabled !== true
+      ? "数据源已配置；还需在主动联系的外部触发源中开启余额感知。"
+      : "仅在服务余额达到阈值时作为主动联系素材，不会持续注入日常对话；不表示用户欠款。";
     const searchSource = news.sourceKind === "search";
+    const dailySource = /AI\s*(早报|日报)|橘鸦/i.test(news.label || "");
     const explorationEnabled = news.explorationEnabled === true;
-    const externalValue = searchSource
-      ? explorationEnabled ? news.ready ? news.label || "网络搜索来源已就绪" : "网络探索已启用，搜索源未就绪" : "网络探索未启用"
-      : explorationEnabled ? "探索已开启，当前来源不是搜索" : news.label || (ready ? "尚未配置外部来源" : "正在读取外部来源");
-    const externalState = searchSource && explorationEnabled
-      ? news.ready ? "ready" : "pending"
-      : explorationEnabled ? "pending" : news.ready ? "ready" : "off";
+    const sourceAssembled = news.assembled ?? news.ready;
+    const networkSucceeded = news.networkStatus === "succeeded";
+    const networkLabel = news.networkStatus === "failed" ? "上次网络检查失败"
+      : news.networkStatus === "succeeded" ? "网络检查通过"
+        : sourceAssembled ? "网络尚未检查" : "来源未装配";
+    const externalValue = !ready ? configurationFailed ? "外部来源设置读取失败" : "正在读取外部来源" : searchSource
+      ? explorationEnabled ? networkSucceeded ? news.label || "网络搜索检查通过" : sourceAssembled ? `网络搜索已配置 · ${networkLabel}` : "网络探索已启用，搜索源未装配" : "网络探索未启用"
+      : dailySource ? `AI 日报已装配 · ${networkSucceeded ? "后台持续维护" : networkLabel}`
+        : sourceAssembled ? `${news.label || "资讯来源"} · ${networkSucceeded ? "后台持续维护" : networkLabel}`
+          : ready ? "尚未配置外部来源" : "正在读取外部来源";
+    const externalState = !ready ? "pending" : searchSource && explorationEnabled
+      ? networkSucceeded ? "ready" : "pending"
+      : networkSucceeded ? "ready" : sourceAssembled ? "pending" : "off";
     const externalDetail = [
-      searchSource ? "AstrBot 网页搜索或自定义搜索源" : `来源类型 ${news.sourceKind || "未选择"}`,
+      searchSource ? "AstrBot 网页搜索或自定义搜索源" : dailySource ? "内置 AI 日报来源" : `来源类型 ${news.sourceKind || "未选择"}`,
       news.explorationInterests ? `兴趣：${news.explorationInterests}` : "未指定搜索兴趣",
       Number.isInteger(news.explorationIntervalHours) ? `最短间隔 ${news.explorationIntervalHours} 小时` : "",
       Number.isInteger(news.explorationResultCount) ? `每次最多 ${news.explorationResultCount} 条` : "",
-      news.lastCheckedAt ? `最近检查 ${news.lastCheckedAt}` : "",
+      networkLabel,
+      news.lastAttemptAt ? `最近尝试 ${news.lastAttemptAt}` : "",
+      news.lastCheckedAt ? `最近同步 ${news.lastCheckedAt}` : "",
     ].filter(Boolean).join(" · ");
     const weatherValue = weather.state === "available"
       ? `${weather.location || environment.locationName || "当前位置"} · ${weather.condition || "天气已读取"}${weather.temperature_c == null ? "" : ` · ${weather.temperature_c}°C`}`
@@ -216,7 +525,7 @@ window.CompanionPerceptionOverviewPage = (() => {
     const voiceValue = voiceState === "loading" ? "正在读取语音绑定"
       : voiceState === "error" ? "TTS 绑定暂不可读"
         : voiceStatus?.voice_enabled === false ? "语音回复未启用"
-          : voiceProvider?.label || voiceProvider?.name || voiceLanguage?.bind || "尚未绑定 TTS";
+          : voiceProvider?.model || voiceProvider?.label || voiceProvider?.name || voiceLanguage?.bind || "尚未绑定 TTS";
     const generated = imageStatus?.actions?.find(item => item.action === "image.generate");
     const imageRoute = modelRoute("image.generate");
     const imageValue = imageState === "loading" ? "正在读取生图状态"
@@ -225,22 +534,40 @@ window.CompanionPerceptionOverviewPage = (() => {
     const visionRoute = modelRoute("vision.review") || modelRoute("screen.interpretation");
     const analysisProvider = semanticStatus?.settings?.analysis_provider;
     const events = upcomingDates(snapshot);
-    const alertList = Array.isArray(weather.alerts) ? weather.alerts.slice(0, 4) : [];
+    const alertList = weather.state === "available" && Array.isArray(weather.alerts) ? weather.alerts.slice(0, 4) : [];
     const screenValue = screenResult.state === "available" ? screenResult.interpretation || "已有屏幕解读"
       : screenResult.state === "blocked" ? reasonLabel(screenResult.reason)
         : screenResult.state === "empty" ? "暂无已保存解读"
           : runtimeState === "loading" ? "正在核对屏幕权限" : "屏幕解读暂不可读";
     const mobileValue = mobile.location?.available
       ? mobile.location.label || "附近位置已读取"
-      : realityResult.state === "blocked" ? reasonLabel(realityResult.reason)
+      : runtimeState === "loading" ? "正在读取定位状态"
+        : runtimeState === "error" ? "定位状态读取失败"
+          : realityResult.reason ? reasonLabel(realityResult.reason)
         : realityResult.state === "ready" ? "授权已就绪，暂无位置快照"
           : "暂无已授权的位置快照";
+    const device = mobile.device || {}, activity = mobile.activity || {};
+    const phoneParts = [];
+    if (device.available === true) {
+      if (Number.isFinite(device.battery_percent)) phoneParts.push(`电量 ${device.battery_percent}%`);
+      if (device.charging === true) phoneParts.push("充电中");
+      const appState = ({foreground:"前台运行",background:"后台运行"})[device.app_state];
+      if (appState) phoneParts.push(appState);
+    }
+    if (activity.available === true && activity.label) phoneParts.push(`${activity.stale ? "上次活动" : "活动"} · ${activity.label}`);
+    const phoneAvailable = phoneParts.length > 0;
+    const phoneValue = phoneAvailable ? phoneParts.join(" · ")
+      : runtimeState === "loading" ? "正在读取手机状态"
+        : runtimeState === "error" ? "手机状态读取失败"
+          : realityResult.reason ? reasonLabel(realityResult.reason) : "暂无已授权的手机状态快照";
     const cameraObservation = cameraResult.observation || {};
     const cameraValue = cameraResult.state === "available"
       ? cameraResult.answer_available
         ? cameraObservation.summary || cameraObservation.scene_description || cameraObservation.purpose_answer || "最近单帧已识别"
         : cameraObservation.uncertainty || cameraResult.message || "最近单帧结果不确定"
-      : cameraResult.state === "blocked" ? reasonLabel(cameraResult.reason)
+      : runtimeState === "loading" ? "正在读取摄像头状态"
+        : runtimeState === "error" ? "摄像头状态读取失败"
+          : cameraResult.reason ? reasonLabel(cameraResult.reason)
         : cameraResult.state === "ready" ? "授权已就绪，暂无识别结果" : "暂无可用的摄像头结果";
     const recalls = Array.isArray(recallStatus?.entries) ? recallStatus.entries : [];
     const recallValue = recallState === "loading" ? "正在读取撤回记录"
@@ -265,104 +592,269 @@ window.CompanionPerceptionOverviewPage = (() => {
     const injections = Array.isArray(runtimeSnapshot?.other_injections)
       ? runtimeSnapshot.other_injections.filter(item => typeof item === "string" || item?.label || item?.name).slice(0, 6) : [];
     const injectionLabels = injections.map(item => typeof item === "string" ? item : item.label || item.name);
-    const signals = [
-      streamRow({tab:"config-environment:perception-detail-place", iconName:"map-pin", title:"所在地",
-        value:locationName || "尚未设置角色地点",
-        detail:locationName ? "使用角色配置的区域；不显示经纬度。" : "在地点与天气设置中填写城市或区域。",
-        state:locationName ? "ready" : ready ? "off" : "pending", tag:locationName ? "已配置" : "待设置"}),
-      streamRow({tab:"config-environment:perception-detail-place", iconName:"cloud-sun", title:"天气实况",
-        value:weather.state === "available"
-          ? `${weather.condition || "天气已读取"}${weather.temperature_c == null ? "" : ` · ${weather.temperature_c}°C`}`
-          : weatherValue,
-        detail:weatherDetail,
-        state:weather.state === "available" ? "ready" : weather.state === "disabled" ? "off" : "pending",
-        tag:weather.state === "available" ? "实况" : weather.state === "disabled" ? "未启用" : "待配置"}),
-      ...(alertList.length ? [streamRow({tab:"config-environment:perception-detail-place", iconName:"triangle-alert", title:"天气预警",
-        value:alertList[0].title || alertList[0].event_name || "有官方预警",
-        detail:`${alertList[0].severity || "级别待核对"}${alertList[0].ends_at ? ` · 至 ${new Date(alertList[0].ends_at).toLocaleString("zh-CN")}` : ""}${alertList.length > 1 ? ` · 另有 ${alertList.length - 1} 条` : ""}`,
-        state:"pending", tag:`${alertList.length} 条预警`})] : []),
-      streamRow({tab:"config-models:perception-detail-model-route", iconName:"cpu", title:"对话模型",
-        value:routeLabel(modelInfo, modelState === "loading"), detail:detailForRoute(modelInfo),
-        state:modelInfo ? "ready" : "pending", tag:modelInfo ? "当前路由" : modelStateLabel}),
-      streamRow({tab:"config-models:perception-detail-model-route", iconName:"audio-lines", title:"TTS 模型",
-        value:voiceValue, detail:voiceLanguage ? `${voiceLanguage.n || voiceLanguage.k} · ${voiceStatus?.catalog_state || "AstrBot TTS Provider"}` : "按语种绑定，配置在模型与连接页。",
-        state:voiceState === "error" || voiceState === "loading" ? "pending" : voiceStatus?.voice_enabled === false || !voiceLanguage?.bind ? "off" : "ready",
-        tag:voiceStatus?.voice_enabled === false ? "未启用" : voiceLanguage?.bind ? "已绑定" : "未绑定"}),
-      streamRow({tab:"config-models:perception-detail-model-route", iconName:"image", title:"生图模型",
-        value:imageValue, detail:generated?.owner ? `${generated.owner}${imageRoute ? ` · ${imageRoute.model}` : ""} · ${generated.state || "状态已读取"}`
-          : "Native 生图动作与扩展由模型与连接页管理。",
-        state:generated?.state === "ready" || imageRoute ? "ready" : generated?.state === "disabled" ? "off" : "pending",
-        tag:generated?.state === "ready" ? "可调用" : generated?.state === "disabled" ? "已关闭" : imageRoute ? "已分配" : "待检查"}),
-      ...(visionRoute || analysisProvider ? [streamRow({tab:"config-models:perception-detail-model-route", iconName:"scan-eye", title:"视觉模型",
-        value:visionRoute?.model || analysisProvider,
-        detail:visionRoute ? detailForRoute(visionRoute) : "语义视觉分析 Provider",
-        state:"ready", tag:"已配置"})] : []),
-      streamRow({tab:"config-news:perception-detail-external", iconName:"globe-2", title:"外部资讯与检索",
-        value:externalValue,
-        detail:externalDetail + (news.failureCode ? ` · ${news.failureCode}` : ""),
-        state:externalState, tag:externalState === "ready" ? "来源可用" : externalState === "off" ? "未启用" : "待检查"}),
-      streamRow({tab:"config-screen:perception-detail-device-access", iconName:"smartphone", title:"用户定位",
-        value:mobileValue,
-        detail:mobile.location?.available ? `最近读取 ${ageLabel(mobile.location.captured_at)} · 仅展示授权区域，不显示坐标`
-          : realityResult.state === "blocked" ? "位置读取需要当前私聊授权。" : "只回显对话已经读取的位置，不主动采集。",
-        state:mobile.location?.available ? "ready" : realityResult.state === "blocked" ? "pending" : "off",
-        tag:mobile.location?.available ? "已读取" : realityResult.state === "blocked" ? "需授权" : "暂无快照"}),
-      streamRow({tab:"config-screen:perception-detail-device-access", iconName:"scan-eye", title:"识屏信息",
-        value:screenValue,
-        detail:screenResult.state === "available" ? `${screenResult.surface || "屏幕画面"} · 采集 ${ageLabel(screenResult.captured_at)} · 解读 ${ageLabel(screenResult.created_at)}`
-          : "只显示最近完成的授权解读；刷新不会触发采集。",
-        state:screenResult.state === "available" ? "ready" : screenResult.state === "blocked" ? "pending" : "off",
-        tag:screenResult.state === "available" ? "有结果" : screenResult.state === "blocked" ? "需授权" : "暂无结果"}),
-      streamRow({tab:"config-screen:perception-detail-device-access", iconName:"camera", title:"摄像头状态",
-        value:cameraValue,
-        detail:cameraResult.state === "available" ? `最近读取 ${ageLabel(cameraResult.captured_at)} · ${cameraResult.purpose || "按本轮明确请求"}`
-          : "只显示已经完成的单帧识别；不会因刷新而拍摄。",
-        state:cameraResult.state === "available" || cameraResult.state === "ready" ? "ready" : cameraResult.state === "blocked" ? "pending" : "off",
-        tag:cameraResult.state === "available" ? "已识别" : cameraResult.state === "blocked" ? "需授权" : cameraResult.state === "ready" ? "待请求" : "未就绪"}),
-      streamRow({tab:"config-recall:perception-detail-recalls", iconName:"message-square-quote", title:"撤回记录",
-        value:recallValue, detail:recallDetail,
-        state:recallState === "error" || recallState === "loading" ? "pending" : recalls.length ? "ready" : "off",
-        tag:recalls.length ? "只读记录" : recallState === "error" ? "不可读" : "无记录"}),
-      ...(mihomeSummary ? [streamRow({tab:"config-screen:perception-detail-mihome", iconName:"plug-zap", title:"米家设备",
-        value:mihomeSummary,
-        detail:configuredDevices.slice(0, 3).map(item => `${item.name || item.aliases?.[0] || "设备"} ${item.online === true ? "在线" : item.online === false ? "离线" : "状态未知"}`).join(" · ")
-          + (mihomeStatus?.snapshot_at ? ` · 同步 ${mihomeStatus.snapshot_at}` : ""),
-        state:offlineCount ? "pending" : "ready", tag:offlineCount ? `${offlineCount} 台离线` : "设备正常"})] : []),
-      ...(injectionLabels.length ? [streamRow({tab:"config-injection:perception-detail-injection", iconName:"layers-3", title:"其他注入",
-        value:`${injectionLabels.length} 项进入本轮上下文`, detail:injectionLabels.join(" · "),
-        state:"ready", tag:"本轮材料"})] : []),
+    /* === 感知通道单一数据源 ===
+       仪表盘只登记"当前真实存在的通道"，
+       每条都带上它自己的读数与说明。不给通道编造数值、百分比或统一总数；
+       读不到就说读不到（未启用 / 待授权），不拿旧数据冒充当前值。 */
+    const percepts = [];
+    const channel = (id, board, spec) => percepts.push({id, board, ...spec});
+    const tabModel = "config-models:perception-detail-model-route";
+    const tabPlace = "config-environment:perception-detail-place";
+    const tabDevice = "config-screen:perception-detail-device-access";
+    const tabCalendar = "config-models:perception-detail-context";
+
+    channel("model-conversation", "models", {tab:tabModel, modelTab:"fn", icon:"cpu", title:"对话模型",
+      value:routeLabel(modelInfo, modelState === "loading"), detail:detailForRoute(modelInfo),
+      state:modelInfo ? "ready" : "pending", tag:modelInfo ? "当前路由" : modelStateLabel});
+    channel("model-tts", "models", {tab:tabModel, modelTab:"voice", icon:"audio-lines", title:"TTS 模型",
+      value:voiceValue,
+      detail:voiceLanguage ? `${voiceLanguage.n || voiceLanguage.k} · ${modelAvailabilityLabel(voiceStatus?.catalog_state)}` : "按语种绑定，配置在模型与连接页。",
+      state:voiceState === "error" || voiceState === "loading" ? "pending" : voiceStatus?.voice_enabled === false || !voiceLanguage?.bind ? "off" : "ready",
+      tag:voiceState === "error" ? "读取失败" : voiceState === "loading" ? "读取中" : voiceStatus?.voice_enabled === false ? "未启用" : voiceLanguage?.bind ? "已绑定" : "未绑定"});
+    channel("model-image", "models", {tab:tabModel, modelTab:"image", icon:"image", title:"生图模型",
+      value:imageValue,
+      detail:generated?.owner ? `${generated.owner}${imageRoute ? ` · ${imageRoute.model}` : ""} · ${modelAvailabilityLabel(generated.state)}`
+        : "Native 生图动作与扩展由模型与连接页管理。",
+      state:imageState !== "ready" ? "pending" : generated?.state === "ready" || imageRoute ? "ready" : generated?.state === "disabled" ? "off" : "pending",
+      tag:imageState === "error" ? "读取失败" : imageState === "loading" ? "读取中" : generated?.state === "ready" ? "可调用" : generated?.state === "disabled" ? "已关闭" : imageRoute ? "已分配" : "待检查"});
+    if (visionRoute || analysisProvider) channel("model-vision", "models", {tab:tabModel, modelTab:"fn", icon:"scan-eye", title:"视觉模型",
+      value:visionRoute?.model || analysisProvider,
+      detail:visionRoute ? detailForRoute(visionRoute) : "语义视觉分析 Provider",
+      state:"ready", tag:"已配置"});
+
+    /* 日期与历法：服务端 project_local_date 的产出必须有出口。
+       每一项都只在服务端真的给出时才显示——历法项各有一个总开关，没开就是没开。 */
+    const calendarView = (() => {
+      const cal = calendarContext();
+      if (!cal) return null;
+      const labels = [];
+      if (typeof cal.weekday === "string" && cal.weekday) labels.push(cal.weekday);
+      if (typeof cal.period === "string" && cal.period) labels.push(cal.period);
+      const detail = [];
+      if (cal.lunar_status === "available" && typeof cal.lunar_date === "string" && cal.lunar_date)
+        detail.push(cal.lunar_date.startsWith("农历") ? cal.lunar_date : `农历${cal.lunar_date}`);
+      const terms = [];
+      const today = cal.automatic_solar_terms?.today;
+      if (Array.isArray(today)) for (const item of today) for (const name of item?.names || []) terms.push(name);
+      const listed = cal.configured_annual_calendar?.listed_today?.solar_terms;
+      if (Array.isArray(listed)) terms.push(...listed);
+      if (terms.length) detail.push(`节气 ${terms.slice(0, 2).join("、")}`);
+      if (cal.almanac?.status === "available" && cal.almanac.yi && cal.almanac.ji)
+        detail.push(`宜 ${cal.almanac.yi} · 忌 ${cal.almanac.ji}`);
+      return {
+        labels: labels.length ? labels.join(" · ") : "历法已启用",
+        detail: detail.length ? detail.join(" · ") : "服务端未产出更多历法明细；农历、节气与黄历各有独立开关。",
+      };
+    })();
+    if (calendarView) channel("env-calendar", "environment", {tab:tabCalendar, icon:"calendar-days", title:"日期与历法",
+      value:calendarView.labels, detail:calendarView.detail, state:"ready", tag:"服务端日历"});
+    channel("env-location", "environment", {tab:tabPlace, icon:"map-pin", title:"所在地",
+      value:locationName || (!ready ? `角色地点${configurationState}` : "尚未设置角色地点"),
+      detail:locationName ? "使用角色配置的区域；不显示经纬度。" : "在日程与规划中填写角色所在地。",
+      state:locationName ? "ready" : ready ? "off" : "pending", tag:locationName ? "已配置" : !ready ? configurationFailed ? "读取失败" : "读取中" : "待设置"});
+    channel("env-weather", "environment", {tab:tabPlace, icon:"cloud-sun", title:"天气实况",
+      value:weather.state === "available"
+        ? `${weather.condition || "天气已读取"}${weather.temperature_c == null ? "" : ` · ${weather.temperature_c}°C`}`
+        : weatherValue,
+      detail:weatherDetail,
+      state:weather.state === "available" ? "ready" : weather.state === "disabled" ? "off" : "pending",
+      tag:weather.state === "available" ? "实况" : weather.state === "disabled" ? "未启用" : weather.state === "unconfigured" ? "待配置" : runtimeState === "loading" ? "读取中" : "读取失败"});
+    if (alertList.length) channel("env-alert", "environment", {tab:tabPlace, icon:"triangle-alert", title:"天气预警",
+      value:alertList[0].title || alertList[0].event_name || "有官方预警",
+      detail:`${alertList[0].severity || "级别待核对"}${alertList[0].ends_at ? ` · 至 ${new Date(alertList[0].ends_at).toLocaleString("zh-CN")}` : ""}${alertList.length > 1 ? ` · 另有 ${alertList.length - 1} 条` : ""}`,
+      state:"pending", tag:`${alertList.length} 条预警`});
+    channel("ext-external", "external", {tab:"config-news:perception-detail-external", icon:"globe-2", title:"外部资讯与检索",
+      value:externalValue, detail:externalDetail + (news.failureCode ? ` · ${news.failureCode}` : ""),
+      state:externalState,
+      tag:!ready ? configurationFailed ? "读取失败" : "读取中" : externalState === "ready" ? "检查通过" : externalState === "off" ? "未启用" : news.networkStatus === "failed" ? "检查失败" : "待检查"});
+    channel("ext-balance", "external", {tab:"config-balance:perception-detail-balance-source", icon:"wallet-cards", title:"余额感知",
+      value:balanceValue, detail:[balanceDetail, balanceObservation ? `${balanceResultIsDraft ? "草稿测试" : "最近查询"} ${formatBalanceAmount(balanceObservation.amount)} ${balanceObservation.currency_label || "额度"}` : "尚无余额查询结果"].join(" · "),
+      state:balanceObservation ? "ready" : balanceSourceConfigured || balanceSourceInvalid || balanceEnabled === true || !ready || balanceError || balanceTestError ? "pending" : "off",
+      tag:balanceTag});
+
+    channel("device-location", "devices", {tab:tabDevice, icon:"smartphone", title:"用户定位",
+      value:mobileValue,
+      detail:mobile.location?.available ? `最近读取 ${ageLabel(mobile.location.captured_at)} · 仅展示授权区域，不显示坐标`
+        : realityResult.state === "blocked" ? "位置读取需要当前私聊授权。" : "只回显对话已经读取的位置，不主动采集。",
+      state:mobile.location?.available ? "ready" : realityResult.reason === "capability_role_disabled" ? "off" : "pending",
+      tag:mobile.location?.available ? "已读取" : runtimeState === "error" ? "读取失败" : runtimeState === "loading" ? "读取中" : realityResult.state === "blocked" ? "需授权" : "暂无快照"});
+    channel("device-screen", "devices", {tab:tabDevice, icon:"scan-eye", title:"识屏信息",
+      value:screenValue,
+      detail:screenResult.state === "available" ? `${screenResult.surface || "屏幕画面"} · 采集 ${ageLabel(screenResult.captured_at)} · 解读 ${ageLabel(screenResult.created_at)}`
+        : "只显示最近完成的授权解读；刷新不会触发采集。",
+      state:screenResult.state === "available" ? "ready" : "pending",
+      tag:screenResult.state === "available" ? "有结果" : runtimeState === "error" ? "读取失败" : runtimeState === "loading" ? "读取中" : screenResult.state === "blocked" ? "需授权" : "暂无结果"});
+    channel("device-phone", "devices", {tab:tabDevice, icon:"smartphone", title:"手机状态",
+      value:phoneValue, detail:"展示最近已授权快照中的电量、运行状态与活动；刷新页面不会触发手机采集。",
+      state:phoneAvailable ? "ready" : realityResult.reason === "capability_role_disabled" ? "off" : "pending",
+      tag:phoneAvailable ? "有快照" : runtimeState === "error" ? "读取失败" : runtimeState === "loading" ? "读取中" : realityResult.state === "blocked" ? "需授权" : "暂无快照"});
+    channel("device-camera", "devices", {tab:tabDevice, icon:"camera", title:"摄像头状态",
+      value:cameraValue,
+      detail:cameraResult.state === "available" ? `最近读取 ${ageLabel(cameraResult.captured_at)} · ${cameraResult.purpose || "按本轮明确请求"}`
+        : "只显示已经完成的单帧识别；不会因刷新而拍摄。",
+      state:cameraResult.state === "available" && cameraResult.answer_available === true ? "ready" : "pending",
+      tag:cameraResult.state === "available" ? "已识别" : cameraResult.state === "blocked" ? "需授权" : cameraResult.state === "ready" ? "待请求" : "未就绪"});
+    channel("device-recalls", "external", {tab:"config-recall:perception-detail-recalls", icon:"message-square-quote", title:"撤回记录",
+      value:recallValue, detail:recallDetail,
+      state:recallState === "error" || recallState === "loading" ? "pending" : recalls.length ? "ready" : "off",
+      tag:recallState === "error" ? "读取失败" : recallState === "loading" ? "读取中" : recalls.length ? "只读记录" : "无记录"});
+    if (mihomeEnabled) channel("device-mihome", "devices", {tab:"config-screen:perception-detail-mihome", icon:"plug-zap", title:"米家设备",
+      value:mihomeSummary,
+      detail:configuredDevices.slice(0, 3).map(item => `${item.name || item.aliases?.[0] || "设备"} ${item.online === true ? "在线" : item.online === false ? "离线" : "状态未知"}`).join(" · ")
+        + (mihomeStatus?.snapshot_at ? ` · 同步 ${mihomeStatus.snapshot_at}` : ""),
+      state:offlineCount ? "pending" : "ready", tag:offlineCount ? `${offlineCount} 台离线` : "设备正常"});
+    if (injectionLabels.length) channel("ext-injection", "external", {tab:"config-injection:perception-detail-injection", icon:"layers-3", title:"其他注入",
+      value:`${injectionLabels.length} 项进入本轮上下文`, detail:injectionLabels.join(" · "), state:"ready", tag:"本轮材料"});
+
+    const activeCount = percepts.filter(item => item.state === "ready").length;
+    /* === 顶部态势板 ===
+       四张卡按能力簇分板，每块只用一个主视觉说话：环境卡给天气读数、模型卡给磁贴、
+       设备与外部卡突出定位与余额，状态行显示实际读数、时间及缺失原因。
+       卡头与通道直接选择仪表盘下方的真实配置页，不在卡内重复展开状态列表。 */
+    const boardRows = id => percepts.filter(item => item.board === id);
+    const boardSpecs = [
+      {id:"environment", tone:"environment", icon:"cloud-sun", title:"时空 · 环境", tab:tabPlace},
+      {id:"models", tone:"models", icon:"cpu", title:"模型能力", tab:tabModel, modelTab:"fn"},
+      {id:"devices", tone:"devices", icon:"radar", title:"现实感知功能", tab:tabDevice},
+      {id:"external", tone:"external", icon:"layers-2", title:"外部与记录", tab:"config-news:perception-detail-external"},
     ];
-    const activeCount = [model.calendarEnabled, events.length > 0, locationName, weather.state === "available", alertList.length > 0,
-      modelInfo, voiceLanguage?.bind, generated?.state === "ready", visionRoute || analysisProvider,
-      searchSource && explorationEnabled && news.ready, screenResult.state === "available",
-      mobile.location?.available, cameraResult.state === "available", recallStatus?.enabled && recalls.length > 0,
-      mihomeEnabled && configuredDevices.length > 0, injectionLabels.length > 0].filter(Boolean).length;
-    root.innerHTML = `<section class="perception-overview" aria-labelledby="perceptionOverviewTitle">
-      <header class="perception-overview-head"><div><span class="perception-kicker">CONTEXT BOARD · ${activeCount} 项有实况</span>
-        <h1 id="perceptionOverviewTitle">此刻，对话能读到什么</h1><p>按当前对象与角色配置汇总；设备内容只在真实输入和授权后出现。</p></div>
-        <span class="perception-pulse ${ready && runtimeState === "ready" ? "is-ready" : "is-pending"}" data-perception-overview-state role="status" aria-live="polite"><i></i>${runtimeState === "error" || snapshot?.error ? "读取未完成" : runtimeState === "loading" ? "正在读取实况" : ready ? "真实状态已同步" : "角色上下文待读取"}</span></header>
-      <div class="perception-context-board">
-        <div class="perception-clock-panel">
-          <button type="button" class="perception-clock-main" data-perception-focus="config-environment:perception-detail-calendar" aria-label="打开本地日期与历法配置">
-            <span class="perception-clock-label">ROLE LOCAL TIME</span>
-            <span class="perception-clock-values"><time class="perception-clock-time" data-context-clock-time>--:--:--</time>
-            <span class="perception-clock-date-stack"><span class="perception-clock-date" data-context-clock-date>正在读取日期…</span><strong class="perception-clock-weekday" data-context-clock-weekday>—</strong></span>
-            <span class="perception-clock-zone"><span>时区</span><b data-context-clock-zone>—</b></span>
-            </span>
-          </button>
-          <button type="button" class="perception-calendar-context" data-perception-focus="config-environment:perception-detail-calendar" aria-label="打开历法与日期上下文配置">${calendarDetailsMarkup(calendar)}
-            <span class="perception-calendar-state ${model.calendarEnabled ? "enabled" : ""}">${icon(model.calendarEnabled ? "calendar-check-2" : "calendar-days")}<span>${model.calendarEnabled ? "日期上下文进入对话" : ready ? "日期上下文未启用" : "日历状态待读取"}</span></span>
-          </button>
-          ${events.length ? `<button type="button" class="perception-clock-events" data-perception-focus="config-environment:perception-detail-important-days" aria-label="${esc(`打开重要日子配置：${events.map(event => `${event.label}，${event.days === 0 ? "今天" : `${event.days} 天后`}`).join("；")}`)}">${icon("calendar-heart")}<span>${events.map(event => `${esc(event.label)} · ${event.days === 0 ? "今天" : `${event.days} 天后`}`).join("　/　")}</span>${icon("arrow-up-right")}</button>` : ""}
+    const destinationAttrs = (destination, modelTab="") => `data-board-goto="${esc(destination)}" aria-controls="${esc(destination.split(":")[0])}" aria-expanded="false"${modelTab ? ` data-board-model-tab="${esc(modelTab)}"` : ""}`;
+    const channelAttrs = item => `id="perception-channel-${item.id}" ${destinationAttrs(item.tab, item.modelTab)} title="${esc(`${item.tag} · ${item.value} · ${item.detail}`)}" aria-label="${esc(`${item.title}：${item.tag}。${item.value}。${item.detail}。打开对应配置`)}"`;
+    const channelById = id => percepts.find(item => item.id === id);
+    const timeMarkup = (value, fallback="") => {
+      const date = typeof value === "number" ? new Date(value * 1000) : new Date(value || "");
+      return Number.isNaN(date.getTime()) ? fallback ? `<small class="perception-reading-age">${esc(fallback)}</small>` : ""
+        : `<time class="perception-reading-age" datetime="${esc(date.toISOString())}" title="${esc(date.toLocaleString("zh-CN", {timeZone:clockZone()}))}">${esc(ageLabel(value))}</time>`;
+    };
+    const badgeMarkup = (state, label) => `<span class="perception-reading-badge is-${state}"><i class="perception-dot" aria-hidden="true"></i>${esc(label)}</span>`;
+    const readingRow = (item, label, value, observedAt, fallback="") => `<button type="button" class="perception-reading-row is-${item.state}" ${channelAttrs(item)}>
+      <span class="perception-reading-icon">${icon(item.icon)}</span><strong>${esc(label)}</strong>
+      <span class="perception-reading-value">${esc(value)}</span>${timeMarkup(observedAt, fallback)}<i class="perception-dot" aria-hidden="true"></i>
+    </button>`;
+    const deviceCard = (() => {
+      const location = channelById("device-location"), screen = channelById("device-screen"), phone = channelById("device-phone");
+      const camera = channelById("device-camera"), mihome = channelById("device-mihome");
+      const cameraAuthorized = cameraResult.state === "available" || cameraResult.state === "ready";
+      const cameraTag = cameraAuthorized ? "已授权" : runtimeState === "error" ? "读取失败" : runtimeState === "loading" ? "读取中" : /consent/.test(cameraResult.reason || "") ? "待授权" : "未就绪";
+      const mihomeLabel = mihome ? mihomeSummary : mihomeState === "disabled" ? "未启用" : mihomeState === "loading" ? "读取中" : "暂不可读";
+      return `<div class="perception-reading-card">
+        <button type="button" class="perception-feature is-location is-${location.state}" ${channelAttrs(location)}>
+          <span class="perception-feature-icon">${icon("map-pin")}</span>
+          <span class="perception-feature-copy"><small>当前定位</small><strong>${esc(mobileValue)}</strong><span>${mobile.location?.available ? "最近授权快照" : "点击配置定位与手机授权"}</span></span>
+          <span class="perception-feature-meta">${badgeMarkup(location.state, mobile.location?.available ? "最近一次定位" : location.tag)}${timeMarkup(mobile.location?.available ? mobile.location.captured_at : null)}</span>
+        </button>
+        ${readingRow(screen, "识屏", screenResult.state === "available" ? `上次识别 · ${screenResult.surface || "屏幕画面"}` : screenValue, screenResult.state === "available" ? screenResult.created_at || screenResult.captured_at : null)}
+        ${readingRow(phone, "手机状态", phoneValue, phoneAvailable ? device.last_report_at || activity.last_report_at || realityResult.captured_at : null)}
+        <div class="perception-board-footer"><span>设备授权</span><div class="perception-authorization-chips">
+          <button type="button" class="perception-authorization-chip is-${cameraAuthorized ? "ready" : camera.state}" ${channelAttrs(camera)}><i class="perception-dot" aria-hidden="true"></i>摄像头 · ${esc(cameraTag)}</button>
+          <button type="button" class="perception-authorization-chip is-${mihome?.state || (mihomeState === "disabled" ? "off" : "pending")}" ${mihome ? channelAttrs(mihome) : destinationAttrs(tabDevice)} title="${esc(mihome?.detail || mihomeLabel)}"><i class="perception-dot" aria-hidden="true"></i>米家 · ${esc(mihomeLabel)}</button>
+        </div></div>
+      </div>`;
+    })();
+    const externalCard = (() => {
+      const balance = channelById("ext-balance"), external = channelById("ext-external"), recall = channelById("device-recalls"), injection = channelById("ext-injection");
+      const balanceReadLabel = balanceObservation ? balanceResultIsDraft ? "草稿测试结果" : "最近一次查询"
+        : balanceTesting ? "查询中" : balanceTestError || balanceError ? "读取失败" : balanceConfigLoading ? "读取中" : balanceSourceInvalid ? "配置无效" : balanceSourceConfigured ? "尚未查询" : balanceConfig ? "未配置" : "尚未查询";
+      const balanceReadDetail = balanceTestError || balanceError || (balanceObservation ? balanceObservation.provider_label || "NewAPI"
+        : balanceSourceInvalid ? "请检查数据源配置" : balanceSourceConfigured ? "点击后测试连接，读取服务余额" : "点击后配置数据源并测试连接");
+      const newsSummary = !ready ? externalValue : networkSucceeded
+        ? `${Number.isInteger(news.itemCount) && news.itemCount >= 0 ? `最近检查 ${news.itemCount} 条` : "最近检查通过"} · ${news.label || "资讯来源"}`
+        : news.networkStatus === "failed" ? "上次检查失败 · 请检查来源" : externalValue;
+      return `<div class="perception-reading-card">
+        <button type="button" class="perception-feature is-balance is-${balance.state}" ${channelAttrs(balance)}>
+          <span class="perception-feature-icon">${icon("circle-dollar-sign")}</span>
+          <span class="perception-feature-copy"><small>余额感知</small><strong>${balanceObservation ? `<span class="perception-balance-unit">${esc(balanceObservation.currency_label || "额度")}</span> ${esc(formatBalanceAmount(balanceObservation.amount))}` : "尚无余额读数"}</strong><span>${esc(balanceReadDetail)}</span></span>
+          <span class="perception-feature-meta">${badgeMarkup(balance.state, balanceReadLabel)}${timeMarkup(balanceObservation?.observed_at)}</span>
+        </button>
+        ${readingRow(external, "外部资讯", newsSummary, news.lastAttemptAt || news.lastCheckedAt)}
+        ${readingRow(recall, "撤回记录", recallState === "ready" && recallStatus?.enabled !== false ? `当前窗口 ${recalls.length} 条可读记录` : recallValue, recalls[0]?.withdrawn_at, recalls[0]?.local_time)}
+        <div class="perception-board-footer">${injection ? `<button type="button" class="perception-injection-summary" ${channelAttrs(injection)}>${icon("layers-3")}<span>其他注入 · 本轮 ${injectionLabels.length} 项 · ${esc(injectionLabels.join("、"))}</span></button>` : '<span>本轮暂无其他注入</span>'}</div>
+      </div>`;
+    })();
+    const weatherIconName = condition => {
+      const text = String(condition || "");
+      if (/雨|雪|雷|雾|霾/.test(text)) return "cloud-rain";
+      if (/阴/.test(text)) return "cloud";
+      return "cloud-sun";
+    };
+    /* 环境卡：地点、时间、更新时刻、预警状态、温度读数全靠排版层级说话，不写标签行。 */
+    const weatherCard = (() => {
+      const item = percepts.find(entry => entry.id === "env-weather");
+      const available = weather.state === "available";
+      const place = weather.location || locationName || (!ready ? `角色地点${configurationState}` : "尚未设置角色地点");
+      const alertState = alertList.length ? "实时预警" : runtimeState === "error" ? "读取失败"
+        : runtimeState === "loading" ? "待读取" : weather.state === "disabled" || weather.state === "unconfigured" ? "未启用"
+          : !available || configurationFailed ? "暂不可读" : environment.alertsReady ? "当前无预警" : "未配置";
+      const metaBits = [weather.humidity_pct == null ? "" : `湿度 ${weather.humidity_pct}%`,
+        weather.wind_kph == null ? "" : `风 ${weather.wind_kph} km/h`].filter(Boolean);
+      return `<div class="perception-wx">
+        <div class="perception-wx-top">
+          <button type="button" class="perception-wx-place" ${destinationAttrs(tabPlace)} aria-label="所在地：${esc(place)}。打开所在地与天气配置">${icon("map-pin")}<b>${esc(place)}</b></button>
+          <button type="button" class="perception-wx-time" ${destinationAttrs(tabCalendar)} aria-label="打开日期与历法上下文配置" data-context-clock-time>--:--</button>
         </div>
-        <div class="perception-stream" aria-label="对话上下文来源">${signals.join("")}</div>
+        <div class="perception-wx-sub">
+          <button type="button" class="perception-wx-date" ${destinationAttrs(tabCalendar)} aria-label="日期与历法：${esc(calendarView?.detail || "服务端日历暂不可用")}。打开日期与历法上下文配置"><i data-context-clock-date>${runtimeState === "loading" ? "正在读取服务端日历…" : ""}</i><i data-context-clock-lunar></i><em data-context-clock-tag hidden></em></button>
+          <button type="button" class="perception-wx-chip is-${alertState === "实时预警" ? "alert" : alertState === "当前无预警" ? "ready" : "off"}" ${destinationAttrs(tabPlace)} title="${esc(alertList.map(item => item.title || item.event_name || "官方预警").join(" · "))}">${icon("triangle-alert")}<span>天气预警 · ${alertState}</span></button>
+        </div>
+        <button type="button" class="perception-wx-main" ${channelAttrs(item)}>
+          <span class="perception-wx-icon">${icon(available ? weatherIconName(weather.condition) : "cloud")}</span>
+          <span class="perception-wx-temp">${esc(available && weather.temperature_c != null ? String(weather.temperature_c) : "—")}<i>°C</i></span>
+          <span class="perception-wx-meta">
+            <strong>${esc(available ? weather.condition || "实况已读取" : item.value)}</strong>
+            <small>${esc(metaBits.length ? metaBits.join(" · ") : item.detail)}</small>
+          </span>
+        </button>
+        ${calendarView?.detail ? `<button type="button" class="perception-wx-calendar" ${destinationAttrs(tabCalendar)}>${esc(calendarView.detail)}</button>` : ""}
+        <button type="button" class="perception-wx-events" ${destinationAttrs("config-environment:perception-detail-important-days")}>${icon("calendar-heart")}<span>${events.length ? events.map(event => `${esc(event.label)} · ${event.days === 0 ? "今天" : event.days === 1 ? "明天" : `${event.days} 天后`}`).join("；") : "配置重要日子与饭点"}</span></button>
+      </div>`;
+    })();
+    const boardBodyMarkup = spec => {
+      if (spec.id === "environment") return weatherCard;
+      if (spec.id === "models") return `<div class="perception-mtiles">${boardRows("models").map(item =>
+        `<button type="button" class="perception-mtile is-${item.state}" ${channelAttrs(item)}>${icon(item.icon)}<span class="perception-mtile-title">${esc(item.title)}</span><strong class="perception-mtile-model">${esc(item.value)}</strong></button>`).join("")}</div>`;
+      return spec.id === "devices" ? deviceCard : externalCard;
+    };
+    const boardMarkup = `<section class="perception-board" aria-label="感知态势板">${boardSpecs.map(spec => {
+      const rows = boardRows(spec.id);
+      const live = rows.filter(item => item.state === "ready").length;
+      const subtitle = spec.id === "environment" || spec.id === "models" ? ""
+        : `<span class="perception-board-channels">${rows.length} 通道</span>`;
+      return `<article class="perception-board-card is-${spec.tone}">
+        <button type="button" id="perception-board-toggle-${spec.id}" class="perception-board-head" data-perception-board="${spec.id}" ${destinationAttrs(spec.tab, spec.modelTab)}
+          aria-label="${esc(spec.title)}：${rows.length} 条通道，${live} 项实况在线。打开下方配置">
+          <span class="perception-board-icon">${icon(spec.icon)}</span>
+          <span class="perception-board-title"><strong>${esc(spec.title)}</strong></span>${subtitle}
+          <span class="perception-board-chevron">${icon("arrow-down-right")}</span>
+        </button>
+        <div class="perception-board-body">${boardBodyMarkup(spec)}</div>
+      </article>`;
+    }).join("")}</section>`;
+
+    /* 页头保留真实的整体读数：通道数与"实况在线"都由当前 percepts 现算，
+       不写死总数——模型视觉、天气预警、米家这类通道本来就时有时无。 */
+    /* 同步状态必须说出来：日期与天气都绑在服务端快照上，读失败时页面会停在旧值，
+       不给提示就等于拿过期读数冒充当前实况。 */
+    const readStates = [runtimeState, modelState, voiceState, imageState, semanticState, recallState];
+    const syncState = readStates.includes("error") || configurationFailed ? {label:"读取未完成", tone:"warn", icon:"triangle-alert"}
+      : readStates.includes("loading") || !ready ? {label:"正在读取实况", tone:"pending", icon:"loader-circle"}
+        : ready ? {label:"真实状态已同步", tone:"ready", icon:"check"} : {label:"角色上下文待读取", tone:"pending", icon:"clock"};
+    const barMarkup = `<header class="perception-board-bar">
+      <div>
+        <span class="perception-kicker">实时感知</span>
+        <h1>感知仪表盘</h1>
       </div>
-      <footer class="perception-overview-foot"><span>${icon("shield-check")}只回显当前范围已授权数据 · 不主动采集手机、屏幕或摄像头 · 点击条目查看对应配置</span>
-        <button type="button" class="perception-refresh" data-context-refresh title="刷新感知状态" aria-label="刷新感知状态" ${runtimeState === "loading" ? "disabled" : ""}>${icon("refresh-cw")}</button></footer>
-    </section>`;
+      <span class="perception-board-count">
+        <span class="perception-board-sync is-${syncState.tone}" role="status" aria-live="polite">${icon(syncState.icon)}${syncState.label}</span>
+        <b>${percepts.length} 个感知通道 · ${activeCount} 项实况在线</b>
+        <button type="button" id="perception-status-refresh" class="button small" data-context-refresh>${icon("refresh-cw")}重新读取状态</button>
+      </span>
+    </header>`;
+    root.innerHTML = `${barMarkup}${boardMarkup}`;
+    syncSelection();
+    if (balanceSource) renderBalanceSource();
+
+    // 保留工作区处理逻辑
     const page = root.parentElement;
-    const injectionTab = page?.querySelector('[data-perception-tab="config-injection"]');
-    if (injectionTab) injectionTab.hidden = injectionLabels.length === 0;
     const mihomePanel = page?.querySelector("#perception-detail-mihome");
     if (mihomePanel) mihomePanel.hidden = !mihomeEnabled;
     const mihomeWorkspace = page?.querySelector("#mihomeStatusWorkspace");
@@ -384,11 +876,12 @@ window.CompanionPerceptionOverviewPage = (() => {
         const detail = typeof item === "string" ? "本轮上下文材料" : item.detail || item.source || "本轮上下文材料";
         return `<li><strong>${esc(label)}</strong><span>${esc(detail)}</span></li>`;
       }).join("")}</ul>` : "";
+    if (focusedId) root.querySelector(`#${focusedId}`)?.focus?.({preventScroll:true});
     window.lucide?.createIcons({attrs:{"aria-hidden":"true"}});
     lastDay = ""; updateClock();
   }
   async function refreshModel(ticket = generation) {
-    if (!root) return;
+    if (!validRoot(ticket)) return;
     modelState = "loading"; render();
     try {
       const endpoint = product.role()?.model_api;
@@ -397,68 +890,83 @@ window.CompanionPerceptionOverviewPage = (() => {
       const value = product.unwrap(response);
       if (!validRoot(ticket)) return;
       if (!Array.isArray(value.tasks) || !Array.isArray(value.providers)) throw new Error("invalid model route");
-      modelStatus = value; modelState = "ready";
+      modelStatus = value; modelState = "ready"; rememberOverview("modelStatus", value, "modelState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
       modelStatus = null; modelState = "error";
+      forgetOverview("modelStatus", "modelState");
     }
     render();
   }
   async function refreshVoice(ticket = generation) {
+    if (!validRoot(ticket)) return;
+    voiceState = "loading"; render();
     try {
       const endpoint = product.role()?.model_api;
       if (typeof endpoint !== "string" || !endpoint) throw new Error("missing voice route");
       const value = product.unwrap(await product.request("GET", product.relative(endpoint.replace(/\/$/, "") + "/voice")));
       if (!validRoot(ticket)) return;
       if (!Array.isArray(value.languages) || !Array.isArray(value.providers)) throw new Error("invalid voice status");
-      voiceStatus = value; voiceState = "ready";
+      voiceStatus = value; voiceState = "ready"; rememberOverview("voiceStatus", value, "voiceState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
       voiceStatus = null; voiceState = "error";
+      forgetOverview("voiceStatus", "voiceState");
     }
     render();
   }
   async function refreshImage(ticket = generation) {
+    if (!validRoot(ticket)) return;
+    imageState = "loading"; render();
     try {
       const endpoint = product.role()?.model_api;
       if (typeof endpoint !== "string" || !endpoint) throw new Error("missing image route");
       const value = product.unwrap(await product.request("GET", product.relative(endpoint.replace(/\/$/, "") + "/image")));
       if (!validRoot(ticket)) return;
       if (!Array.isArray(value.actions)) throw new Error("invalid image status");
-      imageStatus = value; imageState = "ready";
+      imageStatus = value; imageState = "ready"; rememberOverview("imageStatus", value, "imageState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
       imageStatus = null; imageState = "error";
+      forgetOverview("imageStatus", "imageState");
     }
     render();
   }
   async function refreshSemanticStatus(ticket = generation) {
+    if (!validRoot(ticket)) return;
+    semanticState = "loading"; render();
     try {
       const bridge = product.bridgeNow?.() || await product.bridgeFor();
       const value = product.unwrap(await bridge.apiGet("semantic", {...product.selection(), kind:"reaction"}));
       if (!validRoot(ticket)) return;
       if (!value || typeof value !== "object") throw new Error("invalid semantic status");
-      semanticStatus = value; semanticState = "ready";
+      semanticStatus = value; semanticState = "ready"; rememberOverview("semanticStatus", value, "semanticState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
       semanticStatus = null; semanticState = "error";
+      forgetOverview("semanticStatus", "semanticState");
     }
     render();
   }
   async function refreshRecalls(ticket = generation) {
+    if (!validRoot(ticket)) return;
+    recallState = "loading"; render();
     try {
       const bridge = product.bridgeNow?.() || await product.bridgeFor();
       const value = product.unwrap(await bridge.apiGet("reply/recalls", {limit:5}));
       if (!validRoot(ticket)) return;
       if (!Array.isArray(value.entries)) throw new Error("invalid recall status");
-      recallStatus = value; recallState = "ready";
+      recallStatus = value; recallState = "ready"; rememberOverview("recallStatus", value, "recallState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
       recallStatus = null; recallState = "error";
+      forgetOverview("recallStatus", "recallState");
     }
     render();
   }
   async function refreshMihome(ticket = generation) {
+    if (!validRoot(ticket)) return;
+    mihomeState = "loading"; render();
     try {
       if (typeof window.fetch !== "function") throw new Error("fetch unavailable");
       const statusResponse = await window.fetch("/api/plugin/astrbot_plugin_mihome/status", {
@@ -470,7 +978,7 @@ window.CompanionPerceptionOverviewPage = (() => {
       if (status?.ok !== true || typeof status.tools?.enable_readonly_tool !== "boolean")
         throw new Error("invalid device capability status");
       if (!status.tools.enable_readonly_tool) {
-        mihomeStatus = null; mihomeState = "disabled";
+        mihomeStatus = null; mihomeState = "disabled"; forgetOverview("mihomeStatus", "mihomeState");
         render();
         return;
       }
@@ -482,14 +990,16 @@ window.CompanionPerceptionOverviewPage = (() => {
       if (!validRoot(ticket)) return;
       if (devices?.ok !== true || !Array.isArray(devices.devices)) throw new Error("invalid device status");
       mihomeStatus = {...devices, enabled:true, tools:status.tools}; mihomeState = "ready";
+      rememberOverview("mihomeStatus", mihomeStatus, "mihomeState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
       mihomeStatus = null; mihomeState = "unavailable";
+      forgetOverview("mihomeStatus", "mihomeState");
     }
     render();
   }
   async function refreshRuntime(ticket = generation) {
-    if (!root) return;
+    if (!validRoot(ticket)) return;
     runtimeState = "loading"; render();
     try {
       const endpoint = product.role()?.perception_native_api;
@@ -499,45 +1009,262 @@ window.CompanionPerceptionOverviewPage = (() => {
       if (!validRoot(ticket)) return;
       if (!value || typeof value !== "object" || !value.weather || !value.screen || !value.reality || !value.calendar)
         throw new Error("invalid perception runtime snapshot");
-      runtimeSnapshot = value; runtimeState = "ready";
+      runtimeSnapshot = value; runtimeState = "ready"; rememberOverview("runtimeSnapshot", value, "runtimeState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
       runtimeSnapshot = null; runtimeState = "error";
+      forgetOverview("runtimeSnapshot", "runtimeState");
     }
     render();
   }
+  async function readBalanceConfig(ticket = generation) {
+    if (!validRoot(ticket) || balanceConfigLoading || balanceSaving || balanceTesting) return;
+    balanceConfigLoading = true; balanceError = ""; balanceMessage = ""; render();
+    try {
+      const bridge = product.bridgeNow?.() || (product.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
+      if (!bridge?.apiGet) throw new Error("页面连接尚未就绪，请稍后重试。");
+      const value = product.unwrap(await bridge.apiGet("host-options/balance"));
+      if (!validRoot(ticket)) return;
+      if (!value?.service_balance || !value?.edit_tokens?.balance) throw new Error("余额数据源配置暂不可读。");
+      balanceConfig = value.service_balance;
+      balanceConfig.edit_token = value.edit_tokens.balance;
+      if ((balanceResultConfigToken && balanceResultConfigToken !== balanceConfig.edit_token)
+          || (balanceResultConfigKey && balanceResultConfigKey !== balanceConfigKey(balanceConfig))) clearBalanceResult();
+      if (!balanceDraft) balanceDraft = emptyBalanceDraft(balanceConfig);
+      rememberBalanceCache();
+    } catch (error) {
+      if (!validRoot(ticket)) return;
+      balanceConfig = null; balanceDraft = null;
+      clearBalanceResult();
+      balanceError = error.message || "余额数据源配置暂不可读。";
+    } finally {
+      if (validRoot(ticket)) {balanceConfigLoading = false; render();}
+    }
+  }
+  async function saveBalanceConfig(event) {
+    const form = event.target?.closest?.("[data-balance-form]");
+    if (!form) return;
+    event.preventDefault();
+    if (!balanceConfig?.edit_token || balanceSaving || balanceTesting) return;
+    const pendingFocus = balanceFocus(form);
+    const draft = rememberBalanceDraft(form);
+    const {url, api_key:apiKey, user_id:userId, value_divisor:divisor, clear_configuration:clear} = draft;
+    if (!clear && (!url || !/^https:\/\//i.test(url))) {
+      balanceError = "请填写有效的 HTTPS NewAPI 地址。"; render(); return;
+    }
+    if (!clear && !apiKey && !balanceConfig.has_api_key) {
+      balanceError = "首次配置需要填写 NewAPI 管理令牌。"; render(); return;
+    }
+    if (!clear && userId && !/^[1-9][0-9]{0,18}$/.test(userId)) {
+      balanceError = "NewAPI 用户 ID 必须为正整数。"; render(); return;
+    }
+    if (!clear && (!divisor || !Number.isFinite(Number(divisor)) || Number(divisor) <= 0)) {
+      balanceError = "额度单位除数必须是大于 0 的数字。"; render(); return;
+    }
+    balanceSaving = true; balanceError = ""; balanceMessage = "";
+    balanceTestError = ""; clearBalanceResult();
+    const ticket = generation;
+    render();
+    try {
+      const bridge = product.bridgeNow?.() || (product.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
+      if (!bridge?.apiPost) throw new Error("页面连接尚未就绪，请稍后重试。");
+      const changes = clear ? {clear_configuration:true} : {url, api_key:apiKey, user_id:userId, value_divisor:divisor};
+      const value = product.unwrap(await bridge.apiPost("host-options/balance", {
+        edit_token:balanceConfig.edit_token, changes,
+      }));
+      if (!validRoot(ticket)) return;
+      balanceConfig = value.service_balance;
+      balanceConfig.edit_token = value.edit_tokens.balance;
+      balanceMessage = clear ? "已移除本页数据源；环境变量数据源仍可继续使用。" : "已保存并立即生效。";
+      balanceDraft = emptyBalanceDraft(balanceConfig);
+      clearBalanceResult(); balanceTestError = "";
+    } catch (error) {
+      if (!validRoot(ticket)) return;
+      balanceError = error.message || "余额数据源保存失败。";
+    } finally {
+      if (validRoot(ticket)) {
+        balanceSaving = false;
+        const focusLost = window.document?.activeElement === window.document?.body;
+        render();
+        if (focusLost && pendingFocus) restoreBalanceFocus(pendingFocus);
+      }
+    }
+  }
+  const balanceTestErrors = {
+    balance_test_timeout:"NewAPI 查询超时，请核对地址和服务状态。",
+    balance_test_failed:"连接失败，请检查令牌权限、用户 ID 和地址。",
+    host_options_conflict:"设置已在别处更新，请重新读取后重试。",
+    dashboard_identity_required:"请登录 AstrBot Dashboard 后再测试数据源。",
+  };
+  async function testBalanceConfig(form) {
+    if (!balanceConfig?.edit_token || balanceSaving || balanceTesting) return;
+    const pendingFocus = balanceFocus(form);
+    const draft = rememberBalanceDraft(form);
+    let changes, usesCurrent = false;
+    if (draft.clear_configuration) {
+      balanceTestError = "先取消移除数据源，再测试当前连接。"; render(); return;
+    }
+    if (balanceDraftIsCurrent()) {
+      changes = {use_current:true};
+      usesCurrent = true;
+    } else {
+      if (!draft.url || !/^https:\/\//i.test(draft.url)) {
+        balanceTestError = "请填写有效的 HTTPS NewAPI 地址。"; render(); return;
+      }
+      if (!draft.api_key && !balanceConfig.has_api_key) {
+        balanceTestError = "请填写带 profile:read 权限的 NewAPI 管理令牌后再测试。"; render(); return;
+      }
+      if (draft.user_id && !/^[1-9][0-9]{0,18}$/.test(draft.user_id)) {
+        balanceTestError = "NewAPI 用户 ID 必须为正整数。"; render(); return;
+      }
+      if (!draft.value_divisor || !Number.isFinite(Number(draft.value_divisor)) || Number(draft.value_divisor) <= 0) {
+        balanceTestError = "额度单位除数必须是大于 0 的数字。"; render(); return;
+      }
+      changes = {url:draft.url, api_key:draft.api_key, user_id:draft.user_id,
+        value_divisor:draft.value_divisor};
+    }
+    balanceTesting = true; balanceTestError = ""; clearBalanceResult();
+    const ticket = generation;
+    render();
+    try {
+      const bridge = product.bridgeNow?.() || (product.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
+      if (!bridge?.apiPost) throw new Error("页面连接尚未就绪，请稍后重试。");
+      const value = product.unwrap(await bridge.apiPost("host-options/balance/test", {
+        edit_token:balanceConfig.edit_token, changes,
+      }));
+      if (!validRoot(ticket)) return;
+      if (value?.tested !== true || value?.available !== true || !["number", "string"].includes(typeof value.amount)
+          || String(value.amount).trim() === "" || !Number.isFinite(Number(value.amount)) || Number(value.amount) < 0)
+        throw new Error("NewAPI 未返回可用余额，请检查配置后重试。");
+      balanceTestResult = {...value, amount:formatBalanceAmount(value.amount)};
+      balanceResultScope = scope;
+      balanceResultConfigToken = usesCurrent ? balanceConfig.edit_token : "";
+      balanceResultConfigKey = usesCurrent ? balanceConfigKey(balanceConfig) : "";
+      balanceResultIsDraft = !usesCurrent;
+      rememberBalanceCache();
+    } catch (error) {
+      if (!validRoot(ticket)) return;
+      const code = error.code || "";
+      balanceTestError = balanceTestErrors[code]
+        || (error.message && error.message !== code ? error.message : "连接失败，请检查数据源配置后重试。");
+    } finally {
+      if (validRoot(ticket)) {
+        balanceTesting = false;
+        const focusLost = window.document?.activeElement === window.document?.body;
+        render();
+        if (focusLost && pendingFocus) restoreBalanceFocus(pendingFocus);
+      }
+    }
+  }
+  function input(event) {
+    const field = event.target?.closest?.("[data-balance-field]");
+    if (!field) return;
+    const name = field.dataset?.balanceField || field.name;
+    if (!["url", "user_id", "value_divisor", "api_key", "clear_configuration"].includes(name)) return;
+    if (!balanceDraft) balanceDraft = emptyBalanceDraft(balanceConfig);
+    balanceDraft[name] = name === "clear_configuration" ? field.checked === true : field.value;
+    const hadObservation = !!balanceTestResult;
+    balanceError = ""; balanceTestError = ""; clearBalanceResult();
+    rememberBalanceCache();
+    const form = field.closest?.("[data-balance-form]");
+    const result = form?.querySelector("[data-balance-test-result]");
+    if (result) result.hidden = true;
+    const test = form?.querySelector("[data-balance-test]");
+    if (test) test.disabled = balanceSaving || balanceTesting || balanceDraft.clear_configuration
+      || !(balanceDraftIsCurrent() || (balanceDraft.url && (balanceDraft.api_key || balanceConfig?.has_api_key)));
+    if (hadObservation) render({balanceSource:false});
+  }
   function click(event) {
+    const testButton = event.target.closest("[data-balance-test]");
+    if (testButton) {
+      event.preventDefault();
+      const form = testButton.closest("[data-balance-form]");
+      if (form) void testBalanceConfig(form);
+      return;
+    }
+
+    const gotoButton = event.target.closest("[data-board-goto]");
+    if (gotoButton) {
+      /* 配置本体由页面下方的分区面板维护，这里只负责切过去，
+         避免在卡里再写一遍表单、两边各存一份状态。 */
+      window.CompanionPerceptionTabs?.activate?.(gotoButton.dataset.boardGoto, {
+        focus:true, scroll:true, modelTab:gotoButton.dataset.boardModelTab || "",
+      });
+      return;
+    }
+    if (event.target.closest("[data-balance-reload]")) {readBalanceConfig(generation); return;}
     if (!event.target.closest("[data-context-refresh]")) return;
     window.CompanionNativePerceptionPage?.refresh?.();
     const ticket = generation;
     refreshModel(ticket); refreshRuntime(ticket); refreshVoice(ticket); refreshImage(ticket);
     refreshSemanticStatus(ticket); refreshRecalls(ticket); refreshMihome(ticket);
+    if (!balanceConfig || balanceDraftIsCurrent()) void readBalanceConfig(ticket);
+  }
+  function change(event) {
+    input(event);
+    const clear = event.target.closest('[name="clear_configuration"]');
+    if (!clear) return;
+    const form = clear.closest("[data-balance-form]");
+    if (!form) return;
+    for (const field of form.querySelectorAll('[name="url"], [name="user_id"], [name="value_divisor"], [name="api_key"]'))
+      field.disabled = clear.checked;
+    const button = form.querySelector('button[type="submit"]');
+    if (button) button.textContent = clear.checked ? "移除数据源" : "保存数据源";
+    const test = form.querySelector("[data-balance-test]");
+    if (test) test.disabled = clear.checked || balanceTesting || balanceSaving;
   }
   function mount(node) {
     unmount();
-    root = node; scope = product.scopeKey(); abort = new AbortController();
+    const nextScope = activeScopeKey();
+    root = node; scope = nextScope; abort = new AbortController();
+    overviewRouteKey = routeKey();
+    restoreBalanceCache(nextScope);
+    balanceWorkspace = root.parentElement?.querySelector("#perceptionBalanceSourceWorkspace") || null;
     const ticket = ++generation;
-    snapshot = null; runtimeSnapshot = null; runtimeState = "loading";
-    modelStatus = null; modelState = "loading"; voiceStatus = null; voiceState = "loading";
-    imageStatus = null; imageState = "loading"; semanticStatus = null; semanticState = "loading";
-    recallStatus = null; recallState = "loading"; mihomeStatus = null; mihomeState = "loading";
+    const cached = overviewCache.get(`${scope}:${overviewRouteKey}`) || {};
+    snapshot = cached.snapshot || null; runtimeSnapshot = cached.runtimeSnapshot || null;
+    runtimeState = cached.runtimeState || "loading";
+    modelStatus = cached.modelStatus || null; modelState = cached.modelState || "loading";
+    voiceStatus = cached.voiceStatus || null; voiceState = cached.voiceState || "loading";
+    imageStatus = cached.imageStatus || null; imageState = cached.imageState || "loading";
+    semanticStatus = cached.semanticStatus || null; semanticState = cached.semanticState || "loading";
+    recallStatus = cached.recallStatus || null; recallState = cached.recallState || "loading";
+    mihomeStatus = cached.mihomeStatus || null; mihomeState = cached.mihomeState || "loading";
     root.addEventListener("click", click, {signal:abort.signal});
+    if (balanceWorkspace) {
+      balanceWorkspace.addEventListener("click", click, {signal:abort.signal});
+      balanceWorkspace.addEventListener("submit", saveBalanceConfig, {signal:abort.signal});
+      balanceWorkspace.addEventListener("input", input, {signal:abort.signal});
+      balanceWorkspace.addEventListener("change", change, {signal:abort.signal});
+    }
     unsubscribe = window.CompanionNativePerceptionPage?.subscribe?.(next => {
       if (!validRoot(ticket)) return;
-      snapshot = next; render();
+      /* native 页刚挂载时会先发 loading。已有成功快照时保留它，避免切页
+         回来出现一整块空白；明确失败仍清掉旧快照并展示失败状态。 */
+      if (next?.ready === true || !snapshot || (next?.loading === false && next?.error)) snapshot = next;
+      if (snapshot?.ready === true) rememberOverview("snapshot", snapshot);
+      else if (next?.loading === false && next?.error) forgetOverview("snapshot");
+      render();
     }) || null;
     render();
     refreshModel(ticket); refreshRuntime(ticket); refreshVoice(ticket); refreshImage(ticket);
-    refreshSemanticStatus(ticket); refreshRecalls(ticket); refreshMihome(ticket);
+    refreshSemanticStatus(ticket); refreshRecalls(ticket); refreshMihome(ticket); readBalanceConfig(ticket);
     clockTimer = setInterval(updateClock, 1000);
   }
   function unmount() {
+    rememberBalanceCache();
     generation++; abort?.abort(); abort = null; unsubscribe?.(); unsubscribe = null;
     if (clockTimer) clearInterval(clockTimer);
-    clockTimer = null; root = null; scope = ""; snapshot = null; runtimeSnapshot = null; runtimeState = "loading";
+    clockTimer = null; root = null; scope = ""; overviewRouteKey = ""; snapshot = null; runtimeSnapshot = null; runtimeState = "loading";
     modelStatus = null; modelState = "loading"; voiceStatus = null; voiceState = "loading";
     imageStatus = null; imageState = "loading"; semanticStatus = null; semanticState = "loading";
     recallStatus = null; recallState = "loading"; mihomeStatus = null; mihomeState = "loading";
+    lastDay = ""; selectedDestination = ""; selectedModelTab = "";
+    balanceWorkspace = null; balanceMarkup = "";
+    balanceConfig = null; balanceDraft = null; balanceExpanded = false; balanceConfigLoading = false;
+    balanceSaving = false; balanceTesting = false;
+    balanceTestResult = null; balanceResultScope = ""; balanceResultConfigToken = ""; balanceResultConfigKey = ""; balanceResultIsDraft = false;
+    balanceMessage = ""; balanceError = ""; balanceTestError = "";
   }
-  return {mount, unmount, refresh:refreshRuntime, upcomingDates};
+  return {mount, unmount, select, refresh:refreshRuntime, upcomingDates};
 })();

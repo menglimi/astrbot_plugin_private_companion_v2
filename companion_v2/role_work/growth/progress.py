@@ -17,8 +17,8 @@ from companion_v2.model_gateway.models import ModelTaskProfile
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
-from .configuration import skill_settings
-from .models import GrowthState
+from .configuration import skill_settings, skills_enabled
+from .models import GrowthKind, GrowthState
 
 
 KIND = "role.growth.progress"
@@ -124,8 +124,11 @@ class GrowthProgressService:
                 source, recipient=context.actor.subject, observed_at=at))
         candidates = self.growth.candidates(context, at)
         targets = []
+        use_skills = skills_enabled(self.runtime, context)
         for item in candidates.items:
             record = self.ledger.record(item.reference["growth_id"], owner=self.growth.owner(context))
+            if record.kind is GrowthKind.SKILL and not use_skills:
+                continue
             if record.state is GrowthState.ACTIVE and record.created_at <= experience.occurred_at:
                 targets.append({"growth_id": record.growth_id, "revision": record.revision,
                     "kind": record.kind.value, "title": record.title,

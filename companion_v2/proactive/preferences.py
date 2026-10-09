@@ -20,7 +20,7 @@ DEDUP_PURPOSE_POLICY = {
     "chat": "semantic", "greeting": "daily_slot", "life": "life_event",
     "creation": "content_fingerprint", "news": "content_fingerprint",
     "followup": "conversation_anchor", "invitation": "event_anchor", "reminder": "event_anchor",
-    "environment": "event_revision", "meal": "daily_slot",
+    "environment": "event_revision", "meal": "daily_slot", "screen": "semantic",
 }
 DEDUP_EVENT_POLICY = (
     ("official_alert_event", "event_revision"), ("weather_change_event", "event_revision"),
@@ -40,24 +40,25 @@ class ContactPreferences:
     def __post_init__(self):
         object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
 
-    def reason(self, purpose):
+    def reason(self, purpose, *, ignore_time_restrictions=False):
         if purpose not in PURPOSES:
             raise TaskError("unknown_contact_purpose", "contact purpose must be registered")
         values = self.values
         if not values["enabled"] or not values[purpose + ".enabled"]:
             return "proactive_disabled"
-        if any(until is not None and self.observed_at < until for until in
-               (pause_time(values["pause_until"]), pause_time(values[purpose + ".pause_until"]))):
-            return "proactive_paused"
-        if values["quiet_enabled"]:
+        if not ignore_time_restrictions:
+            if any(until is not None and self.observed_at < until for until in
+                   (pause_time(values["pause_until"]), pause_time(values[purpose + ".pause_until"]))):
+                return "proactive_paused"
+        if not ignore_time_restrictions and values["quiet_enabled"]:
             now = self.observed_at.astimezone(ZoneInfo(values["quiet_timezone"])).time()
             start, end = local_time(values["quiet_start"]), local_time(values["quiet_end"])
             if (start == end or (start <= now < end if start < end else now >= start or now < end)):
                 return "proactive_quiet_hours"
         return None
 
-    def require_contact(self, purpose):
-        reason = self.reason(purpose)
+    def require_contact(self, purpose, *, ignore_time_restrictions=False):
+        reason = self.reason(purpose, ignore_time_restrictions=ignore_time_restrictions)
         if reason:
             raise TaskError(reason, "current contact preferences do not permit this contact")
 

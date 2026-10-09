@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from companion_v2.execution.models import TaskError, digest
@@ -22,6 +22,7 @@ from .native import (NativeAudioLocator, NativeConversationInput, NativePrivateB
 from .quotes import NativeQuoteLocator, image_locator
 from .forwards import NativeForwardLocator, resource_id
 from .group_quotes import mention_text
+from .files import file_locator, prepare_file_text, MAX_FILES
 
 
 @dataclass(frozen=True)
@@ -74,8 +75,164 @@ class NativeGroupBridge(NativePrivateBridge):
     def _umo(platform_id, session_id):
         return f"{platform_id}:GroupMessage:{session_id}"
 
+    @staticmethod
+    def _text_only_parts(event, route, *, require_text=False):
+        """Read the authenticated text skeleton without requiring attachments.
+
+        AstrBot may hand the plugin a message whose quote/image/forward lookup
+        is no longer available.  The raw OneBot envelope still gives us the
+        text and mention components, so keep that evidence and mark the
+        unavailable component with a bounded placeholder.  This mirrors V1's
+        early group observation path while retaining the strict route checks.
+        """
+        raw = getattr(event.message_obj, "raw_message", None)
+        segments = raw.get("message") if isinstance(raw, Mapping) else None
+        parts = segments if isinstance(segments, list) else getattr(event.message_obj, "message", ())
+        if not isinstance(parts, (list, tuple)) or not 1 <= len(parts) <= 128:
+            raise TaskError("host_group_media_unsupported", "group text components are unavailable")
+        raw_kinds = {
+            part.get("type") for part in segments
+            if isinstance(part, Mapping) and isinstance(part.get("type"), str)
+        } if isinstance(segments, list) else set()
+        native_kinds = {
+            getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
+            for part in getattr(event.message_obj, "message", ())
+        }
+        # AstrBot can replace a voice/video with a Plain component after a
+        # failed host lookup.  The raw envelope must still match a native
+        # component before its placeholder is accepted; otherwise an
+        # untrusted text rewrite could masquerade as the original media.
+        native_for_raw = {"image": "Image", "reply": "Reply", "forward": "Forward",
+                          "record": "Record", "video": "Video", "file": "File"}
+        if any(kind not in {"text", "at", *native_for_raw} for kind in raw_kinds):
+            raise TaskError("host_group_media_unsupported", "group component type is unavailable")
+        if any(native_for_raw[kind] not in native_kinds for kind in raw_kinds if kind in native_for_raw):
+            raise TaskError("host_group_media_unsupported", "group media differs from its original component")
+        # A real OneBot envelope can carry an image/voice/video without any
+        # plain text.  Keep that bounded placeholder so the group still has a
+        # readable turn when the optional attachment lookup is unavailable.
+        # Synthetic/preprocessed component lists without their raw envelope
+        # remain strict, as they cannot prove which native media was sent.
+        media_only_allowed = bool(raw_kinds) and raw_kinds.issubset(
+            {"image", "record", "video", "file", "reply", "forward"})
+        text, has_text = [], False
+        for part in parts:
+            if isinstance(part, Mapping):
+                kind, data = part.get("type"), part.get("data")
+                if not isinstance(data, Mapping):
+                    raise TaskError("host_group_media_unsupported", "group component data is unavailable")
+                if kind == "text" and isinstance(data.get("text"), str):
+                    value = data["text"]
+                    text.append(value)
+                    has_text |= bool(value.strip())
+                elif kind == "at":
+                    try:
+                        value = mention_text(data.get("qq"), route.account_id)
+                        text.append(value)
+                        has_text |= value == "[提及机器人]"
+                    except (TaskError, ValueError, TypeError):
+                        text.append("[提及不可用]")
+                elif kind == "image":
+                    text.append("\n[图片不可用]\n")
+                elif kind == "reply":
+                    text.append("\n[引用消息不可用]\n")
+                elif kind == "forward":
+                    text.append("\n[合并转发不可用]\n")
+                elif kind == "record":
+                    text.append("\n[语音不可用]\n")
+                elif kind == "video":
+                    text.append("\n[视频不可用]\n")
+                elif kind == "file":
+                    text.append("\n[文件附件，正文尚未读取]\n")
+                else:
+                    text.append("\n[消息组件不可用]\n")
+                continue
+            kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
+            if kind == "Plain" and isinstance(getattr(part, "text", None), str):
+                value = part.text
+                text.append(value)
+                has_text |= bool(value.strip())
+            elif kind == "At":
+                try:
+                    value = mention_text(part.qq, route.account_id)
+                    text.append(value)
+                    has_text |= value == "[提及机器人]"
+                except (TaskError, ValueError, TypeError):
+                    text.append("[提及不可用]")
+            elif kind in ("Image", "Reply", "Forward", "Record", "Video", "File"):
+                has_text |= kind == "Reply" and not require_text
+                text.append({"Image": "\n[图片不可用]\n", "Reply": "\n[引用消息不可用]\n",
+                             "Forward": "\n[合并转发不可用]\n", "Record": "\n[语音不可用]\n",
+                             "Video": "\n[视频不可用]\n",
+                             "File": "\n[文件附件，正文尚未读取]\n"}[kind])
+            else:
+                text.append("\n[消息组件不可用]\n")
+        value = "".join(text)
+        if ((not has_text and (require_text or not media_only_allowed))
+                or not value.strip() or len(value) > 65536):
+            raise TaskError("host_text_invalid", "group input must be bounded nonempty text")
+        return value
+
+    async def capture_text_only(self, event):
+        """Capture a group turn when optional native media is unavailable."""
+        try:
+            if type(event) is not self.event_type:
+                raise TaskError("host_event_unsupported", "group capture requires the verified native event class")
+            route = group_event_route(event)
+            target = self.target_for_route(*route.route_key)
+            account = self.accounts.get((route.platform_id, route.account_id))
+            if target is None or account is None or target.bot_id != account.bot_id:
+                raise TaskError("host_target_unavailable", "group and account require an explicit target mapping")
+            parts = self.component_reader(event) if self.component_reader is not None else tuple(event.message_obj.message)
+            self._validate_quote_components(event.message_obj.raw_message.get("message"), parts)
+            text = self._text_only_parts(event, route)
+            at, event_client = datetime.fromtimestamp(event.created_at, timezone.utc), event.bot
+            principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, route.platform_id,
+                route.sender_id, account.bot_id, route.account_id)
+            cid, role, instruction = await self._role(account, route.session_id)
+            scope = ScopeRef(self.installation_id, route.platform_id, ScopeKind.GROUP, route.group_id,
+                             account.bot_id, route.account_id, cid, route.session_id)
+            if event_client is not self.client(scope) or not event_client._wsr_api_clients.get(route.account_id):
+                raise TaskError("host_client_mismatch", "group event did not originate from the connected account client")
+            speaker = SubjectRef(self.installation_id, SubjectKind.HUMAN, "onebot-user:" + route.sender_id)
+            return Outcome.success(NativeConversationInput(route.event_id, principal,
+                ConversationRoute(scope, group_id=route.group_id), group_audience(scope, speaker), text, at, role,
+                instruction))
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except Exception:
+            return Outcome.failed("host_capture_failed", "group route, sender or persona could not be verified")
+
+    @staticmethod
+    def _validate_quote_components(original_parts, parts):
+        if original_parts is None:
+            return
+        if (not isinstance(original_parts, list) or not 1 <= len(original_parts) <= 128
+                or any(not isinstance(part, Mapping) or not isinstance(part.get("data"), Mapping)
+                       or part.get("type") not in ("text", "at", "image", "reply", "forward", "record", "video", "file")
+                       for part in original_parts)):
+            raise TaskError("host_group_media_unsupported", "original group components need their own source adapter")
+        try:
+            raw_quotes = tuple((position, message_number(part["data"].get("id")))
+                               for position, part in enumerate(original_parts) if part.get("type") == "reply")
+            native_quotes = tuple((position, message_number(part.id)) for position, part in enumerate(parts)
+                                  if getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Reply")
+        except (TaskError, ValueError, TypeError, AttributeError):
+            raise TaskError("host_quote_invalid", "group quote identifiers are not valid") from None
+        if raw_quotes != native_quotes:
+            raise TaskError("host_quote_invalid", "group quote component differs from its original OneBot segment")
+
+    def target_for_route(self, platform_id, account_id, group_id):
+        target = self.group_targets.get((platform_id, account_id, group_id))
+        if target is None:
+            template = self.group_targets.get((platform_id, account_id, "*"))
+            if template is not None:
+                target = replace(template, target_id="group-" + digest([platform_id, account_id, group_id])[:24],
+                                 group_id=group_id)
+        return target
+
     def target_for_scope(self, scope):
-        target = self.group_targets.get((scope.platform, scope.account_id, scope.native_scope_id))
+        target = self.target_for_route(scope.platform, scope.account_id, scope.native_scope_id)
         if scope.kind is not ScopeKind.GROUP or target is None or scope.bot_id != target.bot_id:
             raise TaskError("host_target_unavailable", "the native group target is not configured")
         return target
@@ -96,12 +253,26 @@ class NativeGroupBridge(NativePrivateBridge):
             raise TaskError("host_persona_changed", "group conversation/persona differs from the original turn")
         return prompt
 
-    async def capture(self, event):
+    @staticmethod
+    def _text_fallback_allowed(code):
+        """Only attachment availability failures may keep the frozen text."""
+        return code in {
+            "host_media_timeout",
+            "host_quote_unavailable", "host_quote_timeout", "host_quote_unsupported",
+            "host_forward_unavailable", "host_forward_timeout", "host_forward_unsupported",
+            "host_image_unavailable", "host_image_fetch_failed", "host_image_format_unsupported",
+            "host_audio_unavailable", "host_audio_fetch_failed", "host_audio_decode_timeout",
+            "host_video_unavailable", "host_video_fetch_failed", "host_video_decode_timeout",
+        }
+
+    async def capture(self, event, *, allow_text_fallback=False):
+        intake = self.forward_intake
+        fallback_input = None
         try:
             if type(event) is not self.event_type:
                 raise TaskError("host_event_unsupported", "group capture requires the verified native event class")
             route = group_event_route(event)
-            target = self.group_targets.get(route.route_key)
+            target = self.target_for_route(*route.route_key)
             account = self.accounts.get((route.platform_id, route.account_id))
             if target is None or account is None or target.bot_id != account.bot_id:
                 raise TaskError("host_target_unavailable", "group and account require an explicit target mapping")
@@ -109,15 +280,17 @@ class NativeGroupBridge(NativePrivateBridge):
             if original_parts is not None and (not isinstance(original_parts, list)
                     or not 1 <= len(original_parts) <= 128
                     or any(not isinstance(p, Mapping) or not isinstance(p.get("data"), Mapping)
-                           or p.get("type") not in ("text", "at", "image", "reply", "forward", "record", "video") for p in original_parts)):
+                           or p.get("type") not in ("text", "at", "image", "reply", "forward", "record", "video", "file") for p in original_parts)):
                 # Host STT can replace Record with Plain before this plugin runs.
                 # Such text cannot bypass the original group media contract.
                 raise TaskError("host_group_media_unsupported", "original group components need their own source adapter")
             parts = self.component_reader(event) if self.component_reader is not None else tuple(event.message_obj.message)
             if not parts or len(parts) > 128:
                 raise TaskError("host_media_unsupported", "message components are empty or exceed the intake budget")
+            self._validate_quote_components(original_parts, parts)
             text_parts, image_locators, quote_locators, forward_locators = [], [], [], []
             audio_locators, video_locators = [], []
+            file_locators = []
             for position, part in enumerate(parts):
                 kind = getattr(part.type, "value", part.type)
                 if kind == "Plain" and isinstance(part.text, str):
@@ -145,6 +318,10 @@ class NativeGroupBridge(NativePrivateBridge):
                         raise TaskError("host_video_unavailable", "group video has no original host attachment")
                     video_locators.append(NativeVideoLocator(position, value))
                     text_parts.append("\n[视频 " + str(len(video_locators)) + "]\n")
+                elif kind == "File" and self.file_type is not None and type(part) is self.file_type:
+                    if len(file_locators) < MAX_FILES:
+                        file_locators.append(file_locator(position, part))
+                    text_parts.append("\n[文件附件，正文尚未读取]\n")
                 else:
                     raise TaskError("host_group_media_unsupported", "this group component needs its own source adapter")
             if original_parts is not None:
@@ -173,12 +350,17 @@ class NativeGroupBridge(NativePrivateBridge):
             elif audio_locators or video_locators:
                 raise TaskError("host_group_media_unsupported", "group media requires original OneBot components")
             if (len(image_locators) > MAX_INPUT_IMAGES or len(quote_locators) > 1
-                    or len(forward_locators) > self.forward_intake.max_forwards or len(audio_locators) > MAX_INPUT_AUDIOS
+                    or len(forward_locators) > intake.max_forwards or len(audio_locators) > MAX_INPUT_AUDIOS
                     or len(video_locators) > MAX_VIDEOS):
                 raise TaskError("host_group_media_limit", "group attachments exceed the input budget")
             text = "".join(text_parts)
             if not text.strip() or len(text) > 65536:
                 raise TaskError("host_text_invalid", "group input must be bounded nonempty text")
+            try:
+                fallback_text = (self._text_only_parts(event, route, require_text=True)
+                                 if allow_text_fallback else None)
+            except TaskError:
+                fallback_text = None
             at, event_client = datetime.fromtimestamp(event.created_at, timezone.utc), event.bot
             principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, route.platform_id,
                 route.sender_id, account.bot_id, route.account_id)
@@ -190,9 +372,17 @@ class NativeGroupBridge(NativePrivateBridge):
             if event_client is not self.client(scope) or not event_client._wsr_api_clients.get(route.account_id):
                 raise TaskError("host_client_mismatch", "group event did not originate from the connected account client")
             connection = event_client._wsr_api_clients[route.account_id]
+            if fallback_text is not None:
+                speaker = SubjectRef(self.installation_id, SubjectKind.HUMAN, "onebot-user:" + route.sender_id)
+                fallback_input = NativeConversationInput(route.event_id, principal,
+                    ConversationRoute(scope, group_id=route.group_id), group_audience(scope, speaker),
+                    fallback_text, at, role, instruction)
             frozen_images, frozen_quotes, frozen_forwards = (tuple(image_locators), tuple(quote_locators),
                                                                tuple(forward_locators))
             frozen_audios, frozen_videos = tuple(audio_locators), tuple(video_locators)
+            frozen_files = tuple(file_locators)
+            from companion_v2.conversation.media.understanding import settings as understanding_settings
+            file_preferences = understanding_settings(self.file_settings(scope, role) if self.file_settings else {})
 
             async def prepare():
                 images = await self._capture_images(frozen_images)
@@ -201,7 +391,7 @@ class NativeGroupBridge(NativePrivateBridge):
                     if locator.message_id == route.event_id:
                         raise TaskError("host_quote_invalid", "a group input cannot quote itself")
                     quote = await self.quote_loader(locator, client=event_client, scope=scope,
-                                                    intake=self.forward_intake)
+                                                    intake=intake)
                     if (type(quote) not in (CapturedQuote, CapturedQuoteMedia, CapturedForwardQuote, CapturedForwardQuoteMedia)
                             or quote.position != locator.position
                             or quote.message_id != locator.message_id
@@ -216,7 +406,7 @@ class NativeGroupBridge(NativePrivateBridge):
                         i.descriptor for quote in quotes for i in event_images(quote))
                     forwards = await self.forward_loader(frozen_forwards, message_id=route.event_id,
                         sender_id=route.sender_id, client=event_client, scope=scope, retained=retained,
-                        intake=self.forward_intake)
+                        intake=intake)
                     if (not isinstance(forwards, tuple) or len(forwards) != len(frozen_forwards)
                             or any(type(f) is not CapturedForward or
                                 (f.position, f.resource_hash) != (l.position, digest(l.resource))
@@ -263,6 +453,11 @@ class NativeGroupBridge(NativePrivateBridge):
                     images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
                 except asyncio.TimeoutError:
                     raise TaskError("host_media_timeout", "group attachment preparation exceeded its intake time") from None
+            if frozen_files:
+                file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
+                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)))
+                text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
+            if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or frozen_files:
                 if await self._role(account, route.session_id) != (cid, role, instruction):
                     raise TaskError("host_persona_changed", "group role changed while preparing attachments")
                 if (event_client is not self.client(scope)
@@ -273,6 +468,18 @@ class NativeGroupBridge(NativePrivateBridge):
                 ConversationRoute(scope, group_id=route.group_id), group_audience(scope, speaker), text, at, role, instruction,
                 images, quotes, forwards, audios, videos))
         except TaskError as error:
+            if fallback_input is not None and self._text_fallback_allowed(error.code):
+                try:
+                    if await self._role(account, route.session_id) != (cid, role, instruction):
+                        raise TaskError("host_persona_changed", "group role changed while preparing attachments")
+                    if (event_client is not self.client(scope)
+                            or event_client._wsr_api_clients.get(route.account_id) is not connection):
+                        raise TaskError("host_client_mismatch", "original group account connection changed")
+                    return Outcome.success(fallback_input)
+                except TaskError as changed:
+                    return Outcome.failed(changed.code, str(changed))
+                except Exception:
+                    return Outcome.failed("host_capture_failed", "original group route could not be reverified")
             return Outcome.failed(error.code, str(error))
         except Exception:
             return Outcome.failed("host_capture_failed", "group route, sender or persona could not be verified")

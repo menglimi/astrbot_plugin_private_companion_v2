@@ -50,7 +50,7 @@ function makeNode(name) {
   return node;
 }
 
-function harness() {
+function harness({animationDuration = "0s"} = {}) {
   const body = makeNode("body");
   const main = makeNode("main");
   main.hidden = true;
@@ -91,9 +91,14 @@ function harness() {
     querySelector: selector => (selector === "#main" ? main : null),
   };
   const arrangement = {draft: null};
+  const exitTimers = [];
   const sandbox = {
     document,
-    window: {scrollY: 120},
+    window: {
+      scrollY: 120,
+      getComputedStyle: () => ({animationName: animationDuration === "0s" ? "none" : "room-editor-leave", animationDuration}),
+      setTimeout(callback, delay) { exitTimers.push({callback, delay}); return exitTimers.length; },
+    },
     escapeHTML: value => String(value ?? ""),
     I: () => "<i></i>",
     icons() {},
@@ -108,7 +113,21 @@ function harness() {
       layout: {items: {desk: {x: 1}}},
       getLayout() { return this.layout; },
       setLayout(layout) { this.layout = layout; },
-      getCatalog() { return {houseStyles: {classic: "简约"}, styles: {oak: "橡木"}}; },
+      getCatalog() {
+        return {
+          houseStyles: {classic: {label: "原木小屋", materials: "木地板"}, washitsu: {label: "日式和室", materials: "榻榻米"}},
+          styles: {oak: "原木日常", cream: "奶油逸居"},
+          styleDetails: {oak: {note: "温润木色"}, cream: {note: "柔和浅色"}},
+          furniture: {desk: "书桌"},
+          objectModels: {desk: {basic: {label: "常规", surfaces: ["floor", "wall"]}}},
+          surfaces: {floor: "地面", wall: "墙面"},
+        };
+      },
+      getState() { return {houseStyle: "classic", storedFurniture: []}; },
+      updateHouseStyle(value) { this.updatedHouseStyle = value; },
+      updateFurniture(value) { this.updatedFurniture = value; },
+      selectFurniture(value) { this.selectedFurniture = value; },
+      restoreDefaults() { this.defaultsRestored = true; },
       setEditing(value) { this.editing = value; },
       resize() { this.resized = (this.resized || 0) + 1; },
     },
@@ -122,7 +141,7 @@ function harness() {
     saved() {},
     syncEnvironment() {},
     renderShellSide() {
-      side.setAttribute("aria-label", arrangement.draft ? "布置房间工作台" : "当前状态与日程");
+      side.setAttribute("aria-label", arrangement.draft ? "布置房间工作台" : "此刻的状态与今日安排");
       if (arrangement.draft) return;
       side.innerHTML = "<state-band></state-band><schedule-band></schedule-band>";
     },
@@ -132,7 +151,11 @@ function harness() {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(SOURCE, sandbox);
-  return {sandbox, body, main, shell, stage, stageRegion, side, editor: () => editor};
+  return {
+    sandbox, body, main, shell, stage, stageRegion, side, editor: () => editor,
+    exitTimers,
+    runExitTimers() { exitTimers.splice(0).forEach(timer => timer.callback()); },
+  };
 }
 
 test("进入布置后工作台替换右栏，场景仍留在原位", () => {
@@ -164,20 +187,40 @@ test("取消布置后恢复状态与日程，场景和主内容区不变", () =>
   assert.equal(view.removed, true, "退出时应移除工作台");
   assert.equal(body.classList.contains("room-editing"), false);
   assert.equal(side.children.map(item => item.name).join(","), "state-band,schedule-band");
-  assert.equal(side.attributes["aria-label"], "当前状态与日程");
+  assert.equal(side.attributes["aria-label"], "此刻的状态与今日安排");
   assert.equal(stage.parent, stageRegion, "场景不需要在退出时搬回");
   assert.equal(shell.children.includes(stageRegion), true);
   assert.equal(main.hidden, true);
+});
+
+test("退出时等工作台缓动结束后再恢复状态栏", () => {
+  const {sandbox, body, side, editor, exitTimers, runExitTimers} = harness({animationDuration: "240ms"});
+
+  sandbox.openRoomEditor();
+  const view = editor();
+  sandbox.finishRoomEditor(false);
+
+  assert.equal(view.removed, false, "缓动期间工作台节点应保留");
+  assert.equal(body.classList.contains("room-editing"), false);
+  assert.equal(body.classList.contains("room-editing-exit"), true);
+  assert.equal(exitTimers[0].delay, 240);
+
+  runExitTimers();
+  assert.equal(view.removed, true);
+  assert.equal(body.classList.contains("room-editing-exit"), false);
+  assert.equal(side.children.map(item => item.name).join(","), "state-band,schedule-band");
 });
 
 test("保存布置时保留当前布局", () => {
   const {sandbox, side} = harness();
 
   sandbox.openRoomEditor();
+  sandbox.handleRoomEditorChange({hasAttribute: name => name === "data-room-time", value: "night"});
   sandbox.voxelController.layout = {items: {desk: {x: 9}}};
   sandbox.finishRoomEditor(true);
 
   assert.equal(sandbox.state.roomLayouts["role-a"].items.desk.x, 9);
+  assert.equal(sandbox.state.scene, "day", "预览时段不会随家具布局保存");
   assert.equal(sandbox.voxelController.layout.items.desk.x, 9);
   assert.equal(side.children.map(item => item.name).join(","), "state-band,schedule-band");
 });
@@ -188,10 +231,70 @@ test("布局样式与右栏重绘共同守住工作台位置", () => {
   assert.doesNotMatch(css, /\.room-editing[^{}]*#homeShell[^{}]*\{\s*display:\s*none/);
   assert.doesNotMatch(css, /\.room-editing[^{}]*#main[^{}]*\{\s*display:\s*none/);
 
+  const shellCSS = fs.readFileSync(path.join(PAGE, "shell.css"), "utf8");
+  assert.match(shellCSS, /body\.room-editing \.shell-body\s*\{[^}]*grid-template-columns:/s);
+  assert.match(shellCSS, /@keyframes room-editor-enter/);
+  assert.match(shellCSS, /@keyframes room-editor-leave/);
+
   const app = fs.readFileSync(path.join(PAGE, "app.js"), "utf8");
   assert.match(app, /function renderShellSide\(\)\s*\{[^}]*if\(arrangementDraft\)return;/s);
 
   const html = fs.readFileSync(path.join(PAGE, "index.html"), "utf8");
   assert.match(html, /data-detail="arrange"/);
   assert.match(html, /room-editor\.js\?v=/);
+  assert.match(html, /styles\.css\?v=room-editor-v1-cards-/);
+  assert.match(html, /app\.js\?v=/);
+});
+
+test("工作台提供 V1 式房屋与家具卡片、数值坐标和方向微调", () => {
+  const {sandbox, side} = harness();
+  sandbox.openRoomEditor();
+
+  assert.match(side.innerHTML, /房屋样式[\s\S]*data-room-house="classic"[\s\S]*data-room-time/);
+  assert.match(side.innerHTML, /data-room-furniture/);
+  assert.match(side.innerHTML, /家具样式[\s\S]*data-room-style="oak"/);
+  assert.match(side.innerHTML, /data-room-coordinate="x"[\s\S]*data-room-coordinate="z"[\s\S]*data-room-coordinate="rotation"/);
+  assert.match(side.innerHTML, /data-room-nudge="up"[\s\S]*data-room-nudge="left"[\s\S]*data-room-nudge="right"[\s\S]*data-room-nudge="down"/);
+  assert.match(side.innerHTML, /data-room-rotate="-45"[\s\S]*data-room-rotate="45"/);
+  assert.match(side.innerHTML, /data-room-defaults/);
+  assert.doesNotMatch(side.innerHTML, /data-room-tab=|data-room-panel=/);
+  assert.match(SOURCE, /aria-live="polite"/);
+  assert.match(SOURCE, /title="向右旋转 45 度"/);
+
+  const css = fs.readFileSync(path.join(PAGE, "styles.css"), "utf8");
+  assert.match(css, /\.room-editing \.shell-side\s*\{[^}]*height:\s*min\(82vh,\s*calc\(min\(54vh,\s*36vw\)\s*\+\s*116px\)\)/s);
+  assert.match(css, /\.room-editor-controls\s*\{[^}]*display:\s*flex/s);
+  assert.match(css, /\.room-editor-group\s*\{/);
+  assert.match(css, /\.room-choice-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2/s);
+  assert.match(css, /\.room-coordinate-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3/s);
+  assert.match(css, /\.room-editor-nudge[^{}]*:active/);
+  assert.match(css, /@container[^{}]*max-width:\s*620px/s);
+});
+
+test("房屋卡片、家具样式、数值输入和默认布局连接到控制器", () => {
+  const {sandbox} = harness();
+  sandbox.openRoomEditor();
+  sandbox.handleRoomEditorClick({dataset: {roomHouse: "washitsu"}, hasAttribute: () => false});
+  assert.equal(sandbox.voxelController.updatedHouseStyle, "washitsu");
+
+  sandbox.handleRoomEditorClick({dataset: {roomStyle: "cream"}, hasAttribute: () => false});
+  assert.equal(sandbox.voxelController.updatedFurniture.style, "cream");
+
+  sandbox.handleRoomEditorChange({dataset: {roomCoordinate: "x"}, value: "1.75", hasAttribute: name => name === "data-room-coordinate"});
+  assert.equal(sandbox.voxelController.updatedFurniture.x, 1.75);
+
+  sandbox.handleRoomEditorClick({dataset: {}, hasAttribute: name => name === "data-room-defaults"});
+  assert.equal(sandbox.voxelController.defaultsRestored, true);
+  assert.ok(sandbox.arrangementDraft, "editing controls must keep the draft open");
+});
+
+test("小屋右栏先显示 V2 状态，再显示今日安排", () => {
+  const app = fs.readFileSync(path.join(PAGE, "app.js"), "utf8");
+  assert.match(app, /host\.innerHTML=homeStateBand\(\)\+homeScheduleBand\(\)/);
+  assert.match(app, /function homeStateBand\(\)\{return sideBand\('此刻的状态'/);
+  assert.match(app, /function homeScheduleBand\(\)\{return sideBand\('今日安排'/);
+  assert.match(app, /data-home-agenda-clock/);
+  assert.match(app, /async function refreshHomeAgendaClock\(refresh=false\)/);
+  assert.match(app, /function armHomeAgendaClock\(\)[\s\S]*?await refreshHomeAgendaClock\(true\);[\s\S]*?armHomeAgendaClock\(\);[\s\S]*?\},15000\)/);
+  assert.match(app, /aria-label',arrangementDraft\?'布置房间工作台':'此刻的状态与今日安排'/);
 });

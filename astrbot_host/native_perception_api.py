@@ -17,15 +17,16 @@ from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.proactive.management import ContactManagement
+from companion_v2.proactive.material_pool import read_material_pool
 from companion_v2.role_work.state.management import StateManagement
 
 from .management_identity import dashboard_operator
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/perception-native"
-STATE_FIELDS = frozenset(("planning_timezone", "planning_annual_calendars",
-                          "planning_weather_enabled", "planning_weather_location",
-                          "planning_weather_max_age_minutes"))
+ENVIRONMENT_STATUS_FIELDS = frozenset(("planning_timezone", "planning_annual_calendars",
+                                       "planning_weather_enabled", "planning_weather_location",
+                                       "planning_weather_max_age_minutes"))
 CONTACT_FIELDS = frozenset(("news_share_enabled", "news_check_interval_minutes", "news.enabled",
                             "news_source_kind", "news_source_uid", "news_source_url",
                             "news_daily_hot_read_enabled", "news_hot_sources", "news_hot_result_count",
@@ -41,6 +42,7 @@ class NativePerceptionWebAPI:
     def routes(self):
         return [(PREFIX, self.status, ["GET"], "Read native perception settings"),
                 (PREFIX + "/runtime", self.runtime_snapshot, ["GET"], "Read current perception data"),
+                (PREFIX + "/materials", self.material_pool, ["GET"], "Read current proactive materials"),
                 (PREFIX + "/configure", self.configure, ["POST"], "Save native perception settings"),
                 (PREFIX + "/news-diagnostic", self.news_diagnostic, ["POST"],
                  "Check the configured news source")]
@@ -57,14 +59,16 @@ class NativePerceptionWebAPI:
         source = diagnostic.get("source", {})
         weather = app.contact_schedule.weather_events
         alerts = app.contact_schedule.official_alert_events
+        weather_port = getattr(weather, "port", None) if weather is not None else None
         return {"model": model, "contact": contact,
-                "environment": {"settings": {name: state["settings"][name] for name in STATE_FIELDS},
-                                "edit_token": state["edit_token"],
-                                "sources": {"weather_ready": weather is not None and weather.port is not None,
+                "environment": {"settings": {name: state["settings"][name] for name in ENVIRONMENT_STATUS_FIELDS},
+                                "sources": {"weather_ready": weather_port is not None,
+                                            "weather_provider": getattr(weather_port, "provider", ""),
                                             "alerts_ready": alerts is not None and alerts.port is not None}},
                 "news": {"settings": {name: contact["settings"][name] for name in CONTACT_FIELDS},
                          "edit_token": contact["edit_token"],
                          "source": {"ready": bool(source.get("ready")),
+                                    "assembled": bool(source.get("assembled", source.get("ready"))),
                                     "kind": source.get("kind", ""),
                                     "label": source.get("label", "")},
                          "diagnostic": diagnostic,
@@ -340,6 +344,33 @@ class NativePerceptionWebAPI:
         except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
             return outcome_response(Outcome.failed("perception_request_invalid", "invalid perception request"))
 
+    async def material_pool(self):
+        from .web_api import outcome_response
+        try:
+            if request.query:
+                raise TaskError("perception_request_invalid", "target overrides are not accepted")
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load a V2 profile first")
+                observed_at = controller.now()
+                operator = dashboard_operator(controller.runtime, username, at=observed_at)
+                app, context = session.application, session.profile.target
+                contact = require(ContactManagement(app, context).status(operator))
+                return outcome_response(Outcome.success(read_material_pool(
+                    app.contact_schedule, context, observed_at=observed_at,
+                    settings=contact["settings"])))
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+            return outcome_response(Outcome.failed("perception_request_invalid", "invalid material request"))
+
     async def news_diagnostic(self):
         from .web_api import outcome_response
         try:
@@ -392,11 +423,6 @@ class NativePerceptionWebAPI:
                     section = data["section"]
                     if section == "model":
                         result = require(PerceptionManagement(app, context).configure(operator, data["command"]))
-                    elif section == "environment":
-                        command = {"action": "configure", **data["command"]}
-                        if set(command["changes"]) - STATE_FIELDS:
-                            raise TaskError("perception_request_invalid", "unknown environment field")
-                        result = require(StateManagement(app, context).command(operator, command))
                     else:
                         if set(data["command"]["changes"]) - CONTACT_FIELDS:
                             raise TaskError("perception_request_invalid", "unknown news field")
@@ -427,7 +453,7 @@ class NativePerceptionWebAPI:
             data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
                               parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite value")))
             if (type(data) is not dict or set(data) != {"section", "command"}
-                    or data["section"] not in ("model", "environment", "news")
+                    or data["section"] not in ("model", "news")
                     or type(data["command"]) is not dict
                     or set(data["command"]) != {"operation_key", "edit_token", "changes"}
                     or type(data["command"]["changes"]) is not dict or not data["command"]["changes"]):

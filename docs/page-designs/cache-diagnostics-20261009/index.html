@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>缓存诊断 · 设计稿 v1</title>
+<style>
+  :root {
+    --bg: #05080F;
+    --panel: #0A0F1C;
+    --card: #0F1725;
+    --card-2: #141E30;
+    --card-3: #1A2539;
+    --line: rgba(148, 163, 184, .14);
+    --line-soft: rgba(148, 163, 184, .08);
+    --text: #E9EFFA;
+    --text-2: #93A4C0;
+    --text-3: #5C6C88;
+    --teal: #3EE0D0;
+    --green: #3FE0A6;
+    --blue: #6FA2FF;
+    --purple: #A17BFF;
+    --amber: #FFC258;
+    --pink: #F0468A;
+    --red: #F0524D;
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+
+    /* 字阶：全页统一 10 级，正文与数字一律走 token，禁止再出现零散字面量
+       nano 微型注记 · micro 次要说明 · tiny 标签/次级数值 · sm 正文 · md 卡标题/派生值
+       lg 单卡主值 · xl 指标主值 · 2xl 大数值 · 3xl 总量 · 4xl 环形中心 */
+    --fs-nano: 8.5px;
+    --fs-micro: 9.5px;
+    --fs-tiny: 10.5px;
+    --fs-sm: 11.5px;
+    --fs-md: 12.5px;
+    --fs-lg: 15px;
+    --fs-xl: 16px;
+    --fs-2xl: 19px;
+    --fs-3xl: 21px;
+    --fs-4xl: 25px;
+    --lh-tight: 1.25;   /* 大数值 */
+    --lh-body: 1.5;     /* 正文与列表 */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    font-family: var(--sans);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-body);
+    color: var(--text);
+    padding: 40px 24px 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .doc-note {
+    width: 1080px;
+    display: flex; align-items: center; gap: 10px;
+    color: var(--text-3); font-size: var(--fs-sm); letter-spacing: .02em;
+  }
+  .doc-note b { color: var(--text-2); font-weight: 600; }
+  .doc-note .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--amber); }
+
+  .board {
+    width: 1080px;
+    background: var(--panel);
+    border: 1px solid var(--line-soft);
+    border-radius: 20px;
+    padding: 20px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+
+  /* ---------- 通用卡片 ---------- */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: 14px;
+    padding: 14px 16px 16px;
+    display: flex; flex-direction: column;
+    min-width: 0;
+  }
+  .card-head {
+    display: flex; align-items: center; gap: 8px;
+    padding-bottom: 12px;
+    min-width: 0;
+  }
+  .card-head .ic {
+    width: 18px; height: 18px; flex: 0 0 18px;
+    border-radius: 5px; display: grid; place-items: center;
+  }
+  .card-head .ic svg { width: 11px; height: 11px; }
+  .card-head h3 { font-size: var(--fs-md); font-weight: 700; letter-spacing: .01em; white-space: nowrap; }
+  .card-head .tail { margin-left: auto; min-width: 0; font-size: var(--fs-tiny); color: var(--text-3); display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-head .tail b { color: var(--text); font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; }
+
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- 顶部筛选条 ---------- */
+  .filters {
+    display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: 14px;
+    padding: 11px 16px;
+  }
+  .fgroup { display: flex; align-items: center; gap: 9px; }
+  .flabel {
+    font-size: var(--fs-tiny); color: var(--text-3); letter-spacing: .04em;
+    padding-left: 9px; border-left: 2px solid rgba(79, 141, 247, .55);
+    line-height: 1.25;
+  }
+  .seg { display: flex; gap: 3px; background: rgba(148,163,184,.07); border-radius: 9px; padding: 3px; }
+  .seg span {
+    font-size: var(--fs-sm); padding: 5px 12px; border-radius: 7px;
+    color: var(--text-2); white-space: nowrap;
+  }
+  .seg span.on {
+    background: linear-gradient(180deg, #2B6BE4, #1D4FB5);
+    color: #fff; font-weight: 600;
+    box-shadow: 0 2px 8px rgba(43,107,228,.35);
+  }
+  .date-chip {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 9px;
+    font-family: var(--mono); font-size: var(--fs-sm); color: var(--text);
+    background: rgba(148,163,184,.06);
+    border: 1px solid var(--line);
+    border-radius: 9px; padding: 6px 12px;
+  }
+  .date-chip .arrow { color: var(--text-3); }
+
+  /* ---------- 行布局 ---------- */
+  .row { display: grid; gap: 14px; }
+  .row-2 { grid-template-columns: 424px minmax(0, 1fr); }
+  .row-2eq { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* ---------- 01 缓存命中率总览 ---------- */
+  .rate-body { display: grid; grid-template-columns: 132px minmax(0, 1fr); align-items: center; gap: 16px; }
+  .donut { position: relative; width: 132px; height: 132px; }
+  .donut svg { display: block; }
+  .donut .center {
+    position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 1px;
+  }
+  .donut .center strong { font-family: var(--mono); font-size: var(--fs-4xl); font-weight: 700; letter-spacing: -.01em; }
+  .donut .center span { font-size: var(--fs-micro); color: var(--text-3); letter-spacing: .1em; }
+  .delta-pill {
+    position: absolute; top: -2px; right: 2px;
+    font-size: var(--fs-tiny); font-family: var(--mono);
+    padding: 3px 8px; border-radius: 999px;
+    color: var(--green); background: rgba(52, 211, 153, .12);
+    border: 1px solid rgba(52, 211, 153, .3);
+  }
+  .rate-right { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+  .rate-right .k { font-size: var(--fs-tiny); color: var(--text-3); }
+  .rate-right .v { display: flex; align-items: baseline; gap: 6px; }
+  .rate-right .v b { font-family: var(--mono); font-size: var(--fs-2xl); font-weight: 700; }
+  .rate-right .v i { font-style: normal; color: var(--text-3); font-size: var(--fs-md); }
+  .rate-right .v em {
+    margin-left: auto; font-style: normal; font-family: var(--mono);
+    font-size: var(--fs-md); color: var(--green); font-weight: 600;
+  }
+  .meter { height: 6px; border-radius: 999px; background: rgba(148,163,184,.1); overflow: hidden; }
+  .meter > i { display: block; height: 100%; border-radius: inherit; }
+  .rate-foot { display: flex; align-items: center; gap: 6px; font-size: var(--fs-tiny); color: var(--text-3); }
+  .rate-foot b { color: var(--green); font-family: var(--mono); }
+
+  /* ---------- 02 四项度量 ---------- */
+  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+  .metric {
+    background: var(--card-2);
+    border: 1px solid var(--line-soft);
+    border-radius: 11px;
+    padding: 10px 11px 8px;
+    display: flex; flex-direction: column; gap: 7px;
+    position: relative; overflow: hidden;
+  }
+  .metric .mhead { display: flex; align-items: center; gap: 6px; }
+  .metric .mhead .mic {
+    width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; flex: 0 0 20px;
+  }
+  .metric .mhead .mic svg { width: 11px; height: 11px; }
+  .metric .mhead span { font-size: var(--fs-tiny); color: var(--text-2); white-space: nowrap; }
+  .metric .val { font-family: var(--mono); font-size: var(--fs-xl); font-weight: 700; letter-spacing: -.01em; }
+  .metric .sub { display: flex; align-items: center; gap: 5px; font-size: var(--fs-micro); }
+  .metric .sub b { font-family: var(--mono); font-weight: 600; }
+  .up { color: var(--green); }
+  .down { color: var(--red); }
+  .metric .spark { position: absolute; right: 0; bottom: 0; left: 0; height: 26px; opacity: .9; }
+
+  /* ---------- 03 Token 构成 ---------- */
+  .tok-head { display: flex; align-items: baseline; gap: 10px; padding-bottom: 11px; }
+  .tok-head .tot { font-family: var(--mono); font-size: var(--fs-3xl); font-weight: 700; letter-spacing: -.02em; }
+  .tok-head .unit { font-size: var(--fs-tiny); color: var(--text-3); }
+  .tok-head .side { margin-left: auto; display: flex; gap: 14px; }
+  .tok-head .side div { text-align: right; }
+  .tok-head .side span { display: block; font-size: var(--fs-nano); color: var(--text-3); }
+  .tok-head .side b { font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; }
+
+  /* ===== 拉链旗带 v3：SVG 圆角三角咬合（JS 按容器宽生成，03 / 07 共用）===== */
+  .zip { position: relative; height: 24px; margin-top: 4px; }
+  .zip svg { display: block; width: 100%; height: 100%; overflow: visible; }
+  .zip svg .seg { transition: opacity 150ms ease; }
+  .zip svg:has(.seg:hover) .seg:not(:hover) { opacity: .38; }
+  .zip svg .seg:hover polygon { filter: brightness(1.18); }
+  .zip svg polygon { transition: filter 150ms ease; transform-box: fill-box; animation: zip-pop 360ms cubic-bezier(.2,.8,.3,1.25) backwards; }
+  .zip svg polygon.up   { transform-origin: 50% 100%; }
+  .zip svg polygon.down { transform-origin: 50% 0%; }
+  @keyframes zip-pop { from { transform: scaleY(0); } }
+  @media (prefers-reduced-motion: reduce) { .zip svg polygon { animation: none; } }
+
+  .zip-labels { display: flex; gap: 5px; margin-top: 9px; }
+  .zip-labels > span { min-width: 0; text-align: center; white-space: nowrap; overflow: hidden; }
+  .zip-labels .nm { display: block; font-size: var(--fs-tiny); font-weight: 700; }
+  .zip-labels .nm b { font-family: var(--mono); font-weight: 600; margin-left: 4px; }
+  .zip-labels .vl { display: block; font-family: var(--mono); font-size: var(--fs-nano); color: var(--text-2); margin-top: 1px; }
+  .zip-labels .cap { display: block; font-size: var(--fs-nano); color: var(--text-3); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .l-hit { color: var(--green); } .l-write { color: var(--teal); }
+  .l-plain { color: var(--purple); } .l-out { color: var(--amber); }
+
+  .zip-caps {
+    display: flex; justify-content: space-between;
+    margin-top: 10px; padding-top: 7px; border-top: 1px dashed var(--line-soft);
+    font-family: var(--mono); font-size: var(--fs-nano); color: var(--text-3);
+  }
+  .zip-caps b { color: var(--text-2); font-weight: 500; }
+
+  .tok-derived {
+    display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px;
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft);
+  }
+  .tok-derived > div { display: flex; flex-direction: column; gap: 3px; }
+  .tok-derived span { font-size: var(--fs-nano); color: var(--text-3); }
+  .tok-derived b { font-family: var(--mono); font-size: var(--fs-md); font-weight: 700; }
+
+  /* ---------- 表格式（Provider / 低命中） ---------- */
+  /* 固定列宽：长 Provider / 模型名不再把数字列挤变形，宽度由 colgroup 决定 */
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  thead th {
+    font-size: var(--fs-micro); font-weight: 500; color: var(--text-3);
+    text-align: left; padding: 0 0 7px;
+    border-bottom: 1px solid var(--line-soft);
+    letter-spacing: .03em;
+  }
+  thead th.r { text-align: right; }
+  tbody td { padding: 8px 0; border-bottom: 1px solid rgba(148,163,184,.06); vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: none; }
+  .pname { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); white-space: nowrap; }
+  .logo { width: 14px; height: 14px; border-radius: 4px; flex: 0 0 14px; display: grid; place-items: center; font-size: var(--fs-nano); font-weight: 700; color: #08111F; }
+  .rate-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .rate-cell b { font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; }
+  .rate-cell .meter { height: 3px; }
+  .cnum { font-family: var(--mono); font-size: var(--fs-tiny); color: var(--text-2); text-align: right; white-space: nowrap; }
+  .task-name { font-size: var(--fs-tiny); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; min-width: 0; }
+  .tm { font-family: var(--mono); font-size: var(--fs-tiny); color: var(--text-3); white-space: nowrap; }
+  .bad-pill {
+    font-family: var(--mono); font-size: var(--fs-tiny); font-weight: 600;
+    color: #FFD9D6; background: rgba(240, 82, 77, .16);
+    border: 1px solid rgba(240, 82, 77, .3);
+    padding: 2px 7px; border-radius: 999px;
+  }
+  .rule-note { display: flex; align-items: center; gap: 5px; font-size: var(--fs-micro); color: var(--text-3); }
+  .rule-note i { width: 5px; height: 5px; border-radius: 50%; background: var(--red); }
+
+  /* ---------- 长文本防溢出体系 ----------
+     真实 Provider / 模型名可达 40+ 字符（如 anthropic/claude-3-5-sonnet-20241022），
+     规则：名称列一律单行省略 + title 全名；数字列 tabular-nums 且绝不换行 */
+  .trunc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trunc-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 0; }
+  /* flex 子项必须显式 min-width:0，否则 nowrap 文本会撑破父级（表格固定布局下同样适用） */
+  .pname { min-width: 0; }
+  .pname .trunc { flex: 1 1 auto; }
+  .pname .logo { flex: 0 0 14px; }
+  .type-cell { min-width: 0; }
+  .type-cell b,
+  .type-cell code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sid, .tm, .diff { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  /* 数字统一等宽对齐，列宽不随读数跳动 */
+  .cnum, .tm, .sid, .val, .cval, .sig .big, .tok-head .tot, .cpct,
+  .rate-right .v b, .donut .center strong, .tok-derived b { font-variant-numeric: tabular-nums; }
+  /* 大数值收紧行高，避免被正文行高拉散 */
+  .val, .cval, .sig .big, .tok-head .tot, .rate-right .v b, .donut .center strong { line-height: var(--lh-tight); }
+
+  /* ---------- 06 请求前缀签名诊断 ---------- */
+  .signatures { display: grid; grid-template-columns: repeat(8, minmax(0,1fr)); gap: 10px; }
+  .sig {
+    background: var(--card-2);
+    border: 1px solid var(--line-soft);
+    border-radius: 11px;
+    padding: 10px;
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 0;
+  }
+  .sig .no {
+    font-family: var(--mono); font-size: var(--fs-micro); font-weight: 700;
+    width: 21px; height: 21px; border-radius: 6px; display: grid; place-items: center;
+    color: #DCE9FF; background: linear-gradient(145deg, rgba(79,141,247,.34), rgba(79,141,247,.12));
+    border: 1px solid rgba(79,141,247,.34);
+  }
+  .sig h4 { font-size: var(--fs-tiny); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sig .big { font-family: var(--mono); font-size: var(--fs-lg); font-weight: 700; letter-spacing: -.01em; margin-top: 1px; }
+  .sig .cap { font-size: var(--fs-nano); color: var(--text-3); white-space: nowrap; }
+  .sig .meter { height: 3px; margin-top: 2px; }
+  .sig.alt .no { color: #FFE7CC; background: linear-gradient(145deg, rgba(245,166,35,.34), rgba(245,166,35,.12)); border-color: rgba(245,166,35,.34); }
+  .sig.alt .big { color: var(--amber); }
+
+  /* ---------- 07 请求上下文统计 ---------- */
+  .ctx-axis { display: flex; justify-content: space-between; margin-top: 5px; font-size: var(--fs-nano); color: var(--text-3); }
+  .ctx-axis b { font-family: var(--mono); color: var(--text-2); font-weight: 600; }
+
+  .ctx-grid { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 10px; margin-top: 12px; }
+  .ctx {
+    background: var(--card-2); border: 1px solid var(--line-soft); border-radius: 11px;
+    padding: 10px 11px 11px; display: flex; flex-direction: column; gap: 7px;
+    min-width: 0; position: relative; overflow: hidden;
+  }
+  .ctx::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--cx);
+  }
+  .ctx .crow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .ctx .cic { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; flex: 0 0 20px; }
+  .ctx .cic svg { width: 11px; height: 11px; }
+  .ctx .cname { font-size: var(--fs-tiny); color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ctx .cpct { margin-left: auto; font-family: var(--mono); font-size: var(--fs-tiny); color: var(--text-3); }
+  .ctx .cval { font-family: var(--mono); font-size: var(--fs-2xl); font-weight: 700; letter-spacing: -.02em; }
+  .ctx .cval i { font-style: normal; font-size: var(--fs-tiny); font-weight: 500; color: var(--text-3); margin-left: 4px; }
+  .ctx .meter { height: 3px; }
+  .ctx .ccap { font-size: var(--fs-nano); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ctx .ccap b { font-family: var(--mono); font-weight: 600; color: var(--text); }
+  .ctx.total { background: linear-gradient(180deg, rgba(240,70,138,.1), rgba(240,70,138,.03)); border-color: rgba(240,70,138,.22); }
+  .ctx .tag {
+    align-self: flex-start; font-size: var(--fs-nano); color: #FFD6E8;
+    background: rgba(240,70,138,.16); border: 1px solid rgba(240,70,138,.3);
+    padding: 1px 6px; border-radius: 999px;
+  }
+  .ctx-foot {
+    display: flex; align-items: center; gap: 8px; margin-top: 11px; flex-wrap: wrap;
+    padding-top: 10px; border-top: 1px solid var(--line-soft);
+    font-size: var(--fs-nano); color: var(--text-3);
+  }
+  .ctx-foot .k { display: flex; align-items: center; gap: 5px; }
+  .ctx-foot .k i { width: 5px; height: 5px; border-radius: 50%; background: var(--text-3); }
+
+  /* ---------- 08 缓存破坏事件 ---------- */
+  .sev {
+    font-family: var(--mono); font-size: var(--fs-micro); font-weight: 600;
+    padding: 2px 7px; border-radius: 5px; display: inline-block; min-width: 50px; text-align: center;
+  }
+  .sev.high { color: #FFD9D6; background: rgba(240, 82, 77, .18); border: 1px solid rgba(240, 82, 77, .34); }
+  .sev.medium { color: #FFE3BD; background: rgba(245, 166, 35, .15); border: 1px solid rgba(245, 166, 35, .3); }
+  .type-cell { display: flex; flex-direction: column; gap: 2px; }
+  .type-cell b { font-size: var(--fs-tiny); font-weight: 600; }
+  .type-cell code { font-family: var(--mono); font-size: var(--fs-nano); color: var(--text-3); }
+  .sid { font-family: var(--mono); font-size: var(--fs-tiny); color: var(--text-2); }
+  .diff { display: flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-2); white-space: nowrap; }
+  .diff .k { color: var(--text-3); }
+  .diff .arrow { color: #4A5A76; }
+  .diff .to { color: #BFD2F5; }
+</style>
+</head>
+<body>
+
+<div class="doc-note">
+  <span class="dot"></span>
+  <b>缓存诊断 · 设计稿 v1</b>
+  <span>1080 宽 · 深色 · 按参考图还原 8 个展示区块</span>
+  <span>·</span>
+  <span>全部数值为演示值，落代码时以真实 Provider 回执为准</span>
+  <span>·</span>
+  <span>字阶 10 级（nano→4xl）· 名称列单行省略 + title 全名 · 数字 tabular-nums</span>
+</div>
+
+<div class="board">
+
+  <!-- 顶部筛选条 -->
+  <div class="filters">
+    <div class="fgroup">
+      <span class="flabel">统计口径</span>
+      <div class="seg"><span class="on">角色总用量</span><span>外部只读来源</span></div>
+    </div>
+    <div class="fgroup">
+      <span class="flabel">时间范围</span>
+      <div class="seg"><span class="on">今日</span><span>7 日</span><span>30 日</span><span>总计</span><span>按日期</span></div>
+    </div>
+    <div class="date-chip">
+      <span>2026-06-25</span><span class="arrow">~</span><span>2026-06-25</span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#93A4C0" stroke-width="2" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 11h18"/></svg>
+    </div>
+  </div>
+
+  <!-- 行 2：01 缓存命中率总览 + 02 四项度量 -->
+  <div class="row row-2">
+
+    <section class="card">
+      <div class="card-head">
+        <span class="ic" style="background:rgba(45,212,191,.14)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#3EE0D0" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        </span>
+        <h3>缓存命中率总览</h3>
+      </div>
+      <div class="rate-body">
+        <div class="donut">
+          <svg width="132" height="132" viewBox="0 0 132 132">
+            <defs>
+              <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#A17BFF"/>
+                <stop offset="55%" stop-color="#6FA2FF"/>
+                <stop offset="100%" stop-color="#3EE0D0"/>
+              </linearGradient>
+            </defs>
+            <circle cx="66" cy="66" r="52" fill="none" stroke="rgba(148,163,184,.12)" stroke-width="11"/>
+            <circle cx="66" cy="66" r="52" fill="none" stroke="url(#ringGrad)" stroke-width="11"
+                    stroke-linecap="round" stroke-dasharray="223.5 326.7" transform="rotate(-90 66 66)"/>
+          </svg>
+          <div class="center"><strong>68.4%</strong><span>命中率</span></div>
+          <span class="delta-pill">+12.6%</span>
+        </div>
+        <div class="rate-right">
+          <span class="k">有效输入的缓存命中</span>
+          <div class="v">
+            <b>1,248,532</b><i>/ 1,824,309</i><em>88.4%</em>
+          </div>
+          <div class="meter"><i style="width:88.4%;background:linear-gradient(90deg,#A17BFF,#3EE0D0)"></i></div>
+          <div class="rate-foot">相比上个周期 <b>+12.6%</b></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span class="ic" style="background:rgba(139,92,246,.14)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#A17BFF" stroke-width="2" stroke-linecap="round"><path d="M4 19V9M10 19V5M16 19v-6M22 19H2"/></svg>
+        </span>
+        <h3>四项度量</h3>
+      </div>
+      <div class="metrics">
+        <div class="metric">
+          <div class="mhead">
+            <span class="mic" style="background:rgba(45,212,191,.14)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#3EE0D0" stroke-width="2" stroke-linecap="round"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg>
+            </span>
+            <span>缓存读取</span>
+          </div>
+          <div class="val">2,341,552</div>
+          <div class="sub up"><b>↑ 18.3%</b></div>
+          <svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none"><path d="M0 22 L14 19 L28 21 L42 14 L56 16 L70 9 L84 11 L100 3" fill="none" stroke="#3EE0D0" stroke-width="1.6"/></svg>
+        </div>
+        <div class="metric">
+          <div class="mhead">
+            <span class="mic" style="background:rgba(79,141,247,.14)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#6FA2FF" stroke-width="2" stroke-linecap="round"><path d="M12 21V9M7 14l5-5 5 5M4 3h16"/></svg>
+            </span>
+            <span>缓存写入</span>
+          </div>
+          <div class="val">542,318</div>
+          <div class="sub up"><b>↑ 6.7%</b></div>
+          <svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none"><path d="M0 20 L14 21 L28 17 L42 18 L56 12 L70 13 L84 8 L100 6" fill="none" stroke="#6FA2FF" stroke-width="1.6"/></svg>
+        </div>
+        <div class="metric">
+          <div class="mhead">
+            <span class="mic" style="background:rgba(139,92,246,.14)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#A17BFF" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </span>
+            <span>普通输入</span>
+          </div>
+          <div class="val">1,128,776</div>
+          <div class="sub up"><b>↑ 2.1%</b></div>
+          <svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none"><path d="M0 18 L14 17 L28 19 L42 15 L56 16 L70 11 L84 12 L100 9" fill="none" stroke="#A17BFF" stroke-width="1.6"/></svg>
+        </div>
+        <div class="metric">
+          <div class="mhead">
+            <span class="mic" style="background:rgba(240,70,138,.14)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#F0468A" stroke-width="2" stroke-linecap="round"><path d="M12 3l8 3v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6l8-3z"/></svg>
+            </span>
+            <span>确认覆盖</span>
+          </div>
+          <div class="val">86,432</div>
+          <div class="sub down"><b>↓ 3.4%</b></div>
+          <svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none"><path d="M0 8 L14 10 L28 7 L42 12 L56 11 L70 16 L84 15 L100 20" fill="none" stroke="#F0468A" stroke-width="1.6"/></svg>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- 行 3：03 Token 构成可视化（独占整行） -->
+  <section class="card">
+      <div class="card-head">
+        <span class="ic" style="background:rgba(52,211,153,.14)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#3FE0A6" stroke-width="2" stroke-linecap="round"><path d="M3 12h4l3 7 4-16 3 9h4"/></svg>
+        </span>
+        <h3>Token 构成可视化</h3>
+        <span class="tail">28 枚圆角三角咬合 · 边界落在缝上</span>
+      </div>
+
+      <div class="tok-head">
+        <span class="tot">4,899,078,312</span>
+        <span class="unit">Total Token · 本期合计</span>
+        <div class="side">
+          <div><span>输入</span><b>89.6%</b></div>
+          <div><span>输出</span><b>10.4%</b></div>
+        </div>
+      </div>
+
+      <!-- 拉链旗带 v3：28 枚圆角三角，数据边界（42.7 / 61 / 89.6%）精确落在段缝上 -->
+      <div class="zip" id="zipBand" role="img" aria-label="Token 构成拉链旗带：28 枚圆角三角形，缓存命中 12 枚、缓存写入 5 枚、普通输入 8 枚、输出 3 枚"></div>
+
+      <div class="zip-labels">
+        <span class="l-hit" style="flex:42.7">
+          <span class="nm">缓存命中<b>42.7%</b></span>
+          <span class="vl">2,091,245,663</span>
+          <span class="cap">cache_read · 命中既有前缀</span>
+        </span>
+        <span class="l-write" style="flex:18.3">
+          <span class="nm">缓存写入<b>18.3%</b></span>
+          <span class="vl">894,552,317</span>
+          <span class="cap">cache_creation · 首次写入前缀</span>
+        </span>
+        <span class="l-plain" style="flex:28.6">
+          <span class="nm">普通输入<b>28.6%</b></span>
+          <span class="vl">1,401,337,660</span>
+          <span class="cap">input · 未被缓存覆盖</span>
+        </span>
+        <span class="l-out" style="flex:10.4">
+          <span class="nm">输出<b>10.4%</b></span>
+          <span class="vl">511,942,672</span>
+          <span class="cap">output · 不参与命中率</span>
+        </span>
+      </div>
+
+      <div class="zip-caps">
+        <span>▸ 28 facets · 1 ≈ 3.6%</span>
+        <b>输入侧 25 枚 = 89.3% · 输出侧 3 枚 = 10.7%</b>
+        <span>cache://zip-composition ▸</span>
+      </div>
+
+      <div class="tok-derived">
+        <div><span>输入缓存覆盖率</span><b style="color:var(--green)">68.1%</b></div>
+        <div><span>命中 : 写入</span><b>2.34 : 1</b></div>
+        <div><span>命中占输入</span><b style="color:var(--green)">47.7%</b></div>
+      </div>
+  </section>
+
+  <!-- 行 4：04 Provider 表现 + 05 低命中清单 -->
+  <div class="row row-2eq">
+
+    <section class="card">
+      <div class="card-head">
+        <span class="ic" style="background:rgba(79,141,247,.14)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#6FA2FF" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/></svg>
+        </span>
+        <h3>Provider 缓存表现</h3>
+        <span class="tail">前 5 名 · 长名单行省略，悬停看全名</span>
+      </div>
+      <table>
+        <colgroup><col style="width:32%"><col style="width:24%"><col style="width:22%"><col style="width:22%"></colgroup>
+        <thead>
+          <tr><th>提供方</th><th>命中率</th><th class="r">回执调用数</th><th class="r">写入量</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><div class="pname"><span class="logo" style="background:#10A37F">O</span><span class="trunc" title="openai/gpt-4o-2024-11-20">openai/gpt-4o-2024-11-20</span></div></td>
+            <td><div class="rate-cell"><b>72.6%</b><div class="meter"><i style="width:72.6%;background:#10A37F"></i></div></div></td>
+            <td class="cnum">482,331</td><td class="cnum">186,442</td>
+          </tr>
+          <tr>
+            <td><div class="pname"><span class="logo" style="background:#D97757">A</span><span class="trunc" title="anthropic/claude-3-5-sonnet-20241022">anthropic/claude-3-5-sonnet-20241022</span></div></td>
+            <td><div class="rate-cell"><b>68.9%</b><div class="meter"><i style="width:68.9%;background:#D97757"></i></div></div></td>
+            <td class="cnum">321,772</td><td class="cnum">128,331</td>
+          </tr>
+          <tr>
+            <td><div class="pname"><span class="logo" style="background:#4D6BFE">D</span><span class="trunc" title="deepseek/deepseek-chat">deepseek/deepseek-chat</span></div></td>
+            <td><div class="rate-cell"><b>61.2%</b><div class="meter"><i style="width:61.2%;background:#4D6BFE"></i></div></div></td>
+            <td class="cnum">218,554</td><td class="cnum">96,773</td>
+          </tr>
+          <tr>
+            <td><div class="pname"><span class="logo" style="background:#4285F4">G</span><span class="trunc" title="google/gemini-2.0-flash-001">google/gemini-2.0-flash-001</span></div></td>
+            <td><div class="rate-cell"><b>57.8%</b><div class="meter"><i style="width:57.8%;background:#4285F4"></i></div></div></td>
+            <td class="cnum">176,221</td><td class="cnum">74,882</td>
+          </tr>
+          <tr>
+            <td><div class="pname"><span class="logo" style="background:#0A7CD6">A</span><span class="trunc" title="azure/gpt-4o-mini-2024-07-18">azure/gpt-4o-mini-2024-07-18</span></div></td>
+            <td><div class="rate-cell"><b>52.4%</b><div class="meter"><i style="width:52.4%;background:#0A7CD6"></i></div></div></td>
+            <td class="cnum">103,662</td><td class="cnum">58,210</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span class="ic" style="background:rgba(240,82,77,.14)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#F0524D" stroke-width="2" stroke-linecap="round"><path d="M12 3l9 16H3l9-16z"/><path d="M12 9v5M12 17h.01"/></svg>
+        </span>
+        <h3>低命中调用清单</h3>
+        <span class="tail"><span class="rule-note"><i></i>输入 ≥ 1,000 Token 且命中率 &lt; 20%</span></span>
+      </div>
+      <table>
+        <colgroup><col style="width:46%"><col style="width:14%"><col style="width:20%"><col style="width:20%"></colgroup>
+        <thead>
+          <tr><th>任务</th><th>提供方</th><th>时间</th><th class="r">命中率</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><div class="task-name" title="角色对话-长文档分析">角色对话-长文档分析</div></td><td><span class="logo" style="background:#10A37F">O</span></td><td class="tm">06/25 12:43</td><td class="cnum"><span class="bad-pill">8.7%</span></td></tr>
+          <tr><td><div class="task-name" title="资料检索-法律条款">资料检索-法律条款</div></td><td><span class="logo" style="background:#D97757">A</span></td><td class="tm">06/25 10:21</td><td class="cnum"><span class="bad-pill">12.3%</span></td></tr>
+          <tr><td><div class="task-name" title="代码生成-复杂项目">代码生成-复杂项目</div></td><td><span class="logo" style="background:#4D6BFE">D</span></td><td class="tm">06/25 09:16</td><td class="cnum"><span class="bad-pill">15.6%</span></td></tr>
+          <tr><td><div class="task-name" title="文档总结-多文件">文档总结-多文件</div></td><td><span class="logo" style="background:#4285F4">G</span></td><td class="tm">06/25 08:44</td><td class="cnum"><span class="bad-pill">9.8%</span></td></tr>
+          <tr><td><div class="task-name" title="知识问答-行业报告">知识问答-行业报告</div></td><td><span class="logo" style="background:#10A37F">O</span></td><td class="tm">06/25 07:32</td><td class="cnum"><span class="bad-pill">18.4%</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+  </div>
+
+  <!-- 行 5：06 请求前缀签名诊断（8 格，原右下角插画位改真实指标） -->
+  <section class="card">
+    <div class="card-head">
+      <span class="ic" style="background:rgba(139,92,246,.14)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#A17BFF" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h6"/></svg>
+      </span>
+      <h3>请求前缀签名诊断</h3>
+      <span class="tail">更高的命中率，带来更流畅的对话体验 · Cache Diagnostics</span>
+    </div>
+    <div class="signatures">
+      <div class="sig">
+        <span class="no">01</span><h4>服务路由</h4>
+        <span class="big">62.3%</span><span class="cap">有效请求 1,284,332</span>
+        <div class="meter"><i style="width:62.3%;background:linear-gradient(90deg,#6FA2FF,#3EE0D0)"></i></div>
+      </div>
+      <div class="sig">
+        <span class="no">02</span><h4>system 前缀</h4>
+        <span class="big">71.8%</span><span class="cap">有效请求 932,771</span>
+        <div class="meter"><i style="width:71.8%;background:linear-gradient(90deg,#6FA2FF,#3EE0D0)"></i></div>
+      </div>
+      <div class="sig">
+        <span class="no">03</span><h4>工具定义</h4>
+        <span class="big">48.7%</span><span class="cap">有效请求 421,693</span>
+        <div class="meter"><i style="width:48.7%;background:linear-gradient(90deg,#FFC258,#F0524D)"></i></div>
+      </div>
+      <div class="sig">
+        <span class="no">04</span><h4>上下文重置</h4>
+        <span class="big">76.2%</span><span class="cap">有效请求 310,552</span>
+        <div class="meter"><i style="width:76.2%;background:linear-gradient(90deg,#6FA2FF,#3EE0D0)"></i></div>
+      </div>
+      <div class="sig">
+        <span class="no">05</span><h4>材料前缀</h4>
+        <span class="big">69.5%</span><span class="cap">有效请求 287,441</span>
+        <div class="meter"><i style="width:69.5%;background:linear-gradient(90deg,#6FA2FF,#3EE0D0)"></i></div>
+      </div>
+      <div class="sig">
+        <span class="no">06</span><h4>材料尾部收缩</h4>
+        <span class="big">66.8%</span><span class="cap">有效请求 241,337</span>
+        <div class="meter"><i style="width:66.8%;background:linear-gradient(90deg,#6FA2FF,#3EE0D0)"></i></div>
+      </div>
+      <div class="sig">
+        <span class="no">07</span><h4>资料可用性</h4>
+        <span class="big">73.1%</span><span class="cap">有效请求 512,883</span>
+        <div class="meter"><i style="width:73.1%;background:linear-gradient(90deg,#6FA2FF,#3EE0D0)"></i></div>
+      </div>
+      <div class="sig alt">
+        <span class="no">08</span><h4>变化后命中率</h4>
+        <span class="big">−4.2 pt</span><span class="cap">下降 3 次 · 可比 12 次</span>
+        <div class="meter"><i style="width:34%;background:linear-gradient(90deg,#FFC258,#F0524D)"></i></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 行 6：07 请求上下文统计（全宽） -->
+  <section class="card">
+    <div class="card-head">
+      <span class="ic" style="background:rgba(45,212,191,.14)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#3EE0D0" stroke-width="2" stroke-linecap="round"><path d="M4 5h16v14H4z"/><path d="M4 10h16"/></svg>
+      </span>
+      <h3>请求上下文统计</h3>
+      <span class="tail">单次请求均值 · 请求剖面 = 各段平均估算 Token 占比</span>
+    </div>
+
+    <!-- 请求剖面：一次请求由这四段拼成（拉链旗带，与 03 卡同语言；段名与占比见下方卡片） -->
+    <div class="zip" id="zipCtx" role="img" aria-label="请求剖面拉链旗带：28 枚圆角三角形，参考材料 15 枚、消息上下文 6 枚、system 消息 2 枚、工具定义 5 枚"></div>
+    <div class="ctx-axis">
+      <span>请求头 → 请求尾（缓存前缀从头部起算，越靠前的段变化代价越高）</span>
+      <span>合计 <b>15.4K</b> 估算 Token</span>
+    </div>
+
+    <div class="ctx-grid">
+      <div class="ctx" style="--cx:#A17BFF">
+        <div class="crow">
+          <span class="cic" style="background:rgba(139,92,246,.14)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#A17BFF" stroke-width="2" stroke-linecap="round"><path d="M5 4h11l3 3v13H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+          </span>
+          <span class="cname">参考材料</span><span class="cpct">54.5%</span>
+        </div>
+        <span class="cval" style="color:#A78BFA">8.4K<i>估算 Token</i></span>
+        <div class="meter"><i style="width:54.5%;background:#A17BFF"></i></div>
+        <span class="ccap"><b>12.4</b> 条 / 次 · 延后 <b>2</b> · 不可用 <b>0</b></span>
+      </div>
+
+      <div class="ctx" style="--cx:#3FE0A6">
+        <div class="crow">
+          <span class="cic" style="background:rgba(52,211,153,.14)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#3FE0A6" stroke-width="2" stroke-linecap="round"><path d="M4 6h16v10H9l-5 4z"/></svg>
+          </span>
+          <span class="cname">消息上下文</span><span class="cpct">20.8%</span>
+        </div>
+        <span class="cval" style="color:#6EE7B7">3.2K<i>估算 Token</i></span>
+        <div class="meter"><i style="width:20.8%;background:#3FE0A6"></i></div>
+        <span class="ccap"><b>18.6</b> 条 / 次 · <b>4,210</b> 字</span>
+      </div>
+
+      <div class="ctx" style="--cx:#FFC258">
+        <div class="crow">
+          <span class="cic" style="background:rgba(245,166,35,.14)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#FFC258" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2"/></svg>
+          </span>
+          <span class="cname">system 消息</span><span class="cpct">7.1%</span>
+        </div>
+        <span class="cval" style="color:#FBBF24">1.1K<i>估算 Token</i></span>
+        <div class="meter"><i style="width:7.1%;background:#FFC258"></i></div>
+        <span class="ccap"><b>1</b> 条 / 次 · <b>1,142</b> 字</span>
+      </div>
+
+      <div class="ctx" style="--cx:#6FA2FF">
+        <div class="crow">
+          <span class="cic" style="background:rgba(79,141,247,.14)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#6FA2FF" stroke-width="2" stroke-linecap="round"><path d="M14 3l7 7-9 9H5v-7z"/><path d="M12 5l7 7"/></svg>
+          </span>
+          <span class="cname">工具定义</span><span class="cpct">17.6%</span>
+        </div>
+        <span class="cval" style="color:#93B4FB">2.7K<i>估算 Token</i></span>
+        <div class="meter"><i style="width:17.6%;background:#6FA2FF"></i></div>
+        <span class="ccap"><b>9</b> 个 / 次 · <b>3,842</b> 字节</span>
+      </div>
+
+      <div class="ctx total" style="--cx:#F0468A">
+        <div class="crow">
+          <span class="cic" style="background:rgba(240,70,138,.16)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#F0468A" stroke-width="2" stroke-linecap="round"><path d="M4 17l5-6 4 4 7-9"/><path d="M15 6h5v5"/></svg>
+          </span>
+          <span class="cname">完整请求</span><span class="tag">= 前四项合计</span>
+        </div>
+        <span class="cval" style="color:#F9A8D4">15.4K<i>估算 Token</i></span>
+        <div class="meter"><i style="width:100%;background:linear-gradient(90deg,#A17BFF,#3FE0A6,#FFC258,#6FA2FF)"></i></div>
+        <span class="ccap">图像 <b>1.2</b> · 音频 <b>0</b> · 视频 <b>0</b> 均值</span>
+      </div>
+    </div>
+
+    <div class="ctx-foot">
+      <span class="k"><i></i>估算口径：CJK / ASCII 启发式，不替代 Provider 实报</span>
+      <span class="k"><i></i>延后与不可用材料不计入估算</span>
+      <span class="k"><i></i>媒体按单次请求均值统计，无媒体时为 0</span>
+    </div>
+  </section>
+
+  <!-- 行 7：08 缓存破坏事件（全宽） -->
+  <section class="card">
+      <div class="card-head">
+        <span class="ic" style="background:rgba(240,82,77,.14)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#F0524D" stroke-width="2" stroke-linecap="round"><path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 12l9-5M12 12v10M12 12L3 7"/></svg>
+        </span>
+        <h3>缓存破坏事件（最近）</h3>
+        <span class="tail">按时间倒序 · 最近 12 条（可扩至 20 条）</span>
+      </div>
+      <table>
+        <colgroup><col style="width:22%"><col style="width:11%"><col style="width:13%"><col style="width:13%"><col style="width:41%"></colgroup>
+        <thead>
+          <tr><th>类型</th><th>严重度</th><th>会话</th><th>时间</th><th>前后变化</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><div class="type-cell"><b>工具定义变更</b><code title="tools_change">tools_change</code></div></td>
+            <td><span class="sev high">high</span></td>
+            <td class="sid">8e3f3ae9</td><td class="tm">06/25 14:12</td>
+            <td><div class="diff"><span class="k">tool</span>f27a5c1e<span class="arrow">→</span><span class="to">8d4a7e22</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>system 变更</b><code title="system_prompt_change">system_prompt_change</code></div></td>
+            <td><span class="sev high">high</span></td>
+            <td class="sid">a8c1f2e0</td><td class="tm">06/25 13:47</td>
+            <td><div class="diff"><span class="k">system</span>7a4b58a0<span class="arrow">→</span><span class="to">cd317d95</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>材料前缀变更</b><code title="material_prefix_change">material_prefix_change</code></div></td>
+            <td><span class="sev medium">medium</span></td>
+            <td class="sid">8c3d89e1</td><td class="tm">06/25 13:36</td>
+            <td><div class="diff"><span class="k">material</span>19a4c8e7<span class="arrow">→</span><span class="to">f2d5f9d1</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>上下文重置</b><code title="context_reset">context_reset</code></div></td>
+            <td><span class="sev medium">medium</span></td>
+            <td class="sid">b9a4c2f7</td><td class="tm">06/25 11:23</td>
+            <td><div class="diff"><span class="k">context</span>6a7a3f21<span class="arrow">→</span><span class="to">b7fa269a</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>工具定义变更</b><code title="tools_change">tools_change</code></div></td>
+            <td><span class="sev high">high</span></td>
+            <td class="sid">7d4c4e3a</td><td class="tm">06/25 10:15</td>
+            <td><div class="diff"><span class="k">tool</span>6a3b2777<span class="arrow">→</span><span class="to">1dc4a5a4</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>system 变更</b><code title="system_prompt_change">system_prompt_change</code></div></td>
+            <td><span class="sev medium">medium</span></td>
+            <td class="sid">a19d4a1c</td><td class="tm">06/25 09:03</td>
+            <td><div class="diff"><span class="k">system</span>2f8a6c11<span class="arrow">→</span><span class="to">9b6f7e66</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>材料前缀变更</b><code title="material_prefix_change">material_prefix_change</code></div></td>
+            <td><span class="sev medium">medium</span></td>
+            <td class="sid">a1f6f73b</td><td class="tm">06/25 08:42</td>
+            <td><div class="diff"><span class="k">material</span>6d5b2c31<span class="arrow">→</span><span class="to">4a1c9f77</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>资料可用性变更</b><code title="material_availability_change">material_availability_change</code></div></td>
+            <td><span class="sev high">high</span></td>
+            <td class="sid">8bf63ff2</td><td class="tm">06/25 07:13</td>
+            <td><div class="diff"><span class="k">resource</span>3a8c1e55<span class="arrow">→</span><span class="to">7d2f8490</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>模型切换</b><code title="model_change">model_change</code></div></td>
+            <td><span class="sev high">high</span></td>
+            <td class="sid">c4d28b90</td><td class="tm">06/25 06:58</td>
+            <td><div class="diff"><span class="k">model</span>a1c7e533<span class="arrow">→</span><span class="to">d90b4e17</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>材料尾部收缩</b><code title="material_tail_shrink">material_tail_shrink</code></div></td>
+            <td><span class="sev medium">medium</span></td>
+            <td class="sid">5f7a1c06</td><td class="tm">06/25 06:21</td>
+            <td><div class="diff"><span class="k">material</span>b2e94d70<span class="arrow">→</span><span class="to">3c1a8f52</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>工具定义变更</b><code title="tools_change">tools_change</code></div></td>
+            <td><span class="sev high">high</span></td>
+            <td class="sid">9b0e6a44</td><td class="tm">06/24 23:47</td>
+            <td><div class="diff"><span class="k">tool</span>4d5c8a19<span class="arrow">→</span><span class="to">e7f3b2c6</span></div></td>
+          </tr>
+          <tr>
+            <td><div class="type-cell"><b>system 变更</b><code title="system_prompt_change">system_prompt_change</code></div></td>
+            <td><span class="sev high">high</span></td>
+            <td class="sid">2a6f4d81</td><td class="tm">06/24 22:10</td>
+            <td><div class="diff"><span class="k">system</span>0b7d5e24<span class="arrow">→</span><span class="to">f4a2c9b3</span></div></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+</div>
+
+<script>
+  /* 拉链旗带 v3：按容器实际宽度生成 SVG 圆角三角，缩放窗口即时重绘
+     buildZipBand(el, plan)：plan 每段 { c:[亮端,暗端], flex:占比, count:枚数 }
+     枚数按占比配置，保证段间边界正好落在缝上；两带共用一套渲染与入场动画 */
+  (function () {
+    var H = 24, SW = 4, OVERLAP = 2, GAP_SEG = 4;
+    var NS = "http://www.w3.org/2000/svg";
+
+    function buildZipBand(el, plan) {
+      if (!el) return;
+      function render() {
+        var W = el.clientWidth;
+        if (!W) return;
+        el.innerHTML = "";
+        var svg = document.createElementNS(NS, "svg");
+        svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+        svg.setAttribute("preserveAspectRatio", "none");
+
+        var axis = document.createElementNS(NS, "line");
+        axis.setAttribute("x1", 0); axis.setAttribute("x2", W);
+        axis.setAttribute("y1", H / 2); axis.setAttribute("y2", H / 2);
+        axis.setAttribute("stroke", "rgba(233,239,250,.18)");
+        axis.setAttribute("stroke-dasharray", "4 5");
+        svg.appendChild(axis);
+
+        var totalFlex = plan.reduce(function (s, p) { return s + p.flex; }, 0);
+        var usable = W - GAP_SEG * (plan.length - 1);
+        var x = 0, gi = 0, delay = 0;
+
+        plan.forEach(function (seg) {
+          var segW = usable * seg.flex / totalFlex;
+          var cell = segW / seg.count;
+          var g = document.createElementNS(NS, "g");
+          g.setAttribute("class", "seg");
+          var c = seg.c;
+          for (var i = 0; i < seg.count; i++) {
+            var up = gi % 2 === 0;
+            var cx = x + cell * (i + 0.5);
+            var half = cell / 2 + OVERLAP;
+            var baseY = up ? H - SW / 2 : SW / 2;
+            var apexY = up ? SW / 2 : H - SW / 2;
+            var poly = document.createElementNS(NS, "polygon");
+            poly.setAttribute("points", cx + "," + apexY + " " + (cx + half) + "," + baseY + " " + (cx - half) + "," + baseY);
+            var col = up ? c[0] : c[1];
+            poly.setAttribute("fill", col);
+            poly.setAttribute("stroke", col);
+            poly.setAttribute("stroke-width", SW);
+            poly.setAttribute("stroke-linejoin", "round");
+            poly.setAttribute("class", up ? "up" : "down");
+            poly.style.animationDelay = (delay += 24) + "ms";
+            g.appendChild(poly);
+            gi++;
+          }
+          svg.appendChild(g);
+          x += segW + GAP_SEG;
+        });
+        el.appendChild(svg);
+      }
+      render();
+      window.addEventListener("resize", render);
+    }
+
+    /* 03 Token 构成可视化：命中 12 / 写入 5 / 普通输入 8 / 输出 3 = 28 枚（1 ≈ 3.6%） */
+    buildZipBand(document.getElementById("zipBand"), [
+      { c: ["#3FE0A6", "#33C795"], flex: 42.7, count: 12 },
+      { c: ["#3EE0D0", "#31C4B6"], flex: 18.3, count: 5 },
+      { c: ["#A17BFF", "#8F6BF0"], flex: 28.6, count: 8 },
+      { c: ["#FFC258", "#EDAF45"], flex: 10.4, count: 3 }
+    ]);
+
+    /* 07 请求剖面：参考材料 15 / 消息上下文 6 / system 消息 2 / 工具定义 5 = 28 枚
+       配色跟随下方 ctx 卡片（紫=材料、绿=上下文、琥珀=system、蓝=工具定义） */
+    buildZipBand(document.getElementById("zipCtx"), [
+      { c: ["#A17BFF", "#8F6BF0"], flex: 54.5, count: 15 },
+      { c: ["#3FE0A6", "#33C795"], flex: 20.8, count: 6 },
+      { c: ["#FFC258", "#EDAF45"], flex: 7.1, count: 2 },
+      { c: ["#6FA2FF", "#5E93F0"], flex: 17.6, count: 5 }
+    ]);
+  })();
+</script>
+</body>
+</html>

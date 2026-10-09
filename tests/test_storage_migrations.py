@@ -13,6 +13,8 @@ from companion_v2.storage.schema import (
     MIGRATION_V20_TO_V21_ID, MIGRATION_V21_TO_V22_ID, MIGRATION_V30_TO_V31_ID,
     MIGRATION_V30_TO_V31_FINGERPRINT, MIGRATION_V31_TO_V32_ID,
     MIGRATION_V31_TO_V32_FINGERPRINT, SCHEMA_VERSION, SCHEMA_VERSION_V1,
+    MIGRATION_V51_TO_V52_FINGERPRINT, MIGRATION_V51_TO_V52_ID, SCHEMA_VERSION_V51, SCHEMA_VERSION_V52,
+    MIGRATION_V52_TO_V53_FINGERPRINT, MIGRATION_V52_TO_V53_ID, V53_MIGRATION_STATEMENTS,
     SCHEMA_VERSION_V20, SCHEMA_VERSION_V21, SCHEMA_VERSION_V22, SCHEMA_VERSION_V30,
     SCHEMA_VERSION_V31, SCHEMA_VERSION_V32, V1_SCHEMA_STATEMENTS, V2_MIGRATION_STATEMENTS,
     V2_REQUIRED_TABLES, V21_REQUIRED_TABLES, V22_REQUIRED_TABLES, V30_REQUIRED_TABLES,
@@ -24,7 +26,7 @@ from companion_v2.storage.schema import (
     MIGRATION_V34_TO_V35_ID, MIGRATION_V34_TO_V35_FINGERPRINT,
     V36_MIGRATION_STATEMENTS, MIGRATION_V35_TO_V36_ID, SCHEMA_VERSION_V35,
 )
-from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36
+from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36, remove_v52, remove_v53
 
 
 class StorageMigrationTests(unittest.TestCase):
@@ -76,6 +78,23 @@ class StorageMigrationTests(unittest.TestCase):
                 "SELECT value FROM runtime_metadata WHERE key = 'schema_version'"
             ).fetchone()[0]
 
+    def test_empty_data_root_initializes_the_latest_schema(self) -> None:
+        fresh_root = Path(self.temporary.name) / "empty-data"
+        fresh_root.mkdir()
+        runtime = StorageRuntime.open(data_root=fresh_root, installation_id="installation-a")
+        self.addCleanup(runtime.close)
+
+        self.assertEqual(runtime.read_one(
+            "SELECT value FROM runtime_metadata WHERE key = 'schema_version'", (),
+        )["value"], SCHEMA_VERSION)
+        columns = {row["name"] for row in runtime.read_all(
+            "PRAGMA table_info(conversation_batches)", (),
+        )}
+        self.assertIn("presentation_action", columns)
+        self.assertIsNotNone(runtime.read_one(
+            "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V51_TO_V52_ID,),
+        ))
+
     def assert_v1_unchanged(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection:
             version = connection.execute(
@@ -96,6 +115,11 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(row["fingerprint"], MIGRATION_V1_TO_V2_FINGERPRINT)
         tables = {r["name"] for r in runtime.read_all("SELECT name FROM sqlite_master WHERE type = 'table'", ())}
         self.assertTrue(V2_REQUIRED_TABLES.issubset(tables))
+        batch_columns = {r["name"] for r in runtime.read_all("PRAGMA table_info(conversation_batches)", ())}
+        self.assertIn("presentation_action", batch_columns)
+        self.assertIsNotNone(runtime.read_one(
+            "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V51_TO_V52_ID,),
+        ))
         self.assertEqual(runtime.read_one("SELECT * FROM inbox", ())["event_id"], "existing-event")
         self.assertEqual(runtime.read_one("SELECT * FROM operations", ())["commit_state"], "unknown")
         self.assertEqual(runtime.read_one("SELECT * FROM outbox", ())["state"], "unknown")
@@ -118,6 +142,72 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertTrue(V21_REQUIRED_TABLES.issubset(tables))
         self.assertIsNotNone(upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V19_TO_V20_ID,)))
         self.assertIsNotNone(upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V20_TO_V21_ID,)))
+
+    def test_v51_storage_migrates_reply_presentation_action(self) -> None:
+        runtime = self.open_runtime()
+        runtime.close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            remove_v52(connection)
+            connection.execute(
+                "UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                (SCHEMA_VERSION_V51,),
+            )
+            connection.commit()
+
+        upgraded = self.open_runtime()
+        self.assertEqual(upgraded.read_one(
+            "SELECT value FROM runtime_metadata WHERE key = 'schema_version'", (),
+        )["value"], SCHEMA_VERSION)
+        columns = {row["name"] for row in upgraded.read_all("PRAGMA table_info(conversation_batches)", ())}
+        self.assertIn("presentation_action", columns)
+        migration = upgraded.read_one(
+            "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V51_TO_V52_ID,),
+        )
+        self.assertEqual(migration["from_version"], SCHEMA_VERSION_V51)
+        self.assertEqual(migration["to_version"], SCHEMA_VERSION_V52)
+        self.assertEqual(migration["fingerprint"], MIGRATION_V51_TO_V52_FINGERPRINT)
+
+    def test_v53_upgrade_adds_stream_records_and_rolls_back_on_failure(self):
+        from companion_v2.storage.schema import V54_MIGRATION_STATEMENTS, SCHEMA_VERSION_V53, MIGRATION_V53_TO_V54_ID
+        from tests.execution_support import remove_v54
+        runtime = self.open_runtime()
+        runtime.close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v54(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'", (SCHEMA_VERSION_V53,))
+            connection.commit()
+        with patch("companion_v2.storage.runtime.V54_MIGRATION_STATEMENTS", V54_MIGRATION_STATEMENTS + ("INVALID UPGRADE",)):
+            with self.assertRaises(StorageOpenError):
+                self.open_runtime()
+        self.assertEqual(self.version(), SCHEMA_VERSION_V53)
+        upgraded = self.open_runtime()
+        self.assertIsNotNone(upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V53_TO_V54_ID,)))
+        self.assertEqual(upgraded.read_all("SELECT * FROM conversation_reply_streams", ()), ())
+        self.assertEqual(upgraded.read_one("SELECT state FROM outbox", ())["state"], "unknown")
+
+    def test_v52_upgrade_adds_response_diagnostics_and_rolls_back_on_failure(self):
+        runtime = self.open_runtime()
+        runtime.close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v53(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V52,))
+            connection.commit()
+        with patch("companion_v2.storage.runtime.V53_MIGRATION_STATEMENTS",
+                   V53_MIGRATION_STATEMENTS + ("INVALID UPGRADE",)):
+            with self.assertRaises(StorageOpenError):
+                self.open_runtime()
+        self.assertEqual(self.version(), SCHEMA_VERSION_V52)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'model_call_diagnostics'").fetchone())
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V52_TO_V53_ID,))
+        self.assertEqual(migration["fingerprint"], MIGRATION_V52_TO_V53_FINGERPRINT)
+        self.assertEqual(migration["to_version"], "companion-v2.storage.v53")
+        self.assertEqual(upgraded.read_one("SELECT state FROM outbox", ())["state"], "unknown")
 
     def test_v21_memory_schema_adds_role_growth_tables_and_preserves_memory(self):
         runtime = self.open_runtime()

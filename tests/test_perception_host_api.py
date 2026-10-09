@@ -14,12 +14,14 @@ from starlette.requests import Request
 from astrbot_host.perception_api import PREFIX
 
 
-class ScreenProvider:
+class LegacyScreenProvider:
     def __init__(self):
         self.values = {"enabled": False, "remote_auth_token": ""}
+        self.reads = 0
         self.updates = []
 
     def companion_v2_perception_settings(self):
+        self.reads += 1
         return {"groups": [{"id": "runtime", "title": "运行", "fields": ["enabled"]}],
                 "fields": {"enabled": {"type": "bool"}}, "values": dict(self.values)}
 
@@ -53,7 +55,7 @@ class PerceptionAPITests(unittest.IsolatedAsyncioTestCase):
             self.native, support.host_config(), Path(temporary.name), native_types=types,
             now=lambda: support.NOW)
         self.addAsyncCleanup(self.controller.terminate)
-        self.screen = ScreenProvider()
+        self.screen = LegacyScreenProvider()
         self.reality = RealityProvider()
         self.stars = [NS(root_dir_name=name, activated=True, star_cls=NS(extension_api=api))
                       for name, api in (("astrbot_plugin_screen_companion", self.screen),
@@ -74,17 +76,19 @@ class PerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         with bind_request_context(PluginRequest(native, username=username)):
             return await self.routes[(PREFIX, method)]()
 
-    async def test_read_and_update_dispatch_only_to_requested_owner(self):
+    async def test_screen_is_v2_native_and_only_reality_uses_the_external_perception_bridge(self):
         self.assertEqual((await self.call())["data"]["code"], "staging_not_initialized")
         (await self.controller.initialize_profile()).unwrap()
         data = (await self.call())["data"]["providers"]
-        self.assertTrue(data["screen"]["available"])
+        self.assertEqual(set(data), {"reality"})
+        self.assertEqual(self.screen.reads, 0)
         self.assertTrue(data["reality"]["settings"]["secrets"]["pairing_token_configured"])
 
         screen = await self.call(body={"provider": "screen", "section": "settings",
                                        "updates": {"enabled": True}})
-        self.assertEqual(screen["status"], "ok", screen)
-        self.assertEqual(self.screen.updates, [{"enabled": True}])
+        self.assertEqual(screen["data"]["code"], "perception_request_invalid")
+        self.assertEqual(self.screen.reads, 0)
+        self.assertEqual(self.screen.updates, [])
         reality = await self.call(body={"provider": "reality", "section": "camera",
                                         "updates": {"camera_enabled": True}})
         self.assertEqual(reality["status"], "ok", reality)
@@ -94,17 +98,20 @@ class PerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bad["data"]["code"], "perception_request_invalid")
         self.assertEqual(len(self.reality.updates), 1)
 
-    async def test_missing_owner_and_dashboard_identity_block_writes(self):
+    async def test_missing_legacy_screen_plugin_does_not_disable_native_screen_and_auth_blocks_external_writes(self):
         (await self.controller.initialize_profile()).unwrap()
         body = {"provider": "screen", "section": "settings", "updates": {"enabled": True}}
         for username in (None, "", "api_key:synthetic"):
             self.assertEqual((await self.call(body=body, username=username))["data"]["code"],
                              "dashboard_identity_required")
+        self.assertEqual(self.screen.reads, 0)
         self.assertEqual(self.screen.updates, [])
         self.stars = self.stars[1:]
         missing = await self.call()
-        self.assertFalse(missing["data"]["providers"]["screen"]["available"])
-        self.assertEqual((await self.call(body=body))["data"]["code"], "perception_provider_unavailable")
+        self.assertEqual(set(missing["data"]["providers"]), {"reality"})
+        self.assertEqual((await self.call(body=body))["data"]["code"], "perception_request_invalid")
+        self.assertEqual(self.screen.reads, 0)
+        self.assertEqual(self.screen.updates, [])
 
     async def test_shutdown_unregisters_routes_and_retained_handler_rejects(self):
         (await self.controller.initialize_profile()).unwrap()

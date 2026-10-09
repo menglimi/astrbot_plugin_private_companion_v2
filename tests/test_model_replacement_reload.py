@@ -26,6 +26,7 @@ class NativeSingleRoutingReloadTests(unittest.IsolatedAsyncioTestCase):
 
         backup = FakeProvider()
         backup.provider_config["id"] = "native-backup"
+        native.get_all_providers = lambda: [native.provider, backup]
         native.get_provider_by_id = lambda provider_id: {
             "native-model": native.provider, "native-backup": backup}.get(provider_id)
         config = host_config(model={"additional_providers": [{"provider_id": "native-backup",

@@ -5,12 +5,13 @@ window.CompanionRoleProfileDraft = (() => {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[char]));
   const icon = name => '<i data-lucide="' + name + '" aria-hidden="true"></i>';
-  const state = {target: "role_profile", draft: null, source: null, knowledge: [], fieldValues: {}, selectedFields: null, limits: null, totalLimit: 30000, current: null, scopeKey: "", supplements: {role_profile: "", relationship_profile: ""}, busy: false, busyKind: "", ticket: 0};
+  const state = {target: "role_profile", draft: null, source: null, knowledge: [], fieldValues: {}, selectedFields: null, limits: null, totalLimit: 30000, current: null, scopeKey: "", pendingApply: null, personaId: "", personas: [], supplements: {role_profile: "", relationship_profile: ""}, busy: false, busyKind: "", ticket: 0};
   const errorText = {
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开陪伴小屋。",
     core_access_required: "当前账号没有管理权限。",
-    staging_not_initialized: "请先在账号与会话中加载 V2 运行实例。",
+    staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
     role_profile_source_unavailable: "当前没有可读取的 AstrBot 人格，请先选择一个已配置人格。",
+    host_persona_unavailable: "所选 AstrBot 人格已不可用，请重新读取。",
     role_profile_source_too_large: "当前人格文本较长，请先整理底稿后再生成。",
     role_profile_model_unavailable: "当前模型暂时不能整理档案，请检查模型与连接设置。",
     role_profile_source_changed: "角色或人格刚刚发生变化，请重新读取后再整理。",
@@ -30,6 +31,7 @@ window.CompanionRoleProfileDraft = (() => {
       '<div><span data-role-profile-draft-target>PERSONA → ROLE CANON</span><h2 id="roleProfileDraftTitle">整理角色资料</h2></div>' +
       '<button class="icon-button" type="button" data-role-profile-draft-close aria-label="关闭" title="关闭">' + icon("x") + '</button></header>' +
       '<section class="role-profile-draft-compose" aria-label="补充角色设定">' +
+      '<label class="role-profile-draft-persona">AstrBot 人格<select data-role-profile-draft-persona aria-label="选择整理来源人格"></select></label>' +
       '<label for="roleProfileDraftSupplement" data-role-profile-draft-supplement-label>补充已确认的角色设定</label>' +
       '<textarea id="roleProfileDraftSupplement" rows="3" maxlength="4000" placeholder="例如：她其实是人造人，生日是第一次醒来的那天；不擅长直接表达担心。"></textarea>' +
       '<div class="role-profile-draft-compose-foot"><p>人格原文提供角色底稿，角色档案与世界知识补足稳定设定；缺少依据的字段会留空。</p>' +
@@ -37,6 +39,8 @@ window.CompanionRoleProfileDraft = (() => {
       icon("book-open-text") + '<span>管理世界知识</span></button>' +
       '<button class="button small primary" type="button" data-role-profile-draft-generate>' + icon("sparkles") + '<span>生成可编辑草稿</span></button></div></div></section>' +
       '<p class="role-profile-draft-notice" data-role-profile-draft-notice role="status" aria-live="polite">会参考当前人格、已保存角色档案和符合范围的世界资料；草稿只供检查，不会自动保存。</p>' +
+      '<div class="role-profile-draft-recovery" data-role-profile-draft-recovery hidden><span>上次保存结果尚未确认；核对会沿用同一操作标识。</span>' +
+      '<button class="button small" type="button" data-role-profile-draft-recover>核对原保存结果</button></div>' +
       '<section class="role-profile-draft-output" data-role-profile-draft-output hidden aria-label="角色资料草稿">' +
       '<div class="role-profile-draft-source" data-role-profile-draft-source></div>' +
       '<div class="role-profile-draft-knowledge" data-role-profile-draft-knowledge></div>' +
@@ -59,12 +63,60 @@ window.CompanionRoleProfileDraft = (() => {
     target.dataset.state = bad ? "error" : "ready";
   }
   function apiError(error) {
-    return errorText[error?.code] || error?.message || "暂时无法读取设置，请刷新后重试。";
+    return errorText[error?.code] || errorText[error?.message] || "本次操作没有完成，草稿已保留，请重新读取后重试。";
   }
   function operationKey() {
     return window.crypto?.randomUUID?.() || "role-profile-draft-" + Date.now() + "-" + Math.random().toString(36).slice(2);
   }
-  async function personaRequest(role, target, supplement) {
+  function pendingApplyKey(target, scope, endpoint) {
+    const identity = window.CompanionProduct?.identity?.() || {};
+    return "companion-role-profile-apply.v1:" + JSON.stringify([
+      identity.installation_id || "", identity.operator_id || "", scope, target, endpoint,
+    ]);
+  }
+  function storePendingApply(value = state.pendingApply) {
+    if (!value) return false;
+    try {
+      sessionStorage.setItem(pendingApplyKey(value.target, value.scopeKey, value.endpoint), JSON.stringify(value));
+      return true;
+    } catch { return false; }
+  }
+  function restorePendingApply(target, scope, endpoint) {
+    if (!endpoint) return null;
+    try {
+      const value = JSON.parse(sessionStorage.getItem(pendingApplyKey(target, scope, endpoint)));
+      const body = value?.body;
+      if (value?.target === target && value?.scopeKey === scope && value.endpoint === endpoint
+          && body?.section === target && typeof body.operation_key === "string"
+          && body.operation_key.length > 0 && body.operation_key.length <= 128
+          && typeof body.edit_token === "string" && body.edit_token.length === 64
+          && body.changes && typeof body.changes === "object" && !Array.isArray(body.changes)
+          && Object.keys(body.changes).length) return value;
+    } catch {}
+    return null;
+  }
+  function clearPendingApply(value = state.pendingApply) {
+    if (value) {
+      try { sessionStorage.removeItem(pendingApplyKey(value.target, value.scopeKey, value.endpoint)); } catch {}
+    }
+    state.pendingApply = null;
+    renderPendingApply();
+  }
+  function renderPendingApply() {
+    const dialog = $("#roleProfileDraftDialog");
+    if (!dialog) return;
+    const pending = state.pendingApply;
+    const panel = $("[data-role-profile-draft-recovery]", dialog);
+    const button = $("[data-role-profile-draft-recover]", dialog);
+    if (panel) panel.hidden = !pending;
+    if (button) button.disabled = state.busy || !pending;
+    for (const control of dialog.querySelectorAll(
+      "[data-role-profile-draft-select], [data-role-profile-draft-value], #roleProfileDraftSupplement, [data-role-profile-draft-persona]")) {
+      control.disabled = !!pending || state.busy;
+    }
+    updateMeter();
+  }
+  async function personaRequest(role, target, supplement, personaId) {
     const product = window.CompanionProduct;
     const bridge = product?.bridgeNow?.() || (product?.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
     if (!bridge?.apiPost || !role?.persona_api) throw new Error("当前角色没有人格工作区。");
@@ -72,13 +124,46 @@ window.CompanionRoleProfileDraft = (() => {
     let timer;
     try {
       const response = await Promise.race([
-        bridge.apiPost(route, {target, supplement}),
+        bridge.apiPost(route, {target, supplement, persona_id: personaId}),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(Object.assign(new Error("请求等待过久"), {code: "role_profile_draft_timeout"})), 120000);
         }),
       ]);
       return product.unwrap(response);
     } finally { clearTimeout(timer); }
+  }
+  async function loadPersonaChoices(role) {
+    const select = $("[data-role-profile-draft-persona]");
+    if (!select || !role?.persona_api) return;
+    select.disabled = true;
+    try {
+      const product = window.CompanionProduct;
+      const bridge = product?.bridgeNow?.() || (product?.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
+      const value = product.unwrap(await bridge.apiGet(product.relative(role.persona_api), {limit: 1}));
+      state.personas = Array.isArray(value.personas) ? value.personas : [];
+      const currentId = value.persona?.persona_id || "";
+      if (!state.personaId || !state.personas.some(item => item.value === state.personaId)) state.personaId = currentId;
+      select.replaceChildren();
+      for (const persona of state.personas) {
+        const option = document.createElement("option");
+        option.value = persona.value;
+        option.textContent = persona.label || persona.value;
+        option.selected = persona.value === state.personaId;
+        select.append(option);
+      }
+      if (!state.personas.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "没有可用人格";
+        select.append(option);
+      }
+      select.disabled = !!state.pendingApply || state.busy || state.personas.length < 2;
+      select.value = state.personaId;
+    } catch (error) {
+      notice(apiError(error), true);
+    } finally {
+      select.disabled = !!state.pendingApply || state.busy || state.personas.length < 2;
+    }
   }
   async function readCurrent(role, target = state.target) {
     const product = window.CompanionProduct;
@@ -89,6 +174,10 @@ window.CompanionRoleProfileDraft = (() => {
       throw new Error("没有读到当前角色档案。");
     }
     return section;
+  }
+  function configEndpoint(role, product = window.CompanionProduct) {
+    if (!role?.config_api || typeof product?.relative !== "function") return "";
+    try { return product.relative(role.config_api) + "/configure"; } catch { return ""; }
   }
   function profileSpec() { return window.CompanionConfigEditors?.spec?.[state.target] || {}; }
   function setTargetPresentation(target) {
@@ -141,7 +230,7 @@ window.CompanionRoleProfileDraft = (() => {
       budget.dataset.fieldOver = fieldOver ? "true" : "false";
     }
     if (actions) for (const button of actions.querySelectorAll("[data-role-profile-draft-apply]")) {
-      button.disabled = state.busy || !state.current || !selected.length || fieldOver || total > Number(state.totalLimit || 30000);
+      button.disabled = state.busy || !!state.pendingApply || !state.current || !selected.length || fieldOver || total > Number(state.totalLimit || 30000);
     }
   }
   function paintDraft() {
@@ -275,10 +364,19 @@ window.CompanionRoleProfileDraft = (() => {
       $("[data-role-profile-draft-actions]", dialog).hidden = true;
     }
     setTargetPresentation(target);
+    const product = window.CompanionProduct;
+    const endpoint = configEndpoint(product?.role?.(), product);
+    state.pendingApply = restorePendingApply(target, scope, endpoint);
+    if (state.pendingApply) {
+      state.scopeKey = scope;
+      notice("上次保存结果尚未确认；核对会沿用同一操作标识。", true);
+    }
     $("#roleProfileDraftSupplement", dialog).value = state.supplements[target];
     if (state.draft && state.scopeKey === scope && state.target === target) paintDraft();
     if (!dialog.open) dialog.showModal();
+    void loadPersonaChoices(window.CompanionProduct?.role?.());
     resetGenerateButton();
+    renderPendingApply();
     window.lucide?.createIcons({attrs: {"aria-hidden": "true"}});
   }
   async function generate() {
@@ -287,6 +385,7 @@ window.CompanionRoleProfileDraft = (() => {
     const product = window.CompanionProduct;
     const role = product?.role?.();
     const target = state.target;
+    const personaId = $("[data-role-profile-draft-persona]", dialog)?.value || state.personaId;
     const scope = currentScope();
     const ticket = ++state.ticket;
     state.supplements[target] = $("#roleProfileDraftSupplement", dialog)?.value || "";
@@ -299,7 +398,7 @@ window.CompanionRoleProfileDraft = (() => {
       ? "正在读取当前人格并整理这段关系资料…"
       : "正在读取当前人格并整理角色资料…");
     try {
-      const payload = await personaRequest(role, target, state.supplements[target]);
+      const payload = await personaRequest(role, target, state.supplements[target], personaId);
       if (ticket !== state.ticket || !dialog.open) return;
       if (payload.target !== target) throw Object.assign(new Error("草稿目标已经变化，请重新整理。"), {code: "role_profile_source_changed"});
       if (scope !== currentScope()) throw Object.assign(new Error("角色或对象已切换，请重新整理。"), {code: "role_profile_source_changed"});
@@ -333,17 +432,73 @@ window.CompanionRoleProfileDraft = (() => {
       }
     }
   }
+  async function submitPendingApply(pending) {
+    const dialog = $("#roleProfileDraftDialog");
+    const product = window.CompanionProduct;
+    const role = product?.role?.();
+    if (!dialog || !pending) return;
+    if (pending.target !== state.target || pending.scopeKey !== currentScope()
+        || pending.endpoint !== configEndpoint(role, product)) {
+      notice("对象、角色或配置入口已变化；请切回原对象后核对这次保存。", true);
+      return;
+    }
+    state.busy = true;
+    state.busyKind = "apply";
+    resetGenerateButton();
+    updateMeter();
+    renderPendingApply();
+    try {
+      const result = await product.request("POST", pending.endpoint, pending.body);
+      const receipt = result?.result ?? result;
+      if (typeof receipt?.operation_id !== "string" || typeof receipt?.replayed !== "boolean") {
+        notice("服务回执不完整；保存结果尚未确认。核对时会沿用同一操作标识。", true);
+        return;
+      }
+      const changes = pending.body.changes;
+      clearPendingApply(pending);
+      for (const field of Object.keys(changes)) state.selectedFields?.delete(field);
+      document.dispatchEvent(new Event(pending.target === "relationship_profile"
+        ? "companion:relationship-profile-updated" : "companion:role-profile-updated"));
+      const savedMessage = (receipt.replayed ? "原保存已确认" : "已保存") + " " + Object.keys(changes).length +
+        (pending.target === "relationship_profile" ? " 项相处资料" : " 项角色资料") +
+        (pending.skipped_count ? "，" + pending.skipped_count + " 项已有内容未覆盖" : "") + "。";
+      try {
+        state.current = await readCurrent(role, pending.target);
+        if (state.draft) paintDraft();
+        notice(savedMessage);
+      } catch {
+        state.current = null;
+        notice(savedMessage + "但当前资料未能刷新，请重新打开后核对。", true);
+      }
+    } catch (error) {
+      if (error.confirmed === true) clearPendingApply(pending);
+      notice(error.confirmed === true ? apiError(error)
+        : "保存结果尚未确认；点击“核对原保存结果”会沿用同一请求和操作标识。", true);
+    } finally {
+      state.busy = false;
+      state.busyKind = "";
+      resetGenerateButton();
+      renderPendingApply();
+      updateMeter();
+    }
+  }
+  async function recoverPendingApply() {
+    if (state.busy || !state.pendingApply) return;
+    await submitPendingApply(state.pendingApply);
+  }
   async function apply(mode) {
     const dialog = $("#roleProfileDraftDialog");
     const product = window.CompanionProduct;
-    if (!dialog || state.busy || !state.draft) return;
+    if (!dialog || state.busy) return;
+    if (state.pendingApply) { await recoverPendingApply(); return; }
+    if (!state.draft) return;
     if (!state.scopeKey || currentScope() !== state.scopeKey) {
       notice("会话对象或角色已切换，请重新整理这份草稿。", true);
       return;
     }
     const role = product?.role?.();
-    const rolePath = role?.config_api;
-    if (!rolePath) { notice("当前角色没有配置保存入口。", true); return; }
+    const endpoint = configEndpoint(role, product);
+    if (!endpoint) { notice("当前角色没有配置保存入口。", true); return; }
     const values = Object.fromEntries(selectedFields().map(field => {
       const textarea = $("[data-role-profile-draft-value=\"" + field + "\"]", dialog);
       return [field, textarea?.value || ""];
@@ -375,17 +530,16 @@ window.CompanionRoleProfileDraft = (() => {
         notice("所选字段已有内容，没有写入；选择“覆盖所选字段”可替换它们。");
         return;
       }
-      await product.request("POST", product.relative(rolePath) + "/configure", {
-        section: state.target, operation_key: operationKey(), edit_token: fresh.edit_token, changes,
-      });
-      state.current = await readCurrent(role, state.target);
-      for (const field of Object.keys(changes)) state.selectedFields?.delete(field);
-      paintDraft();
-      document.dispatchEvent(new Event(state.target === "relationship_profile"
-        ? "companion:relationship-profile-updated" : "companion:role-profile-updated"));
-      notice("已保存 " + Object.keys(changes).length +
-        (state.target === "relationship_profile" ? " 项相处资料" : " 项角色资料") +
-        (skipped.length ? "，" + skipped.length + " 项已有内容未覆盖" : "") + "。");
+      const pending = {target:state.target, scopeKey:state.scopeKey, endpoint, skipped_count:skipped.length,
+        body:{section:state.target, operation_key:operationKey(), edit_token:fresh.edit_token, changes}};
+      state.pendingApply = pending;
+      if (!storePendingApply(pending)) {
+        state.pendingApply = null;
+        notice("当前浏览器无法记录这次保存请求，尚未提交。请检查页面存储后重试。", true);
+        return;
+      }
+      renderPendingApply();
+      await submitPendingApply(pending);
     } catch (error) {
       notice(apiError(error), true);
     } finally {
@@ -421,14 +575,31 @@ window.CompanionRoleProfileDraft = (() => {
 
   document.addEventListener("click", event => {
     const open = event.target.closest?.("[data-role-profile-draft-open]");
-    if (open) { event.preventDefault(); openDialog(open.dataset.roleProfileDraftOpen || "role_profile"); return; }
+    if (open) {
+      event.preventDefault();
+      openDialog(open.dataset.roleProfileDraftOpen || "role_profile");
+      /* 从「角色自述」画布进入时，把画布内容作为补充设定的初始值；
+         该目标已有补充稿时不覆盖，避免辛苦写的文字被画布内容顶掉。 */
+      if (open.dataset.selfwriteSource !== undefined) {
+        const canvas = $("#selfwriteCanvas");
+        const supplement = $("#roleProfileDraftSupplement");
+        if (canvas && supplement && canvas.value.trim() && !state.supplements[state.target]) {
+          supplement.value = canvas.value;
+          state.supplements[state.target] = supplement.value;
+        }
+      }
+      return;
+    }
     const close = event.target.closest?.("[data-role-profile-draft-close]");
     if (close) { event.preventDefault(); closeDialog(); return; }
+    if (event.target.closest?.("[data-role-profile-draft-recover]")) {
+      event.preventDefault(); void recoverPendingApply(); return;
+    }
     if (event.target.matches?.("#roleProfileDraftDialog")) { closeDialog(); return; }
     if (event.target.closest?.("[data-role-profile-draft-knowledge-open]")) {
       event.preventDefault();
       closeDialog();
-      document.querySelector('.self-workspace-tabs [data-self-pane="knowledge"]')?.click();
+      document.querySelector('.deck-tabs [data-self-pane="knowledge"]')?.click();
       return;
     }
     if (event.target.closest?.("[data-role-profile-draft-generate]")) { event.preventDefault(); void generate(); return; }

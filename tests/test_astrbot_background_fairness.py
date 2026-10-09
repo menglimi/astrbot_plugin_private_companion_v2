@@ -200,7 +200,7 @@ class BackgroundFairnessTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase
     async def test_stale_state_schedule_pages_cannot_starve_the_current_target(self):
         app = await self.initialize()
         context = self.enable_state()
-        # Historical bindings stay in SQLite across real persona replacements.
+        # Historical per-window rows are consolidated on the role's next binding.
         for index in range(40):
             old = replace(context, role_binding=replace(context.role_binding, revision=100 + index))
             with app.runtime.transaction() as connection:
@@ -219,7 +219,7 @@ class BackgroundFairnessTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase
         await self.until(lambda: not app.state_maintenance.workers)
         self.assertEqual(app.role_state.read(context)["values"]["energy"], 77)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(app.runtime.read_one("SELECT COUNT(*) n FROM role_state_schedules", ())["n"], 41)
+        self.assertEqual(app.runtime.read_one("SELECT COUNT(*) n FROM role_state_schedules", ())["n"], 1)
         self.assertEqual(app.runtime.read_one("SELECT COUNT(*) n FROM execution_tasks WHERE kind = 'role.state.maintain'", ())["n"], 1)
 
 

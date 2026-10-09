@@ -7,6 +7,7 @@ from companion_v2.legacy.catalog import (
     LEGACY_COMPATIBILITY_CATALOG,
     V1_PLUGIN_ID,
     V1_SUPPORTED_VERSION,
+    V1_SUPPORTED_VERSIONS,
 )
 from companion_v2.legacy.surface_ledger import (
     LEGACY_SURFACE_LEDGER,
@@ -20,7 +21,8 @@ class LegacyCompatibilityCatalogTests(unittest.TestCase):
 
         self.assertEqual(catalog.validate(), ())
         self.assertEqual(catalog.target_plugin_id, V1_PLUGIN_ID)
-        self.assertEqual(catalog.supported_v1_versions, (V1_SUPPORTED_VERSION,))
+        self.assertEqual(catalog.supported_v1_versions, V1_SUPPORTED_VERSIONS)
+        self.assertEqual(V1_SUPPORTED_VERSION, "6.7.0")
         self.assertGreaterEqual(len(catalog.entries), 8)
         self.assertEqual(
             catalog.entry("private.core_profiles").source_plugin_id,

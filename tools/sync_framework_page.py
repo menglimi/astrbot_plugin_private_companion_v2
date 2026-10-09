@@ -51,19 +51,25 @@ def publish(*, check=False, preview=None):
         html = (source_root / "workspace.html").read_text(encoding="utf-8-sig")
         bridge = (SOURCE / "embedded-bridge.js").read_text(encoding="utf-8-sig")
         js = (source_root / "app.js").read_text(encoding="utf-8-sig")
+        extras = (["member-editor.js"] if name == "identity" else
+                  ["group-memory.js"] if name == "relationships" else [])
+        if extras:
+            js = (SOURCE / "assets" / "lucide.min.js").read_text(encoding="utf-8-sig") + "\n" + "\n".join(
+                (source_root / filename).read_text(encoding="utf-8-sig") for filename in extras) + "\n" + js
         css = (source_root / "style.css").read_text(encoding="utf-8-sig")
         html = re.sub(r'<script[^>]*src="[^"]+"[^>]*></script>', "", html)
         html = html.replace('<link rel="stylesheet" href="style.css">',
                             "<style>" + css + "\n" + palette + "\n" + workspace_theme + "</style>")
         html = html.replace("</body>", "<script>" + (bridge + "\n" + js).replace("</script", "<\\/script") + "</script></body>")
         bundle[name] = html
-        for filename in ("index.html", "app.js", "style.css"):
+        for filename in ("index.html", "app.js", "style.css", *extras):
             source_filename = "workspace.html" if filename == "index.html" else filename
             payload = (ROOT / "pages" / source / source_filename).read_bytes()
             if filename == "index.html":
                 html = payload.decode("utf-8-sig").replace(
                     '<script src="/api/plugin/page/bridge-sdk.js" defer></script>',
                     '<script src="../../embedded-bridge.js" defer></script>')
+                html = html.replace('../陪伴小屋/assets/lucide.min.js', '../../assets/lucide.min.js')
                 payload = html.encode("utf-8")
             destination = SOURCE / "workspaces" / name / filename
             projected[destination.relative_to(SOURCE).as_posix()] = emit(destination, payload)
@@ -74,7 +80,8 @@ def publish(*, check=False, preview=None):
 
     files = {p.relative_to(SOURCE).as_posix(): normalized_payload(p, p.read_bytes())
              for p in sorted(SOURCE.rglob("*"))
-             if p.is_file() and p.name != "page-build.json" and "__pycache__" not in p.parts}
+             if p.is_file() and p.name != "page-build.json" and p.name != "shell-preview.html"
+             and p.suffix.lower() not in {".bak", ".backup"} and "__pycache__" not in p.parts}
     files.update(projected)
     hashes = {name: hashlib.sha256(payload).hexdigest() for name, payload in sorted(files.items())}
     manifest = (json.dumps({"source": "astrbot_plugin_private_companion_v2/pages/陪伴小屋",

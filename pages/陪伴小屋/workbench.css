@@ -60,7 +60,7 @@
 .wb-section-tab:hover{background:var(--t-surface-soft);color:var(--t-text-strong)}
 .wb-section-tab:active{transform:translateY(1px)}
 .wb-section-tab:focus-visible{outline:2px solid var(--t-focus);outline-offset:2px}
-.wb-section-tab[aria-selected="true"]{border-color:var(--t-line);background:var(--t-surface-raised);color:var(--t-accent-ink);box-shadow:0 1px 3px rgba(28,48,39,.08)}
+.wb-section-tab[aria-selected="true"]{border-color:var(--t-line);background:var(--t-surface-raised);color:var(--t-accent-ink);box-shadow:var(--t-shadow)}
 .wb-section-tab>svg{width:14px;height:14px;color:var(--t-text-faint);transition:transform var(--dur-fast) ease,color var(--dur-fast) ease}
 .wb-section-tab[aria-selected="true"]>svg{color:var(--t-accent);transform:translateX(2px)}
 .wb-section-index{display:grid;place-items:center;width:25px;height:25px;border:1px solid var(--t-line);border-radius:var(--r-2xs);background:var(--t-surface);color:var(--t-text-faint);font:600 10px/1 var(--numeric-font)}
@@ -106,6 +106,7 @@
 .wb-field:has(textarea),
 .wb-field:has(.wb-word-editor),
 .wb-field:has(.wb-keywords),
+.wb-field:has(.wb-source-picker),
 .wb-field:has(.wb-order-editor){grid-column:1/-1}
 .wb-field.is-inherited{background:linear-gradient(90deg,var(--t-surface-soft) 0%,transparent 62%)}
 
@@ -178,6 +179,21 @@
   transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease;
 }
 .wb-control textarea{min-height:78px;resize:vertical;line-height:1.8}
+.wb-line-list-editor{display:grid;gap:var(--sp-1);min-width:0}
+.wb-control .wb-line-list{min-height:112px;line-height:1.7;resize:vertical;white-space:pre}
+.wb-line-list-count{color:var(--t-text-faint);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
+.wb-source-picker{display:grid;gap:var(--sp-2);min-width:0}
+.wb-source-group{min-width:0;padding:var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-xs);background:var(--t-surface)}
+.wb-source-group>p{margin:var(--sp-1) 0 0 calc(22px + var(--sp-2));color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5;overflow-wrap:anywhere}
+.wb-source-documents{display:grid;gap:2px;margin:var(--sp-2) 0 0 var(--sp-3);padding-left:var(--sp-2);border-left:1px solid var(--t-line-firm)}
+.wb-source-option{display:flex;align-items:flex-start;gap:var(--sp-2);min-width:0;padding:var(--sp-1);border-radius:var(--r-xs);cursor:pointer}
+.wb-source-option:hover{background:var(--t-surface-raised)}
+.wb-source-option input{flex:none;width:16px;height:16px;margin:2px 0 0;accent-color:var(--t-accent)}
+.wb-source-option>span{display:grid;gap:2px;min-width:0}
+.wb-source-option b{min-width:0;color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600;overflow-wrap:anywhere}
+.wb-source-option small{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.45;overflow-wrap:anywhere}
+.wb-source-missing{padding:var(--sp-1);border:1px dashed var(--t-line-firm);border-radius:var(--r-xs);color:var(--t-risk-ink)}
+.wb-source-count{justify-self:end;color:var(--t-text-faint);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
 .wb-textarea-wrap{display:grid;gap:var(--sp-1);min-width:0}
 .wb-text-length{justify-self:end;color:var(--t-text-faint);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
 .wb-text-length.is-over-limit{color:var(--t-risk-ink);font-weight:650}
@@ -204,7 +220,7 @@
 }
 .wb-switch-track::after{
   content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;
-  background:var(--t-surface-raised);box-shadow:0 1px 3px rgba(0,0,0,.18);
+  background:var(--t-surface-raised);box-shadow:var(--t-shadow);
   transition:transform var(--dur) cubic-bezier(.2,.8,.2,1);
 }
 .wb-switch input:checked + .wb-switch-track{background:var(--t-accent);border-color:var(--t-accent)}
@@ -225,7 +241,7 @@
   transition:background var(--dur-fast) ease,color var(--dur-fast) ease,box-shadow var(--dur-fast) ease;
 }
 .wb-segmented-option input:checked+span{
-  color:var(--t-accent-ink);background:var(--t-surface-raised);box-shadow:0 1px 3px rgba(0,0,0,.1);
+  color:var(--t-accent-ink);background:var(--t-surface-raised);box-shadow:var(--t-shadow);
 }
 .wb-segmented-option input:focus-visible+span{box-shadow:var(--focus-ring)}
 .wb-segmented-option input:disabled+span{opacity:.55;cursor:not-allowed}
@@ -268,8 +284,9 @@
 .wb-keyword-add:active,.wb-word-special:active{transform:scale(.97)}
 .wb-keyword-add:disabled,.wb-word-special:disabled{opacity:.45;cursor:not-allowed}
 .wb-keyword-add svg,.wb-word-special svg{width:12px;height:12px}
-.wb-word-tools{display:flex;align-items:center;gap:var(--sp-1);min-height:24px}
+.wb-word-tools{display:flex;align-items:center;gap:var(--sp-1);min-height:24px;flex-wrap:wrap}
 .wb-word-tools>span{margin-left:auto;color:var(--t-text-faint);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
+.wb-word-tools>.wb-word-tools-label{margin-left:0;color:var(--t-text-soft);font-variant-numeric:normal}
 
 /* 结构化替换规则与消息组件顺序 */
 .wb-replacement-editor{display:flex;flex-direction:column;gap:var(--sp-2);min-width:0}
@@ -512,4 +529,71 @@
   .wb-actions>.wb-save{flex:1}
   .wb-actions-note{margin-left:0;flex-basis:100%}
   .wb-card-body{padding:var(--sp-4)}
+}
+
+/* === 轻结构文本控件（自我页）：生日 / 词条快选 / 词条小片 / 台词气泡 ===
+   四种的真源都是 data-wb-field 那一个控件；这里只画辅助件。
+   词条快选不进通栏列表：性别/种族这类单值字段要和相邻短字段成对。 */
+词条快选不进通栏列表：性别/种族这类单值字段要和相邻短字段成对。*/
+.wb-field:has(.wb-quotes),
+.wb-field:has(.wb-tagset),
+.wb-field:has(.wb-date){grid-column:1/-1}
+.wb-date{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;min-width:0}
+.wb-date input[type=date]{
+  box-sizing:border-box;flex:1 1 170px;min-width:150px;max-width:240px;min-height:38px;
+  padding:var(--sp-2) var(--sp-3);border:1px solid var(--field-border);border-radius:var(--field-radius);
+  background:var(--field-bg);color:var(--t-text);font:inherit;font-size:var(--fs-body);
+  transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease;
+}
+.wb-date input[type=date]:focus-visible{outline:none;border-color:var(--t-accent);box-shadow:var(--focus-ring)}
+.wb-date-flag{display:inline-flex;align-items:center;gap:5px;min-height:38px;padding:0 var(--sp-3);
+  border:1px solid var(--field-border);border-radius:var(--field-radius);background:var(--field-bg);
+  color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer;user-select:none;white-space:nowrap}
+.wb-date-flag input{width:15px;height:15px;margin:0;accent-color:var(--t-accent)}
+.wb-chipset{display:grid;gap:var(--sp-2);min-width:0}
+.wb-chip-opts{display:flex;flex-wrap:wrap;gap:6px}
+.wb-chip-opt{
+  display:inline-flex;align-items:center;min-height:30px;padding:4px 14px;
+  border:1px solid var(--field-border);border-radius:99px;background:var(--field-bg);
+  color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer;white-space:nowrap;
+  transition:border-color var(--dur-fast) ease,color var(--dur-fast) ease,background var(--dur-fast) ease;
+}
+.wb-chip-opt:hover{border-color:var(--t-accent);color:var(--t-accent-ink)}
+.wb-chip-opt.is-on{border-color:var(--t-accent);background:var(--t-accent-quiet);color:var(--t-accent-ink);font-weight:600}
+.wb-chip-opt:disabled{opacity:.5;cursor:not-allowed}
+.wb-chipset input[type=text]{min-height:34px}
+.wb-tagset{display:grid;gap:var(--sp-2);min-width:0}
+.wb-tag-slips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.wb-tag{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px 4px 12px;
+  border:1px solid var(--t-line);border-radius:99px;background:var(--t-surface);
+  color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.wb-tag>span:first-child{overflow-wrap:anywhere;white-space:nowrap}
+.wb-tag button{display:grid;place-items:center;width:20px;height:20px;flex:none;border:0;border-radius:50%;
+  background:transparent;color:var(--t-text-faint);cursor:pointer}
+.wb-tag button:hover{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.wb-tag button svg{width:11px;height:11px}
+.wb-tag-form{display:flex;gap:6px;min-width:0}
+.wb-tag-form input[type=text]{flex:1 1 160px;min-width:120px;min-height:34px}
+.wb-tag-form .wb-keyword-add{min-height:34px}
+.wb-quotes{display:grid;gap:var(--sp-2);min-width:0}
+.wb-quote-list{display:grid;gap:var(--sp-2);min-width:0}
+.wb-quote{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:var(--sp-2);min-width:0}
+.wb-quote-no{display:grid;place-items:center;width:22px;height:22px;margin-top:5px;
+  border:1px solid var(--t-line);border-radius:50%;background:var(--t-surface);
+  color:var(--t-text-faint);font:600 10px/1 var(--numeric-font)}
+.wb-quote textarea{
+  min-height:0;height:auto;resize:none;overflow:hidden;line-height:1.7;
+  border-bottom-left-radius:4px;box-shadow:var(--t-shadow);
+}
+.wb-quote-remove{display:grid;place-items:center;width:24px;height:24px;margin-top:4px;
+  border:1px solid var(--t-line-firm);border-radius:50%;background:var(--t-surface);
+  color:var(--t-text-faint);cursor:pointer}
+.wb-quote-remove:hover{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+.wb-quote-remove svg{width:11px;height:11px}
+.wb-quote-tools{display:flex;align-items:center;gap:var(--sp-2);min-width:0}
+.wb-quote-tools .wb-text-length{margin-left:auto}
+@media(max-width:650px){
+  .wb-quote{grid-template-columns:auto minmax(0,1fr)}
+  .wb-quote-remove{grid-column:2;justify-self:end;margin-top:calc(-1 * var(--sp-1))}
+  .wb-tag-form input[type=text]{min-width:0}
 }

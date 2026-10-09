@@ -27,6 +27,7 @@ import sqlite3
 
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.outcome import Outcome
+from .management import cleanup_backups
 
 
 BACKUP_FORMAT = "companion-v2.installation-backup.v1"
@@ -141,15 +142,20 @@ def _inspect(path: Path, *, installation_id: str, schema_version: str) -> dict:
 class InstallationBackup:
     """Snapshot and restore one V2 installation's complete database."""
 
-    def __init__(self, runtime, *, now=None):
+    def __init__(self, runtime, *, now=None, retention_count=10, retention_days=90,
+                 directory: Path | None = None):
         self.runtime = runtime
         self.now = now
+        self.retention_count = retention_count
+        self.retention_days = retention_days
+        self._directory = Path(directory) if directory is not None else None
 
     # -- paths -----------------------------------------------------------
 
     @property
     def directory(self) -> Path:
-        return self.runtime.data_root / BACKUP_DIRECTORY
+        return self._directory or Path(getattr(self.runtime, "backup_directory", None)
+                                       or self.runtime.data_root / BACKUP_DIRECTORY)
 
     @property
     def pending_path(self) -> Path:
@@ -176,7 +182,15 @@ class InstallationBackup:
     def create(self, *, note: str = "") -> Outcome:
         """Write one verified snapshot and return its manifest."""
         try:
-            return Outcome.success(self._create(note=note))
+            manifest = self._create(note=note)
+            try:
+                cleanup = cleanup_backups(self.runtime.data_root, retention_count=self.retention_count,
+                                          retention_days=self.retention_days, now=self._at(),
+                                          backup_directory=self.directory,
+                                          installation_id=self.runtime.installation_id)
+            except OSError:
+                cleanup = {"removed_count": 0, "removed_bytes": 0, "failed": True}
+            return Outcome.success({**manifest, "retention": cleanup})
         except BackupError as error:
             return Outcome.failed(error.code, str(error))
 
@@ -347,7 +361,8 @@ def _completed_snapshot(backup: "InstallationBackup", document: dict) -> bool:
     return document.get("content_hash") == _sha256(path)
 
 
-def apply_pending(data_root: Path, *, installation_id: str, schema_version: str) -> dict:
+def apply_pending(data_root: Path, *, installation_id: str, schema_version: str,
+                  backup_directory: Path | None = None) -> dict:
     """Swap in a staged snapshot. Called by the host before the store is opened.
 
     This runs with no live connection, which is the only moment the database file
@@ -355,7 +370,8 @@ def apply_pending(data_root: Path, *, installation_id: str, schema_version: str)
     restore leaves the caller with the original data root and a readable reason.
     """
     try:
-        return _apply_pending(data_root, installation_id=installation_id, schema_version=schema_version)
+        return _apply_pending(data_root, installation_id=installation_id, schema_version=schema_version,
+                              backup_directory=backup_directory)
     except BackupError as error:
         return {"applied": False, "reason": error.code, "detail": str(error)}
     except TaskError as error:
@@ -366,12 +382,13 @@ def apply_pending(data_root: Path, *, installation_id: str, schema_version: str)
         return {"applied": False, "reason": "backup_restore_failed", "detail": str(error)}
 
 
-def _apply_pending(data_root: Path, *, installation_id: str, schema_version: str) -> dict:
+def _apply_pending(data_root: Path, *, installation_id: str, schema_version: str,
+                   backup_directory: Path | None = None) -> dict:
     pending_path = Path(data_root) / PENDING_FILENAME
     if not pending_path.is_file():
         return {"applied": False, "reason": "no_pending_restore"}
     request = require(_load_pending(pending_path))
-    directory = Path(data_root) / BACKUP_DIRECTORY
+    directory = Path(backup_directory) if backup_directory is not None else Path(data_root) / BACKUP_DIRECTORY
     source = directory / f"companion-v2-{request['snapshot_id']}.sqlite3"
     details = _inspect(source, installation_id=installation_id, schema_version=schema_version)
     if _sha256(source) != request["content_hash"] or details["schema_version"] != schema_version:

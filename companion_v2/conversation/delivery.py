@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import logging
+from time import perf_counter
 
 from companion_v2.execution.models import ProviderBinding, TaskContext, TaskError, TaskRecord, TaskResult, TaskSpec, digest, encode, require, stamp
 from companion_v2.execution.service import outcome
@@ -16,9 +17,11 @@ from companion_v2.storage.repositories import OperationRepository
 
 from companion_v2.delivery.models import DeliveryEnvelope, DeliveryReceipt, LocalSender
 from companion_v2.delivery.media import ImageDeliveryEnvelope, image_manifest, payload_hash
+from companion_v2.delivery.plan import PokePlan
 from companion_v2.memory.group.access import owner_key as group_owner_key
 from companion_v2.memory.group.hits import evaluate_message, persist_hits
 from .media.review import ALLOW, WITHHOLD, kept_manifests
+from .media.reply import reply_manifest
 from .outbound_plan import first_text_sequence, outbound_plan, sealed_inputs
 from .text_processing import text_policy
 
@@ -138,13 +141,6 @@ class LocalConversationDelivery:
         """Queue the separately authorized private delivery of a withheld image."""
         return self.messages.image_fallback.enqueue(part, deadline_at=deadline_at)
 
-    def enqueue_fallback(self, part, *, deadline_at):
-        """Queue the separately authorized private delivery of a withheld image."""
-        images, image_position, plan = self.manifest(part)
-        if plan is None or plan.decision != WITHHOLD:
-            return None
-        return self.messages.image_fallback.queue(part, plan, deadline_at=deadline_at)
-
     def _forbidden_word_hit(self, part):
         batch = self.messages.batch(part["batch_id"])
         try:
@@ -162,11 +158,22 @@ class LocalConversationDelivery:
             raise TaskError("message_batch_closed", "original reply is unavailable for delivery")
         generation = require(self.tasks.read(context, batch["generation_task_id"]))
         if generation.state != "succeeded":
-            raise TaskError("message_generation_pending", "only a completed original generation may be delivered")
+            from .streaming_reply import stream_record, validate_stream
+            if stream_record(self.messages, batch["batch_id"]) is None:
+                raise TaskError("message_generation_pending", "only a completed original generation may be delivered")
+            validate_stream(self.messages, batch, context, at)
         request = self.messages._request(batch, context, at)
-        images, _ = self.messages.reply_images.read(batch, context, at, request=request)
+        images, _reference, _image_part_id, image_position = self.messages.reply_images.read_binding(
+            batch, context, at, request=request, with_position=True)
+        parts = self.runtime.read_all("SELECT text FROM conversation_parts WHERE batch_id = ? ORDER BY sequence",
+                                      (batch["batch_id"],))
+        if reply_manifest(batch["batch_id"], batch["call_id"], tuple(part["text"] for part in parts), images,
+                          image_position=image_position, action=batch["presentation_action"]) != batch["manifest_hash"]:
+            raise TaskError("message_manifest_changed", "original reply action or parts changed after generation")
         if images and not self.sender.supports_images:
             raise TaskError("message_sender_media_unavailable", "original sender does not support image envelopes")
+        if batch["presentation_action"] == "poke" and not self.sender.supports_poke:
+            raise TaskError("message_sender_poke_unavailable", "original sender does not support native poke actions")
 
     @outcome
     def validate(self, spec, at):
@@ -234,16 +241,21 @@ class LocalConversationDelivery:
             operation = OperationRef("send-" + part["part_id"], "conversation.delivery", run.task.spec.context.scope,
                                      VersionRef(part["part_id"], 1), part["part_id"])
             plan = self.outbound_plan(part)
+            batch = self.messages.batch(part["batch_id"])
+            poke = PokePlan() if batch["presentation_action"] == "poke" else None
+            voice_required = batch["presentation_action"] == "voice_only"
             require(self.operations.reserve(operation, parameter_hash=digest([
                 run.task.spec.context.key, content_hash, self.sender.binding]
-                + ([plan.document()] if plan is not None else [])), observed_at=self.tasks.now()))
+                + ([plan.document()] if plan is not None else [])
+                + ([{"poke": poke.document()}] if poke is not None else [])), observed_at=self.tasks.now()))
             run.record_operation(operation.operation_id)
             connection.execute("""UPDATE conversation_parts SET state = 'dispatched', operation_id = ?,
                 dispatched_at = ? WHERE part_id = ?""", (operation.operation_id, stamp(self.tasks.now()), part["part_id"]))
             kind = ImageDeliveryEnvelope if images else DeliveryEnvelope
             return kind(part["part_id"], operation.operation_id, run.task.spec.context,
                 part["sequence"], part["text"], content_hash, self.sender.binding, run.validate,
-                plan=plan, **({"images": images, "image_position": image_position} if images else {}))
+                plan=plan, poke=poke, voice_required=voice_required,
+                **({"images": images, "image_position": image_position} if images else {}))
 
     def _unknown(self, part_id):
         with self.runtime.transaction() as connection:
@@ -259,6 +271,10 @@ class LocalConversationDelivery:
 
     async def deliver(self, run):
         envelope = self._dispatch(run)
+        started = perf_counter()
+        batch_id = self._part(envelope.part_id)["batch_id"]
+        logger.info("[CompanionV2] 回复分段开始投递 batch=%s part=%s sequence=%d",
+                    batch_id, envelope.part_id, envelope.sequence)
         try:
             receipt = await self.sender.send(envelope)
             if not isinstance(receipt, DeliveryReceipt):
@@ -268,19 +284,25 @@ class LocalConversationDelivery:
             # A callback may arrive after cancellation. Account for the original effect
             # without reviving its task, reading its sources, or scheduling another part.
             require(self.record_receipt(receipt))
+            logger.info("[CompanionV2] 回复分段投递回执 batch=%s part=%s status=%s elapsed_ms=%d",
+                        batch_id, envelope.part_id, receipt.status,
+                        round((perf_counter() - started) * 1000))
         except asyncio.CancelledError:
             self._unknown(envelope.part_id)
             raise
-        except Exception:
+        except Exception as error:
             self._unknown(envelope.part_id)
+            logger.warning("[CompanionV2] 回复分段投递结果未知 batch=%s part=%s reason=%s elapsed_ms=%d",
+                           batch_id, envelope.part_id,
+                           error.code if isinstance(error, TaskError) else type(error).__name__,
+                           round((perf_counter() - started) * 1000))
             return self._result(self._part(envelope.part_id))
         # The image was deliberately kept out of the group. Its separate private
         # delivery is queued only after the group receipt, so a reviewed image is
         # never sent anywhere the reviewer did not authorize.
         if self.messages.image_fallback is not None:
             try:
-                self.messages.image_fallback.enqueue(self._part(envelope.part_id),
-                                                     deadline_at=run.task.spec.deadline_at)
+                self.enqueue_fallback(self._part(envelope.part_id), deadline_at=run.task.spec.deadline_at)
             except TaskError:
                 pass  # A missing private route keeps the original blocked; it never reopens the group.
         return self._result(self._part(envelope.part_id))
@@ -292,7 +314,7 @@ class LocalConversationDelivery:
             part = self._part(receipt.part_id)
             batch = self.messages.batch(part["batch_id"])
             if (part["operation_id"] != receipt.operation_id or batch["origin_key"] != receipt.origin_key or
-                    part["payload_hash"] != self._sent_hash(part, receipt.payload_hash) or
+                    receipt.payload_hash != self._sent_hash(part, receipt.payload_hash) or
                     part["sender_json"] != encode(receipt.sender) or
                     part["dispatched_at"] is None):
                 raise TaskError("message_receipt_mismatch", "receipt does not belong to this original dispatch")
@@ -325,6 +347,19 @@ class LocalConversationDelivery:
                 connection.execute("""INSERT INTO conversation_sent_history
                     (part_id, batch_id, origin_key, delivered_at, receipt_ref) VALUES (?, ?, ?, ?, ?)""",
                     (receipt.part_id, part["batch_id"], batch["origin_key"], stamp(receipt.delivered_at), receipt.receipt_ref))
+                first_confirmed_part = connection.execute("""SELECT COUNT(*) AS count
+                    FROM conversation_sent_history WHERE batch_id = ?""", (part["batch_id"],)).fetchone()["count"] == 1
+                if first_confirmed_part and self.messages.expression_style_context is not None:
+                    connection.execute("SAVEPOINT expression_feedback_delivery")
+                    try:
+                        context = TaskContext.restore(json.loads(batch["context_json"]))
+                        self.messages.expression_style_context.confirm_delivery(connection,
+                            batch_id=part["batch_id"], context=context, delivered_at=receipt.delivered_at)
+                        connection.execute("RELEASE SAVEPOINT expression_feedback_delivery")
+                    except Exception as error:
+                        connection.execute("ROLLBACK TO SAVEPOINT expression_feedback_delivery")
+                        connection.execute("RELEASE SAVEPOINT expression_feedback_delivery")
+                        logger.warning("V2 expression feedback delivery accounting failed: %s", type(error).__name__)
             return state
 
     @outcome

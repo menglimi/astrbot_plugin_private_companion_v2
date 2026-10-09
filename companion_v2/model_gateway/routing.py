@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationSnapshot
@@ -24,7 +24,7 @@ def configuration_fields(profiles: tuple[ModelTaskProfile, ...]) -> tuple[FieldD
     for profile in profiles:
         for suffix, kind, default in (
             ("provider", ValueKind.TEXT, profile.default_provider),
-            ("fallback", ValueKind.TEXT, profile.default_fallback),
+            ("fallback", ValueKind.TEXT, profile.default_fallback or profile.default_provider),
             ("prompt", ValueKind.TEXT, profile.default_prompt),
             ("max_output_tokens", ValueKind.INTEGER, profile.max_output_tokens),
             ("replacement_rules", ValueKind.TEXT, profile.replacement_rules),
@@ -50,8 +50,9 @@ class ResolvedModelPlan:
 
 class ModelRouter:
     def __init__(self, configuration: ConfigurationService, profiles: tuple[ModelTaskProfile, ...],
-                 providers: tuple[LocalProvider, ...]):
+                 providers: tuple[LocalProvider, ...], *, default_provider_resolver=None):
         self.configuration = configuration
+        self.default_provider_resolver = default_provider_resolver
         self.profiles = MappingProxyType({p.kind: p for p in profiles})
         self.providers = MappingProxyType({p.binding.provider: p for p in providers})
         if not profiles or len(self.profiles) != len(profiles) or len(self.providers) != len(providers):
@@ -61,12 +62,80 @@ class ModelRouter:
                 raise ValueError("model fields must use the shared configuration registry")
         self.generation: int | None = None
         for profile in profiles:
+            if profile.default_fallback and profile.default_fallback not in self.providers:
+                raise ValueError("model task fallback must select a loaded provider")
             validate_targets(checked_rules(profile.replacement_rules), self.providers,
                              capabilities=profile.capabilities, max_output_tokens=profile.max_output_tokens)
+
+    def provider_default(self, context, profile, snapshot=None):
+        """Read the host's current conversation route before sealing a model plan."""
+        if self.default_provider_resolver is None:
+            return None
+        if snapshot is not None:
+            primary = snapshot.fields[profile.group + ".provider"]
+            fallback = snapshot.fields[profile.group + ".fallback"]
+            if primary.explicit and (fallback.explicit or profile.default_fallback):
+                return None
+        provider_id = self.default_provider_resolver(context, profile)
+        if provider_id is not None and provider_id not in self.providers:
+            raise TaskError("model_provider_unavailable", "the current host conversation model has no local adapter")
+        return provider_id
+
+    @staticmethod
+    def apply_provider_default(profile, snapshot, provider_id):
+        if provider_id is None:
+            return snapshot
+        fields = dict(snapshot.fields)
+        for suffix in ("provider", "fallback"):
+            key = profile.group + "." + suffix
+            if not fields[key].explicit and (suffix == "provider" or not profile.default_fallback):
+                fields[key] = replace(fields[key], value=provider_id)
+        # This projection only supplies routing values. Adoption must retain
+        # the original saved snapshot; the host selection belongs in the audit.
+        return replace(snapshot, fields=fields)
 
     def start(self, *, expected_generation: int) -> int:
         self.generation = self.configuration.start_consumer(CONSUMER, expected_generation=expected_generation)
         return self.generation
+
+    def _route_selection(self, profile, values, context, request, at):
+        rules = checked_rules(values["replacement_rules"])
+        validate_targets(rules, self.providers, capabilities=profile.capabilities,
+                         max_output_tokens=values["max_output_tokens"])
+        texts = [material.payload for material in request.context.materials
+                 if material.source is not None and material.source.scope == context.scope
+                 and (material.purpose == "current_source" and material.source == request.event.source
+                      or material.purpose.startswith("merged_input:"))] if hasattr(request.event, "source") else []
+        in_scope = (values["replacement_scope"] == "all" or
+                    values["replacement_scope"] == "conversation" and profile.kind == "conversation.reply" or
+                    values["replacement_scope"] == "plugin" and profile.kind != "conversation.reply")
+        match = match_route(rules, "\n".join(texts), at) if in_scope else None
+        primary = match.provider_id if match else values["provider"]
+        provider_ids = (primary,) + ((values["fallback"],)
+            if values["fallback"] and values["fallback"] != primary else ())
+        selected = tuple(self.providers.get(provider_id) for provider_id in provider_ids)
+        if any(provider is None for provider in selected):
+            raise TaskError("model_provider_unavailable", "configured provider has no local adapter")
+        return match, selected, in_scope
+
+    def selected_route(self, context, kind, request, *, at):
+        """Resolve the configured primary model and provider chain without dispatch."""
+        profile = self.profiles.get(kind)
+        if profile is None:
+            raise TaskError("model_task_unregistered", "model task type has no registered profile")
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
+                              context.role_binding.role, context.scope)
+        snapshot = require(self.configuration.read(context.actor, target=target,
+            group_id=profile.group, observed_at=at))
+        snapshot = self.apply_provider_default(profile, snapshot, self.provider_default(context, profile, snapshot))
+        values = {name.rsplit(".", 1)[1]: item.value for name, item in snapshot.fields.items()}
+        match, providers, _ = self._route_selection(profile, values, context, request, at)
+        if any(not set(profile.capabilities).issubset(provider.capabilities)
+               or values["max_output_tokens"] > provider.maximum_output_tokens for provider in providers):
+            raise TaskError("model_capability_mismatch", "selected provider cannot fulfill this task profile")
+        primary = providers[0]
+        return (primary.binding.provider, match.model if match and match.model else primary.model,
+                providers)
 
     def resolve(self, run: TaskRun, request: PromptRequest) -> ResolvedModelPlan:
         task = run.validate()
@@ -81,48 +150,45 @@ class ModelRouter:
                               context.role_binding.role, context.scope)
         snapshot = require(self.configuration.read(context.actor, target=target,
                            group_id=profile.group, observed_at=run.supervisor.now()))
-        values = {name.rsplit(".", 1)[1]: item.value for name, item in snapshot.fields.items()}
-        if values["fallback"] == values["provider"]:
+        provider_default = self.provider_default(context, profile, snapshot)
+        routed_snapshot = self.apply_provider_default(profile, snapshot, provider_default)
+        values = {name.rsplit(".", 1)[1]: item.value for name, item in routed_snapshot.fields.items()}
+        fallback_field = routed_snapshot.fields[profile.group + ".fallback"]
+        if values["fallback"] and values["fallback"] == values["provider"] and fallback_field.explicit:
             raise TaskError("model_fallback_duplicate", "fallback must select a different provider")
+        evaluated_at = run.supervisor.now()
         try:
-            rules = checked_rules(values["replacement_rules"])
-            validate_targets(rules, self.providers, capabilities=profile.capabilities,
-                             max_output_tokens=values["max_output_tokens"])
+            match, selected, in_scope = self._route_selection(profile, values, context, request, evaluated_at)
+        except TaskError:
+            # TaskError is itself a ValueError, but its stable code is the
+            # product diagnostic we need to preserve (for example, an
+            # unregistered provider). Only malformed route definitions should
+            # be normalized to the generic route-invalid code below.
+            raise
         except ValueError as error:
             raise TaskError("model_route_invalid", str(error)) from error
-        # Only sealed inputs can trigger keyword routing. Recalled memory,
-        # persona prompts and tool continuations cannot change the chosen route.
-        texts = [material.payload for material in request.context.materials
-                 if material.source is not None and material.source.scope == context.scope
-                 and (material.purpose == "current_source" and material.source == request.event.source
-                      or material.purpose.startswith("merged_input:"))] if hasattr(request.event, "source") else []
-        evaluated_at = run.supervisor.now()
-        in_scope = (values["replacement_scope"] == "all" or
-                    values["replacement_scope"] == "conversation" and profile.kind == "conversation.reply" or
-                    values["replacement_scope"] == "plugin" and profile.kind != "conversation.reply")
-        match = match_route(rules, "\n".join(texts), evaluated_at) if in_scope else None
-        primary = match.provider_id if match else values["provider"]
-        provider_ids = (primary,) + ((values["fallback"],) if values["fallback"] and values["fallback"] != primary else ())
-        selected = []
-        for provider_id in provider_ids:
-            provider = self.providers.get(provider_id)
-            if provider is None:
-                raise TaskError("model_provider_unavailable", "configured provider has no local adapter")
+        for provider in selected:
             if not set(profile.capabilities).issubset(provider.capabilities):
                 raise TaskError("model_capability_mismatch", "provider lacks required model task capabilities")
-            if (request.images or request.videos) and "image" not in provider.capabilities:
+            if request.native_video_input and "video" not in provider.capabilities:
+                raise TaskError("model_capability_mismatch", "original video bytes require a native video provider")
+            if (request.images or request.videos and not request.native_video_input) and "image" not in provider.capabilities:
                 raise TaskError("model_capability_mismatch", "the original images require an image-capable provider")
             if request.audios and "audio" not in provider.capabilities:
                 raise TaskError("model_capability_mismatch", "the original voice requires an audio-capable provider")
             if values["max_output_tokens"] > provider.maximum_output_tokens:
                 raise TaskError("model_output_limit", "configured output exceeds provider capability")
-            selected.append(provider)
         audit = {
             "profile": {"kind": profile.kind, "version": profile.version, "lane": profile.lane.value},
             "configuration_token": snapshot.resolution_token,
-            "fields": {key: {"source": item.source.document() if item.source else "registry_default",
+            "fields": {key: {"source": item.source.document() if item.source else
+                             "host_conversation" if provider_default is not None and
+                             (key == profile.group + ".provider" or
+                              key == profile.group + ".fallback" and not profile.default_fallback)
+                             else "registry_default",
                              "explicit": item.explicit, "revision": item.source_revision}
-                       for key, item in snapshot.fields.items()},
+                       for key, item in routed_snapshot.fields.items()},
+            "provider_default": provider_default or profile.default_provider,
             "providers": [asdict(p.binding) for p in selected],
             "role_revision": context.role_binding.revision,
             "role_prompt_hash": digest(request.role_instruction),

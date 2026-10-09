@@ -5,12 +5,14 @@ from __future__ import annotations
 import base64
 from hashlib import sha256
 from io import BytesIO
+import warnings
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.conversation.media.models import ImageDescriptor
+from companion_v2.conversation.media.output_settings import effective_settings as image_settings, parse_scene_presets
 from companion_v2.execution.models import TaskContext, TaskError, digest, require
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -45,6 +47,8 @@ MANAGEMENT_SCOPE = "page.management"
 MANAGEMENT_ACTION = "memory.manage"
 ALBUM_LIMIT = 16
 THUMBNAIL_BYTES = 160 * 1024
+REFERENCE_THUMBNAIL_BYTES = 64 * 1024
+UPLOAD_MAX_BYTES = 12 * 1024 * 1024
 IMAGE_ROLES = tuple(role.value for role in ReferenceRole)
 
 
@@ -53,6 +57,7 @@ def _asset_view(repository, owner, asset):
         "asset_id": asset.asset_id,
         "label": asset.label,
         "roles": repository.roles_of(owner, asset.asset_id),
+        "usage": repository.usage_of(owner, asset.asset_id),
         "state": asset.state.value,
         "mime_type": asset.mime_type,
         "size_bytes": asset.size_bytes,
@@ -98,8 +103,8 @@ class ReferenceMaterialManagement:
         references = ReferenceConfigurationOwner(self.runtime).read(target, reference_fields())
         wardrobe = WardrobeConfigurationOwner(self.runtime).read(target, wardrobe_fields())
         return (
-            {key.removeprefix(REFERENCE_GROUP + "."): value for key, value in references.values.items()},
-            {key.removeprefix(WARDROBE_GROUP + "."): value for key, value in wardrobe.values.items()},
+            {key.removeprefix(REFERENCE_GROUP + "."): item.value for key, item in references.fields.items()},
+            {key.removeprefix(WARDROBE_GROUP + "."): item.value for key, item in wardrobe.fields.items()},
         )
 
     @staticmethod
@@ -118,8 +123,24 @@ class ReferenceMaterialManagement:
     def inventory(self, operator, context, *, at):
         owner = self._admit(operator, context, at)
         reference_options, wardrobe_options = self._settings(context)
-        assets = self.repository.list(owner, state=None)
+        assets = (*self.repository.list(owner, state=ReferenceState.ACTIVE),
+                  *self.repository.list(owner, state=ReferenceState.WITHDRAWN))
         items = self.repository.list_items(owner, state=None)
+        reference_views = []
+        for asset in assets:
+            view = _asset_view(self.repository, owner, asset)
+            if asset.state is ReferenceState.ACTIVE:
+                payload = self.repository.get_payload(owner, asset.asset_id)
+                if payload is not None:
+                    try:
+                        view["thumbnail"] = self._thumbnail(payload, byte_limit=REFERENCE_THUMBNAIL_BYTES)
+                    except TaskError as error:
+                        if error.code != "reference_thumbnail_invalid":
+                            raise
+                        view["thumbnail"] = ""
+                    except (Image.DecompressionBombError, Image.DecompressionBombWarning, OSError, ValueError):
+                        view["thumbnail"] = ""
+            reference_views.append(view)
         local_date = self._local_date(self.application, context, at)
         selected = self.repository.daily_outfit_item(owner, local_date)
         daily = None if selected is None else {
@@ -128,13 +149,117 @@ class ReferenceMaterialManagement:
         }
         return {
             "settings": {"references": reference_options, "wardrobe": wardrobe_options},
-            "references": [_asset_view(self.repository, owner, asset) for asset in assets],
+            "scene_presets": parse_scene_presets(image_settings(self.runtime, context)["scene_presets_json"]),
+            "references": reference_views,
             "wardrobe": [{"item_id": item.item_id, "name": item.name,
                           "description": item.description, "tags": item.tags,
                           "asset_id": item.asset_id, "state": item.state.value,
                           "revision": item.revision} for item in items],
             "daily_outfit": daily,
         }
+
+    @staticmethod
+    def _thumbnail(payload, *, byte_limit):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(payload)) as source:
+                source.load()
+                preview = ImageOps.exif_transpose(source)
+                preview.thumbnail((256, 256), Image.Resampling.LANCZOS)
+                rgba = preview.convert("RGBA")
+                canvas = Image.new("RGB", rgba.size, "#f3f4f4")
+                canvas.paste(rgba, mask=rgba.getchannel("A"))
+                thumbnail = BytesIO()
+                canvas.save(thumbnail, format="JPEG", quality=68, optimize=True)
+        data = thumbnail.getvalue()
+        if not data or len(data) > byte_limit:
+            raise TaskError("reference_thumbnail_invalid", "a reference preview exceeds its image budget")
+        return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+
+    @staticmethod
+    def _validate_upload(payload, declared_mime):
+        expected_format = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}.get(declared_mime)
+        if not expected_format:
+            raise TaskError("reference_image_type_invalid", "reference images support PNG, JPEG and WebP")
+        if not isinstance(payload, bytes) or not payload or len(payload) > UPLOAD_MAX_BYTES:
+            raise TaskError("reference_upload_too_large", "reference images must be 12 MiB or smaller")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(BytesIO(payload)) as source:
+                    if source.format != expected_format:
+                        raise TaskError("reference_image_type_mismatch", "the declared image type does not match its contents")
+                    if getattr(source, "n_frames", 1) != 1:
+                        raise TaskError("reference_image_animated", "animated images cannot be registered as reference material")
+                    source.verify()
+                with Image.open(BytesIO(payload)) as source:
+                    if source.format != expected_format:
+                        raise TaskError("reference_image_type_mismatch", "the declared image type does not match its contents")
+                    source.load()
+        except TaskError:
+            raise
+        except Exception as error:
+            raise TaskError("reference_image_invalid", "the image is damaged or cannot be decoded") from error
+        return declared_mime
+
+    def register_uploaded_reference(self, operator, context, *, at, payload, mime_type,
+                                    label, roles, operation_key):
+        owner = self._admit(operator, context, at)
+        reference_options, _wardrobe_options = self._settings(context)
+        if not reference_options["enabled"]:
+            raise TaskError("photo_reference_disabled", "turn on reference images for this role before registering one")
+        if type(label) is not str or label != label.strip() or len(label) > 120:
+            raise TaskError("reference_label_invalid", "the image label must be trimmed and under 120 characters")
+        operation_key = self._operation_key(operation_key)
+        selected_roles = self._roles(roles)
+        mime_type = self._validate_upload(payload, mime_type)
+        identifier = self._asset_id(owner, operation_key)
+        asset = ReferenceAsset(
+            asset_id=identifier, kind=ReferenceKind.REFERENCE_IMAGE, role=selected_roles[0],
+            content_hash=ContentDigest(sha256(payload).hexdigest()), size_bytes=len(payload),
+            mime_type=mime_type, media_ref=OWNED_REFERENCE_PREFIX + "upload:" + identifier,
+            source=ReferenceSource.OPERATOR, label=label)
+        existing = self.repository.get(owner, identifier)
+        expected_roles = tuple(role.value for role in selected_roles)
+        if existing is not None:
+            if (any(getattr(existing, field) != getattr(asset, field) for field in (
+                        "asset_id", "kind", "role", "content_hash", "size_bytes", "mime_type",
+                        "media_ref", "source", "label"))
+                    or existing.state is not ReferenceState.ACTIVE
+                    or self.repository.roles_of(owner, identifier) != expected_roles
+                    or self.repository.get_payload(owner, identifier) != payload):
+                raise TaskError("reference_operation_conflict", "this upload key already names different material")
+            return _asset_view(self.repository, owner, existing)
+        with self.runtime.transaction():
+            stored = self.repository.put(owner, asset, created_at=at, payload=payload)
+            for role in selected_roles[1:]:
+                self.repository.add_role(owner, identifier, role, created_at=at)
+        return _asset_view(self.repository, owner, stored)
+
+    def update_reference(self, operator, context, asset_id, *, at, label, roles, expected_revision, usage=None):
+        owner = self._admit(operator, context, at)
+        if type(asset_id) is not str or not asset_id:
+            raise TaskError("reference_asset_missing", "select one registered reference image")
+        if type(label) is not str or label != label.strip() or len(label) > 120:
+            raise TaskError("reference_label_invalid", "the image label must be trimmed and under 120 characters")
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise TaskError("reference_revision_invalid", "reload the reference material before editing")
+        selected_roles = self._roles(roles)
+        asset = self.repository.update_registration(
+            owner, asset_id, label=label, roles=selected_roles,
+            expected_revision=expected_revision, updated_at=at, usage=usage)
+        return _asset_view(self.repository, owner, asset)
+
+    def reorder_references(self, operator, context, *, expected_asset_ids, asset_ids, at):
+        owner = self._admit(operator, context, at)
+        for value in (expected_asset_ids, asset_ids):
+            if (type(value) is not list or len(value) > 24
+                    or any(type(item) is not str or not item or len(item) > 128 for item in value)
+                    or len(set(value)) != len(value)):
+                raise TaskError("reference_order_invalid", "the gallery order must contain unique reference IDs")
+        ordered = self.repository.reorder_active(
+            owner, expected_asset_ids=expected_asset_ids, asset_ids=asset_ids)
+        return {"asset_ids": list(ordered)}
 
     def album(self, operator, context, *, at, cursor=None):
         self._admit(operator, context, at)
@@ -221,11 +346,12 @@ class ReferenceMaterialManagement:
                 self.repository.add_role(owner, identifier, role, created_at=at)
         return _asset_view(self.repository, owner, stored)
 
-    def withdraw_reference(self, operator, context, asset_id, *, at):
+    def withdraw_reference(self, operator, context, asset_id, *, at, expected_revision=None):
         owner = self._admit(operator, context, at)
         if type(asset_id) is not str or not asset_id:
             raise TaskError("reference_asset_missing", "select one registered reference image")
-        return {"withdrawn": bool(self.repository.withdraw(owner, asset_id, updated_at=at))}
+        return {"withdrawn": bool(self.repository.withdraw(
+            owner, asset_id, updated_at=at, expected_revision=expected_revision))}
 
     def register_wardrobe_item(self, operator, context, *, at, operation_key, name,
                                description="", tags=(), asset_id=None):

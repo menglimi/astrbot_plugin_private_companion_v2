@@ -59,7 +59,15 @@ class ImageQuotaGate:
         """Raise when this parent task may not dispatch another image action today."""
         context = task.spec.context
         scope = self._classify(task)
+        from .output_settings import effective_settings
+        settings = effective_settings(self.runtime, context)
+        if scope != "proactive" and (not settings["allow_user_requests"] or settings["trigger_mode"] == "off"):
+            raise TaskError("image_requests_disabled", "image requests are disabled for this role")
         limit = self._limit(context, scope)
+        extra = settings["proactive_max_daily"] if scope == "proactive" else (
+            settings["rule_max_daily"] if settings["trigger_mode"] == "rules" else -1)
+        if extra >= 0:
+            limit = extra if limit < 0 else min(limit, extra)
         if limit < 0:
             return
         if self._used(context, scope, at) >= limit:

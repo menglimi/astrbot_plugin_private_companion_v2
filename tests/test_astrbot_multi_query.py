@@ -6,11 +6,24 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tests import test_astrbot_staging_host as sdk_environment
 from astrbot.api.web import PluginMultiDict
+from astrbot_host.acquaintance_api import AcquaintanceWebAPI
 from astrbot_host.multi_api import MultiHostWebAPI
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.execution.models import TaskError
 
 
 class MultiQueryTests(unittest.IsolatedAsyncioTestCase):
+    def test_acquaintance_route_query_reads_plugin_multidict_without_integer_iteration(self):
+        route = PluginMultiDict([("platform", "qq"), ("bot_id", "bot-a"),
+                                 ("account_id", "100"), ("role_id", "role-a")])
+        self.assertEqual(AcquaintanceWebAPI._route_query(route), {
+            "platform": "qq", "bot_id": "bot-a", "account_id": "100", "role_id": "role-a",
+        })
+        self.assertIsNone(AcquaintanceWebAPI._route_query(PluginMultiDict([])))
+        with self.assertRaises(TaskError) as error:
+            AcquaintanceWebAPI._route_query(PluginMultiDict([("platform", "qq")]))
+        self.assertEqual(error.exception.code, "acquaintance_route_required")
+
     async def test_control_accepts_sdk_keys_and_rejects_ambiguous_parameters(self):
         controller = NS(probe=AsyncMock(return_value=Outcome.success({})),
                         authorize_delivery=AsyncMock(return_value=Outcome.success({})))

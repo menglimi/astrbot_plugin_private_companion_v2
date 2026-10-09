@@ -5,6 +5,7 @@ from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import OperationRef, ScopeKind, VersionRef
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+from companion_v2.identity_policy.grants import PERSON_PERMISSION_GRANT_PREFIX
 
 from .configuration import GROUP, PURPOSES, RELATIONSHIP_BUDGET_FIELDS, target_for
 from .preferences import ContactPreferences
@@ -65,6 +66,10 @@ class ContactManagement:
 
     def _grants(self, enabled, operation_id):
         identity, context = self.app.tasks.identity, self.context
+        if any(grant.grant_id.startswith(PERSON_PERMISSION_GRANT_PREFIX)
+               and grant.capability == GROUP and grant.scope == context.scope
+               and grant.subject == context.actor.subject for grant in identity.snapshot().grants):
+            return
         for grant in identity.snapshot().grants:
             if (grant.grant_id.startswith(GRANT_PREFIX) and grant.capability == GROUP
                     and grant.scope == context.scope and grant.subject == context.actor.subject
@@ -75,8 +80,7 @@ class ContactManagement:
                 subject=context.actor.subject, scope=context.scope, capability=GROUP,
                 tier=AuthorizationTier.STANDARD, valid_from=self.app.now(), expected_revision=identity.revision)
 
-    @outcome
-    def configure(self, operator, data):
+    def _configure(self, operator, data, *, require_running):
         if (type(data) is not dict or set(data) != {"operation_key", "edit_token", "changes"}
                 or type(data["operation_key"]) is not str or not data["operation_key"].strip()
                 or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
@@ -84,10 +88,15 @@ class ContactManagement:
                 or type(data["changes"]) is not dict or not data["changes"]
                 or any(type(key) is not str for key in data["changes"])):
             raise TaskError("contact_configuration_invalid", "provide original settings, edit token and stable operation key")
-        self.app.require_running()
+        if require_running:
+            self.app.require_running()
+        elif (set(data["changes"]) != {"enabled"}
+                or type(data["changes"]["enabled"]) is not bool or data["changes"]["enabled"]):
+            raise TaskError("contact_configuration_invalid", "stopped contact recovery may only revoke contact permission")
         with self.runtime.transaction():
             self._authorize(operator)
-            require(self.app.tasks.check_generation())
+            if require_running:
+                require(self.app.tasks.check_generation())
             fields = {field.field_id.removeprefix(GROUP + ".") for field in self.app.configuration.registry.group(GROUP)}
             if set(data["changes"]) - fields:
                 raise TaskError("contact_configuration_invalid", "contact settings contain unknown fields")
@@ -103,3 +112,17 @@ class ContactManagement:
             result = {"operation_id": operation_id, "replayed": receipt.replayed, "status": self._status(operator)}
         self.app.notify()
         return result
+
+    @outcome
+    def configure(self, operator, data):
+        return self._configure(operator, data, require_running=True)
+
+    @outcome
+    def restore_temporary_disable(self, operator, data):
+        """Revoke a temporary setup-test grant without starting host intake."""
+        if (type(data) is not dict or type(data.get("changes")) is not dict
+                or set(data["changes"]) != {"enabled"}
+                or type(data["changes"].get("enabled")) is not bool
+                or data["changes"]["enabled"]):
+            raise TaskError("contact_configuration_invalid", "stopped contact recovery may only revoke contact permission")
+        return self._configure(operator, data, require_running=False)

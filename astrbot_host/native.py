@@ -11,11 +11,14 @@ from astrbot import __version__ as ASTRBOT_VERSION
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
-from astrbot.core.message.components import Image, Reply, Forward, Record, Video
+from astrbot.core.provider.sources.gemini_source import ProviderGoogleGenAI
+from astrbot.core.message.components import Image, Reply, Forward, Record, Video, File
 
-from companion_v2.adapters.astrbot.native import HostPersona, NativePrivateBridge, account_number, persona_instruction
+from companion_v2.adapters.astrbot.native import (
+    HostPersona, NativePrivateBridge, account_number, bounded_native_lookup, persona_instruction,
+)
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
-from companion_v2.adapters.astrbot.provider_catalog import assemble_providers
+from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.adapters.astrbot.staging_config import REQUIRED_CAPABILITIES, StagingConfiguration
 from companion_v2.execution.models import digest
@@ -26,12 +29,18 @@ from .media import load_native_image
 from .audio.loader import load_native_audio
 from .media_components import group_components, private_components
 from .video.loader import load_native_video
+from .files.loader import load_native_file
+from .video.gemini_provider import GeminiNativeVideoProvider
 from .quotes import load_native_quote, load_native_group_quote
 from .forwards import load_native_forwards, load_native_group_forwards
 
 
 HOST_ID = "astrbot-local-staging"
 ECOSYSTEM_ID = "companion-v2"
+
+
+def _native_video_provider(context, bridge, native_types, native, settings):
+    return GeminiNativeVideoProvider(context, bridge, native_types, native, settings=settings)
 
 
 def installed_native_types() -> NativeAdapterTypes:
@@ -56,6 +65,10 @@ def installed_native_types() -> NativeAdapterTypes:
         video=Video,
         video_loader=load_native_video,
         group_component_reader=group_components,
+        file=File,
+        file_loader=load_native_file,
+        video_provider_type=ProviderGoogleGenAI,
+        video_provider_factory=_native_video_provider,
     )
 
 
@@ -192,22 +205,25 @@ class NativeProbeService:
 
         umo = f"{settings.platform_id}:FriendMessage:{settings.participant_id}"
         manager = self.context.conversation_manager
-        conversation_id = await manager.get_curr_conversation_id(umo)
+        conversation_id = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
         conversation = (
-            await manager.get_conversation(umo, conversation_id, create_if_not_exists=False)
+            await bounded_native_lookup(manager.get_conversation(umo, conversation_id, create_if_not_exists=False),
+                                        operation="conversation")
             if conversation_id is not None
             else None
         )
         if conversation_id is not None and conversation is None:
             raise HostControlError("staging_conversation_missing", "the selected AstrBot conversation is unavailable")
         provider_settings = self.context.get_config(umo=umo).get("provider_settings", {})
-        selected, persona, _, special = await self.context.persona_manager.resolve_selected_persona(
-            umo=umo,
-            conversation_persona_id=conversation.persona_id if conversation is not None else None,
-            platform_name="aiocqhttp",
-            provider_settings=provider_settings,
+        selected, persona, _, special = await bounded_native_lookup(
+            self.context.persona_manager.resolve_selected_persona(
+                umo=umo,
+                conversation_persona_id=conversation.persona_id if conversation is not None else None,
+                platform_name="aiocqhttp",
+                provider_settings=provider_settings,
+            ), operation="persona"
         )
-        if await manager.get_curr_conversation_id(umo) != conversation_id:
+        if await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_verify") != conversation_id:
             raise HostControlError("staging_conversation_changed", "the AstrBot conversation changed during the probe")
         if special or persona is None and selected not in (None, "[%None]"):
             raise HostControlError("staging_persona_unsupported", "the selected AstrBot persona cannot be pinned")
@@ -221,7 +237,10 @@ class NativeProbeService:
         if type(provider) is not self.native_types.provider:
             raise HostControlError("staging_provider_unsupported", "the configured provider does not use the verified AstrBot adapter")
         assemble_providers(self.context, bridge=None, native_types=self.native_types,
-                           primary_id=settings.provider_id, additional=settings.additional_providers)
+                           primary_id=settings.provider_id, additional=settings.additional_providers,
+                           defaults=TextProviderSettings(settings.provider_id, settings.tariff,
+                               settings.max_output_tokens, settings.maximum_input_estimate,
+                               settings.output_parameter, settings.streaming))
 
         installation_id = settings.installation_id
         scope = ScopeRef(

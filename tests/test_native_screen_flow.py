@@ -2,11 +2,9 @@
 
 import base64
 from dataclasses import replace
-import importlib
 import io
 import json
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,6 +12,11 @@ from unittest.mock import patch
 from PIL import Image, ImageGrab
 
 from astrbot_host.native_extensions import NativeExtensionRegistry
+from astrbot_host.native_extensions.screen_provider import (
+    NativeScreenProvider,
+    PLUGIN_ID as SCREEN_PACKAGE_ID,
+    capture_local_screen,
+)
 from companion_v2.adapters.astrbot.model_wire import build_wire
 from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
 from companion_v2.conversation.flow import ConversationPolicy
@@ -22,20 +25,12 @@ from companion_v2.conversation.media.models import ImageDescriptor
 from companion_v2.conversation.media.screen import ScreenPromptImage
 from companion_v2.execution.models import TaskError
 from companion_v2.model_gateway.models import ToolCall
+from companion_v2.product import PRODUCT_VERSION
 from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS, SCREEN_READ, ScreenOriginalStore
 from companion_v2.sources import SourceRepository
 from tests.test_host_application import HostFixture
 from tests.test_management_access import NOW, SCOPE
 from tests.test_role_tool_loop import answered, requested
-
-
-def provider_module():
-    plugin_parent = str(Path(__file__).resolve().parents[2])
-    sys.path.insert(0, plugin_parent)
-    try:
-        return importlib.import_module("astrbot_plugin_screen_companion.native_v2.provider")
-    finally:
-        sys.path.remove(plugin_parent)
 
 
 def sample_jpeg():
@@ -48,7 +43,7 @@ def sample_jpeg():
 class NativeScreenCaptureTests(unittest.TestCase):
     def test_default_capture_uses_pillow_and_returns_bounded_jpeg(self):
         with patch.object(ImageGrab, "grab", return_value=Image.new("RGB", (8, 8), "green")) as grab:
-            body = provider_module()._capture_local()
+            body = capture_local_screen()
         grab.assert_called_once_with(all_screens=False)
         with Image.open(io.BytesIO(body)) as image:
             self.assertEqual((image.format, image.size), ("JPEG", (8, 8)))
@@ -88,13 +83,12 @@ class NativeScreenFlowTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         return self.jpeg
 
     def create_screen_registry(self):
-        provider = provider_module().NativeScreenProvider(self.provider_directory, version="3.3.1",
-            device_id="synthetic-desktop", platform_id="onebot", account_id=SCOPE.account_id,
-            bot_id=SCOPE.bot_id, capture=self.capture, now=self.clock.now)
+        provider = NativeScreenProvider(self.provider_directory, version=PRODUCT_VERSION,
+            capture=self.capture, now=self.clock.now)
         self.screen_provider = provider
         self.addAsyncCleanup(provider.close)
-        star = SimpleNamespace(root_dir_name="astrbot_plugin_screen_companion",
-            name="astrbot_plugin_screen_companion", version="3.3.1", activated=True,
+        star = SimpleNamespace(root_dir_name=SCREEN_PACKAGE_ID,
+            name=SCREEN_PACKAGE_ID, version=PRODUCT_VERSION, activated=True,
             star_cls=SimpleNamespace(extension_api=SimpleNamespace(
                 companion_v2_native=lambda: provider)))
         registry = NativeExtensionRegistry(SimpleNamespace(get_all_stars=lambda: (star,)), now=self.clock.now)
@@ -125,7 +119,7 @@ class NativeScreenFlowTests(HostFixture, unittest.IsolatedAsyncioTestCase):
 
     async def restart_screen(self, host):
         await host.application.close()
-        await self.screen_provider.close()
+        self.screen_provider.close()
         generation = self.screen_provider.generation
         self.native_registry = self.create_screen_registry()
         self.assertEqual(self.screen_provider.generation, generation)

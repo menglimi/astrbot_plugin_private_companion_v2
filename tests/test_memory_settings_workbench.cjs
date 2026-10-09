@@ -127,6 +127,7 @@ function harness({hosted = true, memoryApi = MEMORY_PATH} = {}) {
   const sessionStorage = {getItem: key => store.get(key) || null,
     setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key)};
   const window = {
+    addEventListener() {}, removeEventListener() {},
     CompanionProduct: {
       hosted: () => hosted,
       role: () => (memoryApi ? {memory_api: memoryApi} : {}),

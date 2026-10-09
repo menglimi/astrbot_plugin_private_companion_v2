@@ -27,41 +27,50 @@ class VersionedRecords:
     def operation_key(self, context):
         return self.owner_key(context)
 
-    def get(self, context, identifier):
+    def get(self, context, identifier, *, storage_key=None):
         row = self.runtime.read_one(
             f"SELECT record_json FROM {self.domain}_records WHERE owner_key = ? AND record_id = ?",
-            (self.owner_key(context), identifier))
+            (storage_key or self.owner_key(context), identifier))
         return json.loads(row["record_json"]) if row else None
 
-    def list(self, context, *, after_id="", limit=100):
+    def list(self, context, *, after_id="", limit=100, storage_key=None, kinds=None):
         if type(limit) is not int or not 1 <= limit <= 100 or type(after_id) is not str:
             raise TaskError("record_page_invalid", "invalid record page")
+        values, parameters = ["owner_key = ?", "record_id > ?"], [storage_key or self.owner_key(context), after_id]
+        if kinds is not None:
+            kinds = tuple(kinds)
+            if not kinds or any(type(kind) is not str or not kind for kind in kinds):
+                raise TaskError("record_page_invalid", "invalid record kind filter")
+            values.append("json_extract(record_json, '$.kind') IN (" + ", ".join("?" for _ in kinds) + ")")
+            parameters.extend(kinds)
+        parameters.append(limit)
         return tuple(json.loads(row["record_json"]) for row in self.runtime.read_all(
-            f"SELECT record_json FROM {self.domain}_records WHERE owner_key = ? AND record_id > ? ORDER BY record_id LIMIT ?",
-            (self.owner_key(context), after_id, limit)))
+            f"SELECT record_json FROM {self.domain}_records WHERE {' AND '.join(values)} ORDER BY record_id LIMIT ?",
+            tuple(parameters)))
 
-    def version(self, context, identifier, revision):
+    def version(self, context, identifier, revision, *, storage_key=None):
         row = self.runtime.read_one(
             f"SELECT record_json FROM {self.domain}_history WHERE owner_key = ? AND record_id = ? AND revision = ?",
-            (self.owner_key(context), identifier, revision))
+            (storage_key or self.owner_key(context), identifier, revision))
         if row is None:
             raise TaskError("record_version_unavailable", "original record version is unavailable")
         return json.loads(row["record_json"])
 
-    def receipt(self, context, operation_id):
+    def receipt(self, context, operation_id, *, storage_key=None):
         row = self.runtime.read_one(
             f"SELECT result_json FROM {self.domain}_receipts WHERE owner_key = ? AND operation_id = ?",
-            (self.owner_key(context), operation_id))
+            (storage_key or self.owner_key(context), operation_id))
         if row is None:
             raise TaskError("operation_unavailable", "original domain operation is unavailable")
         return json.loads(row["result_json"])
 
-    def change(self, context, identifier, *, operation_key, expected_revision, parameters, transform, at):
+    def change(self, context, identifier, *, operation_key, expected_revision, parameters, transform, at,
+               storage_key=None):
         if (type(identifier) is not str or not identifier.strip() or len(identifier) > 512
                 or type(operation_key) is not str or not operation_key.strip() or len(operation_key) > 512
                 or type(expected_revision) is not int or expected_revision < 0):
             raise TaskError("record_command_invalid", "invalid record identity or revision")
-        key = self.owner_key(context)
+        key = storage_key or self.owner_key(context)
         operation_id = self.domain + ":" + digest([self.operation_key(context), operation_key])
         operation = OperationRef(operation_id, self.domain, context.scope, VersionRef(operation_id, 1),
                                  operation_id)
@@ -70,7 +79,7 @@ class VersionedRecords:
                 parameter_hash=digest([context.key, identifier, expected_revision, parameters]), observed_at=at))
             if reservation.replayed:
                 return {**self.receipt(context, operation_id), "replayed": True}
-            current = self.get(context, identifier)
+            current = self.get(context, identifier, storage_key=key)
             if (current["revision"] if current else 0) != expected_revision:
                 raise TaskError("record_revision_conflict", "record changed; read its current revision")
             if current and current["updated_at"] > stamp(at):

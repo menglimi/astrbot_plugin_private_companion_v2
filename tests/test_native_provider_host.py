@@ -7,12 +7,17 @@ from types import SimpleNamespace
 import unittest
 
 from astrbot_host.native_extensions import NativeExtensionRegistry
+from astrbot_host.native_extensions.builtins import BundledNativeLease, MANAGED_EXTENSIONS
+from astrbot_host.native_extensions.screen_provider import NativeScreenProvider, PLUGIN_ID as SCREEN_PACKAGE_ID
 from companion_v2.capabilities import native_reads
-from companion_v2.capabilities.models import CapabilityAuthorizationState
+from companion_v2.capabilities.models import CapabilityAuthorizationState, CapabilityPackageDescriptor, FurnitureDescriptor
 from companion_v2.capabilities.repositories import CapabilityRepository
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.execution.models import encode
 from companion_v2.model_gateway.models import ToolCall
+from companion_v2.product import PRODUCT_VERSION
+from companion_v2.screen import SCREEN_EXTENSION
+from companion_v2.storage.runtime import StorageRuntime
 from tests.test_host_application import HostFixture
 from tests.test_management_access import NOW, SCOPE
 from tests.test_native_extensions_registry import Context, Port, Star
@@ -80,7 +85,7 @@ class NativeProviderHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.failure.code, "native_provider_changed")
         self.assertEqual(self.capabilities.descriptors(extension_id="image"), ())
 
-    async def test_catalog_conflict_rolls_back_other_packages(self):
+    async def test_catalog_identity_conflict_isolates_the_optional_package(self):
         port = Port()
         port.document["plugin_id"] = "zz_native_test"
         port.document["package"].update(extension_id="second", package_id="zz_native_test")
@@ -91,11 +96,57 @@ class NativeProviderHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         registry = NativeExtensionRegistry(context)
         self.addCleanup(registry.close)
         host = self.host(tool_port=registry)
-        package = registry.declarations()[-1].descriptor.package
-        self.capabilities.register_descriptor(replace(package, artifact_hash="old-package"), registered_at=NOW).unwrap()
+        package = next(item.descriptor.package for item in registry.declarations()
+                       if item.descriptor.package.extension_id == "image")
+        old_package = replace(package, package_id="astrbot_plugin_legacy_image",
+                              publisher_id="menglimi", artifact_hash="old-package")
+        self.capabilities.register_descriptor(old_package, registered_at=NOW).unwrap()
         result = registry.register_catalog(observed_at=NOW)
-        self.assertEqual(result.failure.code, "capability_descriptor_conflict")
-        self.assertEqual(self.capabilities.descriptors(extension_id="image"), ())
+        self.assertIsNone(result.failure)
+        self.assertEqual(tuple(item.extension_id for item in result.unwrap()), ("second",))
+        self.assertIn((self.port.document["plugin_id"], "capability_identity_conflict"), registry.issues)
+        self.assertIsNotNone(self.runtime.read_one(
+            "SELECT 1 FROM capability_descriptors WHERE extension_id = ? AND package_id = ?",
+            ("image", "astrbot_plugin_legacy_image")))
+        self.assertIsNotNone(self.runtime.read_one(
+            "SELECT 1 FROM capability_descriptors WHERE extension_id = ? AND package_id = ?",
+            ("second", "zz_native_test")))
+
+    async def test_native_screen_identity_does_not_rewrite_legacy_screen_records(self):
+        provider = NativeScreenProvider(self.runtime.data_root / "screen-native", version=PRODUCT_VERSION,
+                                        now=self.clock.now)
+        lease = BundledNativeLease(SCREEN_PACKAGE_ID, provider,
+            furniture=FurnitureDescriptor("screen", SCREEN_EXTENSION, "屏幕台", "screen"))
+        self.addCleanup(lease.close)
+        identity_runtime = StorageRuntime.open(data_root=self.root / "screen-identity",
+                                               installation_id=self.runtime.installation_id)
+        self.addCleanup(identity_runtime.close)
+        capabilities = CapabilityRepository(identity_runtime)
+        legacy = CapabilityPackageDescriptor(
+            extension_id="companion.screen", package_id="astrbot_plugin_screen_companion",
+            publisher_id="menglimi", package_version="3.3.1", artifact_hash="a" * 64,
+            capabilities=("screen.read", "screen.process"), dataset_owners=("screen",))
+        capabilities.register_descriptor(legacy, registered_at=NOW).unwrap()
+
+        package = lease.manifest.package
+        self.assertEqual(package.extension_id, "companion.screen.native")
+        self.assertNotEqual(package.extension_id, legacy.extension_id)
+        capabilities.register_descriptor(package, registered_at=NOW).unwrap()
+        self.assertIsNotNone(identity_runtime.read_one(
+            "SELECT 1 FROM capability_descriptors WHERE extension_id = ? AND package_id = ?",
+            ("companion.screen", "astrbot_plugin_screen_companion")))
+        self.assertIsNotNone(identity_runtime.read_one(
+            "SELECT 1 FROM capability_descriptors WHERE extension_id = ? AND package_id = ?",
+            ("companion.screen.native", SCREEN_PACKAGE_ID)))
+
+    async def test_legacy_screen_provider_is_not_discovered_for_native_v2_furniture(self):
+        port = Port()
+        port.document["plugin_id"] = "astrbot_plugin_screen_companion"
+        port.document["package"].update(extension_id="companion.screen",
+                                        package_id="astrbot_plugin_screen_companion")
+        registry = NativeExtensionRegistry(Context(Star(port)), managed_extensions=MANAGED_EXTENSIONS)
+        self.addCleanup(registry.close)
+        self.assertEqual(registry.declarations(), ())
 
     async def test_dispatch_keeps_original_task_audience_and_receipt(self):
         host, batch, row = await self.invoke()

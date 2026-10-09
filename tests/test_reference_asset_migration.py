@@ -12,6 +12,7 @@ from companion_v2.storage.reference_asset_schema import (
     REFERENCE_ASSET_TABLES, reference_limit,
 )
 from companion_v2.storage.runtime import StorageRuntime
+from tests.execution_support import remove_v51
 
 
 NEW_TABLES = frozenset({"reference_assets", "reference_asset_roles", "wardrobe_items"})
@@ -48,7 +49,6 @@ class ReferenceAssetMigrationTests(unittest.TestCase):
 
     def test_fresh_root_lands_on_v43_with_the_asset_tables(self):
         self.open_runtime()
-        self.assertEqual(schema.SCHEMA_VERSION, schema.SCHEMA_VERSION_V45)
         version = self.query("SELECT value FROM runtime_metadata WHERE key = 'schema_version'")[0][0]
         # The head version moves as later migrations land; what this test owns is
         # that the v43 asset migration ran and its tables exist.
@@ -60,6 +60,13 @@ class ReferenceAssetMigrationTests(unittest.TestCase):
         self.assertTrue(NEW_TABLES.issubset(names), NEW_TABLES - names)
         self.assertEqual(schema.REFERENCE_ASSET_TABLES if hasattr(schema, "REFERENCE_ASSET_TABLES")
                          else REFERENCE_ASSET_TABLES, NEW_TABLES)
+        columns = {row[1] for row in self.query("PRAGMA table_info(reference_assets)")}
+        self.assertIn("position", columns)
+        final_migration = self.query("SELECT from_version, to_version FROM schema_migrations WHERE migration_id = ?",
+                                     (schema.MIGRATION_V50_TO_V51_ID,))
+        self.assertEqual(len(final_migration), 1)
+        self.assertEqual((final_migration[0]["from_version"], final_migration[0]["to_version"]),
+                         (schema.SCHEMA_VERSION_V50, schema.SCHEMA_VERSION_V51))
 
     def test_the_whole_migration_chain_is_recorded(self):
         self.open_runtime()
@@ -92,6 +99,29 @@ class ReferenceAssetMigrationTests(unittest.TestCase):
         self.open_runtime()
         self.assertEqual(self.query("SELECT COUNT(*) FROM schema_migrations")[0][0], first)
 
+    def test_v50_assets_keep_their_existing_order_after_gallery_migration(self):
+        runtime = self.open_runtime()
+        runtime.close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v51(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (schema.SCHEMA_VERSION_V50,))
+            for owner, asset_id, created_at in (("owner-a", "b", "2026-10-02"),
+                                               ("owner-a", "a", "2026-10-01"),
+                                               ("owner-a", "c", "2026-10-02"),
+                                               ("owner-b", "d", "2026-10-03")):
+                connection.execute("""INSERT INTO reference_assets
+                    (owner_key, asset_id, kind, role, label, content_hash, size_bytes, mime_type,
+                     media_ref, source, state, revision, created_at, updated_at)
+                    VALUES(?, ?, 'reference_image', 'identity', '', ?, 10, 'image/png',
+                           'media', 'operator', 'active', 1, ?, ?)""",
+                    (owner, asset_id, "a" * 64, created_at, created_at))
+            connection.commit()
+        self.open_runtime()
+        rows = self.query("SELECT owner_key, asset_id, position FROM reference_assets ORDER BY owner_key, position")
+        self.assertEqual([tuple(row) for row in rows],
+                         [("owner-a", "a", 0), ("owner-a", "b", 1), ("owner-a", "c", 2), ("owner-b", "d", 0)])
+
     def test_reference_assets_carry_the_hash_and_role_constraints(self):
         self.open_runtime()
         columns = {row[1]: row for row in
@@ -103,9 +133,11 @@ class ReferenceAssetMigrationTests(unittest.TestCase):
         connection = self.writing()
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
-                """INSERT INTO reference_assets VALUES(
-                    'owner', 'asset-short', 'reference_image', 'identity', '', 'abc',
-                    10, 'image/png', 'media-1', 'operator', 'active', 1, 'now', 'now')""")
+                """INSERT INTO reference_assets(
+                    owner_key, asset_id, kind, role, label, content_hash, size_bytes, mime_type,
+                    media_ref, source, state, revision, created_at, updated_at, position)
+                    VALUES('owner', 'asset-short', 'reference_image', 'identity', '', 'abc',
+                    10, 'image/png', 'media-1', 'operator', 'active', 1, 'now', 'now', 0)""")
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO reference_asset_roles VALUES('owner', 'missing', 'identity', 'now')")
@@ -114,9 +146,11 @@ class ReferenceAssetMigrationTests(unittest.TestCase):
         self.open_runtime()
         connection = self.writing()
         connection.execute(
-            """INSERT INTO reference_assets VALUES(
-                'owner', 'asset-1', 'reference_image', 'identity', 'label', ?, 10,
-                'image/png', 'media-1', 'operator', 'active', 1, 'now', 'now')""",
+                """INSERT INTO reference_assets(
+                    owner_key, asset_id, kind, role, label, content_hash, size_bytes, mime_type,
+                    media_ref, source, state, revision, created_at, updated_at, position) VALUES(
+                    'owner', 'asset-1', 'reference_image', 'identity', 'label', ?, 10,
+                    'image/png', 'media-1', 'operator', 'active', 1, 'now', 'now', 0)""",
             ("a" * 64,))
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(

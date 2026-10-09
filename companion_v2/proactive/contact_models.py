@@ -38,7 +38,13 @@ class ContactJob:
     automatic_origin: dict | None = None
     last_reply: dict | None = None
     presentation_settings: dict | None = None
+    segmentation_settings: dict | None = None
     # The exact task deadline the contact must finish inside. Optional memory
     # recall borrows it as the query-session expiry so a session can never
     # outlive the message it was captured for.
     deadline_at: datetime | None = None
+    administrator_test: bool = False
+    diagnostic_source_backed: bool = False
+    diagnostic_origin: dict | None = None
+    expression_style: dict | None = None
+    dialogue_history: dict | None = None

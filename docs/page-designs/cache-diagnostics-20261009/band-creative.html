@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Token 构成条带 · 五种视觉范式</title>
+<style>
+  :root {
+    --bg: #05080F;
+    --card: #0F1725;
+    --line: rgba(148, 163, 184, .14);
+    --line-soft: rgba(148, 163, 184, .08);
+    --text: #E9EFFA;
+    --text-2: #93A4C0;
+    --text-3: #5C6C88;
+    --teal: #3EE0D0;
+    --green: #3FE0A6;
+    --blue: #6FA2FF;
+    --purple: #A17BFF;
+    --amber: #FFC258;
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(1200px 500px at 70% -10%, rgba(111,162,255,.06), transparent 60%),
+      radial-gradient(900px 420px at 10% 110%, rgba(161,123,255,.05), transparent 60%),
+      var(--bg);
+    font-family: var(--sans);
+    color: var(--text);
+    padding: 36px 24px 72px;
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page-head { width: 100%; max-width: 880px; margin-bottom: 4px; }
+  .page-head h1 { font-size: 17px; font-weight: 700; }
+  .page-head p { margin-top: 5px; font-size: 11.5px; color: var(--text-2); line-height: 1.7; }
+
+  .variant {
+    width: 100%; max-width: 880px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 16px 20px 15px;
+  }
+  .v-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .v-badge {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    color: var(--amber); background: rgba(255,194,88,.08);
+    border: 1px solid rgba(255,194,88,.28); border-radius: 999px; padding: 2px 9px;
+  }
+  .v-head h2 { font-size: 13px; font-weight: 700; }
+  .v-head .tail { margin-left: auto; font-size: 10px; color: var(--text-3); }
+  .v-note { font-size: 10.5px; color: var(--text-2); line-height: 1.6; margin-bottom: 13px; }
+  .v-note b { color: var(--text); }
+
+  .c-hit { color: var(--green); } .c-write { color: var(--teal); }
+  .c-plain { color: var(--purple); } .c-out { color: var(--amber); }
+
+  /* ===== 范式 1：点阵 —— 100 格 LED，每格 = 1% ===== */
+  .px-row { display: flex; gap: 2px; height: 15px; }
+  .px-row i {
+    flex: 1; min-width: 0; border-radius: 2px;
+    transition: filter 120ms ease, transform 120ms ease;
+  }
+  .px-row i:hover { filter: brightness(1.35); transform: scaleY(1.18); }
+  .px-meta { display: flex; margin-top: 6px; font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+  .px-meta .m-in { flex: 89; } .px-meta .m-out { flex: 10; text-align: right; }
+  .px-meta .m-in b { color: var(--blue); font-weight: 600; }
+
+  /* ===== 范式 2：终端 —— 字形即数据 ===== */
+  .term-wrap { position: relative; padding: 9px 12px 7px; border-radius: 8px; background: #060A12; border: 1px solid rgba(148,163,184,.1); overflow: hidden; }
+  .term-wrap::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,.022) 0 1px, transparent 1px 3px);
+  }
+  .term-band { font-family: var(--mono); font-size: 13px; line-height: 1; letter-spacing: -.5px; white-space: nowrap; overflow: hidden; }
+  .term-band b { font-weight: 400; }
+  .term-meta { display: flex; justify-content: space-between; margin-top: 6px; font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+  .term-meta b { color: var(--text-2); font-weight: 500; }
+  .term-cursor { display: inline-block; width: 7px; height: 12px; background: var(--green); opacity: .85; vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ===== 范式 3：棱镜 —— 斜切晶面链 ===== */
+  .prism-row { display: flex; align-items: stretch; height: 26px; padding: 2px 8px; }
+  .prism-row > span {
+    transform: skewX(-18deg); border-radius: 3px; margin: 0 2px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.34), inset 0 -2px 3px rgba(0,0,0,.3), 1px 0 0 rgba(255,255,255,.06);
+    transition: filter 140ms ease;
+  }
+  .prism-row > span:hover { filter: brightness(1.15); }
+  .prism-meta { display: flex; margin-top: 7px; font-size: 9.5px; font-weight: 650; }
+  .prism-meta span { white-space: nowrap; overflow: hidden; }
+  .prism-meta .off1 { padding-left: 6%; } .prism-meta .off2 { padding-left: 5%; } .prism-meta .off3 { padding-left: 4%; }
+
+  /* ===== 范式 4：霓虹负形 —— 深底 + 发光界线 ===== */
+  .neon-wrap { position: relative; height: 24px; border-radius: 7px; overflow: hidden; }
+  .neon-wrap .fill { position: absolute; inset: 0; display: flex; }
+  .neon-wrap .fill i { height: 100%; }
+  .neon-wrap .f-hit { flex: 42.7; background: rgba(63,224,166,.09); }
+  .neon-wrap .f-write { flex: 18.3; background: rgba(62,224,208,.09); }
+  .neon-wrap .f-plain { flex: 28.6; background: rgba(161,123,255,.09); }
+  .neon-wrap .f-out { flex: 10.4; background: rgba(255,194,88,.09); }
+  .neon-wrap .tube { position: absolute; top: 0; bottom: 0; width: 3px; border-radius: 2px; }
+  .neon-wrap .tube::before, .neon-wrap .tube::after {
+    content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+    width: 7px; height: 7px; border-radius: 50%;
+  }
+  .neon-wrap .tube::before { top: -2px; } .neon-wrap .tube::after { bottom: -2px; }
+  .neon-wrap .t1 { left: calc(42.7% - 1.5px); background: var(--teal); box-shadow: 0 0 9px rgba(62,224,208,.9); }
+  .neon-wrap .t1::before, .neon-wrap .t1::after { background: var(--teal); box-shadow: 0 0 8px rgba(62,224,208,.9); }
+  .neon-wrap .t2 { left: calc(61% - 1.5px); background: var(--purple); box-shadow: 0 0 9px rgba(161,123,255,.9); }
+  .neon-wrap .t2::before, .neon-wrap .t2::after { background: var(--purple); box-shadow: 0 0 8px rgba(161,123,255,.9); }
+  .neon-wrap .t3 { left: calc(89.6% - 1.5px); background: var(--amber); box-shadow: 0 0 9px rgba(255,194,88,.85); }
+  .neon-wrap .t3::before, .neon-wrap .t3::after { background: var(--amber); box-shadow: 0 0 8px rgba(255,194,88,.85); }
+  .neon-meta { display: flex; margin-top: 8px; font-size: 9.5px; font-weight: 650; }
+  .neon-meta span { white-space: nowrap; overflow: hidden; }
+
+  /* ===== 范式 5：波形 —— 信号示波纹理 ===== */
+  .wave-wrap { position: relative; display: flex; align-items: flex-end; gap: 2px; height: 26px; padding-bottom: 1px; border-bottom: 1px solid rgba(148,163,184,.18); }
+  .wave-wrap i { flex: 1; min-width: 0; border-radius: 1.5px 1.5px 0 0; transition: filter 120ms ease; }
+  .wave-wrap i:hover { filter: brightness(1.4); }
+  .wave-meta { display: flex; justify-content: space-between; margin-top: 6px; font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+  .wave-meta .sig b { color: var(--text-2); font-weight: 500; }
+</style>
+</head>
+<body>
+
+  <div class="page-head">
+    <h1>Token 构成条带 · 五种视觉范式</h1>
+    <p>不再是「圆角条 + 渐变」的换皮——五种范式各自换掉条带的<b>表达方式</b>本身。数据同前：命中 42.7 / 写入 18.3 / 普通 28.6 / 输出 10.4（占总量），界线在 42.7% / 61% / 89.6%。落码配色换主题 token。</p>
+  </div>
+
+  <!-- ===== 1 点阵 ===== -->
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">范式 1</span><h2>点阵 · 一百格账本</h2><span class="tail">离散 · 可数 · 诚实</span></div>
+    <p class="v-note">条带不再是连续色块，而是 <b>100 个独立格，每格 = 1% 的本期 Token</b>。占比是"数出来"的而不是"量出来"的——和你账本页的气质同源。悬停任意格会立起。</p>
+    <div class="px-row" id="pxBand" role="img" aria-label="Token 构成点阵：缓存命中 43 格，缓存写入 18 格，普通输入 29 格，输出 10 格，每格代表百分之一"></div>
+    <div class="px-meta">
+      <span class="m-in">输入侧 <b>89 格</b> · 缓存覆盖 68.1%</span>
+      <span class="m-out">输出侧 <b>10 格</b>（±1 格为四舍五入）</span>
+    </div>
+  </section>
+
+  <!-- ===== 2 终端 ===== -->
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">范式 2</span><h2>终端 · 字形即数据</h2><span class="tail">维护页的原生语言</span></div>
+    <p class="v-note">用等宽字形 <b>█▓▒░</b> 直接"打印"构成：命中是实心 █，写入降一档 ▓，普通输入 ▒，输出 ░——<b>明度本身就在编码层级</b>，色只是辅助。自带扫描线与闪烁光标，和缓存诊断的排障语境严丝合缝。</p>
+    <div class="term-wrap">
+      <div class="term-band" id="termBand" role="img" aria-label="Token 构成终端字形：缓存命中实心块，缓存写入次密块，普通输入稀疏块，输出最稀疏块"></div>
+      <div class="term-meta"><span>CACHE://composition --period=current</span><b>hit <span class="c-hit">42.7%</span> · write <span class="c-write">18.3%</span> · plain <span class="c-plain">28.6%</span> · out <span class="c-out">10.4%</span></b></div>
+    </div>
+  </section>
+
+  <!-- ===== 3 棱镜 ===== -->
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">范式 3</span><h2>棱镜 · 斜切晶面链</h2><span class="tail">几何签名 · 独一份的剪影</span></div>
+    <p class="v-note">全页所有条形都是矩形——这条偏不：四段<b>平行四边形晶面</b>斜切咬合，像一条被打磨过的棱镜链。斜切方向统一 -18°，顶部内高光模拟玻璃折面。剪影即签名，一眼认出这是"构成卡"。</p>
+    <div class="prism-row" role="img" aria-label="Token 构成棱镜链：缓存命中 42.7%，缓存写入 18.3%，普通输入 28.6%，输出 10.4%">
+      <span class="s-hit c-hit-b" style="flex:42.7;background-image:linear-gradient(180deg,#3FE0A6,#16A36C)"></span>
+      <span style="flex:18.3;background-image:linear-gradient(180deg,#3EE0D0,#129C93)"></span>
+      <span style="flex:28.6;background-image:linear-gradient(180deg,#A17BFF,#6340D6)"></span>
+      <span style="flex:10.4;background-image:linear-gradient(180deg,#FFC258,#D98A0C)"></span>
+    </div>
+    <div class="prism-meta">
+      <span class="c-hit">命中 42.7%</span>
+      <span class="c-write off1">写入 18.3%</span>
+      <span class="c-plain off1">普通 28.6%</span>
+      <span class="c-out off2">输出 10.4%</span>
+    </div>
+  </section>
+
+  <!-- ===== 4 霓虹负形 ===== -->
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">范式 4</span><h2>霓虹负形 · 光只画界线</h2><span class="tail">负空间编码 · 最反直觉</span></div>
+    <p class="v-note">反转常规：段内几乎全黑（9% 透明度），<b>只有三条数据界线是发光的霓虹管</b>，两端带节点灯。深色主题里最省墨、最戏剧化——"构成不是涂出来的，是切出来的"。悬停无段可高亮，界线即焦点。</p>
+    <div class="neon-wrap" role="img" aria-label="Token 构成霓虹界线：界线位于 42.7%、61% 与 89.6%，各段以极暗底色区分">
+      <div class="fill"><i class="f-hit"></i><i class="f-write"></i><i class="f-plain"></i><i class="f-out"></i></div>
+      <span class="tube t1"></span><span class="tube t2"></span><span class="tube t3"></span>
+    </div>
+    <div class="neon-meta">
+      <span class="c-hit">← 命中 42.7%</span>
+      <span class="c-write" style="margin-left:14%">写入 18.3%</span>
+      <span class="c-plain" style="margin-left:12%">普通 28.6%</span>
+      <span class="c-out" style="margin-left:auto">输出 10.4% →</span>
+    </div>
+  </section>
+
+  <!-- ===== 5 波形 ===== -->
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">范式 5</span><h2>波形 · 信号示波纹理</h2><span class="tail">把构成画成一条被测信号</span></div>
+    <p class="v-note">条带变成一段<b>示波器信号</b>：120 根微柱的振幅做纹理噪声，颜色在数据界线处切换。隐喻直给——缓存命中率本来就该像信号一样"越稳越好"。底部基线 + 等宽注记，仪器感自然长出来。</p>
+    <div class="wave-wrap" id="waveBand" role="img" aria-label="Token 构成波形：120 根振幅柱，颜色按缓存命中、缓存写入、普通输入、输出分段"></div>
+    <div class="wave-meta">
+      <span class="sig">SIG://cache-composition · 120 samples</span>
+      <span class="c-hit">hit 42.7%</span><span class="c-write">write 18.3%</span><span class="c-plain">plain 28.6%</span><span class="c-out">out 10.4%</span>
+    </div>
+  </section>
+
+<script>
+  // 范式 1：100 格点阵
+  (function () {
+    var segs = [[43, "#3FE0A6"], [18, "#3EE0D0"], [29, "#A17BFF"], [10, "#FFC258"]];
+    var band = document.getElementById("pxBand");
+    segs.forEach(function (s) {
+      for (var i = 0; i < s[0]; i++) {
+        var c = document.createElement("i");
+        c.style.background = s[1];
+        band.appendChild(c);
+      }
+    });
+  })();
+
+  // 范式 2：终端字形（密度字符编码层级）
+  (function () {
+    var glyphs = { hit: "█", write: "▓", plain: "▒", out: "░" };
+    var counts = { hit: 43, write: 18, plain: 29, out: 10 };
+    var colors = { hit: "#3FE0A6", write: "#3EE0D0", plain: "#A17BFF", out: "#FFC258" };
+    var el = document.getElementById("termBand");
+    ["hit", "write", "plain", "out"].forEach(function (k) {
+      var b = document.createElement("b");
+      b.style.color = colors[k];
+      b.textContent = Array(counts[k] + 1).join(glyphs[k]);
+      el.appendChild(b);
+    });
+    var cur = document.createElement("span");
+    cur.className = "term-cursor";
+    el.appendChild(cur);
+  })();
+
+  // 范式 5：120 根波形柱（确定性伪噪声）
+  (function () {
+    var cuts = [0.427, 0.61, 0.896];
+    var colors = ["#3FE0A6", "#3EE0D0", "#A17BFF", "#FFC258"];
+    var n = 120, band = document.getElementById("waveBand");
+    for (var i = 0; i < n; i++) {
+      var x = i / n;
+      var amp = 9 + 7 * Math.abs(Math.sin(i * 1.7) * Math.sin(i * 0.53)) + 4 * Math.abs(Math.sin(i * 0.29));
+      var bar = document.createElement("i");
+      var ci = x < cuts[0] ? 0 : x < cuts[1] ? 1 : x < cuts[2] ? 2 : 3;
+      bar.style.background = colors[ci];
+      bar.style.height = Math.min(24, Math.max(4, amp)).toFixed(1) + "px";
+      band.appendChild(bar);
+    }
+  })();
+</script>
+</body>
+</html>

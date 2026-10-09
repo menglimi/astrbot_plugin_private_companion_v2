@@ -30,7 +30,16 @@ MAX_INTERRUPT_CHARS = 80
 MEDIA_PLACEHOLDERS = frozenset((
     "[图片]", "【图片】", "图片", "[语音]", "【语音】", "语音", "[视频]", "【视频】", "视频",
     "[文件]", "【文件】", "文件", "[合并转发]", "[分享卡片]"))
+MEDIA_PLACEHOLDER_PATTERN = re.compile(
+    r"(?:\[(?:图片|语音|音频|视频|文件|合并转发|引用消息|分享卡片)(?:不可用|\s+\d+)?\]"
+    r"|【(?:图片|语音|音频|视频|文件|合并转发|引用消息|分享卡片)(?:不可用|\s+\d+)?】)")
 TRAILING_MARKS = re.compile(r"[!！?？。.,，~～…]+$")
+
+
+def clean_group_text(text):
+    """Remove adapter media labels before deriving any group text signal."""
+    compact = " ".join(MEDIA_PLACEHOLDER_PATTERN.sub(" ", str(text or "")).split())
+    return "" if compact in MEDIA_PLACEHOLDERS else compact
 
 
 @dataclass(frozen=True)
@@ -73,7 +82,7 @@ def repeat_signature(text):
     placeholder, so those never accumulate under one signature. Trailing
     punctuation is dropped, because "哈哈" and "哈哈！" are the same repeat.
     """
-    compact = " ".join(str(text or "").replace(ADDRESS_MARKER, " ").split())
+    compact = clean_group_text(str(text or "").replace(ADDRESS_MARKER, " "))
     if not compact or compact in MEDIA_PLACEHOLDERS:
         return ""
     compact = TRAILING_MARKS.sub("", compact).strip()

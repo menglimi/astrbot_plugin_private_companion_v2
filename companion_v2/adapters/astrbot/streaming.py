@@ -2,7 +2,7 @@
 
 The native SDK still assembles the final completion. This transcript detects
 missing ends, swallowed accumulator failures and mismatched tool arguments;
-incremental text is never treated as an approved reply or a tool operation.
+incremental content is offered only to the reply owner's structured decoder.
 """
 
 from contextlib import aclosing
@@ -12,7 +12,7 @@ from .native import native_id
 
 
 class StreamTranscript:
-    def __init__(self, client):
+    def __init__(self, client, on_content=None):
         self.client = client
         self.stream = None
         self.response_id = None
@@ -24,6 +24,7 @@ class StreamTranscript:
         self.chunks = 0
         self.usage_receipt = None
         self.refusal = False
+        self.on_content = on_content
 
     def _fragment(self, value):
         if value is None:
@@ -105,6 +106,10 @@ class StreamTranscript:
         async def chunks():
             async for chunk in self.stream:
                 self.observe(chunk)
+                choice = chunk.choices[0] if chunk.choices else None
+                if (self.on_content is not None and choice is not None and choice.delta is not None
+                        and choice.delta.content and not self.calls and not self.refusal):
+                    await self.on_content(choice.delta.content)
                 yield chunk
             self.ended = True
         return chunks()

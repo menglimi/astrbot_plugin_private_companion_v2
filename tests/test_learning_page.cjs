@@ -45,7 +45,7 @@ const ACTIONS_FOR = {
   retired: ['retire'],
 };
 function withActions(rows) {
-  return rows.map(row => ({...row, actions: ACTIONS_FOR[row.state] || []}));
+  return rows.map(row => ({...row, actions: row.actions.length ? row.actions : ACTIONS_FOR[row.state] || []}));
 }
 function review(id, extra = {}) {
   return {
@@ -119,8 +119,10 @@ function harness() {
 }
 
 /* 列表与审阅都从挂载时并行发起，所以夹具要循环答「谁在飞就答谁」。 */
-async function boot(h, rows = [], reviews = [], extra = {}) {
-  const mounted = h.page.mount(h.element);
+async function boot(h, rows = [], reviews = [], extra = {}, selection = {}) {
+  const mounted = h.page.mount(h.element, {growthApi:selection.growthApi || GROWTH,
+    scopeKey:selection.scopeKey || 'selected-growth-scope', layout:selection.layout,
+    roleLabel:selection.roleLabel || '选定角色'});
   await h.settle();
   const answered = new Set();
   for (let round = 0; round < 20; round++) {
@@ -139,6 +141,10 @@ async function boot(h, rows = [], reviews = [], extra = {}) {
       if (request.route === 'growth/progress') {
         h.reply(request, {items: reviews, next_cursor: extra.reviewNext || null,
           context_key: 'ctx', role_id: 'role-1'});
+        continue;
+      }
+      if (request.route.endsWith('/growth/evidence') || request.route === 'growth/evidence') {
+        h.reply(request, {items:[{text:'本轮可核验的原始依据',issued_at:'2026-10-07T08:00:00+00:00'}]});
         continue;
       }
       h.reply(request, {});
@@ -186,14 +192,33 @@ test('挂载后同时读列表与待审阅，路径是插件相对路径', async
   assert.equal(h.page.state.data.reviews.length, 1);
 });
 
+test('成长链路在选定角色范围内读取详情凭证并使用工作台布局', async () => {
+  const h = harness();
+  await boot(h, [record('g-1','active')], [], {}, {layout:'chain',roleLabel:'角色 A'});
+  assert.ok(h.requests.some(request => request.method === 'GET' && request.route === 'growth/evidence'
+    && request.params.growth_id === 'g-1'));
+  assert.match(h.element.innerHTML, /lea-chain-grid/);
+  assert.match(h.element.innerHTML, /依据与凭证/);
+  assert.match(h.element.innerHTML, /本轮可核验的原始依据/);
+  assert.match(h.element.innerHTML, /权限开关/);
+});
+
 test('没有角色路由时不发请求，并说明原因', async () => {
   const h = harness();
-  h.window.CompanionProduct.role = () => null;
   await h.page.mount(h.element);
   await h.settle();
   assert.equal(h.requests.length, 0);
   assert.equal(h.page.state.data.ready, false);
-  assert.ok(h.element.innerHTML.includes('按「角色 + 对象」保存'), '要说清是缺对象');
+  assert.match(h.element.innerHTML, /还没有可管理的角色成长记录/);
+});
+
+test('成长列表使用学习工作台选定的角色路由，不读取当前聊天角色', async () => {
+  const h = harness();
+  h.window.CompanionProduct.role = () => ({role_id:'current-chat', growth_api:'/' + HOST + '/current-chat/growth'});
+  await boot(h, [record('g-1', 'active')], [], {},
+    {growthApi:'/' + HOST + '/targets/profile-2/roles/role-2/growth', scopeKey:'profile-2:role-2'});
+  assert.ok(h.requests.some(request => request.route === 'targets/profile-2/roles/role-2/growth'));
+  assert.ok(!h.requests.some(request => request.route.includes('current-chat')));
 });
 
 test('权限随列表一起回来，不用另发一次请求', async () => {
@@ -287,7 +312,11 @@ test('来源不可读取时说明读不到，而不是显示空卡', async () =>
   assert.ok(html.includes('is-blind'), '要有专门的视觉标记');
   /* 详情里也要说清楚，并且要说明为什么只能归档。 */
   click(h, {id: 'g-9'});
-  assert.ok(h.element.innerHTML.includes('读不到来源就不该把内容摊出来'));
+  assert.match(h.element.innerHTML, /来源不可读；仅可归档/);
+  click(h, {action:'close-detail'});
+  click(h, {act:'retire',id:'g-9'});
+  assert.match(h.element.innerHTML, /来源已不可读取的记录/);
+  assert.doesNotMatch(h.element.innerHTML, /lea-confirm-target[^>]*>[^<]*g-9/);
 });
 
 /* ---- 审阅队列 --------------------------------------------------------- */
@@ -300,7 +329,7 @@ test('依据读不出来时只剩不采纳，并解释为什么', async () => {
   const html = h.element.innerHTML;
   assert.ok(html.includes('不采纳'), '要给出可用的那个动作');
   assert.ok(!/data-review="accept"/.test(html), '依据不可读时后端不给采纳，页面也不能给');
-  assert.ok(html.includes('无法核对'), '要解释为什么没有采纳');
+  assert.match(html, /依据不可读取，无法采纳/);
 });
 
 test('审阅裁决的载荷只有那五个字段', async () => {
@@ -328,7 +357,8 @@ test('读取关闭时，提案那一项跟随而不是独立', async () => {
   });
   click(h, {view: 'gate'});
   const html = h.element.innerHTML;
-  assert.ok(html.includes('跟随读取的判定'), '要画出从属关系');
+  assert.match(html, /需先启用读取权限/);
+  assert.match(html, /data-access="proposals_enabled"[^>]*disabled/);
   assert.ok(html.includes('is-following'), '要有专门的视觉标记');
 });
 
@@ -343,6 +373,14 @@ test('开关保存只提交这一个布尔，并带上 edit_token', async () => 
   assert.equal(Object.keys(post.values.changes).join(","), 'proposals_enabled', '一次只动一项');
   assert.equal(post.values.changes.proposals_enabled, false);
   assert.equal(post.values.edit_token, 'a'.repeat(64));
+  post.resolve({status: 'ok', data: {access: access({settings: {read_enabled: true, proposals_enabled: false}})}});
+  await h.settle();
+  const refresh = h.requests.filter(r => r.method === 'GET' && r.route === 'growth').at(-1);
+  h.reply(refresh, {items: withActions([record('g-1', 'active')]), next_cursor: null,
+    context_key: 'ctx', role_id: 'role-1', profile_id: 'profile-1', operator_name: 'operator',
+    access: access({settings: {read_enabled: true, proposals_enabled: false}})});
+  await h.settle();
+  assert.equal(h.page.state.data.writing, false, '保存完成后权限控件必须解除写入锁');
 });
 
 /* ---- 状态与轨道 ------------------------------------------------------- */
@@ -367,7 +405,7 @@ test('不认识的状态单独列出，不混进已知段', async () => {
   await boot(h, [record('g-1', 'active', 'skill', {state: 'archived_by_newer_version'})]);
   const html = h.element.innerHTML;
   assert.ok(html.includes('状态未识别'), '新状态要单独列出来');
-  assert.ok(html.includes('archived_by_newer_version'), '要显示原始取值');
+  assert.doesNotMatch(html, /archived_by_newer_version/, '未知状态以可读说明呈现');
   /* 关键：不能把它塞进任何已知状态段——塞进 achieved 会误报「已结束」，
      塞进 active 会误报「还在推进」。
      逐段切开比，而且只看**卡片**部分：未知段自己的提示文案里就写着这个状态名，

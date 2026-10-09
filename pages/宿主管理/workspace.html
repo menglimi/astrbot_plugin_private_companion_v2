@@ -7,7 +7,7 @@
   <title>账号与会话 · Companion V2</title>
   <link rel="stylesheet" href="style.css">
   <script src="/api/plugin/page/bridge-sdk.js" defer></script>
-  <script src="app.js?v=host-connection-20260930" defer></script>
+  <script src="app.js?v=role-topology-20261006" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -18,7 +18,7 @@
     <section class="status-panel" aria-labelledby="status-heading" aria-busy="true">
       <div class="panel-heading"><div><h2 id="status-heading">等待读取状态</h2></div><button id="refresh" class="button button-quiet" type="button">刷新状态</button></div>
       <dl class="status-grid">
-        <div><dt>运行实例</dt><dd id="profile">—</dd></div>
+        <div><dt>运行范围</dt><dd id="profile">—</dd></div>
         <div><dt>运行状态</dt><dd id="runtime-state">—</dd></div>
         <div><dt>是否接收消息</dt><dd id="accepting">—</dd></div>
       </dl>
@@ -29,7 +29,7 @@
       <div class="panel-heading topology-heading">
         <div>
           
-          <h2 id="topology-heading">Bot 账号 → 人格 → 会话窗口</h2>
+          <h2 id="topology-heading">账号 → 角色 / 人格 → 会话窗口</h2>
           
         </div>
         <div class="topology-summary" aria-live="polite">
@@ -38,13 +38,19 @@
         </div>
       </div>
       <p id="topology-note" class="topology-note" hidden></p>
-      <section class="binding-editor" aria-labelledby="binding-editor-heading" hidden>
-        <div class="binding-editor-heading"><div><h3 id="binding-editor-heading">绑定配置</h3><p>选择 Bot 账号、AstrBot 人格和要接管的会话窗口。</p></div><label class="switch-row"><input id="bindings-enabled" type="checkbox"><span>启用多账号接管</span></label></div>
-        <div class="binding-editor-columns"><div class="binding-editor-column"><div class="editor-column-head"><strong>Bot 账号</strong><button id="add-account" class="button button-quiet" type="button">添加账号</button></div><div id="edit-accounts"></div></div><div class="binding-editor-column"><div class="editor-column-head"><strong>人格</strong><button id="add-persona" class="button button-quiet" type="button">添加人格</button></div><div id="edit-personas"></div></div><div class="binding-editor-column"><div class="editor-column-head"><strong>会话窗口</strong><button id="add-session" class="button button-quiet" type="button">添加窗口</button></div><div id="edit-sessions"></div></div></div>
-        <div class="binding-footer"><span id="binding-check" role="status">读取配置中</span><button id="save-bindings" class="button button-primary" type="button" disabled>检查并保存</button></div>
+      <div class="topology-toolbar"><span id="directory-state" role="status"></span></div>
+      <section class="binding-editor" aria-labelledby="binding-editor-heading">
+        <div class="binding-editor-heading">
+          <div><h3 id="binding-editor-heading">账号下的角色与人格</h3><p>读取 AstrBot 的账号和人格。将私聊、群聊人格归入同一角色，插件自动处理这些人格对应的会话窗口。</p></div>
+          <label class="binding-filter"><input id="hide-unlinked-personas" type="checkbox" checked><span>隐藏未关联窗口的人格</span></label>
+        </div>
+        <div class="binding-editor-columns role-binding-layout">
+          <div class="binding-editor-column"><div class="editor-column-head"><strong>Bot 账号</strong></div><div id="edit-accounts" class="account-binding-list"></div></div>
+        </div>
+        <div class="binding-footer"><span id="binding-check" role="status">读取配置中</span><button id="save-bindings" class="button button-primary" type="button" disabled>保存角色映射</button></div>
       </section>
       <div id="topology-empty" class="topology-empty" role="status" hidden>
-        <strong>暂时没有可绘制的绑定目录</strong>
+        <strong>还没有账号与会话链路</strong>
         
       </div>
       <div id="topology-canvas" class="topology-canvas" hidden>
@@ -52,21 +58,26 @@
         <section class="topology-column" data-topology-column="accounts" aria-labelledby="topology-accounts-heading">
           <div class="topology-column-heading">
             <span class="topology-column-index">01</span>
-            <span><strong id="topology-accounts-heading">Bot 账号</strong></span>
+            <span><strong id="topology-accounts-heading">AstrBot 账号</strong><small>平台与登录账号</small></span>
           </div>
           <div id="topology-accounts" class="topology-list"></div>
         </section>
-        <section class="topology-column" data-topology-column="personas" aria-labelledby="topology-personas-heading">
+        <section class="topology-column" data-topology-column="roles" aria-labelledby="topology-roles-heading">
           <div class="topology-column-heading">
             <span class="topology-column-index">02</span>
-            <span><strong id="topology-personas-heading">人格</strong></span>
+            <span><strong id="topology-roles-heading">角色 / 人格</strong><small>角色框分组 · 连线对应人格</small></span>
           </div>
-          <div id="topology-personas" class="topology-list"></div>
+          <div id="topology-roles" class="topology-list"></div>
         </section>
         <section class="topology-column" data-topology-column="sessions" aria-labelledby="topology-sessions-heading">
           <div class="topology-column-heading">
             <span class="topology-column-index">03</span>
             <span><strong id="topology-sessions-heading">会话窗口</strong></span>
+          </div>
+          <div id="topology-session-filters" class="topology-session-filters" role="group" aria-label="按会话类型筛选">
+            <button class="topology-session-filter" type="button" data-session-filter="all" aria-pressed="true">全部</button>
+            <button class="topology-session-filter" type="button" data-session-filter="private" aria-pressed="false">私聊</button>
+            <button class="topology-session-filter" type="button" data-session-filter="group" aria-pressed="false">群聊</button>
           </div>
           <div id="topology-sessions" class="topology-list topology-session-list"></div>
           <nav id="topology-session-pagination" class="topology-pagination" aria-label="会话窗口分页" hidden>
@@ -76,57 +87,29 @@
           </nav>
         </section>
       </div>
-      
-    </section>
-
-    <section class="actions-panel" aria-labelledby="actions-heading">
-      <div class="panel-heading">
-        <div>
-          
-          <h2 id="actions-heading">实例生命周期</h2>
+      <section id="group-target-panel" class="group-target-panel" aria-labelledby="group-target-heading" hidden>
+        <div class="panel-heading">
+          <div><h3 id="group-target-heading">群聊目标</h3><p class="group-target-intro">仅明确启用的群会接入 V2。</p></div>
+          <span id="group-target-count" class="group-target-count" aria-live="polite"></span>
         </div>
-        <span id="probe-state" class="probe-state">请先执行连接探测</span>
-      </div>
-      <div class="action-grid">
-        <article class="action-item">
-          <span class="action-mark" aria-hidden="true">01</span>
-          <h3>连接探测</h3>
-          <p>检查连接，不调用模型或发送消息。</p>
-          <button id="probe" class="button button-primary" type="button">执行探测</button>
-        </article>
-        <article class="action-item">
-          <span class="action-mark" aria-hidden="true">02</span>
-          <h3>初始化运行实例</h3>
-          
-          <button id="initialize" class="button" type="button" disabled>初始化</button>
-        </article>
-        <article class="action-item">
-          <span class="action-mark" aria-hidden="true">03</span>
-          <h3>启动接管</h3>
-          <p>开始处理匹配的入站消息。</p>
-          <button id="start" class="button" type="button" disabled>启动</button>
-        </article>
-        <article class="action-item">
-          <span class="action-mark" aria-hidden="true">04</span>
-          <h3>停止接管</h3>
-          <p>停止接收，等待当前任务完成。</p>
-          <button id="stop" class="button button-danger" type="button" disabled>停止</button>
-        </article>
-      </div>
-      
+        <p id="group-target-note" class="group-target-note" role="status"></p>
+        <div id="group-target-list" class="group-target-list"></div>
+        <div class="group-target-footer"><span id="group-target-state" role="status"></span><button id="save-group-targets" class="button button-primary" type="button" disabled>保存群目标</button></div>
+      </section>
+      <section id="session-manager" class="session-manager" aria-labelledby="session-manager-heading" hidden>
+        <div class="panel-heading"><h3 id="session-manager-heading"></h3><button id="close-session-manager" class="button button-quiet" type="button" aria-label="关闭详情" title="关闭">×</button></div>
+        <p id="session-manager-meta" class="session-manager-meta"></p>
+        <div id="session-manager-related" class="session-manager-related"></div>
+        <button id="topology-pin-session" class="button button-quiet topology-pin-session" type="button" aria-pressed="false" hidden>置顶窗口</button>
+        <section id="session-group-network" class="session-group-network" aria-labelledby="session-group-network-heading" hidden>
+          <div class="group-network-heading"><h4 id="session-group-network-heading">群成员与关系网</h4><span id="session-group-network-counts"></span></div>
+          <p id="session-group-network-state" class="group-network-state" role="status"></p>
+          <div id="session-group-network-content" class="session-group-network-content"></div>
+        </section>
+        <p id="session-manager-state" role="status"></p>
+      </section>
     </section>
-  </main>
 
-  <dialog id="confirm" aria-labelledby="confirm-heading" aria-describedby="confirm-copy">
-    <form method="dialog" class="confirm-form">
-      
-      <h2 id="confirm-heading">确认操作</h2>
-      <p id="confirm-copy"></p>
-      <div class="confirm-actions">
-        <button id="cancel" class="button button-quiet" value="cancel" type="submit">返回</button>
-        <button id="confirm-action" class="button button-primary" value="confirm" type="submit">继续</button>
-      </div>
-    </form>
-  </dialog>
+  </main>
 </body>
 </html>

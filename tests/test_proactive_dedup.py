@@ -6,18 +6,59 @@ import json
 from threading import Event, current_thread, main_thread
 import unittest
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
+from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.execution.models import TaskError
 from companion_v2.proactive.configuration import configuration_fields, dedup_policies
-from companion_v2.proactive.preferences import DEDUP_EVENT_POLICY, ContactPreferences
+from companion_v2.proactive.prompts import news_presentation_instruction
+from companion_v2.proactive.preferences import DEDUP_EVENT_POLICY, DEDUP_PURPOSE_POLICY, ContactPreferences
 from tests.contact_schedule_support import ContactScheduleFixture
 from tests.test_management_access import NOW
 from tests.test_role_tool_loop import answered
 
 
 class ProactiveDedupTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_afternoon_contact_keeps_yesterdays_reply_as_context_beyond_dedup_window(self):
+        self.clock.advance(timedelta(hours=12, minutes=8))
+
+        async def model(envelope):
+            return answered('{"decision":"skip","text":""}'
+                if isinstance(envelope.original.event, BackgroundPromptTrigger)
+                else "怎么会不理你呢？昨晚已经回复你了。")
+
+        self.model_behavior = model
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        self.settings(app, {"enabled": True}).unwrap()
+        batch = host.receive(self.event("yesterdays-answered-message", text="不理我")).unwrap()
+        await self.done(app, batch)
+        self.clock.advance(timedelta(hours=19, minutes=1))
+
+        opportunity = self.opportunity("afternoon-greeting")
+        await self.contact(app, opportunity, (self.intent(opportunity, purpose="greeting"),))
+        request = self.contact_calls()[-1].original
+        intent = json.loads(next(item.payload for item in request.context.materials
+                                 if item.purpose == "contact_intent"))
+        self.assertEqual((intent["local_date"], intent["local_time"]), ("2026-09-22", "15:09"))
+        dialogue = [json.loads(item.payload) for item in request.context.materials
+                    if item.purpose == "recent_private_dialogue"]
+        self.assertEqual([(item["role"], item["text"]) for item in dialogue], [
+            ("user", "不理我"), ("assistant", "怎么会不理你呢？昨晚已经回复你了。")])
+        self.assertNotIn("last_confirmed_reply", {item.purpose for item in request.context.materials})
+        self.assertIn("不要把旧消息当成仍待回复的内容重新接续", request.instruction)
+        self.assertIn("不要为了补齐问候而重新接续昨晚已回复的消息", request.instruction)
+        self.assertIn("role=user 的旧发言不是本轮新请求", request.instruction)
+
+        self.settings(app, {"generation_history_limit": 0, "dedup_enabled": False}).unwrap()
+        await self.contact(app, self.opportunity("without-history"))
+        self.assertFalse(any(item.owner == "delivery.history"
+                             for item in self.contact_calls()[-1].original.context.materials))
+        self.assertFalse(any(item.owner == "conversation.private_history"
+                             for item in self.contact_calls()[-1].original.context.materials))
+
     async def test_confirmed_exact_repeat_skips_with_reason_and_policy_can_exempt_route(self):
         app = await self.enabled()
         first = (await self.contact(app)).unwrap().task
@@ -91,7 +132,15 @@ class ProactiveDedupTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
                 return answered('{"decision":"send","text":"记住了。"}')
             return answered("记住了。")
         self.model_behavior = same
+        self.settings(app, {"generation_history_limit": 1}).unwrap()
         task = (await self.contact(app)).unwrap().task
+        materials = self.contact_calls()[-1].original.context.materials
+        dialogue = [json.loads(item.payload) for item in materials
+                    if item.purpose == "recent_private_dialogue"]
+        last_reply = [json.loads(item.payload) for item in materials
+                      if item.purpose == "last_confirmed_reply"]
+        self.assertEqual([item["role"] for item in dialogue], ["user"])
+        self.assertEqual([item["text"] for item in last_reply], ["记住了。"])
         self.assertEqual(app.proactive.observe(context, task.task_id).unwrap()["dedup_reason"], "exact_repeat")
         event_key = app.runtime.read_one("SELECT event_key FROM conversation_inputs WHERE batch_id = ?", (batch,))[0]
         app.withdraw(context, event_key).unwrap()
@@ -108,7 +157,7 @@ class ProactiveDedupTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
         event_key = app.runtime.read_one("SELECT event_key FROM conversation_inputs WHERE batch_id = ?", (batch,))[0]
         async def revoke(envelope):
             if isinstance(envelope.original.event, BackgroundPromptTrigger):
-                self.assertTrue(any(m.purpose == "last_confirmed_reply" for m in envelope.original.context.materials))
+                self.assertTrue(any(m.purpose == "recent_private_dialogue" for m in envelope.original.context.materials))
                 app.withdraw(context, event_key).unwrap()
                 return answered('{"decision":"send","text":"另一个话题"}')
             return answered("记住了。")
@@ -158,13 +207,37 @@ class ProactiveDedupTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
         app = await self.enabled()
         self.settings(app, {"dedup_min_shared_tokens": 3, "dedup_min_overlap_ratio": 0.65}).unwrap()
         await self.contact(app)
-        instruction = self.contact_calls()[-1].original.instruction
+        request = self.contact_calls()[-1].original
+        instruction = request.instruction
         self.assertIn("短话题最少共享锚点 3 个", instruction)
         self.assertIn("较长话题最低重叠比例 0.65", instruction)
+        intent = json.loads(next(item.payload for item in request.context.materials
+                                 if item.purpose == "contact_intent"))
+        local_now = self.clock.now().astimezone(ZoneInfo(intent["timezone"]))
+        self.assertEqual(intent["local_now"], local_now.isoformat())
+        self.assertEqual(intent["local_date"], local_now.date().isoformat())
+        self.assertEqual(intent["local_time"], local_now.strftime("%H:%M"))
+        self.assertIn("下午不要说“早安”或“早上好”", instruction)
+        self.assertIn("不要把旧消息当成仍待回复的内容重新接续", instruction)
         for changes in ({"dedup_min_shared_tokens": 0}, {"dedup_min_shared_tokens": 5},
                         {"dedup_min_overlap_ratio": -0.1}, {"dedup_min_overlap_ratio": 1.1}):
             with self.subTest(changes=changes):
                 self.assertFalse(self.settings(app, changes).is_success)
+
+
+class ProactiveFormattingPromptTests(unittest.TestCase):
+    def test_news_prompts_do_not_request_blank_lines(self):
+        single = news_presentation_instruction(SegmentationPolicy(enabled=False, max_segments=1))
+        bubbles = news_presentation_instruction(SegmentationPolicy(
+            enabled=True, llm_controlled=True, max_segments=3))
+        self.assertIn("不插入空行", single)
+        self.assertNotIn("留一个空行", single)
+        self.assertIn("消息边界前后也不要填充空白行", bubbles)
+
+    def test_paragraph_rule_boundary_is_compatible_with_edge_cleanup(self):
+        paragraphs = news_presentation_instruction(SegmentationPolicy(rule_mode="paragraphs"))
+        self.assertIn("用一个空行作为分段边界", paragraphs)
+        self.assertIn("程序会裁掉各条消息首尾的空行", paragraphs)
 
 
 class WeatherDedupCoverageTests(unittest.TestCase):
@@ -187,6 +260,10 @@ class WeatherDedupCoverageTests(unittest.TestCase):
             with self.subTest(origin=origin):
                 route = next(route for marker, route in DEDUP_EVENT_POLICY if marker == origin)
                 self.assertIn(route, self.enabled)
+
+    def test_every_registered_contact_purpose_has_a_deduplication_route(self):
+        from companion_v2.proactive.configuration import PURPOSES
+        self.assertEqual(set(DEDUP_PURPOSE_POLICY), set(PURPOSES))
 
     def test_a_weather_window_alone_cannot_suppress_anything(self):
         """Guards the reasoning above: the window is inert without a matching route."""

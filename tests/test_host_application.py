@@ -13,6 +13,8 @@ from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.conversation.messages import REPLY_KIND
+from companion_v2.conversation.segmentation import SegmentationPolicy
+from companion_v2.conversation.reply_settings import configuration_fields as reply_configuration_fields
 from companion_v2.execution.models import Lane, ProviderBinding, SupervisorLimits, TaskContext, TaskError, digest
 from companion_v2.foundation.clock import DeterministicClock
 from companion_v2.foundation.outcome import Outcome
@@ -63,8 +65,19 @@ class HostFixture(ManagementFixture):
             registry=self.registry, profiles=self.profiles, providers=self.providers,
             budget=BudgetPolicy(*(Amount(100000, 100000) for _ in range(5))), sender=self.sender,
             limits=self.limits, policy=policy or ConversationPolicy(part_gap_seconds=0),
-            now=now or self.clock.now, split=lambda text: tuple(text.splitlines(keepends=True)))
+            now=now or self.clock.now, split=lambda text: tuple(text.splitlines(keepends=True)),
+            segmentation=SegmentationPolicy(enabled=False))
         options.update(changes)
+        # Synthetic lifecycle tests explicitly use no punctuation cleanup and
+        # fixed spacing. Product defaults have their own V1 preset regression.
+        registry = options["registry"]
+        reply_fields = tuple(replace(field, default={"part_gap_mode": "fixed", "content_cleanup_enabled": False}.get(
+            field.field_id.removeprefix("conversation.presentation."), field.default))
+            for field in reply_configuration_fields(options["segmentation"], self.providers[0].default_streaming,
+                options["policy"].part_gap_seconds, options.get("voice_policy"))
+            if field.field_id not in registry.fields)
+        options["registry"] = FieldRegistry(version=registry.version,
+            fields=(*registry.fields.values(), *reply_fields))
         host = AstrBotCompanionHost(runtime or self.runtime, **options)
         self.addAsyncCleanup(host.application.close)
         return host
@@ -149,7 +162,7 @@ class HostApplicationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original.role_instruction, "原角色人格提示")
         self.assertEqual([m.payload for m in original.context.materials if m.owner == "conversation.host_input"],
                          ["输入 event-1", "输入 event-2"])
-        self.assertEqual([e.text for e in self.sent], ["第一段\n", "第二段"])
+        self.assertEqual([e.text for e in self.sent], ["第一段", "第二段"])
         self.assertEqual(len(app.messages.history(self.context(app, batch)).unwrap()["items"]), 2)
         self.assertEqual(host.receive(first).unwrap(), batch)
         await asyncio.sleep(0.01)

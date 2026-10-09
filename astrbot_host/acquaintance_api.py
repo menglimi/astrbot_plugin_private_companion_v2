@@ -1,43 +1,208 @@
-"""Dashboard directory for acquaintance cards and their per-capability authorization.
-
-The directory spans every configured target of the loaded profile. It is
-navigation data for the relations-and-permissions page: it grants no delivery
-authorization, exposes no private memory body and never mutates cards.
-
-The authorization routes beside it are the operator's one place to see and change
-what *one private participant* is allowed to do. What they may change is decided
-by ``PersonAuthorizationManagement`` from the grant id itself: a grant the loaded
-profile document re-issues on every load is reported with its real state and is
-refused here, naming where it is changed instead. Refusing is not a limitation we
-can lift by trying harder -- revoking such a grant is undone by the next
-bootstrap, so a page that offered the button would be lying.
-"""
+"""Dashboard directory and editors for trusted private-member routes."""
 
 from __future__ import annotations
 
 import json
+import asyncio
+import logging
+from datetime import datetime, timezone
 
 from astrbot.api.web import request
 
-from companion_v2.execution.models import TaskError, require
+from companion_v2.execution.models import TaskContext, TaskError, require
 from companion_v2.foundation.outcome import Outcome
-from companion_v2.foundation.refs import ScopeKind, ScopeRef
+from companion_v2.foundation.refs import AudienceRef, ScopeKind, ScopeRef
 from companion_v2.identity_policy.management import (
     PAGE_MANAGED_CAPABILITIES,
+    PERSON_ROUTE_KEYS,
     PersonAuthorizationManagement,
 )
+from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.memory.person.admin_names import PersonAcquaintanceNameManagement
 from companion_v2.memory.person.management import PersonAcquaintanceDirectory
+from companion_v2.memory.person.models import empty_document
+from companion_v2.knowledge.catalog import KnowledgeCatalog
+from companion_v2.relationships.group_network import (
+    PREFIX as GROUP_NETWORK_PREFIX,
+    VERSION as GROUP_NETWORK_VERSION,
+    GroupRelationshipStore,
+    attach_member_clues,
+)
+from companion_v2.relationships.private_management import PrivateMemberSettings
 
 from .management_identity import dashboard_operator
+from .display_names import display_names
+from .settings import HostControlError
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/acquaintance"
 AUTHORIZATION_PATH = PREFIX + "/authorization"
 ADMIN_NAME_PATH = PREFIX + "/admin-name"
+IDENTITY_PATH = PREFIX + "/identity"
+SETTINGS_PATH = PREFIX + "/settings"
 MAX_AUTHORIZATION_BODY = 8192
+logger = logging.getLogger(__name__)
+
+
+def _group_route_key(group):
+    return (group.get("platform_id") or group.get("platform") or "", group.get("bot_id") or "",
+            group.get("account_id") or "", str(group.get("group_id") or ""))
+
+
+def _persona_metadata(settings, bot_id, role_id):
+    """Label a stored role for display without changing its ownership or grants."""
+    if hasattr(settings, "all_targets"):
+        ids = [item.persona_id for item in settings.personas
+               if item.bot_id == bot_id and item.role_id == role_id]
+    else:
+        ids = [settings.persona_id] if (settings.bot_id, settings.role_id) == (bot_id, role_id) else []
+    if not ids:
+        return {}
+    ids = sorted({"" if item is None or item in ("", "[%None]") else item for item in ids})
+    from .identity_derivation import role_display_name
+    return {"persona_ids": ids, "role_name": role_display_name(role_id, ids)}
+
+
+def _include_native_groups(groups, sessions):
+    """Expose native group sessions as discoveries, without importing their authority."""
+    known = {_group_route_key(group): group for group in groups}
+    for session in sessions:
+        if not isinstance(session, dict) or session.get("native") is not True or session.get("scope_kind") != "group":
+            continue
+        group_id = str(session.get("group_id") or "")
+        platform_id = session.get("platform_id") or ""
+        if not group_id or not platform_id:
+            continue
+        group = {"group_id": group_id, "platform_id": platform_id,
+                 "bot_id": session.get("bot_id") or "", "account_id": session.get("account_id") or "",
+                 "configured": session.get("managed") is True, "discovered": True,
+                 "roles": list(session.get("roles") or []),
+                 "member_count": 0, "msg_count": 0}
+        key = _group_route_key(group)
+        existing = known.get(key)
+        if existing is not None:
+            existing["discovered"] = True
+            existing["configured"] = bool(existing.get("configured") or group["configured"])
+            existing["roles"] = list({role["role_id"]: role
+                for role in [*existing.get("roles", []), *group["roles"]]
+                if isinstance(role, dict) and role.get("role_id")}.values())
+            continue
+        known[key] = group
+        groups.append(group)
+
+
+def _group_relationship_networks(runtime, settings, persons, groups):
+    """Join group graph records with acquaintance cards and weak member clues.
+
+    This is one management projection.  The three inputs keep their provenance
+    in separate fields so a display name or imported account can never become an
+    identity assertion or a permission decision.
+    """
+    if runtime is None:
+        return ()
+    if hasattr(settings, "all_targets"):
+        # A wildcard group target is the automatic admission rule. It is not a
+        # literal group and must never appear as a fake member of the directory.
+        targets = [target for target in settings.all_targets
+                   if getattr(target, "group_id", None)
+                   and getattr(target, "group_id", None) != "*"]
+        role_ids = lambda target: tuple(sorted({p.role_id for p in settings.personas if p.bot_id == target.bot_id}))
+        mapped_roles = lambda bot_id: tuple(sorted({p.role_id for p in settings.personas if p.bot_id == bot_id}))
+    else:
+        targets = []
+        role_ids = lambda target: (settings.role_id,)
+        mapped_roles = lambda bot_id: (settings.role_id,) if bot_id == settings.bot_id else ()
+    def group_is_configured(platform_id, account_id, group_id, bot_id, role_id):
+        resolver = getattr(settings, "group_target", None)
+        if callable(resolver):
+            target = resolver(platform_id, account_id, group_id)
+            return target is not None and target.bot_id == bot_id and role_id in mapped_roles(bot_id)
+        return False
+
+    routes = []
+    for target in targets:
+        for role_id in role_ids(target):
+            routes.append((target.platform_id, target.bot_id, target.account_id, target.group_id, role_id,
+                           group_is_configured(target.platform_id, target.account_id,
+                                               target.group_id, target.bot_id, role_id)))
+    # Native discoveries are supplied by the session topology.  They do not
+    # carry a role of their own, so project one route per role mapped to the
+    # account.  A wildcard group target makes the route managed automatically.
+    for group in groups:
+        group_id = str(group.get("group_id") or "")
+        if not group_id or group_id == "*":
+            continue
+        if group.get("discovered") and not group.get("configured"):
+            continue
+        assigned = mapped_roles(group.get("bot_id", ""))
+        native_roles = {role.get("role_id") for role in group.get("roles", []) if isinstance(role, dict)}
+        roles = (tuple(sorted(native_roles.intersection(assigned))) if native_roles else
+                 tuple(sorted({group.get("role_id")} - {None, ""})) or assigned)
+        for role_id in roles:
+            key = (group.get("platform_id") or group.get("platform") or "", group.get("bot_id", ""),
+                   group.get("account_id", ""), group_id, role_id)
+            if all(key) and key not in {(a, b, c, d, e) for a, b, c, d, e, _ in routes}:
+                routes.append((*key, group_is_configured(key[0], key[2], key[3], key[1], key[4])))
+    # Historical groups are still useful in the directory after an operator
+    # removes a configured target, but their graph is never confused with a
+    # currently managed target.
+    known = {(a, b, c, d, e) for a, b, c, d, e, _ in routes}
+    for person in persons:
+        for group_id in person.get("groups", {}):
+            key = (person.get("platform"), person.get("bot_id"), person.get("account_id"), group_id,
+                   person.get("role_id"))
+            if key[0] and key[1] and key[2] and key[4] and key not in known:
+                known.add(key)
+                routes.append((*key, group_is_configured(key[0], key[2], key[3], key[1], key[4])))
+    prefix_length = len(GROUP_NETWORK_PREFIX)
+    for row in runtime.read_all("SELECT value FROM runtime_metadata WHERE substr(key, 1, ?) = ?",
+                                 (prefix_length, GROUP_NETWORK_PREFIX)):
+        try:
+            document = json.loads(row["value"])
+        except (TypeError, ValueError):
+            continue
+        group = document.get("group") if isinstance(document, dict) else None
+        if (not isinstance(document, dict) or document.get("version") != GROUP_NETWORK_VERSION
+                or not isinstance(group, dict)
+                or group.get("installation_id") != runtime.installation_id):
+            continue
+        key = (group.get("platform_id"), group.get("bot_id"), group.get("account_id"),
+               group.get("group_id"), group.get("role_id"))
+        if key[3] == "*":
+            continue
+        if all(key) and key not in known:
+            known.add(key)
+            routes.append((*key, group_is_configured(key[0], key[2], key[3], key[1], key[4])))
+    store = GroupRelationshipStore(runtime)
+    catalog = KnowledgeCatalog(runtime)
+    result = []
+    for platform_id, bot_id, account_id, group_id, role_id, configured in routes:
+        matching = [person for person in persons
+                    if person.get("platform") == platform_id and person.get("bot_id") == bot_id
+                    and person.get("account_id") == account_id and person.get("role_id") == role_id
+                    and group_id in person.get("groups", {})]
+        network = store.projection_for_route(runtime.installation_id, platform_id, bot_id, account_id,
+                                             group_id, role_id, people=matching)
+        scope = ScopeRef(runtime.installation_id, platform_id, ScopeKind.GROUP, group_id,
+                         bot_id, account_id, group_id, group_id)
+        try:
+            clues = catalog.member_entries(installation_id=runtime.installation_id, source_limit=64,
+                                           role_id=role_id, scope_ids=(group_id,), scope_kind=ScopeKind.GROUP,
+                                           scope=scope)
+        except Exception:
+            clues = ()
+        attach_member_clues(network, clues)
+        network.update({"platform_id": platform_id, "bot_id": bot_id, "account_id": account_id,
+                        "role_id": role_id,
+                        "role_name": next((person.get("role_name") for person in matching
+                                           if person.get("role_name")), None),
+                        "configured": configured,
+                        **_persona_metadata(settings, bot_id, role_id)})
+        result.append(network)
+    result.sort(key=lambda item: (not item["configured"], str(item.get("group_id") or ""), item["role_id"]))
+    return tuple(result)
 
 
 def _configured_windows(settings):
@@ -47,12 +212,12 @@ def _configured_windows(settings):
     manages what one person may do, and a group is not a person.
     """
     if not hasattr(settings, "all_targets"):
-        return [{"key": (settings.platform_id, settings.account_id, settings.participant_id)}]
-    return [{"key": (target.platform_id, target.account_id, target.participant_id)}
+        return [{"key": (settings.platform_id, settings.bot_id, settings.account_id, settings.participant_id)}]
+    return [{"key": (target.platform_id, target.bot_id, target.account_id, target.participant_id)}
             for target in settings.all_targets if not getattr(target, "group_id", None)]
 
 
-def _authorization_participants(runtime, settings):
+def _authorization_participants(runtime, settings, *, observed_at=None):
     """One entry per configured private person: their subject and their window.
 
     Both come from the registered conversation route rather than from settings.
@@ -64,15 +229,28 @@ def _authorization_participants(runtime, settings):
     """
     wanted = {entry["key"] for entry in _configured_windows(settings)}
     participants = []
+    identity = PersistentIdentityDirectory(runtime)
+    at = observed_at or datetime.now(timezone.utc)
     for row in runtime.read_all("SELECT record_json FROM conversation_routes", ()):
         route = ConversationRoute.restore(json.loads(row["record_json"]))
         if route.scene_kind is not ScopeKind.PRIVATE or route.user is None or not route.scope.is_resolved:
             continue
         scope = route.scope
-        if (scope.platform, scope.account_id, scope.native_scope_id) not in wanted:
+        key = scope.platform, scope.bot_id, scope.account_id, scope.native_scope_id
+        if not scope.native_scope_id or scope.native_scope_id == "*" or not (
+                key in wanted or (*key[:3], "*") in wanted):
+            continue
+        binding = identity.resolve_role(scope, observed_at=at)
+        if not binding.is_success:
+            continue
+        role_id = binding.unwrap().role.subject_id
+        mapped = ({item.role_id for item in settings.personas if item.bot_id == scope.bot_id}
+                  if hasattr(settings, "all_targets") else {settings.role_id})
+        if role_id not in mapped:
             continue
         participants.append({"target": None, "subject_id": route.user.subject_id,
-                             "subject": route.user, "scope": scope})
+                             "subject": route.user, "scope": scope,
+                             "role_id": role_id})
     return participants
 
 
@@ -83,13 +261,35 @@ def _directory_routes(settings):
             roles = [persona.role_id for persona in settings.personas if persona.bot_id == target.bot_id]
             routes.extend({"platform": target.platform_id, "bot_id": target.bot_id,
                            "account_id": target.account_id, "role_id": role_id} for role_id in roles)
-            if getattr(target, "group_id", None):
-                groups.append({"group_id": target.group_id, "bot_id": target.bot_id,
-                               "account_id": target.account_id, "member_count": 0, "msg_count": 0})
+            if getattr(target, "group_id", None) and target.group_id != "*":
+                groups.append({"target_id": target.target_id, "group_id": target.group_id, "bot_id": target.bot_id,
+                               "platform_id": target.platform_id, "account_id": target.account_id,
+                               "configured": True, "member_count": 0, "msg_count": 0})
     else:
         routes.append({"platform": settings.platform_id, "bot_id": settings.bot_id,
                        "account_id": settings.account_id, "role_id": settings.role_id})
     return routes, groups
+
+
+def _group_target_access(controller, settings):
+    """Describe the exact preconditions enforced by AccountSessionWebAPI."""
+    session = getattr(controller, "session", None)
+    application = getattr(session, "application", None)
+    session_state = str(getattr(application, "state", "unloaded"))
+    running = bool(getattr(controller, "_accepting", False)) or bool(
+        session is not None and session_state not in ("new", "stopped"))
+    multi = bool(getattr(controller, "_multi_host", False))
+    targets = tuple(getattr(settings, "all_targets", ())) if multi else ()
+    accounts = sorted({(item.platform_id, item.account_id, item.bot_id) for item in targets})
+    persona_bots = sorted({item.bot_id for item in getattr(settings, "personas", ())}) if multi else []
+    return {
+        "editable": multi and not running and not bool(getattr(controller, "_terminated", False)),
+        "running": running,
+        "session_state": session_state,
+        "accounts": [{"platform_id": platform, "account_id": account, "bot_id": bot}
+                     for platform, account, bot in accounts],
+        "persona_bots": persona_bots,
+    }
 
 
 class AcquaintanceWebAPI:
@@ -103,7 +303,68 @@ class AcquaintanceWebAPI:
                 (AUTHORIZATION_PATH, self.authorize, ["POST"],
                  "Switch one page-managed capability for one person"),
                 (ADMIN_NAME_PATH, self.set_admin_name, ["POST"],
-                 "Set a directory person's administrator-assigned display name")]
+                 "Set a directory person's administrator-assigned display name"),
+                (IDENTITY_PATH, self.set_identity, ["POST"], "Set one trusted person's management tier"),
+                (SETTINGS_PATH, self.member_settings, ["GET"], "Read one private member's settings"),
+                (SETTINGS_PATH, self.configure_member, ["POST"], "Save one private member's settings")]
+
+    def _settings(self):
+        settings = self.controller.settings
+        return settings if hasattr(settings, "all_targets") else self.controller.resolved_settings()
+
+    def _participants(self):
+        return _authorization_participants(self.controller.runtime, self._settings(), observed_at=self.controller.now())
+
+    def _members(self, result, settings):
+        """Configured people stay selectable before an acquaintance card exists."""
+        runtime = self.controller.runtime
+        identity = PersistentIdentityDirectory(runtime)
+        bindings = identity.snapshot().bindings
+        registered = self._participants()
+        persons = {tuple(person[key] for key in ("subject_id", *PERSON_ROUTE_KEYS)): person
+                   for person in result["persons"]}
+        if hasattr(settings, "all_targets"):
+            targets = [target for target in settings.all_targets if not getattr(target, "group_id", None)]
+        else:
+            targets = [settings]
+        entries = []
+        for entry in registered:
+            scope = entry["scope"]
+            entries.append((entry["subject"], scope.platform, scope.bot_id, scope.account_id,
+                            scope.native_scope_id, entry["role_id"]))
+        for target in targets:
+            if target.participant_id == "*":
+                continue
+            matched = [item for item in bindings if
+                (item.principal.platform, item.principal.bot_id, item.principal.account_id,
+                 item.principal.native_account_id) ==
+                (target.platform_id, target.bot_id, target.account_id, target.participant_id)]
+            if not matched:
+                continue
+            subject = matched[0].subject
+            roles = [(p.role_id, p.persona_id) for p in settings.personas if p.bot_id == target.bot_id] \
+                if hasattr(settings, "all_targets") else [(settings.role_id, settings.persona_id)]
+            entries.extend((subject, target.platform_id, target.bot_id, target.account_id,
+                            target.participant_id, role_id) for role_id in dict(roles))
+        for subject, platform_id, bot_id, account_id, participant_id, role_id in entries:
+            key = (subject.subject_id, platform_id, bot_id, account_id, role_id)
+            if key not in persons:
+                route = {"subject_id": subject.subject_id, "platform": platform_id,
+                         "bot_id": bot_id, "account_id": account_id, "role_id": role_id}
+                document = {**empty_document(), "native_account_id": participant_id}
+                persons[key] = PersonAcquaintanceDirectory(runtime)._person(route, document, None, 0)
+            persons[key].update(private_target=True,
+                settings_available=any(entry["subject"] == subject
+                    and (entry["scope"].platform, entry["scope"].bot_id, entry["scope"].account_id,
+                         entry["role_id"]) == key[1:] for entry in registered))
+        for person in persons.values():
+            person.update(_persona_metadata(settings, person["bot_id"], person["role_id"]))
+            row = runtime.read_one("SELECT tier FROM subject_access_tiers WHERE subject_kind = 'human' AND subject_id = ?",
+                                   (person["subject_id"],))
+            person["identity_tier"] = row["tier"] if row else "standard"
+        result["persons"] = list(persons.values())
+        result["counts"] = PersonAcquaintanceDirectory._counts(result["persons"])
+        return result
 
     async def _operator(self):
         """The signed-in-operator, loaded-profile gate both routes must pass.
@@ -130,7 +391,33 @@ class AcquaintanceWebAPI:
     def _management(self):
         controller = self.controller
         return PersonAuthorizationManagement(controller.runtime,
-            participants=_authorization_participants(controller.runtime, controller.settings))
+            participants=self._participants())
+
+    def _context(self, person, route):
+        subject, scope = self._management()._person(person, route)
+        identity = PersistentIdentityDirectory(self.controller.runtime)
+        for binding in identity.snapshot().bindings:
+            principal = binding.principal
+            if (binding.subject != subject or (principal.platform, principal.bot_id, principal.account_id,
+                    principal.native_account_id) != (scope.platform, scope.bot_id, scope.account_id, scope.native_scope_id)):
+                continue
+            actor = identity.resolve_authenticated(principal, observed_at=self.controller.now())
+            if actor.is_success and actor.unwrap().subject == subject:
+                role = require(identity.resolve_role(scope, observed_at=self.controller.now()))
+                if role.role.subject_id != route["role_id"]:
+                    break
+                return TaskContext(actor.unwrap(), role, AudienceRef(scope, (subject,)))
+        raise TaskError("acquaintance_route_unknown", "the selected private route is no longer current")
+
+    @staticmethod
+    def _route_query(query):
+        # AstrBot's PluginMultiDict exposes ``keys()`` but intentionally does
+        # not implement positional iteration; iterating it directly can ask
+        # for key ``0`` and turn a valid request into HTTP 500.
+        supplied = set(query.keys()).intersection(PERSON_ROUTE_KEYS)
+        if supplied and supplied != set(PERSON_ROUTE_KEYS):
+            raise TaskError("acquaintance_route_required", "provide one complete private member route")
+        return {key: query[key] for key in PERSON_ROUTE_KEYS} if supplied else None
 
     @staticmethod
     def _query(allowed, required=()):
@@ -148,27 +435,78 @@ class AcquaintanceWebAPI:
                 raise TaskError("acquaintance_request_invalid", "the directory does not accept query overrides")
             async with controller._control_lock:
                 username, _ = await self._operator()
-                routes, groups = _directory_routes(controller.settings)
-                result = PersonAcquaintanceDirectory(controller.runtime).directory(routes)
+                runtime, settings_snapshot = controller.runtime, controller.settings
+                settings = self._settings()
+                group_access = _group_target_access(controller, settings)
+                routes, groups = _directory_routes(settings)
+                result = self._members(PersonAcquaintanceDirectory(controller.runtime).directory(routes), settings)
+            topology = getattr(controller, "session_topology", None)
+            if topology is not None:
+                try:
+                    _include_native_groups(groups, await topology.inventory())
+                except Exception as error:
+                    logger.exception("AstrBot native group directory read failed")
+                    detail = " ".join(str(error).split())
+                    reason = "AstrBot 原生群聊目录读取失败"
+                    reason += (f"（{type(error).__name__}: {detail[:512]}）" if detail
+                               else f"（{type(error).__name__}）")
+                    raise TaskError("acquaintance_native_directory_unavailable", reason) from error
+            async with controller._control_lock:
+                await self._operator()
+                if controller.runtime is not runtime or controller.settings is not settings_snapshot:
+                    raise TaskError("staging_not_initialized", "the profile changed while reading native sessions")
                 members = {}
+                known_groups = {_group_route_key(group) for group in groups}
                 for person in result["persons"]:
                     for group_id, entry in person["groups"].items():
-                        members.setdefault(group_id, []).append(person)
+                        key = _group_route_key({"platform_id": person["platform"], "bot_id": person["bot_id"],
+                                                "account_id": person["account_id"], "group_id": group_id})
+                        members.setdefault(key, []).append(person)
+                        if key not in known_groups:
+                            known_groups.add(key)
+                            groups.append({"group_id": group_id, "bot_id": person["bot_id"],
+                                "platform_id": person["platform"], "account_id": person["account_id"],
+                                "configured": False, "member_count": 0, "msg_count": 0})
                 for group in groups:
-                    for person in members.get(group["group_id"], ()):
+                    for person in members.get(_group_route_key(group), ()):
                         group["member_count"] += 1
                         group["msg_count"] += person["groups"][group["group_id"]]["msg_count"]
+                group_networks = _group_relationship_networks(runtime, settings, result["persons"], groups)
+                known_groups = {_group_route_key(group) for group in groups}
+                for network in group_networks:
+                    key = _group_route_key(network)
+                    if key not in known_groups:
+                        known_groups.add(key)
+                        groups.append({"group_id": network["group_id"], "bot_id": network["bot_id"],
+                                       "platform_id": network["platform_id"], "account_id": network["account_id"],
+                                       "configured": network["configured"],
+                                       "member_count": network["member_count"],
+                                       "msg_count": sum(member["group_observation"]["message_count"]
+                                                         for member in network["members"])})
+            names = display_names(controller)
+            persons, groups = await asyncio.gather(names.persons(result["persons"]), names.targets(groups))
+            async with controller._control_lock:
+                await self._operator()
+                if controller.runtime is not runtime or controller.settings is not settings_snapshot:
+                    raise TaskError("staging_not_initialized", "the profile changed while reading display names")
                 return outcome_response(Outcome.success({
                     "installation_id": controller.runtime.installation_id,
                     "profile_id": getattr(controller, "target_id", None) or controller.settings.profile_id,
-                    "operator_name": username, "persons": result["persons"],
+                    "operator_name": username, "persons": persons,
                     "groups": groups, "counts": result["counts"],
+                    "group_access": group_access,
+                    "group_networks": list(group_networks),
                     # The page must not keep its own copy of which capabilities this
                     # page owns: a second list would drift and start offering a
                     # control for a capability that cannot be changed here.
                     "page_managed_capabilities": list(PAGE_MANAGED_CAPABILITIES)}))
-        except TaskError as error:
+        except (TaskError, HostControlError) as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
+        except Exception as error:
+            logger.exception("V2 acquaintance directory read failed")
+            detail = " ".join(str(error).split())
+            reason = f"{type(error).__name__}: {detail[:512]}" if detail else type(error).__name__
+            return outcome_response(Outcome.failed("acquaintance_directory_read_failed", reason))
 
     async def authorization(self):
         """Read the real state of every capability one person holds."""
@@ -177,10 +515,10 @@ class AcquaintanceWebAPI:
         try:
             async with controller._control_lock:
                 _, operator = await self._operator()
-                query = self._query(("subject_id",), required=("subject_id",))
+                query = self._query(("subject_id", *PERSON_ROUTE_KEYS), required=("subject_id",))
                 manager = self._management()
                 return outcome_response(manager.status(operator, query["subject_id"],
-                                                       observed_at=controller.now()))
+                    route=self._route_query(query), observed_at=controller.now()))
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
 
@@ -249,7 +587,7 @@ class AcquaintanceWebAPI:
                 raise TaskError("person_nickname_command_invalid", "the name command does not match its contract")
             async with controller._control_lock:
                 _, operator = await self._operator()
-                routes, _ = _directory_routes(controller.settings)
+                routes, _ = _directory_routes(self._settings())
                 manager = PersonAcquaintanceNameManagement(controller.runtime)
                 return outcome_response(manager.set_nickname(operator, routes=routes, observed_at=controller.now(),
                     subject_id=command["subject_id"], platform=command["platform"], bot_id=command["bot_id"],
@@ -261,3 +599,65 @@ class AcquaintanceWebAPI:
         except (ValueError, TypeError, UnicodeError, RecursionError):
             return outcome_response(Outcome.failed("person_nickname_command_invalid",
                                                    "the name command is not valid JSON"))
+
+    async def _command(self, *, expected):
+        raw = await request.body()
+        if len(raw) > 32768 or request.query:
+            raise TaskError("acquaintance_request_invalid", "provide one bounded JSON body")
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate field")
+                result[key] = value
+            return result
+        command = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+        if type(command) is not dict or set(command) != expected:
+            raise TaskError("private_member_command_invalid", "the member command does not match its contract")
+        return command
+
+    async def set_identity(self):
+        from .web_api import outcome_response
+        try:
+            async with self.controller._control_lock:
+                _, operator = await self._operator()
+                command = await self._command(expected={"operation_key", "subject_id", "route", "tier", "expected_revision"})
+                result = self._management().set_identity(operator, command, observed_at=self.controller.now())
+                session = self.controller.session or self.controller.last_session
+                if result.is_success and session:
+                    session.application.notify()
+                return outcome_response(result)
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return outcome_response(Outcome.failed("identity_command_invalid", "invalid identity command"))
+
+    async def _member_settings(self, *, write=False):
+        from .web_api import outcome_response
+        try:
+            async with self.controller._control_lock:
+                _, operator = await self._operator()
+                if write:
+                    command = await self._command(expected={"operation_key", "subject_id", "route", "sections"})
+                    subject_id, route = command["subject_id"], command["route"]
+                else:
+                    query = self._query(("subject_id", *PERSON_ROUTE_KEYS), required=("subject_id", *PERSON_ROUTE_KEYS))
+                    subject_id, route = query["subject_id"], self._route_query(query)
+                context = self._context(subject_id, route)
+                session = self.controller.session or self.controller.last_session
+                if session is None:
+                    raise TaskError("staging_not_initialized", "load the private session first")
+                editor = PrivateMemberSettings(session.application, context)
+                result = (editor.configure(operator, {key: command[key] for key in ("operation_key", "sections")})
+                          if write else editor.status(operator))
+                return outcome_response(result)
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return outcome_response(Outcome.failed("private_member_command_invalid", "invalid private member settings"))
+
+    async def member_settings(self):
+        return await self._member_settings()
+
+    async def configure_member(self):
+        return await self._member_settings(write=True)

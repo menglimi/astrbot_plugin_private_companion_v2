@@ -72,11 +72,11 @@ Content 编排的三段按此口径复核结果：
 ### Image（`astrbot_plugin_image_companion` 0.5.0）
 
 - **状态**：独立 owner、存储、执行、采用与私聊/群聊投递；`native_v2/adapter.py` 按后端 `operations` 动态声明。
-- **动作**：`image.generate`、`image.edit`（保存原图或本轮私聊输入图，支持多参考用途）、`image.mask_edit`（明确底图与蒙版）。
+- **动作**：`image.generate`、`image.edit`（保存原图或本轮私聊/群聊输入图，支持多参考用途；角色参考图按角色共享，群聊使用单独开关默认关闭）、`image.mask_edit`（明确底图与蒙版，私聊）。
 - **对应设计稿**：[CORE_NATIVE_IMAGE_DELIVERY_20260925](CORE_NATIVE_IMAGE_DELIVERY_20260925.md)、[CORE_PRIVATE_IMAGE_DELIVERY_20260924](CORE_PRIVATE_IMAGE_DELIVERY_20260924.md)、[CORE_GROUP_IMAGE_DELIVERY_20260925](CORE_GROUP_IMAGE_DELIVERY_20260925.md)、提供方 `docs/IMAGE_V2_NATIVE_PROVIDER_20260925.md` 与 `docs/IMAGE_NATIVE_EXECUTION_V1.md`。
 - **对应 V1 实现**：`photo_generation_scope.py`（已迁为 T01 张数额度）、`photo_reference_*`（图参考记忆，V2 无对应物）、`photo_wardrobe_decision.py`（衣柜）、`image_edit_region.py`（区域编辑）。
 - **要求**：后端每次只执行一次；未选产物不附图；原产物、来源与 QQ ACK 可对账；未实现的模式不得伪报成功；凭据归提供方，V2 不复制密钥。
-- **进度（源码）**：E03 的当前私聊输入图租约、多参考用途绑定、蒙版工作流校验及蒙版外像素保护已接线；宿主仅为原调用签发一次性句柄，读取和采用均重新核权。群聊目录与准入明确排除 `image.mask_edit`。E04（相册/衣柜/每日穿搭）仍**待补齐**。2026-10-01 Image 提供方原生专项 21 项通过；V2 图片、额度、目录与门禁集 63 项通过、16 个子用例通过，另有一个群聊续轮用例因提示前缀校验失败，详见[实施记录](IMAGE_EXTENSION_GAP_DESIGN_20260927.md)。E02/E03 合成测试通过不等于真实后端或 QQ 现场验收。
+- **进度（源码）**：E03 的当前私聊/群聊输入图租约、多参考用途绑定、角色参考图群聊权限、蒙版工作流校验及蒙版外像素保护已接线；宿主仅为原调用签发一次性句柄，读取和采用均重新核权。群聊目录与准入明确排除 `image.mask_edit`。E04（相册/衣柜/每日穿搭）仍**待补齐**。2026-10-01 Image 提供方原生专项 21 项通过；V2 图片、额度、目录与门禁集 63 项通过、16 个子用例通过，另有一个群聊续轮用例因提示前缀校验失败，详见[实施记录](IMAGE_EXTENSION_GAP_DESIGN_20260927.md)。E02/E03 合成测试通过不等于真实后端或 QQ 现场验收。
 
 ### Reality（`astrbot_plugin_reality_companion` 0.4.2）
 

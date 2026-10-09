@@ -4,12 +4,13 @@ const fs = require('node:fs/promises');
 const http = require('node:http');
 const path = require('node:path');
 
-async function run({browser, outputDir, bridgePath, replyOnly=false}) {
+async function run({browser, outputDir, bridgePath, replyOnly=false, identityOnly=false}) {
   const root=path.resolve(__dirname,'../pages/陪伴小屋');
   await fs.mkdir(outputDir,{recursive:true});
   const sdk=await fs.readFile(bridgePath,'utf8');
   const HOST='astrbot_plugin_private_companion_v2';
-  const qa={calls:[],posts:[],mode:'direct',initialized:true,deny:false,late:null,growthState:'proposed',semanticRevision:1,semanticReactions:true};
+  const qa={calls:[],posts:[],mode:'direct',catalogMode:'multi',initialized:true,deny:false,late:null,growthState:'proposed',semanticRevision:1,semanticReactions:true};
+  const internalIdentity={installation_id:'synthetic-installation-internal',operator_id:'dashboard:qa-internal'};
   const replyDefaults={enabled:false,llm_controlled:true,rules_enabled:false,rule_mode:'sentences',threshold:120,min_segment_chars:12,max_segments:4,prompt:'',streaming:false,part_gap_ms:0,image_position:'after_text',
     voice_enabled:false,voice_trigger_mode:'always',voice_generation_mode:'plain',voice_segment_mode:'each',voice_delivery_mode:'voice_and_text',voice_position:'after_media',voice_language:'zh',voice_foreign_text_mode:'original',
     voice_probability:1,voice_cooldown_seconds:0,voice_max_speech_chars:1800,voice_timeout_seconds:30,voice_trigger_keywords:'',voice_provider_id:'',voice_zh_provider_id:'',voice_ja_provider_id:'',voice_en_provider_id:'',voice_extra_prompt:''};
@@ -26,11 +27,28 @@ async function run({browser, outputDir, bridgePath, replyOnly=false}) {
   const ok=data=>qa.mode==='direct'?data:qa.mode==='nested'?{data:{status:'ok',data}}:{status:'ok',data};
   const failed=code=>({status:'error',data:{code}});
   function catalog() {
-    return {mode:'multi',installation_id:'synthetic',operator_id:'dashboard:qa',targets:[
-      ...['a','b'].map((id,index)=>({target_id:id,scope_kind:'private',participant_id:'user-'+id,
+    return {mode:qa.catalogMode,...internalIdentity,acquaintance_api:full('acquaintance'),targets:[
+      ...(qa.catalogMode==='single'?['a']:['a','b']).map((id,index)=>({target_id:id,scope_kind:'private',participant_id:'user-'+id,
         platform_id:'qq',account_id:'bot-'+id,bot_id:'bot-'+id,roles:[{role_id:index?'晚星':'晨星',
           ...Object.fromEntries(['life','state','growth','memory','relationships','reply'].map(name=>[name+'_api',full('host/targets/'+id+'/roles/role-'+id+'/'+name)]))}]})),
-      {target_id:'group',scope_kind:'group',group_id:'group-1',platform_id:'qq',account_id:'bot-a',roles:[{role_id:'晨星',life_api:null,state_api:null,growth_api:null,memory_api:null,relationships_api:null}]}]};
+      ...(qa.catalogMode==='single'?[]:[{target_id:'group',scope_kind:'group',group_id:'group-1',platform_id:'qq',account_id:'bot-a',roles:[{role_id:'晨星',life_api:null,state_api:null,growth_api:null,memory_api:null,relationships_api:null}]}])]};
+  }
+  function accountDirectory() {
+    const targets=catalog().targets.map(target=>({...target,bot_id:target.bot_id||target.account_id,
+      account_name:target.account_id==='bot-a'?'测试账号一':'测试账号二',
+      display_name:target.scope_kind==='group'?'测试群':target.target_id==='a'?'测试联系人一':'测试联系人二',
+      roles:target.roles.map(role=>({role_id:role.role_id,role_name:role.role_id,persona_ids:[role.role_id]})),
+      session_key:'session-'+target.target_id,native:true,managed:true,persona_id:target.roles[0].role_id,
+      llm_enabled:true,session_enabled:true}));
+    const accounts=[...new Map(targets.map(target=>[target.bot_id,{
+      platform_id:target.platform_id,account_id:target.account_id,bot_id:target.bot_id,account_name:target.account_name,
+    }])).values()];
+    const personas=[...new Map(targets.flatMap(target=>target.roles.map(role=>[target.bot_id+'|'+role.role_id,{
+      bot_id:target.bot_id,role_id:role.role_id,persona_id:role.role_id,label:role.role_name,
+    }]))).values()];
+    return {mode:qa.catalogMode,enabled:true,accounts,personas,
+      sessions:targets.filter(target=>target.scope_kind==='private'),groups:targets.filter(target=>target.scope_kind==='group'),
+      discovered:{accounts,personas,targets}};
   }
   const growth=id=>({role_id:id==='a'?'晨星':'晚星',items:[{growth_id:'growth-'+id,revision:1,kind:'goal',state:qa.growthState,
     title:'练习水彩 '+id,description:'本周画一幅',progress_note:'留意窗边的光',source_count:1,view_token:'growth-token-'+id,
@@ -44,6 +62,17 @@ async function run({browser, outputDir, bridgePath, replyOnly=false}) {
     qa.calls.push(message);const {action,endpoint,params={},body={}}=message;
     if(qa.deny)return failed('core_access_required');
     if(endpoint==='page/targets')return qa.initialized?ok(catalog()):failed('staging_not_initialized');
+    if(endpoint==='acquaintance'){
+      assert.equal(action,'api:get');
+      return ok({...internalIdentity,profile_id:'测试运行实例',operator_name:'测试管理员',persons:[],groups:[],
+        counts:{total:0,private_chat:0,group_member:0,both:0},page_managed_capabilities:[]});
+    }
+    if(/^host\/targets\/([ab])\/roles\/role-\1\/config$/.test(endpoint)){
+      assert.equal(action,'api:get');
+      assert.equal(typeof params.sections,'string');
+      return ok({sections:{[params.sections]:{settings:{},fields:{},provenance:{},edit_token:'c'.repeat(64),
+        revision:1,scope:'role',layers:['installation','role'],section:params.sections}}});
+    }
     if(endpoint==='integration/manifest')return ok({product:{version:'2.0.0'},host:{enabled:true},
       core:[{id:'life',label:'生活、日记与成长',description:'已实现的本体生活模块'}],
       providers:[{capability_id:'image',plugin_id:'astrbot_plugin_image_companion',label:'生图与相册',description:'生成与编辑',version:'1.0',enabled:false,runtime_ready:null,installed:true,status_connected:true,integration_state:'disabled',reason:'提供方配置已关闭',pages:[]},
@@ -51,7 +80,14 @@ async function run({browser, outputDir, bridgePath, replyOnly=false}) {
         {capability_id:'reality',plugin_id:'astrbot_plugin_reality_companion',label:'现实触及',version:'1.0',enabled:true,runtime_ready:false,installed:true,status_connected:true,execution_integrated:false,integration_state:'waiting',reason:'提供方尚未就绪',pages:['reality-companion']}],
       summary:{connected_count:3,installed_count:3,missing_count:5}});
     if(endpoint==='staging/status')return {status:'error',message:'未找到该路由',data:{}};
-    if(endpoint==='host/status')return ok({mode:'multi',enabled:true,installation_id:'synthetic',state:'new',accepting:false,delivery_mode:'preview',group_delivery_mode:'preview',targets:[]});
+    if(endpoint==='host/status')return ok({mode:'multi',enabled:true,...internalIdentity,state:'new',accepting:false,
+      delivery_mode:'preview',group_delivery_mode:'preview',targets:accountDirectory().discovered.targets});
+    if(endpoint==='accounts'){
+      assert.equal(action,'api:get');return ok(accountDirectory());
+    }
+    if(endpoint==='page/ownership')return ok({owner:'self',reason:'owner_module_absent'});
+    if(endpoint==='reply/recalls')return ok({items:[],next_cursor:null});
+    if(endpoint==='perception')return ok({providers:{screen:{available:false},reality:{available:false}}});
     if(endpoint==='semantic'){
       const selection=action==='api:get'?params:body;
       assert.equal(selection.target_id,'b');assert.equal(selection.role_id,'晚星');
@@ -132,16 +168,67 @@ async function run({browser, outputDir, bridgePath, replyOnly=false}) {
   const shell=()=>page.frameLocator('#cottage');
   const inner=()=>shell().frameLocator('.product-workspace-frame');
   const checks=[];
-  const ready=async()=>{await shell().locator('[data-host-badge]').filter({hasText:'已连接'}).waitFor();await shell().locator('#product-target:not([disabled])').waitFor();};
+  const ready=async()=>{await shell().locator('[data-host-badge].host-connected').waitFor({state:'attached'});};
   const layout=async()=>assert.equal(await shell().locator('body').evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   const capture=async(name,fullPage=true)=>{await page.screenshot({path:path.join(outputDir,name+'.png'),fullPage});};
+  const visit=async hash=>{
+    await shell().locator('body').evaluate((_body,value)=>{location.hash=value;},hash);
+    await shell().locator('body').evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  };
+  const privateFields=async()=>{
+    for(const frame of page.frames().slice(1)){
+      assert.doesNotMatch(await frame.locator('body').innerText(),/synthetic-installation-internal|dashboard:qa-internal/);
+    }
+  };
   try {
     await page.goto('http://127.0.0.1:'+server.address().port);await ready();
+    if(identityOnly){
+      const directory=()=>shell().frameLocator('[data-workspace="identity"] iframe');
+      const relationships=()=>shell().frameLocator('[data-workspace="relationships"] iframe');
+      const identityReady=async id=>{
+        await directory().locator('#sync-state').filter({hasText:'V2 数据已同步'}).waitFor();
+        await relationships().locator('#role').filter({hasText:id==='a'?'晨星':'晚星'}).waitFor();
+      };
+      const privateFields=async()=>{
+        for(const text of [await shell().locator('body').innerText(),await directory().locator('body').innerText(),
+          await relationships().locator('body').innerText()]){
+          assert.doesNotMatch(text,/身份与范围|synthetic-installation-internal|dashboard:qa-internal/);
+        }
+        assert.deepEqual(await shell().locator('body').evaluate(()=>window.CompanionProduct.identity()),internalIdentity);
+      };
+      await shell().locator('body').evaluate(()=>{location.hash='#manage/identity';});
+      await identityReady('a');
+      for(const mode of ['multi','single']){
+        if(mode==='single'){
+          qa.catalogMode=mode;
+          await page.setViewportSize({width:1440,height:1050});
+          await shell().locator('[data-product-refresh]').click();await ready();await identityReady('a');
+          assert.equal(await shell().locator('#productScope').isVisible(),false);
+          assert.equal(await shell().locator('body').evaluate(()=>window.CompanionProduct.targets().length),1);
+        }
+        for(const [width,height] of [[1440,1050],[390,844],[320,720]]){
+          await page.setViewportSize({width,height});await privateFields();await layout();
+          await capture('product-identity-'+mode+'-'+width,false);
+          checks.push(mode+' identity page keeps runtime identifiers internal at '+width+' pixels');
+        }
+        if(mode==='multi'){
+          await shell().locator('#product-target').selectOption('b');await ready();await identityReady('b');
+          await privateFields();
+          assert(qa.calls.some(call=>call.endpoint==='host/targets/b/roles/role-b/relationships'));
+          checks.push('relationship workspace follows target changes while the acquaintance directory remains available');
+        }
+      }
+      assert(qa.calls.some(call=>call.endpoint==='acquaintance'));
+      assert.equal(qa.posts.length,0);
+      assert.deepEqual(browserErrors,[]);assert.deepEqual(serverErrors,[]);
+      const report={checks,passed:checks.length,browserErrors,serverErrors,posts:qa.posts.length};
+      await fs.writeFile(path.join(outputDir,'identity-results.json'),JSON.stringify(report,null,2)+'\n','utf8');return report;
+    }
     if(replyOnly){
       const field=name=>shell().locator(`[data-reply-field="${name}"]`);
       const action=name=>shell().locator(`[data-reply-action="${name}"]`);
       const loaded=()=>shell().locator('.reply-notice').filter({hasText:'已读取'}).waitFor();
-      await shell().locator('#mainNav a[href="#manage/expression"]').click();await loaded();
+      await shell().locator('[data-shell-section="expression"]').click();await loaded();
       assert.match(await shell().locator('.reply-record').first().locator('summary').innerText(),/尚未固定配置/);
       await shell().locator('.reply-record').nth(1).locator('summary').click();
       const diagnostic=await shell().locator('.reply-record').nth(1).innerText();
@@ -205,44 +292,48 @@ async function run({browser, outputDir, bridgePath, replyOnly=false}) {
       const report={checks,passed:checks.length,browserErrors,serverErrors,posts:qa.posts.length};
       await fs.writeFile(path.join(outputDir,'reply-results.json'),JSON.stringify(report,null,2)+'\n','utf8');return report;
     }
-    const nav=await shell().locator('#mainNav .nav-group').evaluateAll(groups=>groups.map(group=>({
-      title:group.querySelector('.nav-group-title')?.textContent,
-      links:[...group.querySelectorAll('.rail-link')].map(link=>({label:link.textContent,href:link.getAttribute('href')})),
+    const nav=await shell().locator('#shellNav .shell-nav-group').evaluateAll(groups=>groups.map(group=>({
+      title:group.querySelector('.shell-nav-title')?.textContent||'',
+      links:[...group.querySelectorAll('.shell-nav-link')].map(link=>({label:link.querySelector('span').textContent,section:link.dataset.shellSection})),
     })));
     assert.deepEqual(nav.map(group=>[group.title,...group.links.map(link=>link.label)]),[
-      ['小屋','首页 / 小屋'],
-      ['生活','日程与状态','日记与生活','目标与成长','角色状态','联系安排'],
-      ['关系','人物与关系','记忆与经历'],
-      ['表达','回复与分段'],
-      ['设置','账号与会话','感知能力','生活与环境','身份与权限','模型与连接','资料与维护'],
+      ['','关系与权限','主动与联系','事实与经历','学习与反思','模型与连接','治理与维护'],
+      ['能力配置','感知','决策','行动','产出','表达','自我'],
+      ['设置','开始使用','外观与设置','账号与会话','资料与维护'],
     ]);
-    assert(nav.flatMap(group=>group.links).every(link=>/^#(life|people|memories|manage)(\/|$)/.test(link.href)));
-    assert.equal(nav.flatMap(group=>group.links).some(link=>/#(library|activities)|#manage\/capabilities/.test(link.href)),false);
-    checks.push('native workspaces are grouped in the sidebar, apart from optional extensions');
-    assert.match(await shell().locator('.room-sidebar').innerText(),/71 \/ 100/);
-    assert.match(await shell().locator('#home-observation').innerText(),/生活正文 a/);
-    assert.doesNotMatch(await shell().locator('#main').innerText(),/草木之间|9 月 23 日|望舒/);
+    assert.equal(new Set(nav.flatMap(group=>group.links).map(link=>link.section)).size,16);
+    checks.push('all 16 native sections remain reachable in the current sidebar');
+    assert.match(await shell().locator('.home-state-board').getAttribute('aria-label'),/71 \/ 100/);
+    assert.doesNotMatch(await shell().locator('body').innerText(),/草木之间|9 月 23 日|望舒/);
     assert.equal(qa.posts.length,0);await layout();await capture('product-home-desktop');
     const canvas=shell().locator('canvas');assert(await canvas.count()>0);
+    await canvas.screenshot({path:path.join(outputDir,'product-room-desktop.png')});
+    await visit('#life/observation');
+    await shell().locator('#shellPanel').filter({hasText:'生活正文 a'}).waitFor();
+    checks.push('hosted home and observation use the selected role records without design samples or writes');
+    await visit('#life/directory');
     await shell().locator('[data-furniture-filter="extensions"]').click();
-    assert.deepEqual(await shell().locator('[data-furniture-card]').evaluateAll(cards=>cards.map(card=>card.dataset.furnitureCard)),
-      ['content','image','together','game','screen','reality','live']);
-    await shell().locator('[data-furniture-filter="all"]').click();
+    const extensionRows=shell().locator('#directoryGrid .home-item');
+    assert.equal(await extensionRows.count(),7);
+    assert.deepEqual(await extensionRows.locator('.home-item-main strong').allTextContents(),
+      ['创作书架','画面工作室','共处电话','游戏棋桌','屏幕台','现实设备台','直播与表演']);
     checks.push('all seven optional providers remain in the home furniture directory');
-    checks.push('hosted homepage uses saved facts, not design samples; initial load is GET only');
+    await shell().locator('#railBrand').click();
     await shell().locator('[data-detail="arrange"]').click();
     await capture('product-room-editor');
     await shell().locator('body').press('Escape');
     checks.push('voxel scene and nonmodal room editor remain reachable');
     await shell().locator('#product-target').selectOption('b');await ready();
-    assert.match(await shell().locator('.room-sidebar').innerText(),/83 \/ 100/);
-    assert.doesNotMatch(await shell().locator('#home-observation').innerText(),/生活正文 a/);
-    await shell().locator('.life-tabs [data-life="schedule"]').click();
-    await shell().locator('#roleStateWorkspace .state-metrics').filter({hasText:'83 / 100'}).waitFor();
-    assert.match(await shell().locator('#main').innerText(),/日程与状态/);
+    assert.match(await shell().locator('.home-state-board').getAttribute('aria-label'),/83 \/ 100/);
+    await visit('#life/observation');
+    await shell().locator('#shellPanel').filter({hasText:'生活正文 b'}).waitFor();
+    assert.doesNotMatch(await shell().locator('#shellPanel').innerText(),/生活正文 a/);
+    await shell().locator('.home-state-board').click();
+    await shell().locator('#roleStateWorkspace [data-state-feature="energy"]').waitFor();
+    assert.match(await shell().locator('#roleStateWorkspace').innerText(),/83/);
     assert.equal(await shell().locator('.product-workspace-frame').count(),0);
     checks.push('calendar navigation opens the selected role state and calendar workspace');
-    await shell().locator('[data-life="diary"]').first().click();
+    await shell().locator('[data-shell-furniture="desk"]').click();
     await inner().locator('#role').filter({hasText:'晚星'}).waitFor();
     assert.equal(await inner().locator('#start-host').isVisible(),false);
     await inner().locator('#settings summary').click();
@@ -250,38 +341,46 @@ async function run({browser, outputDir, bridgePath, replyOnly=false}) {
     await inner().locator('#notice').filter({hasText:'操作已完成'}).waitFor();
     assert.equal(qa.posts.at(-1).endpoint,'host/targets/b/roles/role-b/life/command');
     checks.push('embedded life workspace reads and saves through the selected target path');
-    await shell().locator('a[href="#people"]').click();
-    await inner().locator('#role').filter({hasText:'晚星'}).waitFor();
+    await shell().locator('[data-shell-section="identity"]').click();
+    await shell().frameLocator('[data-workspace="relationships"] iframe').locator('#role').filter({hasText:'晚星'}).waitFor();
+    await shell().frameLocator('[data-workspace="identity"] iframe').locator('#sync-state').filter({hasText:'V2 数据已同步'}).waitFor();
+    await privateFields();
     await capture('product-relationships');
     checks.push('relationships reuse the same selected target and role');
-    await shell().locator('#mainNav a[href="#memories"]').click();
+    await shell().locator('[data-shell-section="memory"]').click();
     await shell().locator('#memory-area-facts').click();
     await shell().locator('#memoryWorkspace').filter({hasText:'已保存的事实 b'}).waitFor();
     checks.push('memory navigation opens saved records for the selected role');
-    await shell().locator('[data-go="manage"][data-manage="host"]').click();
-    await inner().locator('h1').filter({hasText:'账号与会话'}).waitFor();
+    await shell().locator('[data-shell-section="host"]').click();
+    await inner().locator('#accepting').filter({hasText:'未接管消息'}).waitFor();
+    await inner().locator('.status-panel[aria-busy="false"]').waitFor();
     assert.equal(await inner().locator('#accepting').innerText(),'未接管消息');
+    assert.match(await inner().locator('#topology-counts').innerText(),/2 个账号.*2 个人格.*3 个窗口/);
+    await privateFields();await capture('product-host-topology');
     const postCount=qa.posts.length;
-    await shell().locator('[data-manage-tab="growth"]').click();
+    await shell().locator('#railBrand').click();
+    await shell().locator('[data-shell-furniture="garden"]').click();
     await shell().locator('[data-growth-action="confirm"]').click();
     await shell().locator('#growth-form button[type="submit"]').click();
     await shell().locator('[data-growth-action="complete"]').waitFor();
     assert.equal(qa.posts.length,postCount+1);assert.equal(qa.posts.at(-1).body.growth_id,'growth-b');
     checks.push('host status is read-only; growth commands preserve scope, revision and view token');
-    await shell().locator('#mainNav a[href="#manage/perception"]').click();
-    await shell().locator('#semanticSettings').waitFor();
-    assert.match(await shell().locator('#perception-input').innerText(),/图片与动图|语音|合并转发/);
-    assert.match(await shell().locator('#perception-providers').innerText(),/尚未进入 V2 对话/);
+    await shell().locator('[data-shell-section="expression"]').click();
+    await shell().locator('#semanticSettings').waitFor({state:'attached'});
+    await shell().locator('#semanticSettings input[name="reactions_enabled"]').uncheck();
+    await shell().locator('#semanticSettings button[type="submit"]').click();
+    await shell().locator('.semantic-feedback').filter({hasText:'已保存'}).waitFor();
+    assert.equal(qa.posts.at(-1).endpoint,'semantic');
+    assert.equal(qa.posts.at(-1).body.changes.reactions_enabled,false);
+    checks.push('expression settings save through the selected target and role');
+    await shell().locator('[data-shell-section="perception"]').click();
+    await shell().locator('[data-perception-tab="config-screen"]').click();
+    await shell().locator('#perception-detail-device-access summary').click();
     assert.match(await shell().locator('#perception-url-screen').inputValue(),/\/#\/plugin-page\/astrbot_plugin_screen_companion\//);
     assert.match(await shell().locator('#perception-url-reality').inputValue(),/\/#\/plugin-page\/astrbot_plugin_reality_companion\//);
     await shell().locator('[data-copy-perception="screen"]').click();
     await shell().locator('#toast').filter({hasText:/配置地址已复制|地址已选中/}).waitFor();
     await shell().locator('#toast:not(.show)').waitFor();
-    await shell().locator('#semanticSettings input[name="reactions_enabled"]').uncheck();
-    await shell().locator('#semanticSettings button[type="submit"]').click();
-    await shell().locator('#semanticSettings input[name="reactions_enabled"]:not(:checked)').waitFor();
-    assert.equal(qa.posts.at(-1).endpoint,'semantic');
-    assert.equal(qa.posts.at(-1).body.changes.reactions_enabled,false);
     await layout();await page.setViewportSize({width:390,height:844});await layout();
     await shell().locator('body').evaluate(()=>{location.hash='#manage/semantic';});
     await shell().locator('body').evaluate(()=>new Promise(resolve=>{
@@ -289,52 +388,60 @@ async function run({browser, outputDir, bridgePath, replyOnly=false}) {
       addEventListener('hashchange',resolve,{once:true});
     }));
     assert.equal(await shell().locator('body').evaluate(()=>location.hash),'#manage/perception');
-    checks.push('perception page saves semantic settings, reports external owner boundaries, and fits narrow screens');
+    checks.push('perception provider addresses and retired links remain usable on narrow screens');
     qa.mode='nested';await shell().locator('[data-product-refresh]').click();await ready();
-    await shell().locator('#mobileNav a[href="#life"]').press('Enter');
+    await shell().locator('#railBrand').press('Enter');
     assert.equal(await shell().locator('body').evaluate(()=>location.hash),'#life');
-    await shell().locator('#home-observation').waitFor();
-    assert.match(await shell().locator('.room-sidebar').innerText(),/83 \/ 100/);
+    assert.match(await shell().locator('.home-state-board').getAttribute('aria-label'),/83 \/ 100/);
     await shell().locator('#product-target').selectOption('group');await ready();
-    assert.doesNotMatch(await shell().locator('#home-observation').innerText(),/生活正文 b/);
+    await visit('#life/observation');
+    assert.doesNotMatch(await shell().locator('#shellPanel').innerText(),/生活正文 b/);
     checks.push('direct and nested envelopes work; group selection clears private data');
     await shell().locator('#product-target').selectOption('a');await ready();
-    await page.setViewportSize({width:390,height:844});await layout();await capture('product-home-mobile');
-    await page.setViewportSize({width:320,height:720});await layout();
+    await shell().locator('#railBrand').click();
+    for(const [width,height] of [[390,844],[320,720]]){
+      await page.setViewportSize({width,height});await layout();await privateFields();
+      await capture('product-home-'+width,false);
+      await canvas.screenshot({path:path.join(outputDir,'product-room-'+width+'.png')});
+    }
     checks.push('no horizontal overflow at 1440, 390 and 320 pixels');
-    await shell().locator('[data-open-navigation]').press('Enter');
-    await shell().locator('#navigationDialog').waitFor({state:'visible'});
-    await shell().locator('[data-nav-route="manage"][data-nav-tab="host"]').press('Enter');
-    await inner().locator('h1').filter({hasText:'账号与会话'}).waitFor();
-    assert.equal(await shell().locator('#navigationDialog').isVisible(),false);
-    await shell().locator('[data-open-navigation]').press('Enter');
-    await shell().locator('[data-nav-route="life"][data-nav-tab="home"]').press('Enter');
-    checks.push('mobile menu reaches native host settings and returns to the cottage');
+    await shell().locator('[data-shell-section="host"]').press('Enter');
+    await inner().locator('#accepting').filter({hasText:'未接管消息'}).waitFor();
+    await inner().locator('.status-panel[aria-busy="false"]').waitFor();
+    await privateFields();
+    await shell().locator('#railBrand').press('Enter');
+    assert.equal(await shell().locator('#shellPanel').isVisible(),false);
+    checks.push('mobile sidebar reaches account settings and returns to the cottage');
     qa.initialized=false;await shell().locator('[data-product-refresh]').click();
-    await shell().locator('[data-host-badge]').filter({hasText:'待初始化'}).waitFor();
-    await shell().locator('[data-home-section="furniture"]').first().click();
-    assert.match(await shell().locator('#home-furniture').innerText(),/画面工作室/);
-    assert.doesNotMatch(await shell().locator('#main').innerText(),/生活正文 a/);
+    await shell().locator('[data-host-badge]').filter({hasText:'待初始化'}).waitFor({state:'attached'});
+    await visit('#life/directory');
+    assert.match(await shell().locator('#shellPanel').innerText(),/画面工作室/);
+    assert.doesNotMatch(await shell().locator('body').innerText(),/生活正文 a/);
     checks.push('extension inventory remains on the home furniture directory before host initialization');
     qa.deny=true;await shell().locator('[data-product-refresh]').click();
     await shell().locator('#productScope').filter({hasText:'没有管理权限'}).waitFor();
-    assert.doesNotMatch(await shell().locator('#main').innerText(),/生图与相册|生活正文/);
+    assert.doesNotMatch(await shell().locator('body').innerText(),/生图与相册|生活正文/);
+    await privateFields();
     qa.deny=false;qa.initialized=true;qa.mode='direct';
     await page.setViewportSize({width:1440,height:1050});
     await shell().locator('[data-product-refresh]').click();await ready();
     await shell().locator('#product-target').selectOption('b');await ready();
-    await shell().locator('#mainNav a[href="#manage/perception"]').click();
-    await shell().locator('#semanticSettings').waitFor();
+    await shell().locator('[data-shell-section="perception"]').click();
     await layout();await capture('product-perception-desktop',false);
-    await shell().locator('#perception-providers').scrollIntoViewIfNeeded();await capture('product-perception-providers-desktop',false);
+    await shell().locator('[data-perception-tab="config-screen"]').click();
+    await shell().locator('#perception-detail-device-access summary').click();
+    await shell().locator('#perceptionProviderWorkspace').scrollIntoViewIfNeeded();await capture('product-perception-providers-desktop',false);
     await page.setViewportSize({width:390,height:844});await layout();await shell().locator('body').evaluate(()=>scrollTo(0,0));await capture('product-perception-mobile',false);
     await page.setViewportSize({width:320,height:720});await layout();await shell().locator('body').evaluate(()=>scrollTo(0,0));await capture('product-perception-narrow',false);
-    assert.deepEqual(browserErrors,[]);assert.deepEqual(serverErrors,[]);
+    await privateFields();assert.deepEqual(browserErrors,[]);assert.deepEqual(serverErrors,[]);
     checks.push('permission failure clears cached directory and records');
     const report={checks,passed:checks.length,browserErrors,serverErrors,posts:qa.posts.length};
     await fs.writeFile(path.join(outputDir,'product-results.json'),JSON.stringify(report,null,2)+'\n','utf8');return report;
-  } catch(error){await capture('product-failure');error.message+='\nBrowser errors: '+browserErrors.join('; ')+'\nServer errors: '+serverErrors.join('; ');throw error;}
+  } catch(error){
+    await fs.writeFile(path.join(outputDir,'product-failure.json'),JSON.stringify({error:error.message,checks,browserErrors,serverErrors,calls:qa.calls},null,2)+'\n','utf8');
+    await capture('product-failure');throw error;
+  }
   finally{await page.close();await new Promise(resolve=>server.close(resolve));}
 }
 module.exports={run};
-if(require.main===module)(async()=>{const browser=await require('playwright').chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH});try{console.log(JSON.stringify(await run({browser,outputDir:process.argv[2],bridgePath:process.argv[3],replyOnly:process.argv.includes('--reply-only')}),null,2));}finally{await browser.close();}})().catch(error=>{console.error(error);process.exitCode=1;});
+if(require.main===module)(async()=>{const browser=await require('playwright').chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH});try{console.log(JSON.stringify(await run({browser,outputDir:process.argv[2],bridgePath:process.argv[3],replyOnly:process.argv.includes('--reply-only'),identityOnly:process.argv.includes('--identity-only')}),null,2));}finally{await browser.close();}})().catch(error=>{console.error(error);process.exitCode=1;});

@@ -55,8 +55,10 @@ async def read_group_forwards(locators, *, message_id, sender_id, client, scope,
                 or (outer.get("user_id") is not None and account_number(outer["user_id"]) != sender)):
             raise TaskError("host_forward_scope_mismatch", "forward history belongs to another group, sender or message")
         parts = outer.get("message")
-        if not isinstance(parts, list) or not 0 < len(parts) <= 128:
-            raise TaskError("host_forward_unsupported", "outer group message requires a bounded native component array")
+        if not isinstance(parts, list) or not parts:
+            raise TaskError("host_forward_unsupported", "outer group message requires a native component array")
+        if len(parts) > 128:
+            raise TaskError("host_forward_limit", "outer group message exceeds its component budget")
         positions, cards = [], []
         for position, part in enumerate(parts):
             if not isinstance(part, dict) or not isinstance(part.get("data"), dict):

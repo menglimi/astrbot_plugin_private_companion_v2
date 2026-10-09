@@ -8,10 +8,11 @@ import json
 from typing import Awaitable, Callable
 
 from companion_v2.conversation.foreground import ModelDraft, PromptRequest
-from companion_v2.execution.models import Lane, ProviderBinding, encode
+from companion_v2.execution.models import Lane, ProviderBinding, digest, encode
 from companion_v2.identity_policy.models import _opaque
 
 from .failures import ModelFailure
+from .response_diagnostics import ResponseDiagnostics
 
 
 MAX_TOOL_CATALOG = 64
@@ -60,6 +61,31 @@ class BudgetPolicy:
 
 
 @dataclass(frozen=True)
+class PromptSection:
+    key: str
+    label: str
+    default_prompt: str
+    condition: str
+    config_group: str = ""
+    field: str = ""
+    variables: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        for name in ("key", "label", "condition"):
+            _opaque(getattr(self, name), field=name)
+        if type(self.default_prompt) is not str or bool(self.config_group) != bool(self.field):
+            raise ValueError("prompt sections require text and a complete optional configuration binding")
+        for name in ("config_group", "field"):
+            if getattr(self, name):
+                _opaque(getattr(self, name), field=name)
+        object.__setattr__(self, "variables", tuple(self.variables))
+
+    @property
+    def editable(self):
+        return bool(self.field)
+
+
+@dataclass(frozen=True)
 class ModelTaskProfile:
     kind: str
     lane: Lane
@@ -73,6 +99,7 @@ class ModelTaskProfile:
     fallback_on_refusal: bool = False
     timeout_seconds: int = 60
     replacement_scope: str = "all"
+    prompt_sections: tuple[PromptSection, ...] = ()
 
     def __post_init__(self):
         for name in ("kind", "default_provider", "version"):
@@ -98,6 +125,11 @@ class ModelTaskProfile:
             raise ValueError("model timeout must be between 1 and 600 seconds")
         if self.replacement_scope not in ("all", "plugin", "conversation"):
             raise ValueError("replacement scope must name a supported task class")
+        if (any(not isinstance(section, PromptSection) for section in self.prompt_sections)
+                or len({section.key for section in self.prompt_sections}) != len(self.prompt_sections)
+                or any(section.key == "task_prompt" for section in self.prompt_sections)):
+            raise ValueError("business prompt sections must have distinct registered keys")
+        object.__setattr__(self, "prompt_sections", tuple(self.prompt_sections))
 
     @property
     def group(self) -> str:
@@ -138,6 +170,105 @@ class ToolExchange:
 
 
 @dataclass(frozen=True)
+class CacheSignature:
+    """Bounded fingerprints of cache-relevant request structure; never prompt text."""
+
+    model_hash: str
+    system_hash: str
+    system_parts: tuple[str, ...]
+    tools_hash: str
+    tool_parts: tuple[str, ...]
+    context_hashes: tuple[str, ...]
+    context_bytes: int
+    context_observed: bool
+    estimates_observed: bool = False
+    context_est_tokens: int = 0
+    system_est_tokens: int = 0
+    tool_est_tokens: int = 0
+    message_estimates_observed: bool = False
+    message_est_tokens: int = 0
+    message_chars: int = 0
+    message_bytes: int = 0
+    request_estimate_observed: bool = False
+    request_est_tokens: int = 0
+    context_availability_observed: bool = False
+    context_availability_hash: str = ""
+    deferred_material_count: int = 0
+    unavailable_material_count: int = 0
+    context_sequence_hash: str = ""
+    context_multiset_hash: str = ""
+    context_material_count: int = -1
+    context_chars: int = 0
+    request_stats_observed: bool = False
+    message_count: int = 0
+    system_message_count: int = 0
+    system_chars: int = 0
+    system_bytes: int = 0
+    tool_count: int = 0
+    tool_bytes: int = 0
+    image_count: int = 0
+    audio_count: int = 0
+    video_count: int = 0
+
+    def __post_init__(self):
+        if not self.context_sequence_hash:
+            object.__setattr__(self, "context_sequence_hash", digest(list(self.context_hashes)))
+        if not self.context_multiset_hash:
+            object.__setattr__(self, "context_multiset_hash", digest(sorted(self.context_hashes)))
+        if not self.context_availability_hash:
+            object.__setattr__(self, "context_availability_hash", digest({"deferred": [], "unavailable": []}))
+        if self.context_material_count == -1:
+            object.__setattr__(self, "context_material_count", len(self.context_hashes))
+        if (type(self.system_parts) is not tuple or len(self.system_parts) > 32
+                or type(self.tool_parts) is not tuple or len(self.tool_parts) > 64
+                or type(self.context_hashes) is not tuple or len(self.context_hashes) > 256):
+            raise ValueError("cache signature must contain bounded hash lists")
+        hashes = (self.model_hash, self.system_hash, self.tools_hash, *self.system_parts,
+                  *self.tool_parts, self.context_sequence_hash, self.context_multiset_hash,
+                  self.context_availability_hash, *self.context_hashes)
+        counts = (self.context_material_count, self.context_chars, self.context_bytes,
+                  self.context_est_tokens, self.system_est_tokens, self.tool_est_tokens,
+                  self.message_est_tokens, self.message_chars, self.message_bytes, self.request_est_tokens,
+                  self.deferred_material_count, self.unavailable_material_count,
+                  self.message_count, self.system_message_count, self.system_chars,
+                  self.system_bytes, self.tool_count, self.tool_bytes, self.image_count,
+                  self.audio_count, self.video_count)
+        if (any(type(value) is not str or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value) for value in hashes)
+                or any(type(value) is not int or not 0 <= value <= 2**31 - 1 for value in counts)
+                or type(self.context_observed) is not bool
+                or type(self.estimates_observed) is not bool
+                or type(self.message_estimates_observed) is not bool
+                or type(self.request_estimate_observed) is not bool
+                or type(self.context_availability_observed) is not bool
+                or type(self.request_stats_observed) is not bool):
+            raise ValueError("cache signature must contain bounded hashes and context metadata")
+
+    def to_record(self):
+        return {"version": 5, "model_hash": self.model_hash, "system_hash": self.system_hash,
+                "system_parts": list(self.system_parts), "tools_hash": self.tools_hash,
+                "tool_parts": list(self.tool_parts), "context_sequence_hash": self.context_sequence_hash,
+                "context_multiset_hash": self.context_multiset_hash, "context_hashes": list(self.context_hashes),
+                "context_material_count": self.context_material_count, "context_chars": self.context_chars,
+                "context_bytes": self.context_bytes, "context_observed": self.context_observed,
+                "estimates_observed": self.estimates_observed,
+                "context_est_tokens": self.context_est_tokens, "system_est_tokens": self.system_est_tokens,
+                "tool_est_tokens": self.tool_est_tokens,
+                "message_estimates_observed": self.message_estimates_observed,
+                "message_est_tokens": self.message_est_tokens, "message_chars": self.message_chars,
+                "message_bytes": self.message_bytes, "request_estimate_observed": self.request_estimate_observed,
+                "request_est_tokens": self.request_est_tokens,
+                "context_availability_observed": self.context_availability_observed,
+                "context_availability_hash": self.context_availability_hash,
+                "deferred_material_count": self.deferred_material_count,
+                "unavailable_material_count": self.unavailable_material_count,
+                "request_stats_observed": self.request_stats_observed, "message_count": self.message_count,
+                "system_message_count": self.system_message_count, "system_chars": self.system_chars,
+                "system_bytes": self.system_bytes, "tool_count": self.tool_count, "tool_bytes": self.tool_bytes,
+                "image_count": self.image_count, "audio_count": self.audio_count, "video_count": self.video_count}
+
+
+@dataclass(frozen=True)
 class ModelEnvelope:
     original: PromptRequest
     task_prompt: str
@@ -148,8 +279,11 @@ class ModelEnvelope:
     # Ephemeral owner fence, never serialized or sent to the model. Native
     # adapters call it after asynchronous host preparation, just before I/O.
     before_dispatch: Callable[[], object] | None = field(default=None, compare=False, repr=False)
+    record_cache_signature: Callable[[CacheSignature], object] | None = field(default=None, compare=False, repr=False)
     model_override: str = ""
     provider_capabilities: tuple[str, ...] = ()
+    on_reply_prefix: Callable[[ModelDraft], Awaitable[bool]] | None = field(default=None, compare=False, repr=False)
+    reply_prefix_ready: Callable[[ModelDraft], bool] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -175,8 +309,11 @@ class ProviderResponse:
     tool_calls: tuple[ToolCall, ...] = ()
     failure: ModelFailure | None = None
     captured_output: CapturedModelOutput | None = None
+    diagnostics: ResponseDiagnostics | None = None
 
     def __post_init__(self):
+        if self.diagnostics is not None and not isinstance(self.diagnostics, ResponseDiagnostics):
+            raise ValueError("provider diagnostics must contain only trusted response metadata")
         if self.status not in ("generated", "not_started", "unknown"):
             raise ValueError("provider result requires an explicit processing outcome")
         if self.failure is not None and (

@@ -11,6 +11,7 @@ from companion_v2.foundation.refs import ScopeRef, SourceRef, VersionRef
 from companion_v2.role_work.growth.management import RoleGrowthManagement
 from companion_v2.role_work.growth.access_management import RoleGrowthAccessManagement
 from companion_v2.role_work.growth.progress_management import GrowthProgressManagement
+from companion_v2.role_work.journal.self_review_management import SelfReviewManagement
 
 from .management_identity import dashboard_operator
 
@@ -45,9 +46,12 @@ class GrowthWebAPI:
 
     def routes(self):
         return [(PREFIX, self.list, ["GET"], "Read role growth in the pinned private profile"),
+                (PREFIX + "/evidence", self.evidence, ["GET"], "Read current growth source evidence"),
                 (PREFIX + "/command", self.command, ["POST"], "Explicitly manage role growth"),
                 (PREFIX + "/progress", self.progress, ["GET"], "Read pending growth progress reviews"),
-                (PREFIX + "/progress/command", self.progress_command, ["POST"], "Decide a growth progress review")]
+                (PREFIX + "/progress/command", self.progress_command, ["POST"], "Decide a growth progress review"),
+                (PREFIX + "/self-review", self.self_review, ["GET"], "Read role self-review candidates"),
+                (PREFIX + "/self-review/command", self.self_review_command, ["POST"], "Decide a role self-review candidate")]
 
     async def _run(self, arguments, *, method):
         from .web_api import outcome_response
@@ -63,6 +67,7 @@ class GrowthWebAPI:
                 if session is None or controller.runtime is None:
                     raise TaskError("staging_not_initialized", "load an initialized V2 profile first")
                 operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                self_review_request = method.startswith("self_review_")
                 manager = RoleGrowthManagement(session.application.role_growth)
                 access = RoleGrowthAccessManagement(session.application)
                 if method == "configure":
@@ -70,14 +75,17 @@ class GrowthWebAPI:
                 elif method.startswith("progress_"):
                     manager = GrowthProgressManagement(session.application)
                     method = method.removeprefix("progress_")
+                elif self_review_request:
+                    manager = SelfReviewManagement(session.application)
+                    method = method.removeprefix("self_review_")
                 result = getattr(manager, method)(operator=operator, context=session.profile.target, **arguments)
-                if result.is_success and method == "list":
+                if result.is_success and method == "list" and not self_review_request:
                     settings = access.read(operator=operator, context=session.profile.target)
                     if not settings.is_success:
                         return outcome_response(settings)
                     result.unwrap()["access"] = settings.unwrap()
                 response = outcome_response(result)
-                if result.is_success and method == "list":
+                if result.is_success and method == "list" and not self_review_request:
                     response["data"].update(operator_name=username,
                         profile_id=getattr(controller, "target_id", None) or controller.settings.profile_id)
                 return response
@@ -96,6 +104,13 @@ class GrowthWebAPI:
             return outcome_response(Outcome.failed("growth_query_invalid", "invalid page size"))
         return await self._run(dict(state=query.get("state") or None, kind=query.get("kind") or None,
                                     limit=limit, after_id=query.get("after_id") or None), method="list")
+
+    async def evidence(self):
+        from .web_api import outcome_response
+        query = request.query
+        if set(query.keys()) != {"growth_id"} or len(query.getlist("growth_id")) != 1:
+            return outcome_response(Outcome.failed("growth_query_invalid", "select one original growth record"))
+        return await self._run({"growth_id": query["growth_id"]}, method="evidence")
 
     async def command(self):
         from .web_api import outcome_response
@@ -171,3 +186,37 @@ class GrowthWebAPI:
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             return outcome_response(Outcome.failed("growth_progress_command_invalid", "invalid UTF-8 review command"))
         return await self._run(data, method="progress_command")
+
+    async def self_review(self):
+        from .web_api import outcome_response
+        query = request.query
+        if set(query.keys()) - {"state", "limit", "after_id"} or any(
+                len(query.getlist(key)) != 1 for key in query.keys()):
+            return outcome_response(Outcome.failed("self_review_query_invalid", "unknown or repeated query fields"))
+        try:
+            limit = int(query.get("limit", "20"))
+        except (TypeError, ValueError):
+            return outcome_response(Outcome.failed("self_review_query_invalid", "invalid page size"))
+        return await self._run(dict(state=query.get("state") or "pending", limit=limit,
+                                    after_id=query.get("after_id") or None), method="self_review_list")
+
+    async def self_review_command(self):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 100000:
+                raise ValueError("command too large")
+            def unique(pairs):
+                values = {}
+                for key, value in pairs:
+                    if key in values:
+                        raise ValueError("duplicate field")
+                    values[key] = value
+                return values
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+            fields = {"item_id", "action", "view_token", "operation_key"}
+            if type(data) is not dict or set(data) != fields:
+                raise ValueError("unexpected review fields")
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("self_review_command_invalid", "invalid UTF-8 review command"))
+        return await self._run(data, method="self_review_command")

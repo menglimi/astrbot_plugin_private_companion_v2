@@ -9,7 +9,7 @@ from companion_v2.conversation.humanized_expression import (DEFAULT_PROMPT, MAX_
 from companion_v2.conversation.text_processing import TEXT_DEFAULTS, text_policy
 from companion_v2.proactive.configuration import GROUP as CONTACT_GROUP, configuration_fields as contact_fields
 from companion_v2.proactive.preferences import ContactPreferences
-from companion_v2.proactive.prompts import PURPOSES, request_for
+from companion_v2.proactive.prompts import ORIGIN_INSTRUCTIONS, PURPOSES, PURPOSE_INSTRUCTIONS, request_for
 from companion_v2.role_work.journal.models import JournalKind
 from companion_v2.role_work.journal.prompts import request_for as journal_request_for
 from tests.test_management_access import ROLE, SCOPE
@@ -50,6 +50,10 @@ class HumanizedExpressionTests(unittest.TestCase):
         policy = text_policy({"enable_humanized_expression": True})
         self.assertIn("日常表达要求", policy.instruction)
         self.assertIn("不要每次先复述或总结对方说的话", policy.instruction)
+        self.assertIn("可以只发一张图", policy.instruction)
+        self.assertIn("可以选择不接话", policy.instruction)
+        self.assertIn("可以只用语音", policy.instruction)
+        self.assertIn("戳一戳只在当前流程明确提供该能力并允许时考虑", policy.instruction)
         self.assertIn(DEFAULT_PROMPT, policy.instruction)
 
     def test_custom_body_replaces_the_default_and_blank_falls_back(self):
@@ -116,6 +120,117 @@ class ProactiveStyleTests(unittest.TestCase):
         plain_values = dict(PREF_VALUES, style_prompt="")
         plain = request_for(self.contact_job(), (), ContactPreferences(None, plain_values, NOW))
         self.assertNotIn("主动表达风格补充", plain.instruction)
+
+    def test_administrator_diagnostic_omits_history_and_dedup_for_every_purpose(self):
+        values = dict(PREF_VALUES, dedup_enabled=True)
+        preferences = ContactPreferences(snapshot=None, values=values, observed_at=NOW)
+        history = ({"owner": CONTACT_GROUP, "delivered_at": NOW.isoformat(), "text": "private history marker"},)
+        last_reply = {"text": "private last reply marker", "reference": "private-reference"}
+
+        ordinary = request_for(self.contact_job(), (), preferences, history, last_reply=last_reply)
+        self.assertIn("dedup_candidate", {item.purpose for item in ordinary.context.materials})
+        self.assertIn("只用标为 dedup_candidate", ordinary.instruction)
+
+        for purpose in PURPOSES:
+            with self.subTest(purpose=purpose):
+                job = self.contact_job()
+                job.intent.purpose = purpose
+                job.administrator_test = True
+                job.interaction = {"latest_input": "private interaction marker"}
+                request = request_for(job, (), preferences, history, last_reply=last_reply)
+                material_purposes = {item.purpose for item in request.context.materials}
+                material_text = "\n".join(item.payload for item in request.context.materials)
+                self.assertNotIn("communication_state", material_purposes)
+                self.assertNotIn("dedup_candidate", material_purposes)
+                self.assertNotIn("last_confirmed_reply", material_purposes)
+                self.assertNotIn("private history marker", material_text)
+                self.assertNotIn("private last reply marker", material_text)
+                self.assertNotIn("private interaction marker", material_text)
+                self.assertNotIn("只用标为 dedup_candidate", request.instruction)
+                self.assertIn("不要把缺少这些材料判为重复", request.instruction)
+
+    def test_daily_greeting_gets_contextual_humanized_guidance(self):
+        thought = SimpleNamespace(summary="早上有一个轻轻碰面的机会", opportunity=SimpleNamespace(
+            opportunity_id="greeting-1", opened_at=NOW))
+        job = self.contact_job()
+        job.intent = SimpleNamespace(purpose="greeting", thought=thought)
+        job.automatic_origin = {"greeting_event": {"kind": "day_anchor", "anchor": "morning_greeting"}}
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        request = request_for(job, (), preferences)
+        self.assertIn("不是必须完成的签到任务", request.instruction)
+        self.assertIn("没有具体话头就 skip", request.instruction)
+        self.assertIn("不要每次套用", request.instruction)
+
+    def test_insomnia_greeting_keeps_the_low_pressure_rule(self):
+        thought = SimpleNamespace(summary="夜间低压力问候", opportunity=SimpleNamespace(
+            opportunity_id="night-1", opened_at=NOW))
+        job = self.contact_job()
+        job.intent = SimpleNamespace(purpose="care", thought=thought)
+        job.automatic_origin = {"greeting_event": {"kind": "insomnia_night"}}
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        request = request_for(job, (), preferences)
+        self.assertIn("夜间低压力问候机会", request.instruction)
+        self.assertIn("不要求对方回复", request.instruction)
+
+    def test_source_backed_diagnostic_keeps_the_selected_producer_boundary(self):
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        job = self.contact_job()
+        job.intent = SimpleNamespace(purpose="news", thought=job.intent.thought)
+        job.administrator_test = True
+        job.diagnostic_source_backed = True
+        job.diagnostic_origin = {"news_event": {"event_id": "article-1"}, "_diagnostic": {}}
+
+        request = request_for(job, (), preferences)
+
+        self.assertIn(ORIGIN_INSTRUCTIONS["news_event"], request.instruction)
+        self.assertIn("只使用本次提供的已核验来源", request.instruction)
+        self.assertNotIn("测试不读取聊天历史、记忆或真实事件", request.instruction)
+
+    def test_each_registered_purpose_has_its_own_evidence_guidance(self):
+        self.assertEqual(set(PURPOSE_INSTRUCTIONS), set(PURPOSES))
+        for purpose, guidance in PURPOSE_INSTRUCTIONS.items():
+            with self.subTest(purpose=purpose):
+                job = self.contact_job()
+                job.intent = SimpleNamespace(purpose=purpose, thought=job.intent.thought)
+                preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+                request = request_for(job, (), preferences)
+                self.assertIn(guidance, request.instruction)
+                self.assertIn("仅输出 JSON", request.instruction)
+                self.assertIn('"decision_confidence"', request.instruction)
+                self.assertIn('"skip_reason"', request.instruction)
+
+    def test_selected_thought_is_the_anchor_and_old_context_cannot_create_a_task(self):
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        request = request_for(self.contact_job(), (), preferences)
+        self.assertIn("本轮已选中的联系目的、念头和与之对应的有效来源共同构成本轮主动由头", request.instruction)
+        self.assertIn("不能擅自替换由头、恢复旧请求、增加待办或触发工具行为", request.instruction)
+        self.assertIn("正文优先说清一个自然、完整的意思", request.instruction)
+
+    def test_each_supported_event_origin_adds_its_scene_boundary(self):
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        for marker, guidance in ORIGIN_INSTRUCTIONS.items():
+            with self.subTest(marker=marker):
+                job = self.contact_job()
+                job.automatic_origin = {marker: {}}
+                request = request_for(job, (), preferences)
+                self.assertIn(guidance, request.instruction)
+
+    def test_relationship_and_followup_purposes_have_registered_producers(self):
+        from companion_v2.proactive.relationship_events import PURPOSE_CUES
+        self.assertEqual(set(PURPOSE_CUES), {"affection", "care", "play", "repair", "invitation"})
+        examples = {"affection": "我想你，也很喜欢你", "care": "最近很累，也有点难过",
+                    "play": "我们一起玩个游戏吧", "repair": "你刚才那句话让我不舒服",
+                    "invitation": "下次一起去看电影吧"}
+        for purpose, sample in examples.items():
+            with self.subTest(purpose=purpose):
+                self.assertRegex(sample, PURPOSE_CUES[purpose])
+        from companion_v2.proactive.configuration import GROUP, configuration_fields
+        fields = {field.field_id for field in configuration_fields()}
+        self.assertIn(GROUP + ".contact_followup_after_minutes", fields)
+        self.assertIn(GROUP + ".contact_followup_cooldown_minutes", fields)
+        self.assertEqual(PURPOSES["followup"], "接回旧话题")
+        self.assertIn("不暗示已读", PURPOSE_INSTRUCTIONS["followup"])
+        self.assertIn("不要求对方接受", PURPOSE_INSTRUCTIONS["invitation"])
 
 
 class JournalStyleTests(RequestForDreamTests):

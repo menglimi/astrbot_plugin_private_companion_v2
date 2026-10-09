@@ -70,12 +70,13 @@ class ContactFixture(HostFixture):
             return await self.model_behavior(envelope)
         return answered(json.dumps({"decision": "send", "text": "想起你上次提到的书，读到哪里了？"}, ensure_ascii=False))
 
-    async def contact(self, app, opportunity=None, intents=None, *, context=None):
+    async def contact(self, app, opportunity=None, intents=None, *, context=None, administrator_test=False):
         context = context or self.contact_context()
         opportunity = opportunity or self.opportunity()
         intents = intents or (self.intent(opportunity),)
         return await app.proactive.contact(context, opportunity, intents,
-            role_instruction="这是原角色人格，保持自然。", selection_seed="stable-contact-seed")
+            role_instruction="这是原角色人格，保持自然。", selection_seed="stable-contact-seed",
+            administrator_test=administrator_test)
 
     async def enabled(self, **options):
         host = await self.start(self.host(**options))

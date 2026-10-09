@@ -12,7 +12,7 @@
 * **回执有界**：账号、时间、当天第几条、命中哪条配置——够回答"为什么回了这个人"，
   也不构成第二份通讯录。
 
-属于本功能的一次产品选择：真发了这一句之后会 ``stop_event()``，把这一轮从 AstrBot
+属于本功能的一次产品选择：真发了这一句之后会关闭默认模型回复，把这一轮从 AstrBot
 自己的回复管线里拿走。既然插件已经作答，就不该让陌生人收到两条回复。
 """
 
@@ -76,7 +76,8 @@ def stranger_route(controller, event):
         configured = {(settings.platform_id, settings.account_id, settings.participant_id)}
     if (meta.id, login) not in owned:
         return None
-    if (meta.id, login, peer) in configured:
+    if ((meta.id, login, peer) in configured
+            or (meta.id, login, "*") in configured):
         # 已配置的人**不是**陌生号：他们有自己的窗口与权限判定（包括"没有对话权限"
         # 时的礼拒）。挡住这里，是为了这条兜底通道永远不会抢走一个已配置对象的入站。
         return None
@@ -144,44 +145,68 @@ class StrangerNotice:
             return None
         return settings.defaults_installation(self.controller.runtime.installation_id)
 
-    async def handle(self, event):
-        """回一句并返回回执；不发时返回 ``None``。"""
+    async def handle(self, event, *, on_outcome=None):
+        """Return the original send receipt and report every recognized silent gate."""
         controller = self.controller
-        session = controller.session
-        if session is None or controller.runtime is None or session.application.state != "running":
-            return None
-        defaults = self.defaults()
-        if defaults is None or not defaults["stranger_notice"]:
-            return None
-        text = defaults["denied_reply"]
-        if not text or not private_notice_allowed(controller.settings):
-            return None
         route = stranger_route(controller, event)
         if route is None:
             return None
-        at = controller.now()
-        if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
+        reported = False
+
+        def report(state, reason_code):
+            nonlocal reported
+            if reported:
+                return
+            reported = True
+            if callable(on_outcome):
+                on_outcome({"state": state, "reason_code": reason_code})
+
+        def no_reply(reason_code):
+            report("no_reply", reason_code)
             return None
-        room = self._daily_room(at, defaults["stranger_daily_cap"])
-        if room is None:
+
+        session = controller.session
+        replied = False
+        try:
+            if session is None or controller.runtime is None or session.application.state != "running":
+                return no_reply("stranger_notice_session_unavailable")
+            defaults = self.defaults()
+            if defaults is None:
+                return no_reply("stranger_notice_settings_unavailable")
+            if not defaults["stranger_notice"]:
+                return no_reply("stranger_notice_disabled")
+            text = defaults["denied_reply"]
+            if not text or not private_notice_allowed(controller.settings):
+                return no_reply("stranger_notice_delivery_unavailable")
+            at = controller.now()
+            if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
+                return no_reply("stranger_notice_cooldown")
+            room = self._daily_room(at, defaults["stranger_daily_cap"])
+            if room is None:
+                return no_reply("stranger_notice_daily_cap")
+            view_id, count = room
+            receipt = await send_private_notice(controller, event, text=text, route=route)
+            if receipt.get("state") != "delivered":
+                return no_reply("stranger_notice_send_failed")
+            replied = True
+            report("replied", "stranger_notice_sent")
+            # 只有真的送出去了才记账：失败不占用冷却，也不占当天的额度。
+            self._write("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND,
+                        {"version": 1, "platform_id": route.platform_id, "login": route.login,
+                         "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(at)}, at)
+            self._write(view_id, DAILY_KIND,
+                        {"version": 1, "date": at.date().isoformat(), "count": count + 1}, at)
+            return {"platform_id": route.platform_id, "login": route.login, "peer": route.peer,
+                    "count_today": count + 1, "sent_at": stamp(at), "receipt": receipt.get("receipt")}
+        except Exception:
+            if not reported:
+                report("no_reply", "stranger_notice_processing_failed")
             return None
-        view_id, count = room
-        receipt = await send_private_notice(controller, event, text=text, route=route)
-        if receipt.get("state") != "delivered":
-            return None
-        # 只有真的送出去了才记账：失败不占用冷却，也不占当天的额度。
-        self._write("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND,
-                    {"version": 1, "platform_id": route.platform_id, "login": route.login,
-                     "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(at)}, at)
-        self._write(view_id, DAILY_KIND,
-                    {"version": 1, "date": at.date().isoformat(), "count": count + 1}, at)
-        return {"platform_id": route.platform_id, "login": route.login, "peer": route.peer,
-                "count_today": count + 1, "sent_at": stamp(at), "receipt": receipt.get("receipt")}
 
 
-async def refuse_stranger(controller, event):
+async def refuse_stranger(controller, event, *, on_outcome=None):
     """给 ``main.py`` 用：不再抛，只回报"到底发没发"。"""
     try:
-        return await StrangerNotice(controller).handle(event)
+        return await StrangerNotice(controller).handle(event, on_outcome=on_outcome)
     except Exception:  # noqa: BLE001 - 婉拒陌生人永远不该影响正常消息处理
         return None

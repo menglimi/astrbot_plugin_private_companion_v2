@@ -126,7 +126,7 @@ class SelfReviewEvidenceCatalog:
             JOIN conversation_parts p ON p.part_id = h.part_id
             JOIN conversation_batches b ON b.batch_id = h.batch_id
             JOIN conversation_delivery_receipts r ON r.part_id = h.part_id AND r.receipt_ref = h.receipt_ref
-            WHERE p.state = 'delivered' AND r.delivered_at > ? AND r.delivered_at <= ?
+            WHERE p.state = 'delivered' AND p.delivered_at > ? AND p.delivered_at <= ?
             AND json_extract(b.context_json, '$.actor.subject.subject_id') = ?
             AND json_extract(b.context_json, '$.role_binding.role.subject_id') = ?
             AND json_extract(b.context_json, '$.role_binding.scope.bot_id') = ?
@@ -204,22 +204,36 @@ class SelfReviewEvidenceCatalog:
         actually cites, so accepting one item never depends on unrelated evidence
         that has since been withdrawn.
         """
+        self.describe_handles(handles, opened_at, closed_at, context, at)
+        return True
+
+    def describe_handles(self, handles, opened_at, closed_at, context, at):
+        """Return only cited, currently readable evidence for an authorized reviewer."""
         self._authorize(context, at)
-        known = set(handles)
-        if not known:
+        requested = tuple(handles)
+        unresolved = set(requested)
+        if not unresolved or len(unresolved) != len(requested):
             raise TaskError("self_review_evidence_unavailable", "this review has no evidence to recheck")
+        descriptions = {}
         with self.runtime.read_snapshot():
             self._owner().authorize(context, at)
             for row in self._reply_rows(context, opened_at, closed_at):
-                self._confirmed_text(row, self._original(row), at)
-                known.discard(self.reply_handle(context, row["part_id"]))
+                handle = self.reply_handle(context, row["part_id"])
+                if handle not in unresolved:
+                    continue
+                item = self._reply(context, row, at)
+                descriptions[handle] = item.payload
+                unresolved.discard(handle)
             for handle, stream, operation_id in self._receipt_references(context):
-                self._receipt(context, handle, stream, operation_id, at)
-                known.discard(handle)
-        if known:
+                if handle not in unresolved:
+                    continue
+                item = self._receipt(context, handle, stream, operation_id, at)
+                descriptions[handle] = item.payload
+                unresolved.discard(handle)
+        if unresolved:
             raise TaskError("self_review_evidence_changed",
                             "original self-review evidence is no longer available")
-        return True
+        return [descriptions[handle] for handle in requested]
 
     def catalogue(self, window):
         """Deterministic handle, kind and text for the prompt."""

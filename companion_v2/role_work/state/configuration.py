@@ -14,14 +14,21 @@ from .settings_scope import PhysicalSettingsOwner
 from companion_v2.agenda.planning_config import DEFAULTS as PLANNING_DEFAULTS, MAXIMUMS as PLANNING_MAXIMUMS
 from companion_v2.agenda.planning_config import WEATHER_MAX_AGE_MINIMUM
 from companion_v2.agenda.planning_config import validate_settings as validate_planning
+from companion_v2.agenda.calendar_access import revoke_role_calendar_grants
 
 GROUP = "role.state"
 OWNER = "role.state.settings"
+FEATURE_SWITCHES = {name: name + "_enabled" for name in (
+    "energy", "health", "hunger", "sleep", "cycle", "mood", "busy", "location")}
+SPECIAL_DISPLAY_FEATURES = ("health", "hunger", "sleep", "cycle", "busy")
 DEFAULTS = {"enabled": False, "maintenance_minutes": 30, "hunger_enabled": True,
-    "health_enabled": True, "cycle_enabled": False, "calendar_enabled": False,
+    "health_enabled": True, "cycle_enabled": False, "calendar_enabled": True,
+    "energy_enabled": True, "sleep_enabled": True, "busy_enabled": True, "location_enabled": True,
+    "energy_expression_prompt": "", "hunger_expression_prompt": "", "health_expression_prompt": "",
     "home_show_energy": True, "home_show_health": True, "home_show_hunger": True,
     "home_show_sleep": True, "home_show_cycle": True, "home_show_busy": True,
-    "home_show_location": True,
+    "home_show_location": True, "home_show_mood": True,
+    **{"home_only_special_" + name: False for name in SPECIAL_DISPLAY_FEATURES},
     # Refresh without a stop/start toggle. Four seconds reduces request frequency;
     # actual expiry and flicker depend on the QQ client and need field validation.
     "typing_enabled": False, "typing_refresh_seconds": 4, "presence_enabled": False,
@@ -37,9 +44,16 @@ DEFAULTS = {"enabled": False, "maintenance_minutes": 30, "hunger_enabled": True,
 MOOD_LIMITS = {"mood_interest_window_minutes": (5, 1440), "mood_update_max_delta": (1, 4),
     "mood_decay_half_life_minutes": (5, 1440), "mood_neutral_band": (1, 4)}
 PERMISSIONS = {"enabled": ("role.state.read", "role.state.maintain"),
-    "calendar_enabled": ("calendar.read", "calendar.write"),
     "typing_enabled": ("platform.typing",), "presence_enabled": ("platform.presence",),
     "online_status_enabled": ("platform.presence",)}
+EXPRESSION_PROMPTS = ("energy_expression_prompt", "hunger_expression_prompt", "health_expression_prompt")
+
+
+def validate_expression_prompts(values):
+    for name in EXPRESSION_PROMPTS:
+        value = values.get(name, "")
+        if type(value) is not str or len(value) > 512:
+            raise ConfigurationError("state_expression_prompt_invalid", f"{name} must be text up to 512 characters")
 
 
 def validate_mood_settings(values):
@@ -91,6 +105,7 @@ class StateConfigurationOwner(PhysicalSettingsOwner):
     def preview_set(self, target, fields, *, changes):
         result = super().preview_set(target, fields, changes=changes)
         values = {key.rsplit(".", 1)[-1]: field.value for key, field in result.items()}
+        validate_expression_prompts(values)
         validate_settings(values)
         validate_planning(values)
         validate_mood_settings(values)
@@ -108,6 +123,7 @@ class StateConfigurationOwner(PhysicalSettingsOwner):
             proposed.update({key.rsplit(".", 1)[-1]: value for key, value in changes.items()})
             proposed.update({key.rsplit(".", 1)[-1]: DEFAULTS[key.rsplit(".", 1)[-1]] for key in reset})
             validate_settings(proposed)
+            validate_expression_prompts(proposed)
             validate_planning(proposed)
             validate_mood_settings(proposed)
             validate_humanized(proposed)
@@ -115,6 +131,9 @@ class StateConfigurationOwner(PhysicalSettingsOwner):
                                   expected_revision=expected_revision, observed_at=observed_at)
             identity = PersistentIdentityDirectory(self.runtime)
             changed = {key.rsplit(".", 1)[-1] for key in (*changes, *reset)}
+            if "calendar_enabled" in changed and not proposed["calendar_enabled"]:
+                revoke_role_calendar_grants(identity, installation_id=target.installation_id,
+                    bot_id=target.bot_id, role=target.role, revoked_at=observed_at)
             for action in {action for actions in PERMISSIONS.values() for action in actions}:
                 options = [name for name, actions in PERMISSIONS.items() if action in actions]
                 if not changed.intersection(options):

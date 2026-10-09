@@ -25,7 +25,7 @@ function instrument() {
             const r = node.getBoundingClientRect();
             return [r.left, r.top, r.width, r.height];
           };
-          const ui = [".rail", ".shell-side", ".shell-panel", ".stage-bar", ".stage-furniture-strip", ".stage-overlay", ".voxel-hint", ".product-scope"]
+          const ui = [".rail", ".shell-side", ".shell-panel", ".stage-bar", ".stage-role", ".stage-furniture-strip", ".stage-overlay", ".voxel-hint"]
             .map(selector => Number(getComputedStyle(document.querySelector(selector)).opacity));
           const rest = options.measureRest?.() || options.geometry.rest;
           return {label, at: performance.now() - start, box: rect(host),

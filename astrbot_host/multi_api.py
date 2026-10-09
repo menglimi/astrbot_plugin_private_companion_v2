@@ -22,15 +22,21 @@ from .acquaintance_api import AcquaintanceWebAPI
 from .integration_api import IntegrationWebAPI
 from .semantic_api import SemanticWebAPI
 from .setup_api import SetupWebAPI
+from .account_session_api import AccountSessionWebAPI
 from .perception_api import PerceptionWebAPI
 from .native_perception_api import NativePerceptionWebAPI, PREFIX as NATIVE_PERCEPTION_PREFIX
 from .persona_workshop_api import PersonaWorkshopWebAPI, PREFIX as PERSONA_PREFIX
 from .legacy_api import LegacyMigrationWebAPI, PREFIX as LEGACY_PREFIX
+from .legacy_group_data_api import LegacyGroupDataWebAPI
 from .backup_api import BackupWebAPI
 from .reality_access_api import RealityAccessWebAPI, PREFIX as REALITY_ACCESS_PREFIX
 from .screen_access_api import ScreenAccessWebAPI, PREFIX as SCREEN_ACCESS_PREFIX
 from .image_material_api import ImageMaterialsWebAPI, PREFIX as IMAGE_MATERIAL_PREFIX
 from .qzone_api import QzoneWebAPI, PREFIX as QZONE_PREFIX
+from .host_options_api import HostOptionsWebAPI
+from .storage_api import StorageWebAPI
+from .display_names import display_names
+from .identity_derivation import role_display_name
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/host"
@@ -86,6 +92,8 @@ class MultiHostWebAPI:
                 if isinstance(target, GroupTarget) and self.controller.authority is not None
                 and self.controller.runtime is not None else None), "roles": [
             {"role_id": role, "persona_ids": [p.persona_id for p in settings.personas if p.bot_id == target.bot_id and p.role_id == role],
+             "role_name": role_display_name(role, [p.persona_id for p in settings.personas
+                                                    if p.bot_id == target.bot_id and p.role_id == role]),
              "memory_api": (None if isinstance(target, GroupTarget) else
                             PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/memory"),
              "group_memory_api": (PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/group-memory"
@@ -120,7 +128,9 @@ class MultiHostWebAPI:
              # V1 迁移写的是角色设置，所以它和别的域路由一样按角色挂：
              # 页面先选目标与角色，再对着那个角色的路径侦察、试算、执行。
              "legacy_api": (None if isinstance(target, GroupTarget) else
-                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/legacy")}
+                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/legacy"),
+             "legacy_group_data_api": (PREFIX + "/targets/" + target.target_id + "/roles/"
+                            + digest(role) + "/legacy-group-data" if isinstance(target, GroupTarget) else None)}
             for role in sorted({p.role_id for p in settings.personas if p.bot_id == target.bot_id})]}
             for target in settings.all_targets]
 
@@ -133,7 +143,12 @@ class MultiHostWebAPI:
     async def api_status(self):
         try:
             self._admin()
-            return {"status": "ok", "data": self.controller.status()}
+            status = self.controller.status()
+            status["targets"] = await display_names(self.controller).targets(status.get("targets", []))
+            self._admin()
+            if self.controller._terminated:
+                status = self.controller.status()
+            return {"status": "ok", "data": status}
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
 
@@ -179,12 +194,15 @@ class MultiHostWebAPI:
         routes = [(PREFIX + "/status", self.api_status, ["GET"], "Companion V2 multi-target status")] + PageWebAPI(self.controller).routes() + IntegrationWebAPI(self.controller).routes() + AcquaintanceWebAPI(self.controller).routes()
         routes += SemanticWebAPI(self.controller).routes()
         routes += SetupWebAPI(self.controller).routes()
+        routes += AccountSessionWebAPI(self.controller).routes()
         routes += PerceptionWebAPI(self.controller).routes()
         # 备份是安装级的：它不需要目标，快照覆盖当前运行档的那棵 V2 数据根
         # （多目标下是 installations/<installation_key>/runtime）。所以这里挂一次，
         # 不像其它域路由那样按角色重挂。暂存还原的生效点在 multi_controller
-        # 的加载路径上，与单目标同一处、同一个函数。
+        # 的加载路径上，通过同一个暂存还原入口处理。
         routes += BackupWebAPI(self.controller).routes()
+        routes += HostOptionsWebAPI(self.controller).routes()
+        routes += StorageWebAPI(self.controller).routes()
         routes.append((PREFIX + "/preview", self.api_preview, ["GET"], "Companion V2 conversation preview"))
         routes.append((PREFIX + "/batches", self.api_batches, ["GET"], "Companion V2 recent target batches"))
         for action, method in (("probe", "probe"), ("initialize", "initialize_profile"), ("start", "start"),
@@ -200,6 +218,8 @@ class MultiHostWebAPI:
                         role["group_memory_api"]))
                     routes.extend(GroupReplyWebAPI(self.controller, target["target_id"], role["role_id"]).routes(
                         role["reply_api"]))
+                    routes.extend(LegacyGroupDataWebAPI(self.controller, target["target_id"], role["role_id"]).routes(
+                        role["legacy_group_data_api"]))
                 if role["memory_api"] is None:
                     continue
                 view = TargetControllerView(self.controller, target["target_id"], role["role_id"])

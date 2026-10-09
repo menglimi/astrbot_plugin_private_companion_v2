@@ -120,6 +120,8 @@ def normalize_qweather_now(payload, location):
 
 
 class QWeatherWeatherPort:
+    provider = "qweather"
+
     def __init__(self, credentials, *, now=None):
         self._credentials = credentials
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -144,15 +146,24 @@ class QWeatherWeatherPort:
         return normalize_qweather_now(json.loads(raw), location)
 
 
-def configured_qweather_weather_port():
+def configured_qweather_weather_port(config=None):
     """Prefer QWeather when host credentials exist, else fall back to Open-Meteo.
 
     QWeather is the default because it is the only source that can also serve official
     alerts, so one credential covers both. Open-Meteo stays the zero-configuration
     path for an installation that never set any credential.
     """
-    credentials = credentials_from_environment(label="host")
+    settings = config.get("weather", {}) if isinstance(config, dict) else {}
+    provider = settings.get("provider", "auto")
+    if provider not in ("auto", "qweather", "open-meteo"):
+        raise ValueError("invalid weather provider")
+    if provider == "open-meteo":
+        from .weather import OpenMeteoWeatherPort
+        return OpenMeteoWeatherPort()
+    credentials = credentials_from_environment(label="host", config=config)
     if credentials is None:
+        if provider == "qweather":
+            raise ValueError("QWeather requires host credentials")
         from .weather import OpenMeteoWeatherPort
         return OpenMeteoWeatherPort()
     return QWeatherWeatherPort(credentials)

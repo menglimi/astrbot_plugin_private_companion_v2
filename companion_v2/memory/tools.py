@@ -13,6 +13,7 @@ from .prompts import MEMORY_INSTRUCTION
 
 ACTIONS = {
     "memory.query": ("memory.read", ("query_intent",), ("namespace", "kind", "limit", "cursor", "time_start", "time_end", "subjects", "at_time")),
+    "memory.legacy.query": ("memory.read", ("query_intent",), ("material_kind", "limit", "cursor", "time_start", "time_end")),
     "memory.sources": ("memory.read", ("handle",), ("start", "max_chars")),
     "memory.proposal.submit": ("memory.propose", ("proposal",), ()),
     "memory.operation.get": ("memory.read", ("operation_id",), ()),
@@ -59,6 +60,7 @@ class MemoryTools:
         self.memory, self.messages = memory, messages
         self.catalog = tuple(ToolSpec(action,
             {"memory.query": "按人物、事件、时间、物件或原话线索查询已有事实、经历或原文。未命中不代表未发生。kind=facts/sources/experiences/all。",
+             "memory.legacy.query": "只读查询已映射的 V1 历史记忆或时间线；结果是历史资料，不是当前事实，也不能作为记忆写入证据。",
              "memory.sources": "读取本轮真实来源 handle，可用 start/max_chars 续读相邻上下文。",
              "memory.proposal.submit": "提交有来源的记忆提议，明确纠正及时提交；其他待整理认识可设 defer_until_boundary。",
              "memory.operation.get": "核对原记忆操作回执；查不到不能证明未执行。",
@@ -91,6 +93,8 @@ class MemoryTools:
         key = batch_id + ":" + call_id
         if action == "memory.query":
             result = require(query.query(context, session_id, **arguments, **(prepared or {})))
+        elif action == "memory.legacy.query":
+            result = require(query.legacy_materials(context, session_id, **arguments))
         elif action == "memory.sources":
             result = require(query.source(context, session_id, **arguments))
         elif action == "memory.proposal.submit":
@@ -196,6 +200,8 @@ class MemoryTools:
                     handles = [item["handle"]]
                 for handle in handles:
                     resolve(context, session_id, handle)
+        elif row["action"] == "memory.legacy.query":
+            self.memory.query.legacy.verify(context, payload["items"])
         elif row["action"] == "memory.sources":
             evidence = resolve(context, session_id, payload["handle"])
             raw = self.memory.writer.access.evidence(context, evidence)

@@ -37,21 +37,42 @@ def manifest_hash(text, manifests=(), *, image_position="after_text"):
 class ImageDeliveryContent:
     text: str
     images: tuple[PromptImage, ...]
+    allow_cross_scope_images: bool = False
+
+    def __post_init__(self):
+        if (type(self.text) is not str or type(self.images) is not tuple
+                or type(self.allow_cross_scope_images) is not bool):
+            raise ValueError("image delivery content must be explicit and ordered")
 
 
 @dataclass(frozen=True)
 class ImageDeliveryEnvelope(DeliveryEnvelope):
     images: tuple[PromptImage, ...] = field(default=(), repr=False)
     image_position: str = "after_text"
+    allow_cross_scope_images: bool = False
+
+    @staticmethod
+    def _image_scope_valid(context, images, allow_cross_scope_images):
+        if any(not isinstance(image, PromptImage) for image in images):
+            return False
+        foreign = tuple(image for image in images if image.source.scope != context.scope)
+        if not foreign:
+            return not allow_cross_scope_images
+        scopes = {image.source.scope for image in foreign}
+        return (allow_cross_scope_images and len(foreign) == len(images) and len(scopes) == 1
+                and context.scope.kind is ScopeKind.PRIVATE
+                and next(iter(scopes)).kind is ScopeKind.GROUP)
 
     def __post_init__(self):
         super().__post_init__()
         if (self.context.scope.kind not in (ScopeKind.PRIVATE, ScopeKind.GROUP)
                 or (self.context.scope.kind is ScopeKind.GROUP
                     and self.context.audience != group_audience(self.context.scope, self.context.actor.subject))
+                or type(self.allow_cross_scope_images) is not bool
                 or self.image_position not in ("after_text", "before_text")
                 or not isinstance(self.images, tuple)
-                or not self.images or any(not isinstance(i, PromptImage) or i.source.scope != self.context.scope for i in self.images)
+                or not self.images or not self._image_scope_valid(
+                    self.context, self.images, self.allow_cross_scope_images)
                 or len({i.source for i in self.images}) != len(self.images)
                 or not fits_budget(tuple(i.descriptor for i in self.images))
                 or payload_hash(self.text, self.images, image_position=self.image_position) != self.payload_hash):

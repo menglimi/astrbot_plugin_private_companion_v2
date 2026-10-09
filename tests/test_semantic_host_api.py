@@ -88,13 +88,23 @@ class PrivateSemanticAPITests(SemanticRequests, unittest.IsolatedAsyncioTestCase
                                                            "reactions_trigger_probability": 0.6,
                                                            "reactions_cooldown_seconds": 120,
                                                            "reactions_delivery_mode": "separate_before",
-                                                           "reactions_image_format": "qq_emoji"}, revision=revision)
+                                                           "reactions_image_format": "qq_emoji",
+                                                           "reactions_collection_private_enabled": True,
+                                                           "reactions_collection_group_enabled": True,
+                                                           "reactions_collection_private_probability": 0.15,
+                                                           "reactions_collection_group_probability": 0.25,
+                                                           "reactions_collection_mode": "confirm"}, revision=revision)
         self.assertEqual(configured["data"]["settings"]["revision"], revision + 1)
         self.assertEqual({key: configured["data"]["settings"][key] for key in (
             "reactions_trigger_probability", "reactions_cooldown_seconds",
-            "reactions_delivery_mode", "reactions_image_format")}, {
+            "reactions_delivery_mode", "reactions_image_format", "reactions_collection_private_enabled",
+            "reactions_collection_group_enabled", "reactions_collection_private_probability",
+            "reactions_collection_group_probability", "reactions_collection_mode")}, {
             "reactions_trigger_probability": 0.6, "reactions_cooldown_seconds": 120,
-            "reactions_delivery_mode": "separate_before", "reactions_image_format": "qq_emoji"})
+            "reactions_delivery_mode": "separate_before", "reactions_image_format": "qq_emoji",
+            "reactions_collection_private_enabled": True, "reactions_collection_group_enabled": True,
+            "reactions_collection_private_probability": 0.15,
+            "reactions_collection_group_probability": 0.25, "reactions_collection_mode": "confirm"})
         stale = await self.semantic_request(self.selection, action="configure",
                                              changes={"vision_review": True}, revision=revision)
         self.assertEqual(stale["data"]["code"], "semantic_conflict")
@@ -106,16 +116,32 @@ class PrivateSemanticAPITests(SemanticRequests, unittest.IsolatedAsyncioTestCase
                                                 content=base64.b64encode(content).decode("ascii"),
                                                 metadata={"name": "抱抱", "description": "伸手安慰"})
         self.assertEqual(imported["status"], "ok", imported)
+        self.assertTrue(imported["data"]["created"])
         item = imported["data"]["item"]
+        self.assertEqual(set(item["payload"]["manual_fields"]), {"name", "description"})
+        duplicate = await self.semantic_request(self.selection, action="import",
+            content=base64.b64encode(content).decode("ascii"), metadata={"name": "不同文件名"})
+        self.assertEqual(duplicate["data"]["item"]["id"], item["id"])
+        self.assertFalse(duplicate["data"]["created"])
         listed = await self.semantic_request(self.selection, kind="reaction")
         self.assertEqual([row["id"] for row in listed["data"]["items"]], [item["id"]])
+        self.assertEqual(listed["data"]["catalog"]["reaction"]["total"], 1)
         detail = await self.semantic_request(self.selection, kind="reaction", id=item["id"])
         self.assertEqual(base64.b64decode(detail["data"]["image_url"].split(",", 1)[1]), content)
         edited = await self.semantic_request(self.selection, action="edit", kind="reaction", id=item["id"],
                                               revision=item["revision"], values={"intents": "安慰"}, enabled=True)
         self.assertEqual(edited["data"]["item"]["revision"], item["revision"] + 1)
+        self.assertIn("intents", edited["data"]["item"]["payload"]["manual_fields"])
         found = await self.semantic_request(self.selection, action="search", kind="reaction", query="抱抱")
         self.assertEqual([row["id"] for row in found["data"]["items"]], [item["id"]])
+        stale_delete = await self.semantic_request(self.selection, action="delete", kind="reaction",
+                                                    id=item["id"], revision=item["revision"])
+        self.assertEqual(stale_delete["data"]["code"], "semantic_conflict")
+        deleted = await self.semantic_request(self.selection, action="delete", kind="reaction",
+                                               id=item["id"], revision=edited["data"]["item"]["revision"])
+        self.assertTrue(deleted["data"]["deleted"])
+        missing = await self.semantic_request(self.selection, kind="reaction", id=item["id"])
+        self.assertEqual(missing["data"]["code"], "semantic_item_missing")
 
         operator = dashboard_operator(self.controller.runtime, "admin", at=support.NOW)
         policy = ObjectAccessPolicy(self.controller.runtime)
@@ -171,6 +197,23 @@ class GroupSemanticAPITests(SemanticRequests, GroupMemoryManagementFixture, unit
         selected = await self.semantic_request({**selection, "session_id": "201_300"})
         self.assertTrue(selected["data"]["selection_ready"])
 
+    async def test_group_slang_recall_includes_recent_member_context(self):
+        await self.start_host()
+        service = self.app.semantics
+        queries = []
+
+        async def record_search(owner, kind, query, *, context=None, limit=None):
+            queries.append(query)
+            return {"items": []}
+
+        service.search.search = record_search
+        await self.conversation(remember=False, wording="凹凸是以撒里祸兽的代称")
+        await self.conversation(remember=False, wording="为什么我记得普通掉半血？", sender="202")
+        self.assertEqual(len(queries), 2)
+        self.assertIn("凹凸", queries[-1])
+        self.assertIn("普通掉半血", queries[-1])
+        self.assertNotIn("收到这条群聊发言", queries[-1])
+
     async def test_learning_retries_after_failure_and_source_withdrawal_hides_meaning(self):
         await self.start_host()
         port = VocabularyPort()
@@ -185,6 +228,7 @@ class GroupSemanticAPITests(SemanticRequests, GroupMemoryManagementFixture, unit
         self.assertEqual(port.analysis_calls, 2)
         listed = await self.semantic_request(selection, kind="slang")
         self.assertEqual(listed["data"]["items"][0]["payload"]["meaning"], "今晚集合")
+        self.assertIn("vector_ready", listed["data"]["items"][0])
         result = await self.semantic_request(selection, action="search", kind="slang", query="小灯")
         self.assertEqual(len(result["data"]["items"]), 1)
         event = self.app.runtime.read_one("SELECT event_key FROM conversation_inputs WHERE batch_id=?", (batch,))

@@ -97,6 +97,11 @@ class EnumerationTests(unittest.TestCase):
 
 
 class ChoiceTests(unittest.TestCase):
+    def test_astrbot_v3_personas_take_precedence_over_legacy_database_personas(self):
+        manager = Manager(personas_v3=[Manager(name="默认"), Manager(name="星河")],
+                          get_personas=lambda: ["legacy-only"])
+        self.assertEqual(list_personas(Context(manager)), ["星河", "默认"])
+
     def test_the_conversation_persona_leads_the_list(self):
         manager = Manager(get_personas=lambda: ["朝雾", "晚星"])
         choices = choose_personas(Context(manager), selected="晚星")

@@ -45,6 +45,8 @@ function appMounts() {
   for (const group of source.matchAll(/mountConfigEditor\([^,]+,\s*\[([^\]]*)\]/g)) {
     for (const kind of group[1].matchAll(/["']([^"']+)["']/g)) mounted.add(kind[1]);
   }
+  if (/mountSelfRelationshipEditor\(\$\('#relationshipProfileConfigWorkspace'\)\)/.test(source))
+    mounted.add("relationship_profile");
   return mounted;
 }
 
@@ -180,7 +182,13 @@ test("渲染出的每个工作区容器都在面板挂载清单里", () => {
     .map(match => match[1]));
   assert.ok(rendered.size > 0, "app.js 里没有任何 <section id=\"…Workspace\">，这条对账失去意义");
 
-  const missing = [...rendered].filter(id => !panel[1].includes("#" + id));
+  const missing = [...rendered].filter(id => {
+    if (panel[1].includes("#" + id)) return false;
+    if (id !== "relationshipProfileConfigWorkspace" || !panel[1].includes("renderConfigEditors()"))
+      return true;
+    return !/if\(\$\('#relationshipProfileConfigWorkspace'\)\)\{\s*mountSelfRelationshipEditor\(\$\('#relationshipProfileConfigWorkspace'\)\)/
+      .test(app);
+  });
   assert.deepStrictEqual(missing, [],
     `这些工作区容器由渲染函数产出却不在面板挂载清单里，面板会是一块空白：${missing.join(", ")}`);
 });

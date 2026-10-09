@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拉链旗带 · v2 优化</title>
+<style>
+  :root {
+    --bg: #05080F;
+    --card: #0F1725;
+    --line: rgba(148, 163, 184, .14);
+    --text: #E9EFFA;
+    --text-2: #93A4C0;
+    --text-3: #5C6C88;
+    --teal: #3EE0D0;
+    --green: #3FE0A6;
+    --purple: #A17BFF;
+    --amber: #FFC258;
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(1100px 460px at 70% -10%, rgba(62,224,208,.05), transparent 60%),
+      var(--bg);
+    font-family: var(--sans); color: var(--text);
+    padding: 36px 24px 72px;
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .variant {
+    width: 100%; max-width: 880px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 16px 20px 16px;
+  }
+  .v-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .v-badge {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    color: var(--teal); background: rgba(62,224,208,.1);
+    border: 1px solid rgba(62,224,208,.28); border-radius: 999px; padding: 2px 9px;
+  }
+  .v-head h2 { font-size: 13px; font-weight: 700; }
+  .v-head .tail { margin-left: auto; font-size: 10px; color: var(--text-3); }
+  .v-note { font-size: 10.5px; color: var(--text-2); line-height: 1.7; margin-bottom: 15px; }
+  .v-note b { color: var(--text); }
+
+  /* ===== v2 拉链 ===== */
+  .zip {
+    position: relative;
+    display: flex; gap: 7px; height: 30px;
+  }
+  /* 中轴缝线（藏在三角之间的间隙里） */
+  .zip::before {
+    content: ""; position: absolute; left: 2px; right: 2px; top: 50%; height: 1px;
+    background: repeating-linear-gradient(90deg, rgba(233,239,250,.22) 0 4px, transparent 4px 9px);
+    pointer-events: none;
+  }
+  .seg { position: relative; display: flex; gap: 2px; min-width: 0; }
+  .seg > i {
+    flex: 1; min-width: 0; height: 100%;
+    transition: filter 150ms ease;
+  }
+  .seg > i.up   { clip-path: polygon(50% 0, 100% 100%, 0 100%); transform-origin: 50% 100%; }
+  .seg > i.down { clip-path: polygon(0 0, 100% 0, 50% 100%); transform-origin: 50% 0; }
+  /* 分段组悬停：本段点亮，其余退后 */
+  .zip:has(.seg:hover) .seg:not(:hover) > i { filter: brightness(.5) saturate(.75); }
+  .seg:hover > i { filter: brightness(1.2); }
+
+  /* 入场：逐枚弹出 */
+  .seg > i { animation: pop 380ms cubic-bezier(.2,.8,.3,1.2) backwards; }
+  @keyframes pop { from { transform: scaleY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    .seg > i { animation: none; }
+  }
+
+  /* 段间接缝刻度 */
+  .seams { position: relative; height: 8px; margin: 3px 0 0; }
+  .seams i {
+    position: absolute; top: 0; width: 1px; height: 100%;
+    background: rgba(148,163,184,.35);
+  }
+  .seams i::after {
+    content: attr(data-v); position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+    font-family: var(--mono); font-size: 8.5px; color: var(--text-3); white-space: nowrap;
+  }
+
+  /* 分段标签：与段同宽，永远对齐 */
+  .zip-labels { display: flex; gap: 7px; margin-top: 26px; }
+  .zip-labels > span {
+    min-width: 0; text-align: center; white-space: nowrap; overflow: hidden;
+  }
+  .zip-labels .nm { display: block; font-size: 10px; font-weight: 700; }
+  .zip-labels .pc { display: block; font-family: var(--mono); font-size: 10px; margin-top: 1px; }
+  .zip-labels .vl { display: block; font-family: var(--mono); font-size: 8.5px; color: var(--text-3); margin-top: 1px; }
+  .l-hit { color: var(--green); } .l-write { color: var(--teal); }
+  .l-plain { color: var(--purple); } .l-out { color: var(--amber); }
+
+  .zip-caps {
+    display: flex; justify-content: space-between;
+    margin-top: 12px; padding-top: 8px; border-top: 1px dashed var(--line);
+    font-family: var(--mono); font-size: 9px; color: var(--text-3);
+  }
+  .zip-caps b { color: var(--text-2); font-weight: 500; }
+
+  .changelog { margin-top: 14px; display: grid; gap: 6px; font-size: 10.5px; color: var(--text-2); line-height: 1.55; }
+  .changelog li { list-style: none; padding-left: 16px; position: relative; }
+  .changelog li::before { content: "▸"; position: absolute; left: 0; color: var(--teal); }
+  .changelog b { color: var(--text); }
+</style>
+</head>
+<body>
+
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">拉链 v2</span><h2>小三角咬合 · 样式优化</h2><span class="tail">边界落在缝上 · 分组悬停 · 逐枚入场</span></div>
+    <p class="v-note">针对 v1 的四点优化：<b>28 枚三角恰好让全部数据边界落在段缝上</b>（12/5/8/3 枚，每枚 ≈3.6%）、悬停从单枚升级为<b>整段联动</b>（本段点亮、其余退后）、标签改用与段同宽的弹性对位（不再手调 margin）、加载时逐枚弹出。</p>
+
+    <div class="zip" id="zipBand" role="img" aria-label="Token 构成拉链旗带 v2：28 枚交替三角形，数据边界精确落在段缝上；缓存命中 12 枚、缓存写入 5 枚、普通输入 8 枚、输出 3 枚"></div>
+
+    <div class="seams" aria-hidden="true">
+      <i style="left:calc(42.7% + 3.5px)" data-v="42.7%"></i>
+      <i style="left:calc(61% + 7px)" data-v="61.0%"></i>
+      <i style="left:calc(89.6% + 10.5px)" data-v="89.6%"></i>
+    </div>
+
+    <div class="zip-labels">
+      <span class="l-hit" style="flex:42.7">
+        <span class="nm">缓存命中</span>
+        <span class="pc">42.7%</span>
+        <span class="vl">2,091,245,663</span>
+      </span>
+      <span class="l-write" style="flex:18.3">
+        <span class="nm">缓存写入</span>
+        <span class="pc">18.3%</span>
+        <span class="vl">894,552,317</span>
+      </span>
+      <span class="l-plain" style="flex:28.6">
+        <span class="nm">普通输入</span>
+        <span class="pc">28.6%</span>
+        <span class="vl">1,401,337,660</span>
+      </span>
+      <span class="l-out" style="flex:10.4">
+        <span class="nm">输出</span>
+        <span class="pc">10.4%</span>
+        <span class="vl">511,942,672</span>
+      </span>
+    </div>
+
+    <div class="zip-caps">
+      <span>▸ 28 facets · 1 facet ≈ 3.6%</span>
+      <b>输入侧 25 枚 = 89.3% · 输出侧 3 枚 = 10.7%</b>
+      <span>cache://zip-composition ▸</span>
+    </div>
+
+    <ul class="changelog">
+      <li><b>边界落在缝上</b>：v1 的 26 等分与 42.7/61/89.6% 对不上，颜色只能按中心点切；v2 改为 12+5+8+3=28 枚，三条数据边界全部正好是段缝，虚线刻度只做确认。</li>
+      <li><b>分组悬停</b>：每段是一个容器，悬停整段亮起、其余段退到 50% 亮度——扫读时先看段、再看枚。</li>
+      <li><b>标签弹性对位</b>：段名/百分比/数值三个字段放进与段同宽的格子，窄屏收缩不跑位。</li>
+      <li><b>入场动效</b>：逐枚 scaleY 弹出（峰从底线立起、谷从顶线垂下），尊重 prefers-reduced-motion。</li>
+      <li><b>缝线中轴</b>：中轴改为缝纫机式虚线，只在三角间隙里露出来，呼应"咬合"隐喻。</li>
+    </ul>
+  </section>
+
+<script>
+  (function () {
+    var palette = {
+      hit:   ["#3FE0A6", "#0E7A50"],
+      write: ["#3EE0D0", "#0A6B64"],
+      plain: ["#A17BFF", "#4A2FB0"],
+      out:   ["#FFC258", "#8F5A06"]
+    };
+    var plan = [
+      { key: "hit",   count: 12 },
+      { key: "write", count: 5 },
+      { key: "plain", count: 8 },
+      { key: "out",   count: 3 }
+    ];
+    var band = document.getElementById("zipBand");
+    var gi = 0, delay = 0;
+    plan.forEach(function (seg) {
+      var el = document.createElement("span");
+      el.className = "seg";
+      el.style.flex = { hit: "42.7", write: "18.3", plain: "28.6", out: "10.4" }[seg.key];
+      var c = palette[seg.key];
+      for (var i = 0; i < seg.count; i++) {
+        var t = document.createElement("i");
+        t.className = gi % 2 ? "down" : "up";
+        var lightTop = gi % 2 === 0; // 峰：光在上；谷：光在底
+        t.style.backgroundImage = "linear-gradient(180deg," + c[0] + " 0%," + c[1] + " 100%)";
+        if (!lightTop) t.style.backgroundImage = "linear-gradient(0deg," + c[0] + " 0%," + c[1] + " 100%)";
+        t.style.animationDelay = (delay += 26) + "ms";
+        el.appendChild(t);
+        gi++;
+      }
+      band.appendChild(el);
+    });
+  })();
+</script>
+</body>
+</html>

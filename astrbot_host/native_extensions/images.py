@@ -16,6 +16,7 @@ from companion_v2.foundation.refs import ScopeKind, SourceRef, VersionRef
 from companion_v2.sources.models import SourceRecord
 
 from ..media import inspect_image
+from .image_native.references import ReferenceSelectionError, edit_role, select_edit_tickets
 
 
 IMAGE_ACTIONS = frozenset({"image.generate", "image.edit", "image.mask_edit"})
@@ -24,13 +25,13 @@ IMAGE_REFERENCE_ROLES = frozenset({"identity", "outfit", "pose", "scene", "style
 
 
 class ImageReferenceLease:
-    """One invocation's private, one-use references backed by conversation images."""
+    """One invocation's one-use references backed by current images and role assets."""
 
     def __init__(self, registry, invocation):
         self.registry, self.invocation = registry, invocation
         self.messages = getattr(registry.application, "messages", None)
         self._tickets, self._by_handle, self._used = [], {}, []
-        if (self.messages is None or invocation.context.scope.kind is not ScopeKind.PRIVATE):
+        if (self.messages is None or invocation.context.scope.kind not in (ScopeKind.PRIVATE, ScopeKind.GROUP)):
             return
         row = registry.runtime.read_one("""SELECT batch_id FROM extension_tool_invocations
             WHERE invocation_id=? AND parent_task_id=? AND tool_call_id=?""",
@@ -55,7 +56,7 @@ class ImageReferenceLease:
                     raise TaskError("native_reference_binding_mismatch", "input image source differs from its manifest")
                 position = len(self._tickets)
                 if position >= 8:
-                    raise TaskError("native_reference_limit", "the current private turn has too many image references")
+                    raise TaskError("native_reference_limit", "the current turn has too many image references")
                 handle = uuid4().hex
                 reference_id = "inbound-image-" + digest([invocation.invocation_id, reference, position])[:40]
                 ticket = {
@@ -132,15 +133,14 @@ class ImageReferenceLease:
     def _expected_role(self, ticket):
         action = self.invocation.descriptor.tool.action
         if action == "image.edit":
-            roles = json.loads(self.invocation.arguments_json).get("reference_roles")
-            if ticket.get("registered_asset") is not None:
-                selected = (roles[ticket["position"]] if isinstance(roles, list)
-                            and ticket["position"] < len(roles) else
-                            ticket["roles"][0] if roles is None and len(ticket["roles"]) == 1 else None)
-                return selected if selected in ticket["roles"] else None
-            if roles is None:
-                return "edit_source"
-            return roles[ticket["position"]] if isinstance(roles, list) and ticket["position"] < len(roles) else None
+            arguments = json.loads(self.invocation.arguments_json)
+            inbound = tuple(item for item in self._tickets if "roles" not in item)
+            saved = {item["reference_id"]: item for item in self._tickets if "roles" in item}
+            try:
+                selected = select_edit_tickets(arguments, inbound, saved)
+                return edit_role(arguments, selected, ticket)
+            except ReferenceSelectionError as error:
+                raise TaskError(error.code, "the requested image references do not match this invocation") from None
         arguments = json.loads(self.invocation.arguments_json)
         if ticket["position"] == arguments.get("source_index"):
             role = "edit_source"

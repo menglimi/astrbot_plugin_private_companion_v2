@@ -2,13 +2,11 @@
  *
  * 网格结构（宽屏，首页）：
  *
- *   ┌────────┬──────────────────────────────────────┐
- *   │ 左栏    │ 顶栏（仅多 bot / 多人格时存在）        │
- *   │ 导航    ├───────────────────────┬──────────────┤
- *   │        │ 小屋（只在这页）         │ 状态卡片      │
- *   │        ├───────────────────────┴──────────────┤
- *   │        │ 内容面板（家具说明 / 家具目录 / 观察）  │
- *   └────────┴──────────────────────────────────────┘
+ *   ┌────────┬──────────────────────┬──────────────┐
+ *   │ 左栏    │ 小屋（只在这页）      │ 状态卡片      │
+ *   │ 导航    ├──────────────────────┴──────────────┤
+ *   │        │ 内容面板（家具说明 / 家具目录 / 观察） │
+ *   └────────┴─────────────────────────────────────┘
  *
  * 离开首页（点了左栏某一项配置）时，小屋与右栏收起，面板占满：
  *
@@ -25,11 +23,11 @@
  */
 
 :root {
-  --shell-rail: 232px;
+  --shell-rail: 220px;
   --shell-rail-collapsed: 68px;
-  --shell-side: 296px;
-  --shell-gap: 20px;
-  --shell-pad: 22px;
+  --shell-side: 270px;
+  --shell-gap: 16px;
+  --shell-pad: 18px;
   --shell-stage-min: 420px;
 }
 
@@ -37,28 +35,13 @@
 #homeShell {
   display: grid;
   grid-template-columns: var(--shell-rail) minmax(0, 1fr);
-  grid-template-rows: auto auto auto;
-  grid-template-areas:
-    "rail top"
-    "rail scope"
-    "rail body";
+  grid-template-rows: auto;
+  grid-template-areas: "rail body";
   min-height: 100dvh;
   background: var(--t-canvas);
   color: var(--t-text);
+  overflow-anchor: none;
 }
-
-/* 未开多 bot / 多人格时顶栏不渲染（shell.js 里 hidden）。
-   栅格要跟着收掉那一行，否则会留一条空白。 */
-#homeShell[data-mode="single"] {
-  grid-template-rows: auto;
-  grid-template-areas: "rail body";
-}
-#homeShell[data-mode="single"] .topbar { display: none; }
-#homeShell .product-scope{
-  grid-area:scope;min-width:0;margin:12px var(--shell-pad) 0;
-  border-color:var(--t-line);background:var(--t-surface);
-}
-#homeShell[data-mode="single"] .product-scope{display:none}
 
 /* === 左栏 === */
 #homeShell .rail {
@@ -72,8 +55,8 @@
   height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 18px 12px 14px;
+  gap:var(--sp-1);
+  padding:var(--sp-4) var(--sp-3) var(--sp-3);
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--t-surface);
@@ -83,18 +66,18 @@
 #homeShell .rail-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 8px 16px;
+  gap:var(--sp-2);
+  padding:var(--sp-1) var(--sp-2) var(--sp-4);
   color: var(--t-text);
   text-decoration: none;
   font-weight: 600;
-  letter-spacing: .02em;
+  letter-spacing: 0;
 }
 #homeShell .rail-brand i { color: var(--t-accent); }
 #homeShell .rail-brand small {
   display: block;
   font-weight: 400;
-  font-size: 10.5px;
+  font-size: var(--fs-micro);
   color: var(--t-text-faint);
   letter-spacing: 0;
 }
@@ -105,14 +88,14 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
-  padding: 4px 4px 14px;
+  gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-1) var(--sp-3);
 }
 #homeShell .rail-brand.rail-outfit img {
   width: 100%;
   aspect-ratio: 1 / 1;
   object-fit: cover;
-  border-radius: var(--r-md, 12px);
+  border-radius: var(--r-md, var(--r-sm));
   border: 1px solid var(--t-line);
   background: var(--t-surface-soft);
   display: block;
@@ -122,30 +105,30 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap:var(--sp-2);
   width: 100%;
   aspect-ratio: 1 / 1;
-  border-radius: var(--r-md, 12px);
+  border-radius: var(--r-md, var(--r-sm));
   border: 1px dashed var(--t-line);
   background: var(--t-surface-soft);
   color: var(--t-text-faint);
   text-align: center;
-  padding: 10px;
+  padding:var(--sp-2);
 }
 #homeShell .rail-brand .rail-outfit-empty i { width: 18px; height: 18px; opacity: .7; }
-#homeShell .rail-brand .rail-outfit-empty small { font-size: 10.5px; line-height: 1.6; }
+#homeShell .rail-brand .rail-outfit-empty small { font-size:var(--fs-micro); line-height: 1.6; }
 
-.shell-nav-group { display: flex; flex-direction: column; gap: 1px; }
+.shell-nav-group { display: flex; flex-direction: column; gap:1px; }
 .shell-nav-group + .shell-nav-group {
-  margin-top: 12px;
-  padding-top: 12px;
+  margin-top:var(--sp-3);
+  padding-top:var(--sp-3);
   border-top: 1px solid var(--t-line);
 }
 .shell-nav-title {
-  padding: 0 8px 5px;
-  font-size: 10.5px;
+  padding:0 var(--sp-2) var(--sp-1);
+  font-size: var(--fs-micro);
   font-weight: 600;
-  letter-spacing: .08em;
+  letter-spacing: 0;
   color: var(--t-text-faint);
   text-transform: uppercase;
 }
@@ -153,15 +136,17 @@
 .shell-nav-link {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap:var(--sp-2);
   width: 100%;
-  padding: 7px 9px;
+  padding:var(--sp-2) var(--sp-2);
   border: 0;
-  border-radius: var(--r-sm, 8px);
+  border-radius: var(--r-sm, var(--r-xs));
   background: transparent;
   color: var(--t-text-soft);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
+  min-height: 36px;
+  line-height: 1.5;
   text-align: left;
   cursor: pointer;
   transition: background var(--dur-fast, .16s ease), color var(--dur-fast, .16s ease);
@@ -176,30 +161,19 @@
 
 /* 左栏底部：搜索与显示偏好（原本在顶栏里）。 */
 .rail-foot {
-  margin-top: auto;
-  padding-top: 12px;
+  margin-top:auto;
+  padding-top:var(--sp-3);
   border-top: 1px solid var(--t-line);
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap:1px;
 }
-.rail-foot .shell-nav-link { font-size: 12px; }
+.rail-foot .shell-nav-link { font-size: var(--fs-body); }
 .rail-foot .rail-note {
-  padding: 8px 9px 0;
-  font-size: 10.5px;
+  padding:var(--sp-2) var(--sp-2) 0;
+  font-size: var(--fs-micro);
   line-height: 1.6;
   color: var(--t-text-faint);
-}
-
-/* === 顶栏（仅多目标） === */
-#homeShell .topbar {
-  grid-area: top;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 10px var(--shell-pad);
-  border-bottom: 1px solid var(--t-line);
-  background: var(--t-surface);
 }
 
 /* === 主体 === */
@@ -207,20 +181,24 @@
   grid-area: body;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--shell-side);
+  grid-template-columns: minmax(0, 1fr) minmax(var(--shell-side), .3fr);
   grid-template-rows: auto auto;
   grid-template-areas:
     "stage side"
     "panel panel";
-  gap: var(--shell-gap);
-  padding: var(--shell-pad);
+  gap:var(--shell-gap);
+  padding:var(--shell-pad);
   align-items: start;
 }
 
 /* 窄屏：状态卡片移到小屋下面，左栏收起。 */
 @media (max-width: 1120px) {
   #homeShell { grid-template-columns: var(--shell-rail-collapsed) minmax(0, 1fr); }
-  .shell-body { grid-template-columns: minmax(0, 1fr); grid-template-areas: "stage" "side" "panel"; }
+  .shell-body {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0fr);
+    grid-template-rows: auto auto auto;
+    grid-template-areas: "stage stage" "side side" "panel panel";
+  }
 }
 @media (max-width: 1120px) and (min-width: 761px) {
   #homeShell .rail { width: auto; padding-inline: 8px; }
@@ -232,15 +210,14 @@
   #homeShell .rail-foot .shell-nav-link { justify-content: center; }
 }
 @media (max-width: 760px) {
-  #homeShell { grid-template-columns: minmax(0, 1fr); grid-template-rows:auto auto auto auto;grid-template-areas: "rail" "top" "scope" "body"; }
-  #homeShell[data-mode="single"] { grid-template-areas: "rail" "body"; }
+  #homeShell { grid-template-columns: minmax(0, 1fr); grid-template-rows:auto auto;grid-template-areas: "rail" "body"; }
   #homeShell .rail {
     position: static;
     height: auto;
     flex-direction: row;
     align-items: center;
     overflow-x: auto;
-    padding: 10px 12px;
+    padding:var(--sp-2) var(--sp-3);
     border-right: 0;
     border-bottom: 1px solid var(--t-line);
     /* styles.css 在窄屏把 .rail 改成贴底的横条（top:auto;bottom:0;left:0;
@@ -251,10 +228,10 @@
     z-index: auto;
   }
   .shell-nav-group { flex-direction: row; }
-  .shell-nav-group + .shell-nav-group { margin: 0 0 0 10px; padding: 0 0 0 10px; border-top: 0; border-left: 1px solid var(--t-line); }
+  .shell-nav-group + .shell-nav-group { margin:0 0 0 var(--sp-2); padding:0 0 0 var(--sp-2); border-top: 0; border-left: 1px solid var(--t-line); }
   .shell-nav-title { display: none; }
   .shell-nav-link span { display: none; }
-  .rail-foot { margin: 0 0 0 auto; flex-direction: row; border-top: 0; padding-top: 0; }
+  .rail-foot { margin:0 0 0 auto; flex-direction: row; border-top: 0; padding-top:0; }
   .rail-foot .rail-note { display: none; }
 }
 
@@ -281,14 +258,14 @@
 #homeShell[data-away="true"] .shell-body {
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas: "stage" "panel";
-  gap: 14px;
+  gap:var(--sp-3);
 }
 /* 缩略态：高度压到 150px，宽度限在 420px 并居中，
    避免一个横跨整屏的矮条看起来像渲染出错。 */
 #homeShell[data-away="true"] .stage-region {
   justify-self: center;
   width: min(100%, 420px);
-  gap: 6px;
+  gap:var(--sp-1);
 }
 #homeShell[data-away="true"] .stage-region .room-stage {
   height: 150px;
@@ -303,8 +280,6 @@
    关掉 3D 的指针交互，否则点击会被当成拖拽旋转，既转不动也不返回。 */
 #homeShell[data-away="true"] .stage-region .voxel-room { pointer-events: none; }
 #homeShell[data-away="true"] .stage-region .room-stage { cursor: pointer; }
-#homeShell[data-away="true"] .stage-bar { justify-content: center; }
-#homeShell[data-away="true"] .stage-bar h2 { font-size: 12px; color: var(--t-text-faint); }
 
 /* 两套控件按状态互斥：家具速览条/布置/全景/巡游只在首页有，
    缩略态只剩「回到小屋」。用 display 而不是 hidden——
@@ -320,7 +295,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap:var(--sp-2);
 }
 
 /* 小屋随选中项轻微下沉，把注意力让给下方面板；
@@ -335,11 +310,18 @@
   min-height: var(--shell-stage-min);
   /* 速览条移到场景下方、工具按钮收进场景之后，场景是首页的主视觉，
      比例相应放宽（2026-09-29 设计稿）。 */
-  height: clamp(400px, 54vh, 620px);
-  border-radius: var(--r-lg, 16px);
+  height: clamp(400px, 60vh, 680px);
+  border-radius: var(--r-lg, var(--r-md));
   border: 1px solid var(--t-line);
   overflow: hidden;
   background: var(--t-surface-soft);
+}
+
+@media (max-width: 760px) {
+  .stage-region .room-stage {
+    height: clamp(280px, min(62vh, calc(90vw - 32px)), 500px);
+    min-height: 280px;
+  }
 }
 
 /* 镜头复位与布置：常驻场景右上角（2026-09-29 设计稿）。
@@ -349,64 +331,74 @@
   top: 10px;
   right: 10px;
   display: flex;
-  gap: 6px;
+  gap:var(--sp-1);
   z-index: 2;
 }
 .stage-overlay-button {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
+  gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-2);
   border: 1px solid var(--t-line);
-  border-radius: 999px;
+  border-radius:var(--r-pill);
   background: var(--t-surface);
   background: color-mix(in srgb, var(--t-surface) 88%, transparent);
   backdrop-filter: blur(4px);
   color: var(--t-text-soft);
   font: inherit;
-  font-size: 11px;
+  font-size:var(--fs-tiny);
   cursor: pointer;
   transition: border-color var(--dur-fast, .16s ease), color var(--dur-fast, .16s ease);
 }
 .stage-overlay-button:hover { border-color: var(--t-accent); color: var(--t-accent-ink); }
 .stage-overlay-button i { width: 12px; height: 12px; }
 
-/* 小屋工具栏：布置房间 / 家具目录 / 环境。 */
-.stage-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+/* 角色标题与切换器固定在场景内部，避免在小屋上方另占一行。 */
+.stage-role {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  left: 12px;
+  box-sizing: border-box;
+  max-width: calc(100% - 136px);
+  padding: 6px 9px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-sm, var(--r-xs));
+  background: color-mix(in srgb, var(--t-surface) 90%, transparent);
+  backdrop-filter: blur(4px);
 }
-.stage-bar h2 {
-  margin: 0;
-  font-size: 13px;
+.stage-role-title {
+  max-width: 100%;
+  overflow: hidden;
+  margin:0;
+  font-size:var(--fs-body);
   font-weight: 600;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap:var(--sp-2);
   color: var(--t-text);
 }
-.stage-bar .stage-spacer { margin-left: auto; }
-.stage-bar button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border: 1px solid var(--t-line-firm, var(--t-line));
-  border-radius: var(--r-sm, 8px);
-  background: var(--t-surface);
-  color: var(--t-text-soft);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-  transition: border-color var(--dur-fast, .16s ease), color var(--dur-fast, .16s ease);
+.stage-role-picker {
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+  max-width:min(100%, 420px);
+  color:var(--t-text);
+  cursor:pointer;
+  border-radius:var(--r-xs);
 }
-.stage-bar button:hover { border-color: var(--t-accent); color: var(--t-accent-ink); }
-.stage-bar button[aria-pressed="true"] {
-  border-color: var(--t-accent);
-  background: var(--t-accent-quiet);
-  color: var(--t-accent-ink);
+.stage-role-picker:hover { color:var(--t-accent-ink); }
+.stage-role-picker:focus-within { outline:2px solid var(--t-focus); outline-offset:3px; }
+.stage-role-picker .stage-role-title { min-width:0; }
+.stage-role-picker .stage-role-title > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.stage-role-caret { width:14px; height:14px; margin-left:var(--sp-1); flex:0 0 auto; color:var(--t-text-faint); }
+.stage-role-picker select {
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  opacity:0;
+  cursor:pointer;
 }
 
 /* === 右栏状态卡片 === */
@@ -415,7 +407,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap:var(--sp-3);
 }
 /* .shell-side .overview-card 的卡片皮肤已删——右栏现在与管理页、
    与首页其余部分共用 home.css 的 .home-band / .home-row。
@@ -426,49 +418,49 @@
 .side-selection {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding-bottom: 11px;
-  margin-bottom: 11px;
+  gap:var(--sp-2);
+  padding-bottom:var(--sp-3);
+  margin-bottom:var(--sp-3);
   border-bottom: 1px solid var(--t-line);
 }
 .side-selection i { color: var(--t-accent); flex: none; }
-.side-selection strong { display: block; font-size: 13px; }
-.side-selection small { color: var(--t-text-faint); font-size: 11px; line-height: 1.55; }
+.side-selection strong { display: block; font-size:var(--fs-body); }
+.side-selection small { color: var(--t-text-faint); font-size:var(--fs-tiny); line-height: 1.55; }
 
 /* === 内容面板 === */
 .shell-panel {
   grid-area: panel;
   min-width: 0;
   border: 1px solid var(--t-line);
-  border-radius: var(--r-lg, 16px);
+  border-radius: var(--r-lg, var(--r-md));
   background: var(--t-surface);
   overflow: hidden;
 }
 .shell-panel-head {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 13px 16px;
+  gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--t-line);
   background: var(--t-surface-soft);
 }
 .shell-panel-head h2 {
-  margin: 0;
-  font-size: 14.5px;
+  margin:0;
+  font-size: var(--fs-lead);
   font-weight: 600;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap:var(--sp-2);
 }
 .shell-panel-head p {
-  margin: 2px 0 0;
-  font-size: 11.5px;
+  margin:2px 0 0;
+  font-size: var(--fs-tiny);
   color: var(--t-text-faint);
   line-height: 1.6;
 }
-.shell-panel-head .panel-spacer { margin-left: auto; }
-.shell-panel-body { padding: 16px; }
-.shell-panel-body > :first-child { margin-top: 0; }
+.shell-panel-head .panel-spacer { margin-left:auto; }
+.shell-panel-body { padding:var(--sp-4); }
+.shell-panel-body > :first-child { margin-top:0; }
 
 /* 配置编辑器在面板里不需要再自带一层卡片边框——
    面板本身就是容器，双层卡片会让层级变糊。 */
@@ -477,72 +469,72 @@
   border: 0;
   border-radius: 0;
   background: transparent;
-  padding: 0;
+  padding:0;
   box-shadow: none;
 }
-.shell-panel-body .workspace { padding: 0; }
-.life-routine-config { margin-top: var(--sp-5); padding-top: var(--sp-5); border-top: 1px solid var(--t-line); }
+.shell-panel-body .workspace { padding:0; }
+.life-routine-config { margin-top:var(--sp-5); padding-top:var(--sp-5); border-top: 1px solid var(--t-line); }
 
 /* 家具说明视图：不用配置控件，而是一段说明加几个真实入口。 */
-.furniture-brief { display: grid; gap: 14px; }
+.furniture-brief { display: grid; gap:var(--sp-3); }
 .furniture-brief-lead {
   display: flex;
-  gap: 13px;
+  gap:var(--sp-3);
   align-items: flex-start;
 }
 .furniture-brief-symbol {
   flex: none;
   width: 42px;
   height: 42px;
-  border-radius: var(--r-md, 12px);
+  border-radius: var(--r-md, var(--r-sm));
   display: grid;
   place-items: center;
   background: var(--t-accent-quiet);
   color: var(--t-accent-ink);
 }
-.furniture-brief h3 { margin: 0 0 3px; font-size: 15px; }
-.furniture-brief p { margin: 0; color: var(--t-text-soft); font-size: 12.5px; line-height: 1.7; }
-.furniture-brief-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.furniture-brief h3 { margin:0 0 3px; font-size:var(--fs-lead); }
+.furniture-brief p { margin:0; color: var(--t-text-soft); font-size:var(--fs-body); line-height: 1.7; }
+.furniture-brief-actions { display: flex; flex-wrap: wrap; gap:var(--sp-2); }
 .furniture-brief-actions button,
 .furniture-brief-actions a {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 12px;
+  gap:var(--sp-1);
+  padding:var(--sp-2) var(--sp-3);
   border: 1px solid var(--t-line-firm, var(--t-line));
-  border-radius: var(--r-sm, 8px);
+  border-radius: var(--r-sm, var(--r-xs));
   background: var(--t-surface);
-  color: var(--t-text);
+  color: var(--t-text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size:var(--fs-body);
   text-decoration: none;
   cursor: pointer;
 }
 .furniture-brief-actions button:hover,
 .furniture-brief-actions a:hover { border-color: var(--t-accent); color: var(--t-accent-ink); }
 .furniture-brief-actions .primary {
-  background: var(--t-accent);
-  border-color: var(--t-accent);
-  color: var(--t-accent-ink, #fff);
+  background: var(--t-accent-solid);
+  border-color: var(--t-accent-solid);
+  color: var(--t-on-solid, #fff);
 }
 
 /* 家具速览：七件有机位的家具，点一下就选中。 */
 .stage-furniture-strip {
   display: flex;
-  gap: 7px;
+  gap:var(--sp-2);
   flex-wrap: wrap;
 }
 .stage-furniture-strip button {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-2);
   border: 1px solid var(--t-line);
-  border-radius: 999px;
+  border-radius:var(--r-pill);
   background: var(--t-surface);
   color: var(--t-text-soft);
   font: inherit;
-  font-size: 11.5px;
+  font-size: var(--fs-tiny);
   cursor: pointer;
   transition: border-color var(--dur-fast, .16s ease), color var(--dur-fast, .16s ease), background var(--dur-fast, .16s ease);
 }
@@ -562,54 +554,20 @@
 }
 .shell-panel-body.is-swapping { animation: shell-panel-in var(--dur) both; }
 
-/* === 分区进出的过渡 ===
- *
- * 进入配置分区时小屋缩成窄条、右栏收起（见上方 data-away 一段）。
- * 这几个尺寸与位置属性本身是可过渡的，所以不必用动画——
- * 加一条 transition 就够，且它天然可中断：
- * 用户在过渡中途点另一项配置，会从当前值平滑改道，而不是先跳回起点。
- *
- * 为什么只列这几个属性：全部属性写 all 会把 border-color 之外的
- * 很多无关变化也带上（比如面板重绘时的高度抖动），既费性能又容易抖。
- *
- * 为什么高度/宽度能安全过渡：小屋容器在缩略态与首页态都是「由 CSS 决定」
- * 的固定高度，过渡期间 3D 的 resize 会被 ResizeObserver 逐帧触发，
- * 而 Ga 只在边界盒真的变了才动相机（见 entrance.js 坑三）。
- * 缩放过程中相机确实会被重设到当前机位——这是可接受的：
- * 缩略态本来就不需要保住某个特写机位，而回到首页时会重新 focus。 */
+/* 路由切换时只淡化非布局属性。
+   持续插值高度和网格轨道会反复触发布局与 3D 场景 resize，
+   页面较长时还会把内容面板连续推移，形成明显漂移。 */
 .stage-region,
 .shell-side,
 .shell-panel,
 .stage-region .room-stage,
 .shell-nav-group {
-  transition:
-    width var(--dur),
-    height var(--dur),
-    flex-basis var(--dur),
-    opacity var(--dur),
-    filter var(--dur);
-}
-/* 栅格列宽也要过渡，否则「右栏收起」是一瞬间的事。
-   用 transition 而非 animation：栅格轨道宽度是可插值的。 */
-.shell-body {
-  transition: grid-template-columns var(--dur),
-              gap var(--dur);
+  transition: opacity var(--dur), filter var(--dur);
 }
 #homeShell[data-away="true"] .stage-region .room-stage {
-  transition: height var(--dur),
-              filter var(--dur),
-              border-color var(--dur);
+  transition: filter var(--dur), border-color var(--dur);
 }
-/* 顶栏只在多目标时存在，展开/收起也该是过渡而不是闪现。 */
-#homeShell .topbar {
-  transition: opacity var(--dur-fast, .16s ease),
-              padding var(--dur);
-}
-
-/* 入场期间关掉上面这些过渡。
-   理由：入场是「按帧驱动」的——容器尺寸由 --entrance-w/h 每帧写，
-   若同时有 transition，CSS 会去追每一帧的新值，实际表现是容器
-   黏在某个中间尺寸上缓慢跟随，落点也就不准了。 */
+/* 入场期间关掉淡化过渡，避免干扰按帧驱动的场景尺寸。 */
 .is-entrance .stage-region,
 .is-entrance .shell-body,
 .is-entrance .shell-side,
@@ -624,7 +582,6 @@
   .stage-region,
   .shell-side,
   .shell-panel,
-  .shell-body,
   .stage-region .room-stage { transition: none; }
 }
 :root[data-motion="off"] .shell-panel-body.is-swapping { animation: none; }
@@ -632,5 +589,87 @@
 :root[data-motion="off"] .stage-region,
 :root[data-motion="off"] .shell-side,
 :root[data-motion="off"] .shell-panel,
-:root[data-motion="off"] .shell-body,
 :root[data-motion="off"] .stage-region .room-stage { transition: none; }
+
+/* 布置态把场景与工作台并排，栅格尺寸从普通首页状态平滑过渡。 */
+body.room-editing .shell-body {
+  grid-template-columns: minmax(400px, 1.18fr) minmax(360px, .82fr);
+  grid-template-areas: "stage side" "panel panel";
+}
+body.room-editing .stage-region .room-stage {
+  height: clamp(300px, min(54vh, 36vw), 560px);
+  min-height: 300px;
+}
+body.room-editing .room-editor {
+  animation: room-editor-enter var(--dur) cubic-bezier(.22, 1, .36, 1) both;
+}
+.room-editor.is-leaving {
+  animation: room-editor-leave var(--dur) cubic-bezier(.4, 0, .6, 1) both;
+  pointer-events: none;
+}
+body.room-editing-exit .shell-side { pointer-events: none; }
+@keyframes room-editor-enter {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes room-editor-leave {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(12px); }
+}
+
+@media (max-width: 1120px) and (min-width: 761px) {
+  body.room-editing .shell-body {
+    grid-template-columns: minmax(260px, .9fr) minmax(320px, 1.1fr);
+    grid-template-areas: "stage side" "panel panel" ". .";
+  }
+}
+@media (max-width: 760px) {
+  body.room-editing .shell-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "stage" "side" "panel";
+  }
+  body.room-editing .stage-region .room-stage {
+    height: clamp(240px, 48vh, 380px);
+    min-height: 240px;
+  }
+  body.room-editing .room-editor { height: auto; }
+  body.room-editing .room-editor-controls { max-height: none; overflow: visible; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.room-editing .room-editor,
+  .room-editor.is-leaving { animation: none; }
+}
+:root:is([data-motion="low"], [data-motion="off"]) body.room-editing .room-editor,
+:root:is([data-motion="low"], [data-motion="off"]) .room-editor.is-leaving {
+  animation-duration: 0s;
+}
+
+#homeShell:has(#self-panel-questionnaire:not([hidden])) {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "body";
+}
+#homeShell:has(#self-panel-questionnaire:not([hidden])) > .rail,
+#homeShell:has(#self-panel-questionnaire:not([hidden])) .stage-region,
+#homeShell:has(#self-panel-questionnaire:not([hidden])) .shell-side,
+#homeShell:has(#self-panel-questionnaire:not([hidden])) .shell-panel-head {
+  display: none;
+}
+#homeShell:has(#self-panel-questionnaire:not([hidden])) .shell-body {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "panel";
+  gap: 0;
+  padding: 0;
+}
+#homeShell:has(#self-panel-questionnaire:not([hidden])) .shell-panel {
+  min-width: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+#homeShell:has(#self-panel-questionnaire:not([hidden])) .shell-panel-body { padding: 0; }
+#homeShell:has(#self-panel-questionnaire:not([hidden])) #self-panel-questionnaire .product-workspace {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}

@@ -91,8 +91,10 @@ def freeze_nodes(records, resource_hash, *, audio_enabled=True, video_enabled=Tr
             if message and content and message != content:
                 raise TaskError("host_forward_invalid", "node has ambiguous component arrays")
             parts = message or content
-            if not isinstance(parts, list) or not 0 < len(parts) <= 128:
-                raise TaskError("host_forward_unsupported", "forward nodes require bounded component arrays")
+            if not isinstance(parts, list) or not parts:
+                raise TaskError("host_forward_unsupported", "forward nodes require native component arrays")
+            if len(parts) > 128:
+                raise TaskError("host_forward_limit", "forward node exceeds its component budget")
             text, images, audios, videos, nested = [], [], [], [], []
             for position, part in enumerate(parts):
                 if not isinstance(part, dict) or not isinstance(part.get("data"), dict):

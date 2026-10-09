@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -34,7 +34,8 @@ def stamp(value: datetime) -> str:
 def encode(value: object) -> str:
     def default(item):
         if is_dataclass(item):
-            return asdict(item)
+            return {descriptor.name: getattr(item, descriptor.name) for descriptor in fields(item)
+                    if descriptor.metadata.get("encode", True)}
         if isinstance(item, datetime):
             return stamp(item)
         raise TypeError("unsupported task record value")
@@ -199,6 +200,45 @@ class TaskClaim:
     task_id: str
     attempt_id: str
     generation: int
+
+
+@dataclass(frozen=True)
+class WorkerOwnership:
+    process_id: int
+    process_started_at: datetime
+    loop_id: str
+
+    def __post_init__(self):
+        if type(self.process_id) is not int or self.process_id <= 0:
+            raise ValueError("worker ownership requires a process ID")
+        object.__setattr__(self, "process_started_at", normalize_utc(
+            self.process_started_at, field="worker process start"))
+        _opaque(self.loop_id, field="worker loop ID")
+
+    @classmethod
+    def restore(cls, value):
+        return cls(value["process_id"], datetime.fromisoformat(value["process_started_at"]), value["loop_id"])
+
+
+@dataclass(frozen=True)
+class WorkerAttempt:
+    claim: TaskClaim
+    kind: str
+    attempt_no: int
+    started_at: datetime
+    ownership: WorkerOwnership | None
+    side_effect: SideEffect
+
+    @property
+    def worker_name(self):
+        return f"companion:{self.kind}:{self.claim.task_id}:{self.attempt_no}"
+
+
+@dataclass(frozen=True)
+class WorkerStopRecovery:
+    scanned: int
+    last_attempt_id: str | None
+    released_tasks: tuple[str, ...]
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>光谱细带 · 外观质地对比</title>
+<style>
+  :root {
+    --bg: #05080F;
+    --card: #0F1725;
+    --line: rgba(148, 163, 184, .14);
+    --line-soft: rgba(148, 163, 184, .08);
+    --text: #E9EFFA;
+    --text-2: #93A4C0;
+    --text-3: #5C6C88;
+    --teal: #3EE0D0;
+    --green: #3FE0A6;
+    --blue: #6FA2FF;
+    --purple: #A17BFF;
+    --amber: #FFC258;
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    font-family: var(--sans);
+    color: var(--text);
+    padding: 36px 24px 72px;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page-head { width: 100%; max-width: 880px; margin-bottom: 4px; }
+  .page-head h1 { font-size: 17px; font-weight: 700; }
+  .page-head p { margin-top: 5px; font-size: 11.5px; color: var(--text-2); line-height: 1.7; }
+
+  .variant {
+    width: 100%; max-width: 880px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 16px 20px 15px;
+  }
+  .v-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .v-badge {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    color: var(--teal); background: rgba(62,224,208,.1);
+    border: 1px solid rgba(62,224,208,.25); border-radius: 999px; padding: 2px 9px;
+  }
+  .v-head h2 { font-size: 13px; font-weight: 700; }
+  .v-head .tail { margin-left: auto; font-size: 10px; color: var(--text-3); }
+
+  /* ===== 共同骨架：外浮标签 + 细带 + 范围缎带 ===== */
+  .lb-row { display: flex; margin-bottom: 5px; }
+  .lb-row > span {
+    display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden;
+    font-size: 9.5px; font-weight: 650; white-space: nowrap;
+  }
+  .lb-row > span::before { content: ""; width: 1px; height: 9px; background: currentColor; opacity: .9; }
+  .c-hit { color: var(--green); } .c-write { color: var(--teal); }
+  .c-plain { color: var(--purple); } .c-out { color: var(--amber); }
+  .scope { display: flex; gap: 4px; margin-top: 6px; }
+  .scope .rib { height: 5px; border-radius: 999px; }
+  .scope .in { flex: 89.6; background: linear-gradient(90deg, rgba(111,162,255,.15), rgba(111,162,255,.55)); }
+  .scope .out { flex: 10.4; background: rgba(255,194,88,.4); }
+  .scope-lb { display: flex; gap: 4px; margin-top: 4px; }
+  .scope-lb span { font-size: 9px; color: var(--text-3); }
+  .scope-lb .lbin { flex: 89.6; } .scope-lb .lbout { flex: 10.4; text-align: right; }
+
+  /* ===== 质地 1：釉面 —— 扁平渐变 + 顶部内高光 ===== */
+  .t1-band {
+    display: flex; height: 16px; border-radius: 8px; overflow: hidden;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.3), inset 0 -1px 0 rgba(0,0,0,.4);
+  }
+  .t1-band > span { border-right: 1px solid rgba(5,8,15,.5); transition: filter 140ms ease; }
+  .t1-band > span:last-child { border-right: 0; }
+  .t1-band > span:hover { filter: brightness(1.12); }
+
+  /* ===== 质地 2：辉光 —— 分段独立发光，霓虹光谱 ===== */
+  .t2-band { display: flex; gap: 3px; height: 16px; }
+  .t2-band > span { border-radius: 4px; transition: filter 140ms ease; }
+  .t2-band > span:hover { filter: brightness(1.15); }
+  .t2-band .s-hit   { box-shadow: 0 0 12px rgba(63,224,166,.5); }
+  .t2-band .s-write { box-shadow: 0 0 12px rgba(62,224,208,.5); }
+  .t2-band .s-plain { box-shadow: 0 0 12px rgba(161,123,255,.5); }
+  .t2-band .s-out   { box-shadow: 0 0 12px rgba(255,194,88,.45); }
+
+  /* ===== 质地 3：凹槽 —— 仪器槽嵌入，分段微微下沉 ===== */
+  .t3-track {
+    padding: 3px; border-radius: 10px; background: #070B14;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.75), 0 1px 0 rgba(255,255,255,.04);
+  }
+  .t3-band { display: flex; gap: 2px; height: 14px; border-radius: 6px; overflow: hidden; }
+  .t3-band > span { transition: filter 140ms ease; box-shadow: inset 0 -1px 0 rgba(0,0,0,.28); }
+  .t3-band > span:hover { filter: brightness(1.12); }
+
+  /* ===== 质地 4：胶囊 —— 独立圆角药丸，柔和Friendly ===== */
+  .t4-band { display: flex; gap: 2px; height: 16px; }
+  .t4-band > span {
+    border-radius: 999px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.32), inset 0 -1px 1px rgba(0,0,0,.25);
+    transition: filter 140ms ease;
+  }
+  .t4-band > span:hover { filter: brightness(1.12); }
+
+  /* ===== 质地 5：极光 —— 全带连续光谱，数据定界 + 发丝分界 ===== */
+  .t5-wrap { position: relative; height: 16px; border-radius: 8px; overflow: hidden; }
+  .t5-wrap .flow {
+    position: absolute; inset: 0;
+    background: linear-gradient(90deg,
+      #3FE0A6 0%, #3FE0A6 40.2%, #3EE0D0 45.2%,
+      #3EE0D0 58.5%, #A17BFF 63.5%,
+      #A17BFF 87.1%, #FFC258 92.1%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.22);
+  }
+  .t5-wrap i { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(5,8,15,.6); }
+  .t5-wrap .m1 { left: 42.7%; } .t5-wrap .m2 { left: 61%; } .t5-wrap .m3 { left: 89.6%; }
+  .t5-wrap:hover .flow { filter: brightness(1.08); }
+  .t5-wrap .flow { transition: filter 140ms ease; }
+
+  /* 渐变段共用底色 */
+  .s-hit   { background-image: linear-gradient(90deg, #16A36C, #3FE0A6); }
+  .s-write { background-image: linear-gradient(90deg, #129C93, #3EE0D0); }
+  .s-plain { background-image: linear-gradient(90deg, #6340D6, #A17BFF); }
+  .s-out   { background-image: linear-gradient(90deg, #D98A0C, #FFC258); }
+</style>
+</head>
+<body>
+
+  <div class="page-head">
+    <h1>光谱细带 · 五种外观质地</h1>
+    <p>编码结构不变（外浮标签 + 16px 细带 + 范围缎带），只更换细带自身的质地。同一段数据；落码时配色换主题 token。</p>
+  </div>
+
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">质地 1</span><h2>釉面</h2><span class="tail">最稳 · 与现有卡片语言零冲突</span></div>
+    <div class="lb-row">
+      <span class="c-hit" style="flex:42.7">缓存命中 42.7%</span>
+      <span class="c-write" style="flex:18.3">写入 18.3%</span>
+      <span class="c-plain" style="flex:28.6">普通输入 28.6%</span>
+      <span class="c-out" style="flex:10.4">输出 10.4%</span>
+    </div>
+    <div class="t1-band">
+      <span class="s-hit" style="flex:42.7"></span>
+      <span class="s-write" style="flex:18.3"></span>
+      <span class="s-plain" style="flex:28.6"></span>
+      <span class="s-out" style="flex:10.4"></span>
+    </div>
+    <div class="scope"><div class="rib in"></div><div class="rib out"></div></div>
+    <div class="scope-lb"><span class="lbin">输入 89.6% · 缓存覆盖 68.1%</span><span class="lbout">输出 10.4%</span></div>
+  </section>
+
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">质地 2</span><h2>辉光</h2><span class="tail">最抢眼 · 深底上最「光谱」</span></div>
+    <div class="lb-row">
+      <span class="c-hit" style="flex:42.7">缓存命中 42.7%</span>
+      <span class="c-write" style="flex:18.3">写入 18.3%</span>
+      <span class="c-plain" style="flex:28.6">普通输入 28.6%</span>
+      <span class="c-out" style="flex:10.4">输出 10.4%</span>
+    </div>
+    <div class="t2-band">
+      <span class="s-hit" style="flex:42.7"></span>
+      <span class="s-write" style="flex:18.3"></span>
+      <span class="s-plain" style="flex:28.6"></span>
+      <span class="s-out" style="flex:10.4"></span>
+    </div>
+    <div class="scope"><div class="rib in"></div><div class="rib out"></div></div>
+    <div class="scope-lb"><span class="lbin">输入 89.6% · 缓存覆盖 68.1%</span><span class="lbout">输出 10.4%</span></div>
+  </section>
+
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">质地 3</span><h2>凹槽</h2><span class="tail">最仪器感 · 嵌入式读数</span></div>
+    <div class="lb-row">
+      <span class="c-hit" style="flex:42.7">缓存命中 42.7%</span>
+      <span class="c-write" style="flex:18.3">写入 18.3%</span>
+      <span class="c-plain" style="flex:28.6">普通输入 28.6%</span>
+      <span class="c-out" style="flex:10.4">输出 10.4%</span>
+    </div>
+    <div class="t3-track">
+      <div class="t3-band">
+        <span class="s-hit" style="flex:42.7"></span>
+        <span class="s-write" style="flex:18.3"></span>
+        <span class="s-plain" style="flex:28.6"></span>
+        <span class="s-out" style="flex:10.4"></span>
+      </div>
+    </div>
+    <div class="scope"><div class="rib in"></div><div class="rib out"></div></div>
+    <div class="scope-lb"><span class="lbin">输入 89.6% · 缓存覆盖 68.1%</span><span class="lbout">输出 10.4%</span></div>
+  </section>
+
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">质地 4</span><h2>胶囊</h2><span class="tail">最柔和 · 陪伴系气质</span></div>
+    <div class="lb-row">
+      <span class="c-hit" style="flex:42.7">缓存命中 42.7%</span>
+      <span class="c-write" style="flex:18.3">写入 18.3%</span>
+      <span class="c-plain" style="flex:28.6">普通输入 28.6%</span>
+      <span class="c-out" style="flex:10.4">输出 10.4%</span>
+    </div>
+    <div class="t4-band">
+      <span class="s-hit" style="flex:42.7"></span>
+      <span class="s-write" style="flex:18.3"></span>
+      <span class="s-plain" style="flex:28.6"></span>
+      <span class="s-out" style="flex:10.4"></span>
+    </div>
+    <div class="scope"><div class="rib in"></div><div class="rib out"></div></div>
+    <div class="scope-lb"><span class="lbin">输入 89.6% · 缓存覆盖 68.1%</span><span class="lbout">输出 10.4%</span></div>
+  </section>
+
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">质地 5</span><h2>极光</h2><span class="tail">最「光谱」· 全带连续渐变</span></div>
+    <div class="lb-row">
+      <span class="c-hit" style="flex:42.7">缓存命中 42.7%</span>
+      <span class="c-write" style="flex:18.3">写入 18.3%</span>
+      <span class="c-plain" style="flex:28.6">普通输入 28.6%</span>
+      <span class="c-out" style="flex:10.4">输出 10.4%</span>
+    </div>
+    <div class="t5-wrap">
+      <div class="flow"></div>
+      <i class="m1"></i><i class="m2"></i><i class="m3"></i>
+    </div>
+    <div class="scope"><div class="rib in"></div><div class="rib out"></div></div>
+    <div class="scope-lb"><span class="lbin">输入 89.6% · 缓存覆盖 68.1%</span><span class="lbout">输出 10.4%</span></div>
+  </section>
+
+</body>
+</html>

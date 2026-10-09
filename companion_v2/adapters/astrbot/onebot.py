@@ -6,6 +6,7 @@ import logging
 from uuid import uuid4
 
 from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
+from companion_v2.conversation.quotes.models import message_number
 from companion_v2.delivery.components import build_component_plan
 from companion_v2.delivery.models import DeliveryEnvelope
 from companion_v2.delivery.media import ImageDeliveryEnvelope, payload_hash
@@ -13,7 +14,7 @@ from companion_v2.execution.models import digest, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 
-from .native import account_number, check_version, native_id
+from .native import account_number, check_version
 
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class OneBotTextSender:
         self.reaction_image_format = reaction_image_format or (lambda: "image")
 
     def local_sender(self):
-        return LocalSender(self.binding, self.send, supports_images=self.supports_images)
+        return LocalSender(self.binding, self.send, supports_images=self.supports_images, supports_poke=True)
 
     async def _final_dispatch_check(self, envelope, scope, context):
         """Re-read every live boundary immediately before a native API call.
@@ -81,12 +82,15 @@ class OneBotTextSender:
             images = envelope.images if isinstance(envelope, ImageDeliveryEnvelope) else ()
             image_position = envelope.image_position if isinstance(envelope, ImageDeliveryEnvelope) else "after_text"
             plan = envelope.plan
+            has_message_content = bool(envelope.text.strip()) or bool(images)
+            poke_only = not has_message_content and envelope.poke is not None
             if images:
                 if not self.supports_images:
                     return receipt("not_sent")
                 envelope.__post_init__()
             if (envelope.sender != self.binding or payload_hash(envelope.text, images, image_position=image_position) != envelope.payload_hash
-                    or (not envelope.text.strip() and (envelope.text != "" or not images))
+                    or (not has_message_content and not poke_only)
+                    or (not envelope.text.strip() and envelope.text != "" and not images)
                     or len(envelope.text) > 65536
                     or principal.host_id != self.bridge.host_id
                     or principal.installation_id != scope.installation_id or principal.platform != scope.platform
@@ -117,6 +121,9 @@ class OneBotTextSender:
                         voice_segment = await self.voice(context, voice_plan["speech"],
                             provider_id=voice_plan["provider_id"], timeout_seconds=voice_plan["timeout_seconds"])
                     elif self.voice_delivery is None:
+                        voice_plan = {"speech": envelope.text, "provider_id": "", "timeout_seconds": 30,
+                                      "position": "after_media",
+                                      "delivery_mode": "voice_only" if envelope.voice_required else "voice_and_text"}
                         voice_segment = await self.voice(context, envelope.text)
                     else:
                         voice_plan = self.voice_delivery.claim(envelope)
@@ -140,7 +147,7 @@ class OneBotTextSender:
                         or not client._wsr_api_clients.get(scope.account_id)):
                     raise ValueError("original account disconnected during voice synthesis")
             envelope.before_dispatch()
-            component_plan = build_component_plan(
+            component_plan = (build_component_plan(
                 envelope.text,
                 images,
                 voice_segment,
@@ -151,14 +158,22 @@ class OneBotTextSender:
                 order=plan.order if plan is not None else (),
                 mentions=plan.mentions if plan is not None else (),
                 faces=plan.faces if plan is not None else (),
-            )
-            voice_included = component_plan.voice_included
+            ) if has_message_content else None)
+            voice_included = component_plan.voice_included if component_plan is not None else False
             if voice_plan is not None and voice_segment is not None:
                 render_state = "ready" if voice_included else "invalid"
+            if self.voice_delivery is not None and envelope.voice is None:
+                self.voice_delivery.record(envelope.part_id, render_state,
+                    component_plan.kinds if component_plan is not None else (),
+                    component_plan.text_hidden if component_plan is not None else False)
+            if envelope.voice_required and not voice_included:
+                if self.voice_delivery is not None and voice_plan is not None and envelope.voice is None:
+                    self.voice_delivery.release(voice_plan, envelope.part_id)
+                return receipt("not_sent")
             message = []
-            if plan is not None and plan.quote:
+            if has_message_content and plan is not None and plan.quote:
                 message.append({"type": "reply", "data": {"id": plan.quote}})
-            for component in component_plan.components:
+            for component in (component_plan.components if component_plan is not None else ()):
                 if component.kind == "text":
                     message.append({"type": "text", "data": {"text": component.value}})
                 elif component.kind == "image":
@@ -174,12 +189,13 @@ class OneBotTextSender:
                 else:
                     # The component plan has already checked the native record shape.
                     message.append(component.value)
-            if self.voice_delivery is not None and envelope.voice is None:
-                self.voice_delivery.record(envelope.part_id, render_state, component_plan.kinds,
-                                           component_plan.text_hidden)
             if envelope.poke is not None:
                 api = await self._final_dispatch_check(envelope, scope, context)
-                await self._poke(api, context, envelope.poke)
+                poke_status = await self._poke(api, context, envelope.poke)
+                if poke_only:
+                    if poke_status == "delivered":
+                        return receipt("delivered", "onebot-poke:" + digest([envelope.part_id, context.key]))
+                    return receipt(poke_status)
         except asyncio.CancelledError:
             if voice_plan is not None and envelope.voice is None and self.voice_delivery is not None:
                 self.voice_delivery.release(voice_plan, envelope.part_id)
@@ -193,10 +209,9 @@ class OneBotTextSender:
             # Direct reverse-WS call: never use the host boolean result or its HTTP/account fallback.
             result = await api.call_action(action, self_id=scope.account_id,
                 **target, message=message)
-            message_id = native_id(result["message_id"])
-            # OneBot message IDs are positive integers. A negative or zero ID is
-            # not a delivery receipt we can safely persist as confirmed.
-            if str(int(message_id)) != message_id or int(message_id) <= 0:
+            # NapCat can return signed message IDs; account IDs remain positive.
+            message_id = message_number(result["message_id"])
+            if message_id in ("-1", "0"):
                 return receipt("unknown")
             return receipt("delivered", "onebot-message:" + digest([scope.platform, scope.account_id])[:24] + ":" + message_id)
         except Exception:
@@ -211,8 +226,8 @@ class OneBotTextSender:
         """Open one message with the sealed native poke, without blocking the text.
 
         A poke is a separate OneBot action, so it cannot share the message ACK.
-        A failure or timeout is recorded and never retried: the recipient may or
-        may not have received it, and the sealed message still goes out.
+        A failure after the API call starts is unknown and never retried. When a
+        message accompanies the poke, its independent delivery may still proceed.
         """
         scope = context.scope
         try:
@@ -223,15 +238,18 @@ class OneBotTextSender:
                                                 "user_id": int(account_number(
                                                     context.actor.principal.native_account_id))}
             else:
-                return
+                return "not_sent"
             for _ in range(plan.count):
                 try:
                     await api.call_action(action, self_id=scope.account_id, **target)
                 except Exception as error:
-                    logger.warning("V2 proactive poke was not confirmed: %s", type(error).__name__)
-                    return
+                    logger.warning("V2 poke was not confirmed: %s", type(error).__name__)
+                    return "unknown"
+            return "delivered"
         except Exception as error:
-            logger.warning("V2 proactive poke route was unavailable: %s", type(error).__name__)
+            logger.warning("V2 poke route was unavailable: %s", type(error).__name__)
+            return "not_sent"
+            return "not_sent"
 
     def route(self, context):
         raise NotImplementedError("a sender must bind one explicit audience and API action")

@@ -1,105 +1,78 @@
-"""Small, human-oriented configuration surface for the account topology page."""
+"""Dashboard-owned account bindings and native session controls."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
-from pathlib import Path
-from typing import Any
+import logging
 
 from astrbot.api.web import request
+from astrbot.core import sp
 
-from companion_v2.execution.models import TaskError
-from .group_settings import parse_group_targets
+from companion_v2.adapters.astrbot.native import account_number
+from companion_v2.execution.models import TaskError, digest
 from .multi_settings import MultiHostSettings
+from .settings import HostControlError
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/accounts"
+logger = logging.getLogger(__name__)
 
 
 class AccountSessionWebAPI:
-    """Translate the three columns into the existing multi_host contract.
-
-    The page owns only the routing fields. Stable internal IDs are generated here,
-    and the candidate configuration is parsed before it is written.
-    """
-
     def __init__(self, controller):
         self.controller = controller
 
     def routes(self):
-        return [(PREFIX, self.get, ["GET"], "Read account and session configuration"),
-                (PREFIX, self.save, ["POST"], "Save account and session configuration")]
+        return [(PREFIX, self.get, ["GET"], "Read account bindings and native session topology"),
+                (PREFIX, self.save, ["POST"], "Apply reviewed account and group bindings"),
+                (PREFIX + "/group-target", self.save_group_target, ["POST"],
+                 "Enable or disable one discovered group target"),
+                (PREFIX + "/session", self.save_session, ["POST"], "Manage a discovered native session")]
 
     @staticmethod
     def _admin():
         username = request.username
         if type(username) is not str or not username.strip() or username.startswith("api_key:"):
             raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard as an administrator")
-
-    def _config_path(self) -> Path | None:
-        # AstrBot exposes the loaded config object, but not its path on Context.
-        # The normal plugin data directory is the documented fallback used by the
-        # test host; a host may provide an explicit path for real persistence.
-        explicit = getattr(self.controller, "config_path", None)
-        if explicit:
-            return Path(explicit).resolve()
-        return None
+        if request.query:
+            raise TaskError("account_config_invalid", "query fields are not allowed")
 
     def _view(self):
-        section = self.controller.config.get("multi_host", {})
-        if not isinstance(section, dict):
-            section = {}
-        if not hasattr(self.controller, "target_inventory"):
-            return {"enabled": False, "mode": "single", "binding": self.controller.binding_state(),
-                    "accounts": [], "personas": [], "sessions": [], "groups": [],
-                    "discovered": {"accounts": [], "personas": [], "targets": []}}
-        targets = list(section.get("targets", [])) if isinstance(section.get("targets", []), list) else []
-        personas = list(section.get("personas", [])) if isinstance(section.get("personas", []), list) else []
-        return {"enabled": bool(section.get("enabled", False)),
-                "accounts": self._accounts(targets), "personas": personas,
-                "sessions": targets,
-                "groups": list(section.get("group_targets", [])) if isinstance(section.get("group_targets", []), list) else []}
+        controller = self.controller
+        section = controller.config.get("multi_host", {})
+        targets = deepcopy(section.get("targets", []))
+        groups = deepcopy(section.get("group_targets", []))
+        personas = deepcopy(section.get("personas", []))
+        enabled = bool(section.get("enabled", False))
+        accounts = {(row["platform_id"], row["account_id"], row["bot_id"]):
+                    {name: row[name] for name in ("platform_id", "account_id", "bot_id")}
+                    for row in [*section.get("accounts", []), *targets, *groups]}
+        return {"mode": "multi", "enabled": enabled,
+                "accounts": list(accounts.values()), "personas": personas, "sessions": targets, "groups": groups}
 
     async def _discovered(self):
-        """Use the same live inventory as the setup guide for page choices."""
         from .setup_api import SetupWebAPI
-        setup = SetupWebAPI(self.controller)
-        data = (await setup.api_targets()).get("data", {})
-        accounts = data.get("accounts", [])
-        if not accounts and hasattr(self.controller, "settings") and self.controller.settings:
-            accounts = [{"platform_id": item.platform_id, "account_id": item.account_id,
-                         "bot_id": item.bot_id} for item in self.controller.settings.accounts]
-        personas = data.get("personas", [])
-        if not personas and getattr(self.controller, "settings", None):
-            personas = [{"bot_id": item.bot_id, "persona_id": item.persona_id,
-                         "role_id": item.role_id, "label": item.persona_id}
-                        for item in self.controller.settings.personas]
-        return {"accounts": accounts, "personas": personas, "targets": data.get("targets", [])}
-
-    @staticmethod
-    def _accounts(targets):
-        seen, result = set(), []
-        for item in targets:
-            key = (item.get("platform_id", ""), item.get("account_id", ""), item.get("bot_id", ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append({"platform_id": key[0], "account_id": key[1], "bot_id": key[2]})
-        return result
+        response = await SetupWebAPI(self.controller).api_targets()
+        if response.get("status") != "ok":
+            data = response.get("data") if isinstance(response.get("data"), dict) else {}
+            code = data.get("code") or response.get("message") or "setup_targets_unavailable"
+            reason = response.get("reason") or "the native session directory could not be read"
+            raise TaskError(code, reason)
+        return response["data"]
 
     async def get(self):
-        from .web_api import outcome_response
-        from companion_v2.foundation.outcome import Outcome
         try:
             self._admin()
-            if not hasattr(self.controller, "target_inventory"):
-                raise TaskError("account_config_mode_required", "account and session editing is available for the shared host")
-            result = self._view()
-            discovered = await self._discovered()
-            result["discovered"] = discovered
-            return {"status": "ok", "data": result}
-        except TaskError as error:
-            return outcome_response(Outcome.failed(error.code, str(error)))
+            return {"status": "ok", "data": {**self._view(), "discovered": await self._discovered()}}
+        except (TaskError, HostControlError) as error:
+            return self._error(error.code, str(error))
+
+    @staticmethod
+    def _error(code, reason):
+        from .web_api import outcome_response
+        from companion_v2.foundation.outcome import Outcome
+        return outcome_response(Outcome.failed(code, reason))
 
     @staticmethod
     async def _body():
@@ -114,80 +87,239 @@ class AccountSessionWebAPI:
             raise TaskError("account_config_invalid", "configuration must be an object")
         return data
 
-    async def save(self):
-        from .web_api import outcome_response
-        from companion_v2.foundation.outcome import Outcome
+    async def save_session(self):
         try:
             self._admin()
-            if not hasattr(self.controller, "target_inventory"):
-                raise TaskError("account_config_mode_required", "account and session editing is available for the shared host")
-            if request.query:
-                raise TaskError("account_config_invalid", "query fields are not allowed")
-            if getattr(self.controller, "session", None) is not None:
-                raise TaskError("account_config_running", "stop the host before changing account bindings")
             body = await self._body()
+            if (set(body) - {"session_key", "llm_enabled", "session_enabled", "persona_id"} or len(body) < 2
+                    or type(body.get("session_key")) is not str):
+                raise TaskError("account_config_invalid", "select a native session and its settings")
+            if any(field in body and type(body[field]) is not bool for field in ("llm_enabled", "session_enabled")):
+                raise TaskError("account_config_invalid", "session switches must be booleans")
+            async with self.controller._control_lock:
+                if self.controller._terminated:
+                    raise TaskError("staging_host_terminated", "the plugin has stopped")
+                row = await self.controller.session_topology.select(body["session_key"])
+                if row is None or not row["native"]:
+                    raise TaskError("account_session_unavailable", "the selected native session is no longer available")
+                if "persona_id" in body:
+                    from .persona_catalog import available_personas
+                    persona = body["persona_id"]
+                    if type(persona) is not str or persona not in ["", "[%None]", *await available_personas(self.controller.context)]:
+                        raise TaskError("host_persona_unavailable", "select a currently loaded AstrBot persona")
+                    if row["managed"] and persona and not any(
+                            item["bot_id"] == row["bot_id"] and item["persona_id"] == persona
+                            for item in self._view()["personas"]):
+                        raise TaskError("account_session_persona_unmapped", "add this persona to the Bot bindings first")
+                umo = row["unified_msg_origin"]
+                services = dict(await self.controller.session_topology.services(umo))
+                for field in ("llm_enabled", "session_enabled"):
+                    if field in body:
+                        services[field] = body[field]
+                if "persona_id" in body:
+                    if body["persona_id"]:
+                        services["persona_id"] = body["persona_id"]
+                    else:
+                        services.pop("persona_id", None)
+                await sp.put_async(scope="umo", scope_id=umo, key="session_service_config", value=services)
+            return {"status": "ok", "data": {"saved": True, "requires_reload": False}}
+        except (TaskError, HostControlError) as error:
+            return self._error(error.code, str(error))
+        except OSError:
+            return self._error("account_config_save_failed", "the account settings could not be saved")
+
+    async def save_group_target(self):
+        try:
+            self._admin()
+            controller = self.controller
+            body = await self._body()
+            fields = {"platform_id", "account_id", "bot_id", "group_id", "enabled"}
+            if set(body) != fields or type(body.get("enabled")) is not bool:
+                raise TaskError("account_config_invalid", "select one group target and its desired state")
+            enabled = body["enabled"]
+            platform_id, account_id, bot_id, group_id = (body[name] for name in
+                ("platform_id", "account_id", "bot_id", "group_id"))
+            if any(type(value) is not str or len(value) > 128
+                   for value in (platform_id, account_id, bot_id, group_id)):
+                raise TaskError("account_config_invalid", "group target identity fields must be nonempty text")
+            if not platform_id.strip() or not group_id.strip():
+                raise TaskError("account_config_invalid", "group target identity fields must be nonempty text")
+            if enabled and (not account_id.strip() or not bot_id.strip()):
+                raise TaskError("account_group_target_route_unresolved",
+                                "the native group session is not associated with one connected Bot account yet")
+            if not account_id.strip() or not bot_id.strip():
+                raise TaskError("account_config_invalid", "group target identity fields must be nonempty text")
+            account_id = account_number(account_id)
+            group_id = account_number(group_id)
+            current = self._view()
+            route = (platform_id, account_id, bot_id, group_id)
+            group_rows = deepcopy(current["groups"])
+            existing = next((row for row in group_rows if
+                (row["platform_id"], row["account_id"], row["bot_id"], row["group_id"]) == route), None)
+            if enabled and existing is None:
+                account_key = (platform_id, account_id, bot_id)
+                if account_key not in {(row["platform_id"], row["account_id"], row["bot_id"])
+                                       for row in current["accounts"]}:
+                    raise TaskError("account_group_target_account_required",
+                                    "bind this Bot account and persona in account management first")
+                discovered = await self._discovered()
+                if not any(row.get("scope_kind") == "group"
+                           and row.get("platform_id") == platform_id
+                           and row.get("account_id") in ("", account_id)
+                           and row.get("group_id") == group_id
+                           for row in discovered.get("targets", [])):
+                    issue = next((item for item in discovered.get("directory", {}).get("issues", [])
+                                  if item.get("platform_id") in ("", platform_id)), None)
+                    if issue:
+                        raise TaskError(issue["code"], issue["reason"])
+                    raise TaskError("account_group_target_unavailable",
+                                    "select a group currently present in the native session directory")
+                target_id = "group-" + digest((platform_id, account_id, group_id))[:20]
+                group_rows.append({"target_id": target_id, "platform_id": platform_id,
+                                   "account_id": account_id, "bot_id": bot_id, "group_id": group_id})
+            elif enabled:
+                target_id = existing["target_id"]
+            elif existing is None:
+                return {"status": "ok", "data": {"saved": True, "configured": False, "target_id": None}}
+            else:
+                target_id = existing["target_id"]
+                group_rows.remove(existing)
+
+            candidate = deepcopy(dict(controller.config))
+            section = candidate.setdefault("multi_host", {})
+            if type(section) is not dict:
+                raise TaskError("account_config_invalid", "group targets require a valid shared host configuration")
+            section["group_targets"] = group_rows
+            MultiHostSettings.parse(candidate)
+            result = await controller.apply_bindings(candidate)
+            return {"status": "ok", "data": {"saved": True, "configured": enabled,
+                                                   "target_id": target_id if enabled else None,
+                                                   "requires_reload": result["requires_reload"],
+                                                   "requires_initialize": result["requires_initialize"]}}
+        except (TaskError, HostControlError) as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, KeyError):
+            return self._error("account_config_invalid", "the selected group target could not be validated")
+        except OSError:
+            return self._error("account_config_save_failed", "the group access setting could not be saved")
+        except Exception as error:
+            logger.exception("V2 group target update failed")
+            detail = " ".join(str(error).split())
+            reason = f"{type(error).__name__}: {detail[:512]}" if detail else type(error).__name__
+            return self._error("account_group_target_apply_failed", reason)
+
+    async def save(self):
+        try:
+            self._admin()
+            controller = self.controller
+            body = await self._body()
+            if set(body) - {"enabled", "accounts", "sessions", "personas", "groups"}:
+                raise TaskError("account_config_invalid", "configuration has unknown fields")
             enabled = body.get("enabled", True)
             if type(enabled) is not bool:
                 raise TaskError("account_config_invalid", "enabled must be a boolean")
-            accounts = body.get("accounts", [])
-            sessions = body.get("sessions", [])
-            personas = body.get("personas", [])
-            if not all(isinstance(x, dict) for x in (accounts, sessions, personas)):
-                raise TaskError("account_config_invalid", "accounts, personas and sessions must be lists")
+            current = self._view()
+            sync_private_targets = "sessions" not in body
+            accounts = body.get("accounts")
+            sessions = body.get("sessions", current["sessions"])
+            personas = body.get("personas")
+            groups = body.get("groups", current["groups"])
+            if accounts is None:
+                accounts = []
+            if personas is None:
+                personas = current["personas"]
+            if any(type(rows) is not list or any(type(row) is not dict for row in rows)
+                   for rows in (accounts, sessions, personas, groups)):
+                raise TaskError("account_config_invalid", "account bindings must be lists of objects")
             discovered = await self._discovered()
-            known = {(str(x.get("platform_id", "")).strip(), str(x.get("account_id", "")).strip(), str(x.get("bot_id", "")).strip()): x for x in discovered["accounts"]}
-            normalized_accounts = []
-            for item in accounts:
-                key = str(item.get("account_key", "")).strip()
-                parts = key.split("|", 2)
-                candidate = tuple(parts) if len(parts) == 3 else (str(item.get("platform_id", "")).strip(), str(item.get("account_id", "")).strip(), str(item.get("bot_id", "")).strip())
-                if candidate not in known:
-                    raise TaskError("account_config_invalid", "账号必须来自 AstrBot 当前已连接目录")
-                normalized_accounts.append(known[candidate])
-            accounts = normalized_accounts
-            account_map = {(x["platform_id"], x["account_id"], x["bot_id"]): x for x in accounts}
-            if any(not all(key) for key in account_map):
-                raise TaskError("account_config_invalid", "each account needs platform, login account and Bot")
-            target_rows, target_ids = [], set()
-            for index, item in enumerate(sessions, 1):
-                raw_key = str(item.get("account_key", "")).strip()
-                parts = raw_key.split("|", 2)
-                key = tuple(parts) if len(parts) == 3 else (str(item.get("platform_id", "")).strip(), str(item.get("account_id", "")).strip(), str(item.get("bot_id", "")).strip())
-                participant = str(item.get("participant_id", "")).strip()
-                if key not in account_map or not participant:
-                    raise TaskError("account_config_invalid", "each session must select an existing account and participant")
-                reachable = {(str(x.get("platform_id", "")), str(x.get("account_id", "")), str(x.get("bot_id", "")), str(x.get("participant_id") or x.get("group_id") or "")) for x in discovered["targets"]}
-                if (*key, participant) not in reachable and not participant.isdigit():
-                    raise TaskError("account_config_invalid", "新私聊对象必须填写数字账号；群聊窗口必须来自探测目录")
-                target_id = f"target-{index}"
-                if target_id in target_ids:
-                    raise TaskError("account_config_invalid", "session identifiers must be unique")
-                target_ids.add(target_id)
-                target_rows.append({"target_id": target_id, "platform_id": key[0], "account_id": key[1], "bot_id": key[2], "participant_id": participant})
-            persona_rows, persona_keys = [], set()
-            for index, item in enumerate(personas, 1):
-                bot_id = str(item.get("bot_id", "")).strip()
-                persona_id = str(item.get("persona_id", "")).strip()
-                role_id = str(item.get("role_id", "role-" + str(index))).strip()
-                if not bot_id or not persona_id or not role_id or (bot_id, persona_id) in persona_keys:
-                    raise TaskError("account_config_invalid", "each native persona mapping must be unique and complete")
-                persona_keys.add((bot_id, persona_id))
-                persona_rows.append({"bot_id": bot_id, "persona_id": persona_id, "role_id": role_id})
-            candidate = dict(self.controller.config)
-            old = dict(candidate.get("multi_host", {}))
-            old.update({"enabled": enabled, "installation_id": old.get("installation_id", "main"),
-                        "targets": target_rows, "personas": persona_rows, "group_targets": old.get("group_targets", []),
-                        "capabilities": old.get("capabilities", [])})
-            candidate["multi_host"] = old
+            known = {(row["platform_id"], row["account_id"], row["bot_id"]): row for row in discovered["accounts"]}
+
+            def account_key(row):
+                raw = str(row.get("account_key", ""))
+                return tuple(raw.split("|")) if raw else tuple(str(row.get(key, "")).strip()
+                    for key in ("platform_id", "account_id", "bot_id"))
+
+            selected = {account_key(row) for row in accounts}
+            if not selected and not body.get("accounts"):
+                selected = set(known)
+            if not selected or any(key not in known for key in selected):
+                raise TaskError("account_config_invalid", "select currently connected Bot accounts")
+            private, group_rows = [], []
+            for rows, old, peer_field, kind, output in ((sessions, current["sessions"], "participant_id", "private", private),
+                                                      (groups, current["groups"], "group_id", "group", group_rows)):
+                existing = {(row["platform_id"], row["account_id"], row[peer_field]): row for row in old}
+                for row in rows:
+                    key = account_key(row)
+                    peer = row.get(peer_field)
+                    peer = "*" if peer == "*" else account_number(peer)
+                    if kind == "group" and peer == "*":
+                        previous = existing.get((key[0], key[1], peer))
+                        if "groups" not in body and previous is not None and key in selected:
+                            output.append({"target_id": previous["target_id"],
+                                           "platform_id": key[0], "account_id": key[1],
+                                           "bot_id": key[2], peer_field: peer})
+                        continue
+                    route = (key[0], key[1], peer)
+                    previous = existing.get(route)
+                    if key not in selected:
+                        # A removed account must not be retained by its old windows.
+                        # Reject newly supplied references to unselected accounts.
+                        if previous is not None and account_key(previous) == key:
+                            continue
+                        raise TaskError("account_config_invalid", "each window must select a configured Bot account")
+                    if kind == "group" and previous is None and not any(
+                            item.get("scope_kind") == "group" and item["platform_id"] == key[0]
+                            and item.get("account_id") in ("", key[1]) and item.get("group_id") == peer
+                            for item in discovered["targets"]):
+                        issue = next((item for item in discovered.get("directory", {}).get("issues", [])
+                                      if item.get("platform_id") in ("", key[0])), None)
+                        if issue:
+                            raise TaskError(issue["code"], issue["reason"])
+                        raise TaskError("account_config_invalid", "select a group from the native session directory")
+                    output.append({"target_id": previous["target_id"] if previous else kind + "-" + digest(route)[:20],
+                                   "platform_id": key[0], "account_id": key[1], "bot_id": key[2], peer_field: peer})
+            if sync_private_targets:
+                # Keep existing private routes and stable IDs. Only accounts with
+                # no private target receive a discovery template; groups stay explicit.
+                represented = {account_key(row) for row in private}
+                for key in sorted(selected - represented):
+                    private.append({"target_id": "private-" + digest((key[0], key[1], "*"))[:20],
+                                   "platform_id": key[0], "account_id": key[1],
+                                   "bot_id": key[2], "participant_id": "*"})
+            mapped = []
+            available = {(row["bot_id"], row["persona_id"]) for row in discovered["personas"]}
+            old_roles = {(row["bot_id"], row["persona_id"]): row["role_id"] for row in current["personas"]}
+            selected_bots = {key[2] for key in selected}
+            for row in personas:
+                key = (str(row.get("bot_id", "")), str(row.get("persona_id", "")))
+                if key[0] not in selected_bots:
+                    if key in old_roles:
+                        continue
+                    raise TaskError("account_config_invalid", "each persona must select a configured Bot account")
+                if key not in available:
+                    raise TaskError("host_persona_unavailable", "select a currently loaded AstrBot persona")
+                role_id = str(row.get("role_id", old_roles.get(key, ""))).strip()
+                if not role_id or len(role_id) > 128:
+                    raise TaskError("account_config_invalid", "each registered persona needs a role name")
+                mapped.append({"bot_id": key[0], "persona_id": key[1],
+                               "role_id": role_id})
+            candidate = deepcopy(dict(controller.config))
+            section = candidate.setdefault("multi_host", {})
+            section.update(enabled=enabled, accounts=[{"platform_id": key[0], "account_id": key[1], "bot_id": key[2]}
+                                                      for key in sorted(selected)],
+                           targets=private, personas=mapped, group_targets=group_rows)
             MultiHostSettings.parse(candidate)
-            path = self._config_path()
-            saver = getattr(self.controller, "save_plugin_config", None)
-            if callable(saver):
-                saver(candidate)
-            else:
-                raise TaskError("account_config_persistence_unavailable", "AstrBot did not expose a plugin configuration writer")
-            return {"status": "ok", "data": {"saved": True, "requires_reload": True, "configuration": self._view()}}
-        except TaskError as error:
-            return outcome_response(Outcome.failed(error.code, str(error)))
-        except Exception as error:  # noqa: BLE001
-            return outcome_response(Outcome.failed("account_config_invalid", "the selected bindings could not be validated"))
+            result = await controller.apply_bindings(candidate)
+            try:
+                discovered = await self._discovered()
+            except (TaskError, HostControlError):
+                # The configuration is already persisted. A subsequent native
+                # directory read must not turn that save into a failure receipt.
+                result = {**result, "directory_refresh_pending": True}
+            return {"status": "ok", "data": {**result, "configuration": {**self._view(), "discovered": discovered}}}
+        except (TaskError, HostControlError) as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, KeyError):
+            return self._error("account_config_invalid", "the selected account bindings could not be validated")
+        except OSError:
+            return self._error("account_config_save_failed", "the account bindings could not be saved")

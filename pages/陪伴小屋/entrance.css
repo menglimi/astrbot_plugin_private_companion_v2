@@ -152,11 +152,9 @@
  * 隐藏期间仍保留所有布局空间，落场不会改变小屋的目标矩形。
  */
 .is-entrance .rail,
-.is-entrance .topbar,
-.is-entrance .product-scope,
 .is-entrance .shell-side,
 .is-entrance .shell-panel,
-.is-entrance .stage-region .stage-bar,
+.is-entrance .stage-region .stage-role,
 .is-entrance .stage-region .stage-furniture-strip,
 .is-entrance .stage-region .stage-overlay,
 .is-entrance .stage-region .voxel-hint{
@@ -164,11 +162,9 @@
   pointer-events:none;
 }
 .is-entrance.entrance-reveal .rail,
-.is-entrance.entrance-reveal .topbar,
-.is-entrance.entrance-reveal .product-scope,
 .is-entrance.entrance-reveal .shell-side,
 .is-entrance.entrance-reveal .shell-panel,
-.is-entrance.entrance-reveal .stage-region .stage-bar,
+.is-entrance.entrance-reveal .stage-region .stage-role,
 .is-entrance.entrance-reveal .stage-region .stage-furniture-strip,
 .is-entrance.entrance-reveal .stage-region .stage-overlay,
 .is-entrance.entrance-reveal .stage-region .voxel-hint{
@@ -176,9 +172,7 @@
   animation-delay:calc(var(--entrance-ui-pause,90ms) + var(--entrance-delay,0ms));
 }
 .is-entrance .rail{--entrance-delay:0ms;--entrance-from-x:-12px;--entrance-from-y:0px}
-.is-entrance .topbar{--entrance-delay:40ms;--entrance-from-y:-8px}
-.is-entrance .product-scope{--entrance-delay:60ms;--entrance-from-y:6px}
-.is-entrance .stage-region .stage-bar{--entrance-delay:70ms;--entrance-from-y:6px}
+.is-entrance .stage-region .stage-role{--entrance-delay:70ms;--entrance-from-y:6px}
 .is-entrance .shell-side{--entrance-delay:110ms;--entrance-from-x:12px;--entrance-from-y:4px}
 .is-entrance .shell-panel{--entrance-delay:170ms;--entrance-from-y:16px}
 .is-entrance .stage-region .stage-furniture-strip{--entrance-delay:210ms;--entrance-from-y:10px}
@@ -190,11 +184,9 @@
 }
 /* 动画结束后交回原有样式，不强行打开本来不可交互的提示条。 */
 .entrance-settled .rail,
-.entrance-settled .topbar,
-.entrance-settled .product-scope,
 .entrance-settled .shell-side,
 .entrance-settled .shell-panel,
-.entrance-settled .stage-region .stage-bar,
+.entrance-settled .stage-region .stage-role,
 .entrance-settled .stage-region .stage-furniture-strip,
 .entrance-settled .stage-region .stage-overlay,
 .entrance-settled .stage-region .voxel-hint{
@@ -210,7 +202,7 @@
   .is-entrance-pull .stage-region .room-stage{
     overflow:hidden;background:var(--t-surface-soft);border-color:var(--t-line);
   }
-  .is-entrance :is(.rail,.topbar,.product-scope,.shell-side,.shell-panel,.stage-bar,.stage-furniture-strip,.stage-overlay,.voxel-hint){
+  .is-entrance :is(.rail,.shell-side,.shell-panel,.stage-role,.stage-furniture-strip,.stage-overlay,.voxel-hint){
     animation:none;opacity:1;transform:none;
   }
   .is-entrance .stage-region .voxel-room{pointer-events:auto}
@@ -222,7 +214,7 @@
 :root:is([data-motion="low"],[data-motion="off"]) .is-entrance-pull .stage-region .room-stage{
   overflow:hidden;background:var(--t-surface-soft);border-color:var(--t-line);
 }
-:root:is([data-motion="low"],[data-motion="off"]) .is-entrance :is(.rail,.topbar,.product-scope,.shell-side,.shell-panel,.stage-bar,.stage-furniture-strip,.stage-overlay,.voxel-hint){
+:root:is([data-motion="low"],[data-motion="off"]) .is-entrance :is(.rail,.shell-side,.shell-panel,.stage-role,.stage-furniture-strip,.stage-overlay,.voxel-hint){
   animation:none;opacity:1;transform:none;
 }
 :root:is([data-motion="low"],[data-motion="off"]) .is-entrance .stage-region .voxel-room{pointer-events:auto}

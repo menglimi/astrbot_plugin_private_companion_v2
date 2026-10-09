@@ -39,7 +39,7 @@ class MultiLiveAcceptanceTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     def _routes(native):
         return {route: handler for route, handler, _, _ in native.registered_web_apis}
 
-    async def test_preview_recovery_and_single_target_delivery(self):
+    async def test_message_ingress_delivery_and_restart_with_bound_routes(self):
         self.controller.register_routes()
         routes = self._routes(self.native)
         request = NS(username="synthetic-dashboard-admin", query=_Query())
@@ -51,8 +51,8 @@ class MultiLiveAcceptanceTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             first, first_batch = await self._receive(self.controller, "first", "live-preview-first")
             second, _ = await self._receive(self.controller, "second", "live-preview-second")
             self.assertNotEqual(owner_key(first), owner_key(second))
-            self.assertEqual(self.native.platforms["qq-main"].client._api._wsr_api.calls, [])
-            self.assertEqual(self.native.platforms["qq-second"].client._api._wsr_api.calls, [])
+            self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls), 1)
+            self.assertEqual(len(self.native.platforms["qq-second"].client._api._wsr_api.calls), 1)
 
             memory_path = next(path for path in routes if path.startswith(PREFIX + "/targets/first/") and path.endswith("/memory/settings"))
             self.assertEqual((await routes[memory_path]())["status"], "ok")
@@ -82,6 +82,8 @@ class MultiLiveAcceptanceTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(delivery.terminate)
         delivery.register_routes()
         routes = self._routes(self.native)
+        previous_main_sends = len(self.native.platforms["qq-main"].client._api._wsr_api.calls)
+        previous_second_sends = len(self.native.platforms["qq-second"].client._api._wsr_api.calls)
         request.query = _Query()
         with patch("astrbot_host.multi_api.request", request):
             self.assertEqual((await routes[PREFIX + "/probe"]())["status"], "ok")
@@ -93,14 +95,19 @@ class MultiLiveAcceptanceTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
         await self._receive(delivery, "first", "live-delivery-first")
         await self._receive(delivery, "second", "live-delivery-second")
-        self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls), 1)
-        self.assertEqual(self.native.platforms["qq-second"].client._api._wsr_api.calls, [])
+        self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls),
+                         previous_main_sends + 1)
+        self.assertEqual(len(self.native.platforms["qq-second"].client._api._wsr_api.calls),
+                         previous_second_sends + 1)
 
         request.query = _Query({"target_id": "first"})
         with patch("astrbot_host.multi_api.request", request):
             self.assertEqual((await routes[PREFIX + "/revoke-delivery"]())["status"], "ok")
         await self._receive(delivery, "first", "live-delivery-revoked")
-        self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls), 1)
+        self.assertEqual(len(self.native.platforms["qq-main"].client._api._wsr_api.calls),
+                         previous_main_sends + 2)
+        self.assertEqual(len(self.native.platforms["qq-second"].client._api._wsr_api.calls),
+                         previous_second_sends + 1)
         await delivery.terminate()
         self.assertEqual(self.native.registered_web_apis, [])
 

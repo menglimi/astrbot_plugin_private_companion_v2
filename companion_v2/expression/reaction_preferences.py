@@ -31,6 +31,7 @@ POSITIVE = (
     rf"{ASSET}.{{0,8}}(?:不错|合适|贴切|喜欢|好笑|好用)",
     r"^(?:太贴了|太适合了|这张可以|好好笑|笑死了?|绝了)$",
 )
+REACTION_FEEDBACK_WINDOW_SECONDS = 15 * 60
 
 
 def matches(patterns, text):
@@ -100,7 +101,7 @@ class ReactionPreferences:
         target = db.execute("""SELECT batch,id,feedback_event FROM reaction_deliveries
             WHERE owner=? AND actor=? AND delivered_at<=? AND delivered_at>=?
             ORDER BY delivered_at DESC, batch DESC LIMIT 1""",
-            (owner, actor, received_at, received_at - 6 * 3600)).fetchone()
+            (owner, actor, received_at, received_at - REACTION_FEEDBACK_WINDOW_SECONDS)).fetchone()
         if target is None or target["feedback_event"] is not None:
             return
         if not db.execute("""UPDATE reaction_deliveries SET feedback_event=?,feedback_signal=?
@@ -121,7 +122,7 @@ class ReactionPreferences:
                 WHERE owner=? AND actor=? AND signal IS NOT NULL
                 AND received_at>=? AND received_at<=?
                 ORDER BY received_at,event_key""",
-                (owner, actor, delivered_at, delivered_at + 6 * 3600)).fetchall()
+                (owner, actor, delivered_at, delivered_at + REACTION_FEEDBACK_WINDOW_SECONDS)).fetchall()
             for row in rows:
                 self._assign_feedback(db, owner, actor, row["event_key"],
                                       row["received_at"], row["signal"])

@@ -5,15 +5,21 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 from astrbot.api.web import PluginRequest, bind_request_context
 from starlette.requests import Request
 
 from astrbot_host.screen_access_api import PREFIX
 from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
-from companion_v2.identity_policy.models import GrantState
+from companion_v2.execution.models import TaskContext
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import AudienceRef
+from companion_v2.identity_policy.models import AuthorizationTier, GrantState
+from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS, SCREEN_READ
+from astrbot_host.management_identity import dashboard_operator
 from tests import test_astrbot_staging_host as support
 from tests.test_native_screen_flow import provider_module
 
@@ -65,6 +71,7 @@ class ScreenAccessAPITests(unittest.IsolatedAsyncioTestCase):
         initial = (await self.call())["data"]
         self.assertFalse(initial["installed"])
         self.assertFalse(initial["invokable"])
+        self.assertTrue(initial["can_manage"])
         command = {"operation_key": "screen-enable-1", "edit_token": initial["edit_token"], "enabled": True}
         enabled = await self.call(body=command)
         self.assertEqual(enabled["status"], "ok", enabled)
@@ -92,6 +99,25 @@ class ScreenAccessAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(owned)
         self.assertTrue(all(grant.state is GrantState.REVOKED for grant in owned))
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_view_only_operator_gets_read_only_status_and_cannot_submit_consent(self):
+        await self.start()
+        operator = dashboard_operator(self.controller.runtime, "admin", at=support.NOW)
+        original = self.controller.session.profile.target
+        target = TaskContext(operator, original.role_binding, AudienceRef(original.scope, (operator.subject,)))
+        self.controller.session.profile = NS(target=target)
+        policy = ObjectAccessPolicy(self.controller.runtime)
+        policy.set_tier(operator.subject, AuthorizationTier.IMPORTANT,
+            expected_revision=policy.revision, observed_at=support.NOW)
+
+        with patch.object(self.controller.session.application.tasks, "authorize_context",
+                          return_value=Outcome.success(True)):
+            readonly = await self.call()
+            self.assertEqual(readonly["status"], "ok", readonly)
+            self.assertFalse(readonly["data"]["can_manage"])
+            denied = await self.call(body={"operation_key": "read-only-enable",
+                "edit_token": readonly["data"]["edit_token"], "enabled": True})
+        self.assertEqual(denied["data"]["code"], "core_access_required")
 
     async def test_route_requires_dashboard_identity_and_rejects_query_overrides(self):
         await self.start()

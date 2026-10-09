@@ -235,6 +235,37 @@ class GeneratedImages:
         next_cursor = self._encode_album_cursor(page[-1]) if page and more else None
         return {"items": page, "next_cursor": next_cursor}
 
+    def observability_page(self, context, at, *, limit=20):
+        """Read safe image invocation outcomes for the exact selected private route."""
+        if type(limit) is not int or isinstance(limit, bool) or not 1 <= limit <= 50:
+            raise TaskError("generated_observability_limit_invalid", "the image log page size is outside its bounds")
+        self.messages.authorize(context, at)
+        actions = tuple(sorted(IMAGE_ACTIONS))
+        where = "b.origin_key = ? AND i.action IN (?,?,?)"
+        parameters = (context.key, *actions)
+        count = self.runtime.read_one(
+            """SELECT COUNT(*) AS total FROM extension_tool_invocations i
+               JOIN conversation_batches b ON b.batch_id=i.batch_id WHERE """ + where,
+            parameters)
+        rows = self.runtime.read_all(
+            """SELECT i.action, i.state, i.error_code, i.created_at, i.finished_at
+               FROM extension_tool_invocations i JOIN conversation_batches b ON b.batch_id=i.batch_id
+               WHERE """ + where + " ORDER BY i.created_at DESC, i.invocation_id DESC LIMIT ?",
+            (*parameters, limit))
+        items = []
+        for row in rows:
+            elapsed_ms = None
+            if row["finished_at"]:
+                try:
+                    elapsed_ms = max(0, round((datetime.fromisoformat(row["finished_at"])
+                        - datetime.fromisoformat(row["created_at"])).total_seconds() * 1000))
+                except (TypeError, ValueError):
+                    elapsed_ms = None
+            items.append({"action": row["action"], "state": row["state"],
+                          "error_code": row["error_code"], "created_at": row["created_at"],
+                          "finished_at": row["finished_at"], "elapsed_ms": elapsed_ms})
+        return {"total": int(count["total"] if count is not None else 0), "items": tuple(items)}
+
     def album_image(self, context, at, image_id):
         """Re-read one exact accepted image after checking its original context and receipt."""
         if type(image_id) is not str or len(image_id) > 180 or not image_id.startswith("generated-image:"):

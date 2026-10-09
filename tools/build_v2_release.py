@@ -42,17 +42,23 @@ ROOT_FILES = {
 }
 EXCLUDED_DIRS = {
     "data", ".git", "__pycache__", ".pytest_cache", "node_modules", "logs",
-    "dist", "build", "protected_model", "desktop_pet", ".codex-plugin", "%SystemDrive%",
+    "dist", "build", "_archive", "protected_model", "desktop_pet", ".codex-plugin", "%SystemDrive%",
 }
+EXCLUDED_FILES = {
+    "pages/陪伴小屋/shell-preview.html",
+    "pages/陪伴小屋/shell-preview-mock.html",
+    "fixtures/reply_efficiency_preview.json",
+}
+EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".log", ".out", ".db", ".sqlite", ".sqlite3", ".bak", ".backup"}
 TEXT_SUFFIXES = {
     ".py", ".js", ".cjs", ".mjs", ".css", ".html", ".md", ".txt", ".json",
     ".yaml", ".yml", ".toml", ".sql", ".svg", ".ps1", ".sh", ".bat", ".ini", ".conf", ".csv",
 }
 SECRET_PATTERNS = [
-    re.compile(rb"gh[pousr]_[A-Za-z0-9_]{30,}"),
-    re.compile(rb"github_pat_[A-Za-z0-9_]{30,}"),
-    re.compile(rb"abk_[A-Za-z0-9_-]{30,}"),
-    re.compile(rb"sk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
+    re.compile(rb"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9_]{30,}"),
+    re.compile(rb"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{30,}"),
+    re.compile(rb"(?<![A-Za-z0-9])abk_[A-Za-z0-9_-]{30,}"),
+    re.compile(rb"(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
     re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----\s*[A-Za-z0-9+/=\r\n]{80,}-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 ]
 
@@ -63,10 +69,12 @@ def digest(payload):
 
 def allowed(path, root):
     relative = path.relative_to(root)
-    return (not any(part in EXCLUDED_DIRS for part in relative.parts)
+    return (relative.as_posix() not in EXCLUDED_FILES
+            and relative.as_posix() != "fixtures/proactive/news_feed_juya_20261004.xml"
+            and not any(part in EXCLUDED_DIRS for part in relative.parts)
             and not path.is_symlink()
             and path.resolve().is_relative_to(root.resolve())
-            and path.suffix.lower() not in {".pyc", ".pyo", ".log", ".db", ".sqlite", ".sqlite3", ".bak"}
+            and path.suffix.lower() not in EXCLUDED_SUFFIXES
             and not path.name.startswith(("_tmp", ".env", "REGISTRATION_COORDINATION_"))
             and not (root.name.endswith("content_companion") and "framework-preview-v1" in relative.parts))
 
@@ -121,7 +129,8 @@ def metadata(root):
         if not found:
             raise ValueError("metadata missing " + name + ": " + root.name)
         return found.group(1).strip().strip("\"'")
-    return {"plugin_id": field("name"), "version": field("version"), "display_name": field("display_name")}
+    return {"plugin_id": field("name"), "version": field("version"),
+            "display_name": field("display_name"), "astrbot_version": field("astrbot_version")}
 
 
 def build_plugin(root, directories, output, core=False):
@@ -139,6 +148,8 @@ def build_plugin(root, directories, output, core=False):
     if not required.issubset(files):
         raise ValueError("incomplete plugin source: " + root.name)
     if core:
+        required.update({root.name + "/companion_v2/legacy/configuration_rules.json",
+                         root.name + "/CHANGELOG.md"})
         public_entries = [name for name in files if len(Path(name).parts) == 4
                           and Path(name).parts[1] == "pages" and name.endswith("/index.html")]
         if public_entries != [root.name + "/pages/陪伴小屋/index.html"]:
@@ -146,7 +157,8 @@ def build_plugin(root, directories, output, core=False):
         manifest_path = root.name + "/pages/陪伴小屋/page-build.json"
         manifest = json.loads(files[manifest_path])
         for name, expected in manifest["files"].items():
-            if digest(files[root.name + "/pages/陪伴小屋/" + name]) != expected:
+            source = root / "pages" / "陪伴小屋" / name
+            if not source.is_file() or digest(checked_payload(source, root)) != expected:
                 raise ValueError("stale cottage asset: " + name + "; run sync_framework_page.py first")
     else:
         tree = ast.parse(files[root.name + "/main.py"].decode("utf-8"))
@@ -178,7 +190,8 @@ def build(output, core_only=False):
         if not core_only:
             for name, directories in PROVIDERS.items():
                 packages.append(build_plugin(ROOT.parent / ("astrbot_plugin_" + name + "_companion"), directories, stage))
-        manifest = {"product": "我会永远陪着你 V2.0", "version": VERSION, "astrbot_version": "4.27.2",
+        manifest = {"product": "我会永远陪着你 V2.0", "version": VERSION,
+                    "astrbot_version": packages[0]["astrbot_version"],
                     "data_policy": "V2 独立数据，不打包或迁移 V1 用户数据",
                     "provider_integration": "All listed providers ship their native_v2 source; Content, Image and Screen expose native V2 execution, while the remaining providers retain explicit host adapters and status boundaries",
                     "packages": packages}

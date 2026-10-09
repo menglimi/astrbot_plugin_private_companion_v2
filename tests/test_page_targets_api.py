@@ -1,11 +1,12 @@
 """Page discovery and target selection use the real SDK with isolated V2 data."""
 
 import json
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tests import test_astrbot_staging_host as support
 from tests.multi_host_support import MultiFixture, multi_config
@@ -16,9 +17,15 @@ from astrbot_host.management_identity import dashboard_operator
 from astrbot_host.page_api import PREFIX
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+from companion_v2.memory.person.management import PersonAcquaintanceDirectory
+from companion_v2.relationships.group_network import GroupRelationshipStore, VERSION, metadata_key, route_owner_key
 
 
 class PageRequests:
+    def assert_read_only_platform(self):
+        self.assertTrue(all(action in {"get_friend_list", "get_stranger_info", "get_group_list", "get_group_info", "get_login_info"}
+                            for action, _ in self.native.platform.client._api._wsr_api.calls))
+
     def register(self):
         self.controller.register_routes()
         self.handler = next(handler for path, handler, _, _ in self.native.registered_web_apis
@@ -50,11 +57,14 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
         (await self.controller.initialize_profile()).unwrap()
         self.assertEqual((await self.request(query="subject_id=another"))["data"]["code"], "page_request_invalid")
         listed = (await self.request())["data"]
-        self.assertEqual(listed["mode"], "single")
+        self.assertNotIn("mode", listed)
+        self.assertEqual(listed["operator_name"], "admin")
         self.assertEqual(listed["acquaintance_api"], PREFIX + "/acquaintance")
+        self.assertEqual(listed["accounts_api"], PREFIX + "/accounts")
         target = listed["targets"][0]
         self.assertEqual(target["participant_id"], "200")
-        self.assertEqual(target["roles"], [{"role_id":"persona-a",
+        self.assertEqual(target["roles"], [{"role_id":self.controller.resolved_settings().role_id,
+            "role_name": "original",
             **{name + "_api": PREFIX + "/" + name for name in
                ("memory", "state", "life", "relationships", "growth", "reply", "model", "config",
                 # V1 迁移写的是角色设置，所以它的地址也在角色这一层：
@@ -73,7 +83,7 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
                         expected_revision=policy.revision, observed_at=support.NOW)
         self.assertEqual((await self.request())["data"]["code"], "core_access_required")
         self.assertEqual(self.native.provider.client.state.calls, [])
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assert_read_only_platform()
 
     async def test_page_directory_unregisters_and_retained_handler_refuses_stopped_host(self):
         await self.controller.terminate()
@@ -85,19 +95,101 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
         routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
         directory = routes[PREFIX + "/acquaintance"]
         with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
-                patch("astrbot_host.acquaintance_api.PersonAcquaintanceDirectory") as service:
-            service.return_value.directory.return_value = {"persons": [], "counts": {"total": 0}}
+                patch.object(PersonAcquaintanceDirectory, "directory",
+                             return_value={"persons": [], "counts": {"total": 0}}) as listing:
             response = await directory()
         self.assertEqual(response["status"], "ok", response)
-        service.return_value.directory.assert_called_once_with([{
-            "platform": self.controller.settings.platform_id,
-            "bot_id": self.controller.settings.bot_id,
-            "account_id": self.controller.settings.account_id,
-            "role_id": self.controller.settings.role_id,
+        settings = self.controller.resolved_settings()
+        listing.assert_called_once_with([{
+            "platform": settings.platform_id,
+            "bot_id": settings.bot_id,
+            "account_id": settings.account_id,
+            "role_id": settings.role_id,
         }])
         self.assertEqual(response["data"]["groups"], [])
         self.assertEqual(self.native.provider.client.state.calls, [])
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assert_read_only_platform()
+
+    async def test_group_used_for_model_replies_appears_from_relationship_network(self):
+        (await self.controller.initialize_profile()).unwrap()
+        settings = self.controller.resolved_settings()
+        runtime = self.controller.runtime
+        owner = route_owner_key(runtime.installation_id, settings.platform_id, settings.bot_id,
+                                settings.account_id, "450", settings.role_id)
+        document = {"version": VERSION,
+                    "group": {"installation_id": runtime.installation_id,
+                              "platform_id": settings.platform_id, "bot_id": settings.bot_id,
+                              "account_id": settings.account_id, "group_id": "450",
+                              "role_id": settings.role_id},
+                    "members": {"700": {"account_id": "700", "aliases": [], "message_count": 3,
+                                          "active_days": 2, "first_seen": "2026-10-01T00:00:00+00:00",
+                                          "last_seen": "2026-10-01T01:00:00+00:00", "recent": []}},
+                    "edges": {}, "updated_at": "2026-10-01T01:00:00+00:00"}
+        with runtime.transaction() as connection:
+            connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?)",
+                               (metadata_key(owner), json.dumps(document)))
+        routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
+        directory = routes["/astrbot_plugin_private_companion_v2/acquaintance"]
+        with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
+                patch.object(PersonAcquaintanceDirectory, "directory",
+                             return_value={"persons": [], "counts": {"total": 0}}):
+            response = await directory()
+        self.assertEqual(response["status"], "ok", response)
+        group = response["data"]["groups"][0]
+        self.assertEqual(group["group_id"], "450")
+        self.assertFalse(group["configured"])
+        self.assertEqual(response["data"]["group_networks"][0]["members"][0]["native_account_id"], "700")
+
+    async def test_native_group_session_is_listed_without_importing_v2_permissions(self):
+        (await self.controller.initialize_profile()).unwrap()
+        routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
+        directory = routes["/astrbot_plugin_private_companion_v2/acquaintance"]
+        topology = self.controller.session_topology
+        self.native.platform.client._wsr_api_clients = {"100": object()}
+        umo = "qq-main:GroupMessage:450"
+        self.native.conversation_manager.session_conversations = {umo: "conversation-1"}
+        before_grants = self.controller.runtime.read_all("SELECT grant_id FROM identity_grants ORDER BY grant_id", ())
+        discovered = await topology.inventory()
+        discovered_groups = [row for row in discovered if row["scope_kind"] == "group"]
+        self.assertEqual(len(discovered_groups), 1)
+        self.assertEqual(discovered_groups[0]["unified_msg_origin"], umo)
+        with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
+                patch.object(PersonAcquaintanceDirectory, "directory",
+                             return_value={"persons": [], "counts": {"total": 0}}):
+            response = await directory()
+        self.assertEqual(response["status"], "ok", response)
+        self.assertEqual(len(response["data"]["groups"]), 1)
+        group = response["data"]["groups"][0]
+        self.assertEqual((group["platform_id"], group["account_id"], group["group_id"]),
+                         ("qq-main", "100", "450"))
+        self.assertTrue(group["bot_id"])
+        self.assertTrue(group["discovered"])
+        self.assertFalse(group["configured"])
+        self.assertEqual((group["member_count"], group["msg_count"]), (0, 0))
+        self.assertNotIn("unified_msg_origin", group)
+        self.assertNotIn("conversation_id", group)
+        self.assertNotIn("session_key", group)
+        self.assertNotIn("target_id", group)
+        self.assertEqual(response["data"]["group_networks"], [])
+        self.assertEqual(self.controller.runtime.read_all("SELECT grant_id FROM identity_grants ORDER BY grant_id", ()),
+                         before_grants)
+        self.assert_read_only_platform()
+
+    async def test_native_group_directory_failure_is_reported_with_its_cause(self):
+        (await self.controller.initialize_profile()).unwrap()
+        routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
+        directory = routes["/astrbot_plugin_private_companion_v2/acquaintance"]
+        topology = self.controller.session_topology
+        with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
+                patch.object(PersonAcquaintanceDirectory, "directory",
+                             return_value={"persons": [], "counts": {"total": 0}}), \
+                patch.object(topology, "inventory", new=AsyncMock(
+                    side_effect=RuntimeError("simulated session catalog failure"))):
+            response = await directory()
+
+        self.assertEqual(response["status"], "error", response)
+        self.assertEqual(response["data"]["code"], "acquaintance_native_directory_unavailable")
+        self.assertIn("RuntimeError: simulated session catalog failure", response["reason"])
 
     async def test_model_route_requires_dashboard_identity_and_valid_request(self):
         (await self.controller.initialize_profile()).unwrap()
@@ -129,12 +221,95 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress["status"], "ok", progress)
         self.assertEqual(choices["status"], "ok", choices)
         self.assertTrue(progress["data"]["binding"]["pinned"])
-        self.assertEqual(progress["data"]["binding"]["role_id"], self.controller.settings.role_id)
+        pinned = self.controller._read_intent()
+        self.assertEqual(progress["data"]["binding"]["role_id"], pinned.persona.role.subject_id)
         self.assertEqual(set(choices["data"]), {"accounts", "personas", "targets"})
-        self.assertEqual(self.controller.resolved_settings().role_id, self.controller.settings.role_id)
+        self.assertEqual(self.controller.resolved_settings().role_id, pinned.persona.role.subject_id)
         self.assertEqual(self.controller.status()["session_state"], before)
         self.assertEqual(self.native.provider.client.state.calls, [])
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assert_read_only_platform()
+
+    async def test_directory_resolves_platform_names_without_changing_the_target_or_api(self):
+        (await self.controller.initialize_profile()).unwrap()
+        async def metadata(action, **params):
+            self.assertEqual(params["self_id"], "100")
+            return {"get_friend_list": [{"user_id": 200, "remark": "朋友备注", "nickname": "朋友昵称"}],
+                    "get_login_info": {"user_id": 100, "nickname": "小伴"}}[action]
+        self.native.platform.client._api._wsr_api.call_action = AsyncMock(side_effect=metadata)
+        target = (await self.request())["data"]["targets"][0]
+        self.assertEqual(target["display_name"], "朋友备注")
+        self.assertEqual(target["account_name"], "小伴")
+        self.assertEqual(target["participant_id"], "200")
+        self.assertEqual(target["roles"][0]["memory_api"], PREFIX + "/memory")
+
+    async def test_name_lookup_uses_the_pinned_window_after_target_config_changes(self):
+        (await self.controller.initialize_profile()).unwrap()
+        self.controller.config["target"].update(account_id="101", participant_id="201")
+        self.controller.refresh_settings()
+        self.assertEqual(self.controller.settings.account_id, "101")
+
+        async def metadata(action, **params):
+            self.assertEqual(params["self_id"], "100")
+            return {"get_friend_list": [{"user_id": 200, "nickname": "已绑定的朋友"}],
+                    "get_login_info": {"user_id": 100, "nickname": "已绑定的 Bot"}}[action]
+
+        self.native.platform.client._api._wsr_api.call_action = AsyncMock(side_effect=metadata)
+        target = (await self.request())["data"]["targets"][0]
+        self.assertEqual((target["account_id"], target["participant_id"]), ("100", "200"))
+        self.assertEqual(target["display_name"], "已绑定的朋友")
+        self.assertEqual(target["account_name"], "已绑定的 Bot")
+
+    async def test_unreadable_pinned_window_returns_an_explicit_directory_error(self):
+        (await self.controller.initialize_profile()).unwrap()
+        self.controller.intent_path.write_text("{broken pin\n", encoding="utf-8", newline="\n")
+        result = await self.request()
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["data"]["code"], "staging_intent_invalid__invalid")
+
+    async def test_revoked_access_during_name_lookup_cannot_return_directory(self):
+        (await self.controller.initialize_profile()).unwrap()
+        started, release = asyncio.Event(), asyncio.Event()
+        async def metadata(action, **params):
+            started.set()
+            await release.wait()
+            return []
+        self.native.platform.client._api._wsr_api.call_action = AsyncMock(side_effect=metadata)
+        pending = asyncio.create_task(self.request())
+        await asyncio.wait_for(started.wait(), 1)
+        operator = dashboard_operator(self.controller.runtime, "admin", at=support.NOW)
+        policy = ObjectAccessPolicy(self.controller.runtime)
+        async with self.controller._control_lock:
+            policy.set_tier(operator.subject, AuthorizationTier.IMPORTANT,
+                            expected_revision=policy.revision, observed_at=support.NOW)
+        release.set()
+        self.assertEqual((await pending)["data"]["code"], "core_access_required")
+
+    async def test_acquaintance_resolves_historical_group_names_and_keeps_admin_names(self):
+        (await self.controller.initialize_profile()).unwrap()
+        routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
+        settings = self.controller.resolved_settings()
+        person = {"subject_id": "onebot-user:200", "role_id": settings.role_id,
+                  "platform": settings.platform_id, "account_id": settings.account_id,
+                  "bot_id": settings.bot_id, "native_account_id": "200",
+                  "display_name": "管理员称呼", "admin_nickname": "管理员称呼", "name_basis": "administrator",
+                  "private_chat": False, "group_member": True,
+                  "groups": {"300": {"msg_count": 2}}}
+        async def metadata(action, **params):
+            return {"get_group_list": [{"group_id": 300, "group_name": "历史读书群"}],
+                    "get_login_info": {"user_id": 100, "nickname": "小伴"}}[action]
+        api = self.native.platform.client._api._wsr_api
+        api.call_action = AsyncMock(side_effect=metadata)
+        with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
+                patch.object(PersonAcquaintanceDirectory, "directory",
+                             return_value={"persons": [person], "counts": {"total": 1}}):
+            response = await routes[PREFIX + "/acquaintance"]()
+        self.assertEqual(response["status"], "ok", response)
+        self.assertEqual(response["data"]["persons"][0]["display_name"], "管理员称呼")
+        group = response["data"]["groups"][0]
+        self.assertEqual(group["display_name"], "历史读书群")
+        self.assertFalse(group["configured"])
+        self.assertEqual((group["member_count"], group["msg_count"]), (1, 2))
+        self.assertNotIn("get_friend_list", [call.args[0] for call in api.call_action.await_args_list])
 
     async def test_sdk_discovers_same_voxel_shell_and_injects_scoped_bridge(self):
         plugin_root = Path(__file__).resolve().parents[1]
@@ -170,6 +345,48 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
 
 
 class MultiPageTests(PageRequests, MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_historical_group_for_removed_role_is_not_marked_configured(self):
+        from astrbot_host.acquaintance_api import _group_relationship_networks
+
+        self.controller = self.make_controller(multi_config(group_targets=[dict(target_id="groups",
+            platform_id="qq-main", account_id="100", bot_id="bot-a", group_id="*")]))
+        (await self.controller.initialize_profile()).unwrap()
+        people = [{"platform": "qq-main", "account_id": "100", "bot_id": "bot-a",
+                   "role_id": "removed-role", "native_account_id": "200", "groups": {"450": {"msg_count": 2}}},
+                  {"platform": "qq-main", "account_id": "100", "bot_id": "bot-a",
+                   "role_id": "role-a", "native_account_id": "200", "groups": {"450": {"msg_count": 3}}}]
+        networks = _group_relationship_networks(self.controller.runtime, self.controller.settings, people, [])
+        self.assertEqual({network["role_id"]: network["configured"] for network in networks},
+                         {"role-a": True, "removed-role": False})
+        self.assertEqual({network["role_id"]: network["members"][0]["acquaintance"]["group"]["message_count"]
+                          for network in networks}, {"role-a": 3, "removed-role": 2})
+
+    async def test_automatic_native_group_projection_includes_only_the_mapped_role(self):
+        from dataclasses import replace
+        from unittest.mock import AsyncMock
+        from astrbot_host.acquaintance_api import AcquaintanceWebAPI
+        self.controller = self.make_controller(multi_config(group_targets=[dict(target_id="groups",
+            platform_id="qq-main", account_id="100", bot_id="bot-a", group_id="*")]))
+        (await self.controller.initialize_profile()).unwrap()
+        api = AcquaintanceWebAPI(self.controller)
+        native = [{"native": True, "managed": True, "scope_kind": "group", "platform_id": "qq-main",
+                   "account_id": "100", "bot_id": "bot-a", "group_id": "450",
+                   "roles": [{"role_id": "role-a", "persona_ids": ["original"], "role_name": "original"}]}]
+        with patch.object(self.controller.session_topology, "inventory", AsyncMock(return_value=native)), \
+                patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
+                patch("astrbot_host.acquaintance_api.display_names", return_value=NS(
+                    persons=AsyncMock(side_effect=lambda rows: rows), targets=AsyncMock(side_effect=lambda rows: rows))):
+            result = await api.directory()
+            self.assertEqual(result["status"], "ok", result)
+            networks = result["data"]["group_networks"]
+            self.assertEqual([(row["group_id"], row["role_id"], row["configured"]) for row in networks],
+                             [("450", "role-a", True)])
+            self.assertEqual(result["data"]["groups"][0]["roles"], native[0]["roles"])
+            target = self.controller.settings.group_targets[0]
+            self.controller.settings = replace(self.controller.settings, group_targets=(replace(target, bot_id="bot-b"),))
+            result = await api.directory()
+            self.assertTrue(all(not row["configured"] for row in result["data"]["group_networks"]))
+
     async def test_same_native_user_on_different_accounts_roles_and_group_have_distinct_paths(self):
         config = multi_config(group_targets=[dict(target_id="reading", platform_id="qq-main", account_id="100",
                                                   bot_id="bot-a", group_id="300")])

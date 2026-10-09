@@ -12,7 +12,8 @@ class MemorySemanticRecall:
         self.memory, self.gateway, self.settings = memory, gateway, settings
         self.continuations = {}
 
-    async def prepare(self, context, arguments):
+    async def prepare_query(self, context, arguments):
+        """Embed the current intent once without filling document indexes."""
         cfg = self.settings()
         if not cfg["enabled"] or not cfg["memory_enabled"]:
             return {}
@@ -25,10 +26,22 @@ class MemorySemanticRecall:
         cursor = arguments.get("cursor")
         if cursor:
             return self.continuations.get((context.key, cursor), {})
-        namespace, kind = arguments.get("namespace", "personal"), arguments.get("kind", "facts")
         try:
             model, vectors = await self.gateway.embed(owner, [text], cfg["embedding_provider"])
             query.access.check(context)
+            return {"vector": vectors[0], "model": model}
+        except Exception:
+            query.access.check(context)
+            return {}
+
+    async def prepare(self, context, arguments):
+        prepared = await self.prepare_query(context, arguments)
+        if not prepared or arguments.get("cursor"):
+            return prepared
+        cfg, query = self.settings(), self.memory.query
+        owner, model = owner_key(context), prepared["model"]
+        namespace, kind = arguments.get("namespace", "personal"), arguments.get("kind", "facts")
+        try:
             snapshot = query.recall_index.advance(context, namespace, kind)
             with closing(query.index._open()) as db:
                 rows = db.execute("""SELECT d.* FROM recall_documents d LEFT JOIN recall_vectors v
@@ -53,7 +66,7 @@ class MemorySemanticRecall:
                             query.index.put_vector(row["owner"], row["id"], model=model, values=vector, expected_hash=row["hash"])
                         except (TaskError, ValueError):
                             continue
-            return {"vector": vectors[0], "model": model}
+            return prepared
         except Exception:
             query.access.check(context)
             return {}

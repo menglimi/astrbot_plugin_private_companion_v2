@@ -22,7 +22,7 @@ from tests.test_role_state import StateFixture, state_data
 class RoleBodyTests(StateFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.host1, self.app, self.ctx, self.manager = self.setup_state()
-        self.configure(self.manager, enabled=True, cycle_enabled=True, cycle_initialization="first_day")
+        self.configure(self.manager, enabled=True, mood_enabled=True, cycle_enabled=True, cycle_initialization="first_day")
         self.other = self.new_window("other", self.standard)
 
     def new_window(self, name, actor):

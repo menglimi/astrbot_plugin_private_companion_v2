@@ -19,6 +19,9 @@ def offered_images(payload):
 
 def image_reply(payload, *, text="把这张原图附在这里。", handles=None):
     value = json.loads(final_text(text))
+    if text == "":
+        value["action"] = "image"
+        value["claims"] = []
     value["images"] = offered_images(payload) if handles is None else handles
     return completion(json.dumps(value, ensure_ascii=False))
 

@@ -49,8 +49,9 @@ def authenticate_notice_route(controller, event, kind, *, expected_post="notice"
     peer = account_number(raw.get("group_id")) if kind is ScopeKind.GROUP else sender
     settings = controller.settings
     if hasattr(settings, "targets"):
-        targets = settings.group_targets if kind is ScopeKind.GROUP else settings.targets
-        target = next((item for item in targets if item.route_key == (meta.id, login, peer)), None)
+        target = (settings.group_target(meta.id, login, peer)
+                  if kind is ScopeKind.GROUP
+                  else settings.private_target(meta.id, login, peer))
         if target is None:
             return None
         bot_id = target.bot_id

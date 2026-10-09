@@ -11,6 +11,10 @@ def role_owner(context):
     return RoleOwnerRef(context.scope.installation_id, context.scope.bot_id, context.role_binding.role.subject_id)
 
 
+def role_schedule_key(context):
+    return digest(["role-state-maintenance.v1", role_owner(context)])
+
+
 class RoleStateRecords(VersionedRecords):
     def __init__(self, runtime):
         super().__init__(runtime, "role_state")
@@ -26,7 +30,9 @@ class RoleStateRecords(VersionedRecords):
     def storage(self, context):
         return "role" if super().get(context, "current") else "window"
 
-    def get(self, context, identifier):
+    def get(self, context, identifier, *, storage_key=None):
+        if storage_key is not None:
+            return super().get(context, identifier, storage_key=storage_key)
         return super().get(context, identifier) or self.legacy.get(context, identifier)
 
     def version(self, context, identifier, revision, *, storage=None):

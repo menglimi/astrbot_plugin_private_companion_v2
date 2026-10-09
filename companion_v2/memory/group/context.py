@@ -20,6 +20,8 @@ INSTRUCTION = (
     "group-input-1 对应当前输入，后续编号对应合并输入的顺序。每条记录须能由所选原话独立支持；"
     "若只有指代、需要借用他人的旧说法才能成立，先澄清，不自行补成新事实。"
     "附带图片或引用的输入本轮不提供记忆写入句柄，可以正常讨论；不要把图片解读或引用的他人原话另存为当前成员陈述。"
+    "[图片 N]、[语音 N]、[视频 N]、[合并转发 N]、[引用消息] 等占位符，以及话题标题、线程签名和路由元数据，"
+    "都不是成员陈述或群兴趣，不得据此创建 group_memory；本轮兴趣候选也不得持久化为群记忆。"
     "记忆变更成功回执只证明本地保存/撤回，不证明消息已送达。需依据实际查询和操作结果回答。"
     "撤回是停止后续使用，不代表删除群平台消息。可见记忆有预算与分页，未显示不等于没有。"
 )
@@ -99,7 +101,8 @@ class GroupMemoryContext:
             connection.execute("UPDATE conversation_batches SET contributions_json = ? WHERE batch_id = ?",
                                (encode(saved), batch_id))
 
-    def validate_refresh(self, context, batch_id, original, request, old_history, history, tools):
+    def validate_refresh(self, context, batch_id, original, request, old_history, history, tools,
+                         *, optional_refresh=False):
         if len(history) < len(old_history):
             return False
         mutable = lambda m: m.owner == OWNER and m.purpose == "group_memory"
@@ -158,4 +161,4 @@ class GroupMemoryContext:
             if row is None or encode(tools.messages.tools._validate_result(
                     row, request, context, tools.messages.tasks.now())[0]) != exchange.result_json:
                 return False
-        return bool(changed or slang_changed or len(history) > len(old_history))
+        return bool(changed or slang_changed or len(history) > len(old_history) or optional_refresh)

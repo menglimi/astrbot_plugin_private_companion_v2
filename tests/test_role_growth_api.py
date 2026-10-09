@@ -212,3 +212,29 @@ class GrowthManagementHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native.registered_web_apis, [])
         self.assertEqual((await self.request(suffix="/progress"))["data"]["code"],
                          "staging_host_terminated")
+
+    async def test_self_review_routes_read_pending_and_decided_items_for_the_pinned_role(self):
+        self.assertIn(PREFIX + "/self-review", self.routes)
+        self.assertIn(PREFIX + "/self-review/command", self.routes)
+        self.assertEqual((await self.request(suffix="/self-review"))["data"]["code"],
+                         "staging_not_initialized")
+        await self.initialize()
+
+        pending = await self.request(suffix="/self-review")
+        self.assertEqual(pending["status"], "ok", pending)
+        self.assertEqual(pending["data"]["items"], [])
+        decided = await self.request(suffix="/self-review", query="state=decided")
+        self.assertEqual(decided["status"], "ok", decided)
+        self.assertEqual(decided["data"]["items"], [])
+        self.assertEqual((await self.request(suffix="/self-review", query="state=all"))["data"]["code"],
+                         "self_review_query_invalid")
+        self.assertEqual((await self.request(suffix="/self-review", username=None))["data"]["code"],
+                         "dashboard_identity_required")
+
+        malformed = {"item_id":"missing", "action":"accept", "view_token":"view",
+                     "operation_key":"review-test", "scope":{}}
+        self.assertEqual((await self.request(suffix="/self-review", data=malformed))["data"]["code"],
+                         "self_review_command_invalid")
+        valid_shape = {key:value for key, value in malformed.items() if key != "scope"}
+        self.assertEqual((await self.request(suffix="/self-review", data=valid_shape))["data"]["code"],
+                         "self_review_item_unavailable")

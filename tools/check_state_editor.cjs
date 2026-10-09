@@ -7,13 +7,18 @@ async function run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir
   const button=action=>root.locator(`[data-state-edit="${action}"]`);
   const saved=async()=>{await page.waitForFunction(()=>{const button=document.querySelector("#state-refresh");return !document.querySelector("#state-edit-form")&&!!button&&!button.disabled;});};
   const posts=()=>page.evaluate(()=>window.stateQA.posts);
-  const openFeature=async feature=>{
+  const openFeature=async(feature,{edit=false}={})=>{
     const trigger=root.locator(`[data-state-feature="${feature}"]`).first();
     if(await trigger.getAttribute("aria-expanded")!=="true"){
       const active=root.locator('[data-state-feature][aria-expanded="true"]').first();
       if(await active.count())await active.click();
       await trigger.click();
     }
+    if(!edit&&await root.locator("#state-edit-form").count())await root.locator('[data-state-edit="cancel"]').click();
+  };
+  const openSettings=async()=>{
+    await openFeature("presentation",{edit:true});
+    if(await root.locator('[data-state-form-kind="settings"]').count()===0)await button("settings").click();
   };
   assert.equal((await posts()).length,0);
 
@@ -30,9 +35,7 @@ async function run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir
     sessionStorage.setItem("state-QA-backend",JSON.stringify({values:qa.values,pages:qa.pages,posts:qa.posts,
       receipts:qa.receipts,applied:qa.applied,cancelledReminders:qa.cancelledReminders}));
   });
-  await openFeature("presentation");
-
-  await button("settings").click();
+  await openSettings();
   await root.locator("#state-typing-seconds").fill("7");
   await root.locator("#state-typing-enabled").uncheck();
   await root.locator("#state-presence-enabled").check();
@@ -50,7 +53,7 @@ async function run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir
   assert.match(await root.innerText(),/配置刷新间隔：7 秒/);
   await page.setViewportSize({width:320,height:720});await checkWidth();
 
-  await button("settings").click();await root.locator("#state-typing-seconds").fill("8");
+  await openSettings();await root.locator("#state-typing-seconds").fill("8");
   await page.evaluate(first=>{const value=window.stateQA.values[first];value.settings.typing_refresh_seconds=6;value.settings.presence_enabled=false;value.edit_token="concurrent-version";},first);
   await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
   await root.getByText("配置已被更新，填写内容已保留。请读取当前版本后核对。",{exact:true}).waitFor();
@@ -108,8 +111,7 @@ async function run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir
   assert.equal((await posts()).at(-1).body.data.presence,"");
   await root.locator('[data-state-page=""]').click();await loadDone();
 
-  await openFeature("presentation");
-  await button("settings").click();await root.locator("#state-typing-seconds").fill("9");
+  await openSettings();await root.locator("#state-typing-seconds").fill("9");
   await page.evaluate(()=>{window.stateQA.dropNext=true;});
   await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
   await root.getByText("有一笔保存尚待核对",{exact:true}).waitFor();
@@ -128,7 +130,7 @@ async function run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir
   assert.equal(await page.evaluate(()=>window.stateQA.applied),applied);
   assert.match(await root.innerText(),/已核对原请求：保存成功/);
 
-  await button("settings").click();await root.locator("#state-typing-seconds").fill("6");
+  await openSettings();await root.locator("#state-typing-seconds").fill("6");
   await page.evaluate(()=>{window.stateQA.holdNext=true;});
   await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
   await page.waitForFunction(()=>typeof window.stateQA.release==="function");
@@ -149,12 +151,20 @@ async function run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir
   const maintenance=await require("./check_state_maintenance.cjs").run({page,root,button,saved,posts,loadDone,checkWidth,first,secondRole,outputDir});
   await openFeature("planning");
   const calendar=await require("./check_calendar_editor.cjs").run({page,rootPage,loadDone,checkWidth,first,secondRole,outputDir});
-  await openFeature("presentation");
-  await button("settings").click();await root.locator("#state-typing-enabled").check();
+  if(await root.locator("[data-state-feature-close]").count())await root.locator("[data-state-feature-close]").first().click();
+  const beforeMaintenance=await page.evaluate(first=>window.stateQA.values[first].state.revision,first);
+  await root.locator("#state-maintain").click();
+  await root.getByText("状态更新已排队。",{exact:true}).waitFor();
+  const maintainRequest=(await posts()).at(-1);
+  assert.equal(maintainRequest.body.action,"maintain");
+  assert.equal(maintainRequest.body.expected_revision,beforeMaintenance);
+  await root.getByText("状态已更新。",{exact:true}).waitFor({timeout:10000});
+  assert.equal(await page.evaluate(first=>window.stateQA.values[first].state.revision,first),beforeMaintenance+1);
+  await openSettings();await root.locator("#state-typing-enabled").check();
   await page.evaluate(()=>{window.stateQA.denyWrites=true;});
   await root.getByRole("button",{name:"保存展示设置",exact:true}).click();
   await root.getByText("当前账号没有角色状态管理权限。",{exact:true}).waitFor();
   assert.equal(await root.locator("#state-edit-form,.state-presentation,.state-plan-list").count(),0);
-  return {checks:"minimal config patch, drafts survive conflict and failed refresh, explicit conflict rebase, public-wording-only command, pagination and clearing, lost receipt across reload uses identical request, no automatic POST, role-bound in-flight save, shared target selection, revocation clears editor",maintenance,calendar,screenshots:[path.join(outputDir,"state-edit-desktop.png"),path.join(outputDir,"state-edit-mobile.png")]};
+  return {checks:"manual state maintenance schedules against the current revision and confirms after refresh; minimal config patch, drafts survive conflict and failed refresh, explicit conflict rebase, public-wording-only command, pagination and clearing, lost receipt across reload uses identical request, no automatic POST, role-bound in-flight save, shared target selection, revocation clears editor",maintenance,calendar,screenshots:[path.join(outputDir,"state-edit-desktop.png"),path.join(outputDir,"state-edit-mobile.png")]};
 }
 module.exports={run};

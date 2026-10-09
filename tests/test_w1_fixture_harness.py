@@ -122,6 +122,28 @@ class FakeTogether:
     def _get_provider_by_id(self, provider_id):
         return SimpleNamespace(text_chat=lambda **kwargs: None)
 
+    def admit_room_member(self, room, user_id, *, scope_key=""):
+        members = getattr(room, "members", None)
+        if not isinstance(members, dict):
+            members = {}
+            room.members = members
+        members.setdefault(room.user_id, SimpleNamespace(
+            user_id=room.user_id, role="owner", websocket=None))
+        member = members.get(user_id)
+        if member is None:
+            member = SimpleNamespace(user_id=user_id, role="guest", websocket=None,
+                                     scope_key=scope_key)
+            members[user_id] = member
+        return member
+
+    def issue_member_room_ticket(self, room, *, user_id, invitation_id):
+        return SimpleNamespace(token=f"{invitation_id}-{user_id}", mode=room.mode,
+                               expires_at="2026-09-27T00:10:00+00:00")
+
+    @staticmethod
+    def _ticket_url(ticket):
+        return f"https://together.test/join/{ticket.token}?mode={ticket.mode}"
+
 
 class FakeReality:
     """Injection point for the device layer.
@@ -405,7 +427,7 @@ class W1FixtureTests(unittest.IsolatedAsyncioTestCase):
         # Joining is membership, not media control or takeover: the members view
         # reports identity facts only and grants nothing.
         members, _ = await self.run_action(provider, "together.room.members", "f08-members")
-        self.assertEqual(members["result"]["member_count"], 1)
+        self.assertEqual(members["result"]["member_count"], 2)
         blob = json.dumps(members["result"])
         for forbidden in ("prompt", "ticket", "token", "scope_key"):
             self.assertNotIn(forbidden, blob, forbidden)

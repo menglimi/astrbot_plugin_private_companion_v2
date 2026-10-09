@@ -49,14 +49,18 @@ MIGRATED = ("memory-page.css", "learning-page.css", "contact-page.css",
             "models-page.css", "state-page.css", "semantic-page.css",
             "action-page.css", "decision-page.css", "topic-page.css",
             # 自我页展示区与配置导航只使用统一尺度令牌。
-            "self-page.css",
+            "self-page.css", "self-review-page.css",
             # 2026-10-01 这一批（治理与维护 + 芝麻字号）：见下面的迁移记录。
             "maintenance-page.css", "expression-config.css",
             "styles.css", "output-page.css", "workspace-theme.css",
             "home.css", "navigation.css",
             # 工作台字段网格与配置编辑器：最后一页迁完，OTHERS 清空。
-            "workbench.css", "config-editor.css")
+            "workbench.css", "config-editor.css",
+            # 外壳最后一份：它本来就引用 --fs-*，只是从没进过名单，
+            # 于是被【二之二】自发现抓了出来（半迁移）。迁干净后进来。
+            "shell.css")
 # 仍在使用自有尺度的页面：只统计，不判定（逐步迁移）。
+# 2026-10-02：`shell.css` 迁入后这里是空的——`pages/陪伴小屋/*.css` 全部走尺度令牌。
 #
 # 2026-10-01 迁移记录（治理与维护页 + 全站芝麻字号）：
 # 起点是「治理与维护」页看起来被挤成芝麻——它的字号/间距/圆角**全部写死**
@@ -147,7 +151,7 @@ MIGRATED = ("memory-page.css", "learning-page.css", "contact-page.css",
 #   · backup-page.css 更值得记：它**没在 MIGRATED 名单里**（我当时记错了），
 #     却已经用了 --fs-*，属于名单与事实脱节的半迁移。
 # 两页都是先迁干净（字号 13+10 处、间距 4+10 处）再进名单，没有改宽名单消警。
-OTHERS = ("shell.css",)
+OTHERS = ()
 
 # 允许写死的情形：这些不是"节奏"，是不同的东西。
 #   ≤3px        —— 描边、微调、1px 分隔线，不构成节奏

@@ -65,6 +65,8 @@ def participant(subject, scope):
 class AuthorizationFixture(ManagementFixture):
     def setUp(self):
         super().setUp()
+        self.policy.set_tier(self.important.subject, AuthorizationTier.STANDARD,
+                             expected_revision=self.policy.revision, observed_at=NOW)
         # 夹具里已经绑定好的那个人就是「这个人」：subject 与 principal 都齐，
         # 只有窗口要照宿主的形状补全（夹具的 SCOPE 已经是完整窗口）。
         self.subject_id = self.important.subject.subject_id
@@ -99,8 +101,18 @@ class AuthorizationReadTests(AuthorizationFixture):
     def test_a_person_without_grants_gets_an_honest_empty_state(self):
         status = self.status()
         # 一项授权都没有的人：如实说没有，而不是给每项能力画一行空白状态。
-        self.assertEqual(status["items"], [])
+        self.assertEqual({item["capability"] for item in status["items"]}, {"conversation.reply", "proactive.contact"})
+        self.assertTrue(all(item["state"] == "off" for item in status["items"]))
         self.assertFalse(status["companion"])
+
+    def test_status_exposes_administrator_permission_as_the_core_identity_projection(self):
+        standard = self.status()
+        self.assertEqual(standard["administrator"], {"enabled": False, "state": "off", "label": "未开启"})
+        self.policy.set_tier(self.important.subject, AuthorizationTier.CORE,
+                             expected_revision=self.policy.revision, observed_at=NOW)
+        core = self.status()
+        self.assertEqual(core["identity_tier"], "core")
+        self.assertEqual(core["administrator"], {"enabled": True, "state": "active", "label": "核心管理员"})
 
     def test_every_row_carries_the_real_record_not_a_boolean(self):
         self.capability(STAGING_CAPABILITY_GRANT_PREFIX + "conversation.reply", "conversation.reply")
@@ -115,7 +127,7 @@ class AuthorizationReadTests(AuthorizationFixture):
         # 对话回复来自运行实例配置：真实状态是「已生效」，但本页不能改它。
         reply = self.row(status, "conversation.reply")
         self.assertEqual((reply["state"], reply["managed_by"], reply["revocable"]),
-                         ("active", MANAGED_BY_CONFIGURATION, False))
+                         ("active", MANAGED_BY_PAGE, True))
         self.assertEqual(reply["grant_id"], STAGING_CAPABILITY_GRANT_PREFIX + "conversation.reply")
         # 本页签发的那一份：状态、生效范围、档位、到期与写所需 revision 都在。
         contact = self.row(status, "proactive.contact")
@@ -136,21 +148,21 @@ class AuthorizationReadTests(AuthorizationFixture):
         self.assertEqual(self.row(later, "message.delivery")["state"], "expired")
         self.assertFalse(later["companion"])
 
-    def test_companion_needs_both_capabilities_not_either_one(self):
+    def test_companion_uses_dialogue_permission_and_host_owns_delivery(self):
         self.capability(STAGING_CAPABILITY_GRANT_PREFIX + "conversation.reply", "conversation.reply")
-        self.assertFalse(self.status()["companion"])
+        self.assertTrue(self.status()["companion"])
         self.capability(DELIVERY_GRANT_ID, "message.delivery", expires_at=AT + timedelta(seconds=60))
         self.assertTrue(self.status()["companion"])
         # 一条已经撤销的投递授权不算数：标记说的是"现在正在被陪伴"。
         self.identity.revoke_grant(DELIVERY_GRANT_ID, revoked_at=AT, expected_revision=self.identity.revision)
-        self.assertFalse(self.status()["companion"])
+        self.assertTrue(self.status()["companion"])
 
     def test_rows_are_empty_when_nothing_is_bound_to_this_persons_window(self):
         # 另一个窗口上的授权不属于这个人现在的窗口：它不该出现在这一行里，
         # 否则页面会给一个写路径根本够不到的开关。
         self.capability(GRANT_PREFIX + "elsewhere", "proactive.contact",
                         scope=replace(self.scope, native_scope_id="someone-else"))
-        self.assertEqual(self.status()["items"], [])
+        self.assertTrue(all(item["state"] == "off" for item in self.status()["items"]))
 
     def test_an_unknown_person_is_refused_instead_of_addressed(self):
         self.assertEqual(self.manager.status(self.core, "not-in-the-directory", observed_at=AT).failure.code,
@@ -214,7 +226,7 @@ class AuthorizationWriteTests(AuthorizationFixture):
         self.assertEqual(self.runtime.read_all("SELECT * FROM identity_grants", ()), ())
 
     def test_a_configuration_derived_capability_is_refused_and_left_untouched(self):
-        derived = ((STAGING_CAPABILITY_GRANT_PREFIX + "conversation.reply", "conversation.reply"),
+        derived = ((STAGING_CAPABILITY_GRANT_PREFIX + "text", "text"),
                    (DELIVERY_GRANT_ID, "message.delivery"),
                    (STAGING_SCREEN_GRANT_PREFIX + SCREEN_READ, SCREEN_READ))
         for grant_id, capability in derived:
@@ -244,14 +256,14 @@ class AuthorizationWriteTests(AuthorizationFixture):
         关键在于拒绝之后记录仍是原样（状态、版本、条数都不动），
         否则"拒绝了"与"改坏了"会同时为真。
         """
-        self.capability(STAGING_CAPABILITY_GRANT_PREFIX + "conversation.reply", "conversation.reply")
+        self.capability(STAGING_CAPABILITY_GRANT_PREFIX + "text", "text")
         before = self.identity.revision
         for enabled in (False, True):
-            refused = self.command("conversation.reply", enabled, key=f"reissue-{enabled}")
+            refused = self.command("text", enabled, key=f"reissue-{enabled}")
             self.assertEqual(refused.failure.code, "authorization_capability_configured")
         # 记录本身没动：既没有被撤销，也没有多出本页的一份。
         written = next(grant for grant in self.identity.snapshot().grants
-                       if grant.grant_id == STAGING_CAPABILITY_GRANT_PREFIX + "conversation.reply")
+                       if grant.grant_id == STAGING_CAPABILITY_GRANT_PREFIX + "text")
         self.assertEqual((written.state, written.revision), (GrantState.ACTIVE, 1))
         self.assertEqual(len(self.identity.snapshot().grants), 1)
         # 拒绝发生在写入之前：连账本里都不该留下这次尝试。
@@ -363,7 +375,7 @@ class AuthorizationRouteTests(unittest.IsolatedAsyncioTestCase):
 
     async def subject(self):
         """这个运行实例里那个人的受信 subject：目录与授权都按它寻址。"""
-        entries = _authorization_participants(self.controller.runtime, self.controller.settings)
+        entries = _authorization_participants(self.controller.runtime, self.controller.resolved_settings(), observed_at=support.NOW)
         self.assertEqual(len(entries), 1, entries)
         return entries[0]["subject_id"]
 
@@ -395,8 +407,8 @@ class AuthorizationRouteTests(unittest.IsolatedAsyncioTestCase):
         # 运行实例初始化给配置里的能力签了授权：它们如实出现，但本页改不了。
         items = response["data"]["items"]
         self.assertTrue(items)
-        self.assertEqual({item["managed_by"] for item in items}, {MANAGED_BY_CONFIGURATION})
-        self.assertEqual({item["revocable"] for item in items}, {False})
+        self.assertEqual({item["managed_by"] for item in items}, {MANAGED_BY_CONFIGURATION, MANAGED_BY_PAGE})
+        self.assertEqual({item["revocable"] for item in items}, {False, True})
         self.assertIn("conversation.reply", {item["capability"] for item in items})
         # 授权清单不带记忆正文，也不带人格指纹。
         self.assertNotIn("representation", json.dumps(response))
@@ -424,6 +436,24 @@ class AuthorizationRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(item for item in off["data"]["status"]["items"]
                               if item["capability"] == capability)["state"], "revoked")
 
+    async def test_single_account_dialogue_can_be_reenabled_before_reopening(self):
+        (await self.controller.initialize_profile()).unwrap()
+        subject = await self.subject()
+        for enabled in (False, True):
+            status = (await self.send(query=f"subject_id={subject}"))["data"]
+            result = await self.send(method="POST", payload={"subject_id": subject,
+                "operation_key": "single-dialogue-" + str(enabled), "capability": "conversation.reply",
+                "enabled": enabled, "expected_revision": status["policy_revision"]})
+            self.assertEqual(result["status"], "ok", result)
+        await self.controller.terminate()
+        self.controller = support.AstrBotStagingController(self.native, support.host_config(),
+            Path(self.temporary.name), native_types=self.controller.native_types, now=lambda: support.NOW)
+        self.addAsyncCleanup(self.controller.terminate)
+        self.controller.register_routes()
+        (await self.controller.load_existing()).unwrap()
+        status = (await self.send(query=f"subject_id={subject}"))["data"]
+        self.assertEqual(next(item for item in status["items"] if item["capability"] == "conversation.reply")["state"], "active")
+
     async def test_a_malformed_body_or_a_configured_capability_is_refused_with_its_own_code(self):
         (await self.controller.initialize_profile()).unwrap()
         subject = await self.subject()
@@ -438,18 +468,18 @@ class AuthorizationRouteTests(unittest.IsolatedAsyncioTestCase):
         reading = await self.send(query=f"subject_id={subject}")
         revision = reading["data"]["items"][0]["policy_revision"]
         refused = await self.send(method="POST", payload={"operation_key": "route-configured", "subject_id": subject,
-            "capability": "conversation.reply", "enabled": False, "expected_revision": revision})
+            "capability": "text", "enabled": False, "expected_revision": revision})
         self.assertEqual(refused["data"]["code"], "authorization_capability_configured")
         again = await self.send(query=f"subject_id={subject}")
         self.assertEqual(next(item for item in again["data"]["items"]
-                              if item["capability"] == "conversation.reply")["state"], "active")
+                              if item["capability"] == "text")["state"], "active")
 
     async def test_administrator_name_route_is_scoped_revisioned_and_idempotent(self):
         self.assertEqual({name for route, _, methods, _ in self.native.registered_web_apis
                           if route == ADMIN_NAME_PATH for name in methods}, {"POST"})
         (await self.controller.initialize_profile()).unwrap()
         subject = await self.subject()
-        settings = self.controller.settings
+        settings = self.controller.resolved_settings()
         route = {"platform": settings.platform_id, "bot_id": settings.bot_id,
                  "account_id": settings.account_id, "role_id": settings.role_id}
         native_account_id = settings.participant_id

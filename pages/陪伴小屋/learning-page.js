@@ -79,9 +79,9 @@ window.CompanionLearningPage = (() => {
   /* 来源失效的码。后端把它们放在 unavailable_reason 上；
      这一页只需把它翻译成"为什么读不出来"，不参与判定。 */
   const errors = {
-    dashboard_identity_required:"请从已登录的 AstrBot 管理界面打开陪伴小屋。",
-    staging_not_initialized:"V2 数据尚未加载。请先在账号与会话中加载已初始化的配置，再刷新。",
-    staging_host_terminated:"V2 宿主已停止，请重新打开拓展页。",
+    dashboard_identity_required:"当前登录状态不可用，请重新打开陪伴小屋。",
+    staging_not_initialized:"角色数据尚未加载，请重新读取。",
+    staging_host_terminated:"陪伴服务已停止，请重新读取。",
     core_access_required:"当前账号没有成长记录权限。",
     binding_revoked:"管理账号的授权已撤销。", binding_rebound:"管理账号的绑定已变化，请重新进入。",
     relationship_required:"这个对象还没有建立可读写的关系，请先在关系与权限页建立。",
@@ -106,7 +106,7 @@ window.CompanionLearningPage = (() => {
     growth_review_missing:"这条审阅已不在待处理列表。",
     unauthorized:"当前对象尚未获得这项权限。",
     permission_denied:"当前对象尚未获得这项权限。",
-    bridge_unavailable:"页面还没有接上 AstrBot。若这是从管理界面打开的插件页，刷新一次通常就好；若反复出现，请确认插件已启用。",
+    bridge_unavailable:"页面连接暂不可用，请重新读取。",
     bridge_timeout:"未收到服务确认，请刷新核对。",
     invalid_response:"服务返回的数据不完整，请刷新核对。",
   };
@@ -114,8 +114,9 @@ window.CompanionLearningPage = (() => {
   const denied = new Set(["dashboard_identity_required","core_access_required","binding_revoked",
     "binding_rebound","staging_host_terminated","relationship_required"]);
   const e = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  const problem = code => Object.assign(new Error(errors[code] || (code ? "需要核对：" + code : "暂无具体原因")), {code});
-  const reason = code => errors[code] || (code ? "需要核对：" + code : "暂无具体原因");
+  const problem = code => Object.assign(new Error(errors[code] || "当前状态未能确认，请刷新核对。"), {code});
+  const reason = code => errors[code] || (code ? "当前状态未能确认，请刷新核对。" : "暂无具体原因");
+  const actorLabel = id => window.CompanionProduct?.actorLabel?.(id) || (id?.startsWith("dashboard:") ? "管理员" : "授权操作者");
   const when = value => {
     if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return "时间未知";
     return new Date(value).toLocaleString("zh-CN", {hour12:false, month:"numeric", day:"numeric",
@@ -135,11 +136,12 @@ window.CompanionLearningPage = (() => {
   let root = null, bridge = null, version = 0, data = null;
 
   function blank() {
-    return {view:"track",
+    return {view:"track",layout:"default",roleLabel:"",
       path:"", profileId:"", operatorName:"",
       items:[], cursor:"", next:null, stateFilter:"", kindFilter:"",
       reviews:[], reviewCursor:"", reviewNext:null,
       detailId:null, detail:null,
+      evidenceId:"",evidence:[],evidenceLoading:false,evidenceError:false,
       access:null, accessToken:"",
       form:null, busy:false, loading:false, loadingReviews:false, writing:false, ready:false,
       notice:"", error:false, entered:new Set(), confirm:null};
@@ -164,8 +166,8 @@ window.CompanionLearningPage = (() => {
   }
   async function api(method, path, body) {
     const response = await bounded(method === "GET" ? bridge.apiGet(path, body) : bridge.apiPost(path, body));
-    const wrapped = ["ok","error"].includes(response?.status) ? response
-      : ["ok","error"].includes(response?.data?.status) ? response.data : null;
+    const wrapped = ["ok","error"].includes(response?.status) && response?.data !== undefined ? response
+      : ["ok","error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
     if (wrapped?.status === "error") throw problem(CODE.test(wrapped.data?.code || wrapped.message || "")
       ? (wrapped.data?.code || wrapped.message) : "invalid_response");
     const value = wrapped ? wrapped.data : response;
@@ -198,10 +200,20 @@ window.CompanionLearningPage = (() => {
     const ticket = version;
     data.loading = true; render();
     try {
-      const page = await api("GET", data.path, listQuery());
+      let page = await api("GET", data.path, listQuery());
       if (!live(ticket)) return;
       if (!Array.isArray(page.items)) throw problem("invalid_response");
-      data.items = page.items;
+      const rows = [...page.items], cursors = new Set();
+      // Follow the selected record through pagination when arriving from overview.
+      while (data.layout === "chain" && data.detailId && !rows.some(row=>row.growth_id===data.detailId)
+             && page.next_cursor && !cursors.has(page.next_cursor)) {
+        cursors.add(page.next_cursor);
+        page = await api("GET", data.path, listQuery(page.next_cursor));
+        if (!live(ticket)) return;
+        if (!Array.isArray(page.items)) throw problem("invalid_response");
+        rows.push(...page.items);
+      }
+      data.items = [...new Map(rows.map(row=>[row.growth_id,row])).values()];
       data.cursor = data.stateFilter || data.kindFilter ? "" : data.path;
       data.next = typeof page.next_cursor === "string" ? page.next_cursor : null;
       data.profileId = page.profile_id || "";
@@ -214,7 +226,13 @@ window.CompanionLearningPage = (() => {
       }
       data.ready = true;
       /* 详情跟着列表刷新：列表里的那条已经变了，详情不能停在旧版本。 */
-      if (data.detailId) data.detail = item(data.detailId);
+      if (data.detailId && !item(data.detailId)) {
+        data.detailId = null;data.form=null;
+        notice("所选记录已不在当前可读范围。", true);
+      }
+      if (!data.detailId && data.layout==="chain")data.detailId=data.items[0]?.growth_id||null;
+      data.detail=data.detailId?item(data.detailId):null;
+      if(data.layout==="chain"&&data.detailId)await loadEvidence(data.detailId);
     } catch (error) {
       if (!live(ticket)) return;
       data.items = []; data.detail = null; data.next = null;
@@ -224,6 +242,24 @@ window.CompanionLearningPage = (() => {
       if (live(ticket)) { data.loading = false; render(); }
     }
   }
+  async function loadEvidence(id) {
+    const row=item(id);
+    data.evidenceId=id;data.evidence=[];data.evidenceError=false;
+    if(!row||row.unavailable_reason||!data.path){render();return;}
+    const ticket=version;
+    data.evidenceLoading=true;render();
+    try{
+      const result=await api("GET",data.path+"/evidence",{growth_id:id});
+      if(!live(ticket)||data.detailId!==id)return;
+      if(!Array.isArray(result.items))throw problem("invalid_response");
+      data.evidence=result.items;
+    }catch(error){
+      if(!live(ticket)||data.detailId!==id)return;
+      data.evidenceError=true;
+    }finally{
+      if(live(ticket)&&data.detailId===id){data.evidenceLoading=false;render();}
+    }
+  }
   async function loadMore() {
     if (!data.next || data.loading || !data.path) return;
     const ticket = version;
@@ -231,8 +267,8 @@ window.CompanionLearningPage = (() => {
     try {
       const page = await api("GET", data.path, listQuery(data.next));
       if (!live(ticket)) return;
-      if (Array.isArray(page.items)) data.items = data.items.concat(page.items);
-      data.next = typeof page.next_cursor === "string" ? page.next_cursor : null;
+      if (Array.isArray(page.items)) data.items = [...new Map(data.items.concat(page.items).map(row=>[row.growth_id,row])).values()];
+      data.next = typeof page.next_cursor === "string" && page.next_cursor !== data.next ? page.next_cursor : null;
     } catch (error) {
       if (live(ticket)) notice(error.code ? reason(error.code) : "下一页没有读到。", true);
     } finally {
@@ -287,7 +323,7 @@ window.CompanionLearningPage = (() => {
     if (!row.actions || !row.actions.includes(action)) {
       /* 后端没给这个动作就绝不发。发出去一定被拒，而且会把可用动作刷一遍，
          用户看到按钮跳走却不知道为什么。 */
-      notice("当前状态不接受「" + (ACTIONS[action]?.label || action) + "」，已刷新可用动作。", true);
+      notice("当前状态不接受「" + (ACTIONS[action]?.label || "这项操作") + "」，已刷新可用动作。", true);
       await load(); return;
     }
     const ticket = version;
@@ -298,10 +334,11 @@ window.CompanionLearningPage = (() => {
       if (extra) Object.assign(body, extra);
       const payload = await api("POST", data.path + "/command", body);
       if (!live(ticket)) return;
-      data.detailId = null; data.detail = null; data.form = null;
+      data.detailId = data.layout === "chain" ? id : null;
+      data.detail = null; data.form = null;
       data.entered.add(id);
       data.writing = false;
-      notice((ACTIONS[action]?.label || action) + "已完成，版本 " + (payload?.revision ?? row.revision + 1) + "。");
+      notice((ACTIONS[action]?.label || "操作") + "已完成，版本 " + (payload?.revision ?? row.revision + 1) + "。");
       await load();
     } catch (error) {
       if (!live(ticket)) return;
@@ -350,6 +387,9 @@ window.CompanionLearningPage = (() => {
         data.access = payload.access;
         data.accessToken = typeof payload.access.edit_token === "string" ? payload.access.edit_token : data.accessToken;
       }
+      /* 保存成功后立刻解除写入态。load() 只负责重新读列表，若把标志留在
+         true，读回完成后页面仍会把权限控件和按钮当成“正在保存”而锁住。 */
+      data.writing = false;
       notice("权限已保存。");
       await load();
     } catch (error) {
@@ -400,7 +440,7 @@ window.CompanionLearningPage = (() => {
       <div class="lea-head-main">
         <h2>${e(label)}</h2>
         ${pending ? `<span class="lea-pill">${pending} 条待审阅</span>` : ""}
-        ${data.profileId ? `<span class="lea-id" title="记录归属">${e((data.operatorName || "") + " · " + data.profileId)}</span>` : ""}
+        ${data.profileId ? `<span class="lea-id" title="记录归属">${e(data.roleLabel||"当前角色")}</span>` : ""}
       </div>
       <div class="lea-head-actions">
         <button type="button" class="lea-btn" data-action="refresh"${data.loading || data.writing ? " disabled" : ""}>${ICON.refresh}<span>重新读取</span></button>
@@ -420,10 +460,10 @@ window.CompanionLearningPage = (() => {
   }
   function emptyMarkup() {
     if (data.loading) return `<div class="lea-empty"><span class="lea-spinner"></span>正在读取成长记录…</div>`;
-    if (!data.path) return `<div class="lea-empty">${ICON.alert}<strong>还没有可管理的私聊对象</strong>
-      <p>请先选择已初始化的私聊对象与角色。</p></div>`;
+    if (!data.path) return `<div class="lea-empty">${ICON.alert}<strong>还没有可管理的角色成长记录</strong>
+      <p>角色数据尚未加载，请重新读取。</p></div>`;
     return `<div class="lea-empty">${ICON.alert}<strong>还没有读到记录</strong>
-      <p>${e(data.notice || "请重新读取；若反复失败，先在账号与会话中确认 V2 已启动。")}</p>
+      <p>${e(data.notice || "暂无成长记录")}</p>
       <button type="button" class="lea-btn" data-action="refresh">${ICON.refresh}<span>重新读取</span></button></div>`;
   }
   /* 轨道。四段主线一列，归档是旁支挂在末段右侧。
@@ -440,7 +480,7 @@ window.CompanionLearningPage = (() => {
         ${retired.length || data.stateFilter === "retired" ? lane(RETIRED, retired) : ""}
         ${unknown.length ? `<section class="lea-lane is-unknown"><header>
           <h3>状态未识别</h3><em>${unknown.length}</em></header>
-          <p class="lea-lane-warn">状态未识别：${e(unknown.map(r => String(r.state)).join("、"))}</p>
+          <p class="lea-lane-warn">这些记录的状态暂时无法确认，请重新读取后核对。</p>
           ${unknown.map(row => card(row)).join("")}</section>` : ""}
       </div>
       ${confirmMarkup()}
@@ -478,7 +518,7 @@ window.CompanionLearningPage = (() => {
       data-id="${e(row.growth_id)}" tabindex="0" role="button"
       aria-label="${e(blind ? "来源不可读取的记录" : row.title || "未命名记录")}">
       <div class="lea-card-top">
-        <span class="lea-kind">${e(KIND_LABEL[row.kind] || row.kind || "记录")}</span>
+        <span class="lea-kind">${e(KIND_LABEL[row.kind] || "成长记录")}</span>
         <span class="lea-rev">v${e(row.revision)}</span>
       </div>
       <h4 class="lea-card-title">${blind ? `<span class="lea-blind-label">来源已不可读取</span>` : e(row.title || "未命名记录")}</h4>
@@ -488,7 +528,7 @@ window.CompanionLearningPage = (() => {
         <span class="lea-card-meta">${e(row.source_count ?? 0)} 条来源 · ${e(when(row.updated_at))}</span>
         ${(row.actions || []).length ? `<span class="lea-card-actions">${(row.actions || []).slice(0, 2).map(a =>
           `<button type="button" class="lea-mini${ACTIONS[a]?.kind === "primary" ? " is-primary" : ""}"
-            data-act="${e(a)}" data-id="${e(row.growth_id)}">${e(ACTIONS[a]?.label || a)}</button>`).join("")}</span>` : ""}
+            data-act="${e(a)}" data-id="${e(row.growth_id)}">${e(ACTIONS[a]?.label || "处理记录")}</button>`).join("")}</span>` : ""}
       </div>
     </article>`;
   }
@@ -496,30 +536,30 @@ window.CompanionLearningPage = (() => {
   /* 详情。整页唯一的"深度"视图：一张卡的全部字段、完整的动作列表、
      以及修订与来源。动作列表在这里完整给出（卡片上只给前两个）。 */
   function detailView() {
-    const row = data.detail || (data.detailId ? item(data.detailId) : null);
-    if (!row) return `<div class="lea-detail"><p class="lea-lane-empty">这条记录已不在当前列表中。</p>
-      <button type="button" class="lea-btn" data-action="close-detail">${ICON.close}<span>返回轨道</span></button></div>`;
+    const row = data.detail || (data.detailId ? item(data.detailId) : null)
+      || (data.layout === "chain" ? data.items[0] : null);
+    if (!row) return `<div class="lea-detail"><p class="lea-lane-empty">暂无成长记录</p></div>`;
     const stage = STATE_BY_KEY[row.state] || {};
     const blind = !!row.unavailable_reason;
     return `<div class="lea-detail">
-      <button type="button" class="lea-btn is-quiet" data-action="close-detail">${ICON.close}<span>返回轨道</span></button>
+      ${data.layout==="chain"?"":`<button type="button" class="lea-btn is-quiet" data-action="close-detail">${ICON.close}<span>返回轨道</span></button>`}
       <header class="lea-detail-head ${stage.tone || ""}">
-        <span class="lea-pill">${e(stage.label || row.state)}</span>
-        <span class="lea-kind">${e(KIND_LABEL[row.kind] || row.kind)}</span>
+        <span class="lea-pill">${e(stage.label || "状态待核对")}</span>
+        <span class="lea-kind">${e(KIND_LABEL[row.kind] || "成长记录")}</span>
         <span class="lea-rev">v${e(row.revision)}</span>
       </header>
       ${blind ? `<div class="lea-blind">
           ${ICON.sourceKey}
           <div><strong>原来源已不可读取</strong>
-            <p>${e(reason(row.unavailable_reason))}</p>
-            <p class="lea-blind-note">来源不可读；仅可归档。</p></div></div>`
+            <p>来源不可读；仅可归档。${e(reason(row.unavailable_reason))}</p>
+            </div></div>`
         : `<h3 class="lea-detail-title">${e(row.title || "未命名记录")}</h3>
            ${row.description ? `<p class="lea-detail-desc">${e(row.description)}</p>` : ""}
            ${row.progress_note ? `<div class="lea-detail-note"><span>进展</span><p>${e(row.progress_note)}</p></div>` : ""}`}
       ${row.proposed_by || row.confirmed_by || row.changed_by ? `<dl class="lea-chain">
-        ${row.proposed_by ? `<div><dt>提出</dt><dd>${e(row.proposed_by)}</dd></div>` : ""}
-        ${row.confirmed_by ? `<div><dt>确认</dt><dd>${e(row.confirmed_by)}</dd></div>` : ""}
-        ${row.changed_by ? `<div><dt>最近变更</dt><dd>${e(row.changed_by)}</dd></div>` : ""}
+        ${row.proposed_by ? `<div><dt>提出</dt><dd>${e(actorLabel(row.proposed_by))}</dd></div>` : ""}
+        ${row.confirmed_by ? `<div><dt>确认</dt><dd>${e(actorLabel(row.confirmed_by))}</dd></div>` : ""}
+        ${row.changed_by ? `<div><dt>最近变更</dt><dd>${e(actorLabel(row.changed_by))}</dd></div>` : ""}
         </dl>` : ""}
       <dl class="lea-times">
         <div><dt>创建</dt><dd>${e(when(row.created_at))}</dd></div>
@@ -527,20 +567,49 @@ window.CompanionLearningPage = (() => {
         <div><dt>来源</dt><dd>${e(row.source_count ?? 0)} 条</dd></div>
       </dl>
       <section class="lea-detail-actions">
-        <h4>可用动作</h4>
-        
         ${(row.actions || []).length ? `<div class="lea-action-row">${(row.actions || []).map(a => {
-          const spec = ACTIONS[a] || {label:a, kind:"", note:""};
+          const spec = ACTIONS[a] || {label:"处理记录", kind:"", note:""};
           return `<button type="button" class="lea-btn${spec.kind === "primary" ? " is-primary" : spec.kind === "quiet" ? " is-quiet" : ""}"
             data-act="${e(a)}" data-id="${e(row.growth_id)}"${data.writing ? " disabled" : ""}>
             <span>${e(spec.label)}</span></button>`;
-        }).join("")}</div>
-        <ul class="lea-action-notes">${(row.actions || []).map(a =>
-          `<li><strong>${e(ACTIONS[a]?.label || a)}</strong><span>${e(ACTIONS[a]?.note || "")}</span></li>`).join("")}</ul>`
+        }).join("")}</div>`
         : `<p class="lea-lane-empty">当前状态没有可用动作。</p>`}
       </section>
-      ${(row.actions || []).includes("revise") ? reviseForm(row) : ""}
+      ${data.layout!=="chain"&&(row.actions || []).includes("revise") ? reviseForm(row) : ""}
     </div>`;
+  }
+
+  function chainWorkView() {
+    const current=data.detailId?item(data.detailId):data.items[0];
+    const rows=data.items.map(row=>{
+      const stage=STATE_BY_KEY[row.state]||{};
+      return `<button type="button" class="lea-chain-row${current?.growth_id===row.growth_id?" is-selected":""}"
+        data-open="${e(row.growth_id)}" aria-pressed="${current?.growth_id===row.growth_id}">
+        <span class="lea-lane-dot ${stage.tone||""}" aria-hidden="true"></span>
+        <span class="lea-chain-row-copy"><strong>${e(row.unavailable_reason?"来源已不可读取":row.title||"未命名记录")}</strong>
+          <small>${e(KIND_LABEL[row.kind]||"成长记录")} · v${e(row.revision)} · ${e(row.source_count??0)} 条来源 · ${e(when(row.updated_at))}</small></span>
+        <span class="lea-pill ${stage.tone||""}">${e(stage.label||"待核对")}</span></button>`;
+    }).join("");
+    const evidence=rowEvidenceMarkup(current);
+    return `<div class="lea-chain-grid">
+      <div class="lea-chain-left"><section class="lea-chain-list lea-block"><header><h3>记录列表</h3><span>${data.items.length} 条</span></header>
+        ${data.loading&&!data.items.length?`<p class="lea-lane-empty">正在读取…</p>`:rows||`<p class="lea-lane-empty">暂无成长记录</p>`}
+        ${data.next?`<button type="button" class="lea-btn is-wide" data-action="more"${data.loading?" disabled":""}>读取下一页</button>`:""}</section>
+        <section class="lea-chain-evidence lea-block"><header><h3>依据与凭证</h3><span>${current?e(current.source_count??0)+" 条记录":"—"}</span></header>${evidence}</section></div>
+      <div class="lea-chain-right"><section class="lea-chain-detail lea-block"><header><h3>记录详情 · 工作台</h3><button type="button" class="lh-refresh" data-action="refresh" aria-label="重新读取" title="重新读取"${data.loading||data.writing?" disabled":""}>${ICON.refresh}</button></header>${detailView()}</section>
+      ${current?.actions?.includes("revise")?`<section class="lea-chain-revision"><header><h3>修订 · 生成新版本</h3></header>${reviseForm(current)}</section>`:""}</div>
+    </div>
+    <section class="lea-chain-permissions lea-block"><header><h3>权限开关</h3><span>${data.access?"已读取":""}</span></header>${gateView()}</section>
+    ${data.notice?noticeMarkup():""}`;
+  }
+
+  function rowEvidenceMarkup(row) {
+    if(!row)return `<p class="lea-lane-empty">选择一条记录</p>`;
+    if(row.unavailable_reason)return `<p class="lea-card-why">${e(reason(row.unavailable_reason))}</p>`;
+    if(data.evidenceLoading&&data.evidenceId===row.growth_id)return `<p class="lea-lane-empty">正在读取依据…</p>`;
+    if(data.evidenceError&&data.evidenceId===row.growth_id)return `<p class="lea-card-why">依据暂时无法读取。</p>`;
+    if(data.evidenceId!==row.growth_id||!data.evidence.length)return `<p class="lea-lane-empty">没有可显示的来源内容</p>`;
+    return `<ol>${data.evidence.map(item=>`<li><p>${e(item.text)}</p><time>${e(when(item.issued_at))}</time></li>`).join("")}</ol>`;
   }
   function reviseForm(row) {
     const draft = data.form?.id === row.growth_id ? data.form : null;
@@ -554,6 +623,7 @@ window.CompanionLearningPage = (() => {
         <textarea name="progress_note" rows="3" maxlength="2000">${e(draft?.progress_note ?? row.progress_note ?? "")}</textarea></label>
       <div class="lea-form-actions">
         <button type="submit" class="lea-btn is-primary"${data.writing ? " disabled" : ""}>保存修订</button>
+        <button type="button" class="lea-btn" data-action="cancel-revision"${data.writing ? " disabled" : ""}>取消</button>
       </div></form>`;
   }
 
@@ -583,7 +653,7 @@ window.CompanionLearningPage = (() => {
             ${(row.actions || []).map(a => `<button type="button"
               class="lea-btn${REVIEW_ACTIONS[a]?.kind === "primary" ? " is-primary" : REVIEW_ACTIONS[a]?.kind === "quiet" ? " is-quiet" : ""}"
               data-review="${e(a)}" data-id="${e(row.review_id)}"${data.writing ? " disabled" : ""}>
-              <span>${e(REVIEW_ACTIONS[a]?.label || a)}</span></button>`).join("")}
+              <span>${e(REVIEW_ACTIONS[a]?.label || "审阅记录")}</span></button>`).join("")}
           </footer>
           ${(row.actions || []).length === 1 && row.actions[0] === "reject"
             ? `<p class="lea-review-warn">依据不可读取，无法采纳。</p>` : ""}
@@ -601,8 +671,8 @@ window.CompanionLearningPage = (() => {
       <section class="lea-block">
         <h3>当前读不到内容的记录</h3>
         ${blind.length ? `
-          <ul class="lea-blind-list">${blind.map(row => `<li>
-            <code>${e(row.growth_id)}</code>
+          <ul class="lea-blind-list">${blind.map((row,index) => `<li>
+            <strong>成长记录 ${index+1}</strong>
             <span>${e(reason(row.unavailable_reason))}</span>
             <em>${e(row.source_count ?? 0)} 条来源 · v${e(row.revision)}</em>
             <button type="button" class="lea-mini" data-open="${e(row.growth_id)}">查看</button></li>`).join("")}</ul>`
@@ -657,6 +727,10 @@ window.CompanionLearningPage = (() => {
   }
   function render() {
     if (!root || !data) return;
+    if(data.layout==="chain"){
+      root.innerHTML=`<div class="lea-chain-workspace">${!data.ready?emptyMarkup():chainWorkView()}</div>`;
+      return;
+    }
     root.innerHTML = `<div class="lea-app">${railMarkup()}<div class="lea-main">${headMarkup()}${noticeMarkup()}${body()}</div></div>`;
   }
 
@@ -669,6 +743,7 @@ window.CompanionLearningPage = (() => {
     clicked(event);
   }
   function clicked(event) {
+    if(data.writing)return;
     const view = event.target.closest("[data-view]");
     if (view) {
       data.view = view.dataset.view; data.detailId = null; data.form = null; data.notice = ""; render();
@@ -682,6 +757,7 @@ window.CompanionLearningPage = (() => {
       load(); return;
     }
     if (action === "dismiss") { data.notice = ""; render(); return; }
+    if (action === "cancel-revision") {data.form=null;render();return;}
     if (action === "more") { loadMore(); return; }
     if (action === "more-reviews") { loadMoreReviews(); return; }
     if (action === "close-detail") { data.detailId = null; data.form = null; render(); return; }
@@ -690,7 +766,8 @@ window.CompanionLearningPage = (() => {
     const filterKind = event.target.closest("[data-filter-kind]")?.dataset.filterKind;
     if (filterKind !== undefined) { data.kindFilter = filterKind; load(); return; }
     const open = event.target.closest("[data-open]")?.dataset.open;
-    if (open) { data.detailId = open; data.detail = item(open); data.form = null; render(); return; }
+    if (open) { data.detailId = open; data.detail = item(open); data.form = null; data.evidence=[];
+      if(data.layout==="chain")void loadEvidence(open);render();return; }
     /* 状态动作。卡片上的与详情里的是同一条路径。
        变量名不能叫 `act`：那是本模块的状态动作函数，
        同名会把它遮蔽掉，`act(id, name)` 就变成「调用一个 dataset」。 */
@@ -699,7 +776,8 @@ window.CompanionLearningPage = (() => {
       event.stopPropagation();
       const id = actionButton.dataset.id, name = actionButton.dataset.act;
       if (name === "revise") {
-        data.detailId = id; data.detail = item(id); data.form = null; render();
+        if(data.detailId!==id)data.form=null;
+        data.detailId = id; data.detail = item(id); render();
         root.querySelector(".lea-revise input")?.focus();
         return;
       }
@@ -734,13 +812,21 @@ window.CompanionLearningPage = (() => {
     const stage = row ? (STATE_BY_KEY[row.state] || {}) : {};
     return `<div class="lea-confirm" role="alertdialog" aria-label="确认${e(spec.label)}">
       <span class="lea-confirm-text">${e(spec.note)}</span>
-      <span class="lea-confirm-target">${e(stage.label || "")} · ${e(row?.title || pending.id)}</span>
+      <span class="lea-confirm-target">${e(stage.label || "")} · ${e(row?.title || (row?.unavailable_reason ? "来源已不可读取的记录" : "当前成长记录"))}</span>
       <button type="button" class="lea-mini is-primary" data-confirm="yes">确认${e(spec.label)}</button>
       <button type="button" class="lea-mini" data-confirm="no">取消</button></div>`;
   }
   function change(event) {
     const access = event.target.closest("[data-access]");
     if (access) { saveAccess({[access.dataset.access]: access.checked}); return; }
+  }
+  function input(event) {
+    const form=event.target.closest('[data-form="revise"]');
+    if(!form||!["title","description","progress_note"].includes(event.target.name))return;
+    const row=data.detail||item(data.detailId);
+    if(!row)return;
+    if(data.form?.id!==row.growth_id)data.form={id:row.growth_id,title:row.title||"",description:row.description||"",progress_note:row.progress_note||""};
+    data.form[event.target.name]=event.target.value;
   }
   function submit(event) {
     const form = event.target.closest('[data-form="revise"]');
@@ -806,15 +892,19 @@ window.CompanionLearningPage = (() => {
       tick();
     });
   }
-  async function mount(host) {
+  async function mount(host, options = {}) {
     /* 顺序有讲究：unmount() 会 ++version 并清掉 data，所以
        ① 先 unmount，② 再建新 data，③ 才取票号。
        在 unmount() 之前取票会让下面第一处 live(ticket) 立即为假。 */
     unmount();
     root = host; data = blank();
+    data.layout=options.layout==="chain"?"chain":"default";
+    data.detailId=typeof options.recordId==="string"&&options.recordId?options.recordId:null;
+    data.roleLabel=typeof options.roleLabel==="string"?options.roleLabel:"";
     const ticket = ++version;
     root.addEventListener("click", onClick);
     root.addEventListener("change", change);
+    root.addEventListener("input", input);
     root.addEventListener("submit", submit);
     root.addEventListener("keydown", keydown);
     render();
@@ -824,14 +914,15 @@ window.CompanionLearningPage = (() => {
       const context = await bounded(bridge.ready());
       if (!live(ticket)) return;
       if (context?.pluginName !== HOST) throw problem("bridge_unavailable");
-      const absolute = window.CompanionProduct.role?.()?.growth_api;
+      const absolute = options?.growthApi;
       if (typeof absolute !== "string" || !absolute) throw problem("relationship_required");
       data.path = rel(absolute);
+      data.scopeKey = typeof options.scopeKey === "string" ? options.scopeKey : data.path;
       await load(); await loadReviews();
       if (live(ticket)) render();
     } catch (error) {
       if (!live(ticket)) return;
-      notice(error.code ? reason(error.code) : String(error?.message || "未完成"), true);
+      notice(reason(error.code), true);
       render();
     }
   }
@@ -840,6 +931,7 @@ window.CompanionLearningPage = (() => {
     if (!root) { data = null; bridge = null; return; }
     root.removeEventListener("click", onClick);
     root.removeEventListener("change", change);
+    root.removeEventListener("input", input);
     root.removeEventListener("submit", submit);
     root.removeEventListener("keydown", keydown);
     root = null; bridge = null; data = null;

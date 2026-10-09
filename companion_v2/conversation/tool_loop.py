@@ -16,6 +16,7 @@ from companion_v2.execution.models import TaskError, digest, encode, require, st
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import ScopeKind, SourceRef
 from companion_v2.identity_policy.models import _opaque
+from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.model_gateway.models import MAX_TOOL_CATALOG, ToolCall, ToolExchange, ToolSpec
 from companion_v2.qzone.capability import PUBLISH_ACTION as QZONE_PUBLISH_ACTION
 from companion_v2.qzone.topic_prompt import CONVERSATION_GUIDANCE as QZONE_TOPIC_GUIDANCE
@@ -85,7 +86,7 @@ class LocalRoleTools:
         # 所有者的身份，能不能给模型看由 ``_catalog_for`` 每轮判定。
         self.memory = MemoryTools(memory, messages) if memory is not None else None
         from companion_v2.memory.group.tools import GroupMemoryTools
-        self.group_memory = GroupMemoryTools(messages.group_memory)
+        self.group_memory = GroupMemoryTools(messages.group_memory, memory)
         from companion_v2.memory.person.tools import PersonAcquaintanceTools
         self.acquaintance = PersonAcquaintanceTools(messages.acquaintance)
         from .participation import GroupParticipation
@@ -144,12 +145,63 @@ class LocalRoleTools:
         # registry, so an unused extension cannot prevent host startup.
         with self.runtime.read_snapshot():
             catalog = self._catalog_for(context, batch_id)
+        self._validate_catalog_budget(catalog)
+        return catalog
+
+    @staticmethod
+    def _validate_catalog_budget(catalog):
         if len(catalog) > MAX_TOOL_CATALOG:
             raise TaskError("tool_catalog_budget_exceeded",
                 f"this conversation authorizes {len(catalog)} tools; the model catalog budget is {MAX_TOOL_CATALOG}; "
                 "reduce concurrently enabled tool capabilities for this conversation before retrying; "
                 "no tools were dispatched or silently omitted")
-        return catalog
+
+    def catalog_diagnostics(self, context, offered, external_filter_reasons=None):
+        """Summarize registered actions omitted from this exact model catalog."""
+        offered_actions = {tool.action for tool in offered}
+        external_filter_reasons = external_filter_reasons or {}
+        withheld = []
+        for action in sorted(self.actions - offered_actions):
+            reason = "owner_scope_or_authorization_unavailable"
+            if context.scope.kind is ScopeKind.GROUP:
+                if self.external is not None and action in self.external.actions and action not in GROUP_EXTERNAL_ACTIONS:
+                    reason = "not_supported_for_group"
+                elif self.semantic is not None and action in self.semantic.actions:
+                    reason = self.semantic.catalog_filter_reason(context, action)
+                elif action in self.group_memory.actions:
+                    try:
+                        self.group_memory.memory.access.check(context)
+                        if action in self.group_memory.mutations:
+                            self.group_memory.memory.access.check(context, "group.memory.write")
+                        reason = "owner_action_unavailable"
+                    except TaskError as error:
+                        reason = error.code
+                elif action in self.acquaintance.actions:
+                    reason = "acquaintance_unavailable_or_not_authorized"
+                elif self.external is not None and action in self.external.actions:
+                    reason = external_filter_reasons.get(action, "extension_unavailable_or_not_authorized")
+            elif self.semantic is not None and action in self.semantic.actions:
+                reason = self.semantic.catalog_filter_reason(context, action)
+            elif action in TOOL_FIELDS:
+                access = ObjectAccessPolicy(self.runtime).feature_access(
+                    context.actor, scope=context.scope, action=action, observed_at=self.tasks.now())
+                if access.failure is not None:
+                    reason = access.failure.code
+            elif self.external is not None and action in self.external.actions:
+                reason = external_filter_reasons.get(action, "extension_unavailable_or_not_authorized")
+            elif self._memory_is_external() and action in getattr(self.memory, "actions", ()):
+                reason = "memory_delegated_to_external_provider"
+            withheld.append({"action": action, "reason": reason})
+        return tuple(withheld[:128])
+
+    def catalog_for_with_diagnostics(self, context, batch_id=None):
+        """Build a model catalog and omission audit from the same authorization checks."""
+        external_filter_reasons = {}
+        with self.runtime.read_snapshot():
+            offered = self._catalog_for(context, batch_id, external_filter_reasons)
+            self._validate_catalog_budget(offered)
+            filters = self.catalog_diagnostics(context, offered, external_filter_reasons)
+        return offered, filters
 
     def _memory_is_external(self) -> bool:
         """这段时期 ``memory.*`` 是否已经交给别家插件对外提供。
@@ -165,14 +217,19 @@ class LocalRoleTools:
         # 也不要两边都不给而没人说明）。
         return self.memory is not None and memory_context is not None and memory_context.delegated()
 
-    def _catalog_for(self, context, batch_id=None):
+    def _catalog_for(self, context, batch_id=None, external_filter_reasons=None):
         semantic = self.semantic.catalog_for(context, batch_id) if self.semantic is not None else ()
         if context.scope.kind is ScopeKind.GROUP:
             try:
                 self.messages.group_context.authorize(context, self.tasks.now())
             except TaskError:
                 return ()
-            external = self.external.catalog_for(context) if self.external is not None else ()
+            if self.external is not None:
+                external, filtered = self.external.catalog_with_diagnostics(context)
+                if external_filter_reasons is not None:
+                    external_filter_reasons.update({item["action"]: item["reason"] for item in filtered})
+            else:
+                external = ()
             return semantic + self.acquaintance.catalog_for(context) + self.group_participation.catalog_for(context) \
                 + self.group_memory.catalog_for(context) + tuple(
                 tool for tool in external if tool.action in GROUP_EXTERNAL_ACTIONS)
@@ -191,13 +248,17 @@ class LocalRoleTools:
                     | set(self.calendar.actions if self.calendar else ())
                     | set(self.weather.actions)
                     | set(self.relationships.actions if self.relationships else ()))
-        from companion_v2.identity_policy.object_access import ObjectAccessPolicy
         policy = ObjectAccessPolicy(self.runtime)
         at = self.tasks.now()
         base = tuple(tool for tool in self.catalog if tool.action not in filtered and (
             tool.action not in TOOL_FIELDS or policy.feature_access(context.actor,
                 scope=context.scope, action=tool.action, observed_at=at).is_success))
-        external = self.external.catalog_for(context) if self.external is not None else ()
+        if self.external is not None:
+            external, filtered = self.external.catalog_with_diagnostics(context)
+            if external_filter_reasons is not None:
+                external_filter_reasons.update({item["action"]: item["reason"] for item in filtered})
+        else:
+            external = ()
         authoring = (self.authoring.catalog_for(context, {tool.action for tool in external})
                      if self.authoring is not None else ())
         return (semantic + base
@@ -225,9 +286,20 @@ class LocalRoleTools:
                      if exchange.call.action in refreshable else exchange for exchange in history)
 
     def validate_owner_refresh(self, context, batch_id, original, request, old_history, history):
+        optional = self.messages.optional_guidance
+        optional_changed = (tuple(m for m in original.context.materials if optional(m))
+                            != tuple(m for m in request.context.materials if optional(m)))
+        if optional_changed:
+            if not self.messages.validate_optional_refresh(context, batch_id, original, request):
+                return False
+            original = replace(original, context=replace(original.context,
+                materials=tuple(m for m in original.context.materials if not optional(m))))
+            request = replace(request, context=replace(request.context,
+                materials=tuple(m for m in request.context.materials if not optional(m))))
         if context.scope.kind is ScopeKind.GROUP:
             return self.group_memory.memory.context.validate_refresh(
-                context, batch_id, original, request, old_history, history, self.group_memory)
+                context, batch_id, original, request, old_history, history, self.group_memory,
+                optional_refresh=optional_changed)
         if len(history) < len(old_history):
             return False
         # Only memory can change its prompt prefix. Growth refreshes proven tool
@@ -277,7 +349,7 @@ class LocalRoleTools:
                     return False
                 if is_growth or is_calendar:
                     growth_changed = True
-        return bool(changed_atoms) or growth_changed
+        return bool(changed_atoms) or growth_changed or optional_changed
 
     @outcome
     def offer_sources(self, context, batch_id, sources: tuple[ToolSource, ...]):

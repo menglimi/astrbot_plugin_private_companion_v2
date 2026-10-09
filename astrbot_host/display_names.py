@@ -1,0 +1,139 @@
+"""Read-only, account-scoped OneBot names for Dashboard navigation."""
+
+from __future__ import annotations
+
+import asyncio
+from time import monotonic
+
+
+CACHE_SECONDS = 300
+RETRY_SECONDS = 30
+LOOKUP_TIMEOUT = 2
+
+
+def _name(value):
+    return " ".join(value.split())[:128] if isinstance(value, str) else ""
+
+
+def _identifier(value):
+    if type(value) not in (str, int):
+        return ""
+    text = str(value).strip()
+    return text if text.isascii() and text.isdigit() and int(text) > 0 else ""
+
+
+class PlatformDisplayNames:
+    def __init__(self, context):
+        self.context = context
+        self._cache = {}
+        self._locks = {}
+        self._slots = asyncio.Semaphore(6)
+
+    def _api(self, platform_id, account_id):
+        try:
+            platform = self.context.get_platform_inst(platform_id)
+            metadata = platform.meta()
+            if metadata.name != "aiocqhttp" or metadata.id != platform_id:
+                return None
+            client = platform.get_client()
+            if not getattr(client, "_wsr_api_clients", {}).get(account_id):
+                return None
+            api = getattr(getattr(client, "_api", None), "_wsr_api", None)
+            return api if callable(getattr(api, "call_action", None)) else None
+        except Exception:
+            return None
+
+    async def _read(self, platform_id, account_id, action, **params):
+        api = self._api(platform_id, account_id)
+        if api is None:
+            return None
+        try:
+            async with self._slots:
+                result = await asyncio.wait_for(
+                    api.call_action(action, self_id=account_id, **params), LOOKUP_TIMEOUT)
+            if isinstance(result, dict) and ("status" in result or "retcode" in result):
+                if result.get("status", "ok") != "ok" or result.get("retcode", 0) != 0:
+                    return None
+                return result.get("data")
+            return result
+        except Exception:
+            # A failed optional name lookup must not block configuration or permissions.
+            return None
+
+    async def _cached(self, key, read):
+        cached = self._cache.get(key)
+        if cached and cached[0] > monotonic():
+            return cached[1]
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            cached = self._cache.get(key)
+            if cached and cached[0] > monotonic():
+                return cached[1]
+            result = await read()
+            self._cache[key] = (monotonic() + (CACHE_SECONDS if result else RETRY_SECONDS), result)
+            return result
+
+    async def lookup(self, platform_id, account_id, kind, native_id):
+        account_id, native_id = _identifier(account_id), _identifier(native_id)
+        if not platform_id or not account_id or not native_id:
+            return ""
+        key = (platform_id, account_id, kind, native_id)
+
+        async def read():
+            if kind == "account":
+                record = await self._read(platform_id, account_id, "get_login_info")
+                if isinstance(record, dict) and _identifier(record.get("user_id")) == native_id:
+                    return _name(record.get("nickname"))
+                return ""
+            action, id_field = ("get_group_list", "group_id") if kind == "group" else ("get_friend_list", "user_id")
+            records = await self._cached((platform_id, account_id, action),
+                lambda: self._read(platform_id, account_id, action))
+            for record in records if isinstance(records, list) else ():
+                if not isinstance(record, dict) or _identifier(record.get(id_field)) != native_id:
+                    continue
+                name = (_name(record.get("group_name")) if kind == "group" else
+                        _name(record.get("remark")) or _name(record.get("nickname")))
+                if name:
+                    return name
+            detail_action = "get_group_info" if kind == "group" else "get_stranger_info"
+            record = await self._read(platform_id, account_id, detail_action, **{id_field: int(native_id)})
+            if isinstance(record, dict) and _identifier(record.get(id_field)) == native_id:
+                return _name(record.get("group_name" if kind == "group" else "nickname"))
+            return ""
+
+        try:
+            return await asyncio.wait_for(self._cached(key, read), LOOKUP_TIMEOUT * 2 + 0.5) or ""
+        except TimeoutError:
+            return ""
+
+    async def targets(self, targets):
+        async def enrich(target):
+            row = dict(target)
+            platform, account = row.get("platform_id"), row.get("account_id")
+            kind = "group" if row.get("group_id") else "private"
+            native_id = row.get("group_id") if kind == "group" else row.get("participant_id")
+            name, account_name = await asyncio.gather(
+                self.lookup(platform, account, kind, native_id),
+                self.lookup(platform, account, "account", account))
+            row.update(display_name=name or row.get("display_name") or "",
+                       account_name=account_name or row.get("account_name") or "")
+            return row
+        return list(await asyncio.gather(*(enrich(row) for row in targets)))
+
+    async def persons(self, persons):
+        async def enrich(person):
+            row = dict(person)
+            if row.get("admin_nickname") or row.get("name_basis") == "administrator":
+                return row
+            name = await self.lookup(row.get("platform"), row.get("account_id"), "private", row.get("native_account_id"))
+            if name:
+                row.update(display_name=name, name_basis="platform")
+            return row
+        return list(await asyncio.gather(*(enrich(row) for row in persons)))
+
+
+def display_names(controller):
+    resolver = getattr(controller, "_display_names", None)
+    if resolver is None:
+        resolver = PlatformDisplayNames(getattr(controller, "context", None))
+        controller._display_names = resolver
+    return resolver

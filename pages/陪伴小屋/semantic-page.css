@@ -13,21 +13,420 @@
 .semantic-results{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;padding:var(--sp-2) 0;color:var(--t-accent-ink);font-size:var(--fs-body)}.semantic-results button{border:1px solid var(--t-surface-soft);border-radius:var(--r-2xs);background:var(--t-text-invert);padding:var(--sp-1) var(--sp-2);cursor:pointer}
 .semantic-editor{border:1px solid var(--t-surface-soft);border-radius:var(--r-xs);padding:var(--sp-4);margin-top:var(--sp-5);display:grid;gap:var(--sp-2)}.semantic-editor img{max-width:min(100%,360px);max-height:240px;object-fit:contain;justify-self:start;background:var(--t-surface-raised)}.semantic-editor textarea{resize:vertical}
 
-/* 感知页：顶部实时上下文，下面按环境、对话、设备、资讯切换配置。 */
-.perception-page{min-width:0;max-width:1180px;display:grid;gap:var(--sp-5);--perception-ink:var(--t-ok);--perception-accent:var(--t-ok);--perception-line:color-mix(in srgb,var(--t-ok) 16%,transparent)}
-.perception-overview{position:relative;overflow:hidden;padding:clamp(var(--sp-5), 3vw, calc(var(--sp-1) + var(--sp-6)));border:1px solid var(--perception-line);border-radius:var(--r-sm);background:radial-gradient(ellipse at 94% 5%,color-mix(in srgb,var(--t-ok-quiet) 20%,transparent),transparent 36%),linear-gradient(135deg,var(--t-surface),var(--t-surface-soft));box-shadow:0 14px 36px color-mix(in srgb,var(--t-ok) 6%,transparent)}
-.perception-overview::after{content:"";position:absolute;right:-54px;bottom:-90px;width:260px;height:260px;border:1px solid color-mix(in srgb,var(--t-ok) 13%,transparent);border-radius:50%;box-shadow:0 0 0 24px color-mix(in srgb,var(--t-ok) 3.5%,transparent),0 0 0 48px color-mix(in srgb,var(--t-ok) 2.5%,transparent);pointer-events:none}
-.perception-overview-head{position:relative;z-index:1;display:flex;justify-content:space-between;align-items:flex-start;gap:var(--sp-5);margin-bottom:var(--sp-5)}
-.perception-kicker,.perception-section-index{display:block;color:var(--perception-accent);font:700 10px/1.4 var(--numeric-font);letter-spacing:.12em;text-transform:uppercase}
-.perception-overview h1{margin:var(--sp-1) 0 0;color:var(--t-text-strong);font-size:var(--fs-head);line-height:1.2}.perception-overview-head p{margin:var(--sp-2) 0 0;color:var(--t-text-soft);font-size:var(--fs-body)}
-.perception-pulse{display:inline-flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-2);border:1px solid var(--perception-line);border-radius:var(--r-pill);background:var(--t-surface);color:var(--t-text-soft);font-size:var(--fs-tiny);white-space:nowrap}.perception-pulse i{width:7px;height:7px;border-radius:50%;background:var(--t-ok-ink);box-shadow:0 0 0 0 color-mix(in srgb,var(--t-ok-ink) 32%,transparent);animation:perception-pulse 2.2s ease-out infinite}@keyframes perception-pulse{70%{box-shadow:0 0 0 7px color-mix(in srgb,var(--t-ok) 0%,transparent)}100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--t-ok) 0%,transparent)}}
-.perception-signal-grid{position:relative;z-index:1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-2)}.perception-signal{display:grid;grid-template-columns:36px minmax(0,1fr) 16px;align-items:start;gap:var(--sp-3);min-width:0;min-height:104px;padding:var(--sp-3);text-align:left;border:1px solid var(--perception-line);border-radius:var(--r-xs);background:color-mix(in srgb,var(--t-text-invert) 72%,transparent);color:var(--t-text);cursor:pointer;animation:perception-rise .55s cubic-bezier(.2,.75,.25,1) both;animation-delay:var(--delay,0ms);transition:transform .22s ease,border-color .22s ease,background .22s ease,box-shadow .22s ease}@keyframes perception-rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+/* === 感知页新设计：网格卡片拼接布局 === */
+.perception-page{min-width:0;max-width:1200px;display:grid;gap:var(--sp-4);--perception-ink:var(--t-ok);--perception-accent:var(--t-ok);--perception-line:color-mix(in srgb,var(--t-ok) 16%,transparent)}
+
+/* 感知概览容器 - 采用网格布局 */
+.perception-overview{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--sp-3);padding:0}
+
+/* 感知分组 - 大卡片容器。
+   必须单列：分组内只有「标题 + 卡片网格」两个子元素，若用 auto-fit 多列，
+   .perception-group-items 只会落进第一列，右侧留出大片空白。 */
+.perception-group{grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr);gap:var(--sp-3);
+  padding:var(--sp-4);border-radius:var(--r-md);
+  background:linear-gradient(135deg,
+    color-mix(in srgb,var(--t-surface) 95%,var(--t-ok-quiet)),
+    var(--t-surface) 70%);
+  border:1px solid color-mix(in srgb,var(--t-ok) 12%,transparent);
+  box-shadow:0 2px 12px color-mix(in srgb,var(--t-accent) 4%,transparent)}
+
+.perception-group-header{grid-column:1 / -1;display:flex;align-items:center;gap:var(--sp-2);
+  padding-bottom:var(--sp-3);margin-bottom:var(--sp-2);
+  border-bottom:2px solid color-mix(in srgb,var(--t-ok) 18%,transparent)}
+
+.perception-group-header svg{width:20px;height:20px;color:var(--t-ok-ink);flex:none}
+
+.perception-group-header h2{margin:0;font-size:var(--fs-lead);
+  font-weight:700;color:var(--t-text-strong)}
+
+/* 感知卡片 - 小型信息卡 */
+.perception-stream-row{position:relative;display:flex;flex-direction:column;gap:var(--sp-2);
+  padding:var(--sp-3);min-height:120px;
+  border:1px solid color-mix(in srgb,var(--t-line) 50%,transparent);
+  border-radius:var(--r-xs);
+  background:var(--t-surface);
+  box-shadow:0 1px 3px color-mix(in srgb,var(--t-accent) 3%,transparent);
+  cursor:pointer;
+  transition:all 0.25s cubic-bezier(0.4,0,0.2,1);
+  overflow:hidden}
+
+.perception-stream-row::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--t-ok),transparent);
+  opacity:0;transition:opacity 0.25s ease}
+
+.perception-stream-row.state-ready{border-color:color-mix(in srgb,var(--t-ok) 25%,transparent);
+  background:linear-gradient(180deg,
+    color-mix(in srgb,var(--t-ok-quiet) 12%,var(--t-surface)),
+    var(--t-surface))}
+
+.perception-stream-row.state-ready::before{opacity:1}
+
+.perception-stream-row.state-pending{border-color:color-mix(in srgb,var(--t-warn) 20%,transparent)}
+
+.perception-stream-row.state-off{opacity:0.6;border-color:var(--t-line);
+  background:var(--t-surface-soft)}
+
+.perception-stream-row:hover{transform:translateY(-3px);
+  border-color:color-mix(in srgb,var(--t-ok) 40%,transparent);
+  box-shadow:0 6px 18px color-mix(in srgb,var(--t-ok) 10%,transparent)}
+
+/* 卡片头部：图标+标题+标签 */
+.perception-stream-header{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2)}
+
+.perception-stream-node{display:grid;place-items:center;width:36px;height:36px;flex:none;
+  border-radius:var(--r-xs);
+  background:linear-gradient(135deg,
+    color-mix(in srgb,var(--t-ok-quiet) 30%,transparent),
+    color-mix(in srgb,var(--t-ok-quiet) 10%,transparent));
+  color:var(--t-ok-ink);
+  box-shadow:0 2px 4px color-mix(in srgb,var(--t-ok) 6%,transparent)}
+
+.perception-stream-row.state-ready .perception-stream-node{
+  background:linear-gradient(135deg,var(--t-ok-quiet),color-mix(in srgb,var(--t-ok) 70%,var(--t-ok-quiet)))}
+
+.perception-stream-row.state-off .perception-stream-node{opacity:0.5;
+  background:var(--t-surface-soft);color:var(--t-text-faint)}
+
+.perception-stream-node svg{width:18px;height:18px}
+
+.perception-stream-title{flex:1;min-width:0;font-size:var(--fs-body);
+  font-weight:650;color:var(--t-text-strong);line-height:1.3}
+
+.perception-stream-tag{display:inline-flex;align-items:center;flex:none;
+  padding:3px var(--sp-2);border-radius:var(--r-pill);
+  background:color-mix(in srgb,var(--t-ok-quiet) 35%,transparent);
+  color:var(--t-ok-ink);font-size:var(--fs-micro);font-weight:600;
+  border:1px solid color-mix(in srgb,var(--t-ok) 15%,transparent)}
+
+.perception-stream-row.state-ready .perception-stream-tag{
+  background:var(--t-ok-quiet);
+  border-color:color-mix(in srgb,var(--t-ok) 25%,transparent)}
+
+.perception-stream-row.state-pending .perception-stream-tag{
+  background:color-mix(in srgb,var(--t-warn-quiet) 45%,transparent);
+  color:var(--t-warn-ink);
+  border-color:color-mix(in srgb,var(--t-warn) 18%,transparent)}
+
+.perception-stream-row.state-off .perception-stream-tag{
+  background:var(--t-surface-soft);color:var(--t-text-faint);
+  border-color:var(--t-line)}
+
+/* 卡片内容 */
+.perception-stream-value{font-size:var(--fs-lead);font-weight:700;
+  color:var(--t-text-strong);line-height:1.3;margin:var(--sp-1) 0}
+
+.perception-stream-detail{font-size:var(--fs-tiny);color:var(--t-text-soft);
+  line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden}
+
+/* 卡片底部箭头 */
+.perception-stream-arrow{position:absolute;right:var(--sp-2);bottom:var(--sp-2);
+  color:var(--t-text-faint);transition:all 0.25s ease}
+
+.perception-stream-arrow svg{width:16px;height:16px}
+
+.perception-stream-row:hover .perception-stream-arrow{
+  color:var(--t-ok-ink);transform:translateY(-2px)}
+
+.perception-stream-row[aria-expanded="true"] .perception-stream-arrow{
+  transform:rotate(180deg)}
+/* === 方案一：大小混合仪表盘布局 === */
+.perception-stream-container{display:grid;gap:var(--sp-4);margin:var(--sp-4) 0}
+
+/* 仪表盘网格：基础4列布局 */
+.perception-group-items{display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  grid-auto-rows:minmax(100px,auto);
+  gap:var(--sp-3);align-items:stretch}
+
+/* 大卡片：对话模型占2x2 */
+.perception-stream-row.perception-primary{
+  grid-column:span 2;
+  grid-row:span 2;
+  min-height:220px}
+
+/* 宽卡片：外部资讯占3列 */
+.perception-stream-row.perception-wide{
+  grid-column:span 3;
+  min-height:110px}
+
+/* 标准小卡片 */
+.perception-stream-row{min-height:100px}
+
+/* 信息卡片 - 紧凑型设计 */
+.perception-stream-row{position:relative;display:flex;flex-direction:column;
+  gap:var(--sp-2);padding:var(--sp-3);min-height:100px;
+  border:1px solid color-mix(in srgb,var(--t-line) 50%,transparent);
+  border-radius:var(--r-md);
+  background:var(--t-surface);
+  box-shadow:0 1px 3px color-mix(in srgb,var(--t-accent) 3%,transparent);
+  cursor:pointer;
+  transition:all 0.25s cubic-bezier(0.4,0,0.2,1);
+  overflow:hidden}
+
+/* 大卡片增强样式 */
+.perception-stream-row.perception-primary .perception-stream-value{
+  font-size:calc(var(--fs-lead) * 1.2);margin:var(--sp-2) 0}
+
+.perception-stream-row.perception-primary .perception-stream-copy small{
+  -webkit-line-clamp:3}
+
+/* 宽卡片特殊样式 */
+.perception-stream-row.perception-wide{flex-direction:row;align-items:center}
+
+.perception-stream-row.perception-wide .perception-stream-header{flex:0 0 auto}
+
+.perception-stream-row.perception-wide .perception-stream-copy{flex:1;min-width:0}
+
+.perception-stream-row::before{content:"";position:absolute;top:0;left:0;right:0;
+  height:3px;background:linear-gradient(90deg,var(--t-ok),transparent);
+  opacity:0;transition:opacity 0.25s ease}
+
+.perception-stream-row.state-ready{
+  border-color:color-mix(in srgb,var(--t-ok) 25%,transparent);
+  background:linear-gradient(180deg,
+    color-mix(in srgb,var(--t-ok-quiet) 12%,var(--t-surface)),var(--t-surface))}
+
+.perception-stream-row.state-ready::before{opacity:1}
+
+.perception-stream-row.state-pending{
+  border-color:color-mix(in srgb,var(--t-warn) 20%,transparent)}
+
+.perception-stream-row.state-off{opacity:0.6;border-color:var(--t-line);
+  background:var(--t-surface-soft)}
+
+.perception-stream-row:hover{transform:translateY(-3px);
+  border-color:color-mix(in srgb,var(--t-ok) 40%,transparent);
+  box-shadow:0 6px 18px color-mix(in srgb,var(--t-ok) 10%,transparent)}
+
+/* 卡片头部 */
+.perception-stream-header{display:flex;align-items:center;
+  justify-content:space-between;gap:var(--sp-2)}
+
+.perception-stream-node{display:grid;place-items:center;width:36px;height:36px;
+  flex:none;border-radius:var(--r-xs);
+  background:linear-gradient(135deg,
+    color-mix(in srgb,var(--t-ok-quiet) 30%,transparent),
+    color-mix(in srgb,var(--t-ok-quiet) 10%,transparent));
+  color:var(--t-ok-ink);
+  box-shadow:0 2px 4px color-mix(in srgb,var(--t-ok) 6%,transparent)}
+
+.perception-stream-row.state-ready .perception-stream-node{
+  background:linear-gradient(135deg,var(--t-ok-quiet),
+    color-mix(in srgb,var(--t-ok) 70%,var(--t-ok-quiet)))}
+
+.perception-stream-row.state-off .perception-stream-node{opacity:0.5;
+  background:var(--t-surface-soft);color:var(--t-text-faint)}
+
+.perception-stream-node svg{width:18px;height:18px}
+
+.perception-stream-title{flex:1;min-width:0;font-size:var(--fs-body);
+  font-weight:650;color:var(--t-text-strong);line-height:1.3}
+
+.perception-stream-tag{display:inline-flex;align-items:center;flex:none;
+  padding:3px var(--sp-2);border-radius:var(--r-pill);
+  background:color-mix(in srgb,var(--t-ok-quiet) 35%,transparent);
+  color:var(--t-ok-ink);font-size:var(--fs-micro);font-weight:600;
+  border:1px solid color-mix(in srgb,var(--t-ok) 15%,transparent)}
+
+.perception-stream-row.state-ready .perception-stream-tag{
+  background:var(--t-ok-quiet);
+  border-color:color-mix(in srgb,var(--t-ok) 25%,transparent)}
+
+.perception-stream-row.state-pending .perception-stream-tag{
+  background:color-mix(in srgb,var(--t-warn-quiet) 45%,transparent);
+  color:var(--t-warn-ink);
+  border-color:color-mix(in srgb,var(--t-warn) 18%,transparent)}
+
+.perception-stream-row.state-off .perception-stream-tag{
+  background:var(--t-surface-soft);color:var(--t-text-faint);
+  border-color:var(--t-line)}
+
+/* 卡片内容 */
+.perception-stream-copy{display:grid;gap:var(--sp-1);min-width:0}
+
+.perception-stream-value{font-size:var(--fs-lead);font-weight:700;
+  color:var(--t-text-strong);line-height:1.3;margin:2px 0}
+
+.perception-stream-copy small{font-size:var(--fs-tiny);color:var(--t-text-soft);
+  line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden}
+
+/* 卡片底部箭头 */
+.perception-stream-arrow{position:absolute;right:var(--sp-2);bottom:var(--sp-2);
+  color:var(--t-text-faint);transition:all 0.25s ease}
+
+.perception-stream-arrow svg{width:16px;height:16px}
+
+.perception-stream-row:hover .perception-stream-arrow{
+  color:var(--t-ok-ink);transform:translateY(-2px)}
+
+.perception-stream-row[aria-expanded="true"] .perception-stream-arrow{
+  transform:rotate(180deg)}
+/* 展开的配置面板容器 */
+.perception-expanded-panel{display:grid;grid-column:1 / -1;
+  max-height:0;opacity:0;overflow:hidden;
+  transition:max-height 0.4s cubic-bezier(0.4,0,0.2,1),
+    opacity 0.3s ease,
+    padding 0.3s ease,
+    margin 0.3s ease}
+
+.perception-expanded-panel.is-open{max-height:2000px;opacity:1;
+  padding:var(--sp-4);margin-top:var(--sp-3);
+  border:1px solid color-mix(in srgb,var(--t-ok) 20%,transparent);
+  border-radius:var(--r-md);
+  background:linear-gradient(180deg,
+    color-mix(in srgb,var(--t-surface) 95%,var(--t-ok-quiet)),
+    var(--t-surface));
+  box-shadow:inset 0 2px 8px color-mix(in srgb,var(--t-accent) 6%,transparent)}
+
+/* 面板内容区 */
+.perception-panel-content{animation:panel-content-in 0.35s ease both;
+  animation-delay:0.1s}
+
+@keyframes panel-content-in{from{opacity:0;transform:translateY(-8px)}
+  to{opacity:1;transform:none}}
+
+/* 分组布局 - 移除旧的grid布局 */
+.perception-signal-grid{display:none}/* 感知分组容器 - 重新设计为垂直堆叠 */
+/* 旧的定义已移除，使用上面的仪表盘布局 */
+
+.perception-group-header{display:flex;align-items:center;gap:var(--sp-2);
+  margin-bottom:var(--sp-3);padding-bottom:var(--sp-2);
+  border-bottom:2px solid color-mix(in srgb,var(--t-ok) 20%,transparent)}
+
+.perception-group-header h2{margin:0;font-size:var(--fs-title);
+  font-weight:700;color:var(--t-text-strong)}
+
+.perception-group-header svg{width:20px;height:20px;color:var(--t-ok-ink)}
+
+/* 旧的定义已被上面的仪表盘布局替换，此行删除 */
 .perception-signal:hover,.perception-signal:focus-visible{transform:translateY(-3px);border-color:color-mix(in srgb,var(--t-ok-ink) 55%,transparent);background:var(--t-surface);box-shadow:0 9px 22px color-mix(in srgb,var(--t-ok-ink) 9%,transparent);outline:none}.perception-signal-icon{display:grid;place-items:center;width:36px;height:36px;border-radius:var(--r-xs);background:var(--t-text-invert);color:var(--perception-accent)}.perception-signal-icon svg{width:18px;height:18px}.perception-signal-copy{display:grid;gap:var(--sp-1);min-width:0}.perception-signal-copy strong{color:var(--t-text-strong);font-size:var(--fs-body)}.perception-signal-copy small{color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.45}.perception-signal-copy em{color:var(--perception-accent);font-size:var(--fs-micro);font-style:normal}.perception-signal-arrow{color:var(--t-text-faint);transition:transform .2s ease,color .2s ease}.perception-signal-arrow svg{width:15px;height:15px}.perception-signal:hover .perception-signal-arrow{transform:translate(2px,-2px);color:var(--perception-accent)}
 .perception-live-strip{position:relative;z-index:1;display:flex;gap:var(--sp-2) var(--sp-5);flex-wrap:wrap;margin-top:var(--sp-4);padding-top:var(--sp-3);border-top:1px solid var(--perception-line);color:var(--t-text-soft);font-size:var(--fs-tiny)}.perception-live-strip span{display:inline-flex;align-items:center;gap:var(--sp-2)}.perception-live-strip svg{width:14px;height:14px;color:var(--perception-accent)}
 .perception-config-nav{position:sticky;top:var(--sp-2);z-index:5;display:flex;gap:var(--sp-1);padding:var(--sp-1);border:1px solid var(--t-line);border-radius:var(--r-xs);background:color-mix(in srgb,var(--t-surface) 92%,transparent);box-shadow:0 6px 18px color-mix(in srgb,var(--t-accent) 6%,transparent);backdrop-filter:blur(14px)}.perception-config-nav button{display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-2);min-height:40px;flex:1;padding:var(--sp-2) var(--sp-3);border:0;border-radius:var(--r-2xs);background:transparent;color:var(--t-text-soft);font:inherit;font-size:var(--fs-body);cursor:pointer;transition:background .2s ease,color .2s ease,transform .2s ease}.perception-config-nav svg{width:16px;height:16px}.perception-config-nav button:hover{background:var(--t-surface-soft);color:var(--t-text-strong)}.perception-config-nav button.active{background:var(--perception-ink);color:var(--t-text-invert);box-shadow:0 3px 9px color-mix(in srgb,var(--t-ok-ink) 18%,transparent)}
 .perception-config-panels{min-width:0}.perception-config-panel{scroll-margin-top:78px;min-width:0;padding:var(--sp-4) 0 var(--sp-5);border-top:1px solid var(--t-line);animation:perception-panel-in .32s ease both}.perception-config-panel[hidden]{display:none}@keyframes perception-panel-in{from{opacity:.55;transform:translateY(7px)}to{opacity:1;transform:none}}
 .perception-section-index{margin-top:2px}.perception-config-panel .perception-block-head{margin-bottom:var(--sp-3)}
 .perception-source-status{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-4);margin:0 0 var(--sp-3);padding:var(--sp-3) var(--sp-4);border:1px solid color-mix(in srgb,var(--t-ok) 20%,transparent);border-radius:var(--r-xs);background:linear-gradient(110deg,color-mix(in srgb,var(--t-surface-raised) 72%,transparent),color-mix(in srgb,var(--t-surface-raised) 52%,transparent))}.perception-source-status-main{display:flex;align-items:center;gap:var(--sp-3);min-width:0}.perception-source-status-icon{display:grid;place-items:center;width:34px;height:34px;border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--perception-accent);flex:none}.perception-source-status-icon svg{width:18px;height:18px}.perception-source-status-main div{display:grid;gap:3px;min-width:0}.perception-source-status-main strong{color:var(--t-text-strong);font-size:var(--fs-body)}.perception-source-status-main small{color:var(--t-text-soft);font-size:var(--fs-tiny)}.perception-source-status-actions{display:flex;align-items:center;gap:var(--sp-2);flex:none}.perception-source-badge{display:inline-flex;align-items:center;gap:var(--sp-1);color:var(--t-text-soft);font-size:var(--fs-tiny);white-space:nowrap}.perception-source-badge svg{width:14px;height:14px;color:var(--perception-accent)}
+/* === 余额配置面板 - 全新设计 === */
+.perception-balance-config{display:grid;gap:var(--sp-3);
+  padding:var(--sp-4);
+  border:1px solid color-mix(in srgb,var(--t-ok) 22%,transparent);
+  border-radius:var(--r-md);
+  background:linear-gradient(155deg,
+    color-mix(in srgb,var(--t-surface) 92%,var(--t-ok-quiet)),
+    var(--t-surface) 75%);
+  box-shadow:inset 0 1px 0 color-mix(in srgb,var(--t-text-invert) 35%,transparent),
+    0 4px 16px color-mix(in srgb,var(--t-ok) 6%,transparent);
+  animation:balance-config-in 0.4s cubic-bezier(0.4,0,0.2,1) both}
+
+@keyframes balance-config-in{from{opacity:0;transform:translateY(-12px) scale(0.97)}
+  to{opacity:1;transform:none}}
+
+.perception-balance-config-head{display:flex;align-items:center;gap:var(--sp-3);
+  padding-bottom:var(--sp-3);
+  border-bottom:1px solid color-mix(in srgb,var(--t-ok) 18%,transparent)}
+
+.perception-balance-config-head span{display:grid;place-items:center;
+  width:42px;height:42px;border-radius:var(--r-xs);
+  background:linear-gradient(135deg,var(--t-ok-quiet),color-mix(in srgb,var(--t-ok) 80%,var(--t-ok-quiet)));
+  color:var(--t-ok-ink);
+  box-shadow:0 2px 8px color-mix(in srgb,var(--t-ok) 14%,transparent)}
+
+.perception-balance-config-head svg{width:20px;height:20px}
+
+.perception-balance-config-head div{display:grid;gap:3px}
+
+.perception-balance-config-head strong{font-size:var(--fs-body);
+  font-weight:650;color:var(--t-text-strong)}
+
+.perception-balance-config-head small{font-size:var(--fs-tiny);
+  color:var(--t-text-soft);line-height:1.4}
+
+.perception-balance-field{display:grid;gap:var(--sp-2)}
+
+.perception-balance-field>span{font-size:var(--fs-tiny);
+  font-weight:600;color:var(--t-text-strong)}
+
+.perception-balance-field input{width:100%;padding:var(--sp-2) var(--sp-3);
+  border:1px solid color-mix(in srgb,var(--t-line) 70%,transparent);
+  border-radius:var(--r-xs);
+  background:var(--t-text-invert);
+  color:var(--t-text);
+  font:inherit;font-size:var(--fs-body);
+  transition:border-color 0.2s ease,box-shadow 0.2s ease}
+
+.perception-balance-field input:focus{outline:none;
+  border-color:var(--t-ok);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--t-ok) 15%,transparent)}
+
+.perception-balance-note{margin:0;padding:var(--sp-2) var(--sp-3);
+  border-radius:var(--r-xs);
+  background:color-mix(in srgb,var(--t-ok-quiet) 25%,transparent);
+  color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.6}
+
+.perception-balance-clear{display:flex;align-items:flex-start;gap:var(--sp-2);
+  padding:var(--sp-3);border-radius:var(--r-xs);
+  border:1px solid color-mix(in srgb,var(--t-danger) 25%,transparent);
+  background:color-mix(in srgb,var(--t-danger-quiet) 15%,transparent)}
+
+.perception-balance-clear input{width:18px;height:18px;
+  margin-top:2px;flex:none;accent-color:var(--t-danger)}
+
+.perception-balance-clear span{font-size:var(--fs-body);
+  font-weight:600;color:var(--t-text-strong)}
+
+.perception-balance-clear small{display:block;margin-top:var(--sp-1);
+  font-size:var(--fs-tiny);color:var(--t-text-soft);line-height:1.4}
+
+.perception-balance-message{min-height:20px;padding:var(--sp-2) var(--sp-3);
+  border-radius:var(--r-xs);
+  background:color-mix(in srgb,var(--t-ok-quiet) 35%,transparent);
+  color:var(--t-ok-ink);font-size:var(--fs-body)}
+
+.perception-balance-message.is-error{
+  background:color-mix(in srgb,var(--t-danger-quiet) 35%,transparent);
+  color:var(--t-risk-ink)}
+
+.perception-balance-actions{display:flex;justify-content:space-between;
+  align-items:center;gap:var(--sp-3);flex-wrap:wrap;
+  padding-top:var(--sp-3);
+  border-top:1px solid color-mix(in srgb,var(--t-ok) 15%,transparent)}
+
+.perception-balance-contact{display:inline-flex;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-3);
+  border:1px solid var(--t-line);border-radius:var(--r-xs);
+  background:var(--t-surface);
+  color:var(--t-text-soft);font-size:var(--fs-tiny);
+  transition:all 0.2s ease}
+
+.perception-balance-contact:hover{border-color:var(--t-ok);
+  color:var(--t-ok-ink);
+  background:color-mix(in srgb,var(--t-ok-quiet) 20%,transparent)}
+
+.perception-balance-contact svg{width:14px;height:14px}
+
+.perception-balance-buttons{display:flex;gap:var(--sp-2)}
+
+.perception-balance-test,.perception-balance-save{
+  padding:var(--sp-2) var(--sp-4);
+  border-radius:var(--r-xs);
+  font:inherit;font-size:var(--fs-body);font-weight:600;
+  transition:all 0.2s ease}
+
+.perception-balance-test{border:1px solid var(--t-line);
+  background:var(--t-surface);color:var(--t-text)}
+
+.perception-balance-test:hover:not(:disabled){
+  border-color:var(--t-ok);background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+
+.perception-balance-save{border:1px solid var(--t-ok);
+  background:var(--t-ok);color:var(--t-text-invert);
+  box-shadow:0 2px 6px color-mix(in srgb,var(--t-ok) 25%,transparent)}
+
+.perception-balance-save:hover:not(:disabled){
+  background:color-mix(in srgb,var(--t-ok) 85%,var(--t-text-strong));
+  box-shadow:0 4px 12px color-mix(in srgb,var(--t-ok) 35%,transparent)}
+
 /* 整页引导：缺目标或缺环境时用一条替代四处空态。 */
 .page-guide{display:flex;gap:var(--sp-3);align-items:flex-start;margin:var(--sp-4) 0 var(--sp-1);padding:var(--sp-4) var(--sp-5);border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--t-surface)}
 .page-guide>svg{width:19px;height:19px;flex:none;margin-top:2px;color:var(--t-accent)}
@@ -175,21 +574,67 @@
 .perception-save-status{min-height:18px;margin:var(--sp-2) 0 0;color:var(--t-ok);font-size:var(--fs-body);line-height:1.5}
 .native-perception-meta{display:flex;flex-wrap:wrap;gap:var(--sp-1);padding:var(--sp-2) 0 var(--sp-2)}
 .native-perception-meta span{display:inline-flex;align-items:center;gap:var(--sp-1);border:1px solid var(--t-line-firm);border-radius:var(--r-pill);background:var(--t-surface-soft);padding:2px var(--sp-2);font-size:var(--fs-tiny);color:var(--t-text-soft)}
+.native-news-feed{margin:var(--sp-3) 0;padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-soft)}
+.native-news-feed header{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--sp-3);margin-bottom:var(--sp-2)}
+.native-news-feed header h4{margin:2px 0 0;color:var(--t-text-strong);font-size:var(--fs-body)}
+.native-news-feed header p{margin:3px 0 0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.5}
+.native-news-feed-state{flex:none;padding:2px var(--sp-2);border:1px solid var(--t-line-firm);border-radius:var(--r-pill);color:var(--t-ok-ink);font-size:var(--fs-micro);white-space:nowrap}
+.native-news-feed-list{display:grid;gap:0;margin:0;padding:0;list-style:none;border-top:1px solid var(--t-line)}
+.native-news-feed-list li{min-width:0;border-bottom:1px solid var(--t-line)}
+.native-news-feed-list a{display:block;padding:var(--sp-2) 0;color:inherit;text-decoration:none}
+.native-news-feed-list a:hover strong,.native-news-feed-list a:focus-visible strong{text-decoration:underline;text-underline-offset:3px}
+.native-news-feed-list a:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px;border-radius:var(--r-xs)}
+.native-news-feed-list strong{display:block;color:var(--t-text-strong);font-size:var(--fs-body);line-height:1.45;overflow-wrap:anywhere}
+.native-news-feed-list span{display:block;margin-top:2px;color:var(--t-text-faint);font-size:var(--fs-micro)}
+.native-news-feed-list p{margin:3px 0 0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.native-news-feed-empty{margin:0;padding:var(--sp-2) 0}
 .native-perception-form{margin-top:var(--sp-1)}
 .native-perception-fieldset{border:0;margin:0;padding:0;min-width:0}
 .native-perception-actions{display:flex;gap:var(--sp-2);flex-wrap:wrap;margin-top:var(--sp-1)}
+.native-environment-summary{padding:var(--sp-3) 0}
+.native-environment-summary dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2) var(--sp-4);margin:0}
+.native-environment-summary dl>div{min-width:0;padding:var(--sp-2) 0;border-bottom:1px solid var(--t-line)}
+.native-environment-summary dt{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.native-environment-summary dd{margin:3px 0 0;color:var(--t-text-strong);font-size:var(--fs-tiny);overflow-wrap:anywhere}
+@media(max-width:650px){.native-environment-summary dl{grid-template-columns:minmax(0,1fr)}}
 .native-perception-warning{color:var(--t-danger)}
 .perception-setting-primary{grid-column:1 / -1;padding:var(--sp-3);border:1px solid color-mix(in srgb,var(--t-ok-ink) 28%,transparent);border-radius:var(--r-xs);background:color-mix(in srgb,var(--t-text-invert) 48%,transparent)}.perception-setting-primary input{font-size:var(--fs-lead)}.perception-advanced-settings{grid-column:1 / -1;border-top:1px dashed var(--t-line);padding-top:var(--sp-2)}.perception-advanced-settings summary{display:inline-flex;align-items:center;gap:var(--sp-2);color:var(--t-text-soft);font-size:var(--fs-tiny);cursor:pointer}.perception-advanced-settings summary::after{content:"+";font-size:var(--fs-title);color:var(--t-accent)}.perception-advanced-settings[open] summary::after{content:"−"}.perception-advanced-settings .perception-settings-grid{margin-top:var(--sp-3)}
 .perception-settings-disclosure{margin-top:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-xs);background:var(--t-surface);overflow:hidden}.perception-settings-disclosure summary{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);padding:var(--sp-4) var(--sp-4);cursor:pointer;color:var(--t-text-strong);font-weight:650;list-style:none}.perception-settings-disclosure summary::-webkit-details-marker{display:none}.perception-settings-disclosure summary::after{content:"+";color:var(--t-accent);font-size:var(--fs-head);font-weight:400;line-height:1}.perception-settings-disclosure[open] summary::after{content:"−"}.perception-settings-disclosure summary small{color:var(--t-text-faint);font-size:var(--fs-tiny);font-weight:400;margin-left:auto}.perception-settings-disclosure .perception-settings-form{margin:0;border:0;border-top:1px solid var(--t-line);border-radius:0;box-shadow:none}
 /* 版本冲突：这份配置已被别处改过，用户填的值仍保留在下面等待核对。 */
 .semantic-feedback.semantic-conflict{color:var(--t-warn-ink);background:var(--t-warn-quiet);border-radius:var(--r-sm);padding:var(--sp-2) var(--sp-3)}
 
-@media(max-width:700px){.semantic-flags,.semantic-providers{grid-template-columns:1fr}.semantic-toolbar{align-items:stretch}.semantic-toolbar form{justify-content:stretch}.semantic-toolbar input{max-width:none}.semantic-section{padding:var(--sp-4) 0}}
-@media(max-width:700px){.perception-source-grid,.perception-settings-grid{grid-template-columns:1fr}.perception-address>div{flex-wrap:wrap}.perception-address input{flex-basis:100%}.perception-address button{min-height:40px}.perception-settings-heading button{min-height:40px}}
-@media(max-width:900px){.perception-signal-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:620px){.perception-page{gap:var(--sp-3)}.perception-overview{padding:var(--sp-4) var(--sp-3)}.perception-overview-head{margin-bottom:var(--sp-4)}.perception-overview h1{font-size:var(--fs-title)}.perception-signal-grid{gap:var(--sp-2)}.perception-signal{grid-template-columns:30px minmax(0,1fr);min-height:96px;padding:var(--sp-2)}.perception-signal-icon{width:30px;height:30px}.perception-signal-arrow{display:none}.perception-config-nav{position:relative;top:auto;overflow-x:auto;justify-content:flex-start}.perception-config-nav button{flex:none;min-width:max-content;min-height:42px;padding-inline:11px}.perception-live-strip{gap:var(--sp-2) var(--sp-3)}.perception-pulse{font-size:0;padding:var(--sp-2)}.perception-pulse i{margin:0}}
-@media(max-width:620px){.perception-source-status{align-items:flex-start;flex-direction:column}.perception-source-status-actions{width:100%;justify-content:space-between}}
-@media(max-width:380px){.perception-signal-grid{grid-template-columns:1fr}.perception-signal{min-height:76px;grid-template-columns:34px minmax(0,1fr) 16px}.perception-signal-icon{width:34px;height:34px}.perception-signal-arrow{display:block}}
+/* === 响应式设计：仪表盘布局适配 === */
+@media(max-width:900px){
+  .perception-group-items{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .perception-stream-row.perception-primary{grid-column:span 2;grid-row:span 2}
+  .perception-stream-row.perception-wide{grid-column:span 3}
+}
+
+@media(max-width:700px){
+  .semantic-flags,.semantic-providers{grid-template-columns:1fr}
+  .semantic-toolbar{align-items:stretch}
+  .semantic-toolbar form{justify-content:stretch}
+  .semantic-toolbar input{max-width:none}
+  .semantic-section{padding:var(--sp-4) 0}
+
+  .perception-source-grid,.perception-settings-grid{grid-template-columns:1fr}
+  .perception-address>div{flex-wrap:wrap}
+  .perception-address input{flex-basis:100%}
+  .perception-address button{min-height:40px}
+  .perception-settings-heading button{min-height:40px}
+
+  .perception-group-items{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .perception-stream-row.perception-primary{grid-column:span 2;grid-row:span 1;min-height:140px}
+  .perception-stream-row.perception-wide{grid-column:span 2}
+  .perception-stream-header{flex-wrap:wrap}
+}
+
+@media(max-width:500px){
+  .perception-group-items{grid-template-columns:1fr}
+  .perception-stream-row.perception-primary,
+  .perception-stream-row.perception-wide{grid-column:span 1;min-height:120px}
+  .perception-stream-row.perception-wide{flex-direction:column}
+}
 /* 窄屏：提供方卡里地址与设置编辑器窄屏没有横向空间，整宽堆叠。 */
 @media(max-width:820px){
   .perception-lead h1{font-size:var(--fs-title)}
@@ -259,6 +704,36 @@
 .perception-stream-arrow{color:var(--t-text-faint);transition:transform .18s ease,color .18s ease}
 .perception-stream-arrow svg{width:14px;height:14px}
 .perception-stream-row:hover .perception-stream-arrow{transform:translate(2px,-2px);color:var(--perception-accent)}
+.perception-stream-row[data-balance-toggle] .perception-stream-arrow{transition:color .18s ease}
+.perception-stream-row[data-balance-toggle]:hover .perception-stream-arrow{transform:none}
+.perception-balance-config{position:relative;z-index:1;grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-2);min-width:0;margin:0 calc(var(--sp-3) * -1);padding:var(--sp-3);border-top:1px solid var(--t-line);background:color-mix(in srgb,var(--t-surface-soft) 62%,transparent)}
+.perception-balance-config[role="status"]{display:block;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.perception-balance-config-head{grid-column:1/-1;display:flex;align-items:flex-start;gap:var(--sp-2);min-width:0}
+.perception-balance-config-head>span{display:grid;place-items:center;width:30px;height:30px;flex:none;border:1px solid var(--t-line);border-radius:var(--r-xs);color:var(--t-ok-ink)}
+.perception-balance-config-head svg{width:16px;height:16px}
+.perception-balance-config-head>div{display:grid;gap:2px;min-width:0}
+.perception-balance-config-head strong{color:var(--t-text-strong);font-size:var(--fs-body)}
+.perception-balance-config-head small,.perception-balance-note,.perception-balance-clear small{color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.45;overflow-wrap:anywhere}
+.perception-balance-field{display:grid;gap:var(--sp-1);min-width:0;color:var(--t-text-soft);font-size:var(--fs-micro);font-weight:650}
+.perception-balance-field input{width:100%;min-width:0;min-height:36px;padding:var(--sp-1) var(--sp-2);border:1px solid var(--t-line-strong);border-radius:var(--r-xs);background:var(--t-surface);color:var(--t-text-strong);font:inherit;font-weight:400}
+.perception-balance-field input:focus-visible{border-color:var(--t-accent);outline:2px solid color-mix(in srgb,var(--t-accent) 30%,transparent);outline-offset:1px}
+.perception-balance-note{grid-column:1/-1;margin:0}
+.perception-balance-clear{grid-column:1/-1;display:grid;grid-template-columns:18px minmax(0,1fr);align-items:center;gap:2px var(--sp-1);color:var(--t-risk-ink);font-size:var(--fs-micro)}
+.perception-balance-clear input{width:16px;height:16px;grid-row:span 2;margin:0;accent-color:var(--t-risk)}
+.perception-balance-clear small{grid-column:2}
+.perception-balance-message{grid-column:1/-1;margin:0;color:var(--t-ok-ink);font-size:var(--fs-tiny)}
+.perception-balance-message.is-error{color:var(--t-risk-ink)}
+.perception-balance-config footer{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-2)}
+.perception-balance-buttons{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:var(--sp-1)}
+.perception-balance-save,.perception-balance-test,.perception-balance-config[role="status"] button{display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-1);min-height:34px;padding:var(--sp-1) var(--sp-3);border:1px solid var(--t-ok-ink);border-radius:var(--r-xs);background:var(--t-ok-quiet);color:var(--t-ok-ink);font:inherit;font-size:var(--fs-micro);font-weight:650;cursor:pointer}
+.perception-balance-test{border-color:var(--t-line-strong);background:var(--t-surface);color:var(--t-text-soft)}
+.perception-balance-contact{display:inline-flex;align-items:center;gap:var(--sp-1);min-height:34px;padding:var(--sp-1) var(--sp-1);border:0;background:transparent;color:var(--t-accent);font:inherit;font-size:var(--fs-micro);font-weight:650;text-align:left;cursor:pointer}
+.perception-balance-contact svg{width:14px;height:14px;flex:none}
+.perception-balance-actions button:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
+.perception-balance-save:hover:not(:disabled){filter:brightness(.97)}
+.perception-balance-test:hover:not(:disabled){border-color:var(--t-accent);color:var(--t-accent)}
+.perception-balance-contact:hover{color:var(--t-text-strong);text-decoration:underline;text-underline-offset:3px}
+.perception-balance-save:disabled,.perception-balance-test:disabled,.perception-balance-config[role="status"] button:disabled{opacity:.6;cursor:wait}
 .perception-upcoming{display:flex;align-items:center;gap:var(--sp-3);margin-top:var(--sp-3);padding:var(--sp-3);border:1px solid color-mix(in srgb,var(--t-warn-ink) 30%,transparent);border-left:3px solid var(--t-risk);border-radius:var(--r-xs);background:linear-gradient(100deg,color-mix(in srgb,var(--t-warn-quiet) 80%,transparent),color-mix(in srgb,var(--t-surface) 88%,transparent))}
 .perception-upcoming-mark{display:grid;place-items:center;width:34px;height:34px;flex:none;border-radius:var(--r-xs);background:var(--t-warn-quiet);color:var(--t-risk-ink)}.perception-upcoming-mark svg{width:18px;height:18px}
 .perception-upcoming-copy{display:grid;gap:3px;min-width:0;flex:1}.perception-upcoming-copy span{color:var(--t-risk-ink);font-size:var(--fs-micro);font-weight:650}.perception-upcoming-copy strong{overflow-wrap:anywhere;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
@@ -318,6 +793,7 @@
 .perception-config-nav button:focus-visible,.perception-config-panel:focus-visible{outline:2px solid var(--perception-accent);outline-offset:3px}
 .perception-config-panel{animation:perception-panel-in .32s cubic-bezier(.2,.75,.25,1) both}
 @media(max-width:850px){.perception-context-board{grid-template-columns:minmax(190px,.7fr) minmax(0,1.3fr)}.perception-stream-row{grid-template-columns:32px minmax(0,1fr) auto}.perception-stream-arrow{display:none}}
+@media(max-width:650px){.perception-balance-config{grid-template-columns:minmax(0,1fr);margin:0 calc(var(--sp-2) * -1);padding:var(--sp-2)}.perception-balance-config footer{align-items:stretch}.perception-balance-contact{white-space:normal}.perception-balance-buttons{width:100%;justify-content:flex-end}}
 @media(max-width:650px){.perception-overview{padding:var(--sp-3)}.perception-overview-head{align-items:flex-start;gap:var(--sp-2)}.perception-overview h1{font-size:var(--fs-lead)}.perception-pulse{padding:var(--sp-1) var(--sp-2);font-size:0}.perception-pulse i{margin:0}.perception-context-board{grid-template-columns:1fr}.perception-clock-panel{min-height:300px;padding:var(--sp-3)}.perception-clock-time{font-size:var(--fs-hero)}.perception-calendar-state{margin-top:var(--sp-3);padding-top:var(--sp-2)}.perception-stream{padding:0 var(--sp-2)}.perception-stream::before{left:23px}.perception-stream-row{grid-template-columns:30px minmax(0,1fr) auto;min-height:66px;gap:var(--sp-2)}.perception-stream-node{width:28px;height:28px}.perception-stream-tag{max-width:88px}.perception-stream-copy small{white-space:normal}.perception-observation-grid{grid-template-columns:1fr}.perception-observation-facts li{grid-template-columns:78px minmax(0,1fr)}.perception-observation-facts small{grid-column:2}.perception-upcoming{align-items:flex-start;flex-wrap:wrap}.perception-upcoming-copy{flex-basis:calc(100% - 50px)}.perception-upcoming-link{margin-left:46px}.perception-overview-foot{align-items:flex-start}.perception-overview-foot>span{max-width:calc(100% - 44px);line-height:1.45}.perception-config-nav{position:sticky;top:0;overflow-x:auto;justify-content:flex-start}.perception-config-nav button{flex:none;min-width:max-content}.perception-config-panel{scroll-margin-top:56px}}
 @media(max-width:650px){.perception-access-heading{align-items:flex-start;flex-direction:column}.perception-access-heading p{text-align:left}.reality-consent-grid{grid-template-columns:1fr}.reality-consent-head{align-items:flex-start}.reality-consent-panel p{min-height:0}}
 @media(min-width:651px) and (max-width:950px){.perception-observation-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -377,11 +853,32 @@
 .perception-injection-list li{display:grid;gap:3px;padding:var(--sp-3) 0;border-bottom:1px solid var(--t-line)}
 .perception-injection-list strong{color:var(--t-text-strong);font-size:var(--fs-body)}
 .perception-injection-list span{color:var(--t-text-soft);font-size:var(--fs-tiny)}
-.identity-member-clues{margin-top:var(--sp-4);padding-top:var(--sp-3);border-top:1px solid var(--t-line)}
-.identity-member-clues h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-lead)}
-.identity-member-clues p{margin:var(--sp-1) 0 var(--sp-2);color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.identity-network-settings{margin:0 0 var(--sp-4);border-block:1px solid var(--t-line)}
+.identity-network-settings summary{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-2) var(--sp-3);min-height:42px;padding-block:var(--sp-2);cursor:pointer;list-style:none}
+.identity-network-settings summary::-webkit-details-marker{display:none}
+.identity-network-settings summary span{display:flex;align-items:center;gap:var(--sp-2);color:var(--t-text-strong);font-size:var(--fs-body);font-weight:700}
+.identity-network-settings summary span svg{width:16px;height:16px;color:var(--t-text-soft)}
+.identity-network-settings summary small{color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.identity-network-settings[open] summary{margin-bottom:var(--sp-3);border-bottom:1px solid var(--t-line)}
+.identity-network-settings-body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-4);padding-bottom:var(--sp-3)}
+.identity-network-settings-body>*{min-width:0}
+@media(max-width:880px){.identity-network-settings-body{grid-template-columns:minmax(0,1fr)}}
 .learning-semantic-workspace,.expression-semantic-workspace{min-width:0}
 .semantic-kind-label{align-self:center;color:var(--t-text-soft);font-size:var(--fs-tiny);font-weight:650}
+.semantic-collection-summary{min-width:0;margin-top:var(--sp-4);padding:var(--sp-3) 0;border-top:1px solid var(--t-line);border-bottom:1px solid var(--t-line)}
+.semantic-collection-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;margin-bottom:var(--sp-2)}
+.semantic-collection-heading strong{color:var(--t-text-strong);font-size:var(--fs-body)}
+.semantic-collection-heading span{color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.semantic-collection-scopes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-3)}
+.semantic-collection-scope{display:grid;grid-template-columns:52px minmax(0,1fr);gap:var(--sp-2);align-items:start;min-width:0;padding:var(--sp-2) 0;border-bottom:1px solid var(--t-line)}
+.semantic-collection-scope strong{color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.semantic-collection-scope span{color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.5;overflow-wrap:anywhere}
+.semantic-collection-summary ul{display:grid;gap:0;margin:var(--sp-2) 0 0;padding:0;list-style:none}
+.semantic-collection-summary li{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);min-width:0;padding:var(--sp-1) 0;color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.semantic-collection-summary li span{min-width:0;overflow-wrap:anywhere}
+.semantic-collection-summary time{flex:none;color:var(--t-text-faint);font-variant-numeric:tabular-nums}
+.semantic-collection-summary .semantic-collection-empty{color:var(--t-text-faint)}
+@media(max-width:560px){.semantic-collection-scopes{grid-template-columns:minmax(0,1fr)}.semantic-collection-scope{grid-template-columns:48px minmax(0,1fr)}}
 @media(max-width:900px){.perception-context-board{grid-template-columns:minmax(190px,.65fr) minmax(0,1.7fr)}.perception-stream{gap:0 var(--sp-2)}.perception-stream-row{grid-template-columns:28px minmax(0,1fr);min-height:82px}.perception-stream-tag{grid-column:2;justify-self:start;margin-top:2px}.perception-stream-node{grid-row:1 / span 2}}
 @media(max-width:650px){.perception-overview{padding:var(--sp-3)}.perception-context-board{grid-template-columns:1fr;gap:var(--sp-2)}.perception-clock-panel{min-height:0;padding:var(--sp-2) 0 var(--sp-3);border-right:0;border-bottom:1px solid var(--perception-line)}.perception-clock-time{font-size:var(--fs-hero)}.perception-stream{grid-template-columns:1fr}.perception-stream-row{grid-template-columns:30px minmax(0,1fr) auto;min-height:68px}.perception-stream-node{grid-row:auto}.perception-stream-tag{grid-column:auto;justify-self:end;margin-top:0}.perception-stream-copy small{white-space:normal}.perception-config-nav{position:sticky;top:0;overflow-x:auto}.perception-config-nav button{flex:none;min-width:max-content}.perception-subsection-heading,.perception-model-route-note{align-items:flex-start;flex-direction:column}.perception-subsection-heading p{text-align:left}.perception-injection-list ul{grid-template-columns:1fr}}
 @media(max-width:360px){.perception-stream-row{grid-template-columns:28px minmax(0,1fr)}.perception-stream-tag{grid-column:2;justify-self:start;margin-top:2px}.perception-stream-value{white-space:normal}.perception-clock-time{font-size:var(--fs-hero)}}
@@ -460,3 +957,503 @@
 @media(prefers-reduced-motion:reduce){.perception-subpanel>summary>svg:last-child,.perception-subpanel-body{transition:none;animation:none}}
 :root[data-motion="off"] .perception-clock-main,:root[data-motion="off"] .perception-calendar-context,:root[data-motion="off"] .perception-clock-events{transition:none;animation:none}
 @media(prefers-reduced-motion:reduce){.perception-clock-main,.perception-calendar-context,.perception-clock-events{transition:none;animation:none}}
+
+/* Context board: time, model routes, and authorized signals have distinct jobs. */
+.perception-page{width:100%;max-width:none}
+.perception-overview{padding:var(--sp-4);background:var(--t-surface)}
+.perception-overview::before,.perception-overview::after{display:none}
+.perception-overview-head{align-items:center;margin-bottom:var(--sp-4)}
+.perception-context-board{display:grid;grid-template-columns:minmax(300px,.82fr) minmax(0,1.18fr);gap:var(--sp-3)}
+.perception-clock-panel{grid-column:1;display:grid;grid-template-columns:minmax(0,.82fr) minmax(0,1.6fr);grid-template-rows:auto auto;gap:var(--sp-2) var(--sp-5);min-height:0;padding:0 0 var(--sp-3);border:0;border-bottom:1px solid var(--perception-line);border-radius:0;background:transparent;color:var(--t-text)}
+.perception-clock-main{grid-column:1;grid-row:1;display:grid;justify-items:start;gap:var(--sp-1);min-width:0;padding:var(--sp-2) var(--sp-3) var(--sp-2) 0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}
+.perception-clock-main:hover,.perception-calendar-context:hover{color:var(--perception-accent)}
+.perception-clock-main:focus-visible,.perception-calendar-context:focus-visible,.perception-clock-events:focus-visible{outline:2px solid var(--perception-accent);outline-offset:2px}
+.perception-clock-label{color:var(--t-ok-ink);font-size:var(--fs-micro)}
+.perception-clock-values{display:grid;grid-template-columns:minmax(136px,auto) minmax(0,1fr);grid-template-rows:auto auto;align-items:center;gap:2px var(--sp-3);min-width:0}
+.perception-clock-time{grid-column:1;grid-row:1 / span 2;margin:0;color:var(--t-ok-ink);font-size:var(--fs-hero);font-variant-numeric:tabular-nums;white-space:nowrap}
+.perception-clock-date-stack{grid-column:2;grid-row:1;display:grid;gap:2px;min-width:0}
+.perception-clock-date{margin:0;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.perception-clock-weekday{grid-column:2;grid-row:2;margin:0;color:var(--t-risk-ink);font-size:var(--fs-body)}
+.perception-clock-zone{grid-column:2;grid-row:3;margin:2px 0 0;color:var(--t-text-faint)}
+.perception-clock-zone b{color:var(--t-text-soft)}
+.perception-calendar-context{grid-column:2;grid-row:1;display:grid;align-content:center;gap:var(--sp-2);min-width:0;padding:var(--sp-2) 0 var(--sp-2) var(--sp-4);border:0;border-left:1px solid var(--perception-line);background:transparent;color:var(--t-text);text-align:left;cursor:pointer}
+.perception-calendar-details{gap:var(--sp-1);margin:0}
+.perception-calendar-details>div{grid-template-columns:58px minmax(0,1fr)}
+.perception-calendar-state{align-self:center;margin:0;padding:0;border:0;color:var(--t-text-soft)}
+.perception-calendar-state.enabled{color:var(--t-ok-ink)}
+.perception-clock-events{grid-column:1 / -1;grid-row:2;display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:0;padding:var(--sp-2) 0 0;border:0;border-top:1px solid var(--perception-line);background:transparent;color:var(--t-risk-ink);font:inherit;font-size:var(--fs-tiny);text-align:left;cursor:pointer}
+.perception-clock-events>span{min-width:0;overflow-wrap:anywhere}
+.perception-clock-events svg{width:15px;height:15px;flex:none}
+.perception-context-group{min-width:0;padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-xs);background:var(--t-surface)}
+.perception-model-group{grid-column:2;border-top:2px solid var(--perception-accent)}
+.perception-group-head{display:grid;grid-template-columns:32px minmax(0,1fr) auto;align-items:center;gap:var(--sp-3);min-width:0;margin-bottom:var(--sp-2)}
+.perception-group-index{display:grid;place-items:center;width:30px;height:30px;border:1px solid var(--perception-line);border-radius:var(--r-xs);color:var(--perception-accent);font:600 var(--fs-micro)/1 var(--numeric-font);font-variant-numeric:tabular-nums}
+.perception-group-title{display:grid;gap:2px;min-width:0}
+.perception-group-kicker{color:var(--t-text-faint);font:600 var(--fs-micro)/1.3 var(--numeric-font)}
+.perception-group-title h2{margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);line-height:1.3}
+.perception-group-title p{margin:0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.4}
+.perception-group-count{color:var(--t-text-faint);font-size:var(--fs-tiny);white-space:nowrap}
+.perception-context-groups{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:var(--sp-3)}
+.perception-stream{display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:0;min-width:0;padding:0;border:0;border-radius:0;background:transparent}
+.perception-stream::before{display:none}
+.perception-model-stream{grid-template-columns:repeat(2,minmax(0,1fr));column-gap:var(--sp-4)}
+.perception-stream-row{display:grid;grid-template-columns:28px minmax(0,1fr) auto 14px;grid-template-rows:auto;align-items:center;gap:var(--sp-2);min-width:0;min-height:78px;padding:var(--sp-2);border:0;border-bottom:1px solid var(--t-line);border-radius:var(--r-2xs);background:transparent;color:var(--t-text);text-align:left;animation:perception-row-in .28s ease both;transition:background .16s ease,color .16s ease}
+.perception-stream-row:last-child{border-bottom:0}
+.perception-stream-row:hover,.perception-stream-row:focus-visible{transform:none;background:var(--t-surface-soft);outline:none}
+.perception-stream-row:focus-visible{box-shadow:inset 0 0 0 2px var(--perception-accent)}
+.perception-stream-node{width:26px;height:26px;margin:0;border-radius:var(--r-xs)}
+.perception-stream-node svg{width:15px;height:15px}
+.perception-stream-copy{display:grid;gap:2px;min-width:0}
+.perception-stream-copy strong{color:var(--t-text-soft);font-size:var(--fs-tiny);font-weight:600}
+.perception-stream-value{display:-webkit-box;overflow:hidden;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650;line-height:1.4;overflow-wrap:anywhere;white-space:normal;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.perception-stream-copy small{display:-webkit-box;overflow:hidden;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.4;overflow-wrap:anywhere;white-space:normal;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.perception-stream-tag{grid-column:3;grid-row:1;max-width:110px;padding:3px var(--sp-1);border-radius:var(--r-2xs);font-size:var(--fs-micro);text-align:center}
+.perception-stream-arrow{grid-column:4;grid-row:1;display:grid;place-items:center;color:var(--t-text-faint)}
+.perception-stream-arrow svg{width:14px;height:14px}
+.perception-overview-foot{margin-top:var(--sp-3)}
+@media(max-width:900px){.perception-context-board{grid-template-columns:minmax(0,1fr)}.perception-clock-panel,.perception-model-group,.perception-context-groups{grid-column:1}.perception-context-groups{grid-template-columns:minmax(0,1fr)}.perception-context-group .perception-stream{grid-template-columns:repeat(2,minmax(0,1fr));column-gap:var(--sp-3)}.perception-context-group .perception-stream-row:nth-last-child(-n+2){border-bottom:0}}
+@media(max-width:760px){.perception-clock-panel{grid-template-columns:minmax(0,1fr)}.perception-calendar-context{grid-column:1;grid-row:auto;padding:var(--sp-2) 0 0;border-top:1px solid var(--perception-line);border-left:0}.perception-clock-events{grid-column:1}}
+@media(max-width:650px){.perception-overview{padding:var(--sp-3)}.perception-overview-head{align-items:flex-start;flex-direction:column;gap:var(--sp-2)}.perception-pulse{white-space:normal}.perception-model-stream,.perception-context-group .perception-stream{grid-template-columns:minmax(0,1fr)}.perception-context-group .perception-stream-row:nth-last-child(-n+2){border-bottom:1px solid var(--t-line)}.perception-context-group .perception-stream-row:last-child{border-bottom:0}.perception-model-group .perception-stream-row{min-height:72px}.perception-group-head{grid-template-columns:30px minmax(0,1fr) auto;gap:var(--sp-2)}.perception-context-group{padding:var(--sp-2)}.perception-stream-tag{max-width:92px}.perception-overview-foot{align-items:flex-start}}
+@media(max-width:400px){.perception-clock-values{grid-template-columns:minmax(0,1fr);gap:var(--sp-1)}.perception-clock-time,.perception-clock-date-stack,.perception-clock-weekday,.perception-clock-zone{grid-column:1;grid-row:auto}.perception-group-title p{display:none}.perception-stream-row{grid-template-columns:26px minmax(0,1fr) auto}.perception-stream-arrow{display:none}.perception-stream-tag{grid-column:3;grid-row:1;max-width:78px;white-space:normal}}
+
+/* === 感知卡片布局收敛（放在文件末尾以覆盖上面的历史规则）===
+   背景：.perception-stream-row 在本文件里被三套「上下文看板」布局重复定义过
+   （34px/30px/28px 四列或三列的行内网格）。那些规则作用域相同、出现更晚，
+   会把新仪表盘的卡片压成 min-height:78px 的窄行，标题被挤成竖排。
+   这里用 .perception-stream-container 作用域重新确立卡片式布局。 */
+.perception-stream-container .perception-group-items{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  grid-auto-rows:minmax(100px,auto);
+  gap:var(--sp-3);
+  align-items:stretch}
+
+.perception-stream-container .perception-stream-item{
+  display:flex;flex-direction:column;gap:var(--sp-2);min-width:0;align-self:start}
+.perception-stream-container .perception-stream-item.perception-primary{grid-column:span 2;grid-row:span 2}
+.perception-stream-container .perception-stream-item.perception-wide{grid-column:span 3}
+/* 余额按钮保留原网格位置，表单紧随其后占满下一行。 */
+.perception-stream-container .perception-stream-item.perception-balance-item{display:contents}
+
+/* 卡片本体：纵向堆叠的方卡，而不是行内网格 */
+.perception-stream-container .perception-stream-row{
+  display:flex;
+  flex-direction:column;
+  align-items:stretch;
+  gap:var(--sp-2);
+  width:100%;
+  grid-column:auto;
+  grid-row:auto;
+  min-width:0;
+  min-height:100px;
+  padding:var(--sp-3);
+  border:1px solid color-mix(in srgb,var(--t-line) 50%,transparent);
+  border-radius:var(--r-md);
+  background:var(--t-surface);
+  box-shadow:0 1px 3px color-mix(in srgb,var(--t-accent) 3%,transparent);
+  text-align:left;
+  animation:none;
+  transition:box-shadow .2s ease,border-color .2s ease}
+
+.perception-stream-container .perception-stream-row:hover,
+.perception-stream-container .perception-stream-row:focus-visible{
+  transform:none;
+  background:var(--t-surface);
+  box-shadow:0 6px 18px color-mix(in srgb,var(--t-ok) 10%,transparent);
+  outline:none}
+.perception-stream-container .perception-stream-row:focus-visible{
+  box-shadow:0 0 0 2px var(--perception-accent),0 6px 18px color-mix(in srgb,var(--t-ok) 10%,transparent)}
+
+/* 卡片头部：图标 + 标题 + 状态标签，允许换行而不压成竖排 */
+.perception-stream-container .perception-stream-header{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:var(--sp-2);
+  min-width:0}
+.perception-stream-container .perception-stream-node{
+  flex:none;
+  width:32px;
+  height:32px;
+  border-radius:var(--r-xs)}
+.perception-stream-container .perception-stream-node svg{width:17px;height:17px}
+.perception-stream-container .perception-stream-title{
+  flex:1 1 auto;
+  min-width:0;
+  font-size:var(--fs-body);
+  font-weight:650;
+  line-height:1.3;
+  overflow-wrap:anywhere;
+  white-space:normal}
+.perception-stream-container .perception-stream-tag{
+  flex:0 1 auto;
+  max-width:100%;
+  padding:3px var(--sp-2);
+  border-radius:var(--r-pill);
+  font-size:var(--fs-micro);
+  line-height:1.4;
+  text-align:center;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis}
+
+/* 卡片正文：标题值 + 详情说明，多行截断而非省略成一行 */
+.perception-stream-container .perception-stream-copy{
+  display:grid;
+  gap:var(--sp-1);
+  flex:1 1 auto;
+  align-content:start;
+  min-width:0}
+.perception-stream-container .perception-stream-value{
+  display:-webkit-box;
+  overflow:hidden;
+  font-size:var(--fs-lead);
+  font-weight:700;
+  line-height:1.35;
+  color:var(--t-text-strong);
+  overflow-wrap:anywhere;
+  white-space:normal;
+  -webkit-box-orient:vertical;
+  -webkit-line-clamp:3}
+.perception-stream-container .perception-stream-copy small{
+  display:-webkit-box;
+  overflow:hidden;
+  font-size:var(--fs-tiny);
+  line-height:1.45;
+  color:var(--t-text-soft);
+  overflow-wrap:anywhere;
+  white-space:normal;
+  -webkit-box-orient:vertical;
+  -webkit-line-clamp:3}
+
+/* 展开箭头回到卡片右下角，不再占用网格列 */
+.perception-stream-container .perception-stream-arrow{
+  position:absolute;
+  right:var(--sp-2);
+  bottom:var(--sp-2);
+  display:grid;
+  place-items:center;
+  color:var(--t-text-faint);
+  transform:none}
+.perception-stream-container .perception-stream-row .perception-stream-arrow{transform:none}
+.perception-stream-container .perception-stream-arrow svg{width:15px;height:15px}
+
+.perception-stream-details{
+  min-width:0;padding:var(--sp-3);border-top:1px solid var(--t-line);
+  background:var(--t-surface-soft);color:var(--t-text);font-size:var(--fs-body);line-height:1.6;
+  overflow-wrap:anywhere;white-space:normal}
+.perception-stream-details>strong{color:var(--t-text-strong)}
+.perception-stream-details p{margin:var(--sp-2) 0;color:var(--t-text-soft)}
+.perception-stream-details ul{margin:var(--sp-2) 0;padding-left:var(--sp-4)}
+.perception-stream-details li+li{margin-top:var(--sp-2)}
+.perception-stream-detail-actions{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-3)}
+.perception-stream-detail-actions .button{max-width:100%;white-space:normal;text-align:left}
+.perception-stream-detail-actions .button:focus-visible{outline:2px solid var(--perception-accent);outline-offset:2px}
+
+/* 大卡片（对话模型）占 2x2 */
+.perception-stream-container .perception-stream-row.perception-primary{
+  min-height:220px;
+  justify-content:flex-start}
+.perception-stream-container .perception-stream-row.perception-primary .perception-stream-value{
+  font-size:calc(var(--fs-lead) * 1.2);
+  margin:var(--sp-2) 0}
+.perception-stream-container .perception-stream-row.perception-primary .perception-stream-copy small{
+  -webkit-line-clamp:3}
+
+/* 宽卡片（外部资讯）占 3 列，横向排布 */
+.perception-stream-container .perception-stream-row.perception-wide{
+  flex-direction:row;
+  align-items:center;
+  gap:var(--sp-3);
+  min-height:110px}
+.perception-stream-container .perception-stream-row.perception-wide .perception-stream-header{
+  flex:0 1 auto}
+.perception-stream-container .perception-stream-row.perception-wide .perception-stream-copy{
+  flex:1 1 auto;
+  min-width:0}
+
+/* 余额表单在点击的行下方独占整行 */
+.perception-stream-container .perception-balance-config{
+  grid-column:1 / -1;
+  margin:0}
+
+/* 响应式：随可用宽度降列，primary/wide 同步收敛 */
+@media(max-width:1080px){
+  .perception-stream-container .perception-group-items{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .perception-stream-container .perception-stream-item.perception-wide{grid-column:span 3}
+}
+@media(max-width:860px){
+  .perception-stream-container .perception-group-items{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .perception-stream-container .perception-stream-item.perception-primary{grid-column:span 2;grid-row:span 1}
+  .perception-stream-container .perception-stream-item.perception-wide{grid-column:span 2}
+  .perception-stream-container .perception-stream-row.perception-primary{min-height:150px}
+  .perception-stream-container .perception-stream-row.perception-wide{
+    flex-direction:column;align-items:stretch;min-height:120px}
+}
+@media(max-width:560px){
+  .perception-stream-container .perception-group-items{grid-template-columns:minmax(0,1fr)}
+  .perception-stream-container .perception-stream-item.perception-primary,
+  .perception-stream-container .perception-stream-item.perception-wide{grid-column:span 1}
+  .perception-stream-container .perception-stream-row.perception-primary,
+  .perception-stream-container .perception-stream-row.perception-wide{
+    min-height:auto}
+  .perception-stream-container .perception-stream-row.perception-wide{flex-direction:column}
+  .perception-stream-container .perception-stream-row.perception-primary .perception-stream-value{
+    font-size:var(--fs-lead);margin:2px 0}
+  .perception-stream-container .perception-stream-header{gap:var(--sp-1)}
+}
+@media(prefers-reduced-motion:reduce){
+  .perception-stream-container .perception-stream-row{animation:none;transition:none}
+}
+:root[data-motion="off"] .perception-stream-container .perception-stream-row{
+  animation:none;transition:none}
+:root[data-motion="off"] .perception-group-index,:root[data-motion="off"] .perception-stream-row,:root[data-motion="off"] .perception-clock-main,:root[data-motion="off"] .perception-calendar-context,:root[data-motion="off"] .perception-clock-events{transition:none;animation:none}
+@media(prefers-reduced-motion:reduce){.perception-group-index,.perception-stream-row,.perception-clock-main,.perception-calendar-context,.perception-clock-events{transition:none;animation:none}}
+
+/* === 感知页顶部态势板 ===
+   四张卡按能力簇分板：环境卡用天气读数、模型卡用磁贴、设备与外部卡用主读数及状态行。
+   卡头、读数与授权摘要都在仪表盘下方选择对应配置，不再重复展开状态卡。
+   配色接主题色板（--t-accent / --t-ok / --t-warn），随晨雾 / 庭院 / 暮色等主题变色。 */
+.perception-board{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;
+  gap:var(--sp-3);min-width:0}
+.perception-board-card{
+  display:grid;grid-template-rows:auto minmax(0,1fr);align-content:stretch;
+  gap:var(--sp-3);min-width:0;padding:var(--sp-3);
+  border:1px solid var(--t-line);border-top:3px solid var(--board);
+  border-radius:var(--r-lg);background:var(--t-surface);box-shadow:var(--t-shadow)}
+.perception-board-card.is-environment{background:linear-gradient(145deg,color-mix(in srgb,var(--t-ok) 5%,var(--t-surface)),var(--t-surface) 64%)}
+.perception-board-card.is-models{background:linear-gradient(145deg,color-mix(in srgb,var(--t-accent) 5%,var(--t-surface)),var(--t-surface) 64%)}
+.perception-board-card.is-selected{border-color:color-mix(in srgb,var(--board) 50%,var(--t-line))}
+.perception-board-card.is-models{--board:var(--t-accent)}
+.perception-board-card.is-environment{--board:var(--t-ok)}
+.perception-board-card.is-devices{--board:var(--t-warn)}
+.perception-board-card.is-external{--board:var(--t-text-soft)}
+.perception-board-body{display:flex;min-width:0;min-height:0}
+.perception-board-head{
+  display:flex;align-items:center;gap:var(--sp-2);width:100%;padding:0;border:0;
+  background:transparent;color:var(--t-text);font:inherit;text-align:left;cursor:pointer}
+.perception-board-head:hover .perception-board-chevron{color:var(--board)}
+.perception-board-head:focus-visible{outline:2px solid var(--board);outline-offset:3px;border-radius:var(--r-sm)}
+.perception-board-icon{
+  display:grid;place-items:center;width:30px;height:30px;flex:none;border-radius:var(--r-sm);
+  background:color-mix(in srgb,var(--board) 14%,transparent);color:var(--board)}
+.perception-board-icon svg{width:16px;height:16px}
+.perception-board-title{display:grid;gap:1px;flex:1;min-width:0}
+.perception-board-title strong{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.perception-board-title small{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.perception-board-channels{flex:none;color:var(--t-text-faint);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
+.perception-board-chevron{display:grid;place-items:center;flex:none;color:var(--t-text-faint);transition:color .16s ease}
+.perception-board-chevron svg{width:16px;height:16px}
+
+/* 状态点：实心=实况在线；空心=已开通但本轮没有读数；灰空心=未启用 */
+.perception-dot{width:8px;height:8px;flex:none;margin-left:auto;border-radius:50%;background:var(--t-text-faint)}
+.perception-board .is-ready>.perception-dot{background:var(--t-ok)}
+.perception-board .is-pending>.perception-dot{background:transparent;border:1.5px solid var(--t-warn)}
+.perception-board .is-off>.perception-dot{background:transparent;border:1.5px solid var(--t-text-faint)}
+
+/* 模型卡：类别与具体模型分层显示，长模型名完整换行。 */
+.perception-mtiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-2)}
+.perception-mtile{
+  display:grid;grid-template-rows:22px auto minmax(2.8em,1fr);align-content:start;justify-items:center;
+  min-width:0;gap:var(--sp-1);padding:var(--sp-3) var(--sp-2);
+  border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--t-surface-soft);color:var(--board);font:inherit;cursor:pointer}
+.perception-mtile svg{width:22px;height:22px}
+.perception-mtile-title{color:var(--t-text-soft);font-size:var(--fs-tiny);font-weight:500;text-align:center}
+.perception-mtile-model{min-width:0;max-width:100%;color:var(--t-text-strong);font-size:var(--fs-body);
+  display:flex;align-items:center;justify-content:center;font-weight:600;line-height:1.4;text-align:center;overflow-wrap:anywhere;word-break:break-word}
+.perception-mtile.is-pending{opacity:.78;border-style:dashed}
+.perception-mtile.is-off{opacity:.5}
+.perception-mtile.is-off .perception-mtile-title,.perception-mtile.is-off .perception-mtile-model{color:var(--t-text-faint)}
+
+/* 设备 / 外部卡：定位和余额主读数、最近状态与时间、授权摘要。 */
+.perception-reading-card{display:grid;grid-template-rows:minmax(108px,1fr) auto auto auto;gap:var(--sp-2);width:100%;min-width:0}
+.perception-feature{display:flex;align-items:center;gap:var(--sp-3);width:100%;min-width:0;padding:var(--sp-3);border:1px solid transparent;border-radius:var(--r-md);background:var(--t-surface-soft);color:var(--t-text);font:inherit;text-align:left;cursor:pointer}
+.perception-feature-icon{display:grid;place-items:center;flex:none;color:var(--t-ok)}
+.perception-feature-icon svg{width:22px;height:22px}
+.perception-feature-copy{display:grid;gap:3px;flex:1;min-width:0}
+.perception-feature-copy small{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.perception-feature-copy strong{color:var(--t-text-strong);font-size:var(--fs-head);font-weight:700;line-height:1.25;overflow-wrap:anywhere}
+.perception-feature-copy>span{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5;overflow-wrap:anywhere}
+.perception-feature.is-balance.is-ready .perception-feature-copy strong{color:var(--t-ok);font-variant-numeric:tabular-nums}
+.perception-feature:not(.is-ready) .perception-feature-copy strong{font-size:var(--fs-body);font-weight:600}
+.perception-feature:not(.is-ready) .perception-feature-icon{color:var(--t-text-faint)}
+.perception-balance-unit{font-size:var(--fs-tiny);font-weight:500}
+.perception-feature-meta{display:grid;justify-items:end;gap:var(--sp-1);min-width:0;max-width:45%;flex:none}
+.perception-reading-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border:1px solid var(--t-line);border-radius:999px;color:var(--t-text-soft);font-size:var(--fs-micro);line-height:1.4}
+.perception-reading-badge.is-ready{color:var(--t-ok);border-color:transparent;background:var(--t-ok-quiet)}
+.perception-reading-badge.is-pending{color:var(--t-warn-ink);background:var(--t-warn-quiet)}
+.perception-reading-badge .perception-dot,.perception-authorization-chip .perception-dot{width:6px;height:6px;margin-left:0}
+.perception-reading-age{flex:none;color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.4;white-space:nowrap;font-variant-numeric:tabular-nums}
+.perception-reading-row{display:flex;align-items:center;gap:var(--sp-2);width:100%;min-width:0;min-height:50px;padding:var(--sp-2) var(--sp-3);border:1px solid transparent;border-radius:var(--r-sm);background:var(--t-surface-soft);color:var(--t-text);font:inherit;font-size:var(--fs-tiny);text-align:left;cursor:pointer}
+.perception-reading-icon{display:grid;place-items:center;flex:none;color:var(--board)}
+.perception-reading-icon svg{width:16px;height:16px}
+.perception-reading-row>strong{flex:none;font-weight:600;line-height:1.5}
+.perception-reading-value{flex:1;min-width:0;color:var(--t-text-soft);text-align:right;line-height:1.5;overflow-wrap:anywhere}
+.perception-reading-row.is-off .perception-reading-value{color:var(--t-text-faint)}
+.perception-board-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-2);min-width:0;color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.perception-authorization-chips{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:var(--sp-1);min-width:0}
+.perception-authorization-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:3px 9px;border:1px solid var(--t-line);border-radius:999px;background:transparent;color:var(--t-text-faint);font:inherit;text-align:left;overflow-wrap:anywhere;cursor:pointer}
+.perception-authorization-chip.is-ready{color:var(--t-ok);border-color:transparent;background:var(--t-ok-quiet)}
+.perception-authorization-chip.is-pending{color:var(--t-warn-ink)}
+.perception-injection-summary{display:flex;align-items:flex-start;gap:6px;min-width:0;padding:2px 0;border:0;background:transparent;color:var(--t-text-faint);font:inherit;text-align:left;cursor:pointer}
+.perception-injection-summary svg{width:14px;height:14px;flex:none}
+.perception-injection-summary span{min-width:0;overflow-wrap:anywhere}
+.perception-board [data-board-goto]{transition:background-color .16s ease,border-color .16s ease;scroll-margin:var(--sp-3)}
+.perception-board [data-board-goto]:hover{background-color:color-mix(in srgb,var(--board) 7%,var(--t-surface-soft))}
+.perception-board [data-board-goto]:focus-visible{outline:2px solid var(--t-accent);outline-offset:3px}
+.perception-board [data-board-goto].is-selected{background-color:color-mix(in srgb,var(--t-accent) 9%,var(--t-surface-soft));border-color:var(--t-accent)}
+
+/* 环境卡：地点 / 时刻 / 更新 / 预警 / 温度，全部靠排版层级而不是标签行 */
+.perception-wx{display:grid;gap:var(--sp-2);min-width:0}
+.perception-wx [data-board-goto]{border:1px solid transparent;padding:0;border-radius:var(--r-sm);background:transparent;font-family:inherit;text-align:left;cursor:pointer}
+.perception-wx-top{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-2)}
+.perception-wx-place{display:inline-flex;align-items:center;gap:6px;min-width:0}
+.perception-wx-place svg{width:14px;height:14px;flex:none;color:var(--board)}
+.perception-wx-place b{overflow:hidden;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650;text-overflow:ellipsis;white-space:nowrap}
+.perception-wx-time{flex:none;color:var(--t-text-strong);font-size:var(--fs-head);font-weight:700;font-variant-numeric:tabular-nums}
+.perception-board-bar{display:flex;align-items:flex-end;justify-content:space-between;gap:var(--sp-4);flex-wrap:wrap;margin:0 0 var(--sp-3)}
+.perception-board-bar>div{min-width:0;flex:1 1 320px}
+.perception-board-bar h1{margin:2px 0 0;color:var(--t-text-strong);font-size:var(--fs-title);line-height:1.25}
+.perception-board-hint{margin:var(--sp-1) 0 0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.5}
+.perception-board-bar .perception-kicker{color:var(--perception-accent,var(--t-text-faint));font-size:var(--fs-micro);line-height:1.4;letter-spacing:.1em}
+.perception-board-count{flex:0 1 auto;display:inline-flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);min-width:0;max-width:100%;padding:4px 6px 4px 4px;border:1px solid var(--t-line);border-radius:999px;color:var(--t-text-soft);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
+.perception-board-count b{min-width:0;padding-right:6px;font-weight:600;overflow-wrap:anywhere}
+.perception-board-sync{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid transparent;border-radius:999px;color:var(--t-text-faint);font-size:var(--fs-micro)}
+.perception-board-sync svg{width:12px;height:12px;flex:none}
+.perception-board-sync.is-ready{color:var(--t-text-strong);background:var(--t-ok-quiet,transparent)}
+.perception-board-sync.is-pending{color:var(--t-text-faint)}
+.perception-board-sync.is-warn{color:var(--t-warn-ink);border-color:color-mix(in srgb,var(--t-warn) 45%,transparent);background:var(--t-warn-quiet)}
+.perception-wx-sub{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);flex-wrap:wrap;color:var(--t-text-faint);font-size:var(--fs-micro)}
+.perception-wx-date{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;color:var(--t-text-soft);font-size:var(--fs-micro);line-height:1.5}
+.perception-wx-date i{font-style:normal}
+.perception-wx-date i:empty{display:none}
+.perception-wx-date i[data-context-clock-lunar]:not(:empty){color:var(--t-text-faint)}
+.perception-wx-date em{display:none;padding:1px 7px;border:1px solid var(--t-line);border-radius:999px;font-style:normal;color:var(--t-text-soft)}
+.perception-wx-date em:not([hidden]){display:inline-block}
+.perception-wx-chip{display:inline-flex;align-items:center;gap:5px;padding:2px var(--sp-2);border:1px solid var(--t-line);border-radius:999px}
+.perception-wx .perception-wx-chip{padding:2px var(--sp-2);border-color:var(--t-line);border-radius:999px;font-size:var(--fs-micro);line-height:1.5}
+.perception-wx-chip svg{width:12px;height:12px}
+.perception-wx-chip.is-ready{color:var(--t-text-soft)}
+.perception-wx-chip.is-off{color:var(--t-text-faint)}
+.perception-wx-chip.is-alert{color:var(--t-warn-ink);border-color:color-mix(in srgb,var(--t-warn) 45%,transparent);background:var(--t-warn-quiet)}
+.perception-wx-main{display:flex;align-items:center;gap:var(--sp-3);min-width:0}
+.perception-wx-icon{display:grid;place-items:center;width:62px;height:62px;flex:none;border-radius:var(--r-md);background:color-mix(in srgb,var(--board) 14%,transparent);color:var(--board)}
+.perception-wx-icon svg{width:34px;height:34px}
+.perception-wx-temp{flex:none;color:var(--t-text-strong);font-size:clamp(32px,3.2vw,44px);font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
+.perception-wx-temp i{margin-left:2px;font-size:18px;font-style:normal;font-weight:700}
+.perception-wx-meta{display:grid;gap:2px;min-width:0}
+.perception-wx-meta strong{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.perception-wx-meta small{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5;overflow-wrap:anywhere}
+.perception-wx-calendar{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5;overflow-wrap:anywhere}
+.perception-wx-events{display:flex;align-items:flex-start;gap:6px;color:var(--t-text-soft);font-size:var(--fs-micro);line-height:1.5;overflow-wrap:anywhere}
+.perception-wx-events svg{width:14px;height:14px;flex:none}
+.perception-config-workspace{min-width:0;margin-top:var(--sp-5);scroll-margin-top:var(--sp-4)}
+
+@media(min-width:901px){
+  .perception-board-card.is-environment .perception-board-body,
+  .perception-board-card.is-models .perception-board-body{height:100%}
+  .perception-board-card.is-environment .perception-wx{width:100%;height:100%;grid-template-rows:auto auto minmax(0,1fr) auto auto;align-content:stretch}
+  .perception-board-card.is-environment .perception-wx-main{align-self:center}
+  .perception-board-card.is-models .perception-mtiles{width:100%;height:100%;grid-auto-rows:minmax(0,1fr)}
+}
+@media(max-width:900px){.perception-board{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:560px){
+  .perception-board-count{width:100%;border-radius:var(--r-sm)}
+  .perception-board-count [data-context-refresh]{margin-left:auto}
+  .perception-wx-main{flex-wrap:wrap;gap:var(--sp-2)}
+  .perception-wx-icon{width:48px;height:48px}
+  .perception-wx-icon svg{width:26px;height:26px}
+  .perception-feature{flex-wrap:wrap;gap:var(--sp-2)}
+  .perception-feature-copy{flex-basis:calc(100% - 36px)}
+  .perception-feature-meta{display:flex;align-items:center;flex-wrap:wrap;max-width:100%;margin-left:30px}
+  .perception-reading-row{display:grid;grid-template-columns:16px minmax(0,1fr) auto 8px;gap:var(--sp-1) var(--sp-2)}
+  .perception-reading-row>.perception-reading-value{grid-column:2/-1;grid-row:2;text-align:left}
+  .perception-reading-row>.perception-reading-age{grid-column:3;grid-row:1}
+  .perception-reading-row>.perception-dot{grid-column:4;grid-row:1}
+}
+@media(prefers-reduced-motion:reduce){.perception-board [data-board-goto]{transition:none}}
+:root[data-motion="off"] .perception-board [data-board-goto]{transition:none}
+@keyframes gaugePulse{0%,100%{opacity:1}50%{opacity:.55}}
+@media(max-width:920px){
+  .perception-gauge{grid-template-columns:minmax(0,1fr)}
+  .perception-gauge-core{order:-1}
+  .perception-gauge-svg{max-width:168px}}
+@media(max-width:560px){
+  .perception-gauge-tiles{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){.perception-gauge-seg{animation:none}}
+:root[data-motion="off"] .perception-gauge-seg{animation:none}
+
+/* 表情库：真实素材以卡片展示，详情从右侧进入，避免把配置与编辑内容挤成一列。 */
+.semantic-catalog-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-2);margin-bottom:var(--sp-3)}
+.semantic-catalog-stat{display:grid;gap:2px;min-width:0;padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface)}
+.semantic-catalog-stat strong{color:var(--t-text-strong);font-size:var(--fs-lead);font-variant-numeric:tabular-nums}.semantic-catalog-stat span{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.semantic-catalog-progress{display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-3);color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.semantic-catalog-progress>strong{flex:none;font-weight:600}.semantic-catalog-progress>span{display:block;flex:1;height:8px;overflow:hidden;border-radius:var(--r-pill);background:var(--t-surface-sunken)}.semantic-catalog-progress>span>i{display:block;height:100%;border-radius:inherit;background:var(--t-ok);transition:width var(--dur) ease}
+.semantic-import{position:relative;display:inline-flex;align-items:center;justify-content:center;min-height:36px;margin:var(--sp-2) 0 var(--sp-3);cursor:pointer}.semantic-import input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.semantic-row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;align-items:start;gap:var(--sp-2) var(--sp-3);min-width:0;padding:var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);cursor:pointer;transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease,transform var(--dur-fast) ease}
+.semantic-row:hover{border-color:var(--t-line-firm);box-shadow:var(--t-shadow);transform:translateY(-1px)}.semantic-row:focus-within{outline:2px solid var(--t-focus);outline-offset:2px}
+.semantic-row-media{position:relative;display:grid;place-items:center;grid-column:1/-1;aspect-ratio:1.55;min-width:0;overflow:hidden;border-radius:var(--r-xs);background:var(--t-surface-sunken)}.semantic-row-media>img{width:100%;height:100%;object-fit:cover}.semantic-row-placeholder{display:grid;place-items:center;width:54px;height:54px;border:1px solid var(--t-line-firm);border-radius:var(--r-sm);color:var(--t-text-faint)}.semantic-row-placeholder svg{width:28px;height:28px}.semantic-row-state{position:absolute;top:var(--sp-1);right:var(--sp-1);padding:3px var(--sp-2);border-radius:var(--r-pill);background:var(--t-surface);color:var(--t-text-faint);font-size:var(--fs-micro)}.semantic-row-state.is-enabled{background:var(--t-ok-quiet);color:var(--t-ok-ink)}
+.semantic-row-body{display:grid;gap:2px;min-width:0}.semantic-row-body strong{overflow:hidden;color:var(--t-text-strong);font-size:var(--fs-body);text-overflow:ellipsis;white-space:nowrap}.semantic-row-body p{display:-webkit-box;overflow:hidden;margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.45;-webkit-box-orient:vertical;-webkit-line-clamp:2}.semantic-row-body small{overflow:hidden;color:var(--t-text-faint);font-size:var(--fs-micro);text-overflow:ellipsis;white-space:nowrap}.semantic-row>.button{align-self:end}
+.semantic-editor-drawer{position:fixed;inset:0;z-index:80;pointer-events:none}.semantic-editor-backdrop{position:absolute;inset:0;background:var(--scrim);opacity:0;pointer-events:auto;animation:semantic-drawer-fade var(--dur-fast) ease forwards}.semantic-editor{position:absolute;top:0;right:0;display:grid;gap:var(--sp-3);width:min(440px,calc(100vw - 24px));height:100%;overflow:auto;margin:0;padding:var(--sp-5);border:0;border-left:1px solid var(--t-line-firm);border-radius:var(--r-md) 0 0 var(--r-md);background:var(--t-surface);box-shadow:var(--t-shadow-lift);pointer-events:auto;animation:semantic-drawer-slide var(--dur) cubic-bezier(.2,.75,.25,1) both}.semantic-editor .semantic-heading{position:sticky;top:calc(-1 * var(--sp-5));z-index:1;padding:var(--sp-1) 0 var(--sp-3);background:var(--t-surface)}.semantic-editor>img{width:100%;max-height:220px;object-fit:contain;border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-sunken)}.semantic-editor label{display:grid;gap:var(--sp-1)}.semantic-editor textarea{background:var(--t-surface-soft)}
+@keyframes semantic-drawer-slide{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}@keyframes semantic-drawer-fade{from{opacity:0}to{opacity:1}}
+@media(max-width:760px){.semantic-catalog-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.semantic-editor{width:min(100%,440px);border-radius:var(--r-md) 0 0 var(--r-md)}}
+@media(prefers-reduced-motion:reduce){.semantic-catalog-progress>span>i,.semantic-row,.semantic-editor,.semantic-editor-backdrop{transition:none;animation:none}}
+
+/* 学习页语义目录：条目先行，配置与入口并列。 */
+.semantic-learning-view{display:grid;gap:var(--sp-4);min-width:0}
+.semantic-learning-view .settings-heading{margin:0}
+.semantic-learning-view .semantic-learning-catalog,.semantic-learning-view .semantic-config-panel{
+  min-width:0;padding:var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-raised)
+}
+.semantic-learning-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);min-width:0;margin-bottom:var(--sp-3)}
+.semantic-learning-heading h3,.semantic-config-panel h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-subtitle);font-weight:650}
+.semantic-learning-heading>span{flex:none;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.semantic-learning-view .semantic-session{justify-content:space-between;max-width:360px;margin:0 0 var(--sp-3);color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.semantic-learning-view .semantic-session select{min-width:0;min-height:34px;border-color:var(--t-line);background:var(--t-surface);color:var(--t-text-strong)}
+.semantic-learning-toolbar{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);flex-wrap:wrap;margin-bottom:var(--sp-2)}
+.semantic-learning-toolbar form{display:flex;align-items:center;gap:var(--sp-2);flex:1 1 360px;min-width:0}
+.semantic-learning-toolbar form select,.semantic-learning-toolbar form input{min-width:0;min-height:36px;border:1px solid var(--t-line-firm);border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text-strong);font:inherit}
+.semantic-learning-toolbar form select{padding:0 var(--sp-2)}
+.semantic-learning-toolbar form input{flex:1;padding:var(--sp-2) var(--sp-3)}
+.semantic-learning-view .semantic-import{flex:none;margin:0}
+.semantic-learning-view .semantic-list{display:grid;gap:var(--sp-1);border:0}
+.semantic-learning-view .semantic-row{grid-template-columns:48px minmax(0,1fr) auto;grid-template-rows:auto;align-items:center;gap:var(--sp-3);min-height:62px;margin:0;padding:var(--sp-2);border-color:transparent;border-radius:var(--r-sm);background:var(--t-surface-soft);cursor:default;transform:none;box-shadow:none}
+.semantic-learning-view .semantic-row:hover{border-color:var(--t-line-firm);transform:none;box-shadow:none}
+.semantic-learning-view .semantic-row-media{grid-column:auto;display:grid;width:44px;height:44px;aspect-ratio:1;overflow:hidden;border-radius:var(--r-xs);background:var(--t-surface)}
+.semantic-learning-view .semantic-row-media>img{width:100%;height:100%;object-fit:cover}
+.semantic-learning-view .semantic-row-placeholder{width:100%;height:100%;border:0;border-radius:0}
+.semantic-learning-view .semantic-row-placeholder svg{width:20px;height:20px}
+.semantic-learning-view .semantic-row-slang-mark{background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+.semantic-row-title{display:flex;align-items:center;gap:var(--sp-2);min-width:0}
+.semantic-learning-view .semantic-row-kind{flex:none;padding:3px var(--sp-2);border-radius:var(--r-xs);background:var(--t-accent-quiet);color:var(--t-accent-ink);font-size:var(--fs-micro);font-weight:600}
+.semantic-learning-view .semantic-row-title strong{min-width:0;overflow:hidden;color:var(--t-text-strong);font-size:var(--fs-body);text-overflow:ellipsis;white-space:nowrap}
+.semantic-learning-view .semantic-row-body{gap:2px}
+.semantic-learning-view .semantic-row-body p{color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.semantic-learning-view .semantic-row-body small{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.semantic-learning-view .semantic-row>.button{align-self:center}
+.semantic-learning-view .semantic-learning-empty{margin:0;padding:var(--sp-3);color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.semantic-learning-settings{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:var(--sp-3);min-width:0}
+.semantic-config-panel{display:flex;flex-direction:column;gap:var(--sp-2)}
+.semantic-config-panel>header{display:flex;align-items:center;justify-content:space-between;min-height:32px;margin-bottom:var(--sp-1)}
+.semantic-learning-view .semantic-config-panel .semantic-flags{grid-template-columns:minmax(0,1fr);gap:var(--sp-1);margin:0}
+.semantic-learning-view .semantic-config-panel .semantic-toggle{min-height:44px;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--t-text-strong);font-size:var(--fs-tiny)}
+.semantic-learning-view .semantic-toggle input{width:18px;height:18px;flex:none;accent-color:var(--t-ok)}
+.semantic-learning-view .semantic-config-panel .semantic-providers{grid-template-columns:minmax(0,1fr);gap:var(--sp-2)}
+.semantic-learning-view .semantic-config-panel .semantic-providers label{display:grid;grid-template-columns:minmax(0,1fr) minmax(130px,1fr);align-items:center;gap:var(--sp-2);min-height:42px;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--t-text-soft);font-size:var(--fs-tiny);font-weight:550}
+.semantic-learning-view .semantic-config-panel .semantic-providers input,.semantic-learning-view .semantic-config-panel .semantic-providers select{min-height:34px;border-color:var(--t-line);background:var(--t-surface);color:var(--t-text-strong);font-size:var(--fs-tiny)}
+.semantic-learning-links{display:grid;gap:var(--sp-1);margin-top:var(--sp-2)}
+.semantic-learning-links button{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);min-height:46px;padding:var(--sp-2) var(--sp-1);border:0;border-top:1px solid var(--t-line);border-radius:0;background:transparent;color:var(--t-text-strong);font:inherit;text-align:left;cursor:pointer}
+.semantic-learning-links button:hover{color:var(--t-accent-ink);background:var(--t-surface-soft)}
+.semantic-learning-links button:focus-visible,.semantic-learning-toolbar :focus-visible{outline:2px solid var(--t-focus);outline-offset:2px}
+.semantic-learning-links button span{min-width:0;overflow-wrap:anywhere}
+.semantic-learning-links button svg{width:16px;height:16px;flex:none;color:var(--t-accent-ink)}
+.semantic-learning-actions{grid-column:1/-1;display:flex;align-items:center;flex-wrap:wrap;gap:var(--sp-2);padding-top:var(--sp-1)}
+@media(max-width:900px){.semantic-learning-settings{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:560px){
+  .semantic-learning-view .semantic-learning-catalog,.semantic-learning-view .semantic-config-panel{padding:var(--sp-3)}
+  .semantic-learning-view .semantic-row{grid-template-columns:40px minmax(0,1fr);gap:var(--sp-2)}
+  .semantic-learning-view .semantic-row-media{width:38px;height:38px}
+  .semantic-learning-view .semantic-row>.button{grid-column:2;justify-self:start;min-height:30px}
+  .semantic-learning-view .semantic-config-panel .semantic-providers label{grid-template-columns:minmax(0,1fr)}
+}

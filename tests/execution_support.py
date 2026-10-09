@@ -3,8 +3,90 @@
 from companion_v2.storage.schema import MEMORY_TABLES, V10_MIGRATION_STATEMENTS, V15_MIGRATION_STATEMENTS
 
 
+def remove_v54(connection):
+    """Undo incremental reply publication records before older fixtures."""
+    connection.execute('DROP TABLE IF EXISTS "conversation_reply_streams"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v53-to-v54'")
+
+
+def remove_v53(connection):
+    remove_v54(connection)
+    """Undo the response-stage summaries for historical fixtures."""
+    connection.execute('DROP TABLE IF EXISTS "model_call_diagnostics"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v52-to-v53'")
+
+
+def remove_v52(connection):
+    """Undo the reply presentation action column for historical fixtures."""
+    remove_v53(connection)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(conversation_batches)")}
+    if "presentation_action" in columns:
+        connection.execute('ALTER TABLE conversation_batches DROP COLUMN presentation_action')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v51-to-v52'")
+
+
+def remove_v51(connection):
+    """Undo V51 gallery ordering for historical fixtures."""
+    remove_v52(connection)
+    connection.execute('DROP TABLE IF EXISTS "reference_asset_usage"')
+    connection.execute('DROP INDEX IF EXISTS "reference_assets_gallery_order_idx"')
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(reference_assets)")}
+    if "position" in columns:
+        connection.execute('ALTER TABLE reference_assets DROP COLUMN position')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v50-to-v51'")
+
+
+def remove_v50(connection):
+    """Undo V50's diagnostic code column and later migrations."""
+    remove_v51(connection)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(inbound_no_replies)")}
+    if "code" in columns:
+        connection.execute('ALTER TABLE inbound_no_replies DROP COLUMN code')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v49-to-v50'")
+
+
+def remove_v49(connection):
+    """Undo the V49 inbound no-reply ledger."""
+    remove_v50(connection)
+    connection.execute('DROP INDEX IF EXISTS "inbound_no_replies_role_recent_idx"')
+    connection.execute('DROP TABLE IF EXISTS "inbound_no_replies"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v48-to-v49'")
+
+
+def remove_v48(connection):
+    """Undo V48 cache signatures."""
+    remove_v49(connection)
+    connection.execute('DROP TABLE IF EXISTS "model_call_cache_signatures"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v47-to-v48'")
+
+
+def remove_v47(connection):
+    """Undo the V47 reference/outfit additions."""
+    remove_v48(connection)
+    connection.execute('DROP INDEX IF EXISTS "reference_asset_payload_owner_idx"')
+    connection.execute('DROP INDEX IF EXISTS "wardrobe_daily_outfits_recent_idx"')
+    connection.execute('DROP TABLE IF EXISTS "reference_asset_payloads"')
+    connection.execute('DROP TABLE IF EXISTS "wardrobe_daily_outfits"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v46-to-v47'")
+
+
+def remove_v46(connection):
+    """Undo V47 additions and model usage columns so historical fixtures match."""
+    remove_v47(connection)
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_calls'"
+    ).fetchone()
+    if exists is not None:
+        columns = {row[1] for row in connection.execute('PRAGMA table_info("model_calls")')}
+        for name in ("input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens"):
+            if name in columns:
+                connection.execute(f'ALTER TABLE model_calls DROP COLUMN "{name}"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v45-to-v46'")
+
+
 def remove_v45(connection):
-    """Undo the persona draft ledger so a v44 fixture can be rebuilt."""
+    """Undo V46 usage columns and the persona draft ledger for a v44 fixture."""
+    remove_v46(connection)
     for name in ("persona_draft_versions_append_only_update",
                  "persona_draft_versions_append_only_delete"):
         connection.execute(f'DROP TRIGGER IF EXISTS "{name}"')

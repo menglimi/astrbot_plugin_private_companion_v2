@@ -1,58 +1,82 @@
-/* Model configuration: functional task routing, voice (TTS) and image generation, in three tabs. */
+/* Model configuration: task routing, voice, image generation and optional Laya decisions. */
 "use strict";
 window.CompanionModelsPage = (() => {
   const PREFIX = "/astrbot_plugin_private_companion_v2/";
   const routing = ["provider", "fallback", "max_output_tokens"];
   const fields = ["provider", "fallback", "prompt", "max_output_tokens", "timeout_seconds", "replacement_rules", "fallback_on_refusal", "replacement_scope"];
-  const fieldLabel = { provider: "主 Provider", fallback: "备用 Provider", prompt: "附加提示词",
+  const fieldLabel = { provider: "主模型提供方", fallback: "备用模型提供方", prompt: "附加提示词",
     max_output_tokens: "输出上限", timeout_seconds: "请求超时", replacement_rules: "替换规则",
     fallback_on_refusal: "拒答替代", replacement_scope: "替换作用范围" };
   const groups = [
-    ["对话", [["conversation.reply", "对话回复", "当前私聊的正文生成"]]],
+    ["对话", [["conversation.reply", "对话回复", "当前私聊的正文生成"],
+      ["conversation.image_narration", "当前图片转述", "为本轮已授权图片生成简短文字描述"],
+      ["conversation.video_narration", "原生视频转述", "将原视频交给支持视频输入的模型直接理解"]]],
     ["主动与记忆", [["proactive.compose", "主动联系", "有真实契机时组织联系内容"], ["memory.reflect", "记忆整理", "从已授权素材整理认识"]]],
     ["生活与成长", [["calendar.plan", "日程规划", "基于已有目标规划下一步"], ["role.state.maintain", "角色状态", "维护角色的连续生活状态"], ["role.reading.consume", "阅读理解", "阅读实际提供的原文"], ["role.growth.progress", "成长进展", "根据已完成确认提出进展"]]],
     ["私人书写", [["role.journal.diary", "日记", "保存私人书写"], ["role.journal.dream", "梦境", "保存梦境记录"], ["role.journal.derive", "书写整理", "整理已有文字素材"], ["role.journal.select", "素材选择", "选择本次书写素材"]]],
+    ["学习", [["role.expression.learn", "表达学习", "从当前会话的原始素材提炼表达规则"],
+      ["role.expression.review", "回复表达复核", "发送前检查规则应用是否自然"],
+      ["role.expression.contact_review", "主动表达复核", "主动消息发送前检查表达"],
+      ["role.self_review", "每日复盘", "从近期执行记录提炼调整"]]],
   ];
   const names = new Map(groups.flatMap(([group, items]) => items.map(([kind, label, description]) => [kind, { group, label, description }])));
   const errors = {
     configuration_revision_conflict: "配置已变化，草稿保留；核对当前值后再保存。", idempotency_key_conflict: "原保存请求与当前内容不一致，请刷新后核对。",
-    model_configuration_invalid: "请核对任务配置、Provider 和输出上限。", model_task_unavailable: "此任务已不再注册，请刷新列表。",
-    model_provider_unavailable: "当前 Provider 尚无 V2 适配器。", model_capability_mismatch: "所选 Provider 不支持这项任务。", model_output_limit: "输出上限超过所选 Provider 能力。",
-    model_fallback_duplicate: "备用 Provider 必须与主 Provider 不同。", core_access_required: "当前账号没有管理权限。", dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开小屋。",
-    staging_not_initialized: "请先在账号与会话加载 V2 运行实例。", staging_host_terminated: "宿主已停止，请重新打开插件。", bridge_timeout: "连接超时，请核对原保存结果。",
-    model_route_invalid: "替换规则未通过校验：请检查规则默认 Provider、匹配方式与时段。",
-    model_refused: "所选 Provider 拒绝了这次请求。",
-    model_probe_timeout: "测试超时，结果未知。", model_probe_failed: "Provider 未返回可确认结果。",
-    model_provider_changed: "测试期间 Provider 已变化，请重新测试。",
+    model_configuration_invalid: "请核对任务配置、模型提供方和输出上限。", model_task_unavailable: "此任务已不再注册，请刷新列表。",
+    model_provider_unavailable: "所选 AstrBot 模型未加载或暂不可用于 V2。", model_capability_mismatch: "所选模型提供方不支持这项任务。", model_output_limit: "输出上限超过所选模型提供方能力。",
+    model_catalog_unavailable: "无法读取已加载的 AstrBot 文本模型提供方。",
+    model_fallback_duplicate: "备用模型提供方必须与主模型提供方不同。", core_access_required: "当前账号没有管理权限。", dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开小屋。",
+    staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。", staging_host_terminated: "插件已停止，请重新打开插件。", bridge_timeout: "连接超时，请核对原保存结果。",
+    model_route_invalid: "替换规则未通过校验：请检查规则默认模型提供方、匹配方式与时段。",
+    model_refused: "所选模型提供方拒绝了这次请求。",
+    model_probe_timeout: "测试超时，结果未知。", model_probe_failed: "模型提供方未返回可确认结果。",
+    model_provider_changed: "测试期间模型提供方已变化，请重新测试。",
     model_voice_probe_timeout: "语音测试超时，结果未知。", model_voice_probe_failed: "语音合成未返回可确认结果。",
-    model_voice_provider_unavailable: "TTS Provider 尚未加载。", model_voice_audio_invalid: "Provider 未返回有效音频。",
-    model_voice_provider_changed: "测试期间 TTS Provider 已变化，请重新测试。",
-    model_image_store_failed: "生图开关保存失败，请检查宿主数据目录权限。",
+    model_voice_provider_unavailable: "语音服务尚未加载。", model_voice_audio_invalid: "语音服务未返回有效音频。",
+    model_voice_audio_read_failed: "语音文件已生成，但读取试听音频失败。",
+    model_voice_provider_changed: "测试期间语音服务已变化，请重新测试。",
+    model_image_store_failed: "生图开关保存失败，请检查插件数据目录权限。",
     model_request_invalid: "请求未通过校验，请刷新后重试。",
-    staging_profile_conflict: "当前宿主状态与固定 profile 不一致，请在账号与会话重新对配。",
-    tts_provider_invalid: "Provider 配置项未通过校验，请核对必填项。", tts_provider_missing: "TTS Provider 不存在，请刷新列表。",
-    tts_provider_exists: "Provider ID 已存在，请换一个。", tts_provider_unsupported: "当前 AstrBot 不支持动态管理 Provider。",
-    model_image_config_unavailable: "生图扩展未加载，路线与连接不可用。", model_image_config_conflict: "生图配置已在别处修改，请重新读取后再保存。",
-    model_image_config_invalid: "生图扩展拒绝了这些值，请核对路线与连接。", model_image_config_busy: "生图扩展正在执行任务，稍后再调整并发。",
+    staging_profile_conflict: "当前角色映射已变化，请在账号与会话重新读取。",
+    tts_provider_invalid: "语音服务配置未通过校验，请核对必填项。", tts_provider_missing: "语音服务不存在，请刷新列表。",
+    tts_provider_exists: "服务标识已存在，请换一个。", tts_provider_unsupported: "当前 AstrBot 版本不支持动态管理语音服务。",
+    tts_provider_test_timeout: "连接测试超时，请检查网络、代理和上游服务状态。",
+    tts_provider_test_failed: "连接测试未通过，请核对地址、密钥、代理和模型参数。",
+    tts_provider_test_unsupported: "该语音服务不支持连接自检，可继续使用测试合成验证。",
+    tts_provider_unloaded: "语音服务尚未加载，请先启用并刷新宿主状态。",
+    laya_config_conflict: "Laya 配置已变化，请刷新后再保存。", laya_config_invalid: "Laya 配置未通过校验，请核对接入方式。",
+    laya_config_unreadable: "Laya 配置无法读取，请检查插件数据目录。", laya_endpoint_missing: "远程模式需要填写 Laya 服务地址。",
+    laya_endpoint_invalid: "Laya 服务地址必须是 HTTP(S) 地址。", laya_model_invalid: "Laya 检查点选择无效。",
+    laya_mode_invalid: "Laya 接入方式无效。", laya_package_missing: "当前 AstrBot Python 环境未安装 Laya。",
+    laya_initialization_failed: "Laya Router 初始化失败，请检查安装和运行环境。", laya_inference_failed: "Laya 本地推理失败，请查看详细日志。",
+    laya_transport_failed: "Laya 连接失败，请检查地址、网络和远程服务状态。", laya_http_error: "Laya HTTP 服务返回错误，详细信息见下方。",
+    laya_response_invalid: "Laya 返回缺少官方 SystemOne 所需分类。", laya_contract_invalid: "Laya 分类超出插件决策合同，已拒绝采用。",
+    laya_rule_skip: "这类事件由程序规则处理，不调用 Laya。",
   };
   /* Real dashboard bridges reject failed requests with the error code carried in
      Error.message; the mocked bridge resolves error envelopes with Error.code. */
-  const fail = (err, fallback) => errors[err.code] || errors[err.message] || fallback;
+  const fail = (err, fallback) => errors[err.code] || errors[err.message] || err?.reason || fallback;
   /* 后端把机器码放在信封的 message 上（页面桥只转发 message），所以取码要同时
      看 data.code 与 message；reason 里若是人话则原样保留。 */
   const CODE = /^[a-z][a-z0-9_]{2,60}$/;
   const codeOf = wrapped => wrapped?.data?.code
     || (CODE.test(wrapped?.message || "") ? wrapped.message : "") || "";
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const failure = (code, confirmed = false) => Object.assign(new Error(code), { code, confirmed });
+  const failure = (code, confirmed = false, details = {}) => Object.assign(new Error(code), { code, confirmed, ...details });
   const states = new Map();
   let root = null, path = null, key = null, state = null, version = 0;
   const current = (ticket, s) => ticket === version && state === s && root?.isConnected;
   const taskOf = (s, kind) => s.status?.tasks.find(task => task.kind === kind) || null;
-  const configSource = source => ({ default: "插件默认", installation: "安装级", role: "角色级", window: "当前对象" }[source] || "上级配置");
-  const adoption = state => ({ applied: "已采用", next_task: "下次任务", consumer_not_started: "宿主未运行", failed: "采用失败", pending: "等待采用", restart_required: "需重启" }[state] || state);
+  const configSource = source => ({ default: "插件默认", host_conversation: "AstrBot 会话", installation: "安装级", role: "角色级", window: "当前对象" }[source] || "上级配置");
+  const adoption = state => ({ applied: "已采用", next_task: "下次任务", consumer_not_started: "尚未运行", failed: "采用失败", pending: "等待采用", restart_required: "需重启" }[state] || state);
   const taskName = kind => names.get(kind) || { group: "其他任务", label: kind, description: "V2 注册任务" };
   const snapshot = s => s?.status?.tasks || [];
+  const fallbackFor = task => {
+    const field = task.fields.fallback;
+    if (field?.explicit) return field.value || "";
+    return field?.value || field?.inherited_value || task.fields.provider?.inherited_value
+      || task.fields.provider?.value || "";
+  };
   const available = (s, task) => s.status.providers.filter(p => task.capabilities.every(cap => p.capabilities.includes(cap)));
   const effective = (task, draft, name) => draft.inherited[name] ? task.fields[name].inherited_value : draft.values[name];
   const providerFor = (task, draft) => effective(task, draft, "provider");
@@ -91,12 +115,37 @@ window.CompanionModelsPage = (() => {
       else if (!field.explicit || draft.values[name] !== field.value) changes[name] = draft.values[name]; }
     return { changes, reset }; }
   const dirty = (task, draft) => { const p = patchFor(task, draft); return Object.keys(p.changes).length > 0 || p.reset.length > 0; };
+  /* The Dashboard bridge normally returns the inner ``data`` object.  Some
+     older bridges and tests still return the complete response envelope.  A
+     voice probe's inner result also has ``status: "ok"``; only treat a value
+     as an envelope when its shape is actually envelope-shaped, otherwise the
+     successful audio result would be reduced to ``undefined``. */
+  const ENVELOPE_KEYS = new Set(["status", "message", "reason", "data", "error", "code"]);
+  const hasOwn = (value, name) => !!value && typeof value === "object"
+    && Object.prototype.hasOwnProperty.call(value, name);
+  const isEnvelope = value => !!value && typeof value === "object" && !Array.isArray(value)
+    && ["ok", "error"].includes(value.status) && hasOwn(value, "data")
+    && Object.keys(value).every(name => ENVELOPE_KEYS.has(name));
+  const responseContent = response => {
+    if (isEnvelope(response)) return {wrapped: response, value: response.data};
+    if (isEnvelope(response?.data)) return {wrapped: response.data, value: response.data.data};
+    /* A few bridge shims preserve one anonymous `data` layer without the
+       envelope fields.  Unwrap it only when it is the whole response. */
+    if (response && typeof response === "object" && !Array.isArray(response)
+        && !hasOwn(response, "status") && hasOwn(response, "data")
+        && response.data && typeof response.data === "object" && !Array.isArray(response.data)) {
+      return {wrapped: null, value: response.data};
+    }
+    return {wrapped: null, value: response};
+  };
   async function api(method, endpoint, body, timeout = 15000) { let timer;
     try { const bridge = window.CompanionProduct.bridgeNow() || await window.CompanionProduct.bridgeFor();
       const response = await Promise.race([method === "GET" ? bridge.apiGet(endpoint) : bridge.apiPost(endpoint, body), new Promise((_, reject) => { timer = setTimeout(() => reject(failure("bridge_timeout")), timeout); })]);
-      const wrapped = ["ok", "error"].includes(response?.status) ? response : ["ok", "error"].includes(response?.data?.status) ? response.data : null;
-      if (wrapped?.status === "error") throw failure(codeOf(wrapped) || "invalid_response", true);
-      const value = wrapped ? wrapped.data : response;
+      const {wrapped, value} = responseContent(response);
+      if (wrapped?.status === "error") {
+        const code = codeOf(wrapped) || "invalid_response";
+        throw failure(code, true, {reason: wrapped.reason || "", error: wrapped.reason || ""});
+      }
       if (!value || typeof value !== "object" || Array.isArray(value)) throw failure("invalid_response");
       return value;
     } finally { clearTimeout(timer); } }
@@ -120,7 +169,10 @@ window.CompanionModelsPage = (() => {
     if (Object.hasOwn(p.changes, "replacement_rules") && (typeof p.changes.replacement_rules !== "string" || p.changes.replacement_rules.length > 24000)) return false;
     const primary = projected(task, p, "provider"), fallback = projected(task, p, "fallback"), limit = projected(task, p, "max_output_tokens");
     const picked = [primary, ...(fallback ? [fallback] : [])], providers = picked.map(id => state.status.providers.find(provider => provider.id === id));
-    return new Set(picked).size === picked.length && providers.every(provider => provider && task.capabilities.every(cap => provider.capabilities.includes(cap)) && limit <= provider.max_output_tokens); }
+    const fallbackExplicit = Object.hasOwn(p.changes, "fallback")
+      || (!p.reset.includes("fallback") && task.fields.fallback.explicit);
+    return (!fallbackExplicit || !fallback || fallback !== primary)
+      && providers.every(provider => provider && task.capabilities.every(cap => provider.capabilities.includes(cap)) && limit <= provider.max_output_tokens); }
   /* ---------- functional markup (design alignment: MODEL_CONFIG_UI_UX_DESIGN_20260926) ---------- */
   /* Stable per-provider hue for the colored routing pills and map dots. */
   const hue = id => { let h = 0; for (const ch of String(id || "")) h = (h * 31 + ch.charCodeAt(0)) % 360; return h; };
@@ -134,36 +186,33 @@ window.CompanionModelsPage = (() => {
     memory: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/>',
     life: '<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/>',
     write: '<path d="M4 20l4-1 10-10-3-3L5 16l-1 4Z"/>',
-    lane: '<path d="M4 6h16M4 12h16M4 18h16"/>' };
+    lane: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    decision: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="5"/><path d="m8.5 8.5 7 7M15.5 8.5l-7 7"/>' };
   const groupIcon = name => ({ "对话": ICONS.reply, "主动与记忆": ICONS.memory, "生活与成长": ICONS.life, "私人书写": ICONS.write }[name] || ICONS.lane);
   function topbar(s) {
-    return `<div class="model-topbar"><span class="model-topbar-t">当前对象与角色 · 任务 → Provider 路由</span>
-      <span class="model-pill ${s.status?.host_state === "running" ? "ok" : "warn"}">${esc(s.status?.host_state === "running" ? "宿主运行中" : s.status?.host_state || "未连接")}</span>
+    return `<div class="model-topbar"><span class="model-topbar-t">当前对象与角色 · 任务 → 模型提供方路由</span>
+      <span class="model-pill ${s.status?.host_state === "running" ? "ok" : "warn"}">${esc(s.status?.host_state === "running" ? "运行中" : s.status?.host_state || "未连接")}</span>
       <button type="button" class="button small" data-model-action="refresh" ${s.loading || s.busy ? "disabled" : ""}>刷新配置</button></div>`; }
   function overview(s) { const tasks = snapshot(s), custom = tasks.filter(task => fields.some(name => task.fields[name].explicit)).length;
-    const withFb = tasks.filter(task => task.fields.fallback?.value).length;
+    const withFb = tasks.filter(task => fallbackFor(task)).length;
     return `<div class="model-overview"><div><strong>${tasks.length}</strong><span>已注册任务</span></div>
-      <div><strong>${s.status?.providers.length || 0}</strong><span>可用 Provider</span></div>
+      <div><strong>${s.status?.providers.length || 0}</strong><span>可用模型提供方</span></div>
       <div><strong>${withFb}</strong><span>已设回退</span></div>
       <div><strong>${custom}</strong><span>单独设置的任务</span></div></div>`; }
   function notice(s) { const text = s.notice || (s.loading ? "正在读取任务配置…" : "改动进入待保存队列，按下“保存”后在下一次启动的任务生效。");
     return `<div class="model-notice ${s.bad ? "error" : ""}" role="status" aria-live="polite">${esc(text)}</div>`; }
-  function rail(s) { const providers = s.status?.providers || []; if (!providers.length) return "";
-    const used = id => snapshot(s).filter(task => providerFor(task, s.drafts.get(task.kind)) === id).length;
-    const active = id => s.providerFilter === id ? " active" : "";
-    return `<div class="model-mlgd" aria-label="可用的 Provider">${providers.map(provider => `<button type="button" class="model-lgd${active(provider.id)}" data-model-provider="${esc(provider.id)}" aria-pressed="${s.providerFilter === provider.id}">
-        <i style="background:${pillColor(provider.id)}"></i><em>${esc(provider.id)}</em><span>${used(provider.id)} 项 · 上限 ${provider.max_output_tokens}</span></button>`).join("")}
-      ${s.providerFilter ? `<button type="button" class="model-rail-clear" data-model-action="clear-provider">清除 Provider 筛选</button>` : ""}</div>`; }
   function toolbar(s) { const count = selected(s).length;
     return `<div class="model-toolbar"><label class="model-search"><span>搜索任务</span>
         <input type="search" data-model-search value="${esc(s.query)}" placeholder="名称、用途或任务键"></label>
-      <div class="model-switches" role="group" aria-label="视图">${[["tasks", "按任务"], ["providers", "按 Provider"]].map(([id, label]) => `<button type="button" data-model-view="${id}" aria-pressed="${s.view === id}" class="${s.view === id ? "active" : ""}">${label}</button>`).join("")}</div>
+      <label class="model-provider-filter"><span>模型提供方</span><select data-model-provider-filter aria-label="按模型提供方筛选">
+        <option value="" ${s.providerFilter ? "" : "selected"}>全部提供方</option>${(s.status?.providers || []).map(provider => `<option value="${esc(provider.id)}" ${s.providerFilter === provider.id ? "selected" : ""}>${esc(providerLabel(provider))}</option>`).join("")}</select></label>
+      <div class="model-switches" role="group" aria-label="视图">${[["tasks", "按任务"], ["providers", "按提供方"]].map(([id, label]) => `<button type="button" data-model-view="${id}" aria-pressed="${s.view === id}" class="${s.view === id ? "active" : ""}">${label}</button>`).join("")}</div>
       <div class="model-filters" role="group" aria-label="来源筛选">${[["all", "全部"], ["custom", "单独设置"], ["inherited", "跟随上级"]]
         .map(([id, label]) => { const on = (id === "all" && !s.custom) || s.custom === id; return `<button type="button" data-model-custom="${id}" aria-pressed="${on}" class="${on ? "active" : ""}">${label}</button>`; }).join("")}</div>
       <div class="model-filters" role="group" aria-label="通道筛选">${[["all", "全部通道"], ["foreground", "前台"], ["background", "后台"]]
         .map(([id, label]) => `<button type="button" data-model-lane="${id}" aria-pressed="${s.lane === id}" class="${s.lane === id ? "active" : ""}">${label}</button>`).join("")}</div></div>
     ${count ? `<div class="model-selection" role="status">已选 <strong>${count}</strong> 项任务
-      <select data-model-assign aria-label="批量指派 Provider" ${s.busy || s.loading || s.denied ? "disabled" : ""}><option value="">批量指派 Provider…</option>${(s.status?.providers || []).map(provider => `<option value="${esc(provider.id)}">${esc(provider.id)}</option>`).join("")}</select>
+      <select data-model-assign aria-label="批量指派模型提供方" ${s.busy || s.loading || s.denied ? "disabled" : ""}><option value="">批量指派模型提供方…</option>${(s.status?.providers || []).map(provider => `<option value="${esc(provider.id)}">${esc(provider.id)}</option>`).join("")}</select>
       <button type="button" class="button small" data-model-action="inherit" ${s.busy || s.loading || s.denied ? "disabled" : ""}>恢复跟随上级</button>
       <button type="button" class="button small" data-model-action="clear-selection">取消选择</button></div>` : ""}`; }
   function queue(s) { const count = pendingCount(s); if (!count) return "";
@@ -177,10 +226,14 @@ window.CompanionModelsPage = (() => {
      模型名允许为空（本地测试适配器没有这个概念），所以后缀是可选的而不是拼死的。 */
   const providerLabel = provider => provider && provider.model
     ? `${provider.id} · ${provider.model}` : provider ? provider.id : "";
+  const capabilityLabel = capability => ({
+    text: "文本生成", image: "图片输入", audio: "音频输入", tools: "工具调用",
+    embedding: "向量嵌入", video: "视频理解", vision: "图像理解", "conversation.reply": "对话回复",
+  }[capability] || capability);
   function providerOptions(s, task, draft, name) { const providers = available(s, task);
     const selected = draft.inherited[name] ? task.fields[name].inherited_value : draft.values[name];
-    return `${name === "fallback" ? '<option value="">不使用备用 Provider</option>' : ''}${providers.map(provider => `<option value="${esc(provider.id)}" ${selected === provider.id ? "selected" : ""}>${esc(providerLabel(provider))}</option>`).join("")}
-      ${selected && !providers.some(p => p.id === selected) ? `<option value="${esc(selected)}" selected>${esc(selected)} · 未注册</option>` : ""}`; }
+    return `${name === "fallback" ? '<option value="">不使用备用模型</option>' : ''}${providers.map(provider => `<option value="${esc(provider.id)}" ${selected === provider.id ? "selected" : ""}>${esc(providerLabel(provider))}</option>`).join("")}
+      ${selected && !providers.some(p => p.id === selected) ? `<option value="${esc(selected)}" selected>${esc(selected)} · 当前不可用</option>` : ""}`; }
   function sourceCell(s, task, draft) { const field = task.fields.provider;
     if (draft.inherited.provider) return `<span class="model-source inherit">跟随 ${esc(configSource(field.inherited_source || "default"))}</span>`;
     if (field.explicit) return `<span class="model-source own">当前对象单独设置</span>`;
@@ -195,25 +248,25 @@ window.CompanionModelsPage = (() => {
     const testing = main && s.testing.has(main), result = main ? s.providerTests[main] : null;
     return `<article class="model-fncard${open ? " open" : ""}${waiting ? " dirty" : ""}${picked ? " picked" : ""}" data-fncard="${esc(task.kind)}">
       <div class="model-sc-tp">
-        <div class="model-eb">精准配置 · ${esc(info.group)}<span class="st">${own ? '<span class="model-tag a">单独设置</span>' : '<span class="model-tag n">跟随上级</span>'}</span></div>
+        <div class="model-eb">精确配置 · ${esc(info.group)}<span class="st">${own ? '<span class="model-tag a">单独设置</span>' : '<span class="model-tag n">跟随上级</span>'}</span></div>
         <div class="model-ti">${icon(groupIcon(info.group))}<b>${esc(info.label)}</b>
           <label class="model-pick"><input type="checkbox" data-model-pick="${esc(task.kind)}" ${picked ? "checked" : ""} aria-label="选择 ${esc(info.label)}"></label>
           <span class="model-tag ${task.lane === "foreground" ? "g" : "n"}">${task.lane === "foreground" ? "前台" : "后台"}</span></div>
         
-        <div class="model-rl">${task.capabilities.map(cap => `<span>${esc(cap)}</span>`).join("") || "<span>无能力声明</span>"}</div>
+        <div class="model-rl">${task.capabilities.map(cap => `<span>${esc(capabilityLabel(cap))}</span>`).join("") || "<span>无能力声明</span>"}</div>
       </div>
       <div class="model-sc-bd">
         ${draft.stale ? '<div class="model-alert">当前配置已更新。核对字段后，可保留草稿以新版本为基准继续编辑。</div>' : ""}
         ${draft.pending ? '<div class="model-alert">上次保存结果未确认。请核对原操作，避免重复提交。</div>' : ""}
-        <label class="model-fd"><span class="model-cap">主 Provider <em>上级默认 ${esc(task.fields.provider.inherited_value || "未设置")}</em></span>
-          <span class="model-msel"><i style="background:${pillColor(main)}"></i><select data-model-field="provider" data-model-kind="${esc(task.kind)}" aria-label="${esc(info.label)} 主 Provider" ${locked || draft.pending ? "disabled" : ""}>${providerOptions(s, task, draft, "provider")}</select></span></label>
-        <label class="model-fd"><span class="model-cap">备用 Provider <em>主 Provider 失败、超时或拒答时尝试一次</em></span>
-          <span class="model-msel"><i style="background:${pillColor(fallback)}"></i><select data-model-field="fallback" data-model-kind="${esc(task.kind)}" aria-label="${esc(info.label)} 备用 Provider" ${locked || draft.pending ? "disabled" : ""}>${providerOptions(s, task, draft, "fallback")}</select></span></label>
+        <label class="model-fd"><span class="model-cap">主模型提供方 <em>上级默认 ${esc(task.fields.provider.inherited_value || "未设置")}</em></span>
+          <span class="model-msel"><i style="background:${pillColor(main)}"></i><select data-model-field="provider" data-model-kind="${esc(task.kind)}" aria-label="${esc(info.label)} 主模型提供方" ${locked || draft.pending ? "disabled" : ""}>${providerOptions(s, task, draft, "provider")}</select></span></label>
+        <label class="model-fd"><span class="model-cap">备用模型提供方 <em>主模型失败、超时或拒答时尝试一次</em></span>
+          <span class="model-msel"><i style="background:${pillColor(fallback)}"></i><select data-model-field="fallback" data-model-kind="${esc(task.kind)}" aria-label="${esc(info.label)} 备用模型提供方" ${locked || draft.pending ? "disabled" : ""}>${providerOptions(s, task, draft, "fallback")}</select></span></label>
         <div class="model-duo">
           <label class="model-fd"><span class="model-cap">请求超时</span>
             <span class="model-unit"><input type="number" min="1" max="600" step="1" data-model-field="timeout_seconds" data-model-kind="${esc(task.kind)}" value="${esc(effective(task, draft, "timeout_seconds"))}" ${locked || draft.pending ? "disabled" : ""}><i>秒</i></span></label>
           <label class="model-fd"><span class="model-cap">单次输出上限</span>
-            <span class="model-unit"><input type="number" min="1" max="${limit}" step="1" data-model-field="max_output_tokens" data-model-kind="${esc(task.kind)}" value="${esc(effective(task, draft, "max_output_tokens"))}" ${locked || draft.pending ? "disabled" : ""}><i>Token</i></span></label>
+            <span class="model-unit"><input type="number" min="1" max="${limit}" step="1" data-model-field="max_output_tokens" data-model-kind="${esc(task.kind)}" value="${esc(effective(task, draft, "max_output_tokens"))}" ${locked || draft.pending ? "disabled" : ""}><i>令牌</i></span></label>
         </div>
         <label class="model-fd dash"><span class="model-cap">任务附加提示词 <em>最多 8000 字</em></span>
           <textarea rows="3" maxlength="8000" data-model-field="prompt" data-model-kind="${esc(task.kind)}" ${locked || draft.pending ? "disabled" : ""}>${esc(draft.inherited.prompt ? task.fields.prompt.inherited_value : draft.values.prompt)}</textarea></label>
@@ -234,11 +287,10 @@ window.CompanionModelsPage = (() => {
         <button type="button" class="button small" data-model-action="discard" data-model-kind="${esc(task.kind)}" ${locked ? "disabled" : ""}>放弃</button>
         <button type="button" class="button small primary" data-model-action="save-one" data-model-kind="${esc(task.kind)}" ${locked || draft.stale || !dirty(task, draft) ? "disabled" : ""}>保存</button>
       </div>
-      ${caps.length < 2 ? '<p class="model-hint">当前宿主仅注册支持该任务能力的 Provider ' + caps.length + ' 个，无法在此切换通道。</p>' : ""}
     </article>`; }
   function taskCards(s) { const rows = visible(s); if (!rows.length) return '<p class="model-empty">没有匹配的任务。</p>';
     return `<div class="model-qgrid">${rows.map(task => fnCard(s, task)).join("")}</div>`; }
-  function providerView(s) { const providers = s.status?.providers || []; if (!providers.length) return '<p class="model-empty">尚未读取到 Provider。</p>';
+  function providerView(s) { const providers = s.status?.providers || []; if (!providers.length) return '<p class="model-empty">尚未读取到模型提供方。</p>';
     const tasks = visible(s), filtered = !!(s.query || s.custom || s.lane !== "all" || s.providerFilter);
     const panels = providers.filter(provider => !s.providerFilter || s.providerFilter === provider.id).map(provider => {
       const capable = tasks.filter(task => task.capabilities.every(cap => provider.capabilities.includes(cap)));
@@ -247,13 +299,13 @@ window.CompanionModelsPage = (() => {
       return `<article class="model-provider-panel"><header><span><strong>${esc(provider.id)}</strong><em>${routed.length} / ${capable.length} 项任务走这里</em></span>
           <span class="model-state">上限 ${provider.max_output_tokens}</span></header>
         ${provider.model ? `<p class="model-provider-model">${esc(provider.model)}</p>` : ""}
-        <p class="model-provider-caps">${provider.capabilities.map(cap => `<small>${esc(cap)}</small>`).join("") || "<small>无能力声明</small>"}</p>
+        <p class="model-provider-caps">${provider.capabilities.map(cap => `<small>${esc(capabilityLabel(cap))}</small>`).join("") || "<small>无能力声明</small>"}</p>
          <ul class="model-provider-tasks">${routed.map(task => { const info = taskName(task.kind);
-           return `<li><button type="button" data-model-open="${esc(task.kind)}" aria-label="编辑 ${esc(info.label)} 的模型配置">${esc(info.label)}</button></li>`; }).join("") || '<li class="model-empty">还没有任务走这个 Provider。</li>'}</ul>
-         ${capable.length > routed.length ? `<p class="model-provider-note">还有 ${capable.length - routed.length} 项能力相符的任务由其他 Provider 承担。</p>` : ""}</article>`; }).filter(Boolean);
+           return `<li><button type="button" data-model-open="${esc(task.kind)}" aria-label="编辑 ${esc(info.label)} 的模型配置">${esc(info.label)}</button></li>`; }).join("") || '<li class="model-empty">还没有任务走这个模型提供方。</li>'}</ul>
+         ${capable.length > routed.length ? `<p class="model-provider-note">还有 ${capable.length - routed.length} 项能力相符的任务由其他模型提供方承担。</p>` : ""}</article>`; }).filter(Boolean);
     return panels.length ? `<div class="model-providers">${panels.join("")}</div>` : '<p class="model-empty">没有匹配的任务。</p>'; }
-  function body(s) { if (!s.status) return '<p class="model-empty">连接 V2 宿主后显示已注册任务。</p>';
-    if (!snapshot(s).length) return '<p class="model-empty">当前宿主还没有注册任何模型任务。</p>';
+  function body(s) { if (!s.status) return '<p class="model-empty">角色就绪后显示可用模型任务。</p>';
+    if (!snapshot(s).length) return '<p class="model-empty">当前没有可用的模型任务。</p>';
     return s.view === "providers" ? providerView(s) : taskCards(s); }
   function syncInput(kind) { const s = state; if (!root || !s) return;
     const slot = root.querySelector(".model-queue-slot"); if (slot) slot.innerHTML = queue(s);
@@ -263,7 +315,17 @@ window.CompanionModelsPage = (() => {
   /* ---------- functional actions ---------- */
   async function refresh() { const s = state, ticket = version; if (!s || s.loading || s.busy) return; s.loading = true; s.notice = "正在读取任务配置…"; render();
     try { const data = await api("GET", path); if (!current(ticket, s)) return; setStatus(s, data); s.bad = false; s.denied = false; s.notice = "已读取当前任务配置。"; }
-    catch (err) { if (!current(ticket, s)) return; s.bad = true; s.denied = true; s.notice = fail(err, "无法读取任务配置，请检查宿主连接。"); }
+    catch (err) { if (!current(ticket, s)) return;
+      /* 失败后的页面只能显示错误与重试入口，不能把上一次的任务路由、Provider
+         和可编辑草稿继续当成当前真实配置。未提交草稿和待核对保存仍保留，
+         下一次成功读取会由 setStatus() 按令牌重新核对。 */
+      s.status = null;
+      s.selection = [];
+      s.expanded = null;
+      for (const draft of s.drafts.values()) {
+        if (draft && (draft.touched || draft.pending)) draft.stale = true;
+      }
+      s.bad = true; s.denied = true; s.notice = fail(err, "无法读取任务配置，请重新读取状态。"); }
     finally { s.loading = false; if (current(ticket, s)) render(); } }
   async function saveTasks(s, kinds) { if (s.busy || s.loading || s.denied) return; const unsaved = kinds.filter(kind => { const task = taskOf(s, kind), draft = s.drafts.get(kind);
     return task && draft && !draft.stale && !draft.pending && dirty(task, draft); });
@@ -324,6 +386,7 @@ window.CompanionModelsPage = (() => {
     if (s.sub === "pol") { event.type === "change" ? ruleChange(s, event) : ruleInput(s, event); return; }
     if (target.matches("[data-model-search]")) { s.query = target.value; render(); const next = root.querySelector("[data-model-search]");
       if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); } return; }
+    if (target.matches("[data-model-provider-filter]")) { if (event.type !== "change") return; s.providerFilter = target.value || null; render(); return; }
     if (target.matches("[data-model-slot]")) { s.slotDraft[target.dataset.modelSlot] = target.value; render(); return; }
     const kind = target.dataset.modelKind;
     if (target.matches("[data-model-assign]")) { assign(s, target.value); target.value = ""; return; }
@@ -381,8 +444,6 @@ window.CompanionModelsPage = (() => {
     const slotApply = event.target.closest("[data-model-slot-apply]"); if (slotApply) { applySlot(s, slotApply.dataset.modelSlotApply); return; }
     const pick = event.target.closest("[data-model-pick]");
     if (pick) { const kind = pick.dataset.modelPick; s.selection = s.selection.includes(kind) ? s.selection.filter(item => item !== kind) : s.selection.concat(kind); render(); return; }
-    const provider = event.target.closest("[data-model-provider]");
-    if (provider) { const id = provider.dataset.modelProvider; s.providerFilter = s.providerFilter === id ? null : id; render(); return; }
     const custom = event.target.closest("[data-model-custom]");
     if (custom) { const id = custom.dataset.modelCustom; s.custom = id === "all" ? null : id; render(); return; }
     const lane = event.target.closest("[data-model-lane]");
@@ -391,7 +452,6 @@ window.CompanionModelsPage = (() => {
     if (view) { s.view = view.dataset.modelView; render(); return; }
     const action = event.target.closest("[data-model-action]")?.dataset.modelAction; if (!action || s.busy && action !== "refresh") return;
     if (action === "refresh") { refresh(); return; }
-    if (action === "clear-provider") { s.providerFilter = null; render(); return; }
     if (action === "clear-selection") { s.selection = []; render(); return; }
     if (action === "inherit") { restoreInherit(s, selected(s)); return; }
     if (action === "discard-all") { discard(s, selected(s).length ? selected(s) : snapshot(s).map(task => task.kind)); return; }
@@ -417,7 +477,7 @@ window.CompanionModelsPage = (() => {
       if (!Array.isArray(data.languages) || !Array.isArray(data.providers) || typeof data.edit_token !== "string") throw failure("invalid_response");
       if (v.draft && voiceDirty(v)) v.stale = v.data.edit_token !== data.edit_token;
       else v.draft = voiceDraft(data);
-      v.data = data; v.loaded = true; v.bad = false; v.notice = "已读取当前 TTS 绑定。"; }
+      v.data = data; v.loaded = true; v.bad = false; v.notice = "已读取当前语音服务绑定。"; }
     catch (err) { if (!current(ticket, s)) return; v.bad = true; v.notice = fail(err, "无法读取语音配置。"); }
     finally { v.loading = false; if (current(ticket, s)) render(); } }
   async function voiceSave(s, retry = false) { const v = s.voice;
@@ -433,25 +493,50 @@ window.CompanionModelsPage = (() => {
       if (err.confirmed) { v.pending = null; v.stale = true; }
       v.notice = err.confirmed ? (fail(err, "保存未通过，请刷新核对配置。")) : "保存结果未确认，可重试同一请求核对结果。"; }
     finally { v.busy = false; if (current(ticket, s)) render(); } }
+  function clearVoiceTest(v) { if (v.lastTest?.audioUrl && typeof window.URL?.revokeObjectURL === "function") window.URL.revokeObjectURL(v.lastTest.audioUrl); v.lastTest = null; }
+  function voiceAudioUrl(result) {
+    if (result.status !== "ok" || typeof result.audio_base64 !== "string" || !result.audio_base64
+        || typeof window.atob !== "function" || typeof window.Blob !== "function"
+        || typeof window.URL?.createObjectURL !== "function") return "";
+    const binary = window.atob(result.audio_base64), bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    const mime = /^audio\/[a-z0-9.+-]+$/i.test(result.audio_mime_type || "") ? result.audio_mime_type : "";
+    return window.URL.createObjectURL(new window.Blob([bytes], {type: mime}));
+  }
   async function voiceTest(s) { const v = s.voice, lang = voiceCurrent(v), providerId = voiceBinding(v, lang);
     if (!providerId || v.testing || !v.data.providers.some(p => p.id === providerId)) return;
-    const ticket = version; v.testing = true; v.lastTest = null; v.notice = ""; render();
+    const ticket = version; v.testing = true; clearVoiceTest(v); v.notice = ""; render();
     try { const result = await api("POST", path + "/voice/test", {provider_id: providerId, language: lang.k}, 125000);
       if (!current(ticket, s)) return;
-      v.lastTest = {status: result.status, latency_ms: result.latency_ms, code: result.code || ""}; }
+      const audioUrl = voiceAudioUrl(result);
+      const status = result.status === "ok" && !audioUrl ? "unavailable" : result.status || "unknown";
+      const safeResult = {...result};
+      delete safeResult.audio_base64; delete safeResult.audio_mime_type;
+      v.lastTest = {...safeResult, status,
+        code: result.code || (status === "unavailable" ? "model_voice_audio_invalid" : ""), audioUrl}; }
     catch (err) { if (!current(ticket, s)) return;
-      v.lastTest = {status: "unknown", code: err.code || err.message || ""}; }
+      v.lastTest = {status: "unknown", code: err.code || err.message || "model_voice_probe_failed",
+        stage: "request", exception_type: err.name || "Error", error: err.error || err.reason || err.message || "",
+        suggestion: "刷新语音配置并确认 Provider 状态后重试。", request_id: err.request_id || ""}; }
     finally { v.testing = false; if (current(ticket, s)) render(); } }
   /* V1-parity diagnostics: the outcome names the failure stage instead of a bare error. */
   const VOICE_SAMPLES = {"zh": "你好。", "ja": "こんにちは。", "en": "Hello."};
+  const voiceStage = {provider_lookup: "Provider 查找", synthesis: "调用 Provider 合成", audio_read: "读取音频", provider_recheck: "Provider 复核", request: "请求"};
   const voiceTestLabel = r => r.status === "ok" ? `语音合成成功 · ${r.latency_ms} ms`
     : r.code ? (errors[r.code] || "语音合成结果未知。") : "语音合成结果未知。";
+  const voiceTestDiagnostic = r => r.status === "ok" ? "" : `<span class="model-voice-diagnostic">
+    ${r.stage ? `<b>阶段：${esc(voiceStage[r.stage] || r.stage)}</b>` : ""}
+    ${r.exception_type ? `<span>异常：${esc(r.exception_type)}</span>` : ""}
+    ${r.error ? `<span>错误：${esc(r.error)}</span>` : ""}
+    ${r.suggestion ? `<span>建议：${esc(r.suggestion)}</span>` : ""}
+    ${r.request_id ? `<span>诊断号：${esc(r.request_id)}</span>` : ""}
+  </span>`;
   /* ---------- TTS provider management (V1 parity; AstrBot owns provider configs) ---------- */
   async function ttsCatalogLoad(s) { const v = s.voice; if (v.catalogLoading) return;
     const ticket = version; v.catalogLoading = true; render();
     try { const data = await api("GET", path + "/tts/providers"); if (!current(ticket, s)) return;
       v.catalog = data; }
-    catch (err) { if (!current(ticket, s)) return; v.catalog = { items: [], templates: [], error: fail(err, "无法读取 Provider 配置列表。") }; }
+    catch (err) { if (!current(ticket, s)) return; v.catalog = { items: [], templates: [], error: fail(err, "无法读取语音服务配置列表。") }; }
     finally { v.catalogLoading = false; if (current(ticket, s)) render(); } }
 
   const ttsSelected = v => (v.catalog && v.catalog.items || []).find(item => item.id === v.editorId) || null;
@@ -460,82 +545,152 @@ window.CompanionModelsPage = (() => {
       values.enable = item.enable; v.editorValues[item.id] = values; }
     return v.editorValues[item.id]; }
 
+  const ttsFieldRank = field => {
+    const key = String(field?.key || "").toLowerCase();
+    const exact = {api_base: 0, api_key: 1, proxy: 2, timeout: 3, model: 0,
+      "fishaudio-tts-character": 1, "fishaudio-tts-reference-id": 2};
+    if (Object.hasOwn(exact, key)) return exact[key];
+    if (key.includes("model")) return 4;
+    if (key.includes("voice") || key.includes("character")) return 5;
+    if (key.includes("reference")) return 6;
+    return 20;
+  };
+  const ttsFieldValue = (field, value) => {
+    if (field.type === "object" || field.type === "list") {
+      if (typeof value === "string") return value;
+      try { return JSON.stringify(value ?? (field.type === "object" ? {} : []), null, 2); }
+      catch { return String(value ?? ""); }
+    }
+    return value === undefined || value === null ? "" : value;
+  };
   const ttsField = (field, values) => {
     const attr = `data-tts-field="${esc(field.key)}"`;
     if (field.type === "bool") return `<label class="model-fd"><span class="model-cap">${esc(field.label)}</span>
       <label class="model-switch"><input type="checkbox" ${attr} ${values[field.key] ? "checked" : ""}><i></i></label></label>`;
-    if (field.options.length) return `<label class="model-fd"><span class="model-cap">${esc(field.label)}</span>
-      <select ${attr}>${field.options.map(option => `<option value="${esc(option.value)}" ${String(values[field.key]) === option.value ? "selected" : ""}>${esc(option.label)}</option>`).join("")}</select></label>`;
+    if (field.options.length) {
+      const current = String(values[field.key] ?? "");
+      const known = field.options.some(option => String(option.value) === current);
+      return `<label class="model-fd"><span class="model-cap">${esc(field.label)}${field.hint ? ` <em>${esc(field.hint)}</em>` : ""}</span>
+        <select ${attr}>${field.options.map(option => `<option value="${esc(option.value)}" ${String(option.value) === current ? "selected" : ""}>${esc(option.label)}</option>`).join("")}${current && !known ? `<option value="${esc(current)}" selected>${esc(current)} · 当前值</option>` : ""}</select></label>`;
+    }
     if (field.secret) return `<label class="model-fd"><span class="model-cap">${esc(field.label)} <em>${field.set ? "已配置 · 留空表示保留" : "未配置"}</em></span>
-      <input type="password" ${attr} value="" placeholder="${field.set ? "已配置，留空表示保留" : "请输入"}" autocomplete="new-password"></label>`;
+      <input type="password" ${attr} value="${esc(values[field.key] || "")}" placeholder="${field.set ? "已配置，留空表示保留" : "请输入"}" autocomplete="new-password"></label>`;
+    const hint = field.hint ? ` <em>${esc(field.hint)}</em>` : "";
+    if (field.type === "object" || field.type === "list") return `<label class="model-fd"><span class="model-cap">${esc(field.label)}${hint}</span>
+      <textarea ${attr} rows="6" spellcheck="false">${esc(ttsFieldValue(field, values[field.key]))}</textarea></label>`;
     const type = field.type === "int" || field.type === "float" ? "number" : "text";
-    return `<label class="model-fd"><span class="model-cap">${esc(field.label)}${field.hint ? ` <em>${esc(field.hint)}</em>` : ""}</span>
-      <input type="${type}" ${attr} value="${esc(values[field.key] === undefined ? "" : values[field.key])}"></label>`; };
+    const numeric = type === "number";
+    const attrs = numeric ? ` step="${esc(field.step ?? (field.type === "int" ? "1" : "any"))}"${field.min !== null && field.min !== undefined ? ` min="${esc(field.min)}"` : ""}${field.max !== null && field.max !== undefined ? ` max="${esc(field.max)}"` : ""}` : "";
+    return `<label class="model-fd"><span class="model-cap">${esc(field.label)}${hint}</span>
+      <input type="${type}" ${attr} value="${esc(ttsFieldValue(field, values[field.key]))}"${attrs}></label>`; };
 
   function ttsEditor(s) { const v = s.voice;
     if (!v.editorOpen) return "";
-    if (v.catalogLoading) return '<div class="model-card"><p class="model-empty">正在读取 Provider 配置…</p></div>';
+    if (v.catalogLoading) return '<div class="model-card"><p class="model-empty">正在读取语音服务配置…</p></div>';
     if (!v.catalog) return "";
     if (v.catalog.error) return `<div class="model-card"><p class="model-notice error">${esc(v.catalog.error)}</p></div>`;
     const items = v.catalog.items || [];
     const item = ttsSelected(v) || items[0] || null;
     if (item) v.editorId = item.id;
-    const creating = v.creating;
-    const templates = v.catalog.templates || [];
-    const createType = v.createDraft.type || (templates[0] && templates[0].type) || "";
-    const fields = item && item.fields ? item.fields : [];
-    const values = item ? ttsValues(v, item) : null;
-    return `<div class="model-card tts-editor"><div class="model-phead"><div class="model-grow"><span class="model-eb">连接管理</span><h3>TTS Provider 配置</h3></div>
-        <button type="button" class="button small" data-tts-create-toggle ${v.ttsBusy ? "disabled" : ""}>${creating ? "收起新建" : "+ 新建 Provider"}</button></div>
+     const creating = v.creating;
+     const templates = v.catalog.templates || [];
+     const createType = v.createDraft.type || (templates[0] && templates[0].type) || "";
+     const fields = item && item.fields ? [...item.fields].sort((left, right) => ttsFieldRank(left) - ttsFieldRank(right)) : [];
+     const values = item ? ttsValues(v, item) : null;
+     const fieldGroups = [["connection", "连接与凭据"], ["voice", "模型与音色"], ["advanced", "高级参数"]];
+     const fieldMarkup = fieldGroups.map(([group, label]) => {
+       const groupFields = fields.filter(field => (field.group || "advanced") === group);
+       return groupFields.length ? `<section class="model-tts-group"><h4>${label}</h4><div class="model-tts-fields">${groupFields.map(field => ttsField(field, values)).join("")}</div></section>` : "";
+     }).join("");
+     const testResult = item ? v.ttsTestResults?.[item.id] : null;
+     return `<div class="model-card tts-editor"><div class="model-phead"><div class="model-grow"><span class="model-eb">连接管理</span><h3>语音服务配置</h3></div>
+        <button type="button" class="button small" data-tts-create-toggle ${v.ttsBusy ? "disabled" : ""}>${creating ? "收起新建" : "+ 新建语音服务"}</button></div>
       ${creating ? `<div class="model-vcreate">
           <label class="model-fd"><span class="model-cap">提供商类型</span>
             <select data-tts-type>${templates.map(template => `<option value="${esc(template.type)}" ${template.type === createType ? "selected" : ""}>${esc(template.label)}</option>`).join("")}</select></label>
-          <label class="model-fd"><span class="model-cap">Provider ID <em>字母、数字、点、下划线、冒号、短横线</em></span>
+          <label class="model-fd"><span class="model-cap">服务标识 <em>字母、数字、点、下划线、冒号、短横线</em></span>
             <input data-tts-id value="${esc(v.createDraft.id)}" placeholder="例如 fishaudio-ja"></label>
           <div class="model-editor-actions"><button type="button" class="button small primary" data-tts-create ${v.ttsBusy || !createType ? "disabled" : ""}>创建（默认停用）</button></div>
         </div>` : ""}
       ${items.length ? `<label class="model-fd"><span class="model-cap">编辑对象</span>
-          <select data-tts-pick>${items.map(option => `<option value="${esc(option.id)}" ${option.id === (item && item.id) ? "selected" : ""}>${esc(option.id)} · ${esc(option.label)}${option.enable ? " · 已启用" : " · 停用"}${option.loaded ? "" : " · 未加载"}</option>`).join("")}</select></label>` : '<p class="model-empty">还没有可管理的 TTS Provider。</p>'}
+          <select data-tts-pick>${items.map(option => `<option value="${esc(option.id)}" ${option.id === (item && item.id) ? "selected" : ""}>${esc(option.id)} · ${esc(option.label)}${option.enable ? " · 已启用" : " · 停用"}${option.loaded ? "" : " · 未加载"}</option>`).join("")}</select></label>` : '<p class="model-empty">还没有可管理的语音服务。</p>'}
       ${item && values ? `<div class="model-tts-fields">
-          <label class="model-fd"><span class="model-cap">启用 <em>停用的 Provider 不能被语种绑定使用</em></span>
+          <label class="model-fd"><span class="model-cap">启用 <em>停用的语音服务不能被语种绑定使用</em></span>
             <label class="model-switch"><input type="checkbox" data-tts-enable ${values.enable ? "checked" : ""}><i></i></label></label>
-          ${fields.map(field => ttsField(field, values)).join("")}
+           ${fieldMarkup}
         </div>
-        <div class="model-editor-actions">
-          <button type="button" class="button primary" data-tts-save ${v.ttsBusy ? "disabled" : ""}>保存 Provider 配置</button>
-          <button type="button" class="button" data-tts-clone ${v.ttsBusy ? "disabled" : ""}>克隆为${esc(voiceCurrent(v).n)}专用</button></div>
-        <p class="model-note">新建或克隆后需启用。保存对所有会话生效。</p>` : ""}
+         <div class="model-editor-actions">
+           <button type="button" class="button primary" data-tts-save ${v.ttsBusy ? "disabled" : ""}>保存语音服务配置</button>
+           <button type="button" class="button" data-tts-clone ${v.ttsBusy ? "disabled" : ""}>克隆为${esc(voiceCurrent(v).n)}专用</button>
+           <button type="button" class="button" data-tts-test ${v.ttsBusy || !item.loaded ? "disabled" : ""}>${v.ttsBusy && v.ttsTesting ? "测试中…" : "测试连接"}</button></div>
+         ${testResult ? `<div class="model-tts-test-result ${testResult.status === "ok" ? "ok" : "error"}"><b>${testResult.status === "ok" ? "连接测试通过" : "连接测试未通过"}</b><span>${esc(testResult.error || testResult.detail || "Provider 自检完成")}</span>${testResult.suggestion ? `<small>${esc(testResult.suggestion)}</small>` : ""}</div>` : ""}
+         <p class="model-note">新建或克隆后需启用。保存对所有会话生效。</p>` : ""}
     </div>`; }
 
   async function ttsCreate(s) { const v = s.voice; if (v.ttsBusy) return;
     const providerType = v.createDraft.type || (v.catalog && v.catalog.templates && v.catalog.templates[0] && v.catalog.templates[0].type) || "";
     const providerId = String(v.createDraft.id || "").trim();
-    if (!providerType || !providerId) { v.bad = true; v.notice = "先选择类型并填写 Provider ID。"; render(); return; }
-    const ticket = version; v.ttsBusy = true; v.notice = "正在创建 Provider…"; render();
+    if (!providerType || !providerId) { v.bad = true; v.notice = "先选择类型并填写服务标识。"; render(); return; }
+    const ticket = version; v.ttsBusy = true; v.notice = "正在创建语音服务…"; render();
     try { const data = await api("POST", path + "/tts/providers/create", {type: providerType, id: providerId}, 30000);
       if (!current(ticket, s)) return;
       v.catalog = data; v.editorValues = {}; v.editorId = providerId; v.creating = false;
-      v.createDraft = { type: "", id: "" }; v.bad = false; v.notice = "Provider 已创建（默认停用），填写连接并启用。"; }
-    catch (err) { if (!current(ticket, s)) return; v.bad = true; v.notice = fail(err, "Provider 创建未完成。"); }
+      v.createDraft = { type: "", id: "" }; v.bad = false; v.notice = "语音服务已创建（默认停用），填写连接并启用。"; }
+    catch (err) { if (!current(ticket, s)) return; v.bad = true; v.notice = fail(err, "语音服务创建未完成。"); }
     finally { v.ttsBusy = false; if (current(ticket, s)) render(); } }
 
   async function ttsSave(s) { const v = s.voice, item = ttsSelected(v); if (!item || v.ttsBusy) return;
-    const values = ttsValues(v, item); const ticket = version; v.ttsBusy = true; v.notice = "正在保存 Provider 配置…"; render();
-    try { const data = await api("POST", path + "/tts/providers/update", {provider_id: item.id, values}, 30000);
+    const values = ttsValues(v, item), lang = voiceCurrent(v), binding = voiceBinding(v, lang);
+    const shared = binding === item.id && v.data.languages.some(other => other.k !== lang.k && voiceBinding(v, other) === item.id);
+    const ticket = version; v.ttsBusy = true; v.notice = shared ? "检测到多个语种共用此服务，正在拆分当前语种配置…" : "正在保存语音服务配置…"; render();
+    try {
+      let data;
+      if (shared) {
+        data = await api("POST", path + "/tts/providers/clone", {
+          provider_id: item.id, language: lang.k,
+          config: {enable: Boolean(values.enable), values: {...values}},
+        }, 30000);
+        const cloneId = data.created_id || data.provider_id;
+        if (!cloneId) throw failure("invalid_response");
+        v.catalog = data; v.editorValues = {}; v.editorId = cloneId;
+        v.draft.bindings[lang.k] = cloneId;
+        /* The provider clone and language binding are one user action.  Keep
+           the same edit-token/retry semantics as the ordinary voice save. */
+        await voiceSave(s);
+        v.notice = `已将 ${lang.n} 拆分为 ${cloneId}，其他语种仍使用原服务。`;
+      } else {
+        data = await api("POST", path + "/tts/providers/update", {provider_id: item.id, values}, 30000);
+        if (!current(ticket, s)) return;
+        v.catalog = data; delete v.editorValues[item.id]; v.bad = false; v.notice = "语音服务配置已保存，并已写入 AstrBot。";
+      }
       if (!current(ticket, s)) return;
-      v.catalog = data; delete v.editorValues[item.id]; v.bad = false; v.notice = "Provider 配置已保存，写入 AstrBot Provider 配置。"; }
-    catch (err) { if (!current(ticket, s)) return; v.bad = true; v.notice = fail(err, "Provider 配置保存未完成。"); }
+      if (!shared) v.bad = false;
+      }
+    catch (err) { if (!current(ticket, s)) return; v.bad = true; v.notice = fail(err, "语音服务配置保存未完成。"); }
     finally { v.ttsBusy = false; if (current(ticket, s)) render(); } }
 
   async function ttsClone(s) { const v = s.voice, item = ttsSelected(v); if (!item || v.ttsBusy) return;
-    const lang = voiceCurrent(v), ticket = version; v.ttsBusy = true; v.notice = "正在克隆 Provider…"; render();
-    try { const data = await api("POST", path + "/tts/providers/clone", {provider_id: item.id, language: lang.k}, 30000);
+    const lang = voiceCurrent(v), values = ttsValues(v, item), ticket = version; v.ttsBusy = true; v.notice = "正在克隆语音服务…"; render();
+    try { const data = await api("POST", path + "/tts/providers/clone", {provider_id: item.id, language: lang.k,
+        config: {enable: Boolean(values.enable), values: {...values}}}, 30000);
       if (!current(ticket, s)) return;
       v.catalog = data; v.editorValues = {}; v.editorId = data.created_id || v.editorId;
       if (v.draft) v.draft.bindings[lang.k] = data.created_id || "";
       v.bad = false; v.notice = `已克隆为 ${v.editorId}（默认停用），当前语种草稿已指向它；启用并保存语种绑定后生效。`; }
-    catch (err) { if (!current(ticket, s)) return; v.bad = true; v.notice = fail(err, "Provider 克隆未完成。"); }
+    catch (err) { if (!current(ticket, s)) return; v.bad = true; v.notice = fail(err, "语音服务克隆未完成。"); }
     finally { v.ttsBusy = false; if (current(ticket, s)) render(); } }
+
+  async function ttsTest(s) { const v = s.voice, item = ttsSelected(v); if (!item || v.ttsBusy || !item.loaded) return;
+    const ticket = version; v.ttsBusy = true; v.ttsTesting = true; v.notice = "正在测试语音服务连接…"; render();
+    try { const result = await api("POST", path + "/tts/providers/test", {provider_id: item.id}, 95000);
+      if (!current(ticket, s)) return;
+      v.ttsTestResults = {...(v.ttsTestResults || {}), [item.id]: result};
+      v.bad = result.status !== "ok";
+      v.notice = result.status === "ok" ? "语音服务连接测试通过。" : (result.error || "语音服务连接测试未通过。");
+    } catch (err) { if (!current(ticket, s)) return;
+      v.ttsTestResults = {...(v.ttsTestResults || {}), [item.id]: {status: "unknown", code: err.code || err.message || ""}};
+      v.bad = true; v.notice = fail(err, "语音服务连接测试未完成。");
+    } finally { v.ttsBusy = false; v.ttsTesting = false; if (current(ticket, s)) render(); } }
 
   function voicePane(s) { const v = s.voice; if (!v.data || !v.draft) return `<p class="model-empty">${esc(v.notice || "正在读取语音配置…")}</p>`;
     const lang = voiceCurrent(v), binding = voiceBinding(v, lang), loaded = v.data.providers.some(p => p.id === binding);
@@ -543,28 +698,30 @@ window.CompanionModelsPage = (() => {
     const missing = binding && !loaded;
     const shared = binding ? v.data.languages.filter(item => item.k !== lang.k && voiceBinding(v, item) === binding) : [];
     const dot = item => { const b = voiceBinding(v, item); return !b ? "var(--m-line2)" : v.data.providers.some(p => p.id === b) ? "var(--m-green)" : "var(--m-red)"; };
-    const sub = item => { const b = voiceBinding(v, item); return b ? esc(b) + (v.data.providers.some(p => p.id === b) ? " · 已加载" : " · 未加载") : "跟随会话 Provider"; };
+    const sub = item => { const b = voiceBinding(v, item); return b ? esc(b) + (v.data.providers.some(p => p.id === b) ? " · 已加载" : " · 未加载") : "跟随当前会话的语音服务"; };
     const test = v.lastTest;
     return `<div class="model-voice">
       <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">合成后端</span><h3>语音模型</h3></div>
-          <button type="button" class="button small" data-go="manage" data-manage="reply">TTS 增强设置 ↗</button>
+          <button type="button" class="button small" data-go="manage" data-manage="expression" data-manage-subtab="voice">语音增强设置 ↗</button>
           <button type="button" class="button small" data-voice-refresh ${v.loading || v.busy ? "disabled" : ""}>刷新</button></div>
-        <div class="model-kpis">${kpi(v.data.voice_enabled ? "已开启" : "未开启", "语音回复")}${kpi(bound + "/3", "专用语种绑定")}${kpi(v.data.providers.length, "已加载 TTS Provider")}${kpi(v.data.timeout_seconds + "s", "当前合成超时")}</div></div>
-      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">按语种配置 TTS</span><h3>${esc(lang.n)}</h3></div>
+        <div class="model-kpis">${kpi(v.data.voice_enabled ? "已开启" : "未开启", "语音回复")}${kpi(bound + "/3", "专用语种绑定")}${kpi(v.data.providers.length, "已加载语音服务")}${kpi(v.data.timeout_seconds + "s", "当前合成超时")}</div></div>
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">按语种配置语音合成</span><h3>${esc(lang.n)}</h3></div>
           <span class="model-tag ${missing ? "r" : binding ? "g" : "n"}">${missing ? "绑定未加载" : binding ? "已加载" : "跟随会话"}</span>
           <button type="button" class="button small" data-voice-editor ${v.loading || v.busy ? "disabled" : ""}>${v.editorOpen ? "收起连接管理" : "新建 / 编辑连接"}</button></div>
         <div class="model-vtabs">${v.data.languages.map(item => `<button type="button" data-voice-lang="${esc(item.k)}" class="${item.k === lang.k ? "on" : ""}"><b><i class="d" style="background:${dot(item)}"></i>${esc(item.n)}</b><small>${sub(item)}</small></button>`).join("")}</div>
-        ${shared.length ? `<div class="model-sharewarn"><span style="flex:1">该 Provider 同时绑定到${shared.map(item => item.n).join("、")}。V2 按语种独立保存，修改当前语种不会影响其他语种。</span>
+        ${shared.length ? `<div class="model-sharewarn"><span style="flex:1">该语音服务同时绑定到${shared.map(item => item.n).join("、")}。V2 按语种独立保存，修改当前语种不会影响其他语种。</span>
           <button type="button" class="button small" data-voice-unbind ${v.busy || v.loading || v.pending ? "disabled" : ""}>解除${shared.map(item => item.n).join("、")}绑定</button></div>` : ""}
-        <div class="model-vbar"><label class="model-fd"><span class="model-cap">${esc(lang.n)} 语音合成 Provider <em>连接、凭据和声音由 AstrBot TTS 配置管理</em></span>
-          <select data-voice-provider ${v.busy || v.loading || v.pending ? "disabled" : ""}><option value="">跟随 AstrBot 当前会话 Provider</option>
+        <div class="model-vbar"><label class="model-fd"><span class="model-cap">${esc(lang.n)} 语音服务 <em>连接、凭据和声音由 AstrBot 语音配置管理</em></span>
+          <select data-voice-provider ${v.busy || v.loading || v.pending ? "disabled" : ""}><option value="">跟随 AstrBot 当前会话的语音服务</option>
             ${v.data.providers.map(p => `<option value="${esc(p.id)}" ${p.id === binding ? "selected" : ""}>${esc(p.id)}</option>`).join("")}
             ${missing ? `<option value="${esc(binding)}" selected>${esc(binding)} · 未加载</option>` : ""}</select></label></div>
-        <div class="model-vfoot"><span class="model-play">▶</span><span class="model-sample">试听样句：${esc(VOICE_SAMPLES[lang.k] || "")}</span>
+        <div class="model-vfoot"><span class="model-sample">合成样句：${esc(VOICE_SAMPLES[lang.k] || "")}</span>
           <span class="model-res">${v.testing ? '<span class="model-sp"></span>测试中'
             : test ? `<span class="model-resk ${test.status === "ok" ? "ok" : "bad"}">${test.status === "ok" ? "✓" : "！"}</span>${esc(voiceTestLabel(test))}` : ""}</span>
+          ${test ? voiceTestDiagnostic(test) : ""}
+          ${test?.audioUrl ? `<span class="model-audio-label">本次结果 · 试听</span><audio class="model-test-audio" controls preload="none" src="${esc(test.audioUrl)}" aria-label="${esc(lang.n)}语音合成结果试听"></audio>` : ""}
           <span class="model-grow"></span>
-          <span class="model-note">${binding ? "测试只在服务端合成样句，不在聊天中发送音频。" : "未指定时由 AstrBot 当前会话选择 TTS。"}</span>
+          <span class="model-note">${binding ? "测试音频只在此处试听，不会发送到聊天。" : "未指定时由 AstrBot 当前会话选择语音合成服务。"}</span>
           <button type="button" class="button small primary" data-ve-test ${!loaded || v.testing ? "disabled" : ""}>${v.testing ? "测试中…" : "测试合成"}</button></div>
       </div>
       ${v.editorOpen ? ttsEditor(s) : ""}
@@ -577,7 +734,7 @@ window.CompanionModelsPage = (() => {
           ${v.stale ? '<button type="button" class="button" data-voice-rebase>核对后用当前版本保存</button>' : ""}</div></div>
       ${v.notice ? `<div class="model-notice ${v.bad ? "error" : ""}" role="status">${esc(v.notice)}</div>` : ""}</div>`; }
   function voiceInput(s, event) { const v = s.voice; if (v.loading || v.busy) return; const t = event.target;
-    if (t.matches("[data-voice-provider]")) { if (!v.draft || v.pending) return; v.draft.bindings[voiceCurrent(v).k] = t.value; v.lastTest = null; render(); }
+    if (t.matches("[data-voice-provider]")) { if (!v.draft || v.pending) return; v.draft.bindings[voiceCurrent(v).k] = t.value; clearVoiceTest(v); render(); }
     if (t.matches("[data-voice-timeout]")) { if (!v.draft || v.pending) return; v.draft.timeout_seconds = t.valueAsNumber; if (event.type === "change") render(); }
     if (t.matches("[data-tts-field]")) { const item = ttsSelected(v); if (!item || v.ttsBusy) return;
       const values = ttsValues(v, item), key = t.dataset.ttsField;
@@ -589,32 +746,110 @@ window.CompanionModelsPage = (() => {
     if (t.matches("[data-tts-id]")) { v.createDraft.id = t.value; return; }
     if (t.matches("[data-tts-pick]")) { v.editorId = t.value; if (event.type === "change") render(); return; } }
   function voiceClick(s, event) { const v = s.voice, t = event.target;
-    const lang = t.closest("[data-voice-lang]"); if (lang) { v.ui.lang = lang.dataset.voiceLang; render(); return; }
+    const lang = t.closest("[data-voice-lang]"); if (lang) { if (v.ui.lang !== lang.dataset.voiceLang) clearVoiceTest(v); v.ui.lang = lang.dataset.voiceLang; render(); return; }
     if (t.closest("[data-voice-editor]")) { v.editorOpen = !v.editorOpen; if (v.editorOpen && !v.catalog) ttsCatalogLoad(s); render(); return; }
     if (t.closest("[data-tts-create-toggle]")) { v.creating = !v.creating; render(); return; }
     if (t.closest("[data-tts-create]")) { ttsCreate(s); return; }
     if (t.closest("[data-tts-save]")) { ttsSave(s); return; }
     if (t.closest("[data-tts-clone]")) { ttsClone(s); return; }
+    if (t.closest("[data-tts-test]")) { ttsTest(s); return; }
     const unbind = t.closest("[data-voice-unbind]");
     if (unbind) { const current = voiceBinding(v, voiceCurrent(v));
       if (current) v.data.languages.forEach(item => { if (item.k !== v.ui.lang && voiceBinding(v, item) === current) v.draft.bindings[item.k] = ""; });
-      v.lastTest = null; v.bad = false; v.notice = "已解除其他语种的同 Provider 绑定，保存语音配置后生效。"; render(); return; }
+      clearVoiceTest(v); v.bad = false; v.notice = "已解除其他语种的同一服务绑定，保存语音配置后生效。"; render(); return; }
     if (t.closest("[data-voice-refresh]")) { voiceRefresh(s); return; }
     if (t.closest("[data-voice-save]")) { voiceSave(s); return; }
     if (t.closest("[data-voice-retry]")) { voiceSave(s, true); return; }
     if (t.closest("[data-voice-rebase]")) { v.stale = false; render(); return; }
     if (t.closest("[data-ve-test]")) voiceTest(s); }
+  /* ---------- optional Laya decision model ---------- */
+  const layaDraftFrom = data => ({enabled: !!data.enabled, mode: data.mode || "local", endpoint: data.endpoint || "",
+    api_key: "", timeout_seconds: Number(data.timeout_seconds) || 20});
+  const layaChanges = l => { const changes = {};
+    ["enabled", "mode", "endpoint", "timeout_seconds"].forEach(key => {
+      if (l.draft[key] !== l.data[key]) changes[key] = l.draft[key]; });
+    if (l.draft.api_key) changes.api_key = l.draft.api_key;
+    return changes; };
+  const layaDirty = l => !!l.data && !!l.draft && Object.keys(layaChanges(l)).length > 0;
+  async function layaRefresh(s) { const l = s.laya, ticket = version; if (l.loading) return; l.loading = true; l.notice = "正在读取 Laya 配置…"; render();
+    try { const data = await api("GET", path + "/laya"); if (!current(ticket, s)) return;
+      if (!layaDirty(l) || l.stale) l.draft = layaDraftFrom(data); l.data = data; l.loaded = true; l.stale = false; l.bad = false; l.notice = "已读取 Laya 接入状态。"; }
+    catch (err) { if (!current(ticket, s)) return; l.bad = true; l.notice = fail(err, "无法读取 Laya 配置。"); }
+    finally { l.loading = false; if (current(ticket, s)) render(); } }
+  async function layaSave(s) { const l = s.laya; if (l.busy || l.loading || !l.data || l.stale || !layaDirty(l)) return;
+    const ticket = version, changes = layaChanges(l); l.busy = true; l.notice = "正在保存 Laya 配置…"; render();
+    try { const data = await api("POST", path + "/laya/save", {revision: l.data.revision, changes}); if (!current(ticket, s)) return;
+      l.data = data; l.draft = layaDraftFrom(data); l.stale = false; l.bad = false; l.notice = "Laya 配置已保存。"; }
+    catch (err) { if (!current(ticket, s)) return; l.bad = true; l.notice = fail(err, "Laya 配置保存未完成。"); }
+    finally { l.busy = false; if (current(ticket, s)) render(); } }
+  async function layaTest(s) { const l = s.laya; if (l.busy || l.loading || !l.data) return;
+    if (layaDirty(l)) { l.bad = true; l.notice = "请先保存当前 Laya 配置，再执行连接或模型下载测试。"; render(); return; }
+    const ticket = version; l.busy = true; l.test = {status: "testing"}; l.notice = l.data.mode === "local" ? "正在调用官方 Router；首次测试会自动下载检查点…" : "正在调用官方 SystemOne HTTP 接口…"; render();
+    try { const result = await api("POST", path + "/laya/test", {}, 600000); if (!current(ticket, s)) return;
+      l.test = result; l.notice = "Laya 调用完成；当前模式和检查点已验证。"; l.bad = false; await layaRefreshQuiet(s, ticket); }
+    catch (err) { if (!current(ticket, s)) return; l.test = {status: "unknown", code: err.code || err.message, reason: err.reason || ""}; l.bad = true; l.notice = fail(err, "Laya 连接测试未完成。"); }
+    finally { l.busy = false; if (current(ticket, s)) render(); } }
+  async function layaRefreshQuiet(s, ticket) { try { const data = await api("GET", path + "/laya"); if (current(ticket, s)) { s.laya.data = data; s.laya.draft = layaDraftFrom(data); } } catch {} }
+  async function layaDecide(s) { const l = s.laya; if (l.busy || l.loading || !l.data) return;
+    const text = String(l.previewText || "").trim(); if (!text) { l.bad = true; l.notice = "先输入一段测试消息。"; render(); return; }
+    const ticket = version; l.busy = true; l.preview = {status: "testing"}; l.notice = "正在请求 Laya 进行语义分类…"; render();
+    try { const result = await api("POST", path + "/laya/decide", {facts: {message_kind: "text", user_text: text}}, 125000); if (!current(ticket, s)) return;
+      l.preview = result; l.notice = result.status === "skipped" ? "这条测试消息被规则跳过。" : "已收到 Laya 决策。"; l.bad = false; }
+    catch (err) { if (!current(ticket, s)) return; l.preview = {status: "unknown", code: err.code || err.message}; l.bad = true; l.notice = fail(err, "Laya 决策调用未完成。"); }
+    finally { l.busy = false; if (current(ticket, s)) render(); } }
+  function layaField(l, key, label, hint, type = "text") {
+    const value = l.draft?.[key] ?? "", disabled = l.loading || l.busy;
+    if (type === "bool") return `<label class="model-fd"><span class="model-cap">${label}<em>${hint}</em></span><label class="model-switch"><input type="checkbox" data-laya-field="${key}" ${value ? "checked" : ""} ${disabled ? "disabled" : ""}><i></i></label></label>`;
+    return `<label class="model-fd"><span class="model-cap">${label}<em>${hint}</em></span><input type="${type}" data-laya-field="${key}" value="${esc(value)}" ${disabled ? "disabled" : ""}></label>`;
+  }
+  function layaSelect(l, key, label, hint, options) { const value = l.draft?.[key] || "", disabled = l.loading || l.busy;
+    return `<label class="model-fd"><span class="model-cap">${label}<em>${hint}</em></span><select data-laya-field="${key}" ${disabled ? "disabled" : ""}>${options.map(([id, name]) => `<option value="${id}" ${value === id ? "selected" : ""}>${name}</option>`).join("")}</select></label>`; }
+  async function layaCopyInstall(s, field) { const command = s.laya.data?.[field || "install_command"] || ""; if (!command) return;
+    try { await navigator.clipboard.writeText(command); s.laya.notice = field === "remote_start_command" ? "已复制 Laya 服务启动命令。" : field === "remote_install_command" ? "已复制远程 Laya 服务依赖安装命令。" : "已复制当前 AstrBot Python 环境的安装命令。安装后重启 AstrBot，再刷新状态。"; s.laya.bad = false; }
+    catch { s.laya.notice = "无法访问剪贴板，请选中并复制下方命令。"; s.laya.bad = false; } render(); }
+  function layaResult(result) { if (!result) return ""; if (result.status === "testing") return '<div class="model-notice">正在等待 Laya…</div>'; if (result.status === "skipped") return `<div class="model-notice">本次未调用 Laya：${esc(result.reason || "程序规则已处理")}</div>`;
+    if (result.status !== "ok") return `<div class="model-notice error">${esc(fail(result, "Laya 结果未知。"))}</div>`;
+    const decision = result.decision; if (!decision) return "";
+    return `<div class="model-laya-result"><b>决策结果</b><code>${esc(JSON.stringify(decision, null, 2))}</code></div>`; }
+  function layaPane(s) { const l = s.laya; if (!l.data) return `<div class="model-card"><p class="model-empty">${esc(l.notice || "正在读取 Laya 配置…")}</p></div>`;
+    const dirty = layaDirty(l), installed = l.data.package_installed, mode = l.draft?.mode || l.data.mode;
+    return `<div class="model-subpane model-laya-pane">
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">可选能力 · 语义决策</span><h3>Laya 决策模型</h3><p class="model-note">只提供是否说完、回复或等待、表达形式、自然分段倾向等分类建议。模型不输出时间、段数或其他具体数值；最终能力和发送权限由插件处理。</p></div><button type="button" class="button small" data-laya-refresh ${l.loading || l.busy ? "disabled" : ""}>刷新</button></div>
+        <div class="model-kpis">${kpi(l.data.enabled ? "已启用" : "未启用", "运行状态", l.data.enabled ? "g" : "a")}${kpi(mode === "remote" ? "远程模式" : installed ? `已安装 ${l.data.package_version || ""}` : "待安装", "Python 包")}${kpi(mode === "remote" ? "远程管理" : l.data.model_cache_ready ? "已缓存" : "首次调用下载", "模型权重")}${kpi(mode === "local" ? "本地 Python" : "远程 HTTP", "接入方式")}</div>
+        <div class="model-laya-fields">${layaField(l, "enabled", "启用 Laya", "关闭时调用会跳过", "bool")}${layaSelect(l, "mode", "接入方式", "选择 AstrBot 本地 Python 或官方服务接口", [["local", "本地 Python 包"], ["remote", "远程 HTTP 服务"]])}${mode === "remote" ? layaField(l, "endpoint", "SystemOne 服务地址", "可填服务根地址、/v1 或完整 /v1/systemone") : ""}${mode === "remote" ? layaField(l, "api_key", "API Key", l.data.api_key_set ? "已配置；留空保留现有密钥" : "可选，按远程服务配置", "password") : ""}${layaField(l, "timeout_seconds", "连接超时（秒）", "仅为传输超时，不参与语义决策", "number")}</div>
+        <div class="model-editor-actions"><button type="button" class="button primary" data-laya-save ${!dirty || l.busy || l.loading || l.stale ? "disabled" : ""}>保存 Laya 配置</button><button type="button" class="button" data-laya-test ${l.busy || l.loading ? "disabled" : ""}>${mode === "local" && installed && !l.data.model_cache_ready ? "下载并验证模型" : "测试 Laya 调用"}</button></div>
+        ${l.stale ? '<div class="model-alert">配置已在别处变化，请刷新后核对。</div>' : ""}${l.notice ? `<div class="model-notice${l.bad ? " error" : ""}">${esc(l.notice)}</div>` : ""}${l.test ? layaResult(l.test) : ""}
+      </div>
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">官方依赖与权重缓存</span><h3>安装 Laya Python 包</h3></div></div><p class="model-note">插件发行包不包含 Laya 包或检查点权重。将下方命令复制到 AstrBot 所在环境执行；本地首次推理会由官方 Router 自动从 Hugging Face 下载所选检查点。</p>
+        <div class="model-laya-install"><code>${esc(l.data.install_command || "")}</code><button type="button" class="button small" data-laya-copy="install_command" ${l.busy || l.loading ? "disabled" : ""}>复制安装命令</button></div>
+        ${mode === "remote" ? `<p class="model-note">远程服务端使用 Laya 官方 SystemOne 接口，地址以 <code>/v1/systemone</code> 结尾；服务端需要单独部署，以下命令使用本机 AstrBot Python 作为示例。</p><div class="model-laya-install"><code>${esc(l.data.remote_install_command || "")}</code><button type="button" class="button small" data-laya-copy="remote_install_command" ${l.busy || l.loading ? "disabled" : ""}>复制服务端安装命令</button></div><div class="model-laya-install"><code>${esc(l.data.remote_start_command || "")}</code><button type="button" class="button small" data-laya-copy="remote_start_command" ${l.busy || l.loading ? "disabled" : ""}>复制服务启动命令</button></div>` : ""}
+        <div class="model-state">Python：<code>${esc(l.data.python_executable || "未知")}</code> · 权重缓存：<code>${esc(l.data.model_cache_path || "由 Hugging Face 默认配置决定")}</code></div>
+        <div class="model-state">上游源码与版本：<a href="https://github.com/NandhaKishorM/laya" target="_blank" rel="noreferrer">NandhaKishorM/laya</a> · <a href="https://huggingface.co/convaiinnovations/laya-multilingual" target="_blank" rel="noreferrer">Multilingual 权重</a></div>
+      </div>
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">调用预览</span><h3>测试一次语义决策</h3></div></div><label class="model-fd"><span class="model-cap">测试消息<em>只提交这段文字与固定的文本类型事实</em></span><textarea data-laya-preview rows="4" ${l.busy || l.loading ? "disabled" : ""}>${esc(l.previewText || "")}</textarea></label><div class="model-editor-actions"><button type="button" class="button primary" data-laya-decide ${l.busy || l.loading || !l.data.enabled ? "disabled" : ""}>调用 Laya</button></div>${l.preview ? layaResult(l.preview) : ""}</div>
+    </div>`; }
+  function layaInput(s, event) { const l = s.laya, t = event.target;
+    if (t.matches("[data-laya-preview]")) { l.previewText = t.value; return; }
+    const key = t.dataset.layaField; if (!key || !l.draft || l.loading || l.busy) return;
+    l.draft[key] = t.type === "checkbox" ? t.checked : t.type === "number" ? t.valueAsNumber : t.value;
+    if (event.type === "change") { l.bad = false; render(); } }
+  function layaClick(s, event) { const t = event.target;
+    if (t.closest("[data-laya-refresh]")) { layaRefresh(s); return; }
+    if (t.closest("[data-laya-save]")) { layaSave(s); return; }
+    const copy = t.closest("[data-laya-copy]"); if (copy) { layaCopyInstall(s, copy.dataset.layaCopy); return; }
+    if (t.closest("[data-laya-test]")) { layaTest(s); return; }
+    if (t.closest("[data-laya-decide]")) { layaDecide(s); return; } }
   /* ---------- image model ---------- */
   const IMAGE_LABELS = {"image.generate": "文生图", "image.edit": "改图", "image.mask_edit": "局部改图"};
   const imageDirty = i => i.data && i.draft && Object.keys(i.draft).some(action => i.draft[action] !== i.data.enabled[action]);
-  async function imageRefresh(s) { const i = s.image, ticket = version; if (i.loading) return; i.loading = true; i.notice = "正在读取 Native 生图能力…"; render();
+  async function imageRefresh(s) { const i = s.image, ticket = version; if (i.loading) return; i.loading = true; i.notice = "正在读取内置生图能力…"; render();
     try { const data = await api("GET", path + "/image"); if (!current(ticket, s)) return;
       if (!Array.isArray(data.actions) || !data.enabled || Object.keys(IMAGE_LABELS).some(action => typeof data.enabled[action] !== "boolean")) throw failure("invalid_response");
-      if (!imageDirty(i)) i.draft = {...data.enabled}; i.data = data; i.loaded = true; i.bad = false; i.notice = "已读取当前 Native 动作状态。"; }
+      if (!imageDirty(i)) i.draft = {...data.enabled}; i.data = data; i.loaded = true; i.bad = false; i.notice = "已读取当前内置动作状态。"; }
     catch (err) { if (!current(ticket, s)) return; i.bad = true; i.notice = fail(err, "无法读取生图能力。"); }
     finally { i.loading = false; if (current(ticket, s)) render(); } }
   async function imageSave(s) { const i = s.image; if (i.busy || i.loading || !imageDirty(i)) return;
-    const ticket = version; i.busy = true; i.bad = false; i.notice = "正在保存 Native 生图开关…"; render();
+    const ticket = version; i.busy = true; i.bad = false; i.notice = "正在保存内置生图开关…"; render();
     try { const data = await api("POST", path + "/image/save", {enabled: {...i.draft}}); if (!current(ticket, s)) return;
       if (!Array.isArray(data.actions) || !data.enabled) throw failure("invalid_response");
       i.data = data; i.draft = {...data.enabled}; i.notice = "生图开关已保存，后续调用会采用当前设置。"; }
@@ -627,401 +862,17 @@ window.CompanionModelsPage = (() => {
         : result.state === "disabled" ? `${IMAGE_LABELS[action]}当前已关闭。` : `${IMAGE_LABELS[action]}扩展未加载或声明已变化。`; }
     catch (err) { if (!current(ticket, s)) return; i.bad = true; i.notice = fail(err, "注册检查未完成。"); }
     finally { i.testing = null; if (current(ticket, s)) render(); } }
-  /* ---------- image route configuration (owned by the image extension) ---------- */
-  /* 扩展下发的数值边界表。页面的 min/max 与提交前挡下都用它，
-     自己不再抄一份数字——抄一份就会漂移，而漂移的表现是
-     「页面放行、扩展拒绝」，用户提交一次才知道被拒。
-     扩展没给（旧版本）时退回空表，此时只是不写 min/max，不影响其它功能。 */
-  const imageLimits = i => i.config?.limits || null;
-  /* 路线配置的请求体上限。路线说明是可长文本（扩展的单键上限 4000 字），
-     而保存提交的是整份路线数组，写满时能到几百 KB。这里先挡一次，
-     为的是给一句「哪条路线的说明太长」，而不是让用户收到宿主那句
-     「model request is too large」。数字必须与宿主一致：
-     astrbot_host/model_api.py 的 image_config_save 用的是同一个值。 */
-  const IMAGE_SAVE_LIMIT = 262144;
-  const limitSpan = (i, section, key) => {
-    const limits = imageLimits(i);
-    const span = limits && limits[section] && limits[section][key];
-    return span && Number.isFinite(span.min) && Number.isFinite(span.max) ? span : null; };
-  /* 生成 number 输入框的 min/max。没有边界时不留空属性——
-     写 min="" 会让浏览器报 "The specified value is not a valid number"。 */
-  const numAttrs = (i, section, key) => { const span = limitSpan(i, section, key);
-    return span ? ` min="${span.min}" max="${span.max}"` : ""; };
-
-  /* ---------- 路线的四个预置字段 ----------
-   * 扩展把每条路线读成一份 spec，除页面已编辑的五个标量外还有四个字段：
-   *   parameters          数值/文本参数，有真实运行时效果 → 给控件，边界用扩展下发的 limits
-   *   guidance            选路线的说明（六键，含一个受约束的枚举）→ 给控件
-   *   reference_bindings  必须与工作流的图槽位一致，槽位表扩展未下发 → 只读
-   *   masked_edit         派生值（等于绑定里是否存在 edit_mask），不是开关 → 只读
-   * 页面挡一次只为当场说清是哪一条路线哪一格越界；扩展那边必须留着同样的判断。 */
-  const PARAM_LABELS = {width: "宽", height: "高", seed: "随机种子", steps: "步数", batch_size: "每批张数",
-                        cfg_scale: "提示词强度", denoising_strength: "重绘幅度", sampler_name: "采样器"};
-  const PARAM_ORDER = ["width", "height", "seed", "steps", "batch_size", "cfg_scale", "denoising_strength", "sampler_name"];
-  const GUIDE_LABELS = {summary: "一句话说明", edit_method: "改图方式", suitable_for: "适用场景",
-                        limitations: "局限", prompt_advice: "提示建议", test_notes: "实测记录"};
-  const GUIDE_LIST_KEYS = ["suitable_for", "limitations"];
-  const GUIDE_TEXT_KEYS = ["summary", "prompt_advice", "test_notes"];
-  const EDIT_METHODS = {auto: "自动（未声明）", whole_image: "整图重绘", instruction: "指令编辑",
-                        masked: "蒙版局部", controlled: "受控工作流"};
-  const EDIT_ROLES = {identity: "身份", outfit: "服装", pose: "姿态", style: "风格",
-                      background: "背景", continuity: "延续", edit_source: "底图", edit_mask: "蒙版"};
-  /* 展开状态挂在路线对象上（WeakSet），不进草稿——草稿会被整段提交给扩展，
-     多一个页面自己的键就会被它的严格校验拒掉。 */
-  const expandedRoutes = new WeakSet();
-
-  /* 某个后端允许写的参数字段及其边界，全部来自扩展的 limits.parameters。 */
-  function paramSpecs(i, backend) {
-    const all = (imageLimits(i) || {}).parameters || {};
-    const specs = [];
-    const push = (key, spec) => { if (key) specs.push({key, ...spec}); };
-    for (const [key, span] of Object.entries(all.common || {})) push(key, {kind: "int", min: span.min, max: span.max});
-    if (backend === "sd_webui") {
-      for (const [key, span] of Object.entries(all.sd_webui || {})) push(key, {kind: "int", min: span.min, max: span.max});
-      for (const [key, span] of Object.entries(all.float || {})) push(key, {kind: "float", min: span.min, max: span.max});
-      for (const [key, span] of Object.entries(all.text || {})) push(key, {kind: "text", maxLength: span.max_length});
-    }
-    /* 顺序固定，避免后端下发的键序变化让控件跳来跳去。 */
-    return specs.sort((a, b) => {
-      const left = PARAM_ORDER.indexOf(a.key), right = PARAM_ORDER.indexOf(b.key);
-      return (left < 0 ? PARAM_ORDER.length : left) - (right < 0 ? PARAM_ORDER.length : right);
-    });
-  }
-
-  /* 改图方式的可选项。约束在扩展那边：非改图路线只能是 auto；
-     SD WebUI 的允许集取决于 masked_edit（蒙版路线才有 masked）。 */
-  function guidanceMethods(route) {
-    if (route.operation !== "edit") return ["auto"];
-    if (route.backend === "sd_webui") return route.masked_edit === true ? ["auto", "masked"] : ["auto", "whole_image"];
-    return ["auto", "whole_image", "instruction", "masked", "controlled"];
-  }
-
-  function paramCell(i, route, index, spec) {
-    const value = (route.parameters || {})[spec.key];
-    const shown = value === undefined || value === null ? "" : String(value);
-    const label = PARAM_LABELS[spec.key] || spec.key;
-    const title = `${spec.key}${spec.kind === "int" ? ` · ${spec.min}–${spec.max}` : spec.kind === "float" ? ` · ${spec.min}–${spec.max}` : ` · 最多 ${spec.maxLength} 字`}`;
-    const attrs = spec.kind === "text"
-      ? `maxlength="${spec.maxLength}"`
-      : `type="number" step="${spec.kind === "float" ? "0.01" : "1"}" min="${spec.min}" max="${spec.max}"`;
-    return `<label class="model-imgr-p" title="${esc(title)}"><span class="model-cap">${esc(label)}</span>
-      <input ${attrs} data-imgr-param="${index}:${esc(spec.key)}" value="${esc(shown)}" placeholder="未声明" aria-label="参数 ${esc(spec.key)}">
-      <em class="model-mono">${esc(spec.key)}</em></label>`;
-  }
-
-  function guidanceCell(route, index) {
-    const guidance = route.guidance || {};
-    const methods = guidanceMethods(route);
-    const current = typeof guidance.edit_method === "string" ? guidance.edit_method : "";
-    /* 已声明但当前后端/操作不接受时补一条标注，不静默改写用户配置。 */
-    const extra = current && !methods.includes(current)
-      ? `<option value="${esc(current)}" selected>${esc(EDIT_METHODS[current] || current)}（当前不接受，保存会被拒）</option>` : "";
-    const select = `<label class="model-imgr-g"><span class="model-cap">${esc(GUIDE_LABELS.edit_method)}</span>
-      <select data-imgr-guide="${index}:edit_method">
-        <option value="" ${!current ? "selected" : ""}>未声明</option>
-        ${methods.map(m => `<option value="${m}" ${current === m ? "selected" : ""}>${esc(EDIT_METHODS[m])}</option>`).join("")}
-        ${extra}</select></label>`;
-    const text = key => `<label class="model-imgr-g"><span class="model-cap">${esc(GUIDE_LABELS[key])}</span>
-      <textarea rows="2" data-imgr-guide="${index}:${key}" placeholder="未声明">${esc(guidance[key] || "")}</textarea></label>`;
-    const list = key => `<label class="model-imgr-g"><span class="model-cap">${esc(GUIDE_LABELS[key])} <em>每行一条</em></span>
-      <textarea rows="2" data-imgr-guide="${index}:${key}" placeholder="每行一条">${esc((guidance[key] || []).join("\n"))}</textarea></label>`;
-    return select + text("summary") + list("suitable_for") + list("limitations") + text("prompt_advice") + text("test_notes");
-  }
-
-  /* 只读的两项：写清它是什么、由谁核验、为什么本页不给控件。 */
-  function presetReadOnly(route) {
-    const bindings = Array.isArray(route.reference_bindings) ? route.reference_bindings : [];
-    const bindingText = bindings.length
-      ? bindings.map(b => `${EDIT_ROLES[b && b.role] || (b && b.role) || "未知用途"} ← ${(b && b.slot) || "?"}`).join("；")
-      : "未声明（由工作流里的图输入自动绑定）";
-    return `<div class="model-imgr-ro">
-      <p><b>参考图绑定</b> ${esc(bindingText)}</p>
-      
-      <p><b>蒙版改图</b> ${route.masked_edit === true ? "已声明" : "未声明"}（不是开关）</p>
-      
-    </div>`;
-  }
-
-  function routeExtras(i, route, index) {
-    const specs = paramSpecs(i, route.backend || "comfyui");
-    const params = specs.length
-      ? `<div class="model-imgr-ps">${specs.map(spec => paramCell(i, route, index, spec)).join("")}</div>`
-      : `<p class="model-note">${route.backend === "sd_webui" ? "SD WebUI" : "ComfyUI"} 的参数字段边界尚未从扩展读到，保存前无法在本页挡下越界值。</p>`;
-    return `<details class="model-imgr-ext" data-imgr-ext="${index}" ${expandedRoutes.has(route) ? "open" : ""}>
-      <summary>参数与路线说明（4 项预置字段）</summary>
-      <div class="model-imgr-body">
-        <div class="model-fd"><span class="model-cap">数值参数 <em>留空表示未声明，交给扩展默认值</em></span>${params}</div>
-        <div class="model-imgr-gs">${guidanceCell(route, index)}</div>
-        ${presetReadOnly(route)}
-      </div></details>`;
-  }
-
-  /* 超过宿主请求体上限时的提示：只说「太大了」用户没法下手，
-     所以要报出最占地方的那条路线。 */
-  function oversizedNotice(changes, size) {
-    const routes = Array.isArray((changes.preparation || {}).routes) ? changes.preparation.routes : [];
-    let worst = "", worstSize = 0;
-    routes.forEach((route, index) => {
-      const bytes = JSON.stringify(route || {}).length;
-      if (bytes > worstSize) { worstSize = bytes; worst = (route && route.route_id) || `第 ${index + 1} 条`; } });
-    const kb = Math.round(size / 1024), limitKb = Math.round(IMAGE_SAVE_LIMIT / 1024);
-    return `路线配置共约 ${kb} KB，超过一次能保存的 ${limitKb} KB。`
-      + (worst ? `最占地方的是「${worst}」（约 ${Math.round(worstSize / 1024)} KB）：先缩短它的路线说明，或删掉不再用的路线。` : "");
-  }
-
-  async function imageConfigLoad(s) { const i = s.image; if (i.configLoading) return;
-    const ticket = version; i.configLoading = true; render();
-    try { const data = await api("GET", path + "/image/config"); if (!current(ticket, s)) return;
-      i.config = data; const draft = JSON.parse(JSON.stringify(data.sections || {}));
-      if (draft.preparation) draft.preparation.routes = (draft.preparation.routes || []).map(route =>
-        typeof route === "string" ? JSON.parse(route) : route);
-      i.configDraft = draft; }
-    catch (err) { if (!current(ticket, s)) return; i.config = { error: fail(err, "无法读取生图路线配置。") }; }
-    finally { i.configLoading = false; if (current(ticket, s)) render(); } }
-
-  /* ComfyUI 原生适配：工作流按名称引用；行编辑把配置里的字符串路径 / 内联对象规范化呈现 */
-  const workflowNames = comfyRows => comfyRows.map(row => row.__name || "").filter(Boolean);
-  function comfyRowsFrom(draftComfy) {
-    if (Array.isArray(draftComfy.__rows)) return draftComfy.__rows;
-    const raw = draftComfy.workflows || [];
-    draftComfy.__rows = raw.map(entry => {
-      if (typeof entry === "string") return { __kind: "path", __name: entry.split(/[\\/]/).pop().replace(/\.[^.]+$/, ""), path: entry };
-      const inline = entry && typeof entry.workflow === "string" && entry.workflow;
-      const name = String(entry.name || "");
-      return { __kind: inline ? "inline" : "path", __name: name, name, path: String(entry.path || ""), raw: entry };
-    });
-    return draftComfy.__rows;
-  }
-  const comfyEntriesForSave = rows => rows.map(row => row.__kind === "inline"
-    ? { ...(row.raw || {}), name: row.__name || row.name || "" }
-    : (row.raw ? { ...(row.raw || {}), name: row.name || row.__name || "", path: row.path || "" }
-               : (row.path || "").trim()));
-
-  function imageConfigChanges(i) {
-    if (!i.config || !i.configDraft) return {};
-    const before = i.config.sections || {}, draft = i.configDraft, changes = {};
-    for (const name of Object.keys(draft)) {
-      const diff = {}, originalSection = before[name] || {};
-      for (const [key, value] of Object.entries(draft[name] || {})) {
-        if (key === "api_key") {
-          if (draft[name].__clear_key === true) diff[key] = "";
-          else if (String(value || "").trim()) diff[key] = String(value);
-          continue; }
-        if (key === "__rows" || key === "__clear_key" || (name === "comfyui" && key === "workflows" && Array.isArray(draft[name].__rows))) continue;
-        let original = originalSection[key];
-        if (name === "preparation" && key === "routes" && Array.isArray(value)) {
-          original = Array.isArray(original) ? original.map(route => {
-            if (typeof route !== "string") return route;
-            try { return JSON.parse(route); } catch { return route; }
-          }) : [];
-        }
-        if (JSON.stringify(value) !== JSON.stringify(original)) diff[key] = value;
-      }
-      if (name === "comfyui" && Array.isArray(draft[name]?.__rows)) {
-        const workflows = comfyEntriesForSave(draft[name].__rows);
-        if (JSON.stringify(workflows) !== JSON.stringify(originalSection.workflows || [])) diff.workflows = workflows; }
-      if (Object.keys(diff).length) changes[name] = diff;
-    }
-    return changes;
-  }
-  const imageConfigDirty = i => Object.keys(imageConfigChanges(i)).length > 0;
-
-  function imageConfigEditor(s) { const i = s.image;
-    if (!i.configOpen) return "";
-    if (i.configLoading) return '<div class="model-imgconfig"><p class="model-empty">正在读取生图路线配置…</p></div>';
-    if (!i.config) return "";
-    if (i.config.error) return `<div class="model-imgconfig"><p class="model-notice error" role="status">${esc(i.config.error)}</p></div>`;
-    const draft = i.configDraft || (i.configDraft = {});
-    const prep = draft.preparation || (draft.preparation = {});
-    const routes = prep.routes || (prep.routes = []);
-    const sd = draft.sd_webui || (draft.sd_webui = {});
-    const comfy = draft.comfyui || (draft.comfyui = {});
-    const comfyRows = comfyRowsFrom(comfy);
-    const srcSections = i.config.sections || {};
-    const keyFlag = present => present ? "已配置 · 留空保留" : "尚未配置";
-    const maxRoutes = Number.isInteger(i.config.limits?.max_routes) ? i.config.limits.max_routes : null;
-    const workflowCell = (route, index) => {
-      if (route.backend !== "comfyui") return `<input data-imgr-edit="${index}:workflow_id" value="" disabled placeholder="仅 ComfyUI 使用" aria-label="工作流">`;
-      if (comfyRows.length) return `<select data-imgr-edit="${index}:workflow_id" aria-label="工作流">
-        <option value="">未指定</option>${comfyRows.map(row => `<option value="${esc(row.__name)}" ${route.workflow_id === row.__name ? "selected" : ""}>${esc(row.__name)}</option>`).join("")}</select>`;
-      return `<input data-imgr-edit="${index}:workflow_id" value="${esc(route.workflow_id || "")}" placeholder="工作流名称" aria-label="工作流">`; };
-    const comfyRow = (row, index) => `<li class="model-cfgr">
-      <span class="model-tag ${row.__kind === "inline" ? "a" : "n"}">${row.__kind === "inline" ? "内联" : "文件"}</span>
-      <input data-cfgr="${index}:name" value="${esc(row.__name || row.name || "")}" placeholder="名称（路线按此引用）" aria-label="工作流名称">
-      ${row.__kind === "inline" ? '<span class="model-mono">内联 workflow JSON · 请在扩展配置维护</span>'
-        : `<input data-cfgr="${index}:path" value="${esc(row.path || "")}" placeholder="API JSON 文件路径" aria-label="工作流文件路径">`}
-      <button type="button" class="button small danger" data-cfgr-del="${index}" aria-label="删除工作流">删除</button></li>`;
-    const routeRow = (route, index) => `<li class="model-imgr-item">
-      <div class="model-imgr">
-      <input data-imgr-edit="${index}:route_id" value="${esc(route.route_id || "")}" placeholder="route-id" aria-label="路线 ID">
-      <select data-imgr-edit="${index}:operation" aria-label="操作">
-        <option value="generate" ${route.operation === "generate" ? "selected" : ""}>文生图</option>
-        <option value="edit" ${route.operation === "edit" ? "selected" : ""}>改图</option></select>
-      <select data-imgr-edit="${index}:backend" aria-label="后端">
-        <option value="comfyui" ${(route.backend || "comfyui") === "comfyui" ? "selected" : ""}>ComfyUI</option>
-        <option value="sd_webui" ${route.backend === "sd_webui" ? "selected" : ""}>SD WebUI</option></select>
-      ${workflowCell(route, index)}
-      <input data-imgr-edit="${index}:profile" value="${esc(route.profile || "")}" placeholder="profile" aria-label="提示词分层">
-      <button type="button" class="button small danger" data-imgr-del="${index}" aria-label="删除路线">删除</button></div>
-      ${routeExtras(i, route, index)}</li>`;
-    const connectionFields = (name, section, label, placeholder) => `<div class="model-img-connection">
-      <header><b>${label}</b><span>${esc(section.timeout_seconds === undefined ? "使用扩展默认超时" : `超时 ${section.timeout_seconds} 秒`)}</span></header>
-      <label class="model-fd"><span class="model-cap">服务地址</span><input data-imgr-sec="${name}:base_url" value="${esc(section.base_url || "")}" placeholder="${placeholder}" autocomplete="url"></label>
-      <label class="model-fd"><span class="model-cap">API 密钥 <em>${keyFlag(!!(srcSections[name] && srcSections[name].api_key_set))}</em></span><input type="password" data-imgr-sec="${name}:api_key" value="" autocomplete="new-password">${srcSections[name] && srcSections[name].api_key_set ? `<span class="model-key-clear"><input type="checkbox" data-imgr-clear="${name}"> 清除已保存的密钥</span>` : ""}</label>
-      <label class="model-fd"><span class="model-cap">请求超时（秒）</span><input type="number"${numAttrs(i, "connection", "timeout_seconds")} data-imgr-sec="${name}:timeout_seconds" value="${esc(section.timeout_seconds === undefined ? "" : section.timeout_seconds)}"></label>
-    </div>`;
-    const tabs = [["routes", "执行路线", `${routes.length} 条`], ["limits", "资源限额", "用量与保留"],
-      ["comfyui", "ComfyUI", `${comfyRows.length} 个工作流`], ["sd_webui", "SD WebUI", "连接"]];
-    if (!tabs.some(([id]) => id === i.configTab)) i.configTab = "routes";
-    const dirty = imageConfigDirty(i);
-    let content = "";
-    if (i.configTab === "routes") content = `<div class="model-img-view" role="tabpanel" id="model-imgcfg-panel">
-      <header class="model-img-sectionhead"><div><b>执行路线</b><span>为文生图和改图指定后端与工作流</span></div><button type="button" class="button small" data-imgr-add ${maxRoutes !== null && routes.length >= maxRoutes ? "disabled" : ""}>+ 新增路线</button></header>
-      <div class="model-duo">
-        <label class="model-fd"><span class="model-cap">默认文生图路线</span>
-          <select data-imgr-def="default_generate_route"><option value="">未指定</option>${routes.filter(route => route.operation === "generate").map(route => `<option value="${esc(route.route_id)}" ${prep.default_generate_route === route.route_id ? "selected" : ""}>${esc(route.route_id)}</option>`).join("")}</select></label>
-        <label class="model-fd"><span class="model-cap">默认改图路线</span>
-          <select data-imgr-def="default_edit_route"><option value="">未指定</option>${routes.filter(route => route.operation === "edit").map(route => `<option value="${esc(route.route_id)}" ${prep.default_edit_route === route.route_id ? "selected" : ""}>${esc(route.route_id)}</option>`).join("")}</select></label></div>
-      <div class="model-fd"><span class="model-cap">路线队列 <em>route_id 必须唯一；profile 对应提示词分层</em></span>
-        <ul class="model-imgrs">${routes.map(routeRow).join("") || '<li class="model-empty">还没有路线。新增一条路线后，才能为动作指定默认执行方式。</li>'}</ul></div>
-    </div>`;
-    if (i.configTab === "limits") content = `<div class="model-img-view" role="tabpanel" id="model-imgcfg-panel">
-      <header class="model-img-sectionhead"><div><b>资源限额</b><span>控制生成频率、历史保留与并发</span></div></header>
-      <div class="model-img-limits">
-        <label class="model-fd"><span class="model-cap">每日生成上限</span><input type="number"${numAttrs(i, "preparation", "daily_limit")} data-imgr-num="daily_limit" value="${esc(prep.daily_limit === undefined ? "" : prep.daily_limit)}"></label>
-        <label class="model-fd"><span class="model-cap">最大并发</span><input type="number"${numAttrs(i, "preparation", "max_concurrency")} data-imgr-num="max_concurrency" value="${esc(prep.max_concurrency === undefined ? "" : prep.max_concurrency)}"></label>
-        <label class="model-fd"><span class="model-cap">记录保留天数</span><input type="number"${numAttrs(i, "preparation", "retention_days")} data-imgr-num="retention_days" value="${esc(prep.retention_days === undefined ? "" : prep.retention_days)}"></label>
-        <label class="model-fd"><span class="model-cap">存储上限（MB）</span><input type="number"${numAttrs(i, "preparation", "max_storage_mb")} data-imgr-num="max_storage_mb" value="${esc(prep.max_storage_mb === undefined ? "" : prep.max_storage_mb)}"></label>
-      </div>
-    </div>`;
-    if (i.configTab === "comfyui") content = `<div class="model-img-view" role="tabpanel" id="model-imgcfg-panel">
-      <header class="model-img-sectionhead"><div><b>ComfyUI 连接</b><span>工作流名称要与路线中的 workflow_id 对应</span></div><span class="model-tag">${comfyRows.length} 个工作流</span></header>
-      <div class="model-fd"><span class="model-cap">工作流清单 <em>文件路径按 ComfyUI API JSON 读取；内联 JSON 请在扩展配置维护</em></span>
-        <ul class="model-cfgrs">${comfyRows.map(comfyRow).join("") || '<li class="model-empty">尚未登记工作流。添加文件工作流后，可在执行路线中按名称引用。</li>'}</ul>
-        <div class="model-editor-actions"><button type="button" class="button small" data-cfgr-add>+ 新增文件工作流</button></div></div>
-      ${connectionFields("comfyui", comfy, "连接参数", "http://127.0.0.1:8188")}
-    </div>`;
-    if (i.configTab === "sd_webui") content = `<div class="model-img-view" role="tabpanel" id="model-imgcfg-panel">
-      <header class="model-img-sectionhead"><div><b>SD WebUI 连接</b><span>连接信息由生图扩展安全保存</span></div></header>
-      ${connectionFields("sd_webui", sd, "连接参数", "http://127.0.0.1:7860")}
-    </div>`;
-    return `<section class="model-imgconfig" aria-label="生图路线与连接配置">
-      <header class="model-imgconfig-head"><div><span class="model-eb">IMAGE PIPELINE</span><h3>路线与连接</h3><p>当前配置由生图扩展校验；切换面板不会丢失未保存内容。</p></div>
-        <span class="model-tag ${dirty ? "a" : "g"}">${dirty ? "有未保存更改" : "配置已同步"}</span></header>
-      <div class="model-img-workbench"><nav class="model-img-nav" role="tablist" aria-label="生图配置分区">
-        ${tabs.map(([id, label, meta], index) => `<button type="button" role="tab" data-imgcfg-tab="${id}" aria-selected="${i.configTab === id}" class="${i.configTab === id ? "on" : ""}"><span class="model-img-nav-no">0${index + 1}</span><span><b>${label}</b><small>${esc(meta)}</small></span><i aria-hidden="true">›</i></button>`).join("")}
-      </nav><div class="model-img-main">${content}</div></div>
-      <footer class="model-img-savebar"><span>${dirty ? "更改尚未写入扩展" : "所有面板共用同一份草稿"}</span>
-        <div><button type="button" class="button small" data-imgcfg-reload ${i.configSaving ? "disabled" : ""}>${dirty ? "放弃更改并重读" : "重新读取"}</button>
-          <button type="button" class="button primary" data-imgcfg-save ${i.configSaving || !dirty ? "disabled" : ""}>${i.configSaving ? "保存中…" : "保存路线与连接"}</button></div></footer>
-      <p class="model-note">密钥留空则保留；勾选清除则删除已保存的密钥。保存后由扩展校验生效。</p>
-    </section>`; }
-  /* 越界提示里的字段名。键与扩展的 limits.preparation 一一对应，
-     漏掉一个只是退回显示英文键，不会漏检。 */
-  const IMAGE_LIMITS_LABEL = {daily_limit: "每日生成上限", retention_days: "记录保留天数",
-    max_storage_mb: "存储上限", max_concurrency: "最大并发"};
-
-  /* 边界表是对照扩展下发的 limits 逐格检查草稿。
-     返回一句人话（越界的那一格和允许范围），全部在范围内则返回空串。
-     刻意只查**扩展声明过边界的字段**：没有边界的就是没有边界，
-     页面不能凭感觉加一条比扩展更严的规则，那会让本来能存的值存不下去。 */
-  function checkImageBounds(i) {
-    const limits = imageLimits(i); if (!limits) return "";
-    const draft = i.configDraft || {};
-    const prep = draft.preparation || {};
-    for (const [key, span] of Object.entries(limits.preparation || {})) {
-      const value = prep[key]; if (value === undefined || value === null || value === "") continue;
-      /* input[type=number] 的值可能是字符串（用户正在输入时），先转成数再比。
-         非数字在这里不拦——扩展那边会给出更准确的 invalid_configuration。 */
-      const number = Number(value);
-      if (!Number.isFinite(number) || !Number.isInteger(number)) continue;
-      if (number < span.min || number > span.max)
-        return `${IMAGE_LIMITS_LABEL[key] || key} 需要在 ${span.min}–${span.max} 之间，当前是 ${number}。`;
-    }
-    const conn = limits.connection && limits.connection.timeout_seconds;
-    if (conn) for (const name of ["comfyui", "sd_webui"]) {
-      const value = (draft[name] || {}).timeout_seconds;
-      if (value === undefined || value === null || value === "") continue;
-      const number = Number(value);
-      if (!Number.isFinite(number) || !Number.isInteger(number)) continue;
-      if (number < conn.min || number > conn.max)
-        return `${name === "comfyui" ? "ComfyUI" : "SD WebUI"} 超时需要在 ${conn.min}–${conn.max} 秒之间，当前是 ${number}。`;
-    }
-    /* 路线的预置字段：参数的数值/文本边界、说明的条数与字数、改图方式是否适用于当前操作与后端。
-       这三样都属于"提交后才知道被拒"，所以在页面一次说清是哪一条路线的哪一格。 */
-    const guide = limits.guidance || null;
-    for (const [index, route] of (Array.isArray(prep.routes) ? prep.routes : []).entries()) {
-      if (!route || typeof route !== "object") continue;
-      const where = `路线 ${route.route_id || index + 1}`;
-      for (const spec of paramSpecs(i, route.backend || "comfyui")) {
-        const value = (route.parameters || {})[spec.key];
-        if (value === undefined || value === null || value === "") continue;
-        const label = PARAM_LABELS[spec.key] || spec.key;
-        if (spec.kind === "text") {
-          if (typeof value === "string" && value.length > spec.maxLength)
-            return `${where} 的${label}最多 ${spec.maxLength} 个字符，当前 ${value.length} 个。`;
-          continue; }
-        const number = Number(value);
-        if (!Number.isFinite(number)) continue;
-        if (number < spec.min || number > spec.max)
-          return `${where} 的${label}需要在 ${spec.min}–${spec.max} 之间，当前是 ${number}。`;
-      }
-      const guidance = route.guidance || {};
-      if (guide) {
-        for (const key of GUIDE_LIST_KEYS) {
-          const items = guidance[key];
-          if (!Array.isArray(items)) continue;
-          if (guide.max_items && items.length > guide.max_items)
-            return `${where} 的「${GUIDE_LABELS[key]}」最多 ${guide.max_items} 条，当前 ${items.length} 条。`;
-          if (guide.max_chars && items.some(item => String(item).length > guide.max_chars))
-            return `${where} 的「${GUIDE_LABELS[key]}」单条最多 ${guide.max_chars} 字。`;
-        }
-        for (const key of GUIDE_TEXT_KEYS) {
-          const text = guidance[key];
-          if (typeof text === "string" && guide.max_chars && text.length > guide.max_chars)
-            return `${where} 的「${GUIDE_LABELS[key]}」最多 ${guide.max_chars} 字，当前 ${text.length} 字。`;
-        }
-      }
-      const method = typeof guidance.edit_method === "string" ? guidance.edit_method : "";
-      const allowed = guidanceMethods(route);
-      if (method && !allowed.includes(method))
-        return `${where} 的改图方式「${EDIT_METHODS[method] || method}」不适用于当前操作或后端，请改为 ${allowed.map(item => EDIT_METHODS[item]).join(" / ")}。`;
-    }
-    return ""; }
-
-  async function imageConfigSave(s) { const i = s.image;
-    if (!i.config || !i.configDraft || i.configSaving) return;
-    /* 提交前按扩展下发的边界挡一次。
-       这不是重复校验——扩展那边必须留着同样的判断（页面是提示层，不是安全边界）。
-       在页面挡的价值是：用户当场看到是哪一格越界，而不是提交后收到一句
-       「生图扩展拒绝了这些值」，然后自己去猜是四格里的哪一格。
-       只在扩展给了边界时生效；旧版扩展不下发 limits 时静默跳过。 */
-    const outOfRange = checkImageBounds(i);
-    if (outOfRange) { i.bad = true; i.notice = outOfRange; render(); return; }
-    const changes = imageConfigChanges(i);
-    if (!Object.keys(changes).length) { i.notice = "路线与连接没有改动。"; render(); return; }
-    /* 路线说明是可长文本，保存提交的是整份路线数组；超过宿主的请求体上限时
-       先在页面说清是哪条路线占地方，别让用户去读宿主那句 "model request is too large"。 */
-    const size = JSON.stringify(changes).length;
-    if (size > IMAGE_SAVE_LIMIT) { i.bad = true; i.notice = oversizedNotice(changes, size); render(); return; }
-    const ticket = version; i.configSaving = true; i.notice = "正在保存生图路线与连接…"; render();
-    try { const result = await api("POST", path + "/image/config/save", {revision: i.config.revision, changes}, 45000);
-      if (!current(ticket, s)) return;
-      i.bad = false; i.notice = "生图路线与连接已保存，由生图扩展校验生效。"; i.config = null; i.configDraft = null;
-      imageConfigLoad(s); return; }
-    catch (err) { if (!current(ticket, s)) return; i.bad = true; i.notice = fail(err, "生图路线保存未完成。"); }
-    finally { i.configSaving = false; if (current(ticket, s)) render(); } }
 
   function imagePane(s) { const i = s.image; if (!i.data) return '<p class="model-empty">正在读取生图模型配置…</p>';
     const actions = i.data.actions, loaded = actions.filter(item => item.loaded).length;
     const ready = actions.filter(item => item.state === "ready").length;
     return `<div class="model-image">
-      <div class="model-card model-img-status"><div class="model-phead"><div class="model-grow"><span class="model-eb">IMAGE STATUS</span><h3>生图能力与连接</h3></div>
-          <button type="button" class="button small" data-go="manage" data-manage="output">生图相关功能 ↗</button>
+      <div class="model-card model-img-status"><div class="model-phead"><div class="model-grow"><span class="model-eb">生图状态</span><h3>生图能力与连接</h3></div>
+          <button type="button" class="button small" data-go="manage" data-manage="output" data-output-target="capabilities">配置生图后端 ↗</button>
           <button type="button" class="button small" data-img-refresh ${i.loading || i.busy ? "disabled" : ""}>刷新状态</button></div>
-        <div class="model-kpis">${kpi(actions.length, "Native 动作")}${kpi(loaded + "/" + actions.length, "已加载")}${kpi(ready + "/" + actions.length, "当前可调用", ready ? "g" : "a")}${kpi(i.data.authorization === "checked_for_each_invocation" ? "逐次校验" : "未确认", "调用授权")}</div></div>
-      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">执行类型 · 按动作分别控制</span><h3>Native 生图动作</h3></div>
-          <button type="button" class="button small" data-img-config ${i.loading || i.busy ? "disabled" : ""}>${i.configOpen ? "收起路线与连接" : "路线队列与连接"}</button></div>
+        <div class="model-kpis">${kpi(actions.length, "内置生图动作")}${kpi(loaded + "/" + actions.length, "已加载")}${kpi(ready + "/" + actions.length, "当前可调用", ready ? "g" : "a")}${kpi(i.data.authorization === "checked_for_each_invocation" ? "逐次校验" : "未确认", "调用授权")}</div></div>
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">执行类型 · 按动作分别控制</span><h3>内置生图动作</h3></div>
+        </div>
         <ul class="model-pvl">${actions.map((item, index) => {
           const enabled = !!i.draft[item.action], changed = enabled !== i.data.enabled[item.action];
           const stateLabel = !enabled ? "已关闭" : item.state === "ready" ? "已注册" : item.loaded ? "注册未就绪" : "扩展未加载";
@@ -1041,118 +892,19 @@ window.CompanionModelsPage = (() => {
         <div class="model-editor-actions"><button type="button" class="button primary" data-img-save ${i.busy || i.loading || !imageDirty(i) ? "disabled" : ""}>保存生图开关</button></div>
         <p class="model-note">注册检查不提交生图任务。</p>
       </div>
-      ${i.configOpen ? imageConfigEditor(s) : ""}
       ${i.bad ? `<div class="model-notice error" role="status">${esc(i.notice)}</div>` : i.notice ? `<div class="model-notice" role="status">${esc(i.notice)}</div>` : ""}
     </div>`; }
   function imageInput(s, event) { const i = s.image; if (i.loading || i.busy) return; const t = event.target;
-    if (t.matches("[data-img-toggle]") && IMAGE_LABELS[t.dataset.imgToggle]) { i.draft[t.dataset.imgToggle] = t.checked; render(); return; }
-    if (!i.configDraft) return;
-    const clear = t.dataset.imgrClear;
-    if (clear) {
-      // Stored as a draft flag, never as the key value: the diff only turns it
-      // into an explicit empty string at save time.
-      const section = i.configDraft[clear] || (i.configDraft[clear] = {});
-      section.__clear_key = t.checked === true;
-      if (event.type === "change") render();
-      return; }
-    const edit = t.dataset.imgrEdit;
-    if (edit) { const [index, key] = String(edit).split(":"); const route = ((i.configDraft.preparation || {}).routes || [])[Number(index)];
-      if (!route) return;
-      route[key] = key === "operation" || key === "backend" ? t.value : t.value;
-      if (event.type === "change") render(); return; }
-    /* 路线的参数：空值表示「未声明」，直接把键删掉，让扩展用它自己的默认值——
-       写一个空字符串过去会被它的参数类型校验拒掉。 */
-    const param = t.dataset.imgrParam;
-    if (param) { const [index, key] = String(param).split(":"); const route = ((i.configDraft.preparation || {}).routes || [])[Number(index)];
-      if (!route) return;
-      const params = route.parameters || (route.parameters = {});
-      const raw = String(t.value === undefined || t.value === null ? "" : t.value).trim();
-      /* 该键是数字还是文本按扩展下发的参数表判，不看 input 的 type——
-         表里说它是文本就当文本存，表里没有时按字面量能不能当数字读。 */
-      const spec = paramSpecs(i, route.backend || "comfyui").find(item => item.key === key);
-      if (!raw) delete params[key];
-      else if (spec ? spec.kind === "text" : !/^-?\d+(\.\d+)?$/.test(raw)) params[key] = raw;
-      else { const parsed = Number.isFinite(t.valueAsNumber) ? t.valueAsNumber : Number(raw);
-        if (!Number.isFinite(parsed)) return;
-        params[key] = parsed; }
-      if (!Object.keys(params).length) delete route.parameters;
-      if (event.type === "change") render(); return; }
-    /* 路线说明：两个列表字段按行拆成数组，其余按文本存；空值同样删键。 */
-    const guide = t.dataset.imgrGuide;
-    if (guide) { const [index, key] = String(guide).split(":"); const route = ((i.configDraft.preparation || {}).routes || [])[Number(index)];
-      if (!route) return;
-      const guidance = route.guidance || (route.guidance = {});
-      const raw = String(t.value === undefined || t.value === null ? "" : t.value);
-      if (GUIDE_LIST_KEYS.includes(key)) {
-        const items = raw.split("\n").map(item => item.trim()).filter(Boolean);
-        if (items.length) guidance[key] = items; else delete guidance[key];
-      } else if (raw.trim()) guidance[key] = raw;
-      else delete guidance[key];
-      if (!Object.keys(guidance).length) delete route.guidance;
-      if (event.type === "change") render(); return; }
-    if (t.matches("[data-imgr-num]")) { const key = t.dataset.imgrNum; const prep = i.configDraft.preparation || (i.configDraft.preparation = {});
-      const parsed = Number.isFinite(t.valueAsNumber) ? t.valueAsNumber : null;
-      if (event.type === "change") { if (parsed !== null) prep[key] = parsed; render(); } return; }
-    const sec = t.dataset.imgrSec;
-    if (sec) { const [name, key] = String(sec).split(":"); const section = i.configDraft[name] || (i.configDraft[name] = {});
-      if (key === "timeout_seconds") { const parsed = Number.isFinite(t.valueAsNumber) ? t.valueAsNumber : null;
-        if (event.type === "change") { if (parsed !== null) section[key] = parsed; render(); } return; }
-      section[key] = t.value; return; }
-    const def = t.dataset.imgrDef;
-    if (def) { const prep = i.configDraft.preparation || (i.configDraft.preparation = {}); prep[def] = t.value; if (event.type === "change") render(); return; }
-    if (t.matches("[data-imgr-chat]")) { const prep = i.configDraft.preparation || (i.configDraft.preparation = {});
-      prep.chat_enabled = t.checked; if (event.type === "change") render(); return; }
-    const cfgr = t.dataset.cfgr;
-    if (cfgr && i.configDraft.comfyui) { const rows = comfyRowsFrom(i.configDraft.comfyui);
-      const [index, key] = String(cfgr).split(":"); const row = rows[Number(index)];
-      if (row) { row[key] = t.value; row.__name = key === "name" ? t.value : (row.__name || t.value);
-        if (event.type === "change") render(); } return; } }
+    if (t.matches("[data-img-toggle]") && IMAGE_LABELS[t.dataset.imgToggle]) { i.draft[t.dataset.imgToggle] = t.checked; render(); } }
   function imageClick(s, event) { const i = s.image; const t = event.target;
     if (t.closest("[data-img-refresh]")) { imageRefresh(s); return; }
     if (t.closest("[data-img-save]")) { imageSave(s); return; }
-    if (t.closest("[data-img-config]")) { i.configOpen = !i.configOpen; if (i.configOpen && !i.config) imageConfigLoad(s); render(); return; }
-    const configTab = t.closest("[data-imgcfg-tab]");
-    if (configTab) { i.configTab = configTab.dataset.imgcfgTab; render(); return; }
-    if (t.closest("[data-imgcfg-reload]")) { i.config = null; i.configDraft = null; imageConfigLoad(s); return; }
-    if (t.closest("[data-imgcfg-save]")) { imageConfigSave(s); return; }
-    const addRoute = t.closest("[data-imgr-add]");
-    if (addRoute) { const prep = i.configDraft && (i.configDraft.preparation || (i.configDraft.preparation = {}));
-      const routes = prep.routes || (prep.routes = []);
-      const maxRoutes = i.config?.limits?.max_routes;
-      if (Number.isInteger(maxRoutes) && routes.length >= maxRoutes) { i.bad = true; i.notice = `当前版本最多支持 ${maxRoutes} 条执行路线。`; render(); return; }
-      const seed = routes[0] || {};
-      let id = "route-" + (routes.length + 1), guard = 0;
-      while (routes.some(route => route.route_id === id) && guard < 64) { guard += 1; id = "route-" + (routes.length + 1) + "-" + guard; }
-      routes.push({route_id: id, profile: seed.profile || "default", operation: "generate", backend: "comfyui", workflow_id: ""});
-      i.configTab = "routes";
-      render(); return; }
-    const cfgrAdd = t.closest("[data-cfgr-add]");
-    if (cfgrAdd) { const comfy = i.configDraft && (i.configDraft.comfyui || (i.configDraft.comfyui = {}));
-      const rows = comfyRowsFrom(comfy); rows.push({ __kind: "path", __name: "workflow-" + (rows.length + 1), path: "" });
-      render(); return; }
-    const cfgrDel = t.closest("[data-cfgr-del]");
-    if (cfgrDel) { const comfy = i.configDraft && i.configDraft.comfyui; const rows = comfy && comfyRowsFrom(comfy);
-      const index = Number(cfgrDel.dataset.cfgrDel);
-      if (rows[index]) rows.splice(index, 1);
-      render(); return; }
-    const delRoute = t.closest("[data-imgr-del]");
-    if (delRoute) { const prep = i.configDraft && i.configDraft.preparation; const routes = prep && prep.routes || [];
-      const index = Number(delRoute.dataset.imgrDel);
-      if (routes[index]) routes.splice(index, 1);
-      render(); return; }
-    /* 预置字段那一块默认收起（一条路线最多三十几张，全展开会淹掉路线队列）。
-       <details> 的展开状态在重绘后会丢，所以记在路线对象上；重绘由 render() 重建 DOM，
-       这里按点击后的状态提前写入——点击 summary 的默认动作在事件之后才发生。 */
-    const ext = t.closest("details[data-imgr-ext]");
-    if (ext) { const routes = ((i.configDraft || {}).preparation || {}).routes || [];
-      const route = routes[Number(ext.dataset.imgrExt)];
-      if (route) { if (ext.open) expandedRoutes.delete(route); else expandedRoutes.add(route); }
-      return; }
     const testBtn = t.closest("[data-img-test]"); if (testBtn) imageTest(s, testBtn.dataset.imgTest); }
   /* ---------- top-level render & routing ---------- */
   function tabBar(s) { const tabs = [["fn", "功能模型", ICONS.fn, snapshot(s).length],
       ["voice", "语音模型", ICONS.voice, s.voice.data ? s.voice.data.providers.length : ""],
-      ["image", "生图模型", ICONS.image, s.image.data ? s.image.data.actions.length : ""]];
+      ["image", "生图模型", ICONS.image, s.image.data ? s.image.data.actions.length : ""],
+      ["laya", "Laya 决策", ICONS.decision, s.laya.data ? (s.laya.data.enabled ? "启用" : "") : ""]];
     return `<div class="model-tabs" role="tablist" aria-label="模型配置分类">${tabs.map(([id, label, ic, count]) =>
       `<button type="button" role="tab" data-model-tab="${id}" aria-selected="${s.tab === id}" class="${s.tab === id ? "on" : ""}">${icon(ic)}${label}${count !== "" ? `<span class="c">${count}</span>` : ""}</button>`).join("")}</div>`; }
   /* ---------- functional subtabs (design migration) ---------- */
@@ -1160,31 +912,31 @@ window.CompanionModelsPage = (() => {
     return `<div class="model-subtabs" role="tablist" aria-label="功能模型视图">${tabs.map(([id, label]) => `<button type="button" role="tab" data-model-sub="${id}" aria-selected="${s.sub === id}" class="${s.sub === id ? "on" : ""}">${label}</button>`).join("")}</div>`; }
   function kpi(n, label, tone = "") { return `<div class="model-kpi ${tone}"><b>${n}</b><span>${esc(label)}</span></div>`; }
   function fnKpis(s) { const tasks = snapshot(s); const total = tasks.length; const providers = s.status?.providers.length || 0;
-    const withFb = tasks.filter(t => t.fields.fallback?.value).length; const own = tasks.filter(t => fields.some(nm => t.fields[nm]?.explicit)).length;
+    const withFb = tasks.filter(fallbackFor).length; const own = tasks.filter(t => fields.some(nm => t.fields[nm]?.explicit)).length;
     return kpi(total, "需要模型的功能") + kpi(providers, "可用模型") + kpi(withFb, "已设回退", "g")
       + kpi(total - withFb, "暂无回退", "a") + kpi(own, "单独设置"); }
   function sitFilters(s) { const avSeg = [["slot", "按能力槽"], ["lane", "按前台 / 后台"]]; const afSeg = [["all", "全部"], ["nofb", "仅无备用"], ["own", "仅单独设置"]];
     const seg = (cls, attr, arr, cur) => `<div class="${cls}" role="group">${arr.map(([id, label]) => `<button type="button" data-model-${attr}="${id}" aria-pressed="${cur === id}" class="${cur === id ? "active" : ""}">${label}</button>`).join("")}</div>`;
     return `<div class="model-map-filters"><label class="model-search"><span class="sr-only">搜索任务</span><input type="search" data-model-search value="${esc(s.query)}" placeholder="按名称或用途搜索"></label>${seg("model-filters", "av", avSeg, s.av)}${seg("model-filters", "af", afSeg, s.af)}</div>`; }
-  const providerPill = (id, missing) => id
-    ? `<button type="button" class="model-pill m" data-provider-pill="${esc(id)}" style="--mc:${pillColor(id)}" title="查看 ${esc(id)} 的路由分工">${esc(id)}</button>`
+  const providerPill = (id, missing, hovered) => id
+    ? `<button type="button" class="model-pill m${hovered === id ? " is-hovered" : ""}" data-provider-pill="${esc(id)}" style="--mc:${pillColor(id)}" title="查看 ${esc(id)} 的路由分工">${esc(id)}</button>`
     : `<span class="model-pill m none">${missing || "无回退"}</span>`;
   function situationMap(s) { const tasks = snapshot(s); const q = s.query.toLocaleLowerCase();
-    const match = t => { if (s.af === "nofb" && t.fields.fallback?.value) return false; if (s.af === "own" && !fields.some(nm => t.fields[nm]?.explicit)) return false;
+    const match = t => { if (s.af === "nofb" && fallbackFor(t)) return false; if (s.af === "own" && !fields.some(nm => t.fields[nm]?.explicit)) return false;
       if (!q) return true; const info = taskName(t.kind); return (info.label + info.group + info.description + t.kind).toLocaleLowerCase().includes(q); };
     let groups2;
     if (s.av === "lane") groups2 = [["前台 · 用户可见", tasks.filter(t => t.lane === "foreground")], ["后台 · 静默运行", tasks.filter(t => t.lane === "background")]];
     else groups2 = groups.map(([g, items]) => [g, items.map(([kind]) => tasks.find(t => t.kind === kind)).filter(Boolean)]);
     const list = groups2.filter(([, ts]) => ts.length).map(([g, ts]) => {
       const shownTasks = ts.filter(match);
-      const items = shownTasks.map(t => { const info = taskName(t.kind); const main = t.fields.provider?.value || ""; const fb = t.fields.fallback?.value;
+      const items = shownTasks.map(t => { const info = taskName(t.kind); const main = t.fields.provider?.value || ""; const fb = fallbackFor(t);
         const rules = parseRules(t.fields.replacement_rules.value).length, refusal = t.fields.fallback_on_refusal.value === true;
         const picked = s.rule.picked.includes(t.kind);
         return `<li class="model-item${picked ? " seled" : ""}"><label class="model-item-sel"><input type="checkbox" data-map-pick="${esc(t.kind)}" ${picked ? "checked" : ""} aria-label="选择 ${esc(info.label)} 参与批量测试"></label>
           <span class="model-item-nm"><button type="button" class="model-map-open" data-model-open="${esc(t.kind)}" aria-label="编辑 ${esc(info.label)}"><b>${esc(info.label)}</b></button></span>
           <span class="model-item-ch">
-            <span class="model-ln"><i>默认模型</i><span class="model-ps">${providerPill(main, "未设置")}</span></span>
-            <span class="model-ln"><i>备用模型</i><span class="model-ps">${providerPill(fb)}${rules ? `<span class="model-tag">${rules} 规则</span>` : ""}${refusal ? '<span class="model-tag a">拒答替代</span>' : ""}</span></span>
+            <span class="model-ln"><i>默认模型</i><span class="model-ps">${providerPill(main, "未设置", s.hoverProvider)}</span></span>
+            <span class="model-ln"><i>备用模型</i><span class="model-ps">${providerPill(fb, "", s.hoverProvider)}${rules ? `<span class="model-tag">${rules} 规则</span>` : ""}${refusal ? '<span class="model-tag a">拒答替代</span>' : ""}</span></span>
           </span></li>`; }).join("");
       const sel = ts.filter(t => s.rule.picked.includes(t.kind)).length;
       const all = shownTasks.length && shownTasks.every(t => s.rule.picked.includes(t.kind));
@@ -1216,7 +968,7 @@ window.CompanionModelsPage = (() => {
     const rows = (s.rule.report || []).map(line => { const st = line.provider ? s.providerTests[line.provider] : null;
       const running = s.rule.testing && (!st || st.status === "testing");
       const cls = running ? "run" : st && st.status === "ok" ? "ok" : running ? "run" : "bad";
-      const tail = !line.provider ? "无 Provider"
+      const tail = !line.provider ? "无模型提供方"
         : running ? '<span class="model-sp"></span>测试中'
         : st ? esc(probeLabel(st)) : "结果未知";
       return `<div class="model-trow ${cls}"><span class="dotm" style="background:${pillColor(line.provider)}"></span><span class="mno">${esc(line.provider || "—")}</span>
@@ -1224,7 +976,7 @@ window.CompanionModelsPage = (() => {
     const total = (s.rule.report || []).length;
     const done = (s.rule.report || []).filter(line => { const st = line.provider && s.providerTests[line.provider]; return st && st.status !== "testing"; }).length;
     const okCount = (s.rule.report || []).filter(line => s.providerTests[line.provider]?.status === "ok").length;
-    return `<div class="model-dock"><div class="model-selbar"><span>已选 <b>${picked.length}</b> 项任务 · 涉及 <b>${providers.size}</b> 个 Provider</span>
+    return `<div class="model-dock"><div class="model-selbar"><span>已选 <b>${picked.length}</b> 项任务 · 涉及 <b>${providers.size}</b> 个模型提供方</span>
       <span class="model-bar${total && done === total && okCount === total ? " full" : ""}"><i style="width:${total ? Math.round(done / total * 100) : 0}%"></i></span>
       <span class="model-grow"></span>
       <button type="button" class="button small" data-map-clear ${s.rule.testing ? "disabled" : ""}>清空</button>
@@ -1235,15 +987,15 @@ window.CompanionModelsPage = (() => {
     const report = [];
     picked.forEach(kind => { const task = taskOf(s, kind), draft = s.drafts.get(kind), info = taskName(kind);
       const primary = providerFor(task, draft), fallback = effective(task, draft, "fallback");
-      report.push({ provider: primary, role: "主 Provider", label: info.label });
-      if (fallback) report.push({ provider: fallback, role: "备用 Provider", label: info.label }); });
+      report.push({ provider: primary, role: "主模型提供方", label: info.label });
+      if (fallback) report.push({ provider: fallback, role: "备用模型提供方", label: info.label }); });
     s.rule.report = report; s.rule.testing = true; s.bad = false; render();
     for (const provider of new Set(report.map(line => line.provider).filter(Boolean))) {
       await probeProvider(s, provider); if (!current(ticket, s)) return;
     }
     s.rule.testing = false;
     s.bad = report.some(line => !line.provider || s.providerTests[line.provider]?.status !== "ok");
-    s.notice = s.bad ? "部分 Provider 未通过测试，请核对结果。" : "所选任务涉及的 Provider 均已通过测试。"; render(); }
+    s.notice = s.bad ? "部分模型提供方未通过测试，请核对结果。" : "所选任务涉及的模型提供方均已通过测试。"; render(); }
   function quickConfig(s) { const providers = s.status?.providers || [];
     const opts = id => `<option value="">跟随分组默认</option>${providers.map(p => `<option value="${esc(p.id)}" ${s.slotDraft[id] === p.id ? "selected" : ""}>${esc(p.id)}</option>`).join("")}`;
     const cards = groups.map(([g, items]) => { const kinds = items.map(([kind]) => kind);
@@ -1261,14 +1013,14 @@ window.CompanionModelsPage = (() => {
           <div class="model-rl"><span>${items.length} 项任务</span><span>替换规则 ${routed} 条</span>${refusal ? `<span>拒答替代 ${refusal} 项</span>` : ""}</div>
         </div>
         <div class="model-sc-bd">
-          <label class="model-fd"><span class="model-cap">统一指派 Provider <em>写入每项任务的主 Provider</em></span>
+          <label class="model-fd"><span class="model-cap">统一指派模型提供方 <em>写入每项任务的主模型提供方</em></span>
             <select data-model-slot="${esc(g)}" aria-label="${esc(g)} 统一指派">${opts(g)}</select></label>
           <div class="model-fd"><span class="model-cap">当前统一路由</span>
             <div class="model-cur${same ? "" : " miss"}">${esc(same || "混合 / 跟随上级")}</div></div>
         </div>
         <div class="model-sc-rf">
           <div class="r"><b>用途</b><span>${esc(items.map(([, label, desc]) => `${label}：${desc}`).join("；"))}</span></div>
-          <div class="r"><b>覆盖</b><span>只写入各任务的主 Provider，保留各自的备用、提示词与替换规则；可随时在精准配置改回跟随上级。</span></div>
+          <div class="r"><b>覆盖</b><span>只写入各任务的主模型提供方，保留各自的备用、提示词与替换规则；可随时在精确配置改回跟随上级。</span></div>
         </div>
         <div class="model-sc-ft"><code>${esc(g)}</code><span class="model-grow"></span>
           <button type="button" class="model-lk" data-model-exp="${esc(g)}">${open ? "收起" : "覆盖"} ${items.length} 项${own ? ` · ${own} 项单独设置` : ""} ▾</button>
@@ -1339,7 +1091,7 @@ window.CompanionModelsPage = (() => {
   function ruleCard(s, task, rule, index) {
     const info = taskName(task.kind), draft = s.drafts.get(task.kind), locked = s.loading || s.busy || s.denied || draft?.pending;
     const providers = available(s, task), picked = typeof rule.provider_id === "string" ? rule.provider_id : "";
-    const extra = providers.some(provider => provider.id === picked) ? "" : picked ? `<option value="${esc(picked)}" selected>${esc(picked)} · 未注册</option>` : "";
+    const extra = providers.some(provider => provider.id === picked) ? "" : picked ? `<option value="${esc(picked)}" selected>${esc(picked)} · 当前不可用</option>` : "";
     const window = rule.time_window && typeof rule.time_window === "object" ? rule.time_window : null;
     const ref = `${esc(task.kind)}:${index}`;
     return `<li class="model-kw${rule.enabled === false ? " off" : ""}" data-rule-card="${ref}">
@@ -1353,7 +1105,7 @@ window.CompanionModelsPage = (() => {
         <span class="model-cap">关键词</span>
         <textarea class="model-kk" rows="1" data-rule-keywords="${ref}" placeholder="写代码，代码报错（逗号或换行分隔）" ${locked ? "disabled" : ""}>${esc(ruleKeywordText(rule))}</textarea>
         <span class="model-arw">→</span>
-        <select data-rule-provider="${ref}" aria-label="规则目标 Provider" ${locked ? "disabled" : ""}><option value="">未选择 · 规则不生效</option>${providers.map(provider => `<option value="${esc(provider.id)}" ${provider.id === picked ? "selected" : ""}>${esc(provider.id)}</option>`).join("")}${extra}</select>
+        <select data-rule-provider="${ref}" aria-label="规则目标模型提供方" ${locked ? "disabled" : ""}><option value="">未选择 · 规则不生效</option>${providers.map(provider => `<option value="${esc(provider.id)}" ${provider.id === picked ? "selected" : ""}>${esc(provider.id)}</option>`).join("")}${extra}</select>
       </div>
       <div class="model-kwc">
         <span class="model-cap">匹配</span>
@@ -1363,7 +1115,7 @@ window.CompanionModelsPage = (() => {
         <span class="model-cap">优先级</span>
         <input class="model-num" type="number" step="1" data-rule-priority="${ref}" value="${esc(Number.isInteger(rule.priority) ? rule.priority : 0)}" ${locked ? "disabled" : ""}>
         <span class="model-cap">模型覆盖</span>
-        <input class="model-mo" data-rule-model="${ref}" value="${esc(rule.model || "")}" placeholder="${esc(picked && providers.find(provider => provider.id === picked)?.supports_model_override ? "该 Provider 支持覆盖" : "留空沿用默认")}" ${locked ? "disabled" : ""}>
+        <input class="model-mo" data-rule-model="${ref}" value="${esc(rule.model || "")}" placeholder="${esc(picked && providers.find(provider => provider.id === picked)?.supports_model_override ? "该模型提供方支持覆盖" : "留空沿用默认")}" ${locked ? "disabled" : ""}>
       </div>
       <div class="model-rule-time">
         <label class="model-cap"><input type="checkbox" data-rule-window="${ref}" ${window ? "checked" : ""} ${locked ? "disabled" : ""}> 限定生效时段</label>
@@ -1398,30 +1150,30 @@ window.CompanionModelsPage = (() => {
       </section>
       <p class="model-policy-hint">按任务保存；设置会与「${esc(fieldLabel.replacement_rules)}」一起生效。</p>
     </div>`; }
-  function keywordPolicy(s) { const task = policyTask(s); if (!task) return '<p class="model-empty">当前宿主还没有注册任何模型任务。</p>';
+  function keywordPolicy(s) { const task = policyTask(s); if (!task) return '<p class="model-empty">当前没有可用的模型任务。</p>';
     const draft = s.drafts.get(task.kind), locked = s.loading || s.busy || s.denied || draft?.pending;
     const rules = ruleOf(s, task.kind), custom = !draft.inherited.replacement_rules;
     const inherited = task.fields.replacement_rules.inherited_value || "[]";
     return `<article class="model-pol-card"><header class="model-rule-title"><div><h3>关键词替换规则</h3>
-        <p class="model-note">命中时使用目标 Provider。</p></div>
+        <p class="model-note">命中时使用目标模型提供方。</p></div>
         <div class="model-rule-actions"><button type="button" class="button small" data-rule-add ${locked ? "disabled" : ""}>+ 新增规则</button></div></header>
       <ul class="model-rules">${rules.length ? rules.map((rule, index) => ruleCard(s, task, rule, index)).join("") : '<li class="model-empty">这项任务还没有替换规则。</li>'}</ul>
       <p class="model-note">上级默认规则 ${parseRules(inherited).length} 条 · 当前任务 ${rules.length} 条；${custom ? "已单独设置" : "跟随上级"}。</p>
       <details class="model-rule-json"><summary>JSON 源码</summary>
         <textarea rows="7" spellcheck="false" data-model-pol-json ${locked ? "disabled" : ""}>${esc(serializeRules(rules))}</textarea>
         <p class="model-note">失焦后提交；格式错误时保留原值。</p></details></article>`; }
-  function peakPolicy(s) { const task = policyTask(s); if (!task) return '<p class="model-empty">当前宿主还没有注册任何模型任务。</p>';
+  function peakPolicy(s) { const task = policyTask(s); if (!task) return '<p class="model-empty">当前没有可用的模型任务。</p>';
     const draft = s.drafts.get(task.kind), locked = s.loading || s.busy || s.denied || draft?.pending;
     const rules = ruleOf(s, task.kind), windows = rules.filter(rule => !ruleKeywordText(rule) && rule.time_window);
     const providers = available(s, task), alternative = s.peak.provider;
-    const extra = providers.some(provider => provider.id === alternative) ? "" : alternative ? `<option value="${esc(alternative)}" selected>${esc(alternative)} · 未注册</option>` : "";
+    const extra = providers.some(provider => provider.id === alternative) ? "" : alternative ? `<option value="${esc(alternative)}" selected>${esc(alternative)} · 当前不可用</option>` : "";
     return `<article class="model-pol-card">
       <div class="model-phead"><div class="model-grow"><span class="model-eb">成本路由 · 可选</span><h3>高价时段替代</h3></div>
-        <div class="model-st2"><span class="model-tag ${s.peak.on ? (s.peak.provider ? "a" : "a") : "n"}">${s.peak.on ? (s.peak.provider ? "已启用" : "等待选择替代 Provider") : "未启用"}</span>
+        <div class="model-st2"><span class="model-tag ${s.peak.on ? (s.peak.provider ? "a" : "a") : "n"}">${s.peak.on ? (s.peak.provider ? "已启用" : "等待选择替代模型提供方") : "未启用"}</span>
           <label class="model-switch"><input type="checkbox" data-peak-switch ${s.peak.on ? "checked" : ""} ${locked ? "disabled" : ""} aria-label="启用高价时段替代"><i></i></label></div></div>
       ${s.peak.on ? `<div class="model-pol-body">
-        <label class="model-fd"><span class="model-cap">高价时段替代 Provider <em>时段内整体改走这里</em></span>
-          <select data-peak-provider ${locked ? "disabled" : ""}><option value="">请选择替代 Provider</option>${providers.map(provider => `<option value="${esc(provider.id)}" ${provider.id === alternative ? "selected" : ""}>${esc(provider.id)}</option>`).join("")}${extra}</select></label>
+        <label class="model-fd"><span class="model-cap">高价时段替代模型提供方 <em>时段内整体改走这里</em></span>
+          <select data-peak-provider ${locked ? "disabled" : ""}><option value="">请选择替代模型提供方</option>${providers.map(provider => `<option value="${esc(provider.id)}" ${provider.id === alternative ? "selected" : ""}>${esc(provider.id)}</option>`).join("")}${extra}</select></label>
         <div class="model-fd"><span class="model-cap">高价时段 <em>点击格子切换 · 每行一个区间 · 支持跨午夜</em></span>
           <div class="model-band" data-peak-band>${Array.from({ length: 24 }, (_, hour) => {
             const on = peakWindows(s.peak).has(hour);
@@ -1444,7 +1196,7 @@ window.CompanionModelsPage = (() => {
           <div class="rs"><span>写入行为</span><b>替换本任务原有的纯时段规则</b></div>
         </div></div>` : ""}
       </article>`; }
-  function refusalPolicy(s) { const task = policyTask(s); if (!task) return '<p class="model-empty">当前宿主还没有注册任何模型任务。</p>';
+  function refusalPolicy(s) { const task = policyTask(s); if (!task) return '<p class="model-empty">当前没有可用的模型任务。</p>';
     const draft = s.drafts.get(task.kind), locked = s.loading || s.busy || s.denied || draft?.pending;
     const on = draft.inherited.fallback_on_refusal ? !!task.fields.fallback_on_refusal.inherited_value : !!draft.values.fallback_on_refusal;
     const fallback = effective(task, draft, "fallback");
@@ -1453,9 +1205,9 @@ window.CompanionModelsPage = (() => {
         <div class="model-st2"><span class="model-tag ${on ? (fallback ? "g" : "a") : "n"}">${on ? (fallback ? "已启用 · 可重试一次" : "已开启 · 没有备用链路") : "未启用"}</span>
           <label class="model-switch"><input type="checkbox" data-refusal-switch ${on ? "checked" : ""} ${locked ? "disabled" : ""}><i></i></label></div></div>
       ${on ? `<div class="model-pol-body"><div class="model-rf2">
-        <div class="model-fd"><span class="model-cap">拒答时换到哪里 <em>备用 Provider 在「模型配置 · 精准配置」设置</em></span>
-          <div class="model-cur${fallback ? "" : " miss"}">${fallback ? esc(fallback) : "未设置备用 Provider · 开启后仍无路可退"}</div></div>
-        <div class="model-fd"><span class="model-cap">判定方式 <em>V2 依据 Provider 返回的拒答标记，不再按文本匹配</em></span>
+        <div class="model-fd"><span class="model-cap">拒答时换到哪里 <em>备用模型提供方在「模型配置 · 精确配置」设置</em></span>
+          <div class="model-cur${fallback ? "" : " miss"}">${fallback ? esc(fallback) : "未设置备用模型提供方 · 开启后仍无路可退"}</div></div>
+        <div class="model-fd"><span class="model-cap">判定方式 <em>V2 依据模型提供方返回的拒答标记，不再按文本匹配</em></span>
           <div class="model-rfchips">${REFUSAL_HINTS.map(hint => `<span class="model-kchip muted">${esc(hint)}</span>`).join("")}</div></div>
       </div></div>` : ""}
       <p class="model-note">命中拒答时使用备用模型重试一次。</p></article>`; }
@@ -1464,14 +1216,14 @@ window.CompanionModelsPage = (() => {
     const peakCount = rules.filter(rule => !ruleKeywordText(rule) && rule.time_window).length;
     const refusalOn = task && draft ? (draft.inherited.fallback_on_refusal
       ? !!task.fields.fallback_on_refusal.inherited_value : !!draft.values.fallback_on_refusal) : false;
-    const modes = [["kw", "关键词换模", "按内容命中，切换到指定 Provider", `${rules.length} 条规则`],
+    const modes = [["kw", "关键词换模", "按内容命中，切换到指定模型提供方", `${rules.length} 条规则`],
       ["peak", "高价时段替代", "在指定时段改走成本模型", `${peakCount} 条时段规则`],
       ["refuse", "拒答替代", "主模型拒答后使用备用模型重试", refusalOn ? "已启用" : "未启用"]];
     const picked = taskOf(s, s.pol) || snapshot(s)[0];
     const panel = s.pm === "peak" ? peakPolicy(s) : s.pm === "refuse" ? refusalPolicy(s) : keywordPolicy(s);
     const locked = !picked || s.busy || s.loading || s.denied || s.drafts.get(picked.kind)?.pending;
     return `<div class="model-subpane model-policy">
-      <header class="model-policy-heading"><div><span class="model-eb">MODEL ROUTING / ${esc(task ? taskName(task.kind).label : "TASK")}</span>
+      <header class="model-policy-heading"><div><span class="model-eb">任务路由 / ${esc(task ? taskName(task.kind).label : "未选任务")}</span>
         <h3>替换策略工作台</h3><p>为不同任务组合内容路由、时段切换和拒答兜底。</p></div>
         ${draft && dirty(task, draft) ? '<span class="model-tag a">本任务有待保存改动</span>' : '<span class="model-tag">按任务独立生效</span>'}</header>
       ${notice(s)}
@@ -1481,14 +1233,14 @@ window.CompanionModelsPage = (() => {
       <div class="model-policy-layout"><aside class="model-policy-rail">${policyTaskPicker(s)}
         ${picked ? `<div class="model-pol-actions"><button type="button" class="button primary" data-policy-save="${esc(picked.kind)}" ${s.busy || s.loading || s.denied || s.drafts.get(picked.kind)?.stale || !dirty(picked, s.drafts.get(picked.kind)) ? "disabled" : ""}>保存本任务策略</button>
           <button type="button" class="button" data-policy-discard="${esc(picked.kind)}" ${s.busy || s.loading || s.drafts.get(picked.kind)?.pending ? "disabled" : ""}>放弃草稿</button></div>` : ""}
-      </aside><div class="model-policy-editor">${picked ? panel : '<div class="model-empty">当前宿主还没有注册任何模型任务。</div>'}</div></div>
+      </aside><div class="model-policy-editor">${picked ? panel : '<div class="model-empty">当前没有可用的模型任务。</div>'}</div></div>
     </div>`; }
   function cfgPane(s) { const tasks = snapshot(s);
     const own = tasks.filter(t => fields.some(nm => t.fields[nm]?.explicit)).length;
     const note = s.status ? `生效中 · ${own} / ${tasks.length} 项任务单独设置了模型` : "";
-    const cmSeg = [["quick", "快速配置"], ["precise", "精准配置"]];
+    const cmSeg = [["quick", "快速配置"], ["precise", "精确配置"]];
     const seg = `<div class="model-seg" role="group" aria-label="配置模式">${cmSeg.map(([id, label]) => `<button type="button" data-model-cm="${id}" aria-pressed="${s.cm === id}" class="${s.cm === id ? "on" : ""}">${label}</button>`).join("")}</div>`;
-    const body2 = s.cm === "quick" ? quickConfig(s) : `${rail(s)}${toolbar(s)}<div class="model-queue-slot">${queue(s)}</div>${body(s)}`;
+    const body2 = s.cm === "quick" ? quickConfig(s) : `${toolbar(s)}<div class="model-queue-slot">${queue(s)}</div>${body(s)}`;
     return `<div class="model-subpane"><div class="model-note cfg">${seg}</div>${notice(s)}${s.cm === "quick" ? "" : overview(s)}${body2}</div>`; }
   /* ---------- replacement policy: mutations ---------- */
   const ruleTarget = ref => { const [kind, index] = String(ref || "").split(":"); return { kind, index: Number(index) }; };
@@ -1553,7 +1305,7 @@ window.CompanionModelsPage = (() => {
     const preset = t.closest("[data-peak-preset]"); if (preset) { s.peak.windows = "09:00-12:00\n14:00-18:00"; s.peak.start = "09:00"; s.peak.end = "12:00"; render(); return; }
     const clear = t.closest("[data-peak-clear]"); if (clear) { s.peak.windows = ""; s.peak.start = ""; s.peak.end = ""; render(); return; }
     const apply = t.closest("[data-peak-apply]"); if (apply) { const task = policyTask(s); if (!task) return;
-      if (s.peak.on && !s.peak.provider) { s.bad = true; s.notice = "先选择时段替代的 Provider。"; render(); return; }
+      if (s.peak.on && !s.peak.provider) { s.bad = true; s.notice = "先选择时段替代的模型提供方。"; render(); return; }
       const segments = peakSegments(s.peak.windows);
       if (s.peak.on && !segments.length) { s.bad = true; s.notice = "先设置至少一个有效时段。"; render(); return; }
       editRules(s, task.kind, rules => { for (let index = rules.length - 1; index >= 0; index--)
@@ -1583,35 +1335,52 @@ window.CompanionModelsPage = (() => {
     ruleInput(s, event); }
   function fnPane(s) { const sub = s.sub === "map" ? situationMap(s) : s.sub === "pol" ? replacementPolicy(s) : cfgPane(s);
     return `${topbar(s)}${subtabBar(s)}${sub}`; }
-  function pane(s) { if (s.tab === "voice") return voicePane(s); if (s.tab === "image") return imagePane(s); return fnPane(s); }
+  function pane(s) { if (s.tab === "voice") return voicePane(s); if (s.tab === "image") return imagePane(s); if (s.tab === "laya") return layaPane(s); return fnPane(s); }
   function drawer(s) { const id = s.drawer; if (!id) return "";
     const provider = s.status?.providers.find(p => p.id === id); if (!provider) return "";
     const tasks = snapshot(s), asMain = tasks.filter(t => providerFor(t, s.drafts.get(t.kind)) === id);
     const asFb = tasks.filter(t => effective(t, s.drafts.get(t.kind), "fallback") === id);
-    return `<div class="model-mask on" data-drawer-close></div><aside class="model-drawer on" role="dialog" aria-label="Provider ${esc(id)}">
-      <div class="dh"><div><h3>${esc(id)}</h3><p>${esc(provider.capabilities.join(" · ") || "无能力声明")}</p></div>
+    return `<div class="model-mask on" data-drawer-close></div><aside class="model-drawer on" role="dialog" aria-label="模型提供方 ${esc(id)}">
+      <div class="dh"><div><h3>${esc(id)}</h3><p>${esc(provider.capabilities.map(capabilityLabel).join(" · ") || "无能力声明")}</p></div>
         <button type="button" class="x" data-drawer-close aria-label="关闭">×</button></div>
       <dl class="model-kv"><dt>单次输出上限</dt><dd>${provider.max_output_tokens}</dd>
         <dt>承担任务</dt><dd>${asMain.length} 项主路由 · ${asFb.length} 项备用</dd></dl>
       <div class="model-sec"><h4>作为主模型 · ${asMain.length} 项</h4>${asMain.map(t => `<div class="li">${esc(taskName(t.kind).label)}<span>${esc(taskName(t.kind).description)}</span></div>`).join("") || '<span class="model-mono">无</span>'}</div>
       <div class="model-sec"><h4>作为备用 · ${asFb.length} 项</h4>${asFb.map(t => `<div class="li">${esc(taskName(t.kind).label)}<span>${esc(taskName(t.kind).description)}</span></div>`).join("") || '<span class="model-mono">无</span>'}</div>
-      <div class="model-sec"><button type="button" class="button primary" style="width:100%" data-drawer-goto="${esc(id)}">在精准配置中调整</button></div></aside>`; }
+      <div class="model-sec"><button type="button" class="button primary" style="width:100%" data-drawer-goto="${esc(id)}">在精确配置中调整</button></div></aside>`; }
   function render() { if (!root || !state) return; const s = state;
-    root.innerHTML = `<div class="model-workspace">${s.catalog ? `<div class="model-catalog" role="status"><strong>AstrBot 模型列表</strong><span>${s.catalog.providers.length} 个已加载 Provider</span>${s.catalog.providers.map(p => `<span class="model-pill ${p.configured ? "ok" : "warn"}">${esc(p.name || p.id)} · ${esc(p.id)}</span>`).join("")}</div>` : ""}${tabBar(s)}${pane(s)}${drawer(s)}</div>`; }
+    root.innerHTML = `<div class="model-workspace">${tabBar(s)}${pane(s)}${drawer(s)}</div>`; }
   function input(event) { const s = state; if (!s || !root?.isConnected) return;
     if (s.tab === "voice") { voiceInput(s, event); return; }
     if (s.tab === "image") { imageInput(s, event); return; }
+    if (s.tab === "laya") { layaInput(s, event); return; }
     fnInput(event); }
   function click(event) { const s = state; if (!s || !root?.isConnected) return;
     const tab = event.target.closest("[data-model-tab]");
     if (tab) { const id = tab.dataset.modelTab; if (s.tab !== id) { s.tab = id;
-        if (id === "voice" && !state.voice.loaded) voiceRefresh(s); else if (id === "image" && !state.image.loaded) imageRefresh(s);
+        if (id === "voice" && !state.voice.loaded) voiceRefresh(s); else if (id === "image" && !state.image.loaded) imageRefresh(s); else if (id === "laya" && !state.laya.loaded) layaRefresh(s);
         render(); } return; }
     if (s.tab === "voice") { voiceClick(s, event); return; }
     if (s.tab === "image") { imageClick(s, event); return; }
+    if (s.tab === "laya") { layaClick(s, event); return; }
     fnClick(event); }
+  function providerHover(event) {
+    const s = state; if (!s || !root?.isConnected) return;
+    const pill = event.target.closest?.("[data-provider-pill]");
+    if (event.type === "pointerover") {
+      if (!pill) return;
+      s.hoverProvider = pill.dataset.providerPill;
+    } else {
+      if (!pill || s.hoverProvider !== pill.dataset.providerPill) return;
+      const next = event.relatedTarget?.closest?.("[data-provider-pill]");
+      if (next?.dataset.providerPill === s.hoverProvider) return;
+      s.hoverProvider = "";
+    }
+    root.querySelectorAll("[data-provider-pill]").forEach(item =>
+      item.classList.toggle("is-hovered", !!s.hoverProvider && item.dataset.providerPill === s.hoverProvider));
+  }
   /* ---------- lifecycle ---------- */
-  function unmount() { version++; if (root) { root.removeEventListener("input", input); root.removeEventListener("change", input); root.removeEventListener("click", click); }
+  function unmount() { version++; if (root) { root.removeEventListener("input", input); root.removeEventListener("change", input); root.removeEventListener("click", click); root.removeEventListener("pointerover", providerHover); root.removeEventListener("pointerout", providerHover); }
     if (state) { state.loading = false; state.busy = false; }
     root = null; state = null; path = key = null; }
   function mount(element) { unmount(); root = element; if (!root) return; const product = window.CompanionProduct;
@@ -1620,22 +1389,23 @@ window.CompanionModelsPage = (() => {
        现在改成读不到就说读不到，并给一个重新读取的入口——刷新之后桥通常就在了。 */
     const identity = product.identity();
     const endpoint = product.role()?.model_api;
-    if (!product.hosted() || typeof endpoint !== "string" || !endpoint.startsWith(PREFIX) || /[?#%\\:]/.test(endpoint) || endpoint.split("/").slice(1).some(p => !p || p === "." || p === "..") || !identity.operator_id) { root.innerHTML = `<div class="model-empty">${product.hosted()?'当前对象没有模型配置工作区。请选择已初始化的私聊对象和角色。':'还没有读到宿主目录。宿主注入连接通常比页面脚本晚几秒，重新读取一次即可。'}<div class="dialog-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button><button class="button small" type="button" data-go="manage" data-manage="host">账号与会话</button></div></div>`; return; }
+    if (!product.hosted() || typeof endpoint !== "string" || !endpoint.startsWith(PREFIX) || /[?#%\\:]/.test(endpoint) || endpoint.split("/").slice(1).some(p => !p || p === "." || p === "..") || !identity.operator_id) { root.innerHTML = `<div class="model-empty">${product.hosted()?'当前对象没有模型配置工作区。请选择已关联角色的私聊窗口。':'角色与会话目录暂未读到，请稍后重新读取。'}<div class="dialog-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button><button class="button small" type="button" data-go="manage" data-manage="host">账号与会话</button></div></div>`; return; }
     /* path 是每一次请求的基址（model_api + /configure、/voice、/tts/providers…），
        也是 localStorage 键的一部分。桥要插件相对路径，所以切掉插件目录名。 */
     path = endpoint.slice(PREFIX.length); key = "companion-model-edit.v2:" + JSON.stringify([identity.installation_id, identity.operator_id, path]);
-    state = states.get(key) || { status: null, catalog: null, drafts: new Map(), selection: [], expanded: null, view: "tasks", custom: null, lane: "all", providerFilter: null, query: "", sub: "cfg", cm: "precise", av: "slot", af: "all", pm: "kw", slotDraft: {}, providerTests: {}, testing: new Set(),
+    state = states.get(key) || { status: null, drafts: new Map(), selection: [], expanded: null, view: "tasks", custom: null, lane: "all", providerFilter: null, query: "", sub: "cfg", cm: "precise", av: "slot", af: "all", pm: "kw", slotDraft: {}, providerTests: {}, testing: new Set(),
       drawer: null, expOpen: {}, pol: null, rule: { query: "", picked: [], report: null, testing: false }, peak: { on: true, provider: "", start: "09:00", end: "12:00", windows: "09:00-12:00\n14:00-18:00" },
       tab: "fn",
       voice: { data: null, draft: null, loaded: false, loading: false, busy: false, testing: false, bad: false, notice: "", ui: { lang: "ja" },
-        editorOpen: false, catalog: null, catalogLoading: false, editorId: null, editorValues: {}, creating: false, ttsBusy: false, createDraft: { type: "", id: "" } },
+        editorOpen: false, catalog: null, catalogLoading: false, editorId: null, editorValues: {}, creating: false, ttsBusy: false, ttsTesting: false, ttsTestResults: {}, createDraft: { type: "", id: "" } },
       image: { data: null, draft: null, loaded: false, loading: false, busy: false, testing: null, bad: false, notice: "",
-        configOpen: false, config: null, configLoading: false, configSaving: false, configDraft: null, configTab: "routes" },
+      },
+      laya: { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" },
       loading: false, busy: false, bad: false, denied: false, notice: "" };
-    state.providerTests ||= {}; state.testing ||= new Set(); state.expOpen ||= {}; state.drawer ||= null; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.createDraft ||= { type: "", id: "" }; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.image.configTab ||= "routes";
+    state.providerTests ||= {}; state.testing ||= new Set(); state.expOpen ||= {}; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.hoverProvider = "";
     states.set(key, state);
-    root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); render();
-    if (state.tab && state.tab !== "fn") { if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); }
-    else { refresh().catch(error => { if (error?.code !== "staging_not_initialized") return; const ticket = version; api("GET", path + "/catalog").then(data => { if (current(ticket, state)) { state.catalog = data; render(); } }).catch(() => {}); }); } }
+    root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); root.addEventListener("pointerover", providerHover); root.addEventListener("pointerout", providerHover); render();
+    if (state.tab && state.tab !== "fn") { if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); else if (state.tab === "laya" && !state.laya.loaded) layaRefresh(state); }
+    else { refresh().catch(() => {}); } }
   return { mount, unmount };
 })();

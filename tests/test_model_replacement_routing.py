@@ -1,4 +1,4 @@
-"""Native provider registration and sealed-input replacement routing."""
+"""Native provider discovery and sealed-input replacement routing."""
 
 from dataclasses import replace
 from datetime import timedelta
@@ -40,9 +40,18 @@ class NativeRoutingSettingsTests(unittest.TestCase):
         self.assertEqual(after.common.fallback_provider_id, "native-backup")
         self.assertFalse(hasattr(after, "additional_providers"))
 
-    def test_invalid_catalogs_fail_during_config_parse(self):
-        invalid = ([additional_provider("native-model")],
-                   [additional_provider("backup", typo_rate=1)],
+    def test_primary_profile_and_fallback_duplicates_are_ignored(self):
+        config = multi_config()
+        config["model"].update(additional_providers=[additional_provider("native-model")],
+                               fallback_provider_id="native-model")
+
+        settings = MultiHostSettings.parse(config)
+
+        self.assertEqual(settings.common.additional_providers, ())
+        self.assertEqual(settings.common.fallback_provider_id, "")
+
+    def test_invalid_saved_provider_profiles_fail_during_config_parse(self):
+        invalid = ([additional_provider("backup", typo_rate=1)],
                    [additional_provider("backup", output_microusd_per_million=-1)],
                    [additional_provider(f"backup-{index}") for index in range(9)])
         for providers in invalid:
@@ -51,12 +60,20 @@ class NativeRoutingSettingsTests(unittest.TestCase):
                 config["model"]["additional_providers"] = providers
                 MultiHostSettings.parse(config)
 
-    def test_invalid_rule_targets_and_output_limits_fail_during_parse(self):
+    def test_live_provider_ids_are_deferred_to_the_loaded_astrbot_catalog(self):
         for changes in (
-            {"fallback_provider_id": "missing"},
+            {"fallback_provider_id": "loaded-later"},
+            {"replacement_rules": '[{"keywords":["private"],"provider_id":"loaded-later"}]'},
+        ):
+            with self.subTest(changes=changes):
+                config = multi_config()
+                config["model"].update(changes)
+                self.assertEqual(MultiHostSettings.parse(config).common.provider_id, "native-model")
+
+    def test_saved_provider_profiles_still_validate_their_limits(self):
+        for changes in (
             {"additional_providers": [additional_provider(max_output_tokens=50)],
              "fallback_provider_id": "native-backup"},
-            {"replacement_rules": '[{"keywords":["private"],"provider_id":"missing"}]'},
             {"additional_providers": [additional_provider(max_output_tokens=50)],
              "replacement_rules": '[{"keywords":["private"],"provider_id":"native-backup"}]'},
         ):
@@ -79,8 +96,9 @@ class NativeMultiRoutingTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def test_probe_and_start_verify_additional_native_provider(self):
         backup = FakeProvider()
         backup.provider_config["id"] = "native-backup"
-        self.native.get_provider_by_id = lambda provider_id: {
-            "native-model": self.native.provider, "native-backup": backup}.get(provider_id)
+        providers = {"native-model": self.native.provider, "native-backup": backup}
+        self.native.get_provider_by_id = providers.get
+        self.native.get_all_providers = lambda: list(providers.values())
         config = multi_config()
         config["model"].update(additional_providers=[additional_provider()],
                                fallback_provider_id="native-backup")
@@ -91,13 +109,19 @@ class NativeMultiRoutingTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([provider.provider_id for provider in self.controller.session.models],
                          ["native-model", "native-backup"])
 
-    async def test_missing_additional_provider_fails_before_profile_creation(self):
+    async def test_missing_saved_provider_profile_does_not_block_loaded_provider(self):
         config = multi_config()
-        config["model"].update(additional_providers=[additional_provider()])
+        config["model"].update(additional_providers=[additional_provider()],
+                               fallback_provider_id="native-backup",
+                               replacement_rules='[{"provider_id":"native-backup","keywords":["private"]}]')
         self.controller = self.make_controller(config)
-        result = await self.controller.probe()
-        self.assertEqual(result.failure.code, "host_provider_unavailable")
-        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertTrue((await self.controller.probe()).is_success)
+        self.assertTrue((await self.controller.initialize_profile()).is_success)
+        self.assertTrue((await self.controller.start()).is_success)
+        self.assertEqual([model.provider_id for model in self.controller.session.models], ["native-model"])
+        reply = self.controller.session.application.router.profiles["conversation.reply"]
+        self.assertEqual(reply.default_fallback, "")
+        self.assertEqual(reply.replacement_rules, "[]")
 
 
 class ModelReplacementTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
@@ -236,7 +260,7 @@ class NativeModelOverrideTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.native.provider.client.state.behavior = respond
         response = await self.native_model.generate(envelope)
         self.assertEqual(response.captured_output, CapturedModelOutput("", "refusal"))
-        self.assertEqual(response.usage, Amount(40, 90))
+        self.assertEqual(response.usage, Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_tokens=10))
 
         refused.choices[0].message.refusal = "blocked"
         refused.choices[0].finish_reason = "stop"
@@ -245,7 +269,7 @@ class NativeModelOverrideTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         with patch.object(FakeProvider, "_parse_openai_completion", rejected_parser):
             response = await self.native_model.generate(envelope)
         self.assertEqual(response.captured_output, CapturedModelOutput("", "refusal"))
-        self.assertEqual(response.usage, Amount(40, 90))
+        self.assertEqual(response.usage, Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_tokens=10))
 
     async def test_override_reaches_native_payload_without_changing_provider_configuration(self):
         envelope = await self.envelope(model_override="creative")

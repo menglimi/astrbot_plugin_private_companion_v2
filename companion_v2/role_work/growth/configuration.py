@@ -25,6 +25,8 @@ PERMISSIONS = {"read_enabled": "role.growth.read", "proposals_enabled": "role.gr
 SKILL_LAYERS = (ConfigLayer.WINDOW, ConfigLayer.ROLE)
 
 SKILL_FIELDS = (
+    FieldDefinition(SKILLS_GROUP + ".enabled", SKILLS_GROUP, SKILLS_GROUP, ValueKind.BOOLEAN, True,
+                    layers=SKILL_LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=SKILLS_OWNER),
     FieldDefinition(SKILLS_GROUP + ".custom_skills", SKILLS_GROUP, SKILLS_GROUP, ValueKind.TEXT, "[]",
                     layers=SKILL_LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=SKILLS_OWNER),
     FieldDefinition(SKILLS_GROUP + ".schedule_influence_strength", SKILLS_GROUP, SKILLS_GROUP,
@@ -70,9 +72,16 @@ def skill_settings(runtime, context):
     role, while a window that set its own value first keeps it.
     """
     snapshot = SkillConfigurationOwner(runtime).read(skill_target_for(context), SKILL_FIELDS)
+    if snapshot.fields[SKILLS_GROUP + ".enabled"].value is not True:
+        return (), 0
     strength = snapshot.fields[SKILLS_GROUP + ".schedule_influence_strength"].value
     return custom_skills(snapshot.fields[SKILLS_GROUP + ".custom_skills"].value), (
         strength if type(strength) is int else 0)
+
+
+def skills_enabled(runtime, context):
+    snapshot = SkillConfigurationOwner(runtime).read(skill_target_for(context), SKILL_FIELDS)
+    return snapshot.fields[SKILLS_GROUP + ".enabled"].value is True
 
 
 def target_for(context):

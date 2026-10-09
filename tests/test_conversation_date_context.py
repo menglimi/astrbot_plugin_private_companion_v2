@@ -33,6 +33,16 @@ class LocalDateContextTests(unittest.TestCase):
                                       holiday_country="WEEKEND_ONLY")
         self.assertEqual(fallback["holiday"]["label"], "周末")
 
+    def test_holiday_provider_out_of_range_degrades_to_weekday_fallback(self):
+        def out_of_range(_day):
+            raise NotImplementedError("holiday data is unavailable for this year")
+
+        provider = SimpleNamespace(is_holiday=out_of_range, is_workday=lambda _day: False)
+        with patch("companion_v2.conversation.date_context._chinese_calendar", provider):
+            result = project_local_date(datetime(2027, 1, 1, 4, tzinfo=timezone.utc), "UTC")
+        self.assertEqual(result["holiday"], {"status": "available", "kind": "workday",
+                         "label": "工作日", "source": "weekday_fallback"})
+
     def test_configured_makeup_day_overrides_provider_and_almanac_has_content(self):
         provider = SimpleNamespace(is_holiday=lambda _day: False,
             get_holiday_detail=lambda _day: (False, ""), is_workday=lambda _day: False)

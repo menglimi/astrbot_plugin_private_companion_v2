@@ -1,68 +1,74 @@
-# 05 · 感知（`manage/perception`，A 段）
+# 06 · 感知（`manage/perception`）
 
-代码位置：`renderPerception`（`pages/陪伴小屋/app.js:1091-1118`）；缺对象时整页引导 `pageNeedsTarget('感知设置')`（`app.js:1093-1094`）。模块：`perception-native-page.js`（V2 自有感知设置，341 行）、`semantic-page.js`（语义理解与素材，195 行）、`perception-page.js`（屏幕/现实提供方表单嵌入器，211 行）。
+更新日期：2026-10-07。此稿描述当前源码的页面结构和配置归属，不以旧行号、控件数量或历史预览作为现状基线。
 
-## 一、页面功能
+主要实现：`pages/陪伴小屋/app.js` 的 `renderPerceptionOriginal`、`activatePerceptionTab` 与配置挂载逻辑；`perception-overview.js` 管理概览、状态读取和余额数据源表单；`semantic-page.css` 管理本页布局；`perception-native-page.js`、`perception-page.js` 分别编辑角色感知设置与扩展公开设置。
 
-回答"角色**能得到**什么信息"：身边环境（地点/天气/日历）、对话里的信息（消息形态与语义/黑话）、屏幕与设备（识屏解读与提供方）、外部资讯（新闻源）。管理 V2 自有感知配置 + 语义素材目录 + 两个外部提供方的桥接设置。
+## 一、页面职责
 
-## 二、展示部分
+回答「当前角色能获得哪些信息、来源是否可用、在哪里修改」。从当前选择的角色和会话读取实际状态，缺少对象时给统一引导。页面不增加启动、绑定或接管步骤；配置保存通过已有角色、会话和安装级合同完成。
 
-四个分区（`app.js:1097-1116`）：
+群成员识别与熟人资料归「关系网」，知识库与世界书归「自我」中的知识管理。模型、TTS 与生图执行路线归「模型与连接」；感知页共用其配置工作区，可在仪表盘下方直接编辑，也保留完整模型管理入口。
 
-| 分区 | 内容 | 数据来源 |
+## 二、仪表盘与子配置页
+
+首页默认只显示四块仪表盘，下方配置区初始隐藏。移除「模型与路由」「环境与资讯」「设备与感知」三组重复来源卡片，卡头和具体区域直接选择下方对应配置：
+
+| 概览 | 展示内容 |
+| --- | --- |
+| 时空 · 环境 | 角色时区与当前时间、地点、天气与预警、日期与历法、重要日子 |
+| 模型能力 | 对话、TTS、生图与可用视觉路线；每张磁贴直接显示具体模型名，配置状态和最近核验状态分别展示 |
+| 现实感知功能 | 定位主读数；识屏和手机状态及读取时间；摄像头授权与米家状态摘要 |
+| 外部与记录 | 余额主读数及查询状态；资讯检查数量和时间；当前窗口撤回记录；本轮其他上下文材料 |
+
+「时空 · 环境」与「模型能力」标题下不再重复显示通道数和实况在线数。模型名由当前任务路线与 AstrBot TTS 元数据提供；未绑定、读取中或读取失败时显示对应状态，长名称完整换行。
+
+配置区提供四个正式子页签，对应「时空与环境」「模型能力」「现实触及功能」「外部与记录」。仪表盘目标和跨页面配置入口都切到对应子页；模型磁贴可以继续打开模型工作区的任务分页，TTS 和生图分别定位 `voice`、`image`。设置表单和状态都沿用现有挂载点及读写接口。
+
+余额数据源表单固定在下方余额面板，不放入仪表盘卡片。切换分区及异步状态更新保留尚未保存的地址、用户 ID、额度单位除数和令牌，不创建第二份表单。读取或保存失败保留输入，并在表单内显示原因与重试操作。保存成功清空令牌输入，显示「已保存」以及「留空保留当前令牌」提示；服务端只返回令牌是否存在，不回显保存的令牌。
+
+余额表单提供「测试连接」「保存数据源」、已保存数据源的移除操作和主动联系入口。测试可以使用未保存的输入；测试通过和配置已保存分别反馈。进入仪表盘只读取数据源配置，点击测试连接后才查询外部余额；金额和单位取实际返回值，草稿测试有明确标识。更改输入或查询失败后移除旧金额。数据源是否已配置、是否取得余额以及是否启用余额联系条件独立展示，不能用配置存在推断服务已连通或联系功能已启用。
+
+设备卡只展示已取得的授权快照，刷新不会触发手机采集或摄像头拍摄。没有结果时显示待授权、暂无快照或读取失败的具体原因；摄像头授权已就绪不计作已有识别结果。接口没有手机静音状态和累计撤回数量，不照搬设计稿中的示例字段。撤回数量限定为当前窗口返回的可读记录。
+
+顶部「重新读取状态」用于重新核对各来源。读取失败会清除对应旧结果并显示失败状态，其他已成功读取的来源继续显示；重新读取成功后恢复。米家未启用或不可读时在摘要中明确显示，只有实际读到能力才开放设备明细；「其他注入」只有本轮提供材料时开放配置入口，无材料时显示空态。
+
+## 三、七个配置面板
+
+| 面板 ID | 页面位置与内容 | 保存合同或数据来源 |
 | --- | --- | --- |
-| 身边的环境 | `#nativeEnvironmentWorkspace`：天气源/预警源「已装配/尚未就绪」状态（`perception-native-page.js:144-145`）；`#knowledgeConfigWorkspace` 知识库配置编辑器 | `GET {perception_native_api}` |
-| 对话里的信息 | 静态来源卡 `perceptionSources`（文字与引用/图片与动图/语音/视频/合并转发，`app.js:1061-1067`）；`#semanticWorkspace` 语义页：嵌入状态徽章（已就绪/关键词回退/已停用）+ revision、素材计数（表情 N·群词义 N）、检索结果（索引状态、fallback 提示）、素材列表（enabled/analysis/来源已失效） | `GET/POST …/semantic`（`semantic-page.js:44-51,113,151`） |
-| 屏幕与设备 | `#nativeModelWorkspace`（固定说明"配置在下一条封存的对话输入生效"，`perception-native-page.js:147`）；`#screenConfigWorkspace` 编辑器；两张提供方卡（astrbot_plugin_screen_companion / astrbot_plugin_reality_companion 的 integration_state、runtime_ready、reason，`app.js:1069-1084`）+「提供方配置地址」只读框与复制按钮（`app.js:1085`，复制逻辑 `:1500`） | `product.provider()`（integration manifest） |
-| 外部资讯 | `#nativeNewsWorkspace`：资讯源装配状态、最近检查时间与条数、最近失败 code/HTTP、主动联系总开关与后台联系开关 | `GET {perception_native_api}`（`perception-native-page.js:149-157`） |
+| `config-environment` | 「时空与环境」：所在地、天气、预警、日期历法、重要日子与饭点 | 原生感知、角色天气设置；`conversation.perception` 的日期分组；`proactive.contact` 的 `weather`、`meal`、`date` 分段 |
+| `config-models` | 「模型能力」：来源标识、模型与输入模态背景、表达偏好、任务路线、TTS、生图和本轮上下文材料 | `conversation.perception` 的非日期字段与角色模型 API；感知运行快照的 `other_injections` |
+| `config-screen` | 「现实触及功能」：屏幕解读与日记素材、当前私聊的屏幕/手机/摄像头/设备动作授权、观察契机、扩展和米家状态 | `screen`；屏幕与现实授权 API；`proactive.contact` 的 `screen` 分段；扩展公开设置桥与米家公开状态 |
+| `config-news` | 「外部与记录」：资讯来源、网络探索、外部关联、余额数据源与联系条件、最近撤回记录及转录设置 | 原生感知资讯诊断；`proactive.contact` 的 `news`、`web`、`selflink`、`balance` 分段；`host-options/balance`；角色 `reply/recalls` 与 `recall` 配置组 |
 
-## 三、配置部分
+感知页与主动联系页共用上述角色级配置，不各自维护一份开关。数据源凭据保存在安装级配置，余额触发条件按当前角色保存。设备数据是否读取仍由当前会话的实际授权决定；编辑联系条件不授予设备权限。
 
-### ① `knowledge`（知识库与世界书）— 14 项，installation/role/window，立即生效，通道 `/config`
+## 四、状态、空态与交互
 
-挂载 `configEditors('knowledgeConfigWorkspace',['knowledge'])`（`app.js:1100`）。按功能划分：
+- 无来源数据时显示当前可执行的读取、设置或授权入口；不伪造已启用、已连接、已有设备或已有记录。
+- 生图能力需要相应状态成功读取才能判定可用；仅分配模型不能替代执行能力状态。余额联系启用状态也以成功读取的配置为准。
+- 未安装或未就绪的扩展显示公开状态与原因；扩展设置通过公开接口读取和保存，不要求用户操作内部运行层。
+- 仪表盘和配置面板使用稳定网格，状态更新不触发整页进场动画。窄屏状态行和授权摘要允许换行，刷新按钮保持在可视范围内。
+- 配置入口先以 `preventScroll` 设置焦点，再执行一次目标定位；减少动态效果偏好下使用即时定位。余额测试、保存结束后恢复原控制焦点，用户已转向其他控制时不抢焦点。
+- 四个子页签使用 `tablist`、`tab`、`tabpanel` 与对应的 `aria-controls`、`aria-labelledby`。子页中的设置块保持可逐项折叠；仪表盘入口会打开对应子页并定位设置块，表单结果使用状态或告警区域。
 
-| 功能簇 | 字段 |
+## 五、接口与配置归属
+
+| 接口 | 职责 |
 | --- | --- |
-| 导入 | `import_enabled` 允许导入本机知识来源、`import_paths` 世界书文件路径、`source_ids` 知识库/文档标识、`entry_limit` 单次导入条目上限、`entry_char_limit` 单条素材最长字数、`source_limit` 来源数量上限、`candidate_char_budget` 单轮候选字符预算 |
-| 注入 | `inject_enabled` 允许在对话中引用知识、`inject_max_entries` 每轮最多引用条数、`inject_max_chars` 每轮引用字符上限 |
-| 成员线索 | `member_recognition_enabled`、`member_match_aliases`、`member_inject_limit`、`member_clue_chars` |
+| `GET/POST …/perception-native`、`POST …/news-diagnostic` | 当前角色的环境、对话感知和资讯配置及诊断 |
+| 角色感知运行快照 | 最近环境与设备结果、日期历法和本轮上下文材料 |
+| 角色模型 API 及 `/voice`、`/image` | 任务路线、语种语音绑定、生图能力状态 |
+| `GET …/semantic` | 语义能力和素材状态；群黑话学习与表达素材编辑保留各自页面归属 |
+| `GET …/reply/recalls` | 当前窗口授权范围内的撤回记录 |
+| `GET/POST …/host-options/balance`、`POST …/host-options/balance/test` | 保存余额数据源、保留或替换令牌、测试连接 |
+| `GET/POST …/perception` | 屏幕陪伴与现实触及的扩展公开设置桥 |
+| `/config` | `screen`、`recall` 与 `proactive.contact` 对应分段的统一读写 |
+| 米家插件 `/status`、`/devices` | 可选能力与设备公开状态 |
 
-后端：`companion_v2/knowledge/configuration.py:34` → knowledge/* 消费。
+## 六、本批验证范围
 
-### ② `screen`（屏幕解读与日记素材）— 3 项，window，下一轮生效，通道 `/config`
+本批的五个感知定向测试文件共 42 项，覆盖仪表盘、四子页切换、原生感知表单和日历链路；验证页签归属、日期字段分组、模型路由定位、资讯/余额/撤回入口与原有保存接口。源码和新构建核心包均通过。
 
-挂载 `configEditors('screenConfigWorkspace',['screen'])`（`app.js:1110`）：`interpretation_enabled` 解读屏幕画面、`journal_material_enabled` 允许作为日记素材、`journal_material_max_chars` 单条素材最长字数。后端 `companion_v2/screen/configuration.py:15` → screen/interpretation.py、peek.py。
-
-### ③ `conversation.perception`（9 项，window，下一轮生效）— 通道 ② `perception-native` 专用工作台
-
-`perception-native-page.js` 分 environment/model/news 三段表单，`POST {perception_native_api}/configure`（`:83,266`），两段式提交（operation_key+edit_token+changes）；冲突时保留草稿并给「采用最新版本」rebase（`:294-303`）。前端校验：时区合法、年度日历 1-3 份 JSON、地点名+经纬度、开天气需先有地点、沿用 5-120 分钟、guidance ≤2KiB、资讯间隔 15-1440、B 站 UID 十进制、RSS/JSON 必须 HTTPS（`:198-252`）。
-
-### ④ 语义素材（非配置组）— 通道 ② `/semantic`
-
-`semantic-page.js` 动作：configure（带 revision）、reindex 重建索引、import（表情图片 ≤5MB 转 base64）、analyze 识别图片、edit 编辑、search 检索（`:125-189`）。
-
-### ⑤ 屏幕陪伴/现实触及提供方设置（非 V2 组）— 通道 ② `/perception` 桥
-
-`perception-page.js` 按提供方 `settings.groups` 生成表单，`POST perception {provider, section, updates}` 只发改动字段，password 留空保持原值（`:119,148-153`）；screen 在 `native_v2 && read_only` 时只显示"绑定项在屏幕陪伴插件配置中修改"（`:77-79`）。设置由两个提供方插件自持（`astrbot_host/perception_api.py:17-18` 桥接到 `extension_api.companion_v2_perception_settings`）。
-
-## 四、边界与空态
-
-- 提供方不可用 → 显示 `entry.reason` 或「配置暂不可读取，请确认插件已启用并更新」（`perception-page.js:109`）；未读到宿主目录 → 「尚未读到宿主目录」+ 重新读取（`:101-103`）。
-- semantic 页在 staging 未初始化/宿主已停止时只给「打开宿主管理」（`semantic-page.js:66-74`）；群会话无可验证成员输入时说明"收到群消息后即可管理"（`:92`）。
-- 识屏是否进入对话以能力目录接入状态为准；识图用哪个模型在模型与连接页指派（本页不放）。
-
-## 五、后端情况
-
-| 路由 | 服务 |
-| --- | --- |
-| `GET/POST …/perception-native`、`POST /news-diagnostic`（`astrbot_host/native_perception_api.py:31-34`） | `conversation/perception_management.py` `PerceptionManagement` + `role_work/state/management.py` + `proactive/management.py`（`native_perception_api.py:9-13,37-39`） |
-| `GET/POST …/semantic`（`semantic_api.py:23-24`） | `session.application.semantics` 运行时服务（`semantic_api.py:89`） |
-| `GET/POST …/perception`（`perception_api.py:28-29`） | 外部插件桥（`astrbot_plugin_screen_companion` / `astrbot_plugin_reality_companion`） |
-| `/config` 的 knowledge、screen 组 | `KnowledgeManagement`、`ScreenManagement`（`configuration_api.py:35-48`） |
-
-## 六、相关设计稿与复核
-
-- 表情素材检索参数在表达 D3 → [10-expression.md](10-expression.md)；识屏模型 → [14-models.md](14-models.md)。
-- 复核分区：`sed -n '1091,1118p' pages/陪伴小屋/app.js`。
+浏览器截图验收尚未完成；本次没有执行真实 NewAPI 查询、设备采集或消息投递。

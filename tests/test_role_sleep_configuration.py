@@ -2,13 +2,16 @@
 
 import unittest
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta, timezone
 import json
+from zoneinfo import ZoneInfo
 
 from companion_v2.configuration.models import ConfigLayer
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.execution.models import digest, stamp
 from companion_v2.role_work.life.configuration import GROUP as LIFE_GROUP, OWNER as LIFE_OWNER, target_for
+from companion_v2.role_work.life.scheduling import bedtime_at, next_bedtime, sleep_rhythm, variation_for
+from companion_v2.foundation.refs import RoleOwnerRef
 from astrbot_host.management_identity import dashboard_operator
 from tests.multi_host_support import multi_config
 from tests.multi_life_support import MultiLifeFixture
@@ -30,17 +33,20 @@ class RoleSleepConfigurationTests(MultiLifeFixture, unittest.IsolatedAsyncioTest
         self.assertNotEqual(first_enable["operation_id"], second_enable["operation_id"])
 
         await self.command("configure", "first", "role-a", key="set-shared-sleep", changes={
-            "sleep_enabled": True, "sleep_time": "00:01", "sleep_timezone": "UTC", "sleep_minutes": 45,
+            "sleep_enabled": True, "sleep_time": "00:01", "sleep_timezone": "UTC",
+            "sleep_variation_minutes": 30, "sleep_minutes": 45,
             "diary_time": "21:15",
         })
         first = await self.status("first", "role-a")
         second = await self.status("second", "role-a")
         self.assertEqual((first["config"]["sleep_enabled"], first["config"]["sleep_time"],
-                          first["config"]["sleep_timezone"], first["config"]["sleep_minutes"]),
-                         (True, "00:01", "UTC", 45))
+                          first["config"]["sleep_timezone"], first["config"]["sleep_variation_minutes"],
+                          first["config"]["sleep_minutes"]),
+                         (True, "00:01", "UTC", 30, 45))
         self.assertEqual((second["config"]["sleep_enabled"], second["config"]["sleep_time"],
-                          second["config"]["sleep_timezone"], second["config"]["sleep_minutes"]),
-                         (True, "00:01", "UTC", 45))
+                          second["config"]["sleep_timezone"], second["config"]["sleep_variation_minutes"],
+                          second["config"]["sleep_minutes"]),
+                         (True, "00:01", "UTC", 30, 45))
         self.assertEqual((first["config"]["diary_time"], first["config"]["timezone"]),
                          ("21:15", "Europe/London"))
         self.assertEqual((second["config"]["diary_time"], second["config"]["timezone"]),
@@ -50,6 +56,7 @@ class RoleSleepConfigurationTests(MultiLifeFixture, unittest.IsolatedAsyncioTest
         self.assertTrue(first["sleep_schedule"]["owner"]["installation_id"].endswith("shared-test"))
         self.assertEqual(first["sleep_schedule"]["next_sleep_at"], second["sleep_schedule"]["next_sleep_at"])
         self.assertEqual(first["sleep_schedule"]["next_wake_at"], second["sleep_schedule"]["next_wake_at"])
+        self.assertEqual(first["sleep_schedule"]["variation_minutes"], 30)
 
         stale = await self.body("configure", "second", "role-a", key="stale-shared-settings",
             changes={"diary_time": "10:10"})
@@ -96,7 +103,7 @@ class RoleSleepConfigurationTests(MultiLifeFixture, unittest.IsolatedAsyncioTest
     async def test_only_selected_valid_window_starts_shared_automatic_sleep(self):
         app = await self.initialize(self.shared_role_config())
         await self.enable("first", "role-a", sleep_enabled=True, sleep_time="00:01",
-                          sleep_timezone="UTC", sleep_minutes=45)
+                          sleep_timezone="UTC", sleep_variation_minutes=0, sleep_minutes=45)
         await self.enable("second", "role-a")
         await self.start()
 
@@ -194,6 +201,69 @@ class RoleSleepConfigurationTests(MultiLifeFixture, unittest.IsolatedAsyncioTest
         self.assertNotEqual(first_after["sleep_schedule"]["next_sleep_at"], original_next)
         self.assertEqual(first_after["sleep_schedule"]["next_sleep_at"], second_after["sleep_schedule"]["next_sleep_at"])
         self.assertEqual(first_after["sleep_schedule"]["duration_minutes"], 60)
+
+
+class BedtimeVariationTests(unittest.TestCase):
+    def test_variation_is_stable_per_role_and_local_date_and_next_occurrence_handles_midnight(self):
+        owner = RoleOwnerRef("install-a", "bot-a", "role-a")
+        other_owner = RoleOwnerRef("install-a", "bot-a", "role-b")
+        local_day = date(2026, 9, 21)
+        variation = variation_for(owner, local_day, 20)
+        self.assertEqual(variation_for(owner, local_day, 20), variation)
+        self.assertGreaterEqual(variation, -20)
+        self.assertLessEqual(variation, 20)
+        owner_rhythm = [variation_for(owner, local_day + timedelta(days=day), 20) for day in range(60)]
+        other_rhythm = [variation_for(other_owner, local_day + timedelta(days=day), 20) for day in range(60)]
+        self.assertNotEqual(other_rhythm, owner_rhythm)
+
+        bedtime = bedtime_at(owner, local_day, "UTC", time(0, 5), 20)
+        baseline = datetime.combine(local_day, time(0, 5), tzinfo=ZoneInfo("UTC"))
+        self.assertEqual((bedtime - baseline).total_seconds(), variation * 60)
+        self.assertEqual(next_bedtime(bedtime - timedelta(seconds=1), owner, "UTC", time(0, 5), 20), bedtime)
+
+        now = bedtime + timedelta(seconds=1)
+        future = [bedtime_at(owner, local_day + timedelta(days=offset), "UTC", time(0, 5), 20)
+                  for offset in range(-2, 5)]
+        expected = min(candidate for candidate in future if candidate >= now)
+        self.assertEqual(next_bedtime(now, owner, "UTC", time(0, 5), 20), expected)
+
+    def test_daily_offset_moves_with_inertia_instead_of_redrawing_independently(self):
+        owner = RoleOwnerRef("install-a", "bot-a", "role-a")
+        first = date(2026, 9, 1)
+        offsets = [variation_for(owner, first + timedelta(days=day), 20) for day in range(60)]
+        self.assertLessEqual(max(abs(left - right) for left, right in zip(offsets, offsets[1:])), 13)
+        self.assertGreater(len(set(offsets)), 4)
+        self.assertTrue(all(-20 <= offset <= 20 for offset in offsets))
+
+    def test_zero_variation_keeps_the_configured_local_time(self):
+        owner = RoleOwnerRef("install-a", "bot-a", "role-a")
+        local_day = date(2026, 9, 21)
+        expected = datetime.combine(local_day, time(0, 30), tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
+        self.assertEqual(bedtime_at(owner, local_day, "Asia/Shanghai", time(0, 30), 0), expected)
+
+    def test_sleep_rhythm_distinguishes_schedule_projection_from_execution_receipts(self):
+        now = datetime(2026, 9, 21, 23, 45, tzinfo=timezone.utc)
+        next_sleep = now + timedelta(minutes=10)
+        self.assertEqual(sleep_rhythm(now, next_sleep, None)["phase"], "winding_down")
+        projected = sleep_rhythm(now, now + timedelta(minutes=40), None)
+        self.assertEqual((projected["phase"], projected["basis"]), ("sleepy", "schedule_projection"))
+        self.assertEqual(sleep_rhythm(now, None, {"state": "sleeping"})["basis"], "execution_receipt")
+        recent_wake = {"state": "awake", "ended_at": now.isoformat()}
+        self.assertEqual(sleep_rhythm(now, None, recent_wake)["phase"], "recovering")
+        old_wake = {"state": "awake", "ended_at": (now - timedelta(minutes=31)).isoformat()}
+        self.assertEqual(sleep_rhythm(now, None, old_wake)["phase"], "awake")
+
+    def test_short_confirmed_sleep_advances_only_the_sleepy_reference(self):
+        now = datetime(2026, 9, 21, 21, 30, tzinfo=timezone.utc)
+        next_sleep = now + timedelta(minutes=90)
+        started_at = now - timedelta(hours=8, minutes=31)
+        planned_wake_at = started_at + timedelta(hours=8)
+        ended_at = planned_wake_at - timedelta(hours=1)
+        short_sleep = {"state": "awake", "started_at": started_at.isoformat(),
+            "planned_wake_at": planned_wake_at.isoformat(), "ended_at": ended_at.isoformat()}
+        rhythm = sleep_rhythm(now, next_sleep, short_sleep)
+        self.assertEqual(rhythm["phase"], "sleepy")
+        self.assertEqual(rhythm["sleep_debt_minutes"], 60)
 
 
 if __name__ == "__main__":

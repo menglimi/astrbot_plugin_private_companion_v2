@@ -1,6 +1,9 @@
 """TTS provider management and image config delegation use the real SDK with isolated data."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
+from decimal import Decimal
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
@@ -17,7 +20,7 @@ class FakeProviderManager:
     def __init__(self):
         self.providers_config = [{"id": "tts-a", "type": "fishaudio_tts_api", "provider": "fishaudio_tts_api",
                                   "provider_type": "text_to_speech", "enable": True,
-                                  "api_key": "secret-value", "model": "s2.1-pro"}]
+                                  "api_key": "secret-value", "proxy": "http://proxy-secret", "model": "s2.1-pro"}]
 
     async def create_provider(self, config):
         self.providers_config.append(deepcopy(config))
@@ -30,23 +33,26 @@ class FakeProviderManager:
 
 class FakeImageExtensionAPI:
     def __init__(self):
-        self.revision = "rev-12345678"
-        self.sections = {"preparation": {"routes": [{"route_id": "r1", "profile": "p", "operation": "generate"}]},
-                         "sd_webui": {"base_url": "", "api_key_set": False, "timeout_seconds": 300},
-                         "comfyui": {"base_url": "http://127.0.0.1:8188", "api_key_set": True, "timeout_seconds": 300}}
+        self.revision = "a" * 64
+        self.configuration = {"enabled": False, "backend": "auto",
+            "endpoints": [], "sd_webui": {"base_url": "", "api_key_set": False, "timeout_seconds": 300},
+            "comfyui": {"base_url": "", "api_key_set": False, "timeout_seconds": 300}}
         self.saved = None
 
-    def native_configuration(self):
-        return {"status": "ok", "revision": self.revision, "sections": deepcopy(self.sections)}
+    def output_configuration(self):
+        return {"revision": self.revision, "settings": deepcopy(self.configuration), "live": False,
+                "limits": {"max_endpoints": 24}, "supported_backends": ["auto", "online_api", "comfyui", "sd_webui"],
+                "supported_platforms": ["auto", "openai", "minimax"]}
 
-    def save_native_configuration(self, revision, changes):
+    def save_output_configuration(self, revision, changes):
         if revision != self.revision:
-            raise RuntimeError("configuration_conflict")
-        for name, values in changes.items():
-            self.sections[name].update(values)
+            error = RuntimeError("configuration_conflict")
+            error.code = "configuration_conflict"
+            raise error
+        self.configuration.update(deepcopy(changes))
         self.saved = deepcopy(changes)
-        self.revision = "rev-" + ("next" * 2) + "78"
-        return {"status": "ok", "revision": self.revision, "sections": deepcopy(self.sections)}
+        self.revision = "b" * 64
+        return self.output_configuration()
 
 
 async def body(payload):
@@ -68,6 +74,18 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.native.provider_manager = self.manager
         self.native.get_all_tts_providers = lambda: []
 
+    def install_text_provider_catalog(self):
+        primary = self.native.provider
+        primary.meta = lambda: NS(id="native-model", name="Primary model")
+        secondary = support.FakeProvider()
+        secondary.provider_config["id"] = "secondary-model"
+        secondary.model_name = "secondary-fixture"
+        secondary.meta = lambda: NS(id="secondary-model", name="Secondary model")
+        providers = {"native-model": primary, "secondary-model": secondary}
+        self.native.get_all_providers = lambda: list(providers.values())
+        self.native.get_provider_by_id = lambda provider_id: providers.get(provider_id)
+        return providers
+
     async def call(self, route, *, payload=None, username="admin"):
         prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion_v2/astrbot_host.model_api"
         import astrbot_host.model_api as model_api
@@ -81,6 +99,52 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_diagnostics_route_is_registered_as_read_only(self):
         methods = {path: methods for path, _, methods, _ in self.native.registered_web_apis}
         self.assertEqual(methods[PREFIX + "/maintenance"], ["GET"])
+        self.assertEqual(methods[PREFIX + "/balance"], ["GET"])
+
+    async def test_business_prompt_section_roundtrip_uses_the_original_model_route(self):
+        (await self.controller.initialize_profile()).unwrap()
+        listed = await self.call(PREFIX)
+        task = next(item for item in listed["data"]["tasks"] if item["kind"] == "proactive.compose")
+        section = next(item for item in task["prompt_sections"] if item["key"] == "news_sharing")
+        payload = {"kind": task["kind"], "section": "news_sharing", "operation_key": "news-template-route",
+                   "edit_token": section["edit_token"], "changes": {"prompt": "自然分享新鲜事，保留具体感想。"}, "reset": []}
+        saved = await self.call(PREFIX + "/configure", payload=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        self.assertEqual(saved["status"], "ok", saved)
+        changed = next(item for item in saved["data"]["task"]["prompt_sections"] if item["key"] == "news_sharing")
+        self.assertEqual(changed["prompt"], payload["changes"]["prompt"])
+        self.assertEqual(changed["field"]["source"], "window")
+
+    async def test_catalog_reads_loaded_astrbot_text_providers_without_a_registration_route(self):
+        self.install_text_provider_catalog()
+        listed = await self.call(PREFIX + "/catalog")
+        self.assertEqual(listed["status"], "ok", listed)
+        self.assertEqual({item["id"] for item in listed["data"]["providers"]},
+                         {"native-model", "secondary-model"})
+        self.assertNotIn(PREFIX + "/pool", self.routes)
+        self.assertNotIn(PREFIX + "/pool/save", self.routes)
+
+    async def test_balance_route_returns_only_the_normalized_observation(self):
+        from companion_v2.proactive.balance_events import BalanceObservation
+        import astrbot_host.model_api as model_api
+
+        class Port:
+            provider = "newapi"
+            provider_label = "NewAPI"
+            currency_label = "USD"
+
+            async def fetch(self):
+                return BalanceObservation(Decimal("8.5"), None, datetime(2026, 10, 2, tzinfo=timezone.utc))
+
+        (await self.controller.initialize_profile()).unwrap()
+        with patch.object(model_api, "configured_balance_port", return_value=Port()):
+            result = await self.call(PREFIX + "/balance")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["data"], {
+            "configured": True, "available": True, "provider": "newapi", "provider_label": "NewAPI",
+            "currency_label": "USD", "observed_at": "2026-10-02T00:00:00+00:00",
+            "amount": "8.50", "state": "available",
+        })
+        self.assertNotIn("api_key", str(result).lower())
 
     async def test_tts_provider_roundtrip_masks_secrets(self):
         (await self.controller.initialize_profile()).unwrap()
@@ -91,8 +155,15 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["id"], "tts-a")
         secret = next(field for field in item["fields"] if field["key"] == "api_key")
         self.assertTrue(secret["secret"] and secret["set"] and secret["value"] == "")
+        proxy = next(field for field in item["fields"] if field["key"] == "proxy")
+        self.assertTrue(proxy["secret"] and proxy["set"] and proxy["value"] == "")
         model = next(field for field in item["fields"] if field["key"] == "model")
         self.assertEqual(model["value"], "s2.1-pro")
+        self.assertEqual([option["value"] for option in model["options"]],
+                         ["s2.1-pro-free", "s2.1-pro", "s2-pro", "s1"])
+        self.assertEqual(next(field for field in item["fields"] if field["key"] == "proxy")["label"], "代理地址")
+        self.assertGreaterEqual(len(listed["data"]["templates"]), 13)
+        self.assertNotIn("proxy-secret", json.dumps(listed))
 
         created = await self.call(model_api.PREFIX + "/tts/providers/create",
                                   payload=b'{"type": "fishaudio_tts_api", "id": "tts-b"}')
@@ -107,6 +178,14 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         stored = next(entry for entry in self.manager.providers_config if entry["id"] == "tts-b")
         self.assertEqual(stored["api_key"], "new-key")
         self.assertEqual(stored["model"], "s2.1-pro-free")
+
+        cloned_with_draft = await self.call(model_api.PREFIX + "/tts/providers/clone", payload=(
+            b'{"provider_id":"tts-b","language":"en","config":{"enable":true,"values":{"api_key":"","model":"s2-pro"}}}'))
+        draft_clone_id = cloned_with_draft["data"]["created_id"]
+        draft_clone = next(entry for entry in self.manager.providers_config if entry["id"] == draft_clone_id)
+        self.assertTrue(draft_clone["enable"])
+        self.assertEqual(draft_clone["model"], "s2-pro")
+        self.assertEqual(draft_clone["api_key"], "new-key")
 
         blank = await self.call(model_api.PREFIX + "/tts/providers/update", payload=(
             b'{"provider_id": "tts-b", "values": {"api_key": ""}}'))
@@ -127,64 +206,142 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate["data"]["code"], "tts_provider_exists")
         self.assertEqual(self.native.provider.client.state.calls, [])
 
-    async def test_image_config_delegates_to_extension_contract(self):
+    async def test_voice_test_returns_audio_for_inline_preview(self):
         (await self.controller.initialize_profile()).unwrap()
-        prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion_v2/astrbot_host.model_api"
         import astrbot_host.model_api as model_api
-        with patch.object(model_api.ModelWebAPI, "_image_extension_api", lambda self: NS(
-                native_configuration=lambda: {"status": "ok", "revision": "rev-12345678", "sections": {}})):
-            listed = await self.call(model_api.PREFIX + "/image/config")
-            self.assertEqual(listed["data"]["revision"], "rev-12345678")
 
-        class Busy:
-            def native_configuration(self):
-                return {"status": "ok", "revision": "rev-12345678", "sections": {}}
+        class TtsProvider:
+            provider_config = {"api_key": "fixture-tts-secret"}
 
-            def save_native_configuration(self, revision, changes):
-                raise RuntimeError("configuration_busy")
+            def meta(self):
+                return NS(id="tts-live", model="gpt-4o-mini-tts")
 
-        with patch.object(model_api.ModelWebAPI, "_image_extension_api", lambda self: Busy()):
-            busy = await self.call(model_api.PREFIX + "/image/config/save", payload=(
-                b'{"revision": "rev-12345678", "changes": {"preparation": {"daily_limit": 5}}}'))
-            self.assertEqual(busy["data"]["code"], "model_image_config_busy")
+            async def get_audio(self, text):
+                self.text = text
+                return "preview.wav"
 
-        missing = await self.call(model_api.PREFIX + "/image/config")
-        self.assertEqual(missing["data"]["code"], "model_image_config_unavailable")
+        provider = TtsProvider()
+        self.native.get_all_tts_providers = lambda: [provider]
+        # The generic context lookup is not the authoritative TTS lookup on all
+        # AstrBot releases; the route must resolve the live TTS collection.
+        self.native.get_provider_by_id = lambda provider_id: self.native.provider if provider_id == "native-model" else None
+        catalog = await self.call(model_api.PREFIX + "/voice")
+        self.assertEqual(catalog["status"], "ok", catalog)
+        self.assertEqual(catalog["data"]["providers"], [{"id": "tts-live", "model": "gpt-4o-mini-tts"}])
+        self.assertNotIn("fixture-tts-secret", json.dumps(catalog))
+        with patch.object(model_api, "_read_audio", return_value=b"RIFF0000WAVE"):
+            result = await self.call(model_api.PREFIX + "/voice/test", payload=(
+                b'{"provider_id":"tts-live","language":"ja"}'))
 
-    async def test_image_config_save_roundtrip(self):
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["status"], "ok")
+        self.assertEqual(result["data"]["audio_base64"], "UklGRjAwMDBXQVZF")
+        self.assertEqual(result["data"]["audio_mime_type"], "audio/wav")
+        self.assertEqual(provider.text, "こんにちは。")
+
+    async def test_voice_test_returns_sanitized_failure_details_and_suggestion(self):
         (await self.controller.initialize_profile()).unwrap()
-        prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion_v2/astrbot_host.model_api"
+        import astrbot_host.model_api as model_api
+
+        class TtsProvider:
+            provider_config = {"api_key": "fixture-secret", "proxy": "http://proxy-secret"}
+
+            def meta(self):
+                return NS(id="tts-error", model="fishaudio")
+
+            async def get_audio(self, text):
+                raise RuntimeError("Fish Audio API request failed: status 400 api_key=fixture-secret")
+
+        provider = TtsProvider()
+        self.native.get_all_tts_providers = lambda: [provider]
+        self.native.get_provider_by_id = lambda provider_id: self.native.provider if provider_id == "native-model" else None
+        result = await self.call(model_api.PREFIX + "/voice/test", payload=(
+            b'{"provider_id":"tts-error","language":"ja"}'))
+
+        self.assertEqual(result["status"], "ok", result)
+        data = result["data"]
+        self.assertEqual(data["status"], "unknown")
+        self.assertEqual(data["code"], "model_voice_probe_failed")
+        self.assertEqual(data["stage"], "synthesis")
+        self.assertEqual(data["exception_type"], "RuntimeError")
+        self.assertIn("status 400", data["error"])
+        self.assertNotIn("fixture-secret", data["error"])
+        self.assertNotIn("proxy-secret", data["error"])
+        self.assertTrue(data["suggestion"])
+        self.assertRegex(data["request_id"], r"^[0-9a-f]{12}$")
+
+    async def test_voice_test_reports_audio_read_failure_stage(self):
+        (await self.controller.initialize_profile()).unwrap()
+        import astrbot_host.model_api as model_api
+
+        class TtsProvider:
+            def meta(self):
+                return NS(id="tts-read-error", model="fishaudio")
+
+            async def get_audio(self, text):
+                return "preview.wav"
+
+        provider = TtsProvider()
+        self.native.get_all_tts_providers = lambda: [provider]
+        self.native.get_provider_by_id = lambda provider_id: self.native.provider if provider_id == "native-model" else None
+        with patch.object(model_api, "_read_audio", side_effect=OSError("permission denied")):
+            result = await self.call(model_api.PREFIX + "/voice/test", payload=(
+                b'{"provider_id":"tts-read-error","language":"ja"}'))
+
+        data = result["data"]
+        self.assertEqual(data["status"], "unknown")
+        self.assertEqual(data["code"], "model_voice_audio_read_failed")
+        self.assertEqual(data["stage"], "audio_read")
+        self.assertIn("permission denied", data["error"])
+
+    async def test_tts_provider_connection_test_reports_loaded_provider_result(self):
+        (await self.controller.initialize_profile()).unwrap()
+        import astrbot_host.model_api as model_api
+
+        class TtsProvider:
+            async def test(self):
+                return None
+
+        self.manager.inst_map = {"tts-a": TtsProvider()}
+        result = await self.call(model_api.PREFIX + "/tts/providers/test", payload=b'{"provider_id":"tts-a"}')
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["status"], "ok")
+        self.assertEqual(result["data"]["steps"][-1]["status"], "ok")
+
+        self.manager.inst_map = {}
+        unloaded = await self.call(model_api.PREFIX + "/tts/providers/test", payload=b'{"provider_id":"tts-a"}')
+        self.assertEqual(unloaded["data"]["code"], "tts_provider_unloaded")
+
+    async def test_image_output_reads_the_native_configuration_contract(self):
+        (await self.controller.initialize_profile()).unwrap()
         import astrbot_host.model_api as model_api
         fake = FakeImageExtensionAPI()
         with patch.object(model_api.ModelWebAPI, "_image_extension_api", lambda self: fake):
-            saved = await self.call(model_api.PREFIX + "/image/config/save", payload=(
-                b'{"revision": "rev-12345678", "changes": {"sd_webui": {"base_url": "http://127.0.0.1:7860", "api_key": "k"}}}'))
-            self.assertIn("rev-", saved["data"]["revision"])
-            self.assertEqual(fake.saved["sd_webui"]["base_url"], "http://127.0.0.1:7860")
+            listed = await self.call(model_api.PREFIX + "/image/output")
+            self.assertEqual(listed["data"]["revision"], "a" * 64)
+            self.assertEqual(listed["data"]["settings"]["backend"], "auto")
+            self.assertTrue(listed["data"]["host_registered"])
 
-            conflict = await self.call(model_api.PREFIX + "/image/config/save", payload=(
-                b'{"revision": "rev-stale9999", "changes": {"sd_webui": {"base_url": "x"}}}'))
-            self.assertEqual(conflict["data"]["code"], "model_image_config_conflict")
+        with patch.object(model_api.ModelWebAPI, "_image_extension_api", lambda self: None):
+            missing = await self.call(model_api.PREFIX + "/image/output")
+        self.assertEqual(missing["data"]["code"], "model_image_output_unavailable")
 
-    async def test_route_guidance_document_is_large_enough_for_one_save(self):
-        """路线说明是可长文本：一次保存要装得下整份路线数组。
-
-        扩展给的单键上限是 4000 字（image_config_limits.MAX_GUIDANCE_CHARS），
-        而保存提交的是整份路线数组，所以请求体远大于其它配置。
-        这里在旧上限（64 KB）之上发一次——闸门若比扩展允许的内容更早失败，
-        用户会看到一句读不懂的 "model request is too large"。"""
-        import json
-
+    async def test_image_output_save_roundtrip_and_conflict(self):
         (await self.controller.initialize_profile()).unwrap()
         import astrbot_host.model_api as model_api
         fake = FakeImageExtensionAPI()
-        routes = [{"route_id": "route-%d" % index, "operation": "edit", "backend": "comfyui",
-                   "guidance": {"summary": "说" * 4000, "test_notes": "记" * 4000}}
-                  for index in range(8)]
-        payload = json.dumps({"revision": "rev-12345678", "changes": {"preparation": {"routes": routes}}},
-                             ensure_ascii=False).encode("utf-8")
-        self.assertGreater(len(payload), 65536, "这个用例必须在旧上限之上，否则它测不到闸门本身")
         with patch.object(model_api.ModelWebAPI, "_image_extension_api", lambda self: fake):
-            saved = await self.call(model_api.PREFIX + "/image/config/save", payload=payload)
-        self.assertIn("rev-", saved["data"]["revision"])
-        self.assertEqual(len(fake.saved["preparation"]["routes"]), 8)
+            payload = json.dumps({"revision": "a" * 64, "changes": {
+                "enabled": True, "backend": "online_api", "endpoints": [{"id": "primary",
+                    "name": "Primary", "enabled": True, "platform": "openai",
+                    "base_url": "https://api.example.test/v1", "api_key": "image-key",
+                    "model": "gpt-image-1", "width": 1024, "height": 1024,
+                    "timeout_seconds": 60}]}}).encode("utf-8")
+            saved = await self.call(model_api.PREFIX + "/image/output/save", payload=payload)
+            self.assertEqual(saved["data"]["revision"], "b" * 64)
+            self.assertEqual(fake.saved["backend"], "online_api")
+            self.assertEqual(fake.saved["endpoints"][0]["model"], "gpt-image-1")
+
+            conflict_payload = json.dumps({"revision": "a" * 64, "changes": {"enabled": False}}).encode("utf-8")
+            conflict = await self.call(model_api.PREFIX + "/image/output/save", payload=conflict_payload)
+            self.assertEqual(conflict["data"]["code"], "model_image_output_conflict")

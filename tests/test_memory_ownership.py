@@ -378,7 +378,8 @@ class MemoryOwnershipTests(HostFixture, unittest.IsolatedAsyncioTestCase):
 
     def test_legacy_catalog_keeps_the_data_fact_and_adds_the_capability_disposition(self):
         entry = LEGACY_COMPATIBILITY_CATALOG.entry("memory.timeline_and_governance")
-        self.assertEqual(entry.action, CatalogAction.COMPAT_READABLE)
+        self.assertEqual(entry.action, CatalogAction.DATA_CONVERTED)
+        self.assertEqual(entry.handler_id, "v2.memory-snapshot-archive")
         self.assertEqual(entry.source_plugin_id, MEMORY_OWNER_PLUGIN_ID)
         self.assertEqual(validate_capability_dispositions(), ())
         disposition, = CAPABILITY_DISPOSITIONS

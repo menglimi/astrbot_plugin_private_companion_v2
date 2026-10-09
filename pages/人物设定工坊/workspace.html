@@ -3,108 +3,120 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>人格问卷 · 陪伴</title>
+  <title>人格标准化 · 陪伴</title>
   <link rel="stylesheet" href="style.css">
   <script src="/api/plugin/page/bridge-sdk.js" defer></script>
-  <script src="app.js?v=persona-questionnaire-20261001" defer></script>
+  <script src="app.js?v=persona-workflow-20261008" defer></script>
 </head>
 <body>
-  <main class="persona-workspace">
-    <header class="persona-hero">
-      <div class="persona-hero-copy">
-        <p class="eyebrow">SELF / CHARACTER PROFILE</p>
-        <h1>人格问卷</h1>
-        <p>先整理角色的稳定设定，再生成可继续编辑的人格稿。</p>
-      </div>
-      <div class="hero-actions">
-        <span class="save-boundary" id="boundaryNote">保存为版本后，复制到 AstrBot 人格设置</span>
-        <button id="refresh" class="secondary" type="button">重新读取</button>
-      </div>
-      <section class="scope" aria-label="当前编辑范围">
-        <div><span>人格</span><strong id="persona-name">—</strong></div>
-        <div><span>状态</span><strong id="persona-state">—</strong></div>
-        <div><span>原文</span><strong id="original-count">—</strong></div>
-        <div><span>版本</span><strong id="version-count">—</strong></div>
-      </section>
+  <main class="pw">
+    <header class="pw-head">
+      <span class="mark" id="persona-mark" aria-hidden="true">设</span>
+      <div class="who"><strong>人格底稿 · <span id="persona-name">—</span></strong><small>原文 <span id="original-count">—</span> · <button id="load-version" class="meta-action" type="button" aria-label="读取已存稿" title="读取最新已存稿" disabled>已存 <span id="version-count">0</span> 版</button></small></div>
+      <div class="head-actions"><span class="stat" id="persona-state">读取中</span><button id="back-self" class="button secondary small" type="button">返回自我页</button></div>
     </header>
-
     <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="absent" class="absent" hidden><h2>没有可整理的人格</h2><p>请先在 AstrBot 中配置人格，或选择粘贴文本。</p></section>
 
-    <section id="absent" class="absent" hidden aria-label="宿主人格状态">
-      <h2 id="absent-title">AstrBot 现在没有为这个会话选中人格</h2>
-      <p id="absent-body" class="muted">仍可编写并保存草稿。</p>
-    </section>
+    <ol class="flow-line" aria-label="问卷进度">
+      <li class="seg current" data-flow="1" aria-current="step"><span class="no">01</span>问卷与来源</li><li class="arrow" aria-hidden="true">→</li>
+      <li class="seg locked" data-flow="2"><span class="no">02</span>基础稿审核</li><li class="arrow" aria-hidden="true">→</li>
+      <li class="seg locked" data-flow="3"><span class="no">03</span>情景试答</li><li class="arrow" aria-hidden="true">→</li>
+      <li class="seg locked" data-flow="4"><span class="no">04</span>风格规则</li><li class="arrow" aria-hidden="true">→</li>
+      <li class="seg locked" data-flow="5"><span class="no">05</span>对照与落地</li>
+    </ol>
 
-    <section class="questionnaire" aria-labelledby="questionnaire-heading">
-      <header class="section-heading">
-        <div><p class="eyebrow">01 / SHAPE THE CHARACTER</p><h2 id="questionnaire-heading">角色问卷</h2></div>
-        <div class="questionnaire-progress"><strong id="questionnaire-count">0 / 12</strong><span>已填写</span><i><b id="questionnaire-progress-bar"></b></i></div>
-      </header>
-      <div class="questionnaire-layout">
-        <nav id="questionnaire-nav" class="questionnaire-nav" role="tablist" aria-label="问卷分区"></nav>
-        <section class="questionnaire-stage" aria-live="polite">
-          <header class="questionnaire-stage-head"><span id="questionnaire-index">01 / 04</span><h3 id="questionnaire-group-title">角色底色</h3><p id="questionnaire-group-note"></p></header>
-          <div id="questionnaire-fields" class="questionnaire-fields"></div>
-          <footer class="questionnaire-stage-foot">
-            <button id="questionnaire-prev" class="secondary small" type="button">上一组</button>
-            <span id="questionnaire-step">01 / 04</span>
-            <button id="questionnaire-next" class="secondary small" type="button">下一组</button>
-          </footer>
+    <div class="seg-panels">
+      <section class="seg-panel active" data-seg-panel="1">
+        <header class="step-head"><small>STEP 01 / SOURCE</small><h2>问卷与来源</h2><p>选定人格来源与整理强度，再填写你有把握的信息。未提供的内容会留空，不会臆造。</p></header>
+        <section class="card">
+          <h3>人格来源</h3>
+          <div class="source-row" role="radiogroup" aria-label="人格来源">
+            <label class="source-opt on" data-source-option="current"><input type="radio" name="source-mode" value="current" checked><b>选择 AstrBot 人格</b><small>只生成可编辑底稿，不切换实际对话人格</small></label>
+            <label class="source-opt" data-source-option="paste"><input type="radio" name="source-mode" value="paste"><b>粘贴人格文本</b><small>整理列表外的人格或另一份文本</small></label>
+          </div>
+          <div id="persona-select-wrap" class="source-inline"><label class="field"><span>人格选择 <small>选择要整理的人格；未选择时使用当前人格</small></span><span class="source-picker"><select id="source-persona" aria-label="选择要整理的人格"></select><button id="refresh" class="button secondary icon-button" type="button" aria-label="重新读取人格" title="重新读取人格">↻</button></span></label></div>
+          <div id="paste-wrap" class="source-inline" hidden><label class="field"><span>原人格文本</span><textarea id="source-text" rows="6" maxlength="30000" placeholder="粘贴要整理的人格全文；这里只生成审核稿，不会修改原人格"></textarea></label></div>
         </section>
-        <aside class="questionnaire-aside">
-          <span class="aside-mark" aria-hidden="true">01</span>
-          <strong>回答先留在问卷里</strong>
-          <p>生成后会整理成一份完整草稿。你可以在下方逐句修改，再保存多个版本。</p>
-          <button id="load-questionnaire" class="quiet" type="button">从当前成稿载入回答</button>
-          <button id="sync-questionnaire" class="primary" type="button">生成 / 同步成稿</button>
-        </aside>
-      </div>
-    </section>
+        <section class="card">
+          <h3>整理强度</h3>
+          <p class="sub">决定模型改动幅度；生成后仍可逐项审核，不会覆盖当前人格。</p>
+          <div class="chips" role="group" aria-label="整理强度">
+            <button type="button" class="chip" data-strength="light" aria-pressed="false">轻度 · 排版与明显冲突</button>
+            <button type="button" class="chip on" data-strength="medium" aria-pressed="true">中度 · 补齐模块并优化表达</button>
+            <button type="button" class="chip" data-strength="deep" aria-pressed="false">深度 · 按完整模板重组</button>
+          </div>
+        </section>
+        <details class="q-group" open><summary>角色底色 <small>身份 · 外形 · 世界</small></summary><div class="q-body"><div class="grid2">
+          <label class="field"><span>身份与经历 <small>职业、来历或重要经历</small></span><textarea rows="2" maxlength="4000" data-answer="identity"></textarea></label>
+          <label class="field"><span>外形特征 <small>外貌、衣着与标志特征</small></span><textarea rows="2" maxlength="4000" data-answer="appearance"></textarea></label>
+          <label class="field"><span>世界设定 <small>时代、地点、组织与规则</small></span><textarea rows="2" maxlength="4000" data-answer="world"></textarea></label>
+        </div></div></details>
+        <details class="q-group"><summary>内在性格 <small>性格 · 价值 · 关系变化</small></summary><div class="q-body"><div class="grid2">
+          <label class="field"><span>性格底色 <small>稳定性格、优缺点与反差</small></span><textarea rows="2" maxlength="4000" data-answer="personality"></textarea></label>
+          <label class="field"><span>价值与目标 <small>在意的事与内在驱动</small></span><textarea rows="2" maxlength="4000" data-answer="values"></textarea></label>
+          <label class="field"><span>关系变化 <small>对陌生人、朋友和亲近之人的态度</small></span><textarea rows="2" maxlength="4000" data-answer="relationships"></textarea></label>
+        </div></div></details>
+        <details class="q-group"><summary>表达与习惯 / 边界与补充 <small>表达 · 习惯 · 边界 · 其他</small></summary><div class="q-body"><div class="grid2">
+          <label class="field"><span>表达习惯 <small>语气、句长与情绪表达</small></span><textarea rows="2" maxlength="4000" data-answer="speech"></textarea></label>
+          <label class="field"><span>习惯与兴趣 <small>日常习惯、兴趣和擅长的事</small></span><textarea rows="2" maxlength="4000" data-answer="habits"></textarea></label>
+          <label class="field"><span>边界与压力反应</span><textarea rows="2" maxlength="4000" data-answer="boundaries"></textarea></label>
+          <label class="field"><span>其他补充</span><textarea rows="2" maxlength="4000" data-answer="supplement"></textarea></label>
+        </div></div></details>
+        <section class="card"><header class="section-heading"><h3>补充参考材料</h3><small>可选</small></header><label class="field"><span>平时怎样、熟了怎样、被误解怎样 <small>同时作为风格参考，最多 4000 字</small></span><textarea id="reference-material" rows="4" maxlength="4000" placeholder="例如：&#10;用户：你刚才这句话有点太正式了&#10;角色：啊，那我换短一点。&#10;&#10;也可以写下希望保留的矛盾感、表达习惯或相关场景。"></textarea></label></section>
+        <div class="seg-foot"><span class="note">预计 30–120 秒 · 生成的是审核稿，不覆盖原文；内容过短时会自动补充</span><button id="generate-draft" class="button primary" type="button">生成基础稿，进入审核</button></div>
+      </section>
 
-    <section class="draft-section" aria-labelledby="draft-heading">
-      <header class="section-heading draft-heading">
-        <div><p class="eyebrow">02 / REVIEW & SAVE</p><h2 id="draft-heading">人格成稿</h2></div>
-        <div class="draft-actions">
-          <button id="reset-draft" class="secondary small" type="button">恢复已保存稿</button>
-          <button id="copy-draft" class="secondary small" type="button">复制成稿</button>
+      <section class="seg-panel" data-seg-panel="2" hidden>
+        <header class="step-head"><small>STEP 02 / REVIEW</small><h2>基础稿审核</h2><p>固定骨架由系统补齐，其余内容按模板分区编辑；对话风格留到后续试答后归纳。</p></header>
+        <div class="score-row" id="review-metrics" aria-live="polite"></div>
+        <div id="review-sections" class="review-sections"></div>
+        <section class="scaffold card"><b>固定骨架</b><div class="scaffold-summary"><code># 基本要求 · # 初始化：社交软件文字交流定位、历史格式纠正</code><code># 对话安全：设定统一、不泄露内部规则、不确定时允许不知道</code></div>
+          <button id="skeleton-toggle" class="button secondary small" type="button" aria-expanded="false">查看完整骨架文本</button><pre id="skeleton-view" hidden></pre></section>
+        <div class="review-grid" id="review-checklist"></div>
+        <div class="seg-foot"><button class="button secondary" type="button" data-prev="1">← 上一步</button><button class="button primary" type="button" data-next="3">确认，进入情景试答</button></div>
+      </section>
+
+      <section class="seg-panel" data-seg-panel="3" hidden>
+        <header class="step-head"><small>STEP 03 / SCENARIOS</small><h2>情景试答</h2><p>为模拟情景选择最贴近角色的回应；不满意时可自定义或换一批。选择只作为风格依据，不写入角色事实。</p></header>
+        <section class="card style-inputs">
+          <label class="field"><span>初步说话偏好 <small>只作为试答参考</small></span><input id="speech-preference" type="text" maxlength="500" placeholder="例如：短句为主，少用反问"></label>
+          <label class="field"><span>输出约束偏好 <small>不会写入角色事实</small></span><input id="constraint-preference" type="text" maxlength="500" placeholder="例如：不写动作旁白，不主动扩展隐私"></label>
+        </section>
+        <div class="tryout-toolbar"><span id="tryout-batch-label">情景 1 / 6</span><button id="generate-tryouts" class="button secondary" type="button">生成一批试答</button><button id="refresh-tryouts" class="button secondary" type="button" disabled>换一批</button></div>
+        <div id="tryout-scenes" class="tryout-scenes"></div>
+        <div class="seg-foot"><button class="button secondary" type="button" data-prev="2">← 上一步</button><button class="button primary" type="button" data-next="4">继续归纳风格</button></div>
+      </section>
+
+      <section class="seg-panel" data-seg-panel="4" hidden>
+        <header class="step-head"><small>STEP 04 / STYLE RULES</small><h2>风格规则</h2><p>根据审核稿、情景选择与参考材料归纳对话风格；结果仍可手动调整。</p></header>
+        <section class="card style-source">
+          <div class="rule-map">归纳来源：基础稿 · 情景试答 · 参考材料 <span aria-hidden="true">→</span> 回填到 Output_Constraints / 对话风格</div>
+          <button id="generate-style" class="button primary" type="button">归纳风格规则</button>
+        </section>
+        <div id="style-result" class="style-result" hidden>
+          <section class="tpl-section"><label><span class="heading">&lt;Output_Constraints&gt;</span>对话风格</label><textarea id="style-text" rows="5" maxlength="5000" aria-label="对话风格"></textarea></section>
+          <section class="tpl-section"><label><span class="heading">附带产出</span>口吻示例与标志表达</label><textarea id="style-examples" rows="4" maxlength="3000" aria-label="口吻示例与标志表达"></textarea></section>
         </div>
-      </header>
-      <textarea id="draft" class="editor" spellcheck="false" aria-label="可编辑的人格成稿"></textarea>
-      <div class="draft-meta"><span id="draft-meter">—</span><span id="draft-source">还没有存过草稿</span></div>
-      <div class="save-row">
-        <label class="note-field">版本备注
-          <input id="note" type="text" maxlength="200" placeholder="例如：明确说话节奏与拒绝边界">
-        </label>
-        <button id="save" class="primary" type="button">存为新版本</button>
-      </div>
-    </section>
+        <div class="seg-foot"><button class="button secondary" type="button" data-prev="3">← 上一步</button><button class="button primary" type="button" data-next="5">去第 5 步：左右对照</button></div>
+      </section>
 
-    <details class="reference-section">
-      <summary>当前 AstrBot 人格原文</summary>
-      <button id="copy-original" class="quiet" type="button">复制原文</button>
-      <textarea id="original" class="editor readonly" readonly spellcheck="false" aria-label="AstrBot 人格原文（只读）"></textarea>
-      <p class="meter"><span id="original-meter">—</span></p>
-    </details>
-
-    <details class="history" aria-label="版本记录">
-      <summary class="history-head"><span><strong>版本记录</strong><small>可预览、复制或恢复历史版本</small></span></summary>
-      <label class="history-limit">最近
-          <select id="limit">
-            <option value="10">10</option>
-            <option value="30" selected>30</option>
-            <option value="100">100</option>
-          </select> 版
-        </label>
-      <div class="history-body">
-        <ol id="versions" class="version-list" aria-live="polite"></ol>
-        <aside id="preview" class="preview" aria-label="版本预览">
-          <div class="placeholder"><span class="placeholder-mark" aria-hidden="true">✦</span>
-            <h2>选择一版查看</h2></div>
-        </aside>
-      </div>
-    </details>
-
-    
+      <section class="seg-panel" data-seg-panel="5" hidden>
+        <header class="step-head"><small>STEP 05 / COMPARE &amp; SAVE</small><h2>左右分区对照与落地</h2><p>逐区核对并把需要的内容替换到左侧，继续编辑后保存为新底稿版本，不会覆盖当前 AstrBot 人格。</p></header>
+        <div class="compare-head">
+          <section class="side-head"><span class="tag left">左 · 初始</span><b>初始人格</b><button id="copy-left" class="button secondary small" type="button">复制左侧整体</button></section>
+          <section class="side-head"><span class="tag right">右 · 标准化</span><b>标准化版本</b><button id="copy-right" class="button secondary small" type="button">复制右侧整体</button></section>
+        </div>
+        <div id="compare-rows" class="compare-rows"></div>
+        <section class="save-panel card"><label class="field note-field"><span>版本备注</span><input id="note" type="text" maxlength="200" placeholder="例如：调整性格层次与回复边界"></label><button id="save" class="button primary" type="button">保存左侧为新版本</button></section>
+        <div class="seg-foot"><button class="button secondary" type="button" data-prev="4">← 上一步</button></div>
+        <details class="history"><summary><strong>版本记录</strong><span id="history-count">0 版</span></summary>
+          <div class="history-body"><label class="history-limit">显示 <select id="limit"><option value="10">10</option><option value="30" selected>30</option><option value="100">100</option></select> 版</label>
+            <div class="history-grid"><ol id="versions" class="version-list" aria-live="polite"></ol><aside id="preview" class="preview" aria-label="版本预览"></aside></div>
+          </div>
+        </details>
+      </section>
+    </div>
   </main>
 </body>
 </html>

@@ -98,10 +98,15 @@ function makeRoot() {
   return root;
 }
 
-function harness({ready = true} = {}) {
+function harness({ready = true, largeText = false} = {}) {
   const calls = [];
   const appearance = {theme: 'courtyard', density: 'standard', radius: 'standard', typeScale: 'm', motion: 'full'};
   const saved = {};
+  const displayPreferences = {
+    value: largeText,
+    largeText() { return this.value; },
+    setLargeText(value) { this.value = Boolean(value); return this.value; },
+  };
   /* ready=false 模拟"宿主注入还没到"：这时 window.CompanionProduct 整个不存在，
      而不是存在但返回空。两种写法在页面里的走向不同——
      前者读不到就退回默认并拒绝写入，后者会被当成一次失败的读取。 */
@@ -110,6 +115,7 @@ function harness({ready = true} = {}) {
       THEMES,
       label: id => (THEMES.find(t => t.id === id) || {}).label || id,
     },
+    CompanionDisplayPreferences: displayPreferences,
     matchMedia: () => ({matches: false}),
     localStorage: {getItem: k => saved[k] ?? null, setItem: (k, v) => { saved[k] = v; }},
     setTimeout, clearTimeout,
@@ -134,7 +140,7 @@ function harness({ready = true} = {}) {
   const context = vm.createContext({window, localStorage: window.localStorage,
     matchMedia: window.matchMedia, setTimeout, clearTimeout, console, CustomEvent: class { constructor(t, o) { this.type = t; this.detail = o?.detail; } }});
   vm.runInContext(source, context);
-  return {page: context.window.CompanionAppearancePage, calls, appearance, root: makeRoot()};
+  return {page: context.window.CompanionAppearancePage, calls, appearance, displayPreferences, root: makeRoot()};
 }
 
 test('the page renders the live preview plus every theme and dimension', () => {
@@ -146,6 +152,11 @@ test('the page renders the live preview plus every theme and dimension', () => {
   }
   assert.match(root.innerHTML, /窗格纹理与轻圆角/, '主题卡应说明结构风格，不只展示名称');
   assert.match(root.innerHTML, /改变卡片内边距与区块之间的距离/, '显示维度应呈现对应说明');
+  assert.match(root.innerHTML, /预览与主题/);
+  assert.match(root.innerHTML, /这些偏好只作用于当前浏览器/);
+  assert.match(root.innerHTML, /ap-top-grid/);
+  assert.match(root.innerHTML, /显示维度与可读性/);
+  assert.match(root.innerHTML, /ap-dimension-grid/);
   for (const id of THEMES.map(t => t.id)) {
     assert.ok(root.store.apTheme.has(id), '缺少主题 ' + id);
   }
@@ -154,7 +165,7 @@ test('the page renders the live preview plus every theme and dimension', () => {
   }
   /* 明暗分组：深色两套不能混进日间那一组。 */
   const dayStart = root.innerHTML.indexOf('日间');
-  const nightStart = root.innerHTML.indexOf('夜间');
+  const nightStart = root.innerHTML.indexOf('按陈设风格');
   assert.ok(dayStart >= 0 && nightStart > dayStart, '主题应按明暗分组');
   const nightBlock = root.innerHTML.slice(nightStart);
   assert.ok(nightBlock.includes('data-ap-theme="night"') && nightBlock.includes('data-ap-theme="walnut"'),
@@ -198,15 +209,15 @@ test('the reset button restores every dimension through the product layer', () =
   page.unmount();
 });
 
-test('a host that is not injected yet degrades instead of rendering an empty page', () => {
+test('a page bridge that is not ready yet retains the appearance controls and explains retrying', () => {
   const {page, root} = harness({ready: false});
   page.mount(root);
   /* 读不到外观时不能整页空白：主题与维度仍要渲染出来（用默认值），
-     只是改动会被拒绝并给出说明，等宿主注入了再重试。 */
+     只是改动会被拒绝并给出说明，等页面连接就绪后再重试。 */
   assert.match(root.innerHTML, /class="ap-preview"/);
   assert.equal(root.store.apTheme.size, THEMES.length);
   root.fire('click', node('button', {'data-ap-theme': 'night'}));
-  assert.match(root.innerHTML, /需要宿主的注入连接/);
+  assert.match(root.innerHTML, /页面连接尚未就绪/);
   page.unmount();
 });
 
@@ -230,6 +241,17 @@ test('the preview carries all four dimensions as data attributes', () => {
   assert.equal(root.store.previewDensity, 'standard');
   assert.equal(root.store.previewTypeScale, 'm');
   assert.match(root.innerHTML, /data-motion="full"/);
+  page.unmount();
+});
+
+test('the readability switch reflects and updates the shell-owned preference', () => {
+  const {page, displayPreferences, root} = harness({largeText: true});
+  page.mount(root);
+  assert.match(root.innerHTML, /aria-checked="true" data-ap-large aria-label="放大辅助文字"/);
+  const switcher = node('span', {'data-ap-large': '', 'aria-checked': 'true'});
+  root.fire('click', switcher);
+  assert.equal(displayPreferences.value, false);
+  assert.equal(switcher.getAttribute('aria-checked'), 'false');
   page.unmount();
 });
 

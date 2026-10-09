@@ -106,5 +106,5 @@ class ConversationVideos:
                         or hashlib.sha256(row["content"]).hexdigest() != descriptor.content_hash):
                     raise TaskError("video_content_changed", "video body differs from the captured original")
                 frames = self.messages.images.read(context, (self.frame_event(event, descriptor),), at)
-                result.append(PromptVideo(reference, event.source, descriptor, frames))
+                result.append(PromptVideo(reference, event.source, descriptor, frames, row["content"]))
         return tuple(result)

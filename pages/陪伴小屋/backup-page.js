@@ -37,9 +37,7 @@ window.CompanionBackupPage = (() => {
   const PREFIX = "/" + HOST + "/";
   const ROUTE = "backup";
 
-  /* 后端 BackupError 的码全集（从 backup.py 抽出，共 17 个）。
-     页面把能给出可执行提示的都翻成人话；剩下的一律带上原始码，
-     便于用户回帖核对，而不是笼统说「操作失败」。 */
+  /* 后端 BackupError 对应的可读提示。 */
   const errors = {
     backup_snapshot_missing: "这份快照已经不在了，可能在别处被清理。刷新列表看看。",
     backup_snapshot_unreadable: "这份快照读不出来，文件可能已损坏。",
@@ -52,7 +50,7 @@ window.CompanionBackupPage = (() => {
     backup_snapshot_changed: "快照在预览之后发生了变化，出于安全没有继续。请重新预览。",
     backup_snapshot_broken_references: "快照里的引用关系不完整，可能缺少关联数据。",
     backup_confirmation_mismatch: "确认的摘要与快照当前内容不一致，已拒绝执行。请重新预览后再试。",
-    backup_restore_pending: "已有一个还原在等待重启，请先重启宿主再发起新的还原。",
+    backup_restore_pending: "已有一个还原在等待重启，请先重启插件再发起新的还原。",
     backup_restore_unverified: "这份快照尚未通过校验，不能还原。",
     backup_note_invalid: "备注最多 200 个字。",
     backup_write_failed: "写快照失败，可能是磁盘空间或权限问题。",
@@ -60,10 +58,10 @@ window.CompanionBackupPage = (() => {
     backup_metadata_missing: "备份所需的元数据缺失，请确认 V2 数据根完整。",
     backup_pending_unreadable: "等待重启的还原记录读不出来，请检查数据根。",
     backup_preview_failed: "读取当前数据行数失败，请刷新核对。",
-    /* 宿主与身份层的码也要认，否则会显示成「需要核对：xxx」。 */
+    /* 宿主与身份层的提示也在此处翻译。 */
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开。",
     staging_not_initialized: "V2 数据尚未加载，请先在账号与会话中加载已配置的运行实例。",
-    staging_host_terminated: "宿主已停止，请重新打开拓展页。",
+    staging_host_terminated: "插件已停止，请重新打开拓展页。",
     backup_request_invalid: "请求参数不合法，请重新操作。",
     bridge_unavailable: "页面还没有接上 AstrBot。若这是从管理界面打开的插件页，刷新一次通常就好；若反复出现，请确认插件已启用。",
     bridge_timeout: "未收到确认，请刷新核对。",
@@ -74,7 +72,7 @@ window.CompanionBackupPage = (() => {
   const CODE = /^[a-z][a-z0-9_]{2,60}$/;
   const codeOf = wrapped => wrapped?.data?.code
     || (CODE.test(wrapped?.message || "") ? wrapped.message : "") || "";
-  const reason = code => errors[code] || (code ? "需要核对：" + code : "操作没有完成，请重试。");
+  const reason = code => errors[code] || "备份操作未完成，请重新读取快照与还原状态后核对。";
 
   /* 三张被统计的表。中文名只为让用户看懂「还原会替换掉什么」，
      键名必须与 COUNTED_TABLES 一致。 */
@@ -128,8 +126,8 @@ window.CompanionBackupPage = (() => {
   async function call(method, path, body) {
     const response = await bounded(method === "GET"
       ? bridge.apiGet(path, body) : bridge.apiPost(path, body));
-    const wrapped = ["ok", "error"].includes(response?.status) ? response
-      : ["ok", "error"].includes(response?.data?.status) ? response.data : null;
+    const wrapped = ["ok", "error"].includes(response?.status) && response?.data !== undefined ? response
+      : ["ok", "error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
     if (wrapped?.status === "error") {
       const code = codeOf(wrapped) || "invalid_response";
       throw Object.assign(new Error(code), {code, confirmed: true});
@@ -172,10 +170,12 @@ window.CompanionBackupPage = (() => {
     const ticket = token();
     data.busy = "create"; data.notice = ""; paint();
     try {
-      await call("POST", ROUTE + "/create", {note: String(note || "").slice(0, 200)});
+      const created = await call("POST", ROUTE + "/create", {note: String(note || "").slice(0, 200)});
       if (!live(ticket)) return;
       data.busy = "";
-      setNotice("已生成快照。它包含当前的全部记忆、操作记录与配置项。");
+      setNotice(created.retention?.failed
+        ? "快照已生成，自动清理未完成。"
+        : "快照已生成。");
       await load(ticket);
     } catch (error) {
       if (!live(ticket)) return;
@@ -230,9 +230,9 @@ window.CompanionBackupPage = (() => {
       if (!live(ticket)) return;
       const safety = result.safety_snapshot_id ? shortHash(result.safety_snapshot_id) : "";
       data.busy = ""; data.preview = null; data.confirming = null;
-      setNotice("还原请求已暂存，将在下次启动宿主时生效。"
+      setNotice("还原请求已暂存，将在下次启动插件时生效。"
         + (safety ? `还原前的数据已另存为安全副本 ${safety}。` : "")
-        + "现在重启宿主即可完成。");
+        + "现在重启插件即可完成。");
       await load(ticket);
     } catch (error) {
       if (!live(ticket)) return;
@@ -304,7 +304,7 @@ window.CompanionBackupPage = (() => {
     return `<section class="backup-pending" role="status">
       <strong>有一个还原在等待重启</strong>
       <p>它请求把数据还原到 ${e(shortHash(pending.snapshot_id))}，于 ${e(when(pending.requested_at))} 暂存。
-        重启宿主后生效；在此之前不会改动任何数据。</p>
+        重启插件后生效；在此之前不会改动任何数据。</p>
       ${pending.safety_snapshot_id
         ? `<small>还原前的安全副本：<code>${e(shortHash(pending.safety_snapshot_id))}</code></small>` : ""}
     </section>`;
@@ -327,9 +327,10 @@ window.CompanionBackupPage = (() => {
     const list = data.snapshots.length
       ? `<ul class="backup-snapshot-list">${data.snapshots.map(snapshotRow).join("")}</ul>`
       /* 空态要给「怎么让它不空」，不是「为什么没有」——所以直接指向下面的创建按钮。 */
-      : `<p class="backup-empty">暂无备份快照。</p>`;
+      : `<p class="backup-empty">暂无快照</p>`;
     return `${pendingBlock()}
     <div class="backup-create">
+      <strong class="backup-create-title">生成快照</strong>
       <label for="backupNote">备注（可选，最多 200 字）</label>
       <div class="backup-create-row">
         <input id="backupNote" type="text" maxlength="200" placeholder="例如：升级插件之前">

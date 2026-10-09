@@ -9,7 +9,7 @@ import unittest
 
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.foundation.refs import AudienceRef, ScopeKind, ScopeRef, SubjectKind, SubjectRef
-from companion_v2.knowledge.catalog import CatalogKnowledgeProvider, KnowledgeCatalog, SourceBinding
+from companion_v2.knowledge.catalog import CatalogKnowledgeProvider, EntryDocument, KnowledgeCatalog, SourceBinding
 from companion_v2.knowledge.configuration import KnowledgeSettings, read_settings
 from companion_v2.knowledge.context import (
     MEMBER_CLUE_INSTRUCTION,
@@ -25,7 +25,7 @@ from companion_v2.knowledge.importer import (
     KnowledgeSourceSpec,
 )
 from companion_v2.knowledge.members import DECLARED_ACCOUNT, MENTIONED_NAME, select_member_clues
-from companion_v2.knowledge.retrieval import KnowledgeRetriever, query_for_context
+from companion_v2.knowledge.retrieval import KnowledgeCandidate, KnowledgeRetriever, query_for_context
 from companion_v2.sources.repositories import SourceRepository
 from companion_v2.storage.runtime import StorageRuntime
 from tests.test_conversation_messages import MessageFixture
@@ -169,6 +169,31 @@ class KnowledgeImportTests(Fixture):
                            item.chunk_index) for item in self.provider().snapshot()],
                          [("kb-1", "doc-1", "设定", 0), ("kb-1", "doc-1", "设定", 1)])
 
+    def test_selected_official_sources_are_published_into_the_conversation(self):
+        observed = []
+
+        def official_reader(source_ids, **bounds):
+            observed.append((tuple(source_ids), bounds))
+            return (KnowledgeCandidate("astrbot:kb-1:doc-1:0", "米拉喜欢雨天散步",
+                knowledge_base_id="kb-1", document_id="doc-1", document_name="角色资料.md",
+                chunk_index=0),)
+
+        settings = KnowledgeSettings.from_values({"source_ids": "kb:kb-1"})
+        context = KnowledgeContext(KnowledgeRetriever(()), runtime=self.runtime,
+            settings_reader=lambda _: settings, official_candidate_reader=official_reader)
+        task = task_context(SCOPE)
+        audience = task.audience
+
+        contributions = context.contributions(task, text="米拉的雨天习惯", at=NOW, batch_id="official-kb",
+                                              sources=self.sources, audience=audience)
+
+        self.assertEqual(observed[0][0], ("kb:kb-1",))
+        self.assertEqual(observed[0][1]["entry_char_limit"], settings.entry_char_limit)
+        self.assertEqual(len(contributions), 1)
+        self.assertEqual(contributions[0].payload, "米拉喜欢雨天散步")
+        self.assertIsNotNone(contributions[0].source)
+        self.assertTrue(self.sources.validate_reference(contributions[0].source, observed_at=NOW).is_success)
+
     def test_role_and_group_boundaries_isolate_imported_entries(self):
         importer = self.importer()
         importer.import_source(self.spec("worldbook:shared"), lambda item: worldbook(
@@ -212,6 +237,20 @@ class KnowledgeImportTests(Fixture):
         self.assertTrue(self.catalog.get(first, "worldbook:keep").active)
         self.assertFalse(self.catalog.get(second, "worldbook:drop").active)
         self.assertTrue(self.catalog.get(second, "worldbook:new").active)
+
+    def test_source_cleanup_preserves_explicitly_imported_v1_worldbook(self):
+        source_id = "legacy-v1-worldbook-entries-primary"
+        self.catalog.save(self.binding, source_id=source_id, locator="v1-persona:primary",
+            format="legacy_worldbook", content_digest="v1-worldbook-digest",
+            entries=(EntryDocument("legacy-entry", "从 V1 导入的资料"),), members=(),
+            issues=(), at=NOW, code="legacy_v1_imported")
+        importer = self.importer()
+
+        results = importer.import_all(ImportPlan((self.spec(),),
+            lambda item: worldbook(entry("current", "当前资料"))), at=WINDOW)
+
+        self.assertNotIn(source_id, {item.source_id for item in results})
+        self.assertTrue(self.catalog.get(self.binding, source_id).active)
 
 
 class MemberClueTests(Fixture):

@@ -11,8 +11,8 @@
 V1 的数据分三类，处置完全不同：
 
 * ``CONVERTED`` —— 能变成 V2 的记录。只有本插件自己的数据在这一类。
-* ``COMPAT_READABLE`` —— 保持原位可读，V2 不复制它。记忆伴侣的时间线属于这里：
-  V2 自己会从对话里长出新的事实，把旧库整份复制过来只会产生两份互相矛盾的真相。
+* ``COMPAT_READABLE`` —— 保持原位可读，V2 不复制它。
+* 记忆伴侣历史库以 SQLite backup API 归档为完整快照；它不写入 V2 活跃记忆。
 * ``RETAINED_EXTERNAL`` / ``HELD`` —— 归别的插件或别的子系统所有。本插件既不该
   搬也不该改，只能报告「它在哪、归谁管」。
 
@@ -36,10 +36,12 @@ V1 的数据分三类，处置完全不同：
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import stat
 
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.legacy.catalog import (
@@ -47,23 +49,35 @@ from companion_v2.legacy.catalog import (
     CatalogAction,
     LegacyCatalogEntry,
 )
+from companion_v2.legacy.configuration_migration import (
+    configuration_rules,
+    convert_configuration,
+    convert_account_configuration,
+    convert_plugin_configuration,
+    convert_semantic_configuration,
+    plugin_configuration_rules,
+    semantic_configuration_rules,
+)
 from companion_v2.legacy.weather_migration import convert_weather_config
 
 
 # 目录里 ``source_paths`` 有的写成 ``host-config:<plugin_id>``：那不是文件，
 # 而是「宿主配置里的一个插件配置段」，单独处理。
 _CONFIG_PREFIX = "host-config:"
+_PLUGIN_DATA_PREFIX = "plugin-data:"
 
 
 class MigrationState(str, Enum):
     """一个来源在发现阶段的判定结果。"""
 
     READY = "ready"            # 存在，转换器已就绪，可以迁
+    DATA_READY = "data_ready"  # 存在，数据导入器已就绪，可在数据迁移页执行
     ABSENT = "absent"          # 这台机器上没有这份 V1 数据
     NO_HANDLER = "no_handler"  # 存在，但转换器还没写
     READ_ONLY = "read_only"    # 存在，按目录只做兼容读取，不复制
     EXTERNAL = "external"      # 存在，归别的插件所有，这里只报告
     HELD = "held"              # 存在，归属未定，暂不动
+    DOCUMENTED_SKIP = "documented_skip"  # 存在，但有明确的数据边界，不自动复制
     UNREADABLE = "unreadable"  # 存在但打不开或结构不符
 
 
@@ -105,6 +119,9 @@ class ConfigIntent:
     group_id: str
     changes: dict
     source_id: str
+    confidence: dict[str, str] = field(default_factory=dict)
+    sources: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    target_kind: str = "configuration_registry"
 
 
 @dataclass
@@ -139,8 +156,12 @@ class MigrationPlan:
             "warnings": list(self.warnings),
             "change_count": self.change_count,
             "intents": [
-                {"scope": item.scope, "group_id": item.group_id,
-                 "fields": sorted(item.changes), "source_id": item.source_id}
+                {"scope": item.scope, "group_id": item.group_id, "target_kind": item.target_kind,
+                 "fields": sorted(item.changes),
+                 "values": dict(sorted(item.changes.items())),
+                 "confidence": dict(sorted(item.confidence.items())),
+                 "sources": {key: list(value) for key, value in sorted(item.sources.items())},
+                 "source_id": item.source_id}
                 for item in self.intents
             ],
             "differences": list(self.differences),
@@ -156,7 +177,7 @@ def read_json(path: Path):
     损坏会作为 finding 的 detail 报出去。
     """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, UnicodeDecodeError):
         return None
 
@@ -167,6 +188,10 @@ def _size_of(paths: tuple[Path, ...]) -> int:
         try:
             if path.is_file():
                 total += path.stat().st_size
+                if path.suffix == ".db":
+                    wal = Path(str(path) + "-wal")
+                    if wal.is_file():
+                        total += wal.stat().st_size
             elif path.is_dir():
                 for child in path.rglob("*"):
                     if child.is_file():
@@ -199,17 +224,48 @@ def sqlite_tables(path: Path) -> tuple[str, ...] | None:
         connection.close()
 
 
+def plugin_data_path(v1_root: str | Path, relative_path: str) -> Path:
+    """Resolve a plugin_data path using AstrBot's runtime layout and legacy fallbacks."""
+    root = Path(v1_root).expanduser()
+    parts = PurePosixPath(str(relative_path).replace("\\", "/"))
+    if parts.is_absolute() or not parts.parts or any(part in ("", ".", "..") for part in parts.parts):
+        raise ValueError("plugin_data_path_invalid")
+    candidates = (
+        root.parent.parent / "plugin_data" / Path(*parts.parts),
+        root.parent / Path(*parts.parts),
+        root.parent / "plugin_data" / Path(*parts.parts),
+        root / "data" / "plugin_data" / Path(*parts.parts),
+        root / "plugin_data" / Path(*parts.parts),
+    )
+    for candidate in candidates:
+        try:
+            candidate.lstat()
+            return candidate
+        except OSError:
+            continue
+    return candidates[0]
+
+
 def _locate(root: Path, source_paths: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[Path, ...]]:
-    """把目录声明的相对路径拆成「还在的路径」与它们的绝对位置。"""
+    """Resolve catalog paths, including AstrBot's global plugin_data directory."""
     present: list[str] = []
     located: list[Path] = []
     for relative in source_paths:
         if relative.startswith(_CONFIG_PREFIX):
             continue
-        path = root / relative
-        if path.exists():
-            present.append(relative)
-            located.append(path)
+        external = relative.startswith(_PLUGIN_DATA_PREFIX)
+        raw_path = relative[len(_PLUGIN_DATA_PREFIX):] if external else relative
+        parts = PurePosixPath(raw_path.replace("\\", "/"))
+        if parts.is_absolute() or not parts.parts or any(part in ("", ".", "..") for part in parts.parts):
+            continue
+        path = (plugin_data_path(root, raw_path) if external
+                else root.joinpath(*parts.parts))
+        try:
+            path.lstat()
+        except OSError:
+            continue
+        present.append(relative)
+        located.append(path)
     return tuple(present), tuple(located)
 
 
@@ -217,11 +273,22 @@ class LegacyMigration:
     """一次迁移的发现与试算。宿主侧用 ``plan.document()`` 呈现，用
     ``plan.intents`` 写库。"""
 
-    def __init__(self, *, v1_root: str | Path, v1_configuration=None) -> None:
+    def __init__(self, *, v1_root: str | Path, v1_configuration=None, configuration_registry=None,
+                 host_accounts=(), configuration_scope_kind=None) -> None:
         self.v1_root = Path(v1_root)
         # 宿主侧的插件配置（若拿得到）。给了它，「宿主配置段」这一条来源的存在性
         # 就不必依赖数据根里有没有转储——配置本来就在宿主的配置里。
         self.v1_configuration = v1_configuration if isinstance(v1_configuration, dict) else None
+        self.configuration_registry = configuration_registry
+        self.host_accounts = tuple(dict(item) for item in host_accounts if isinstance(item, dict))
+        if configuration_scope_kind not in (None, "private", "group"):
+            raise ValueError("configuration scope kind must be private or group")
+        self.configuration_scope_kind = configuration_scope_kind
+        context = json.dumps({"host_accounts": self.host_accounts,
+                              "configuration_scope_kind": configuration_scope_kind},
+                             ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+                             default=str)
+        self.configuration_context_fingerprint = hashlib.sha256(context.encode("utf-8")).hexdigest()
 
     # ── 发现 ───────────────────────────────────────────────────────────
     def discover(self) -> Outcome[tuple[SourceFinding, ...]]:
@@ -261,6 +328,18 @@ class LegacyMigration:
                 "V1 数据根里没有这个路径。",
             )
 
+        if entry.source_id == "memory.timeline_and_governance":
+            try:
+                info = located[0].lstat()
+                unsafe = (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                          or int(getattr(info, "st_file_attributes", 0)) & 0x400)
+            except OSError:
+                unsafe = True
+            if unsafe:
+                return SourceFinding(entry.source_id, entry.owner, entry.action.value,
+                    MigrationState.UNREADABLE.value, present,
+                    "独立记忆库不是可安全读取的普通文件。", byte_size=size)
+
         for path in located:
             if path.suffix == ".db" and sqlite_tables(path) is None:
                 return SourceFinding(
@@ -290,6 +369,12 @@ class LegacyMigration:
                 if entry.handler_id in HANDLERS
                 else MigrationState.NO_HANDLER
             )
+        if entry.action is CatalogAction.DATA_CONVERTED:
+            return (
+                MigrationState.DATA_READY
+                if entry.handler_id in HANDLERS
+                else MigrationState.NO_HANDLER
+            )
         if entry.action is CatalogAction.NO_HANDLER:
             return MigrationState.NO_HANDLER
         if entry.action is CatalogAction.COMPAT_READABLE:
@@ -298,16 +383,22 @@ class LegacyMigration:
             return MigrationState.EXTERNAL
         if entry.action is CatalogAction.HELD:
             return MigrationState.HELD
+        if entry.action is CatalogAction.DOCUMENTED_SKIP:
+            return MigrationState.DOCUMENTED_SKIP
         return MigrationState.NO_HANDLER
 
     @staticmethod
     def _detail_for(entry: LegacyCatalogEntry, state: MigrationState) -> str:
+        if state is MigrationState.DOCUMENTED_SKIP:
+            return entry.disposition_reason
         return {
             MigrationState.READY: "可以迁移到 V2。",
+            MigrationState.DATA_READY: "数据导入器已就绪；请在数据迁移步骤中预览并选择目标。",
             MigrationState.NO_HANDLER: "这份数据的转换器还没有写，本次迁移会跳过它。",
             MigrationState.READ_ONLY: "保持原位可读，V2 不复制它。",
             MigrationState.EXTERNAL: f"数据归 {entry.owner} 所有，V2 只报告它在哪里。",
             MigrationState.HELD: "归属尚未确定，暂不迁移。",
+            MigrationState.DOCUMENTED_SKIP: "按数据归属与授权边界保留在 V1。",
             MigrationState.UNREADABLE: "数据存在但读不出来。",
             MigrationState.ABSENT: "这台机器上没有这份数据。",
         }[state]
@@ -351,8 +442,8 @@ class LegacyMigration:
     def _convert(self, finding: SourceFinding) -> tuple[list[ConfigIntent], list[dict], list[str]]:
         """把一个来源转成若干 ``ConfigIntent``。
 
-        目前只有宿主配置段的天气一组有转换器；其余 ``READY`` 来源的转换器待写，
-        遇到就说清「这份的转换器还没写」，而不是给一个空结果让人以为它迁完了。
+        配置规则只负责转换账本中已核实的用户设置；目标必须存在于当前 V2 注册表，
+        且值通过目标字段自己的类型与范围校验。
         """
         warnings: list[str] = []
 
@@ -362,35 +453,138 @@ class LegacyMigration:
 
         config = self._configuration()
         if config is None:
-            warnings.append("读不到 V1 的插件配置，天气设置未能试算。")
+            warnings.append("读不到 V1 的插件配置，配置设置未能试算。")
             return [], [], warnings
 
-        outcome = convert_weather_config(config)
-        if not outcome.is_success:
-            warnings.append(f"天气设置未能转换：{outcome.failure.reason}")
-            return [], [], warnings
-
-        migration = outcome.unwrap()
-        # 转换器产出的键是 ``role.state.planning_weather_enabled`` 这种形状，
-        # 前段是作用域、后段是字段。按作用域拆开是因为一次写入针对一个作用域。
         grouped: dict[str, dict] = {}
-        for key, value in migration.changes.items():
+        confidence: dict[str, dict[str, str]] = {}
+        sources: dict[str, dict[str, tuple[str, ...]]] = {}
+        full_confidence: dict[str, str] = {}
+        full_sources: dict[str, tuple[str, ...]] = {}
+
+        weather = convert_weather_config(self._weather_configuration(config))
+        if weather.is_success:
+            weather_migration = weather.unwrap()
+            converted_changes = dict(weather_migration.changes)
+            for key in converted_changes:
+                full_confidence[key] = "high"
+                full_sources[key] = ("weather_config",)
+            differences = [
+                {"field": item.field_id, "kind": item.kind, "explain": item.summary,
+                 "before": item.v1_value, "after": item.v2_value}
+                for item in weather_migration.differences
+            ]
+        else:
+            converted_changes = {}
+            differences = []
+            warnings.append(f"天气设置未能转换：{weather.failure.reason}")
+
+        if self.configuration_registry is not None:
+            configuration = convert_configuration(
+                config, registry=self.configuration_registry,
+                window_kind=self.configuration_scope_kind,
+            )
+            converted_changes.update(configuration.changes)
+            differences.extend(item.document() | {"field": item.field_id, "explain": item.summary}
+                               for item in configuration.differences)
+            for target, level in configuration.confidence.items():
+                full_confidence[target] = level
+                full_sources[target] = configuration.sources[target]
+            rules = configuration_rules()
+            high = sum(rule["confidence"] == "high" for rule in rules)
+            medium = len(rules) - high
+            warnings.append(
+                f"已按 {len(rules)} 条配置映射规则检查当前 V1 配置（高置信 {high} 条、中置信 {medium} 条）。"
+            )
+
+        else:
+            warnings.append("当前运行档未提供配置注册表，除天气与插件级设置外的配置尚未试算。")
+
+        plugin_configuration = convert_plugin_configuration(
+            config, window_kind=self.configuration_scope_kind,
+        )
+        differences.extend(item.document() | {"field": item.field_id, "explain": item.summary}
+                           for item in plugin_configuration.differences)
+        account_configuration = convert_account_configuration(config, accounts=self.host_accounts)
+        differences.extend(item.document() | {"field": item.field_id, "explain": item.summary}
+                           for item in account_configuration.differences)
+        plugin_rules = plugin_configuration_rules()
+        plugin_high = sum(rule["confidence"] == "high" for rule in plugin_rules)
+        warnings.append(
+            f"另检查 {len(plugin_rules)} 条 V2 插件配置映射（高置信 {plugin_high} 条、"
+            f"中置信 {len(plugin_rules) - plugin_high} 条），并按当前宿主目录试算账号、目标及人格绑定。"
+        )
+
+        semantic_configuration = convert_semantic_configuration(config)
+        differences.extend(item.document() | {"field": item.field_id, "explain": item.summary}
+                           for item in semantic_configuration.differences)
+        semantic_rules = semantic_configuration_rules()
+        semantic_high = sum(rule["confidence"] == "high" for rule in semantic_rules)
+        warnings.append(
+            f"另检查 {len(semantic_rules)} 条语义目录设置映射（高置信 {semantic_high} 条、"
+            f"中置信 {len(semantic_rules) - semantic_high} 条）。"
+        )
+        audit_count = sum(bool(item.get("audit")) for item in differences)
+        if audit_count:
+            warnings.append(
+                f"台账共核对 1,010 个 V1 配置键；当前来源有 {audit_count} 项未自动迁移，原因已列在差异审计中。"
+            )
+
+        for key, value in converted_changes.items():
             scope, _, field_id = str(key).rpartition(".")
             if not scope or not field_id:
                 continue
             grouped.setdefault(scope, {})[field_id] = value
+            confidence.setdefault(scope, {})[field_id] = full_confidence.get(key, "high")
+            sources.setdefault(scope, {})[field_id] = full_sources.get(key, ("weather_config",))
 
         intents = [
             ConfigIntent(scope=scope, group_id=GROUP_OF_SCOPE.get(scope, scope), changes=changes,
-                         source_id=finding.source_id)
+                         source_id=finding.source_id,
+                         confidence=confidence.get(scope, {}), sources=sources.get(scope, {}))
             for scope, changes in sorted(grouped.items())
         ]
-        differences = [
-            {"field": item.field_id, "kind": item.kind, "explain": item.summary,
-             "before": item.v1_value, "after": item.v2_value}
-            for item in migration.differences
-        ]
+        plugin_changes = dict(plugin_configuration.changes)
+        plugin_changes.update(account_configuration.changes)
+        plugin_confidence = dict(plugin_configuration.confidence)
+        plugin_confidence.update(account_configuration.confidence)
+        plugin_sources = dict(plugin_configuration.sources)
+        plugin_sources.update(account_configuration.sources)
+        if plugin_changes:
+            intents.append(ConfigIntent(
+                scope="plugin_config", group_id="plugin", changes=plugin_changes,
+                source_id=finding.source_id, confidence=plugin_confidence, sources=plugin_sources,
+                target_kind="plugin_config",
+            ))
+        if semantic_configuration.changes:
+            semantic_changes = {field_id.partition(".")[2]: value
+                                for field_id, value in semantic_configuration.changes.items()}
+            semantic_confidence = {field_id.partition(".")[2]: level
+                                   for field_id, level in semantic_configuration.confidence.items()}
+            semantic_sources = {field_id.partition(".")[2]: value
+                                for field_id, value in semantic_configuration.sources.items()}
+            intents.append(ConfigIntent(
+                scope="semantic_catalog", group_id="semantic", changes=semantic_changes,
+                source_id=finding.source_id, confidence=semantic_confidence, sources=semantic_sources,
+                target_kind="semantic_config",
+            ))
         return intents, differences, warnings
+
+    @staticmethod
+    def _weather_configuration(config: dict) -> dict:
+        """Weather conversion still accepts its historical flat field names.
+
+        AstrBot supplies grouped config objects. Values inside ``weather_config`` are
+        authoritative when a flat compatibility value is also present.
+        """
+        result = {key: value for key, value in config.items() if not isinstance(value, dict)}
+        for key, value in config.items():
+            if key.startswith("weather_config."):
+                result.setdefault(key.partition(".")[2], value)
+        nested = config.get("weather_config")
+        if isinstance(nested, dict):
+            result.update(nested)
+        return result
 
     def _configuration(self):
         """V1 的插件配置：优先用宿主传进来的，其次数据根里的配置转储。
@@ -406,20 +600,18 @@ class LegacyMigration:
                 continue
             loaded = read_json(path)
             if isinstance(loaded, dict):
-                # V1 的导出有时把配置包在 weather_config 之类的子对象里，
-                # 也常是平铺的一层。两种都接。
-                nested = loaded.get("weather_config")
-                if isinstance(nested, dict):
-                    merged = {key: value for key, value in loaded.items() if key != "weather_config"}
-                    merged.update(nested)
-                    return merged
+                # 保留宿主的分组结构：规则按组优先读取，不能把 weather_config
+                # 展平后让别组的同名字段覆盖它。
                 return loaded
         return None
 
 
 # 已经写好的转换器。写在代码里而不是配置里：「哪个转换器实现了」是**代码事实**，
 # 不是运行期状态；放进配置就会出现「配置说有、代码里没有」的假阳性。
-HANDLERS = frozenset({"v2.private-config-converter"})
+HANDLERS = frozenset({"v2.private-config-converter", "v2.role-journal-importer",
+                      "v2.role-journal-and-worldbook-importer",
+                      "v2.group-relationship-importer", "v2.reaction-asset-importer",
+                      "v2.memory-snapshot-archive"})
 
 # 转换器产出的键前段（``role.state`` / ``proactive.contact``）**就是** V2 的配置
 # 分组名——``role_work/state/configuration.py`` 的 ``GROUP`` 与

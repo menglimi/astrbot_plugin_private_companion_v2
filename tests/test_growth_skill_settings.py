@@ -47,7 +47,8 @@ class GrowthSkillTests(unittest.TestCase):
         target = self.target(scope, role, layer)
         snapshot = self.owner.read(target, fields)
         return self.owner.write(target, fields,
-            changes={SKILLS_GROUP + ".custom_skills": value,
+            changes={SKILLS_GROUP + ".enabled": True,
+                     SKILLS_GROUP + ".custom_skills": value,
                      SKILLS_GROUP + ".schedule_influence_strength": strength},
             reset=(), expected_revision=snapshot.revision, observed_at=NOW)
 
@@ -67,7 +68,8 @@ class GrowthSkillTests(unittest.TestCase):
         self.assertEqual({f.field_id for f in permissions},
                          {"role.growth.read_enabled", "role.growth.proposals_enabled"})
         self.assertEqual({f.field_id for f in skills},
-                         {SKILLS_GROUP + ".custom_skills", SKILLS_GROUP + ".schedule_influence_strength"})
+                         {SKILLS_GROUP + ".enabled", SKILLS_GROUP + ".custom_skills",
+                          SKILLS_GROUP + ".schedule_influence_strength"})
         # Permissions stay window-only: a grant is issued per participant.
         self.assertTrue(all(f.layers == (ConfigLayer.WINDOW,) for f in permissions))
         # Skill content may be set at either layer, like role.life.
@@ -78,6 +80,16 @@ class GrowthSkillTests(unittest.TestCase):
         self.assertEqual(skill_settings(self.runtime, self.context()), ((), 0))
         self.set_skills("写作、吉他", strength=2)
         self.assertEqual(skill_settings(self.runtime, self.context()), (("写作", "吉他"), 2))
+
+    def test_disabling_skills_suppresses_automatic_settings_without_deleting_them(self):
+        self.set_skills("写作、吉他", strength=2)
+        target = self.target()
+        snapshot = self.owner.read(target, SKILL_FIELDS)
+        self.owner.write(target, SKILL_FIELDS, changes={SKILLS_GROUP + ".enabled": False},
+                         reset=(), expected_revision=snapshot.revision, observed_at=NOW)
+        self.assertEqual(skill_settings(self.runtime, self.context()), ((), 0))
+        stored = self.owner.read(target, SKILL_FIELDS).fields[SKILLS_GROUP + ".custom_skills"].value
+        self.assertEqual(custom_skills(stored), ("写作", "吉他"))
 
     def test_a_skill_set_in_one_window_is_visible_in_another_window_of_the_role(self):
         # The point of sharing: the same role talking to the same person in another

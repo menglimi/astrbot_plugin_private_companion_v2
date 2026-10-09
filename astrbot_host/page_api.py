@@ -7,6 +7,9 @@ from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 
 from .management_identity import dashboard_operator
+from .display_names import display_names
+from .identity_derivation import role_display_name
+from .settings import HostControlError
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2"
@@ -61,16 +64,16 @@ class PageWebAPI:
                 if controller.runtime is None or controller.settings is None:
                     raise TaskError("staging_not_initialized", "load the explicit V2 profile first")
                 runtime = controller.runtime
+                settings_snapshot = controller.settings
                 operator = dashboard_operator(runtime, username, at=controller.now())
                 require(ObjectAccessPolicy(runtime).feature_access(operator,
                     scope=ScopeRef(runtime.installation_id, "companion", ScopeKind.SYSTEM, "page.management"),
                     action="memory.manage", observed_at=controller.now()))
                 inventory = getattr(controller.web_api, "target_inventory", None)
                 if callable(inventory):
-                    mode, targets = "multi", inventory()
+                    targets = inventory()
                 else:
-                    settings = controller.settings
-                    mode = "single"
+                    settings = controller.resolved_settings()
                     targets = [{"target_id": settings.profile_id, "scope_kind": "private",
                         **{key: getattr(settings, key) for key in ("platform_id", "account_id", "bot_id", "participant_id")},
                         "roles": [{"role_id": settings.role_id, "persona_ids": [settings.persona_id],
@@ -92,17 +95,29 @@ class PageWebAPI:
                 public = [{key: target.get(key) for key in
                     ("target_id", "scope_kind", "platform_id", "account_id", "bot_id", "participant_id", "group_id")}
                     | {"roles": [{"role_id": role["role_id"],
+                                 "role_name": role.get("role_name") or role_display_name(
+                                     role["role_id"], role.get("persona_ids", [])),
                                  **({"group_memory_api": role["group_memory_api"]} if role.get("group_memory_api") else {}),
                                  **{name + "_api": role.get(name + "_api") for name in
                                     ("memory", "state", "life", "relationships", "growth", "reply", "model",
                                      "config", "perception_native", "reality_access", "screen_access", "persona", "legacy",
                                      "qzone_extension", "image_material")}}
                                  for role in target["roles"]]} for target in targets]
-                return outcome_response(Outcome.success({"mode": mode, "installation_id": runtime.installation_id,
+            public = await display_names(controller).targets(public)
+            async with controller._control_lock:
+                if controller.runtime is not runtime or controller.settings is not settings_snapshot:
+                    raise TaskError("staging_not_initialized", "the profile changed while reading display names")
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                require(ObjectAccessPolicy(runtime).feature_access(operator,
+                    scope=ScopeRef(runtime.installation_id, "companion", ScopeKind.SYSTEM, "page.management"),
+                    action="memory.manage", observed_at=controller.now()))
+                return outcome_response(Outcome.success({"installation_id": runtime.installation_id,
                     # Backups cover the whole installation, not one relationship, so the
                     # endpoint sits beside the target list rather than inside a role.
                     "backup_api": PREFIX + "/backup",
                     "acquaintance_api": PREFIX + "/acquaintance",
-                    "operator_id": operator.subject.subject_id, "targets": public}))
-        except TaskError as error:
+                    "accounts_api": PREFIX + "/accounts",
+                    "operator_id": operator.subject.subject_id, "operator_name": username, "targets": public}))
+        except (TaskError, HostControlError) as error:
             return outcome_response(Outcome.failed(error.code, str(error)))

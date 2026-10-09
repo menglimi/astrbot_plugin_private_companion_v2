@@ -81,6 +81,7 @@ class KnowledgeCandidate:
     aliases: tuple[str, ...] = ()
     template: str = ""
     native_scope_ids: tuple[str, ...] = ()
+    scope_route: tuple[str, str, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
@@ -103,6 +104,12 @@ class KnowledgeCandidate:
             raise ValueError("candidate subject must be in its audience")
         if self.native_scope_ids and self.scope_kind is None:
             raise ValueError("candidate native scope ids require an explicit scope kind")
+        if self.scope_route is not None:
+            if (not isinstance(self.scope_route, (tuple, list)) or len(self.scope_route) != 3
+                    or not all(type(value) is str and value.strip() for value in self.scope_route)
+                    or not self.native_scope_ids or self.scope_kind is not ScopeKind.GROUP):
+                raise ValueError("candidate scope route requires a group-scoped native id")
+            object.__setattr__(self, "scope_route", tuple(value.strip() for value in self.scope_route))
         object.__setattr__(self, "candidate_id", self.candidate_id.strip())
         object.__setattr__(self, "text", self.text.strip())
         object.__setattr__(self, "role_id", self.role_id.strip() if isinstance(self.role_id, str) and self.role_id.strip() else None)
@@ -251,6 +258,9 @@ def authorized(candidate: KnowledgeCandidate, query: KnowledgeQuery) -> bool:
     if candidate.scope_kind is not None and candidate.scope_kind is not query.scope.kind:
         return False
     if candidate.native_scope_ids and query.scope.native_scope_id not in candidate.native_scope_ids:
+        return False
+    if candidate.scope_route and (query.scope.kind is not ScopeKind.GROUP
+            or (query.scope.platform, query.scope.bot_id, query.scope.account_id) != candidate.scope_route):
         return False
     role_values = {value for value in (query.role_id, query.persona_id) if value}
     candidate_roles = {value for value in (candidate.role_id, candidate.persona_id) if value}

@@ -89,7 +89,7 @@
 /* 说明是次要信息：不说就删掉，说了也不许超过一行半。
    限宽是硬要求——不限宽时它会拉成一整行，又变回「一坨文字」。 */
 .console-section-note{
-  flex:1 1 260px;min-width:0;max-width:62ch;margin:0;
+  flex:1 1 220px;min-width:0;max-width:62ch;margin:0;
   color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.7;
 }
 .console-section-head .pill{margin-top:2px}
@@ -159,5 +159,7 @@
 @media(max-width:650px){
   /* 窄屏上说明与标题并排会挤成两行半，改成换行独占一行。 */
   .console-section-head{flex-direction:column;align-items:flex-start;gap:var(--sp-2)}
-  .console-section-note{max-width:none}
+  .console-section-note{max-width:none;flex-basis:auto}
+  .console-row{align-items:flex-start;flex-wrap:wrap}
+  .console-row .button{margin-left:auto}
 }

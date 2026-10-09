@@ -4,9 +4,10 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 import json
+import os
 import unittest
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from astrbot.core.message.components import Video
 from astrbot_host.media_components import private_components
@@ -20,7 +21,12 @@ from tests.staging_bootstrap_support import database_contents, wait_for_batch
 from tests.memory_stream_support import StreamFixture
 from tests.video_support import video_bytes
 from astrbot_host.multi_settings import MultiHostSettings
+from astrbot_host.shared_host_migration import migrate_single_target_config
+from astrbot_host.multi_authority import MultiAuthority
+from astrbot_host.settings import INSTALLATION_PREFIX
+from companion_v2.storage.runtime import StorageRuntime
 from astrbot_host.multi_api import PREFIX as MULTI_HOST_PREFIX
+from astrbot_host.host_options_api import HostOptionsWebAPI
 
 
 class _Query(dict):
@@ -32,11 +38,15 @@ class _Query(dict):
 
 
 class MultiSettingsTests(unittest.TestCase):
-    def test_conflicting_modes_accounts_and_duplicate_native_personas_are_rejected(self):
-        configs = []
+    def test_legacy_mode_is_migrated_and_ambiguous_routes_are_rejected(self):
         config = multi_config()
         config["staging"]["enabled"] = True
-        configs.append(config)
+        migrated, changed = migrate_single_target_config(config)
+        self.assertTrue(changed)
+        self.assertFalse(migrated["staging"]["enabled"])
+        self.assertTrue(MultiHostSettings.parse(migrated).enabled)
+
+        configs = []
         config = multi_config()
         config["multi_host"]["targets"][1].update(platform_id="qq-main", account_id="100", participant_id="201")
         configs.append(config)
@@ -55,7 +65,180 @@ class MultiSettingsTests(unittest.TestCase):
         self.assertEqual(MultiHostSettings.parse(original), MultiHostSettings.parse(reordered))
 
 
+class LegacyStagingReceiptTests(unittest.TestCase):
+    def authority(self, receipt):
+        settings = MultiHostSettings.parse(multi_config())
+        authority = object.__new__(MultiAuthority)
+        authority.runtime = NS(installation_id=settings.installation_id,
+                               read_one=lambda _query, _parameters: receipt)
+        authority.settings = settings
+        return authority
+
+    def test_only_a_completed_receipt_for_the_configured_native_target_allows_adoption(self):
+        settings = MultiHostSettings.parse(multi_config())
+        target = settings.target("first")
+        receipt = {"owner": "host.staging.bootstrap", "installation_id": settings.installation_id,
+                   "platform": target.platform_id, "scope_kind": "private",
+                   "native_scope_id": target.participant_id, "bot_id": target.bot_id,
+                   "account_id": target.account_id, "state": "completed"}
+        self.assertTrue(self.authority(receipt)._legacy_staging_receipt_matches())
+
+        for field, value in (("owner", "other.bootstrap"), ("installation_id", "other-installation"),
+                             ("scope_kind", "group"), ("native_scope_id", "201"),
+                             ("bot_id", "bot-b"), ("account_id", "101"), ("state", "accepted")):
+            with self.subTest(field=field, value=value):
+                changed = {**receipt, field: value}
+                self.assertFalse(self.authority(changed)._legacy_staging_receipt_matches())
+
+
 class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_existing_profile_reports_retryable_error_until_platform_loads(self):
+        (await self.controller.initialize_profile()).unwrap()
+        await self.controller.terminate()
+        platforms = self.native.platforms
+        self.native.platforms = {}
+
+        restored = self.make_controller()
+        unavailable = await restored.load_existing()
+        self.assertEqual(unavailable.failure.code, "host_platform_unavailable")
+        self.assertIsNone(restored.runtime)
+
+        self.native.platforms = platforms
+        loaded = await restored.load_existing()
+        self.assertTrue(loaded.is_success, loaded.failure)
+        self.assertTrue(loaded.unwrap()["loaded"])
+
+    async def test_missing_plugin_module_reports_import_failure_without_exception_values(self):
+        with patch.object(self.controller, "_assemble", side_effect=ModuleNotFoundError("synthetic-private-value")):
+            with self.assertLogs("astrbot_host.multi_controller", level="ERROR") as captured:
+                result = await self.controller.initialize_profile()
+        self.assertEqual(result.failure.code, "host_module_unavailable")
+        self.assertIn("重新加载 V2 插件", result.failure.reason)
+        self.assertIn("error_type=ModuleNotFoundError", "\n".join(captured.output))
+        self.assertNotIn("synthetic-private-value", "\n".join(captured.output) + result.failure.reason)
+        self.assertTrue((await self.controller.initialize_profile()).is_success)
+
+    async def test_unexpected_initialization_failure_logs_source_locations_without_exception_values(self):
+        with patch.object(self.controller, "_assemble", side_effect=ValueError("synthetic-private-value")):
+            with self.assertLogs("astrbot_host.multi_controller", level="ERROR") as captured:
+                result = await self.controller.initialize_profile()
+        self.assertEqual(result.failure.code, "host_control_failed")
+        self.assertEqual(self.controller.status()["last_failure"]["operation"], "initialize_profile")
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("operation=initialize_profile", diagnostic)
+        self.assertIn("error_type=ValueError", diagnostic)
+        self.assertIn("_initialize_manifest_locked", diagnostic)
+        self.assertNotIn("synthetic-private-value", diagnostic)
+        self.assertNotIn("synthetic-private-value", result.failure.reason)
+        self.assertTrue((await self.controller.initialize_profile()).is_success)
+        self.assertIsNone(self.controller.status()["last_failure"])
+
+    def repeated_legacy_config(self, *, damaged):
+        config = multi_config()
+        config["multi_host"]["targets"][0]["participant_id"] = "*"
+        if damaged:
+            from companion_v2.execution.models import digest
+            config["multi_host"]["targets"].append({"target_id": "legacy-" + digest(["qq-main", "100", "200"])[:20],
+                "platform_id": "qq-main", "account_id": "100", "bot_id": "bot-a", "participant_id": "200"})
+        return config
+
+    async def test_supervised_task_records_process_and_event_loop_ownership(self):
+        app = await self.start_host()
+        _, batch = await self.accepted()
+        task_id = app.messages.batch(batch)["generation_task_id"]
+        attempt = self.controller.runtime.read_one(
+            "SELECT record_json FROM execution_attempts WHERE task_id = ?", (task_id,))
+        ownership = json.loads(attempt["record_json"])["worker_owner"]
+        self.assertEqual(ownership["process_id"], os.getpid())
+        self.assertEqual(ownership["loop_id"], str(id(asyncio.get_running_loop())))
+        status = self.controller.status()
+        self.assertIsNone(status["failure_code"])
+        self.assertTrue(status["accepting"])
+
+    async def test_saved_role_mapping_recovers_from_repeated_legacy_import_and_survives_restart(self):
+        from astrbot_host.multi_authority import MANIFEST
+        saved = self.make_controller(self.repeated_legacy_config(damaged=False))
+        (await saved.initialize_profile()).unwrap()
+        manifest = saved.authority.read(MANIFEST)
+        await saved.terminate()
+        damaged = self.repeated_legacy_config(damaged=True)
+        persisted = []
+        restored = self.make_controller(damaged)
+
+        def save(candidate):
+            persisted.append(deepcopy(candidate))
+            damaged.clear()
+            damaged.update(candidate)
+
+        restored.save_plugin_config = save
+        restored.register_routes()
+        result = await restored.load_existing()
+        self.assertTrue(result.is_success, result.failure)
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(restored.settings.binding_contract, manifest["binding_contract"])
+        self.assertEqual(restored.authority.read(MANIFEST), manifest)
+        self.assertIsNone(restored.last_failure)
+        (await restored.start()).unwrap()
+        context = restored.authority.context("second", "role-a")
+        self.assertEqual(context.scope.account_id, "101")
+        actual_paths = {route for route, _, _, _ in self.native.registered_web_apis}
+        self.assertTrue(all("/legacy-" not in path for path in actual_paths))
+        self.assertEqual(self.native.provider.client.state.calls, [])
+        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        await restored.terminate()
+        self.assertEqual(self.native.registered_web_apis, [])
+        for _ in range(2):
+            config, changed = migrate_single_target_config(persisted[-1])
+            self.assertFalse(changed)
+            reloaded = self.make_controller(config)
+            (await reloaded.load_existing()).unwrap()
+            (await reloaded.start()).unwrap()
+            self.assertTrue(reloaded._accepting)
+            self.assertEqual(reloaded.settings.binding_contract, manifest["binding_contract"])
+            await reloaded.terminate()
+        self.assertEqual(len(persisted), 1)
+
+    async def test_automatic_mapping_recovery_reports_save_failure_and_leaves_saved_binding_intact(self):
+        from astrbot_host.multi_authority import MANIFEST
+        saved = self.make_controller(self.repeated_legacy_config(damaged=False))
+        (await saved.initialize_profile()).unwrap()
+        manifest = saved.authority.read(MANIFEST)
+        await saved.terminate()
+        damaged = self.repeated_legacy_config(damaged=True)
+        restored = self.make_controller(damaged)
+        before = deepcopy(damaged)
+        restored.save_plugin_config = lambda candidate: (_ for _ in ()).throw(OSError("synthetic private details"))
+        result = await restored.load_existing()
+        self.assertEqual(result.failure.code, "account_config_save_failed")
+        self.assertNotIn("private details", result.failure.reason)
+        self.assertEqual(damaged, before)
+        self.assertEqual(restored.authority.read(MANIFEST), manifest)
+        self.assertIsNone(restored.session)
+        self.assertFalse(restored._accepting)
+        self.assertFalse(restored._lifecycle_lock.locked())
+
+    async def test_legacy_profile_is_reused_only_when_no_shared_database_exists(self):
+        legacy_profile = "legacy-profile"
+        legacy_root = self.root / "profiles" / legacy_profile
+        legacy_runtime = StorageRuntime.open(
+            data_root=legacy_root / "runtime", installation_id=INSTALLATION_PREFIX + legacy_profile)
+        legacy_runtime.close()
+
+        config = multi_config()
+        config["staging"]["profile_id"] = legacy_profile
+        controller = self.make_controller(config)
+        self.assertEqual(controller.profile_root, legacy_root)
+        self.assertTrue(controller._adopting_legacy_profile)
+        self.assertEqual(controller.settings.installation_id, INSTALLATION_PREFIX + legacy_profile)
+
+        shared_root = self.root / "installations" / controller.settings.installation_key
+        shared_runtime = StorageRuntime.open(
+            data_root=shared_root / "runtime", installation_id=controller.settings.installation_id)
+        shared_runtime.close()
+        preferred = self.make_controller(config)
+        self.assertEqual(preferred.profile_root, shared_root)
+        self.assertFalse(preferred._adopting_legacy_profile)
+
     async def test_dashboard_routes_bind_each_target_memory_api_and_unregister_cleanly(self):
         self.controller.register_routes()
         registered = {route: handler for route, handler, _, _ in self.native.registered_web_apis}
@@ -64,9 +247,24 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             for suffix in ("/status", "/probe", "/initialize", "/start", "/stop",
                            "/authorize-delivery", "/revoke-delivery")
         }
+        self.assertTrue({
+            "/astrbot_plugin_private_companion_v2/host-options",
+            "/astrbot_plugin_private_companion_v2/host-options/voice",
+            "/astrbot_plugin_private_companion_v2/host-options/poke",
+            "/astrbot_plugin_private_companion_v2/host-options/forward_intake",
+            "/astrbot_plugin_private_companion_v2/host-options/balance",
+            "/astrbot_plugin_private_companion_v2/storage",
+        }.issubset(registered))
+        storage_methods = {tuple(methods) for route, _, methods, _ in self.native.registered_web_apis
+                           if route == "/astrbot_plugin_private_companion_v2/storage"}
+        self.assertEqual(storage_methods, {("GET",), ("POST",)})
         self.assertTrue(expected.issubset(registered))
-        memory_routes = [route for route in registered if "/targets/" in route and route.endswith("/memory")]
-        self.assertEqual(len(memory_routes), 4)
+        expected_memory_routes = {
+            role["memory_api"] for target in self.controller.web_api.target_inventory()
+            for role in target["roles"] if role["memory_api"] is not None
+        }
+        memory_routes = [route for route in registered if route in expected_memory_routes]
+        self.assertEqual(set(memory_routes), expected_memory_routes)
         # Reality 等按动作注册的路由是闭包而非绑定方法；目标绑定断言只看记忆路由。
         memory_handlers = [handler for route, handler in registered.items() if route in memory_routes]
         self.assertEqual({handler.__self__.controller.target_id for handler in memory_handlers},
@@ -96,11 +294,142 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.controller.unregister_routes()
         self.assertEqual(self.native.registered_web_apis, [])
 
-    async def test_probe_is_read_only_and_initialize_start_use_one_shared_runtime(self):
+    async def test_lifecycle_host_waits_do_not_block_memory_data_routes(self):
+        initialized = await self.controller.initialize_profile()
+        self.assertTrue(initialized.is_success, initialized.failure)
+        self.controller.register_routes()
+        memory_settings = next(handler for route, handler, _, _ in self.native.registered_web_apis
+            if "/targets/first/" in route and route.endswith("/memory/settings"))
+        dashboard_request = NS(username="dashboard-admin", query={})
+
+        probe_entered, allow_probe = asyncio.Event(), asyncio.Event()
+
+        async def hold_probe(_count):
+            probe_entered.set()
+            await allow_probe.wait()
+
+        self.native.before_resolve = hold_probe
+        with patch("astrbot_host.memory_api.request", dashboard_request):
+            starting = asyncio.create_task(self.controller.start())
+            try:
+                await asyncio.wait_for(probe_entered.wait(), timeout=2)
+                response = await asyncio.wait_for(memory_settings(), timeout=1)
+                self.assertEqual(response["status"], "ok", response)
+            finally:
+                allow_probe.set()
+            started = await starting
+            self.assertTrue(started.is_success, started.failure)
+
+            self.native.before_resolve = None
+            session = self.controller.session
+            original_close = session.close
+            close_entered, allow_close = asyncio.Event(), asyncio.Event()
+
+            async def hold_close(*, grace_seconds=0.5):
+                close_entered.set()
+                await allow_close.wait()
+                return await original_close(grace_seconds=grace_seconds)
+
+            session.close = hold_close
+            stopping = asyncio.create_task(self.controller.stop())
+            try:
+                await asyncio.wait_for(close_entered.wait(), timeout=2)
+                response = await asyncio.wait_for(memory_settings(), timeout=1)
+                self.assertEqual(response["status"], "ok", response)
+            finally:
+                allow_close.set()
+                session.close = original_close
+            stopped = await stopping
+            self.assertTrue(stopped.is_success, stopped.failure)
+
+    async def test_unresponsive_astrbot_persona_lookup_fails_within_its_budget(self):
+        entered = asyncio.Event()
+
+        async def unresponsive(_count):
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.native.before_resolve = unresponsive
+        try:
+            with patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.01):
+                result = await self.controller.probe()
+            self.assertTrue(entered.is_set())
+            self.assertEqual(result.failure.code, "host_native_lookup_timeout__persona")
+            self.assertIn("会话生效人格", result.failure.reason)
+            self.assertEqual(self.controller.last_failure["operation"], "probe")
+            self.assertFalse(self.controller._lifecycle_lock.locked())
+        finally:
+            self.native.before_resolve = None
+
+    async def test_lookup_failure_identifies_the_native_read_that_stalled(self):
+        async def unresponsive(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        manager = self.native.conversation_manager
+        for method, stage in (("get_curr_conversation_id", "conversation_id"),
+                              ("get_conversation", "conversation")):
+            with self.subTest(stage=stage), patch.object(manager, method, AsyncMock(side_effect=unresponsive)), \
+                    patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.01):
+                result = await self.controller.probe()
+                self.assertEqual(result.failure.code, "host_native_lookup_timeout__" + stage)
+                self.assertEqual(self.controller.last_failure["code"], result.failure.code)
+                self.assertEqual(self.controller.last_failure["reason"], result.failure.reason)
+                self.assertFalse(self.controller._lifecycle_lock.locked())
+
+    async def test_loading_saved_wildcard_manifest_does_not_scan_native_windows(self):
+        config = multi_config()
+        config["multi_host"]["targets"] = [{**config["multi_host"]["targets"][0], "participant_id": "*"}]
+        config["multi_host"]["personas"] = [row for row in config["multi_host"]["personas"] if row["bot_id"] == "bot-a"]
+        saved = self.make_controller(config)
+        (await saved.initialize_profile()).unwrap()
+        await saved.terminate()
+        restored = self.make_controller(config)
+        restored.last_failure = {"code": "host_native_lookup_timeout"}
+        with patch.object(restored.session_topology, "inventory", AsyncMock(side_effect=AssertionError("unneeded directory read"))) as inventory, \
+                patch.object(self.native.conversation_manager, "get_curr_conversation_id",
+                             AsyncMock(side_effect=AssertionError("unneeded conversation read"))) as current:
+            result = await restored.load_existing()
+        self.assertTrue(result.is_success, result.failure)
+        self.assertTrue(result.unwrap()["loaded"])
+        inventory.assert_not_awaited()
+        current.assert_not_awaited()
+        self.assertIsNone(restored.last_failure)
+        self.assertFalse(restored._accepting)
+        self.assertEqual(self.native.provider.client.state.calls, [])
+
+    async def test_wildcard_probe_allows_directory_to_outlast_one_native_read_budget(self):
+        config = multi_config()
+        config["multi_host"]["targets"] = [{**config["multi_host"]["targets"][0], "participant_id": "*"}]
+        config["multi_host"]["personas"] = [row for row in config["multi_host"]["personas"] if row["bot_id"] == "bot-a"]
+        controller = self.make_controller(config)
+        self.native.conversation_manager.session_conversations = {
+            f"qq-main:FriendMessage:{peer}": "conversation-a" for peer in range(200, 216)}
+        self.native.conversation_manager.session_conversations["qq-main:GroupMessage:300"] = "conversation-a"
+        lookups = []
+
+        async def resolve(**kwargs):
+            self.assertIn(":FriendMessage:", kwargs["umo"])
+            lookups.append(kwargs["umo"])
+            await asyncio.sleep(0.1)
+            return "original", self.native.persona, None, False
+
+        with patch.object(self.native.persona_manager, "resolve_selected_persona", resolve), \
+                patch.object(controller.session_topology, "services", AsyncMock(return_value={})), \
+                patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.3):
+            _, conversations = await controller._probe()
+        self.assertEqual(len(conversations), 16)
+        self.assertEqual(len(lookups), 16)
+        self.assertEqual(self.native.provider.client.state.calls, [])
+
+    async def test_probe_is_read_only_and_first_start_prepares_one_shared_runtime(self):
         before = list(self.root.iterdir())
         self.assertTrue((await self.controller.probe()).is_success)
         self.assertEqual(list(self.root.iterdir()), before)
-        app = await self.start_host()
+        started = await self.controller.start()
+        self.assertTrue(started.is_success, started.failure)
+        app = self.controller.session.application
+        self.assertIn("role.self_review", app.router.profiles)
+        self.assertIn("role.expression.learn", app.router.profiles)
         contexts = []
         for target in ("first", "second"):
             context, _ = await self.accepted(target)
@@ -109,10 +438,48 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(contexts[0].actor.subject, contexts[1].actor.subject)
         self.assertNotEqual(owner_key(contexts[0]), owner_key(contexts[1]))
         self.assertEqual(app.state, "running")
-        # 投递授权已移交按人权限（required: False）：每个目标自己的回复
-        # 直达各自的账号与私聊对象，而不是被静默吞掉。
+        # Each target still sends through only its own native account.
         for platform in self.native.platforms.values():
             self.assertEqual(len(platform.client._api._wsr_api.calls), 1)
+
+    async def test_unregistered_private_persona_does_not_block_start_or_claim(self):
+        self.native.selections["qq-main"] = "unregistered"
+        initialized = await self.controller.initialize_profile()
+        self.assertTrue(initialized.is_success, initialized.failure)
+        started = await self.controller.start()
+        self.assertTrue(started.is_success, started.failure)
+
+        event = self.event()
+        self.assertTrue(self.controller.claims(event))
+        self.assertIsNone(await self.controller.persona_mapping_for_event(event))
+
+    async def test_dashboard_balance_source_reaches_shared_app_and_survives_reload(self):
+        app = await self.start_host()
+        api = HostOptionsWebAPI(self.controller)
+
+        def save(candidate):
+            self.controller.config.clear()
+            self.controller.config.update(candidate)
+
+        self.controller.save_plugin_config = save
+        current = api._view()
+        saved = api._configure(None, "balance", {"edit_token": current["edit_tokens"]["balance"],
+            "changes": {"url": "https://shared.example.com", "api_key": "fixture-secret",
+                        "user_id": "6789", "value_divisor": "250000"}})
+        port = app.contact_schedule.balance_events.port
+        self.assertEqual((port.url, port.headers["New-Api-User"], str(port.divisor)),
+                         ("https://shared.example.com/api/user/self", "6789", "250000"))
+        self.assertNotIn("fixture-secret", json.dumps(saved))
+
+        config = self.controller.config.copy()
+        await self.controller.terminate()
+        self.controller = self.make_controller(config)
+        loaded = await self.controller.load_existing()
+        self.assertTrue(loaded.is_success, loaded.failure)
+        restored = self.controller.session.application.contact_schedule.balance_events.port
+        self.assertEqual((restored.url, restored.headers["New-Api-User"], str(restored.divisor)),
+                         ("https://shared.example.com/api/user/self", "6789", "250000"))
+        self.assertEqual(self.controller.session.application.state, "new")
 
     async def test_two_bots_two_personas_keep_facts_and_sources_isolated_after_switch_back(self):
         app = await self.start_host()
@@ -338,9 +705,22 @@ class MultiHostVideoTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payloads), 2)
         self.assertEqual({row["content"] for row in payloads}, {video_bytes()})
         self.assertEqual(len(self.native.provider.client.state.calls), 2)
+        video_evidence = set()
         for payload, _ in self.native.provider.client.state.calls:
-            content = payload["messages"][2]["content"]
-            self.assertEqual(len([part for part in content if part["type"] == "image_url"]), 4)
+            user_messages = [message for message in payload["messages"] if message["role"] == "user"]
+            self.assertEqual(len(user_messages), 1)
+            content = user_messages[0]["content"]
+            # This fixture has no native video model. Its text reply receives
+            # the unavailable narration for the correct original attachment.
+            self.assertIsInstance(content, str)
+            materials = json.loads(content)["materials"]
+            video = [item for item in materials if item["purpose"].startswith("input_video:")]
+            narration = [item for item in materials if item["purpose"] == "current_video_narration"]
+            self.assertEqual(len(video), 1)
+            self.assertEqual(len(narration), 1)
+            self.assertEqual(narration[0]["evidence"], video[0]["evidence"])
+            video_evidence.add(video[0]["evidence"])
+        self.assertEqual(len(video_evidence), 2)
         for platform in self.native.platforms.values():
             self.assertEqual(len(platform.client._api._wsr_api.calls), 1)
 

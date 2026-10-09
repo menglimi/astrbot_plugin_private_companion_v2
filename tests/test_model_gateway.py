@@ -19,7 +19,7 @@ from companion_v2.foundation.refs import SourceRef, SubjectKind, SubjectRef, Ver
 from companion_v2.identity_policy.personas import PersonaBinding, PersonaSelector, SelectorKind
 from companion_v2.model_gateway.budget import BudgetLedger
 from companion_v2.model_gateway.failures import ModelFailure
-from companion_v2.model_gateway.models import Amount, BudgetPolicy, LocalProvider, ModelTaskProfile, ProviderResponse
+from companion_v2.model_gateway.models import Amount, BudgetPolicy, CacheSignature, LocalProvider, ModelTaskProfile, ProviderResponse
 from companion_v2.model_gateway.perception import capability_instruction
 from companion_v2.model_gateway.routing import ModelRouter, configuration_fields
 from companion_v2.model_gateway.service import LocalModelGateway
@@ -98,6 +98,57 @@ class ModelFixture(ExecutionFixture):
 
 
 class ModelGatewayTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_fully_filtered_catalog_keeps_reasons_without_requiring_tool_capabilities(self):
+        run = self.model_run()
+        request = self.request()
+        withheld = ({"action": "reaction.search", "reason": "reactions_disabled_for_scope"},)
+
+        session = self.gateway.open_session(run, request, tool_filters=withheld)
+        await session.generate(request)
+
+        projection = self.gateway.observe(self.context, run.task.task_id).unwrap()
+        self.assertEqual(projection["plan"]["tool_actions"], [])
+        self.assertEqual(projection["plan"]["tool_filters"], list(withheld))
+        self.assertEqual(len(self.called), 1)
+
+    async def test_cache_signature_sink_persists_only_against_the_dispatched_call(self):
+        signature = CacheSignature("a" * 64, "b" * 64, ("b" * 64,), "c" * 64, (), (), 0, True)
+
+        async def respond(envelope):
+            envelope.record_cache_signature(signature)
+            return ProviderResponse("generated", ModelDraft("private draft", ()), Amount(15, 40), "receipt-primary")
+
+        self.responses["primary"] = respond
+        run = self.model_run()
+        completion = await self.gateway.generate(run, self.request())
+        row = self.runtime.read_one("SELECT signature_json FROM model_call_cache_signatures WHERE call_id = ?",
+                                    (completion.call_id,))
+        self.assertEqual(json.loads(row["signature_json"]), signature.to_record())
+
+    async def test_unset_task_fallback_uses_the_profile_window_provider_after_a_task_override(self):
+        profile = replace(self.profiles[0], default_fallback="")
+        profiles = (profile, self.profiles[1])
+        base_fields = tuple(field for field in self.registry.fields.values()
+                            if not field.field_id.startswith("model.fixture."))
+        registry = FieldRegistry(version="models.window-fallback.v1",
+                                 fields=base_fields + configuration_fields(profiles))
+        configuration = ConfigurationService(self.runtime, registry)
+        router = ModelRouter(configuration, profiles, self.providers)
+        generation = self.runtime.read_one(
+            "SELECT generation FROM configuration_consumers WHERE consumer_id = 'model_gateway'", ())
+        router.start(expected_generation=generation["generation"])
+
+        before = configuration.read(self.core, target=self.window, group_id=profile.group,
+                                    observed_at=self.clock.now()).unwrap()
+        self.assertEqual(before.fields[profile.group + ".fallback"].value, "primary")
+        self.assertFalse(before.fields[profile.group + ".fallback"].explicit)
+        configuration.patch(self.core, target=self.window, group_id=profile.group,
+            operation=self.operation(self.window.authorization_scope), expected_edit_token=before.edit_token,
+            changes={profile.group + ".provider": "fallback"}, observed_at=self.clock.now()).unwrap()
+
+        plan = router.resolve(self.model_run(), self.request())
+        self.assertEqual([provider.binding.provider for provider in plan.providers], ["fallback", "primary"])
+
     async def test_actual_local_call_keeps_original_persona_materials_and_prompt_provenance(self):
         run = self.model_run()
         request = self.request()

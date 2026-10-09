@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import replace
 import unittest
 
-from companion_v2.execution.models import Lane, TaskRegistration, TaskResult
+from companion_v2.execution.models import Lane, TaskError, TaskRegistration, TaskResult
 from companion_v2.execution.runner import LocalTaskRunner
 from tests.test_execution import ExecutionFixture
 from tests.test_management_access import NOW
@@ -169,6 +169,20 @@ class ExecutionRunnerTests(ExecutionFixture, unittest.IsolatedAsyncioTestCase):
         result = (await runner.run_once(Lane.FOREGROUND)).unwrap().task
         self.assertEqual((result.state, result.reason), ("uncertain", "worker_error"))
         self.assertNotIn("private exception payload", str(self.tasks.observe(self.context, result.task_id).unwrap()))
+
+    async def test_task_error_code_is_logged_without_private_exception_text(self):
+        async def handler(_run):
+            raise TaskError("model_usage_unknown", "private exception payload")
+
+        runner = self.runner(handler)
+        self.submit()
+        with self.assertLogs("companion_v2.execution.runner", level="ERROR") as captured:
+            run_result = (await runner.run_once(Lane.FOREGROUND)).unwrap()
+            result = run_result.task
+        self.assertEqual((result.state, result.reason), ("failed", "worker_error"))
+        self.assertEqual(run_result.failure_code, "model_usage_unknown")
+        self.assertIn("model_usage_unknown", "\n".join(captured.output))
+        self.assertNotIn("private exception payload", "\n".join(captured.output))
 
     async def test_close_stops_active_effect_worker_without_claiming_it_was_not_committed(self):
         entered = asyncio.Event()

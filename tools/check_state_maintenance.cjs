@@ -11,6 +11,7 @@ async function run({page,root,button,saved,posts,loadDone,checkWidth,first,secon
       if(await active.count())await active.click();
       await trigger.click();
     }
+    if(await root.locator("#state-edit-form").count())await root.locator('[data-state-edit="cancel"]').click();
   };
   assert.match(await root.locator(".state-feature-detail").innerText(),/健康开启 · 饥饿开启 · 当前人格共享/);
   await button("maintenance").click();

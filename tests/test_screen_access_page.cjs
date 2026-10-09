@@ -36,8 +36,8 @@ function harness({kind = "private", route = true, request} = {}) {
       calls.push({method, path, body});
       if (request) return request(method, path, body);
       return method === "GET"
-        ? {invokable: false, consented: false, edit_token: "edit-a", reason: "capability_not_installed"}
-        : {status: {invokable: body.enabled, consented: body.enabled, edit_token: "edit-b"}};
+        ? {invokable: false, consented: false, can_manage: true, edit_token: "edit-a", reason: "capability_not_installed"}
+        : {status: {invokable: body.enabled, consented: body.enabled, can_manage: true, edit_token: "edit-b"}};
     },
   };
   const window = {CompanionProduct: product};
@@ -45,7 +45,7 @@ function harness({kind = "private", route = true, request} = {}) {
   vm.runInNewContext(source, {window, document, Promise, Map, String, Math, Date, JSON, Object,
     crypto: {randomUUID: () => "operation-a"}});
   window.CompanionScreenAccess.mount(node);
-  return {node, calls};
+  return {node, calls, page: window.CompanionScreenAccess};
 }
 
 test("群聊显示私聊边界，不发送屏幕授权请求", async () => {
@@ -73,6 +73,16 @@ test("缺少原生扩展时指导启用 native_v2 并重载", async () => {
   assert.match(node.innerHTML, /暂不可用/);
 });
 
+test("只有查看权限时标明只读，不显示会被 CORE 权限拒绝的授权按钮", async () => {
+  const {node, calls} = harness({request: async () => ({invokable: false, consented: false,
+    can_manage: false, edit_token: "edit-a", reason: "capability_not_installed"})});
+  await settle();
+  assert.match(node.innerHTML, /当前账号没有管理此授权的权限/);
+  assert.match(node.innerHTML, /只读/);
+  assert.doesNotMatch(node.innerHTML, /data-screen-access-action="enable"/);
+  assert.equal(calls.length, 1);
+});
+
 test("授权和撤回沿用当前私聊的版本令牌", async () => {
   const {node, calls} = harness();
   await settle();
@@ -87,4 +97,18 @@ test("授权和撤回沿用当前私聊的版本令牌", async () => {
   await settle();
   assert.equal(calls[2].body.enabled, false);
   assert.equal(calls[2].body.edit_token, "edit-b");
+});
+
+test("已确认的屏幕授权在路由返回时先保留，再重新核对", async () => {
+  const {node, calls, page} = harness({request: async (method) => method === "GET"
+    ? {invokable: true, consented: true, can_manage: true, edit_token: "edit-a"}
+    : {status: {invokable: true, consented: true, can_manage: true, edit_token: "edit-b"}}});
+  await settle();
+  page.unmount();
+  page.mount(node);
+  assert.match(node.innerHTML, /已授权/);
+  await settle();
+  assert.equal(calls.filter(call => call.method === "GET").length, 2);
+  assert.match(node.innerHTML, /已授权/);
+  page.unmount();
 });

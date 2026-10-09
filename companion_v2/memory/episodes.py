@@ -27,6 +27,7 @@ import json
 
 from companion_v2.execution.models import TaskError, digest, stamp
 from companion_v2.foundation.refs import ScopeKind
+from companion_v2.conversation.reset import batch_current
 
 from . import codec
 from .models import owner_key
@@ -139,7 +140,7 @@ def recent_dialogue_lines(runtime, access, context, manifest, *, limit=MAX_SOURC
     scope = context.scope
     identity = (scope.installation_id, scope.account_id, scope.bot_id,
                 context.role_binding.role.subject_id, context.actor.subject.subject_id)
-    rows = runtime.read_all("""SELECT i.event_key, i.event_json
+    rows = runtime.read_all("""SELECT i.batch_id, i.event_key, i.event_json
         FROM conversation_inputs i JOIN conversation_batches b ON b.batch_id = i.batch_id
         WHERE i.withdrawn = 0
         AND json_extract(i.event_json, '$.received_at') >= ? AND json_extract(i.event_json, '$.received_at') < ?
@@ -152,6 +153,8 @@ def recent_dialogue_lines(runtime, access, context, manifest, *, limit=MAX_SOURC
         (start, end, *identity, limit))
     lines = []
     for row in reversed(rows):
+        if not batch_current(runtime, row["batch_id"]):
+            continue
         try:
             stored = json.loads(row["event_json"])
             reference = codec.source(stored["source"])
@@ -161,7 +164,7 @@ def recent_dialogue_lines(runtime, access, context, manifest, *, limit=MAX_SOURC
         plain = " ".join(str(text or "").split())
         if plain:
             lines.append({"speaker": "user", "at": stored.get("received_at", ""), "text": plain[:MAX_LINE_CHARS]})
-    parts = runtime.read_all("""SELECT p.text, p.delivered_at
+    parts = runtime.read_all("""SELECT p.batch_id, p.text, p.delivered_at
         FROM conversation_parts p
         JOIN conversation_batches b ON b.batch_id = p.batch_id
         JOIN conversation_delivery_receipts r ON r.part_id = p.part_id AND r.receipt_ref = p.receipt_ref
@@ -173,6 +176,8 @@ def recent_dialogue_lines(runtime, access, context, manifest, *, limit=MAX_SOURC
         AND json_extract(b.context_json, '$.actor.subject.subject_id') = ?
         ORDER BY p.delivered_at DESC LIMIT ?""", (start, end, *identity, limit))
     for row in reversed(parts):
+        if not batch_current(runtime, row["batch_id"]):
+            continue
         plain = " ".join(str(row["text"] or "").split())
         if plain:
             lines.append({"speaker": "bot", "at": row["delivered_at"], "text": plain[:MAX_LINE_CHARS]})

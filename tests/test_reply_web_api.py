@@ -30,7 +30,8 @@ async def request(handler, body=None, *, username="reply-admin", raw=None, query
 class ReplyWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def test_dashboard_catalog_hot_voice_toggle_and_target_isolation(self):
         self.controller = self.make_controller(multi_config(delivery_mode="onebot_private"))
-        catalog = Mock(return_value=[NS(meta=lambda: NS(id="tts-a"), provider_config={"key": "fixture-secret"})])
+        catalog = Mock(return_value=[NS(meta=lambda: NS(id="tts-a", model="s2-pro"),
+                                       provider_config={"key": "fixture-secret"})])
         self.native.get_all_tts_providers = catalog
         renderer = AsyncMock(return_value=RECORD)
         with patch("astrbot_host.multi_session.NativeVoiceReply.render", renderer):
@@ -43,7 +44,7 @@ class ReplyWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         first, second = replies["first"], replies["second"]
         status = (await request(handlers[first]))["data"]
         self.assertFalse(status["settings"]["voice_enabled"])
-        self.assertEqual(status["tts"], {"state": "ready", "providers": [{"id": "tts-a"}]})
+        self.assertEqual(status["tts"], {"state": "ready", "providers": [{"id": "tts-a", "model": "s2-pro"}]})
         self.assertNotIn("fixture-secret", json.dumps(status))
         await self.accepted(identifier="voice-initial-off")
         renderer.assert_not_awaited()

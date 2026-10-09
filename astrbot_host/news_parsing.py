@@ -53,10 +53,11 @@ def parse_rss_news(raw, *, source_label):
     items = []
     for entry in entries[:100]:
         values = {local(child): (child.text or "").strip() for child in entry if local(child) != "link"}
-        link = values.get("link", "")
+        link = next((child.attrib.get("href", "") for child in entry
+                     if local(child) == "link" and child.attrib.get("href")), "")
         if not link:
-            link = next((child.attrib.get("href", "") for child in entry
-                         if local(child) == "link" and child.attrib.get("href")), "")
+            link = next(((child.text or "").strip() for child in entry
+                         if local(child) == "link" and (child.text or "").strip()), "")
         published = values.get("pubdate") or values.get("published") or values.get("updated") or values.get("date")
         timestamp = None
         if published:

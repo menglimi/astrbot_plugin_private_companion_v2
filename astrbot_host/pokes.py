@@ -41,8 +41,9 @@ async def _authorize(controller, route):
     session, settings = controller.session, controller.settings
     if hasattr(settings, "targets"):
         targets = settings.group_targets if route.kind is ScopeKind.GROUP else settings.targets
-        target = next((item for item in targets if item.route_key ==
-                       (route.platform_id, route.login, route.peer)), None)
+        target = (settings.group_target(route.platform_id, route.login, route.peer)
+                  if route.kind is ScopeKind.GROUP
+                  else settings.private_target(route.platform_id, route.login, route.peer))
         if target is None:
             raise TaskError("host_poke_route_changed", "poke target is no longer configured")
         if route.kind is ScopeKind.GROUP:

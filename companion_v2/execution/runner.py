@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
+from logging import getLogger
 from time import perf_counter
 from types import MappingProxyType
 from typing import Awaitable, Callable, Mapping
@@ -19,9 +20,13 @@ from .models import Lane, TaskClaim, TaskError, TaskRecord, TaskResult, require
 from .service import TaskSupervisor
 
 
+logger = getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class RunResult:
     task: TaskRecord | None
+    failure_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,10 +119,16 @@ class _TaskRunner:
                         return Outcome.success(RunResult(require(self._stopped(claim, "cancelled"))))
                     try:
                         result = worker.result()
-                    except (Exception, asyncio.CancelledError):
-                        return Outcome.success(RunResult(require(self._stopped(claim, "worker_error"))))
+                    except (Exception, asyncio.CancelledError) as error:
+                        code = error.code if isinstance(error, TaskError) else "unhandled_exception"
+                        logger.error("[CompanionV2] 后台任务执行失败 task=%s kind=%s code=%s error_type=%s",
+                                     task.task_id, task.spec.kind, code, type(error).__name__)
+                        logger.debug("[CompanionV2][开发者追踪] 后台任务异常 task=%s kind=%s code=%s",
+                                     task.task_id, task.spec.kind, code, exc_info=True)
+                        return Outcome.success(RunResult(require(self._stopped(claim, "worker_error")), code))
                     if not isinstance(result, TaskResult):
-                        return Outcome.success(RunResult(require(self._stopped(claim, "worker_error"))))
+                        return Outcome.success(RunResult(require(self._stopped(claim, "worker_error")),
+                                                         "worker_result_invalid"))
                     finished = self.supervisor.finish(claim, result, execution_ms=(perf_counter() - started) * 1000)
                     if finished.failure:
                         reason = "timeout" if finished.failure.code == "task_attempt_expired" else "permission_changed"
@@ -133,10 +144,18 @@ class _TaskRunner:
                 await self._abort(claim, worker, "runner_cancelled")
             raise
         except TaskError as error:
+            logger.warning("[CompanionV2] 后台任务启动失败 task=%s code=%s",
+                           claim.task_id if claim is not None else "unclaimed", error.code)
+            logger.debug("[CompanionV2][开发者追踪] 后台任务启动异常 task=%s code=%s",
+                         claim.task_id if claim is not None else "unclaimed", error.code, exc_info=True)
             if claim is not None and worker is None:
                 self.supervisor.abandon(claim, reason="permission_changed")
             return Outcome.failed(error.code, str(error))
-        except Exception:
+        except Exception as error:
+            logger.error("[CompanionV2] 后台任务调度失败 task=%s error_type=%s",
+                         claim.task_id if claim is not None else "unclaimed", type(error).__name__)
+            logger.debug("[CompanionV2][开发者追踪] 后台任务调度异常 task=%s error_type=%s",
+                         claim.task_id if claim is not None else "unclaimed", type(error).__name__, exc_info=True)
             if claim is not None:
                 if worker is None:
                     self.supervisor.abandon(claim, reason="worker_error")

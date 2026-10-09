@@ -18,9 +18,17 @@ class GroupDeliveryAuthority:
         self.authority = authority
 
     def target(self, target_id):
-        target = self.authority.settings.target(target_id)
+        target = self.authority.target(target_id)
         if not isinstance(target, GroupTarget):
             raise TaskError("host_group_target_required", "group authorization requires an explicit group target")
+        return target
+
+    def validate_target(self, target):
+        known = self.authority.target(target.target_id)
+        if known != target:
+            template = self.authority.settings.template_for(target)
+            if template is None:
+                raise TaskError("host_group_target_required", "the group does not belong to a registered Bot account")
         return target
 
     def authorize(self, target_id, expires_at):
@@ -49,7 +57,7 @@ class GroupDeliveryAuthority:
 
     def access(self, target):
         """正式版：群聊投递不再需要逐群授权；仍然要求这是一个配置里的群目标。"""
-        self.target(target.target_id)
+        self.validate_target(target)
         return {"capability": CAPABILITY, "target": asdict(target), "revision": 1,
                 "issued_at": stamp(self.authority.now()), "expires_at": None, "revoked": False}
 

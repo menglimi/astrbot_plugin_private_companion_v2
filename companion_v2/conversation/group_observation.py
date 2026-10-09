@@ -26,6 +26,7 @@ import json
 import re
 
 from companion_v2.execution.models import digest
+from .group_timing import clean_group_text, repeat_signature
 
 
 PREFIX = "conversation.group_observation.v1"
@@ -120,11 +121,14 @@ def history_items(recent):
             continue
         kind = entry.get("type")
         if kind == "group_member_message":
-            items.append({"kind": "member", "speaker_id": str(entry.get("speaker_id") or ""),
-                          "received_at": entry.get("received_at"), "text": str(entry.get("text") or "")})
+            raw_text = str(entry.get("text") or "")
+            item = {"kind": "member", "speaker_id": str(entry.get("speaker_id") or ""),
+                    "received_at": entry.get("received_at"), "text": clean_group_text(raw_text)}
+            item["dedupe_key"] = item_key({**item, "text": raw_text})
+            items.append(item)
         elif kind == "confirmed_group_reply":
             items.append({"kind": "bot", "speaker_id": "", "received_at": entry.get("delivered_at"),
-                          "text": str(entry.get("text") or "")})
+                          "text": clean_group_text(entry.get("text"))})
     return tuple(items)
 
 
@@ -161,6 +165,90 @@ class GroupPresenceStore:
             (self.key(owner, kind), json.dumps({"version": VERSION, **document},
                                                ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
 
+    def clean_media_placeholders(self):
+        """Repair persisted group signals without rereading private or group chat logs."""
+        prefix = PREFIX + ":"
+        rows = self.runtime.read_all("SELECT key, value FROM runtime_metadata WHERE substr(key, 1, ?) = ?",
+                                     (len(prefix), prefix))
+        updates = []
+        for row in rows:
+            try:
+                document = json.loads(row["value"])
+            except ValueError:
+                continue
+            if type(document) is not dict or document.get("version") != VERSION:
+                continue
+            kind = row["key"][len(prefix):].split(":", 1)[0]
+            changed = False
+            if kind == "moments" and type(document.get("moments")) is list:
+                moments = []
+                seen = set()
+                for item in document["moments"]:
+                    if type(item) is not dict:
+                        changed = True
+                        continue
+                    text = clean_group_text(item.get("text"))
+                    if not text:
+                        changed = True
+                        continue
+                    key = digest(text)
+                    cleaned = {**item, "text": text, "hash": key}
+                    if key in seen:
+                        changed = True
+                        continue
+                    seen.add(key)
+                    moments.append(cleaned)
+                    changed |= cleaned != item
+                if len(moments) > MAX_MOMENTS:
+                    moments = moments[:MAX_MOMENTS]
+                    changed = True
+                if changed:
+                    document["moments"] = moments
+            elif kind == "mood" and type(document.get("mood_scores")) is dict:
+                scores = document["mood_scores"]
+                if _low(scores.get("dead_silence")) > 0:
+                    scores["dead_silence"] = 0.0
+                    document["top_mood"] = _top_mood(scores)
+                    document["social_tension"] = round(sum(
+                        min(100.0, max(0.0, _low(scores.get(label)))) * TENSION_WEIGHTS.get(label, 0.0)
+                        for label in MOOD_LABELS if label != "dead_silence"), 2)
+                    changed = True
+                if _low(document.get("message_count")) > 0:
+                    document["message_count"] = 0
+                    changed = True
+            elif kind == "joke_guard" and type(document.get("samples")) is list:
+                samples = [text for item in document["samples"] if (text := clean_group_text(item))]
+                if samples != document["samples"]:
+                    document["samples"] = samples
+                    document["objections"] = min(int(_low(document.get("objections"))), len(samples))
+                    document["level"] = ("blocked" if document["objections"] >= JOKE_OBJECTION_BLOCK else
+                                          "caution" if document["objections"] >= JOKE_OBJECTION_CAUTION else "normal")
+                    changed = True
+            elif kind == "speech" and type(document.get("repeat")) is dict:
+                repeat = document["repeat"]
+                signature = repeat_signature(repeat.get("signature"))
+                if signature != str(repeat.get("signature") or ""):
+                    document["repeat"] = {**repeat, "signature": signature,
+                        "acts": 0, "last_act_at": ""}
+                    changed = True
+                pending = document.get("pending")
+                if type(pending) is dict and pending.get("kind") in ("repeat_follow", "repeat_interrupt"):
+                    pending_signature = repeat_signature(pending.get("signature"))
+                    if not pending_signature:
+                        document["pending"] = None
+                        changed = True
+                    elif pending_signature != pending.get("signature"):
+                        document["pending"] = {**pending, "signature": pending_signature}
+                        changed = True
+            if changed:
+                updates.append((row["key"], row["value"],
+                    json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+        if updates:
+            with self.runtime.transaction() as connection:
+                connection.executemany("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                    ((value, key, previous) for key, previous, value in updates))
+        return len(updates)
+
 
 # -- mood -----------------------------------------------------------------
 
@@ -174,10 +262,10 @@ def fold_mood(existing, items, at):
     for item in items:
         if item.get("kind") != "member":
             continue  # the group's atmosphere is read from members, never from the role's own wording
-        text = " ".join(str(item.get("text") or "").split())
+        text = clean_group_text(item.get("text"))
         if not text:
             continue
-        key = item_key({**item, "text": text})
+        key = str(item.get("dedupe_key") or item_key({**item, "text": text}))
         if key in seen:
             continue
         seen.add(key)
@@ -256,7 +344,7 @@ def joke_guard(items, at):
     for item in items:
         if item.get("kind") != "member":
             continue
-        text = " ".join(str(item.get("text") or "").split())
+        text = clean_group_text(item.get("text"))
         if text and any(re.search(pattern, text) for pattern in OBJECTION_PATTERNS):
             objections.append(text[:MAX_MOMENT_CHARS])
     count = len(objections)
@@ -274,11 +362,11 @@ def moment_candidates(items, at, *, window_seconds=MOMENT_BURST_SECONDS):
     V1 also treated a quoted reply as a signal. The bounded V2 history carries no
     member-level reply attribution, so that signal is not invented here.
     """
-    texts = [item for item in items if item.get("kind") == "member" and str(item.get("text") or "").strip()
+    texts = [item for item in items if item.get("kind") == "member" and clean_group_text(item.get("text"))
              and (parse_moment(item.get("received_at")) or at) <= at]
     candidates = []
     for index, item in enumerate(texts):
-        text = str(item["text"])
+        text = clean_group_text(item["text"])
         lowered = text.lower()
         score, reasons = 0.0, []
         if any(re.search(pattern, lowered) for pattern in SPARK_PATTERNS):
@@ -306,10 +394,13 @@ def fold_moments(existing, candidates, at):
         for entry in existing.get("moments") or ():
             if type(entry) is not dict or not str(entry.get("text") or ""):
                 continue
+            text = clean_group_text(entry.get("text"))
+            if not text:
+                continue
             expires = parse_moment(entry.get("expires_at"))
             if expires is not None and expires < at:
                 continue
-            stored[str(entry.get("hash") or digest(entry["text"]))] = dict(entry)
+            stored[digest(text)] = {**entry, "text": text, "hash": digest(text)}
     for candidate in candidates:
         text = str(candidate.get("text") or "")
         if not text:
@@ -349,7 +440,7 @@ def moment_portrait(items, current_speaker):
     visible window, they are handed to the prompt as unverified reference, and
     nothing about them is written anywhere.
     """
-    text = " ".join(str(item.get("text") or "") for item in items
+    text = " ".join(clean_group_text(item.get("text")) for item in items
                     if item.get("kind") == "member" and str(item.get("speaker_id") or "") == str(current_speaker or ""))
     if not text:
         return {}

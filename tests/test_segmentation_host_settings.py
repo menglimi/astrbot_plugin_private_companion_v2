@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from tests.segmentation_stream_support import host_support, native_provider, ProviderOpenAIOfficial, FunctionTool, ToolSet
 from tests.native_adapter_support import FakeEvent, FakeReverseApi, FakeHostContext, final_text
@@ -16,14 +17,21 @@ from astrbot_host.controller import AstrBotStagingController
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.adapters.astrbot.staging_config import StagingConfiguration
 from companion_v2.conversation.segmentation import SegmentationPolicy, LLM_SEGMENT_MARKER as MARKER
+from companion_v2.conversation.reply_settings import SPACING_DEFAULTS
 from companion_v2.execution.models import digest
+
+SEGMENT_FIRST = "这是第一段完整回复"
+SEGMENT_SECOND = "这是第二段完整回复"
 
 
 class SegmentationSettingsTests(unittest.TestCase):
     def test_schema_defaults_match_parser_and_existing_fingerprints_are_unchanged(self):
         schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(encoding="utf-8"))
         defaults = {name: value["default"] for name, value in schema["segmentation"]["items"].items()}
-        self.assertEqual(defaults, asdict(SegmentationPolicy()))
+        policy_defaults = asdict(SegmentationPolicy())
+        self.assertNotIn("rules_enabled", defaults)
+        self.assertTrue(policy_defaults["rules_enabled"])
+        self.assertEqual(defaults, {name: policy_defaults[name] for name in defaults})
         self.assertFalse(schema["model"]["items"]["streaming"]["default"])
         common = HostSettings.parse({})
         self.assertEqual(common.segmentation, SegmentationPolicy())
@@ -44,6 +52,8 @@ class SegmentationSettingsTests(unittest.TestCase):
                     "additional_providers", "fallback_provider_id", "replacement_rules", "fallback_on_refusal",
                     "forward_intake"):
             old_multi["common"].pop(key)
+        old_multi.pop("_legacy_group_delivery_shape")
+        old_multi.pop("_storage_installation_id")
         self.assertEqual(multi.fingerprint, digest(old_multi))
 
     def test_enabled_policies_survive_serialization_and_multi_host_assembly(self):
@@ -67,42 +77,60 @@ class SegmentationSettingsTests(unittest.TestCase):
 
 
 class SingleHostSegmentationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_pinned_settings_load_real_streaming_provider_and_segmented_preview(self):
+    def setUp(self):
+        spacing = patch.dict(SPACING_DEFAULTS, {"part_gap_mode": "fixed"})
+        spacing.start()
+        self.addCleanup(spacing.stop)
+
+    async def test_pinned_settings_load_real_streaming_provider_and_segmented_delivery(self):
         temporary = TemporaryDirectory(prefix="companion-segmentation-settings-")
         self.addCleanup(temporary.cleanup)
         native = host_support.WebContext()
         native.provider = native_provider()
-        native.provider.client.state.text = final_text(f"甲\n{MARKER}\n乙")
+        native.provider.client.state.text = final_text(f"{SEGMENT_FIRST}\n{MARKER}\n{SEGMENT_SECOND}")
         types = NativeAdapterTypes("4.27.2", FakeEvent, ProviderOpenAIOfficial, FunctionTool, ToolSet, FakeReverseApi)
         config = host_support.host_config(model={"streaming": True})
-        config["segmentation"] = {"enabled": True}
+        config["segmentation"] = {"enabled": True, "llm_controlled": True}
         controller = AstrBotStagingController(native, config, Path(temporary.name), native_types=types, now=lambda: NOW)
         self.addAsyncCleanup(controller.terminate)
         (await controller.initialize_profile()).unwrap()
         (await controller.start()).unwrap()
         batch = (await controller.receive_claimed(FakeEvent(native))).unwrap()
         await wait_for_batch(controller.session, batch)
-        self.assertEqual([p["text"] for p in (await controller.preview(batch)).unwrap()["parts"]], ["甲\n", "乙"])
+        rows = controller.session.application.runtime.read_all(
+            "SELECT text FROM conversation_parts WHERE batch_id = ? ORDER BY sequence", (batch,))
+        self.assertEqual([row["text"] for row in rows], [SEGMENT_FIRST, SEGMENT_SECOND])
         self.assertTrue(native.provider.client.state.calls[0]["stream"])
-        self.assertEqual(native.platform.client._api._wsr_api.calls, [])
+        deliveries = native.platform.client._api._wsr_api.calls
+        self.assertEqual([action for action, _ in deliveries], ["send_private_msg", "send_private_msg"])
+        self.assertEqual([params["message"][0]["data"]["text"] for _, params in deliveries],
+                         [SEGMENT_FIRST, SEGMENT_SECOND])
         await controller.terminate()
         restored = AstrBotStagingController(native, config, Path(temporary.name), native_types=types, now=lambda: NOW)
         self.addAsyncCleanup(restored.terminate)
         (await restored.load_existing()).unwrap()
         self.assertTrue(restored.configuration.streaming)
         self.assertTrue(restored.session.application.generator.segmentation.enabled)
-        self.assertEqual([p["text"] for p in (await restored.preview(batch)).unwrap()["parts"]], ["甲\n", "乙"])
+        rows = restored.session.application.runtime.read_all(
+            "SELECT text FROM conversation_parts WHERE batch_id = ? ORDER BY sequence", (batch,))
+        self.assertEqual([row["text"] for row in rows], [SEGMENT_FIRST, SEGMENT_SECOND])
         self.assertEqual(len(native.provider.client.state.calls), 1)
 
 
 class MultiHostSegmentationTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        super().setUp()
+        spacing = patch.dict(SPACING_DEFAULTS, {"part_gap_mode": "fixed"})
+        spacing.start()
+        self.addCleanup(spacing.stop)
+
     async def test_multi_private_and_group_targets_share_policy_without_crossing_routes(self):
         self.native.provider = native_provider()
-        self.native.provider.client.state.text = final_text(f"甲\n{MARKER}\n乙")
+        self.native.provider.client.state.text = final_text(f"{SEGMENT_FIRST}\n{MARKER}\n{SEGMENT_SECOND}")
         self.types = replace(self.types, provider=ProviderOpenAIOfficial, function_tool=FunctionTool, tool_set=ToolSet)
         config = group_config()
         config["model"]["streaming"] = True
-        config["segmentation"] = {"enabled": True}
+        config["segmentation"] = {"enabled": True, "llm_controlled": True}
         config["voice_reply"] = {"enabled": True, "private_probability": 0.25, "group_probability": 0.8}
         self.controller = self.make_controller(config)
         app = await self.start_host()
@@ -113,11 +141,22 @@ class MultiHostSegmentationTests(GroupFixture, unittest.IsolatedAsyncioTestCase)
             await wait_for_batch(self.controller.session, batch)
             batches.append(batch)
             rows = app.runtime.read_all("SELECT text FROM conversation_parts WHERE batch_id = ? ORDER BY sequence", (batch,))
-            self.assertEqual([r["text"] for r in rows], ["甲\n", "乙"])
+            self.assertEqual([r["text"] for r in rows], [SEGMENT_FIRST, SEGMENT_SECOND])
             captured = json.loads(app.messages.batch(batch)["contributions_json"])["reply_settings"]["settings"]
             self.assertEqual(captured["voice_probability"], 0.8 if len(batches) == 3 else 0.25)
         scopes = [json.loads(app.messages.batch(batch)["context_json"])["role_binding"]["scope"] for batch in batches]
         self.assertEqual(len({digest(scope) for scope in scopes}), 3)
         self.assertTrue(all(c["stream"] for c in self.native.provider.client.state.calls))
         self.assertEqual(len(self.native.provider.client.state.calls), 3)
-        self.assertTrue(all(not p.client._api._wsr_api.calls for p in self.native.platforms.values()))
+        calls_by_platform = {platform_id: platform.client._api._wsr_api.calls
+                             for platform_id, platform in self.native.platforms.items()}
+        all_deliveries = [call for calls in calls_by_platform.values() for call in calls]
+        actions = [action for action, _ in all_deliveries]
+        self.assertEqual(actions.count("send_private_msg"), 4)
+        self.assertEqual(actions.count("send_group_msg"), 2)
+        self.assertEqual(len(calls_by_platform["qq-main"]), 4)
+        self.assertEqual(len(calls_by_platform["qq-second"]), 2)
+        self.assertTrue(all(params["user_id"] == 200 for action, params in all_deliveries
+                            if action == "send_private_msg"))
+        self.assertTrue(all(str(params["group_id"]) == "300" for action, params in all_deliveries
+                            if action == "send_group_msg"))

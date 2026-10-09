@@ -219,11 +219,13 @@ class GroupQuoteDeliveryTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role,
                               context.scope)
         runtime = self.app.runtime
-        row = runtime.read_one("SELECT revision FROM configuration_targets WHERE target_key = ?", (target.key,))
-        ReplyConfigurationOwner(runtime).write(
-            target, reply_configuration_fields(SegmentationPolicy(), True, 0.0),
+        owner = ReplyConfigurationOwner(runtime)
+        fields = reply_configuration_fields(SegmentationPolicy(), True, 0.0)
+        revision = owner.read(target, fields).revision
+        owner.write(
+            target, fields,
             changes={GROUP + "." + name: value for name, value in changes.items()}, reset=(),
-            expected_revision=row["revision"] if row else 0, observed_at=self.clock.now())
+            expected_revision=revision, observed_at=self.clock.now())
 
     def message_types(self, index=-1):
         return [component["type"] for component in self.sent[index][1]["message"]]

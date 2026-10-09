@@ -102,7 +102,7 @@ class ScreenContactEvents:
 
     @staticmethod
     def _opportunity(context, feedback_id, created_at, reference):
-        expires = min(created_at + MAX_AGE, reference.expires_at or created_at + MAX_AGE)
+        expires = min(created_at + MAX_AGE, reference.source.expires_at or created_at + MAX_AGE)
         return Opportunity("screen-" + digest([context.key, feedback_id]), context.scope, created_at, expires)
 
     def peek_due(self, context, preferences, at):
@@ -245,7 +245,7 @@ class ScreenContactEvents:
             if (record.reference != expected_source or record.audience != context.audience or body != expected
                     or receipt["analysis_hash"] != digest(result.analysis) or record.content_hash != digest(record.payload)):
                 raise ValueError("Screen source changed")
-            return reference
+            return None
         except TaskError:
             raise
         except (KeyError, TypeError, ValueError, AttributeError) as error:

@@ -21,8 +21,36 @@ EVENT_WINDOW = timedelta(minutes=30)
 MAX_AGE = timedelta(hours=24)
 RETRY = timedelta(minutes=5)
 MAX_SEEN = 128
+MAX_FEED_ITEMS = 32
 MEANING = ("这是外部资讯源提供的标题和摘要，未经角色独立核实；"
-           "不要把它说成亲历、刚刚发生或已阅读完整原文。只有自然相关时才分享，保留来源、链接和可用日期。")
+           "不要把它说成亲历、刚刚发生或已阅读完整原文。只有自然相关时才分享；"
+           "来源、链接和发布日期由程序留存，主动正文不附出处页脚，待对方追问时再给。")
+
+
+def news_provenance(material):
+    """Capture attribution from verified input, separately from the visible body."""
+    if (type(material) is not dict or material.get("event") != "external_news_item"
+            or type(material.get("source")) is not str or type(material.get("published_at")) is not str
+            or type(material.get("url")) is not str):
+        raise ValueError("news attribution is incomplete")
+    source = " ".join(material["source"].split())
+    published = datetime.fromisoformat(material["published_at"])
+    url = canonical_news_url(material["url"])
+    title, summary = material.get("title", ""), material.get("summary", "")
+    if (not source or len(source) > 100 or published.tzinfo is None or published.utcoffset() is None
+            or not url or type(title) is not str or len(title) > 240
+            or type(summary) is not str or len(summary) > 1000):
+        raise ValueError("news attribution is invalid")
+    return {"source": source, "published_at": published.isoformat(), "url": url,
+            "title": title, "summary": summary}
+
+
+def attribution_suffix(material):
+    """Legacy formatter retained for diagnostics; proactive delivery no longer appends it."""
+    provenance = news_provenance(material)
+    return (f"\n\n来源：{provenance['source']} · "
+            f"{datetime.fromisoformat(provenance['published_at']).date().isoformat()}\n"
+            f"原文：{provenance['url']}")
 
 
 class NewsContactEvents:
@@ -30,6 +58,7 @@ class NewsContactEvents:
         self.contacts, self.port = contacts, port
         self.runtime = contacts.runtime
         self.guard = bind(self.runtime, SOURCE_OWNER, self._validate_source)
+        self._maintenance_workers = {}
 
     def _port(self, preferences):
         resolver = getattr(self.port, "for_settings", None)
@@ -37,6 +66,111 @@ class NewsContactEvents:
 
     def close(self):
         self.guard.close()
+        for worker in tuple(self._maintenance_workers.values()):
+            worker.cancel()
+        self._maintenance_workers.clear()
+
+    def _maintenance_allowed(self, context, preferences):
+        """Whether the source should be kept warm independently of contact delivery.
+
+        ``news_share_enabled`` and ``automatic_enabled`` govern sending.  They
+        must not make the configured feed disappear from the dashboard: the
+        default host source is the AI daily feed and remains useful for ordinary
+        questions and review even while proactive contact is paused.
+        """
+        if self.port is None or context.scope.kind is not ScopeKind.PRIVATE:
+            return False
+        values = preferences.values
+        kind = values.get("news_source_kind", "host")
+        if kind == "disabled":
+            return False
+        if kind == "search":
+            return values.get("web_exploration_enabled") is True
+        if kind == "hot":
+            return values.get("news_daily_hot_read_enabled") is True
+        return True
+
+    @staticmethod
+    def _feed_item(item, fallback_source=""):
+        """Project one fetched item into a bounded, UI-safe persisted summary."""
+        try:
+            title = str(item.title or "").strip()[:240]
+            summary = str(item.summary or "").strip()[:1000]
+            source = str(item.source or fallback_source or "").strip()[:100]
+            url = canonical_news_url(item.url)
+            published = item.published_at
+            if (not title or not source or not url or published is None
+                    or published.tzinfo is None or published.utcoffset() is None):
+                return None
+            return {"title": title, "summary": summary, "source": source, "url": url,
+                    "published_at": stamp(published)}
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+    def _feed_items(self, batch, port):
+        items = []
+        for item in batch.items[:100]:
+            projected = self._feed_item(item, getattr(port, "source_label", ""))
+            if projected is not None:
+                items.append(projected)
+        items.sort(key=lambda value: (value["published_at"], value["url"]), reverse=True)
+        return items[:MAX_FEED_ITEMS]
+
+    def _maintenance_due(self, context, preferences, at):
+        if not self._maintenance_allowed(context, preferences):
+            return False
+        diagnostic = self.diagnostic(context, preferences)
+        last = diagnostic.get("last_attempt_at") or diagnostic.get("last_checked_at")
+        if not last:
+            return True
+        try:
+            return at >= datetime.fromisoformat(last) + self._poll_interval(preferences)
+        except (TypeError, ValueError):
+            return True
+
+    def maintain(self, context, preferences):
+        """Schedule a durable source refresh without creating a contact opportunity."""
+        worker = self._maintenance_workers.get(context.key)
+        if worker is not None:
+            if not worker.done():
+                return
+            if not worker.cancelled():
+                worker.exception()
+            self._maintenance_workers.pop(context.key, None)
+        at = self.contacts.tasks.now()
+        if not self._maintenance_due(context, preferences, at):
+            return
+        self._maintenance_workers[context.key] = asyncio.create_task(
+            self._maintain(context, preferences.values.copy()),
+            name="companion:news-maintenance:" + context.key)
+
+    async def _maintain(self, context, values):
+        preferences = type("NewsMaintenancePreferences", (), {"values": values})()
+        attempted = self.contacts.tasks.now()
+        port = None
+        try:
+            port = self._source(preferences)
+            if port is None:
+                self._save_diagnostic(context, {"last_attempt_at": stamp(attempted),
+                    "last_checked_at": None,
+                    "failure": {"code": "news_source_disabled", "http_status": None,
+                                 "provider_code": None}, "item_count": 0,
+                    "candidate": False}, port=port)
+                return
+            batch = await asyncio.wait_for(port.fetch(), timeout=10)
+            if type(batch) is not ParseBatch:
+                raise ValueError("news port returned an invalid batch")
+            checked = self.contacts.tasks.now()
+            items = self._feed_items(batch, port)
+            self._save_diagnostic(context, {"last_attempt_at": stamp(attempted),
+                "last_checked_at": stamp(checked), "failure": None,
+                "item_count": len(batch.items), "candidate": False,
+                "items": items}, port=port)
+        except Exception as error:
+            checked = self.contacts.tasks.now()
+            self._save_diagnostic(context, {"last_attempt_at": stamp(attempted),
+                "last_checked_at": None, "failure": news_failure(error),
+                "item_count": 0, "candidate": False}, port=port)
 
     def _settings(self, context, preferences):
         port = self._port(preferences) if self.port is not None else None
@@ -69,14 +203,19 @@ class NewsContactEvents:
             return max(configured, timedelta(days=1))
         return configured
 
-    def _self_link_cooled_down(self, context, preferences, at):
+    def _self_link_cooled_down(self, context, preferences, at, *, exclude_event_id=None):
         if not preferences.values["external_event_self_link_enabled"]:
             return False
         hours = preferences.values["external_event_self_link_cooldown_hours"]
         if not hours:
             return False
-        row = self.runtime.read_one("""SELECT MAX(created_at) AS latest FROM proactive_contacts
-            WHERE origin_key = ? AND json_extract(record_json, '$.purpose') = 'news'""", (context.key,))
+        query = """SELECT MAX(created_at) AS latest FROM proactive_contacts
+            WHERE origin_key = ? AND json_extract(record_json, '$.purpose') = 'news'"""
+        parameters = [context.key]
+        if exclude_event_id is not None:
+            query += " AND COALESCE(json_extract(record_json, '$.automatic_origin.news_event.event_id'), '') != ?"
+            parameters.append(exclude_event_id)
+        row = self.runtime.read_one(query, tuple(parameters))
         return bool(row and row["latest"] and at < datetime.fromisoformat(row["latest"]) + timedelta(hours=hours))
 
     def _row(self, context):
@@ -86,15 +225,22 @@ class NewsContactEvents:
         resolver = getattr(self.port, "for_settings", None)
         return resolver(preferences.values) if callable(resolver) else self.port
 
+    @staticmethod
+    def source_fingerprint(port):
+        if port is None:
+            return None
+        return digest([getattr(port, "fingerprint", None), getattr(port, "kind", ""),
+                       getattr(port, "source_label", "")])
+
     def diagnostic(self, context, preferences):
         """Return only bounded, non-secret fetch state for the management page."""
         try:
             port = self._source(preferences)
-            source = {"ready": port is not None,
+            source = {"ready": port is not None, "assembled": port is not None,
                       "kind": getattr(port, "kind", "") if port is not None else "",
                       "label": getattr(port, "source_label", "") if port is not None else ""}
         except (ValueError, TypeError):
-            port, source = None, {"ready": False, "kind": "", "label": ""}
+            port, source = None, {"ready": False, "assembled": False, "kind": "", "label": ""}
         key = "proactive.news.status:" + context.key
         row = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (key,))
         status = {}
@@ -105,27 +251,83 @@ class NewsContactEvents:
                     status = value
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
+        if status.get("source_fingerprint") != self.source_fingerprint(port):
+            status = {}
         failure = status.get("failure")
         if type(failure) is not dict:
             failure = None
         item_count = status.get("item_count", 0)
         if type(item_count) is not int or item_count < 0:
             item_count = 0
-        return {"source": source, "last_attempt_at": status.get("last_attempt_at"),
-                "last_checked_at": status.get("last_checked_at"),
-                "failure": failure, "item_count": item_count,
+        items = status.get("items", [])
+        if type(items) is not list:
+            items = []
+        items = [item for item in items[:MAX_FEED_ITEMS]
+                 if type(item) is dict and type(item.get("title")) is str
+                 and type(item.get("url")) is str and type(item.get("published_at")) is str]
+        last_attempt_at = status.get("last_attempt_at")
+        last_checked_at = status.get("last_success_at") or status.get("last_checked_at")
+        if port is None:
+            network_status = "not_configured"
+        elif not last_attempt_at:
+            network_status = "not_checked"
+        elif failure is not None:
+            network_status = "failed"
+        elif last_checked_at:
+            network_status = "succeeded"
+        else:
+            network_status = "not_checked"
+        return {"source": source, "network_status": network_status,
+                "last_check_succeeded": network_status == "succeeded",
+                "last_attempt_at": last_attempt_at, "last_checked_at": last_checked_at,
+                "last_success_at": last_checked_at,
+                "failure": failure, "item_count": item_count, "items": items,
                 "candidate": bool(status.get("candidate", False))}
 
-    def _save_diagnostic(self, context, value):
+    def _save_diagnostic(self, context, value, *, port=None):
+        value = dict(value)
+        value["source_fingerprint"] = self.source_fingerprint(port)
+        key = "proactive.news.status:" + context.key
+        previous = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (key,))
+        prior_status = {}
+        if previous is not None:
+            try:
+                parsed = json.loads(previous["value"])
+                if type(parsed) is dict:
+                    prior_status = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        if prior_status.get("source_fingerprint") != value["source_fingerprint"]:
+            prior_status = {}
+        if value.get("failure") is None and value.get("last_checked_at"):
+            value["last_success_at"] = value["last_checked_at"]
+        else:
+            value["last_success_at"] = (prior_status.get("last_success_at")
+                                        or prior_status.get("last_checked_at"))
+            value["last_checked_at"] = value["last_success_at"]
+        if "items" not in value:
+            value["items"] = prior_status.get("items", []) if isinstance(prior_status.get("items", []), list) else []
+        value["items"] = value["items"][:MAX_FEED_ITEMS]
         payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         with self.runtime.transaction() as connection:
             connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
-                ("proactive.news.status:" + context.key, payload))
+                (key, payload))
+
+    def record_lookup(self, context, attempted_at, *, port, checked_at=None, failure=None, item_count=0):
+        """Record a source fetch performed for an ordinary conversation turn."""
+        self._save_diagnostic(context, {
+            "last_attempt_at": stamp(attempted_at),
+            "last_checked_at": stamp(checked_at) if checked_at is not None else None,
+            "failure": failure,
+            "item_count": item_count if type(item_count) is int and item_count >= 0 else 0,
+            "candidate": False,
+        }, port=port)
 
     async def probe(self, context, preferences):
         """Fetch a source for diagnostics without changing polling or contact state."""
         attempt_at = self.contacts.tasks.now()
+        port = None
         try:
             port = self._source(preferences)
             if port is None:
@@ -138,11 +340,12 @@ class NewsContactEvents:
                     raise ValueError("news port returned an invalid batch")
                 checked_at = self.contacts.tasks.now()
                 value = {"last_attempt_at": stamp(attempt_at), "last_checked_at": stamp(checked_at),
-                         "failure": None, "item_count": len(batch.items), "candidate": False}
+                         "failure": None, "item_count": len(batch.items), "candidate": False,
+                         "items": self._feed_items(batch, port)}
         except Exception as error:
             value = {"last_attempt_at": stamp(attempt_at), "last_checked_at": None,
                      "failure": news_failure(error), "item_count": 0, "candidate": False}
-        self._save_diagnostic(context, value)
+        self._save_diagnostic(context, value, port=port)
         return self.diagnostic(context, preferences)
 
     @staticmethod
@@ -166,6 +369,8 @@ class NewsContactEvents:
     def select(self, context, preferences, at):
         settings_hash = self._settings(context, preferences)
         if settings_hash is None:
+            return None
+        if self._self_link_cooled_down(context, preferences, at):
             return None
         row = self._row(context)
         pending = self._candidate(context, row, settings_hash, at)
@@ -224,9 +429,10 @@ class NewsContactEvents:
             if matches:
                 weight = min(settings["external_event_self_link_weight"], 1.0 + 0.25 * matches)
         thought = Thought("news-thought-" + digest(marker), opportunity, ThoughtKind.CONVERSATION,
-            "有一条带出处和日期的新资讯。先仅依据来源提供的标题和摘要整理一两句简明内容，"
-            "再判断它是否和自己的兴趣、身份或近况自然相关；可以跳过。不要补写来源中没有的事实，"
-            "分享时保留出处、链接和可用日期，并说明这是资讯材料而非亲历或完整阅读。",
+            "看到一条有出处和日期的新资讯，可以挑一个让自己好奇或惊讶的亮点，"
+            "像兴冲冲与对方分享新鲜事一样说一点内容和感想；与兴趣、身份或近况不自然相关时可以跳过。"
+            "事实仅取标题和摘要，不补写亲历、完整阅读或未给出的事实；"
+            "主动正文不附来源和原文链接，程序会留存，等对方追问时再给。",
             EvidenceSnapshot(context.scope, at, (record.reference,)), weight)
         return opportunity, (ContactIntent("news", thought),), marker
 
@@ -238,12 +444,15 @@ class NewsContactEvents:
         settings_hash = self._settings(context, preferences)
         if settings_hash is None or settings_hash != marker["settings_hash"]:
             return None
+        if self._self_link_cooled_down(context, preferences, at):
+            return None
         row = self._row(context)
         pending = self._candidate(context, row, settings_hash, at)
         if pending is not None:
             return self._project(context, pending[1], at)
         if self.select(context, preferences, at) is None:
             return None
+        port = None
         try:
             port = self._port(preferences)
             if port is None:
@@ -258,7 +467,7 @@ class NewsContactEvents:
                 seen = json.loads(row["seen_json"]) if row is not None else ()
                 self._save(context, settings_hash, at, checked=False, retry_after=at + RETRY, seen=seen)
                 self._save_diagnostic(context, {"last_attempt_at": stamp(at), "last_checked_at": None,
-                    "failure": news_failure(error), "item_count": 0, "candidate": False})
+                    "failure": news_failure(error), "item_count": 0, "candidate": False}, port=port)
             return None
         at = self.contacts.tasks.now()
         preferences = require(self.contacts.preferences.read(context, observed_at=at))
@@ -272,7 +481,8 @@ class NewsContactEvents:
                 published = item.published_at
                 url = canonical_news_url(item.url)
                 if (not url
-                        or published is not None and not timedelta(0) <= at - published <= MAX_AGE
+                        or published is None or published.tzinfo is None or published.utcoffset() is None
+                        or not timedelta(0) <= at - published <= MAX_AGE
                         or not 1 <= len(item.title) <= 240 or len(item.summary) > 1000
                         or len(item.source) > 100 or len(url) > 2048):
                     continue
@@ -283,22 +493,23 @@ class NewsContactEvents:
                 continue
         event = None
         if candidates:
-            published, key, item, url = max(candidates, key=lambda candidate: (
-                candidate[0] or at, candidate[1]))
-            expires = min(at + EVENT_WINDOW, published + MAX_AGE) if published else at + EVENT_WINDOW
+            published, key, item, url = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+            expires = min(at + EVENT_WINDOW, published + MAX_AGE)
             event = {"id": "news-" + digest([context.key, settings_hash, key]),
                      "opened_at": stamp(at), "expires_at": stamp(expires),
                      "settings_hash": settings_hash, "key": key,
                      "feed": port.source_label,
                      "article": {"source": item.source or port.source_label,
                                  "title": item.title, "summary": item.summary, "url": url,
-                                 "published_at": stamp(published) if published else None}}
-            seen.append(key)
+                                 "published_at": stamp(published)}}
+            if not self._self_link_cooled_down(context, preferences, at):
+                seen.append(key)
+            else:
+                event = None
         self._save(context, settings_hash, at, checked=True, seen=seen, event=event)
         self._save_diagnostic(context, {"last_attempt_at": stamp(at), "last_checked_at": stamp(at),
-            "failure": None, "item_count": len(batch.items), "candidate": event is not None})
-        if event is not None and self._self_link_cooled_down(context, preferences, at):
-            return None
+            "failure": None, "item_count": len(batch.items), "candidate": event is not None,
+            "items": self._feed_items(batch, port)}, port=port)
         return self._project(context, event, at) if event is not None else None
 
     def _validate_source(self, record, at):
@@ -312,7 +523,8 @@ class NewsContactEvents:
                 raise ValueError("news settings or event changed")
             event = json.loads(row["event_json"])
             opportunity = self._opportunity(context, event)
-            if (event["id"] != receipt["event_id"] or not opportunity.opened_at <= at < opportunity.expires_at
+            if (self._self_link_cooled_down(context, preferences, at, exclude_event_id=receipt["event_id"])
+                    or event["id"] != receipt["event_id"] or not opportunity.opened_at <= at < opportunity.expires_at
                     or record != self._record(context, event) or record.content_hash != digest(record.payload)):
                 raise ValueError("news source changed")
         except TaskError:
@@ -325,10 +537,12 @@ class NewsContactEvents:
             raise TaskError("contact_news_invalid", "news marker is invalid")
         try:
             source = source_from_document(marker["source"])
+            preferences = require(self.contacts.preferences.read(context, observed_at=at))
             row = self._row(context)
             event = json.loads(row["event_json"]) if row is not None and row["event_json"] else None
             if (source.owner != SOURCE_OWNER or source.scope != context.scope or event is None
                     or event["id"] != marker["event_id"] or event["settings_hash"] != marker["settings_hash"]
+                    or self._self_link_cooled_down(context, preferences, at, exclude_event_id=event["id"])
                     or source != self._record(context, event).reference):
                 raise ValueError("news marker changed")
             require(self.contacts.sources.validate_reference_for_audience(

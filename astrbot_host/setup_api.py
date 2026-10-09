@@ -4,23 +4,125 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import logging
 from uuid import uuid4
 
 from astrbot.api.web import request
 
-from companion_v2.execution.models import TaskError
+from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import ScopeKind
+from companion_v2.proactive.configuration import PURPOSES
+from companion_v2.proactive.management import ContactManagement
+from companion_v2.proactive.scheduling import DIAGNOSTIC_ENVIRONMENT_VARIANTS
+from companion_v2.sources.privacy import redact_text
 
 from .binding_store import PendingBinding, binding_path, read_binding, write_binding
 from .identity_derivation import derive_bot_id, derive_role_id
+from .management_identity import dashboard_operator
 from .persona_catalog import available_personas
 from .setup_state import SETUP_STEPS, SetupStateStore
+from .display_names import display_names
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/setup"
-TEST_MESSAGE = "V2 主动消息通路测试已送达。此消息由「开始使用」中的主动测试按钮触发。"
+logger = logging.getLogger(__name__)
+
+PROACTIVE_TEST_SUGGESTIONS = {
+    "contact_permission_required": "在核心管理员私聊的主动联系设置中启用主动联系授权。",
+    "model_task_unregistered": "为核心管理员角色配置并启用 proactive.compose 模型任务。",
+    "contact_attempt_budget": "到「主动联系 → 额度与去重」查看或调整“24 小时内最多尝试”，也可以等旧尝试滚出 24 小时窗口后重测。跳过或未投递的尝试同样计入。",
+    "contact_relationship_attempt_budget": "该关系下所有私聊窗口的 24 小时尝试额度已用完；请检查关系级额度，或等旧尝试滚出 24 小时窗口后重测。",
+    "contact_delivery_budget": "到「主动联系 → 额度与去重」查看“24 小时内最多联系”；已有投递仍占用额度，等待窗口恢复后重测。",
+    "contact_relationship_delivery_budget": "该关系下所有私聊窗口的 24 小时投递额度已用完；请检查关系级额度和未决投递，或等待窗口恢复。",
+    "contact_purpose_paused": "检查所选目的的暂停状态和恢复时间。",
+    "contact_quiet_hours": "当前处于静默时段；结束后再运行测试。",
+    "delivery_result_unknown": "投递结果未知；先核对核心管理员私聊，不要重放这次尝试。",
+    "delivery_failed": "检查 OneBot 私聊连接、机器人在线状态和平台返回错误。",
+    "contact_diagnostic_source_required": "当前用途没有有效来源。日常话题需要一轮已完成的真实私聊；外部资讯需要配置来源并读到当前条目；天气变化需要两次新鲜观测；预警和余额需要各自的宿主数据源可用。先补齐来源再运行，不会用通用文案替代。",
+    "contact_weather_unavailable": "检查角色地点与天气观测设置，并确认 Open-Meteo 或已配置的和风凭据可访问；刷新后先在状态页确认出现当前观测。",
+    "contact_weather_change_unavailable": "确认角色地点和天气变化开关已设置；该来源需要前后两次新鲜观测，等第二次观测完成后再测。",
+    "contact_official_alert_unavailable": "确认角色地点包含预警区域，并在宿主环境配置 QWEATHER_ALERT_API_HOST 与 QWEATHER_ALERT_TOKEN；没有当前覆盖该地点的官方预警时不能完成此分支验收。",
+    "contact_balance_unavailable": "在宿主环境配置 COMPANION_V2_BALANCE_URL 和所需认证变量，检查接口可达及余额 JSON 路径；缺少当前有效余额时不能完成此分支验收。",
+    "contact_weather_source_changed": "天气观测在测试期间已更新或过期；刷新角色天气状态，再为当前来源启动一次新测试。",
+    "contact_weather_change_source_changed": "两次天气观测已变化或过期；等待生产器重新确认当前变化后再测。",
+    "contact_official_alert_changed": "预警已更新、撤销或不再覆盖配置地点；刷新官方预警状态后再测。",
+    "contact_diagnostic_variant_invalid": "环境与状态变化可选择天气观测、天气变化、官方预警、服务余额或外部资讯；请重新选择来源。",
+    "model_provider_unavailable": "打开「模型路由」，为当前角色的 proactive.compose 选择一个已加载且支持文本生成的 Provider。",
+    "model_generation_failed": "查看 proactive.compose 任务的 Provider 返回与用量限制；修复连接、额度或模型错误后，用新的来源验收。",
+    "persona_review_denied": "检查 proactive.judge 的 Provider、角色设定和拒绝理由；调整后重新验收，不能绕过人格复核。",
+    "delivery_result_unknown": "投递结果未知；核对核心管理员私聊与平台消息记录。确认是否收到前不要重试本次测试。",
+    "delivery_failed": "检查 OneBot 私聊连接、机器人在线状态和平台返回错误；确认没有收到后，再用新的验收尝试重测。",
+}
+
+PROACTIVE_TEST_FAILURE_LABELS = {
+    "contact_attempt_budget": ("attempt_budget", "本私聊的24小时尝试额度已用完"),
+    "contact_relationship_attempt_budget": ("relationship_attempt_budget", "关系级24小时尝试额度已用完"),
+    "contact_delivery_budget": ("delivery_budget", "本私聊的24小时投递额度已用完"),
+    "contact_relationship_delivery_budget": ("relationship_delivery_budget", "关系级24小时投递额度已用完"),
+    "contact_permission_required": ("authorization", "主动联系授权未通过"),
+    "contact_purpose_paused": ("purpose", "所选联系目的当前已暂停"),
+    "contact_quiet_hours": ("settings", "当前处于免打扰时段"),
+    "model_task_unregistered": ("model_route", "主动联系模型任务未配置"),
+    "contact_diagnostic_source_required": ("trusted_candidate", "当前没有所选目的的有效真实来源"),
+    "contact_diagnostic_variant_invalid": ("trusted_candidate", "测试来源选择无效"),
+    "contact_weather_unavailable": ("trusted_candidate", "天气观测来源不可用"),
+    "contact_weather_change_unavailable": ("trusted_candidate", "天气变化来源不可用"),
+    "contact_official_alert_unavailable": ("trusted_candidate", "官方预警来源不可用"),
+    "contact_balance_unavailable": ("trusted_candidate", "服务余额来源不可用"),
+    "contact_weather_source_changed": ("trusted_candidate", "天气观测来源已变化"),
+    "contact_weather_change_source_changed": ("trusted_candidate", "天气变化来源已变化"),
+    "contact_official_alert_changed": ("trusted_candidate", "官方预警来源已变化"),
+    "model_provider_unavailable": ("model_route", "主动联系模型 Provider 不可用"),
+    "model_generation_failed": ("model_generation", "主动联系模型生成失败"),
+    "persona_review_denied": ("persona_review", "人格复核未放行"),
+    "delivery_result_unknown": ("delivery", "平台投递结果未知"),
+    "delivery_failed": ("delivery", "平台投递失败"),
+}
+
+PROACTIVE_TEST_STAGE_SUGGESTIONS = {
+    "authorization": "使用已登录的 Dashboard 管理员身份，并确认当前账号仍有插件管理权限。",
+    "binding": "重新确认核心管理员的私聊窗口、机器人账号和当前角色绑定。",
+    "runtime": "在宿主管理页检查 V2 运行实例、角色载入和路由注册状态。",
+    "settings": "检查主动联系总开关、目的开关及角色/关系/窗口各层的有效配置。",
+    "purpose": "检查该用途是否启用、暂停时间是否结束，以及当前权限是否覆盖该私聊。",
+    "trusted_candidate": "修复对应生产器的数据源或等待一条有效来源；不要用手工文案补造候选。",
+    "model_route": "在模型路由中为 proactive.compose 选择可用文本 Provider。",
+    "attempt_budget": "查看「主动联系 → 额度与去重」的 24 小时尝试额度；等待滚动窗口恢复后再测。",
+    "relationship_attempt_budget": "查看关系级尝试额度，或等关系级滚动窗口恢复。",
+    "delivery_budget": "查看「主动联系 → 额度与去重」的 24 小时投递额度。",
+    "relationship_delivery_budget": "查看关系级投递额度与未决投递。",
+    "model_generation": "检查 proactive.compose Provider、任务参数、服务可达性与模型用量。",
+    "persona_review": "检查 proactive.judge 路由、角色设定和复核理由；不要跳过复核。",
+    "delivery": "检查 OneBot 连接和平台回执；未知结果先核对收件窗口，禁止重发。",
+    "receipt": "检查同一 attempt 的平台投递回执和核心管理员私聊是否实际收到。",
+}
+
+PROACTIVE_TEST_STAGE_ORDER = (
+    "authorization", "binding", "runtime", "settings", "purpose", "trusted_candidate",
+    "attempt_budget", "relationship_attempt_budget", "delivery_budget", "relationship_delivery_budget",
+    "model_route", "model_generation", "persona_review", "delivery", "receipt",
+)
+
+PROACTIVE_TEST_STAGE_BY_CODE = {
+    "dashboard_identity_required": "authorization",
+    "setup_binding_confirmation_required": "binding",
+    "setup_core_window_not_configured": "binding",
+    "setup_private_window_required": "binding",
+    "staging_not_initialized": "runtime",
+    "proactive_diagnostic_unavailable": "runtime",
+    "contact_permission_required": "settings",
+    "contact_purpose_paused": "purpose",
+    "contact_quiet_hours": "purpose",
+    "contact_diagnostic_source_required": "trusted_candidate",
+    "contact_diagnostic_variant_invalid": "trusted_candidate",
+    "model_task_unregistered": "model_route",
+    "model_provider_unavailable": "model_route",
+    "delivery_result_unknown": "delivery",
+    "delivery_failed": "delivery",
+}
 
 
 class SetupWebAPI:
@@ -28,18 +130,25 @@ class SetupWebAPI:
         self.controller = controller
         self.progress = SetupStateStore(controller.data_root)
         self._test_lock = asyncio.Lock()
+        self._test_task = None
 
     def routes(self):
         return [
             (PREFIX + "/status", self.status, ["GET"], "Read persistent Companion V2 setup progress"),
             (PREFIX + "/targets", self.api_targets, ["GET"], "Read connected OneBot accounts and native personas"),
-            (PREFIX + "/mode", self.mode, ["POST"], "Select the Companion V2 account and persona mode"),
             (PREFIX + "/binding/confirm", self.confirm_binding, ["POST"], "Confirm the Companion V2 core administrator window"),
             (PREFIX + "/model", self.model, ["POST"], "Choose the initial Companion V2 text provider"),
+            (PREFIX + "/model-tasks", self.model_tasks, ["GET"], "Read per-task model routes for the setup role"),
+            (PREFIX + "/model-tasks/configure", self.configure_model_task, ["POST"], "Configure one setup-role model task"),
+            (PREFIX + "/profile", self.profile, ["GET"], "Read setup-role profile and relationship cards"),
+            (PREFIX + "/profile-draft", self.profile_draft, ["POST"], "Draft role canon or relationship card from the current persona"),
+            (PREFIX + "/profile/save", self.save_profile, ["POST"], "Save reviewed setup profile fields"),
             (PREFIX + "/host/start", self.reconnect_host, ["POST"], "Reconnect a completed Companion V2 setup"),
             (PREFIX + "/prepare", self.prepare, ["POST"], "Prepare the confirmed Companion V2 profile"),
             (PREFIX + "/complete", self.complete, ["POST"], "Record a completed Companion V2 setup section"),
-            (PREFIX + "/proactive-test", self.proactive_test, ["POST"], "Send the user-requested one-time proactive test"),
+            (PREFIX + "/proactive-test", self.proactive_test, ["POST"], "Run a one-time proactive contact through the V2 contact and delivery pipeline"),
+            (PREFIX + "/proactive-diagnostic", self.proactive_diagnostic, ["POST"], "Run a confirmed purpose-specific proactive diagnostic to the core administrator"),
+            (PREFIX + "/proactive-test/confirm", self.confirm_proactive_test, ["POST"], "Record administrator confirmation of the existing test message"),
         ]
 
     @staticmethod
@@ -52,7 +161,7 @@ class SetupWebAPI:
         return username
 
     @staticmethod
-    async def _body(expected: set[str]) -> dict:
+    async def _body(expected: set[str], *, optional: set[str] | frozenset[str] = frozenset()) -> dict:
         raw = await request.body()
         if len(raw) > 4096:
             raise ValueError("request is too large")
@@ -67,7 +176,8 @@ class SetupWebAPI:
 
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite value")))
-        if type(value) is not dict or set(value) != expected:
+        if (type(value) is not dict or not expected <= set(value)
+                or not set(value) <= expected | set(optional)):
             raise ValueError("unexpected fields")
         return value
 
@@ -79,20 +189,6 @@ class SetupWebAPI:
     @staticmethod
     def _error(code: str, reason: str):
         return SetupWebAPI._response(Outcome.failed(code, reason))
-
-    def _active_mode(self) -> str:
-        return "multiple" if bool(getattr(self.controller, "_multi_host", False)) else "single"
-
-    def _mode_requires_reload(self, mode: dict | None) -> bool:
-        if not mode:
-            return False
-        wants_multi = mode["accounts"] == "multiple" or mode["personas"] == "multiple"
-        config = getattr(self.controller, "config", {})
-        staging = config.get("staging", {}) if isinstance(config, dict) else {}
-        multi_host = config.get("multi_host", {}) if isinstance(config, dict) else {}
-        enabled = bool((multi_host if wants_multi else staging).get("enabled", False))
-        is_multi = self._active_mode() == "multiple"
-        return wants_multi != is_multi or not enabled
 
     def _binding(self) -> dict:
         getter = getattr(self.controller, "binding_state", None)
@@ -131,18 +227,13 @@ class SetupWebAPI:
         state = self.progress.read()
         binding = self._binding()
         status = self.controller.status()
-        mode_matches = bool(state["mode"]) and not self._mode_requires_reload(state["mode"])
         confirmed = bool(binding.get("bound") and not binding.get("pending"))
         prepared = bool(getattr(self.controller, "runtime", None)
                         and (getattr(self.controller, "session", None)
                              or getattr(self.controller, "last_session", None)))
         completed = list(state["completed"])
         skipped = list(state["skipped"])
-        if not state["mode"]:
-            step = "mode"
-        elif not mode_matches:
-            step = "mode"
-        elif not confirmed:
+        if not confirmed:
             step = "binding"
         elif state["ready"]:
             step = "complete"
@@ -153,8 +244,7 @@ class SetupWebAPI:
         else:
             step = next((name for name in SETUP_STEPS if name not in completed and name not in skipped),
                         "proactive_test")
-        return {"step": step, "mode": state["mode"], "active_mode": self._active_mode(),
-                "mode_requires_reload": self._mode_requires_reload(state["mode"]),
+        return {"step": step,
                 "binding": binding, "binding_confirmed": confirmed, "prepared": prepared,
                 "completed": completed, "skipped": skipped,
                 "model": {"provider_id": self._configured_provider_id(),
@@ -165,8 +255,21 @@ class SetupWebAPI:
 
     async def status(self):
         try:
+            username = self._admin()
+            async with self._test_lock:
+                saved = self.progress.read()
+                receipt = saved["proactive_test"]
+                if (receipt and receipt["state"] == "started"
+                        and (self._test_task is None or self._test_task.done())):
+                    await self._restore_test_contact_permission(username, receipt["attempt_id"])
+                    self.progress.finish_proactive_test(outcome="unknown",
+                        finished_at=datetime.now(timezone.utc).isoformat(), error_code="setup_test_interrupted")
+            document = self._status_document()
+            names = display_names(self.controller)
+            if document["binding"].get("participant_id"):
+                document["binding"] = (await names.targets([document["binding"]]))[0]
             self._admin()
-            return self._response(Outcome.success(self._status_document()))
+            return self._response(Outcome.success(document))
         except TaskError as error:
             return self._error(error.code, str(error))
         except (ValueError, OSError, UnicodeError):
@@ -176,90 +279,43 @@ class SetupWebAPI:
         try:
             self._admin()
             context = self.controller.context
-            manager = getattr(context, "platform_manager", None)
-            enumerator = getattr(manager, "get_insts", None)
-            platforms = list(enumerator() or []) if callable(enumerator) else []
-            if not platforms:
-                fallback = getattr(context, "platform", None)
-                platforms = [fallback] if fallback is not None else []
-            accounts = []
-            for platform in platforms:
-                try:
-                    metadata = platform.meta()
-                    platform_id = str(metadata.id)
-                    if metadata.name != "aiocqhttp":
-                        continue
-                    client = platform.get_client()
-                    connections = getattr(client, "_wsr_api_clients", {})
-                    if not isinstance(connections, dict):
-                        continue
-                    for raw_id in connections:
-                        account_id = str(raw_id).strip()
-                        if not account_id.isdigit():
-                            continue
-                        accounts.append({"platform_id": platform_id, "account_id": account_id,
-                                         "bot_id": derive_bot_id(account_id)})
-                except (AttributeError, TypeError, ValueError):
-                    continue
-            accounts = sorted({(item["platform_id"], item["account_id"], item["bot_id"]): item
-                               for item in accounts}.values(),
-                              key=lambda item: (item["platform_id"], int(item["account_id"])))
+            accounts = self.controller.session_topology.accounts()
             persona_names = await available_personas(context)
             choices = []
             for account in accounts:
-                names = persona_names or ["[%None]"]
+                names = [*persona_names, "[%None]"]
                 for persona_id in names:
+                    mapping = next((item for item in self.controller.config.get("multi_host", {}).get("personas", [])
+                                    if item.get("bot_id") == account["bot_id"] and item.get("persona_id") == persona_id), None)
                     choices.append({"bot_id": account["bot_id"], "persona_id": persona_id,
-                                    "role_id": derive_role_id(account["account_id"], persona_id),
+                                    "role_id": mapping["role_id"] if mapping else derive_role_id(account["account_id"], persona_id),
                                     "label": persona_id})
-            configured = getattr(getattr(self.controller, "settings", None), "targets", ())
-            targets = [{"platform_id": item.platform_id, "account_id": item.account_id,
-                        "bot_id": item.bot_id, "participant_id": item.participant_id}
-                       for item in configured]
-            return self._response(Outcome.success({"accounts": accounts, "personas": choices,
-                                                    "targets": targets}))
-        except TaskError as error:
-            return self._error(error.code, str(error))
-        except Exception:
-            return self._error("setup_targets_unavailable", "connected account and persona inventory is unavailable")
-
-    async def mode(self):
-        try:
+            directory = await self.controller.session_topology.inventory_report()
+            targets = directory["targets"]
+            names = display_names(self.controller)
+            accounts = await names.targets(accounts)
+            targets = await names.targets(targets)
             self._admin()
-            data = await self._body({"accounts", "personas"})
-            if (data["accounts"] not in ("single", "multiple")
-                    or data["personas"] not in ("single", "multiple")):
-                raise ValueError("invalid mode")
-            config = self.controller.config
-            if not isinstance(config, dict):
-                raise TaskError("setup_config_unavailable", "the plugin configuration cannot be edited here")
-            save = getattr(self.controller, "save_plugin_config", None)
-            if not callable(save):
-                raise TaskError("setup_config_save_unavailable", "restart the plugin with Dashboard configuration support")
-            candidate = deepcopy(config)
-            multi = data["accounts"] == "multiple" or data["personas"] == "multiple"
-            staging = candidate.setdefault("staging", {})
-            shared = candidate.setdefault("multi_host", {})
-            if type(staging) is not dict or type(shared) is not dict:
-                raise TaskError("setup_config_invalid", "the plugin mode settings have an invalid shape")
-            staging["enabled"] = not multi
-            shared["enabled"] = multi
-            save(candidate)
-            state = self.progress.select_mode(accounts=data["accounts"], personas=data["personas"])
-            return self._response(Outcome.success({"mode": state["mode"],
-                "mode_requires_reload": self._mode_requires_reload(state["mode"]),
-                "active_mode": self._active_mode()}))
+            return self._response(Outcome.success({"accounts": accounts, "personas": choices,
+                                                    "targets": targets,
+                                                    "directory": {"complete": directory["complete"],
+                                                                  "issues": directory["issues"]}}))
         except TaskError as error:
             return self._error(error.code, str(error))
-        except (ValueError, TypeError, KeyError, UnicodeError, OSError):
-            return self._error("setup_mode_invalid", "select one account mode and one persona mode")
+        except Exception as error:
+            logger.exception("AstrBot session topology inventory failed")
+            detail = " ".join(str(error).split())
+            reason = "connected account and persona inventory is unavailable"
+            if detail:
+                reason += f" ({type(error).__name__}: {detail[:512]})"
+            else:
+                reason += f" ({type(error).__name__})"
+            return self._error("setup_targets_unavailable", reason)
 
     async def confirm_binding(self):
         try:
             self._admin()
             await self._body(set())
-            if self._mode_requires_reload(self.progress.read()["mode"]):
-                raise TaskError("setup_mode_reload_required", "restart the plugin to apply the selected mode first")
             confirm = getattr(self.controller, "confirm_binding", None)
             if not callable(confirm):
                 raise TaskError("setup_binding_unavailable", "the active host cannot confirm a private window")
@@ -276,7 +332,12 @@ class SetupWebAPI:
     async def model(self):
         try:
             self._admin()
-            data = await self._body({"provider_id"})
+            raw = await request.body()
+            if len(raw) > 4096:
+                raise ValueError("request is too large")
+            data = json.loads(raw.decode("utf-8"))
+            if type(data) is not dict or set(data) != {"provider_id"}:
+                raise ValueError("invalid model fields")
             provider_id = data["provider_id"]
             if type(provider_id) is not str or not provider_id.strip() or len(provider_id) > 512:
                 raise ValueError("invalid provider")
@@ -294,11 +355,19 @@ class SetupWebAPI:
             save = getattr(self.controller, "save_plugin_config", None)
             if not callable(save):
                 raise TaskError("setup_config_save_unavailable", "restart the plugin with Dashboard configuration support")
-            candidate = deepcopy(config)
+            candidate = deepcopy(dict(config))
             model_settings = candidate.setdefault("model", {})
             if type(model_settings) is not dict:
                 raise TaskError("setup_config_invalid", "the plugin model settings have an invalid shape")
             model_settings["provider_id"] = provider_id
+            profiles = model_settings.get("additional_providers")
+            if type(profiles) is list:
+                model_settings["additional_providers"] = [
+                    profile for profile in profiles
+                    if not isinstance(profile, dict) or profile.get("provider_id") != provider_id
+                ]
+            if model_settings.get("fallback_provider_id") == provider_id:
+                model_settings["fallback_provider_id"] = ""
             save(candidate)
             refresh = getattr(self.controller, "refresh_settings", None)
             if callable(refresh):
@@ -309,10 +378,8 @@ class SetupWebAPI:
             initialized = await self.controller.initialize_profile()
             if initialized.failure is not None:
                 raise TaskError(initialized.failure.code, initialized.failure.reason)
-            state = self.progress.complete("model")
             return self._response(Outcome.success({"provider_id": provider_id,
-                "completed": state["completed"], "prepared": True,
-                "status": self._status_document()}))
+                "prepared": True, "status": self._status_document()}))
         except TaskError as error:
             return self._error(error.code, str(error))
         except (ValueError, TypeError, KeyError, OSError, UnicodeError):
@@ -325,8 +392,6 @@ class SetupWebAPI:
             state = self.progress.read()
             if not state["ready"]:
                 raise TaskError("setup_completion_required", "complete the first-run setup before reconnecting")
-            if self._mode_requires_reload(state["mode"]):
-                raise TaskError("setup_mode_reload_required", "restart the plugin to apply the selected mode first")
             binding = self._binding()
             if not binding.get("bound") or binding.get("pending"):
                 raise TaskError("setup_binding_confirmation_required", "confirm the core administrator private window first")
@@ -352,8 +417,6 @@ class SetupWebAPI:
             refresh = getattr(self.controller, "refresh_settings", None)
             if callable(refresh):
                 refresh()
-            if self._mode_requires_reload(self.progress.read()["mode"]):
-                raise TaskError("setup_mode_reload_required", "restart the plugin to apply the selected mode first")
             binding = self._binding()
             if not binding.get("bound") or binding.get("pending"):
                 raise TaskError("setup_binding_confirmation_required", "confirm the core administrator private window first")
@@ -380,8 +443,6 @@ class SetupWebAPI:
             if step == "model" and skipped:
                 raise TaskError("setup_model_required", "choose a V2 text provider before continuing")
             state = self.progress.read()
-            if state["mode"] is None or self._mode_requires_reload(state["mode"]):
-                raise TaskError("setup_mode_required", "select and activate an account/persona mode first")
             binding = self._binding()
             if not binding.get("bound") or binding.get("pending"):
                 raise TaskError("setup_binding_confirmation_required", "confirm the core administrator private window first")
@@ -428,79 +489,610 @@ class SetupWebAPI:
         except (ValueError, TypeError, KeyError, OSError, UnicodeError):
             return self._error("setup_request_invalid", "finish or skip the current setup section")
 
-    def _test_route(self):
+    async def _test_context(self):
         binding = self._binding()
         if not binding.get("bound") or binding.get("pending"):
             raise TaskError("setup_binding_confirmation_required", "confirm the core administrator private window first")
-        platform_id = binding.get("platform_id")
-        account_id = binding.get("account_id")
-        participant_id = binding.get("participant_id")
-        if not all(type(value) is str and value.isdigit() for value in (account_id, participant_id)):
-            raise TaskError("setup_binding_invalid", "the core administrator window has incomplete OneBot identity")
-        if self._active_mode() == "multiple":
-            settings = getattr(self.controller, "settings", None)
-            if settings is None or not any((target.platform_id, target.account_id, target.participant_id)
-                                           == (platform_id, account_id, participant_id)
-                                           for target in getattr(settings, "targets", ())):
+        session = self.controller.session or self.controller.last_session
+        if session is None:
+            raise TaskError("staging_not_initialized", "initialize the selected V2 role first")
+        if getattr(self.controller, "_multi_host", False):
+            targets = getattr(getattr(self.controller, "settings", None), "targets", ())
+            target = next((item for item in targets if
+                (item.platform_id, item.account_id, item.participant_id) ==
+                (binding.get("platform_id"), binding.get("account_id"), binding.get("participant_id"))), None)
+            if target is None:
                 raise TaskError("setup_core_window_not_configured",
                                 "add this private window to the shared host before testing active delivery")
-        platform = self.controller.context.get_platform_inst(platform_id)
-        if platform is None:
-            raise TaskError("setup_platform_unavailable", "the bound platform instance is not loaded")
-        client = platform.get_client()
-        api = getattr(getattr(client, "_api", None), "_wsr_api", None)
-        if (api is None or not callable(getattr(api, "call_action", None))
-                or not getattr(client, "_wsr_api_clients", {}).get(account_id)):
-            raise TaskError("setup_account_unavailable", "the bound Bot account has no active OneBot reverse connection")
-        return api, account_id, participant_id
+            context, instruction = await session.synchronize(target)
+        else:
+            context = session.profile.target
+            instruction = await session.bridge.verify_role(context.scope, context.role_binding)
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            raise TaskError("setup_private_window_required", "the active test requires the confirmed private window")
+        return session, context, instruction
+
+    async def _setup_context(self):
+        binding = self._binding()
+        session = self.controller.session or self.controller.last_session
+        if session is None:
+            raise TaskError("staging_not_initialized", "initialize the selected V2 role first")
+        if getattr(self.controller, "_multi_host", False):
+            target = self.controller._core_target(self.controller._parked_binding())
+            if target is None:
+                raise TaskError("setup_core_window_not_configured", "add the administrator private window to the shared host first")
+            context, instruction = await session.synchronize(target)
+            if binding.get("role_id") and context.role_binding.role.subject_id != binding["role_id"]:
+                raise TaskError("host_persona_binding_changed", "the administrator role changed; confirm the window again")
+            return session, context, instruction
+        context = session.profile.target
+        instruction = await session.bridge.verify_role(context.scope, context.role_binding)
+        return session, context, instruction
+
+    async def _role_view(self):
+        binding = self._binding()
+        if not getattr(self.controller, "_multi_host", False):
+            return self.controller
+        target = self.controller._core_target(self.controller._parked_binding())
+        if target is None or not binding.get("role_id"):
+            raise TaskError("setup_core_window_not_configured", "confirm and configure the administrator private window first")
+        from .multi_api import TargetControllerView
+        return TargetControllerView(self.controller, target.target_id, binding["role_id"])
 
     @staticmethod
-    def _acknowledged(result) -> bool:
-        if not isinstance(result, dict):
-            return False
-        message_id = result.get("message_id")
-        if isinstance(message_id, bool) or not isinstance(message_id, (str, int)):
-            return False
-        try:
-            return int(message_id) > 0 and str(int(message_id)) == str(message_id)
-        except (TypeError, ValueError):
-            return False
+    def _operator(controller, username):
+        return dashboard_operator(controller.runtime, username, at=controller.now())
 
-    async def proactive_test(self):
-        async with self._test_lock:
-            return await self._run_proactive_test()
-
-    async def _run_proactive_test(self):
+    async def model_tasks(self):
         try:
-            self._admin()
-            await self._body(set())
-            saved = self.progress.read()
-            if saved["ready"]:
-                return self._response(Outcome.success({"state": "delivered", "ready": True,
-                                                       "replay_allowed": False}))
-            if saved["proactive_test"] is not None:
-                raise TaskError("setup_test_non_replayable",
-                                "the proactive test already started; its result cannot be replayed")
-            api, account_id, participant_id = self._test_route()
-            active = await self.controller.start()
-            if active.failure is not None:
-                raise TaskError(active.failure.code, active.failure.reason)
-            started = datetime.now(timezone.utc).isoformat()
-            try:
-                state = self.progress.begin_proactive_test(attempt_id=uuid4().hex, started_at=started)
-            except ValueError as error:
-                raise TaskError("setup_test_non_replayable", str(error)) from error
-            try:
-                result = await api.call_action("send_private_msg", self_id=int(account_id),
-                                               user_id=int(participant_id), message=TEST_MESSAGE)
-                delivered = self._acknowledged(result)
-            except Exception:
-                delivered = False
-            state = self.progress.finish_proactive_test(delivered=delivered,
-                                                        finished_at=datetime.now(timezone.utc).isoformat())
-            return self._response(Outcome.success({"state": state["proactive_test"]["state"],
-                "ready": state["ready"], "replay_allowed": False}))
+            username = self._admin()
+            _session, context, _instruction = await self._setup_context()
+            from companion_v2.model_gateway.management import ModelManagement
+            manager = ModelManagement(_session.application, context)
+            result = require(manager.status(self._operator(self.controller, username)))
+            names = {item["id"]: item["name"] for item in self._model_providers()}
+            for provider in result["providers"]:
+                provider["name"] = names.get(provider["id"], provider["id"])
+            return self._response(Outcome.success(result))
         except TaskError as error:
             return self._error(error.code, str(error))
         except (ValueError, TypeError, KeyError, OSError, UnicodeError):
-            return self._error("setup_test_failed", "the active message test could not be started")
+            return self._error("setup_model_routes_unavailable", "the setup role's model routes could not be read")
+
+    async def configure_model_task(self):
+        try:
+            username = self._admin()
+            data = await self._body({"kind", "operation_key", "edit_token", "changes", "reset"}, optional={"section"})
+            _session, context, _instruction = await self._setup_context()
+            from companion_v2.model_gateway.management import ModelManagement
+            manager = ModelManagement(_session.application, context)
+            saved = require(manager.configure(self._operator(self.controller, username), data))
+            return self._response(Outcome.success(saved))
+        except TaskError as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+            return self._error("setup_model_routes_invalid", "check the selected task, providers and edit token")
+
+    async def profile(self):
+        try:
+            username = self._admin()
+            session, context, _instruction = await self._setup_context()
+            from companion_v2.configuration.management import RoleProfileManagement, RelationshipProfileManagement
+            operator = self._operator(self.controller, username)
+            return self._response(Outcome.success({
+                "role_profile": require(RoleProfileManagement(session.application, context).status(operator)),
+                "relationship_profile": require(RelationshipProfileManagement(session.application, context).status(operator)),
+            }))
+        except TaskError as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+            return self._error("setup_profile_unavailable", "the selected role and private relationship profiles could not be read")
+
+    async def profile_draft(self):
+        try:
+            self._admin()
+            view = await self._role_view()
+            from .persona_workshop_api import PersonaWorkshopWebAPI
+            return await PersonaWorkshopWebAPI(view).profile_draft()
+        except TaskError as error:
+            return self._error(error.code, str(error))
+
+    async def save_profile(self):
+        try:
+            username = self._admin()
+            data = await self._body({"target", "operation_key", "edit_token", "changes"})
+            target, changes = data["target"], data["changes"]
+            if (target not in ("role_profile", "relationship_profile")
+                    or type(data["operation_key"]) is not str or not data["operation_key"].strip()
+                    or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
+                    or len(data["edit_token"]) != 64 or type(changes) is not dict or not changes):
+                raise ValueError("invalid profile patch")
+            session, context, _instruction = await self._setup_context()
+            from companion_v2.configuration.management import RoleProfileManagement, RelationshipProfileManagement
+            editor_type = RoleProfileManagement if target == "role_profile" else RelationshipProfileManagement
+            saved = require(editor_type(session.application, context).configure(
+                self._operator(self.controller, username), {key: data[key] for key in ("operation_key", "edit_token", "changes")}))
+            return self._response(Outcome.success(saved))
+        except TaskError as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+            return self._error("setup_profile_invalid", "review the draft fields and save with the current profile version")
+
+    async def confirm_proactive_test(self):
+        async with self._test_lock:
+            try:
+                username = self._admin()
+                data = await self._body({"attempt_id"})
+                if type(data["attempt_id"]) is not str or not data["attempt_id"]:
+                    raise ValueError("invalid test attempt")
+                binding = self._binding()
+                if not binding.get("bound") or binding.get("pending"):
+                    raise TaskError("setup_binding_confirmation_required", "confirm the core administrator private window first")
+                await self._restore_test_contact_permission(username, data["attempt_id"])
+                state = self.progress.confirm_proactive_test(attempt_id=data["attempt_id"],
+                    confirmed_by=username, confirmed_at=datetime.now(timezone.utc).isoformat())
+                return self._response(Outcome.success({"state": state["proactive_test"]["state"],
+                    "ready": state["ready"], "replay_allowed": False}))
+            except TaskError as error:
+                return self._error(error.code, str(error))
+            except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+                return self._error("setup_test_confirmation_invalid", "confirm receipt of the existing test message")
+
+    async def proactive_test(self):
+        async with self._test_lock:
+            try:
+                username = self._admin()
+                data = await self._body({"enable_proactive"})
+                if type(data["enable_proactive"]) is not bool or not data["enable_proactive"]:
+                    raise TaskError("setup_proactive_opt_in_required",
+                                    "enable private proactive contact before starting its one-time test")
+                saved = self.progress.read()
+                if saved["ready"]:
+                    return self._response(Outcome.success({"state": saved["proactive_test"]["state"], "ready": True,
+                                                           "replay_allowed": False}))
+                receipt = saved["proactive_test"]
+                if receipt and receipt["state"] == "started" and self._test_task is not None and not self._test_task.done():
+                    return self._response(Outcome.success({"state": "started", "ready": False,
+                                                           "replay_allowed": False}))
+                if receipt is not None and receipt["state"] not in ("failed",):
+                    raise TaskError("setup_test_non_replayable",
+                                    "the proactive test already started; its result cannot be replayed")
+                active = await self.controller.start()
+                if active.failure is not None:
+                    raise TaskError(active.failure.code, active.failure.reason)
+                started = datetime.now(timezone.utc).isoformat()
+                attempt_id = uuid4().hex
+                try:
+                    self.progress.begin_proactive_test(attempt_id=attempt_id, started_at=started)
+                except ValueError as error:
+                    raise TaskError("setup_test_non_replayable", str(error)) from error
+                self._test_task = asyncio.create_task(self._execute_proactive_test(username, attempt_id),
+                                                       name="companion-v2-setup-proactive-test")
+                return self._response(Outcome.success({"state": "started", "attempt_id": attempt_id,
+                                                       "ready": False, "replay_allowed": False}))
+            except TaskError as error:
+                return self._error(error.code, str(error))
+            except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+                return self._error("setup_test_failed", "the active message test could not be started")
+
+    async def proactive_diagnostic(self):
+        async with self._test_lock:
+            try:
+                username = self._admin()
+                data = await self._body({"purpose", "confirm_delivery"}, optional={"variant"})
+                purpose = data["purpose"]
+                variant = data.get("variant")
+                if type(purpose) is not str or purpose not in PURPOSES or data["confirm_delivery"] is not True:
+                    raise TaskError("proactive_test_confirmation_required",
+                                    "choose one proactive purpose and confirm delivery to the core administrator")
+                if variant is not None and (type(variant) is not str or purpose != "environment"
+                                            or variant not in DIAGNOSTIC_ENVIRONMENT_VARIANTS):
+                    raise TaskError("contact_diagnostic_variant_invalid",
+                                    "choose a supported environment source for this proactive purpose")
+                binding = self._binding()
+                if not binding.get("bound") or binding.get("pending"):
+                    raise TaskError("setup_binding_confirmation_required",
+                                    "confirm the core administrator private window first")
+                started = datetime.now(timezone.utc).isoformat()
+                attempt_id = uuid4().hex
+                existing = self.controller.session or self.controller.last_session
+                if existing is None or existing.application.state != "running":
+                    active = await self.controller.start()
+                    if active.failure is not None and active.failure.code != "host_already_started":
+                        raise TaskError(active.failure.code, active.failure.reason)
+                session, context, instruction = await self._setup_context()
+                if context.scope.kind is not ScopeKind.PRIVATE:
+                    raise TaskError("setup_private_window_required", "the core administrator target must be private")
+
+                operator = dashboard_operator(self.controller.runtime, username, at=self.controller.now())
+                manager = ContactManagement(session.application, context)
+                status = require(manager.status(operator))
+                purpose_status = status["purposes"].get(purpose)
+                test_time_override = bool(purpose_status and purpose_status.get("reason") in
+                    ("proactive_paused", "proactive_quiet_hours")
+                    and status.get("settings", {}).get("enabled") is True
+                    and status.get("settings", {}).get(purpose + ".enabled") is True)
+                if not purpose_status or (not purpose_status["allowed"] and not test_time_override):
+                    code = purpose_status["reason"] if purpose_status else "contact_purpose_unavailable"
+                    raise TaskError(code, "the selected proactive purpose is not currently authorized")
+
+                now = session.application.now()
+                schedule = getattr(session.application, "contact_schedule", None)
+                producer = getattr(schedule, "diagnostic_candidate", None)
+                if not callable(producer):
+                    raise TaskError("proactive_diagnostic_unavailable",
+                                    "the active host has no source-backed proactive producer registry")
+                route_hint = None
+                if variant is not None:
+                    _producer_name, route_id, route_label = DIAGNOSTIC_ENVIRONMENT_VARIANTS[variant]
+                    route_hint = {"id": route_id, "label": route_label, "variant": variant}
+                try:
+                    candidate = (await producer(context, purpose, at=now, variant=variant)
+                                 if variant is not None else await producer(context, purpose, at=now))
+                except TaskError as error:
+                    failure_stage = PROACTIVE_TEST_FAILURE_LABELS.get(
+                        error.code, ("trusted_candidate", "当前来源生产器未能生成有效候选"))[0]
+                    stages = [{"stage": name, "state": "passed"} for name in
+                        ("authorization", "binding", "runtime", "settings", "purpose")]
+                    stages.append({"stage": failure_stage, "state": "failed"})
+                    return self._response(Outcome.success(self._diagnostic_failure(
+                        purpose, route_hint, failure_stage, error.code, str(error),
+                        stages=stages, route=route_hint)))
+                opportunity, intents = candidate["opportunity"], candidate["intents"]
+                route = candidate["route"]
+                label = PURPOSES[purpose]
+                result = await session.application.proactive.contact(context, opportunity, intents,
+                    role_instruction=candidate["role_instruction"], selection_seed=attempt_id,
+                    administrator_test=True, diagnostic_source_backed=True,
+                    diagnostic_origin=candidate["diagnostic_origin"])
+                if result.failure is not None:
+                    failure = result.failure
+                    failure_stage = PROACTIVE_TEST_FAILURE_LABELS.get(
+                        failure.code, ("contact_admission", "主动联系准入检查失败"))[0]
+                    stages = [{"stage": name, "state": "passed"} for name in
+                        ("authorization", "binding", "runtime", "settings", "purpose", "trusted_candidate")]
+                    stages.append({"stage": failure_stage, "state": "failed"})
+                    budget_usage = self._diagnostic_attempt_usage(
+                        session, context, failure.code)
+                    return self._response(Outcome.success(self._diagnostic_failure(
+                        purpose, route, failure_stage, failure.code, failure.reason,
+                        stages=stages, budget_usage=budget_usage, route=route)))
+                task = result.unwrap().task
+                if task is None:
+                    return self._response(Outcome.success(self._diagnostic_failure(
+                        purpose, route, "model_generation", "contact_task_not_started",
+                        "the proactive service did not create an execution task", route=route)))
+
+                stages = [{"stage": name, "state": "passed"} for name in
+                    ("authorization", "binding", "runtime", "settings", "purpose", "trusted_candidate")]
+                stages[-1]["detail"] = f"{route.get('label', route.get('id', ''))} · {route.get('variant', '')}".strip(" ·")
+                stages.extend(({"stage": "model_generation", "state": "running"},
+                               {"stage": "persona_review", "state": "pending"},
+                               {"stage": "delivery", "state": "pending"},
+                               {"stage": "receipt", "state": "pending"}))
+                deadline = asyncio.get_running_loop().time() + 150
+                observation = None
+                while asyncio.get_running_loop().time() < deadline:
+                    observed = session.application.proactive.observe(context, task.task_id)
+                    if observed.failure is not None:
+                        return self._response(Outcome.success(self._diagnostic_failure(
+                            purpose, route, "delivery", observed.failure.code, observed.failure.reason,
+                            stages=stages, task_id=task.task_id, route=route)))
+                    observation = observed.unwrap()
+                    current_task = require(session.application.tasks.read(context, task.task_id))
+                    if observation["skipped"] or observation["delivery"] in ("delivered", "failed", "unknown", "accepted"):
+                        break
+                    if current_task.state in ("failed", "cancelled", "expired", "uncertain"):
+                        break
+                    await asyncio.sleep(0.2)
+
+                current_task = require(session.application.tasks.read(context, task.task_id))
+                if observation is None:
+                    observation = require(session.application.proactive.observe(context, task.task_id))
+                skipped = observation["skipped"]
+                delivery = observation["delivery"]
+                judge = observation["judge"]
+                stage_by_name = {item["stage"]: item for item in stages}
+                stage_by_name["model_generation"]["state"] = "passed" if current_task.state == "succeeded" else "failed"
+                stage_by_name["persona_review"]["state"] = ("skipped" if skipped else "passed" if observation["judge_allowed"] is True
+                                       else "failed" if observation["judge_allowed"] is False
+                                       else "not_required" if judge is None else "pending")
+                stage_by_name["delivery"]["state"] = ("skipped" if skipped else "passed" if delivery == "delivered"
+                                       else "failed" if delivery in ("failed", "unknown")
+                                       else "pending")
+                stage_by_name["receipt"]["state"] = ("skipped" if skipped else "passed" if delivery == "delivered"
+                                      and observation.get("receipt_ref") else
+                                      "failed" if delivery in ("failed", "unknown") else "pending")
+                state = ("skipped" if skipped else "passed" if delivery == "delivered"
+                         else "unknown" if delivery in ("unknown", "accepted")
+                         else "pending" if delivery in (None, "pending", "dispatched")
+                         else "failed")
+                code = None if state in ("passed", "skipped") else current_task.reason or (
+                    "delivery_result_unknown" if state == "unknown" else "delivery_failed" if state == "failed"
+                    else "proactive_test_timeout")
+                return self._response(Outcome.success({"state": state, "purpose": purpose,
+                    "purpose_label": label, "variant": route,
+                    "route": route,
+                    "recipient": "core_administrator", "attempt_id": attempt_id, "task_id": task.task_id,
+                    "task_state": current_task.state, "delivery_state": delivery,
+                    "judge_state": judge, "judge_reason": (redact_text(observation["judge_reason"])
+                        if observation["judge_reason"] else None),
+                    "skip_reason": observation.get("skip_reason"),
+                    "model_skip_reason": observation.get("model_skip_reason"),
+                    "dedup_reason": observation.get("dedup_reason"),
+                    "presentation_reason": observation.get("presentation_reason"),
+                    "decision_confidence": observation.get("decision_confidence"),
+                    "silence_threshold": observation.get("silence_threshold"),
+                    "receipt_ref": observation["receipt_ref"], "stage": None if state in ("passed", "skipped") else
+                        "delivery" if delivery else "model_generation", "code": code,
+                    "error": None if code is None else redact_text(current_task.reason or code),
+                    "suggestion": (PROACTIVE_TEST_SUGGESTIONS.get(code)
+                        or PROACTIVE_TEST_STAGE_SUGGESTIONS.get(stage_by_name.get("delivery", {}).get("stage", "delivery")))
+                        if code else None,
+                    "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "stages": stages, "replay_allowed": False}))
+            except TaskError as error:
+                failure_stage = PROACTIVE_TEST_STAGE_BY_CODE.get(error.code, "authorization")
+                return self._response(Outcome.success(self._diagnostic_failure(
+                    data.get("purpose") if "data" in locals() and isinstance(data, dict) else None,
+                    None, failure_stage, error.code, str(error))))
+            except (ValueError, TypeError, KeyError, OSError, UnicodeError) as error:
+                return self._response(Outcome.success(self._diagnostic_failure(
+                    None, None, "request", "proactive_test_failed", f"{type(error).__name__}: {error}")))
+            except Exception as error:
+                return self._response(Outcome.success(self._diagnostic_failure(
+                    data.get("purpose") if "data" in locals() and isinstance(data, dict) else None,
+                    None, "execution", "proactive_test_failed", f"{type(error).__name__}: {error}")))
+
+    @staticmethod
+    def _diagnostic_attempt_usage(session, context, code):
+        label = PROACTIVE_TEST_FAILURE_LABELS.get(code)
+        if label is None or not label[0].endswith("attempt_budget"):
+            return None
+        proactive = getattr(session.application, "proactive", None)
+        preferences_store = getattr(proactive, "preferences", None)
+        budget = getattr(proactive, "budget", None)
+        if preferences_store is None or budget is None:
+            return None
+        try:
+            now = session.application.now()
+            result = preferences_store.read(context, observed_at=now)
+            if result.failure is not None:
+                return None
+            usage = budget.attempt_usage(context, result.unwrap(), now)
+            scope = "relationship" if label[0] == "relationship_attempt_budget" else "session"
+            return usage[scope]
+        except Exception:
+            # A supplemental counter must not hide the original admission failure.
+            return None
+
+    @staticmethod
+    def _diagnostic_failure(purpose, variant, stage, code, error, *, stages=None, task_id=None,
+                            budget_usage=None, route=None):
+        label = PROACTIVE_TEST_FAILURE_LABELS.get(code)
+        if label:
+            stage, title = label
+            explanation = title + "。本次在模型生成前被拦截，没有调用模型，也没有发送消息。"
+        else:
+            explanation = None
+        if stages is None:
+            try:
+                failed_index = PROACTIVE_TEST_STAGE_ORDER.index(stage)
+            except ValueError:
+                failed_index = 0
+            stages = ([{"stage": name, "state": "passed"}
+                       for name in PROACTIVE_TEST_STAGE_ORDER[:failed_index]]
+                      + [{"stage": stage, "state": "failed"}])
+        return {"state": "failed", "purpose": purpose,
+            "purpose_label": PURPOSES.get(purpose) if purpose else None,
+            "variant": (variant if isinstance(variant, dict) else
+                        {"id": variant[0], "label": variant[1]} if variant else None),
+            "route": route or (variant if isinstance(variant, dict) else None),
+            "recipient": "core_administrator", "task_id": task_id, "stage": stage, "code": code,
+            "failure_title": title if label else None, "explanation": explanation,
+            "budget_usage": budget_usage,
+            "error": redact_text(error), "suggestion": PROACTIVE_TEST_SUGGESTIONS.get(code)
+                or PROACTIVE_TEST_STAGE_SUGGESTIONS.get(stage, "查看该阶段的宿主日志和当前配置，修复后使用新尝试验收。"),
+            "replay_allowed": False, "stages": stages}
+
+    async def _execute_proactive_test(self, username: str, attempt_id: str) -> None:
+        attempt = None
+        app = context = None
+        route = None
+        task_id = ""
+        stages = [{"stage": name, "state": "passed"} for name in
+            ("authorization", "binding", "runtime", "settings", "purpose")]
+
+        def stage_state(name, value):
+            row = next((item for item in stages if item["stage"] == name), None)
+            if row is not None:
+                row["state"] = value
+
+        def report(delivery_state="", receipt_ref=""):
+            value = {"stages": stages}
+            if route is not None:
+                value["route"] = route
+            if task_id:
+                value["task_id"] = task_id
+            if delivery_state:
+                value["delivery_state"] = delivery_state
+            if receipt_ref:
+                value["receipt_ref"] = receipt_ref
+            return value
+        try:
+            session, context, _instruction = await self._test_context()
+            app = session.application
+            operator = dashboard_operator(self.controller.runtime, username, at=self.controller.now())
+            manager = ContactManagement(app, context)
+            current = require(manager.status(operator))
+            enabled_before = current["settings"]["enabled"]
+            self.progress.record_test_contact_permission(attempt_id=attempt_id,
+                                                         enabled_before=enabled_before)
+            if not enabled_before:
+                require(manager.configure(operator, {
+                    "operation_key": "setup-test-" + attempt_id,
+                    "edit_token": current["edit_token"],
+                    "changes": {"enabled": True},
+                }))
+            self.progress.record_proactive_test_progress(attempt_id=attempt_id, stages=stages)
+            now = self.controller.now()
+            schedule = getattr(app, "contact_schedule", None)
+            producer = getattr(schedule, "diagnostic_candidate", None)
+            if not callable(producer):
+                raise TaskError("proactive_diagnostic_unavailable",
+                                "the active host has no source-backed proactive producer registry")
+            try:
+                candidate = await producer(context, "chat", at=now)
+            except TaskError:
+                stages.append({"stage": "trusted_candidate", "state": "failed"})
+                self.progress.record_proactive_test_progress(attempt_id=attempt_id, stages=stages)
+                raise
+            opportunity, intents = candidate["opportunity"], candidate["intents"]
+            route = candidate["route"]
+            stages.append({"stage": "trusted_candidate", "state": "passed",
+                           "detail": f"{route.get('label', route.get('id', ''))} · {route.get('variant', '')}".strip(" ·")})
+            stages.extend(({"stage": "model_generation", "state": "running"},
+                           {"stage": "persona_review", "state": "pending"},
+                           {"stage": "delivery", "state": "pending"},
+                           {"stage": "receipt", "state": "pending"}))
+            task_id = app.proactive.task_id(context, opportunity, administrator_test=True)
+            self.progress.record_proactive_test_progress(attempt_id=attempt_id, route=route,
+                stages=stages, task_id=task_id)
+            attempt = (app, context, task_id)
+            result = await app.proactive.contact(context, opportunity, intents,
+                role_instruction=candidate["role_instruction"], selection_seed=attempt_id,
+                administrator_test=True, diagnostic_source_backed=True,
+                diagnostic_origin=candidate["diagnostic_origin"])
+            if result.failure is not None:
+                failed_stage = PROACTIVE_TEST_FAILURE_LABELS.get(
+                    result.failure.code, ("model_route", "主动联系准入检查失败"))[0]
+                stages.append({"stage": failed_stage, "state": "failed"})
+                self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                self.progress.finish_proactive_test(outcome="failed",
+                    finished_at=datetime.now(timezone.utc).isoformat(), error_code=result.failure.code,
+                    report=report())
+                return
+            task = result.unwrap().task
+            if task is None:
+                stage_state("model_generation", "failed")
+                self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                self.progress.finish_proactive_test(outcome="failed",
+                    finished_at=datetime.now(timezone.utc).isoformat(), error_code="setup_contact_not_started",
+                    report=report())
+                return
+            deadline = asyncio.get_running_loop().time() + 150
+            last_progress = None
+            while asyncio.get_running_loop().time() < deadline:
+                observed = require(app.proactive.observe(context, task.task_id))
+                delivery = observed["delivery"]
+                stage_state("model_generation", "passed")
+                judge = observed.get("judge")
+                stage_state("persona_review", "passed" if observed.get("judge_allowed") is True else
+                            "not_required" if judge is None else
+                            "running" if judge == "pending" else "pending")
+                if delivery in (None, "pending", "partial"):
+                    stage_state("delivery", "running")
+                progress = (tuple((item["stage"], item["state"], item.get("detail", ""))
+                                  for item in stages), delivery, observed.get("receipt_ref"))
+                if progress != last_progress:
+                    self.progress.record_proactive_test_progress(
+                        attempt_id=attempt_id, stages=stages, route=route,
+                        task_id=task.task_id, delivery_state=delivery or "",
+                        receipt_ref=observed.get("receipt_ref") or "")
+                    last_progress = progress
+                if delivery == "delivered":
+                    stage_state("delivery", "passed")
+                    stage_state("receipt", "passed" if observed.get("receipt_ref") else "failed")
+                    self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                    self.progress.finish_proactive_test(outcome="delivered",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        report=report(delivery, observed.get("receipt_ref") or ""))
+                    return
+                if delivery == "failed" or observed["skipped"] or observed["judge"] == "denied":
+                    stage_state("persona_review", "failed" if observed["judge"] == "denied" else
+                                "skipped" if observed["skipped"] else stages[-3]["state"])
+                    stage_state("delivery", "failed" if delivery == "failed" else "skipped")
+                    stage_state("receipt", "failed" if delivery == "failed" else "skipped")
+                    self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                    self.progress.finish_proactive_test(outcome="failed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        error_code="setup_contact_not_delivered", report=report(delivery or "skipped"))
+                    return
+                if delivery == "unknown" or delivery == "accepted":
+                    stage_state("delivery", "failed")
+                    stage_state("receipt", "failed")
+                    self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                    self.progress.finish_proactive_test(outcome="unknown",
+                        finished_at=datetime.now(timezone.utc).isoformat(), error_code="delivery_result_unknown",
+                        report=report(delivery, observed.get("receipt_ref") or ""))
+                    return
+                await asyncio.sleep(0.2)
+            self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+            stage_state("delivery", "failed")
+            stage_state("receipt", "failed")
+            self.progress.finish_proactive_test(outcome="unknown",
+                finished_at=datetime.now(timezone.utc).isoformat(), error_code="setup_contact_timeout",
+                report=report("unknown"))
+        except asyncio.CancelledError:
+            try:
+                if app is not None and context is not None:
+                    self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                self.progress.finish_proactive_test(outcome="unknown",
+                    finished_at=datetime.now(timezone.utc).isoformat(), error_code="setup_test_interrupted")
+            except (TaskError, ValueError, OSError):
+                pass
+            raise
+        except Exception as error:
+            code = error.code if isinstance(error, TaskError) else "setup_test_failed"
+            outcome = "unknown" if attempt is not None else "failed"
+            if app is not None and context is not None:
+                try:
+                    self._restore_test_contact_permission_with_context(username, attempt_id, app, context)
+                except Exception:
+                    code = "setup_contact_permission_restore_failed"
+                    outcome = "unknown"
+            try:
+                self.progress.finish_proactive_test(outcome=outcome,
+                    finished_at=datetime.now(timezone.utc).isoformat(), error_code=code)
+            except ValueError:
+                pass
+
+    async def _restore_test_contact_permission(self, username: str, attempt_id: str) -> None:
+        receipt = self.progress.read()["proactive_test"]
+        if (not receipt or receipt["attempt_id"] != attempt_id
+                or "contact_enabled_before" not in receipt
+                or receipt.get("contact_permission_restored")):
+            return
+        if receipt["contact_enabled_before"]:
+            self.progress.mark_test_contact_permission_restored(attempt_id=attempt_id)
+            return
+        if self.controller.session is None and self.controller.last_session is None:
+            loaded = await self.controller.load_existing()
+            if loaded.failure is not None:
+                raise TaskError(loaded.failure.code, loaded.failure.reason)
+        session, context, _instruction = await self._test_context()
+        self._restore_test_contact_permission_with_context(
+            username, attempt_id, session.application, context)
+
+    def _restore_test_contact_permission_with_context(self, username: str, attempt_id: str,
+                                                      app, context) -> None:
+        receipt = self.progress.read()["proactive_test"]
+        if (not receipt or receipt["attempt_id"] != attempt_id
+                or "contact_enabled_before" not in receipt
+                or receipt.get("contact_permission_restored")):
+            return
+        enabled_before = receipt["contact_enabled_before"]
+        operator = dashboard_operator(self.controller.runtime, username, at=self.controller.now())
+        manager = ContactManagement(app, context)
+        current = require(manager.status(operator))
+        if current["settings"]["enabled"] and not enabled_before:
+            data = {
+                "operation_key": "setup-test-restore-" + attempt_id,
+                "edit_token": current["edit_token"],
+                "changes": {"enabled": False},
+            }
+            if app.state == "running":
+                require(manager.configure(operator, data))
+            else:
+                require(manager.restore_temporary_disable(operator, data))
+        self.progress.mark_test_contact_permission_restored(attempt_id=attempt_id)

@@ -29,7 +29,7 @@
 感知,A1,环境与世界源,感知,weather_config,weather_source,string,天气数据源,感知,,待接入,待逐项核对,,
 感知,A1,环境与世界源,感知,weather_config,weather_token,string,和风天气凭据（JWT / API Key）,感知,,待接入,待逐项核对,,
 感知,A2,交互源,感知,message_debounce_config,SMART_MESSAGE_DEBOUNCE_PROVIDER_ID,string,智能收口小模型 Provider ID,感知,,部分接入,待逐项核对,,
-感知,A2,交互源,感知,forward_message_config,enable_forward_message_adaptation,bool,启用合并消息自然阅读,感知,,部分接入,待逐项核对,,
+感知,A2,交互源,感知,forward_message_config,enable_forward_message_adaptation,bool,启用合并消息自然阅读,感知,,部分接入,已接入待页面统一接线,见 FORWARD_READING_TOGGLE_SLICE_20261003.md；流式/结构化节点解析复用 V2 既有链路,页面控件随第二阶段统一接入
 感知,A2,交互源,感知,group_observation_config,enable_group_companion,bool,启用群聊陪伴观察,感知,,部分接入,待逐项核对,,
 感知,A2,交互源,感知,group_high_intensity_config,enable_group_high_intensity_mode,bool,群聊高强度收口模式,感知,,部分接入,待逐项核对,,
 感知,A2,交互源,感知,group_scene_config,enable_group_history_injection,bool,启用群聊历史消息注入,感知,,部分接入,待逐项核对,,
@@ -380,7 +380,7 @@
 决策,B3,角色自我,首页小屋,humanized_state_config,enable_rest_reply_simulation,bool,启用休息回复闸门,决策,,部分接入,待逐项核对,,
 决策,B3,角色自我,首页小屋,skill_growth_config,enable_skill_growth_passive_injection,bool,被动回复技能认知,决策,,部分接入,待逐项核对,,
 决策,B3,角色自我,首页小屋,skill_growth_config,enable_skill_growth_schedule_influence,bool,技能约束日程表现,决策,,部分接入,待逐项核对,,
-决策,B3,角色自我,首页小屋,skill_growth_config,enable_skill_growth_simulation,bool,启用技能成长模拟,决策,,部分接入,待逐项核对,,
+决策,B3,角色自我,首页小屋,skill_growth_config,enable_skill_growth_simulation,bool,启用技能成长模拟,决策,,部分接入,已接入待页面统一接线,见 SKILL_GROWTH_SWITCH_SLICE_20261003.md；关闭后停止技能自动成长与规划消费但保留记录,页面控件随第二阶段统一接入
 决策,B3,角色自我,首页小屋,humanized_state_config,humanized_state_intensity,int,拟人状态强度,决策,,部分接入,待逐项核对,,
 决策,B3,角色自我,首页小屋,schedule_detail_config,important_date_lookahead_days,int,重要日期默认提前提醒天数,决策,,部分接入,待逐项核对,,
 决策,B3,角色自我,首页小屋,humanized_state_config,rest_reply_active_windows,string,休息闸门生效时段,决策,,部分接入,待逐项核对,,

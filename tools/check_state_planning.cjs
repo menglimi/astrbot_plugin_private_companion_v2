@@ -12,23 +12,26 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 const scope={installation_id:"synthetic",operator_id:"dashboard:qa",path:"host/targets/first/roles/role-a/state"};
 function fixture(){return {
   settings:{enabled:true,maintenance_minutes:30,calendar_enabled:true,hunger_enabled:true,health_enabled:true,
+    schedule_simulation_mode:"orchestrated",
     cycle_enabled:false,cycle_mode:"basic",cycle_timezone:"Asia/Shanghai",cycle_initialization:"natural",
     cycle_variation_enabled:false,cycle_discomfort_enabled:false,cycle_menstrual_days:5,cycle_follicular_days:7,
     cycle_pre_ovulation_days:2,cycle_ovulation_days:2,cycle_luteal_days:9,cycle_pms_days:3,cycle_expression_prompt:"",
     typing_enabled:true,typing_refresh_seconds:4,presence_enabled:true,
     planning_enabled:false,planning_timezone:"Asia/Shanghai",planning_horizon_days:90,
-    planning_refine_minutes:15,planning_max_items:12,planning_prompt:""},
+    planning_refine_minutes:15,planning_max_items:12,planning_prompt:"",planning_annual_calendars:"",
+    planning_weather_enabled:false,planning_weather_max_age_minutes:120,
+    planning_weather_location:'{"name":"杭州"}'},
   edit_token:"edit-original",state:{state:"active",revision:1,view_token:"view-original"},calendar:{items:[]},
   planning:{enabled:false,calendar_enabled:true,running:false,last_result:null,next_check:null}
 };}
 function harness({storage=new Map(),status=fixture(),api,refresh}={}){
-  const context=vm.createContext({window:{},structuredClone,Intl,Date,crypto:{randomUUID},
+  const context=vm.createContext({window:{},structuredClone,Intl,Date,TextEncoder,crypto:{randomUUID},
     sessionStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)}});
   for(const name of ["state-maintenance.js","state-editor.js"]){
     vm.runInContext(fs.readFileSync(path.join(pageRoot,name),"utf8"),context,{filename:name});
   }
-  const h={posts:[],refreshes:0,failures:[],status,storage,maintenance:context.window.CompanionStateMaintenance};
-  h.editor=context.window.CompanionStateEditor.create({changed(){},
+  const h={posts:[],refreshes:0,failures:[],changes:0,status,storage,maintenance:context.window.CompanionStateMaintenance};
+  h.editor=context.window.CompanionStateEditor.create({changed(){h.changes++;},
     api:async(method,url,body)=>{h.posts.push({method,url,body:clone(body)});return api?api(method,url,body):{operation_id:"op-synthetic"};},
     refresh:async()=>{h.refreshes++;const value=refresh?await refresh():h.status;h.editor.setStatus(value);return value;},
     failed:problem=>h.failures.push(problem)});
@@ -43,13 +46,24 @@ function harness({storage=new Map(),status=fixture(),api,refresh}={}){
 test("planning edits save only changed fields through the existing guarded command",async()=>{
   const h=harness();h.click("planning");
   assert.match(h.editor.markup(),/data-state-form-kind="planning"/);
+  const beforeModeChange=h.changes;
+  h.input("schedule_simulation_mode","continuous");
+  assert.equal(h.changes,beforeModeChange+1);
+  assert.match(h.editor.markup(),/state-planning-mode-option is-selected" for="state-config-schedule-mode-continuous"/);
+  assert.doesNotMatch(h.editor.markup(),/state-planning-mode-option is-selected" for="state-config-schedule-mode-orchestrated"/);
   h.input("planning_enabled",true);h.input("planning_timezone"," Europe/London ");
   h.input("planning_horizon_days","120");h.input("planning_refine_minutes","30");
-  h.input("planning_max_items","8");h.input("planning_prompt","周末留出空闲时间。");
+  h.input("planning_max_items","8");h.input("planning_weather_enabled",true);
+  h.input("planning_weather_max_age_minutes","45");
+  h.input("planning_annual_calendars",JSON.stringify([{schema:"companion.annual-calendar.v1",year:2026,
+    holidays:[],makeup_workdays:[],solar_terms:[]}]))
+  h.input("planning_prompt","周末留出空闲时间。");
   await h.submit();
   assert.equal(h.posts.length,1);assert.equal(h.posts[0].url,scope.path+"/command");
-  assert.deepEqual(h.posts[0].body.changes,{planning_enabled:true,planning_timezone:"Europe/London",planning_horizon_days:120,
-    planning_refine_minutes:30,planning_max_items:8,planning_prompt:"周末留出空闲时间。"});
+  assert.deepEqual(h.posts[0].body.changes,{schedule_simulation_mode:"continuous",planning_enabled:true,planning_timezone:"Europe/London",planning_horizon_days:120,
+    planning_refine_minutes:30,planning_max_items:8,planning_weather_enabled:true,planning_weather_max_age_minutes:45,
+    planning_annual_calendars:JSON.stringify([{schema:"companion.annual-calendar.v1",year:2026,
+      holidays:[],makeup_workdays:[],solar_terms:[]}]),planning_prompt:"周末留出空闲时间。"});
   assert.equal(h.posts[0].body.action,"configure");assert.equal(h.posts[0].body.edit_token,"edit-original");
   assert.equal(typeof h.posts[0].body.operation_key,"string");assert.equal(h.refreshes,1);
   assert.doesNotMatch(h.editor.markup(),/state-edit-form/);
@@ -61,7 +75,8 @@ test("invalid settings never issue a command; Unicode prompt and markup remain i
     ["planning_timezone","Invalid/Zone","Asia/Shanghai"],
     ["planning_horizon_days","367","90"],["planning_horizon_days","1.5","90"],
     ["planning_refine_minutes","0","15"],["planning_refine_minutes","1441","15"],
-    ["planning_max_items","33","12"],["planning_prompt","长".repeat(4097),""]
+    ["planning_max_items","33","12"],["planning_weather_max_age_minutes","4","120"],
+    ["planning_annual_calendars","not-json",""],["planning_prompt","长".repeat(4097),""]
   ];
   for(const [name,value,restore] of invalid){h.input(name,value);await h.submit();assert.equal(h.posts.length,0);h.input(name,restore);}
   h.input("planning_prompt","🌙".repeat(4096));await h.submit();
@@ -71,14 +86,36 @@ test("invalid settings never issue a command; Unicode prompt and markup remain i
   assert.match(h.editor.markup(),/&lt;\/textarea&gt;&lt;img/);assert.doesNotMatch(h.editor.markup(),/<img/);
 });
 
-test("calendar remains an independent prerequisite, with no implicit grant or immediate run",async()=>{
+test("role-wide calendar switch and automatic planning save together",async()=>{
   const status=fixture();status.settings.calendar_enabled=false;status.planning.calendar_enabled=false;
-  const h=harness({status});h.click("planning");h.input("planning_enabled",true);await h.submit();
-  assert.deepEqual(h.posts[0].body.changes,{planning_enabled:true});
+  const h=harness({status});h.click("planning");
+  assert.match(h.editor.markup(),/data-state-form-kind="planning"/);
+  assert.match(h.editor.markup(),/对同一角色的所有私聊生效/);
+  h.input("calendar_enabled",true);h.input("planning_enabled",true);await h.submit();
+  assert.deepEqual(h.posts[0].body.changes,{calendar_enabled:true,planning_enabled:true});
   status.settings.planning_enabled=true;status.planning.enabled=true;h.editor.setStatus(status);
-  assert.match(h.editor.markup(),/日程读写关闭，暂不规划/);
+  assert.match(h.maintenance.planningSummary(status,value=>String(value)),/角色日程已关闭/);
   assert.doesNotMatch(h.editor.markup(),/data-state-edit="(?:run|generate|plan-now)"/);
   assert.equal(h.posts.length,1);
+});
+
+test("calendar does not have a separate window-scoped settings form",()=>{
+  const status=fixture();status.settings.calendar_enabled=false;status.planning.calendar_enabled=false;
+  status.settings.planning_enabled=true;status.planning.enabled=true;
+  const h=harness({status});
+  const summary=h.maintenance.planningSummary(status,value=>String(value));
+  assert.doesNotMatch(summary,/data-state-edit="calendar"/);
+  h.click("planning");
+  assert.match(h.editor.markup(),/data-state-form-kind="planning"/);
+  assert.match(h.editor.markup(),/启用角色日程/);
+  assert.doesNotMatch(h.editor.markup(),/当前窗口权限|按窗口单独授权/);
+});
+
+test("weather cannot be enabled before the shared role location is configured",async()=>{
+  const h=harness();h.status.settings.planning_weather_location="";h.editor.setStatus(h.status);
+  h.click("planning");h.input("planning_weather_enabled",true);await h.submit();
+  assert.equal(h.posts.length,0);
+  assert.match(h.editor.markup(),/请先在本页填写角色天气地点，再启用天气感知/);
 });
 
 test("legacy or incomplete fields disable planning without filling defaults",async()=>{
@@ -105,7 +142,8 @@ test("missing runtime diagnostics show uncertainty and future statuses remain re
     last_result:{state:"future-state",mode:"future-mode",code:'<script>alert(1)</script>',task_id:'task-"<img>'}};
   h.editor.setStatus(status);const markup=h.editor.markup();
   assert.match(markup,/已有处理记录/);assert.match(markup,/检查时间暂不可用/);
-  assert.match(markup,/&lt;script&gt;/);assert.doesNotMatch(markup,/<script>|<img>/);
+  assert.match(markup,/data-receipt="planning:task-&quot;&lt;img&gt;"/);
+  assert.match(markup,/本次规划未完成/);assert.doesNotMatch(markup,/<script>|<img>/);
 });
 
 test("configuration conflicts preserve edits and rebase untouched planning preferences",async()=>{

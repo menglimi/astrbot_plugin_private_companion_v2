@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 
 from companion_v2.conversation.messages import source_from_document
@@ -14,14 +14,24 @@ from companion_v2.sources.models import SourceRecord
 
 from .contact_models import ContactIntent
 from .models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
-
-
 SOURCE_OWNER = "proactive.service_balance"
+DISPLAY_AMOUNT_QUANTUM = Decimal("0.01")
 RETRY = timedelta(minutes=5)
 MAX_OBSERVATION_AGE = timedelta(minutes=5)
 EVENT_WINDOW = timedelta(minutes=30)
 MEANING = ("这是 Bot 所用服务在观测时间的经费状态，不是用户的欠款、付款义务或用户账户余额。"
            "可以自然地略过；不要催促充值、索取付款或凭状态推断服务即将中断。")
+
+
+def display_amount(value):
+    """Return a validated balance amount in the dashboard/message display form."""
+    try:
+        amount = value if type(value) is Decimal else Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as error:
+        raise ValueError("balance display value is invalid") from error
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("balance display value is invalid")
+    return format(amount.quantize(DISPLAY_AMOUNT_QUANTUM, rounding=ROUND_HALF_UP), "f")
 
 
 @dataclass(frozen=True)
@@ -62,10 +72,13 @@ class BalanceContactEvents:
         self.guard.close()
         self.retry_at.clear()
 
-    @staticmethod
-    def _settings(context, preferences):
+    def update_port(self, port):
+        self.port = port
+        self.retry_at.clear()
+
+    def _settings(self, context, preferences):
         values = preferences.values
-        if (context.scope.kind is not ScopeKind.PRIVATE or not values["automatic_enabled"]
+        if (self.port is None or context.scope.kind is not ScopeKind.PRIVATE or not values["automatic_enabled"]
                 or not values["balance_awareness_enabled"] or preferences.reason("environment")):
             return None
         names = ("enabled", "automatic_enabled", "balance_awareness_enabled",
@@ -73,7 +86,8 @@ class BalanceContactEvents:
                  "balance_check_interval_minutes", "balance_message_cooldown_hours",
                  "balance_low_threshold", "balance_critical_threshold",
                  "balance_low_percent_threshold", "balance_critical_percent_threshold")
-        return digest({name: values[name] for name in names})
+        return digest({**{name: values[name] for name in names},
+                       "source": getattr(self.port, "source_fingerprint", None)})
 
     def _row(self, context):
         return self.runtime.read_one("SELECT * FROM proactive_balance_polls WHERE origin_key = ?", (context.key,))
@@ -157,7 +171,7 @@ class BalanceContactEvents:
         body = {"event": "bot_service_balance_low", "level": event["level"],
                 "observed_at": event["opened_at"], "meaning": MEANING}
         if "amount" in event:
-            body.update(amount=event["amount"], currency=event["currency"])
+            body.update(amount=display_amount(event["amount"]), currency=event["currency"])
         payload = encode({**body, "_receipt": {"context": json.loads(encode(context)),
                                              "event_id": event["id"], "settings_hash": event["settings_hash"]}})
         identifier = "contact-balance-source-" + digest([context.key, event["id"]])
@@ -175,14 +189,16 @@ class BalanceContactEvents:
             return None
         candidate = self._candidate(context, self._row(context), settings_hash, at)
         if candidate is None:
+            port = self.port
             try:
-                observation = await asyncio.wait_for(self.port.fetch(), timeout=12)
+                observation = await asyncio.wait_for(port.fetch(), timeout=12)
             except Exception:
-                self.retry_at[context.key] = self.contacts.tasks.now() + RETRY
+                if self.port is port:
+                    self.retry_at[context.key] = self.contacts.tasks.now() + RETRY
                 return None
             at = self.contacts.tasks.now()
             preferences = require(self.contacts.preferences.read(context, observed_at=at))
-            if self._settings(context, preferences) != settings_hash:
+            if self.port is not port or self._settings(context, preferences) != settings_hash:
                 return None
             if (type(observation) is not BalanceObservation
                     or not timedelta(0) <= at - observation.observed_at <= MAX_OBSERVATION_AGE):

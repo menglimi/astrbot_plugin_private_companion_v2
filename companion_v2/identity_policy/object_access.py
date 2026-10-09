@@ -27,10 +27,12 @@ class ActionDefinition:
     domains: tuple[str, ...]
     core_only: bool = False
     shareable: bool = True
+    private_owner_without_grant: bool = False
 
     def __post_init__(self) -> None:
         _opaque(self.action, field="action")
-        if any(type(value) is not bool for value in (self.core_only, self.shareable)):
+        if any(type(value) is not bool for value in (
+                self.core_only, self.shareable, self.private_owner_without_grant)):
             raise ReferenceValidationError("action flags must be boolean")
         if not isinstance(self.domains, tuple) or not self.domains:
             raise ReferenceValidationError("action requires explicit object domains")
@@ -57,6 +59,10 @@ DEFAULT_ACTIONS = (
     ActionDefinition("proactive.contact", ("proactive",), shareable=False),
     ActionDefinition("role.journal.write", ("role.journal",), shareable=False),
     ActionDefinition("role.growth.read", ("role.growth",), shareable=False),
+    # A verified private route can read its own expression samples and rules;
+    # group tasks still require a grant for the exact speaker and group.
+    ActionDefinition("role.expression.read", ("role.expression",), shareable=False,
+                     private_owner_without_grant=True),
     ActionDefinition("role.growth.propose", ("role.growth",), shareable=False),
     ActionDefinition("role.growth.manage", ("role.growth",), core_only=True, shareable=False),
     ActionDefinition("role.reading.record", ("role.life",), shareable=False),
@@ -67,7 +73,9 @@ DEFAULT_ACTIONS = (
     ActionDefinition("role.life.manage", ("role.life",), shareable=False),
     *(ActionDefinition(action, ("role.state",), shareable=False)
       for action in ("role.state.read", "role.state.maintain", "platform.typing", "platform.presence")),
-    *(ActionDefinition(action, ("calendar",), shareable=False)
+    # The private route owner enters the task runner without a per-window grant;
+    # CalendarAccess still checks the role-wide switch at each calendar operation.
+    *(ActionDefinition(action, ("calendar",), shareable=False, private_owner_without_grant=True)
       for action in ("calendar.read", "calendar.write")),
     *(ActionDefinition(f"relationship.memory.{action}", ("relationship.memory",), shareable=False)
       for action in ("read", "propose", "revise", "review", "adopt", "retract")),
@@ -227,6 +235,7 @@ class ObjectAccessPolicy:
 
     def feature_access(
         self, actor: ResolvedIdentity, *, scope: ScopeRef, action: str, observed_at: datetime,
+        allow_private_owner: bool = False,
     ) -> Outcome[ObjectAccessDecision]:
         """Check the feature only; this result never authorizes an arbitrary object."""
         observed_at = normalize_utc(observed_at, field="observed_at")
@@ -252,7 +261,12 @@ class ObjectAccessPolicy:
             tier = AuthorizationTier(row["tier"]) if row else AuthorizationTier.STANDARD
             if definition.core_only and tier is not AuthorizationTier.CORE:
                 return Outcome.failed("core_access_required", "action requires installation core membership")
-            if tier is AuthorizationTier.STANDARD:
+            route = PersonaDirectory(self.runtime).route(scope) if (
+                allow_private_owner and definition.private_owner_without_grant
+                and scope.kind is ScopeKind.PRIVATE
+            ) else None
+            private_owner_feature = route is not None and route.user == actor.subject
+            if tier is AuthorizationTier.STANDARD and not private_owner_feature:
                 granted = self.identity.authorize(actor, scope=scope, capability=action, observed_at=observed_at)
                 if not granted.is_success:
                     return Outcome(failure=granted.failure)
@@ -312,7 +326,8 @@ class ObjectAccessPolicy:
         selected target. Feature opening alone gives IMPORTANT no other container.
         """
         with self.runtime.read_snapshot():
-            feature = self.feature_access(actor, scope=scope, action=action, observed_at=observed_at)
+            feature = self.feature_access(actor, scope=scope, action=action, observed_at=observed_at,
+                                          allow_private_owner=allow_private_owner)
             if feature.failure is not None:
                 return feature
             if owner is not None and owner.installation_id != self.runtime.installation_id:

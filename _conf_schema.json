@@ -1,13 +1,43 @@
 {
+  "storage": {
+    "description": "资料存储与清理",
+    "hint": "存储位置变更会在重启插件时迁移 V2 资料；清理策略只管理已完成的备份快照。",
+    "invisible": true,
+    "type": "object",
+    "items": {
+      "path": {
+        "description": "资料存储位置",
+        "hint": "留空使用 AstrBot 默认目录；填写其他绝对目录可将插件资料迁移到其他磁盘。",
+        "type": "string",
+        "default": ""
+      },
+      "backup_path": {
+        "description": "备份快照位置",
+        "hint": "留空跟随运行资料位置；填写其他绝对目录后，快照将独立存放。",
+        "type": "string",
+        "default": ""
+      },
+      "retention_count": {
+        "description": "保留最近备份数量",
+        "type": "int",
+        "default": 10
+      },
+      "retention_days": {
+        "description": "备份保留天数",
+        "type": "int",
+        "default": 90
+      }
+    }
+  },
   "staging": {
     "description": "兼容设置（高级）",
-    "hint": "日常账号、人格和窗口关系请在「陪伴小屋 → 账号与会话」配置。此处仅保留旧单目标运行档的兼容开关。",
+    "hint": "旧版单目标配置，仅用于升级时迁移；V2 运行状态由「陪伴小屋 → 账号与会话」统一管理。",
     "invisible": true,
     "type": "object",
     "items": {
       "enabled": {
-        "description": "允许 V2 运行实例启动（单目标）",
-        "hint": "由「开始使用」选择单账号/人格模式时写入。已有运行档会在 AstrBot 加载插件后自动接管入站消息。",
+        "description": "旧版单目标开关（升级兼容）",
+        "hint": "新版加载时会迁移到共享宿主配置。",
         "type": "bool",
         "default": false
       },
@@ -78,7 +108,7 @@
     "invisible": true,
     "items": {
       "enabled": {
-        "description": "启用多目标运行实例",
+        "description": "启用 V2 接管",
         "type": "bool",
         "default": false
       },
@@ -221,9 +251,10 @@
         "default": "onebot_private"
       },
       "group_delivery_mode": {
-        "description": "群投递形态",
-        "hint": "onebot_group 由 OneBot 原生渠道发送群消息；preview 仅生成草稿不发送。",
+        "description": "群投递形态（旧字段）",
+        "hint": "仅为旧配置兼容保留，不再控制投递；群消息始终走已配置的 OneBot 原生渠道。运行前预览由操作级草稿接口决定。",
         "type": "string",
+        "invisible": true,
         "options": [
           "onebot_group",
           "preview"
@@ -238,7 +269,8 @@
     "type": "object",
     "items": {
       "provider_id": {
-        "description": "模型 Provider",
+        "description": "插件任务模型 Provider",
+        "hint": "后台维护默认使用此模型。回复与主动消息默认跟随对应 AstrBot 会话的对话模型；陪伴小屋中明确设置的任务模型优先。",
         "_special": "select_provider",
         "type": "string",
         "default": ""
@@ -249,80 +281,22 @@
         "type": "text",
         "default": "保持当前 AstrBot 人格，只根据本轮输入和有依据的材料回复。"
       },
-      "additional_providers": {
-        "description": "V2 备用模型 Provider",
-        "hint": "显式注册可用于任务选择、回退和规则替换的 AstrBot OpenAI 兼容 Provider。各自配置费率和请求限制；保存后重载 V2 生效，不需要新建安装。",
-        "type": "template_list",
-        "default": [],
-        "templates": {
-          "text_provider": {
-            "name": "备用模型",
-            "items": {
-              "provider_id": {
-                "description": "AstrBot Provider",
-                "_special": "select_provider",
-                "type": "string",
-                "default": ""
-              },
-              "max_output_tokens": {
-                "description": "最大输出 Token",
-                "type": "int",
-                "default": 2048
-              },
-              "maximum_input_estimate": {
-                "description": "最大输入估算 Token",
-                "type": "int",
-                "default": 131072
-              },
-              "output_parameter": {
-                "description": "输出限制参数",
-                "type": "string",
-                "options": [
-                  "max_tokens",
-                  "max_completion_tokens"
-                ],
-                "default": "max_tokens"
-              },
-              "streaming": {
-                "description": "默认流式请求",
-                "type": "bool",
-                "default": false
-              },
-              "input_microusd_per_million": {
-                "description": "输入费率（microUSD / 百万 Token）",
-                "type": "int",
-                "default": 0
-              },
-              "cached_input_microusd_per_million": {
-                "description": "缓存输入费率（microUSD / 百万 Token）",
-                "type": "int",
-                "default": 0
-              },
-              "output_microusd_per_million": {
-                "description": "输出费率（microUSD / 百万 Token）",
-                "type": "int",
-                "default": 0
-              }
-            }
-          }
-        }
-      },
       "fallback_provider_id": {
         "description": "回复任务的回退 Provider",
-        "hint": "留空不回退；须在备用模型列表中注册。前一 Provider 确认未开始时回退；开启拒答替代后，明确拒答也可切换。流式中断和结果未知不会重试。",
+        "hint": "留空时回退到当前窗口模型；从 AstrBot 已加载的文本 Provider 中选择备用项。仅当前一 Provider 确认未开始时回退；开启拒答替代后，明确拒答也可切换。流式中断和结果未知不会重试。",
         "_special": "select_provider",
         "type": "string",
         "default": ""
       },
       "fallback_on_refusal": {
         "description": "明确拒答后尝试备用模型",
-        "hint": "仅识别 Provider 的拒答标记或内容过滤结束信号；普通文本、解析失败和未知结果不触发替代。原模型的实际费用仍计入预算。需先配置回退 Provider。",
+        "hint": "仅识别 Provider 的拒答标记或内容过滤结束信号；普通文本、解析失败和未知结果不触发替代。原模型的实际费用仍计入预算。需在回复任务中选择备用 Provider。",
         "type": "bool",
         "default": false
       },
       "replacement_rules": {
         "description": "回复模型替换规则 JSON",
-        "hint": "默认 [] 关闭。示例：[{\"id\":\"code\",\"provider_id\":\"已注册的 Provider ID\",\"keywords\":[\"写代码\"],\"priority\":10}]。可加 model 覆盖模型名，费用按该 Provider 配置费率估算；time_window 支持 timezone、start/end（HH:MM）及 weekdays（0=周一）。仅匹配本轮消息，关键词和时段同时配置时须同时命中；同一任务的工具续答保持首次选择。",
+        "hint": "默认 [] 关闭。示例：[{\"id\":\"code\",\"provider_id\":\"AstrBot Provider ID\",\"keywords\":[\"写代码\"],\"priority\":10}]。可加 model 覆盖模型名，费用按全局费率估算；time_window 支持 timezone、start/end（HH:MM）及 weekdays（0=周一）。仅匹配本轮消息，关键词和时段同时配置时须同时命中；同一任务的工具续答保持首次选择。",
         "type": "text",
         "default": "[]"
       },
@@ -333,7 +307,7 @@
       },
       "streaming": {
         "description": "对话模型使用流式请求",
-        "hint": "收齐流式回复并校验后，按分段设置依次发送。中断或缺少正常结束信号时不发送残稿，也不自动重试；私人书写等后台任务保持原有完整响应协议。",
+        "hint": "启用后按分段配置选择收齐再发送或边生成边发送。中断时停止剩余内容，已确认发出的段落不重发；后台书写保持完整响应协议。",
         "type": "bool",
         "default": false
       },
@@ -370,21 +344,23 @@
   },
   "segmentation": {
     "description": "回复｜文字分段",
-    "hint": "单目标和多目标共用，适用于 V2 接管的私聊和群聊回复。默认关闭；模型分段优先，规则补充分段可单独开启。分段间隔在下方运行设置中配置。与模型设置一样，已初始化运行档会固定这份配置。",
+    "hint": "默认采用 V1 当前全局分段配置：按分段词拆分，最短 5 字、最多 5 条、500 字以内自动分段；模型边界默认关闭。已保存的会话设置优先。分段节奏与清理词在陪伴小屋的表达页配置。",
     "type": "object",
     "items": {
+      "streaming_mode": {
+        "description": "流式分段发送方式",
+        "hint": "buffered：收齐并校验后再分段发送；incremental：流式生成时按分段词、正则或模型边界逐段发送。分段字数阈值在流式中按当前已收到的正文计算；已发送的段落不回改。语音、图片组合回复及未按协议输出的模型收齐后发送。",
+        "type": "string",
+        "options": ["buffered", "incremental"],
+        "default": "buffered"
+      },
       "enabled": {
         "description": "开启分段发送",
         "type": "bool",
-        "default": false
+        "default": true
       },
       "llm_controlled": {
         "description": "允许模型决定分段",
-        "type": "bool",
-        "default": true
-      },
-      "rules_enabled": {
-        "description": "启用规则补充分段",
         "type": "bool",
         "default": false
       },
@@ -401,9 +377,9 @@
       },
       "split_words": {
         "description": "分段标记列表",
-        "hint": "默认包含常用标点和换行；匹配到的分隔符保留在上一段。",
+        "hint": "默认沿用 V1 的分段标点列表并去除重复项；匹配到的分隔符保留在上一段，之后按清理词处理。",
         "type": "text",
-        "default": "[\"。\", \"？\", \"！\", \"~\", \"…\", \"“\", \"\\n\"]"
+        "default": "[\"。\", \"？\", \"！\", \"~\", \"～\", \"?\", \".\", \"!\", \";\", \"；\", \"……\", \"）\", \"“\", \"，\", \"…\"]"
       },
       "match_width_variants": {
         "description": "分段词匹配全角/半角变体",
@@ -413,23 +389,24 @@
       "rule_regex": {
         "description": "正则分段表达式",
         "type": "text",
-        "default": ".*?[。？！~…\\n]+|.+$"
+        "default": "(?<=[。！？!?…~～])\\s*|\\n+",
+        "hint": "仅在正则分段方式下使用；按词分段使用上方列表。支持保留标点的零宽边界。"
       },
       "threshold": {
-        "description": "规则分段最小正文长度",
+        "description": "自动规则分段最大正文长度；更长内容保持整段",
         "type": "int",
-        "default": 120
+        "default": 500
       },
       "min_segment_chars": {
-        "description": "规则分段每段最少字符",
+        "description": "短消息合并参考长度",
         "type": "int",
-        "default": 12
+        "default": 5
       },
       "max_segments": {
         "description": "最多消息数",
-        "hint": "范围 1–64，超出时合并尾段，保留完整正文。",
+        "hint": "范围 1–64，超出时合并相邻段，保留完整正文。",
         "type": "int",
-        "default": 4
+        "default": 5
       },
       "prompt": {
         "description": "自定义模型分段提示",
@@ -447,7 +424,8 @@
       "enabled": {
         "description": "启用语音回复",
         "type": "bool",
-        "default": false
+        "default": false,
+        "invisible": true
       },
       "trigger_mode": {
         "description": "语音触发",
@@ -525,19 +503,22 @@
       "probability": {
         "description": "基础触发概率",
         "type": "float",
-        "default": 1.0
+        "default": 1.0,
+        "invisible": true
       },
       "private_probability": {
         "description": "私聊概率覆盖",
         "type": "float",
         "default": -1.0,
-        "hint": "-1 继承基础概率，范围 0–1。"
+        "hint": "-1 继承基础概率，范围 0–1。",
+        "invisible": true
       },
       "group_probability": {
         "description": "群聊概率覆盖",
         "type": "float",
         "default": -1.0,
-        "hint": "-1 继承基础概率，范围 0–1。"
+        "hint": "-1 继承基础概率，范围 0–1。",
+        "invisible": true
       },
       "cooldown_seconds": {
         "description": "会话冷却秒数",
@@ -591,6 +572,7 @@
   "poke": {
     "description": "互动｜戳一戳",
     "hint": "默认关闭。仅响应已配置目标对当前 Bot 的 OneBot 戳一戳；发送沿用该目标已认证的 OneBot 通道及关系权限。通知按账号、目标、发送者和秒级时间去重；同一秒内重复戳会合并。未知发送结果不会自动重试。",
+    "invisible": true,
     "type": "object",
     "items": {
       "enabled": {
@@ -699,30 +681,102 @@
         "description": "单次合并转发最多读取节点数",
         "hint": "结构上限为 32，只能收紧不能放宽。默认等于原常量，未编辑的安装行为不变。已落库的转发事件不受影响，仍可正常读取。",
         "type": "int",
-        "default": 32
+        "default": 32,
+        "invisible": true
       },
       "forward_max_depth": {
         "description": "合并转发最大嵌套深度",
         "hint": "结构上限为 4，只能收紧不能放宽。已落库的转发事件不受影响，仍可正常读取。",
         "type": "int",
-        "default": 4
+        "default": 4,
+        "invisible": true
       },
       "forward_max_forwards": {
         "description": "单次输入最多合并转发条数",
         "hint": "结构上限为 4，只能收紧不能放宽。已落库的转发事件不受影响，仍可正常读取。",
         "type": "int",
-        "default": 4
+        "default": 4,
+        "invisible": true
+      }
+    }
+  },
+  "weather": {
+    "description": "天气数据源（由陪伴小屋管理）",
+    "hint": "在陪伴小屋的天气感知区管理数据源、专属 API Host 和 JWT/API Key；凭据不进入角色配置导出。",
+    "type": "object",
+    "invisible": true,
+    "items": {
+      "provider": {
+        "description": "实况天气源",
+        "type": "string",
+        "options": [
+          "auto",
+          "qweather",
+          "open-meteo"
+        ],
+        "default": "auto",
+        "invisible": true
+      },
+      "api_host": {
+        "description": "和风专属 API Host",
+        "type": "string",
+        "default": "",
+        "invisible": true
+      },
+      "credential": {
+        "description": "和风 JWT/API Key",
+        "type": "string",
+        "default": "",
+        "invisible": true
+      },
+      "refresh_minutes": {
+        "description": "天气缓存刷新间隔（分钟）",
+        "type": "int",
+        "default": 5,
+        "invisible": true
+      }
+    }
+  },
+  "service_balance": {
+    "description": "服务余额（由陪伴小屋管理）",
+    "hint": "仅保存由管理员在「陪伴小屋 → 此刻，对话能读到什么 → 余额感知」配置的 NewAPI 来源。敏感令牌不会由页面回显。",
+    "type": "object",
+    "invisible": true,
+    "items": {
+      "url": {
+        "description": "NewAPI 地址",
+        "type": "string",
+        "default": "",
+        "invisible": true
+      },
+      "api_key": {
+        "description": "NewAPI 管理令牌",
+        "type": "string",
+        "default": "",
+        "invisible": true
+      },
+      "user_id": {
+        "description": "NewAPI 用户 ID",
+        "type": "string",
+        "default": "",
+        "invisible": true
+      },
+      "value_divisor": {
+        "description": "NewAPI 额度单位除数",
+        "type": "string",
+        "default": "500000",
+        "invisible": true
       }
     }
   },
   "news": {
-    "description": "资讯来源（宿主级默认）",
-    "hint": "主动问候与每日热点读取在会话未单独配置资讯来源时使用的默认源；bilibili 需填 UID，rss/json 需填订阅地址。",
+    "description": "AI 资讯来源（宿主级默认）",
+    "hint": "橘鸦AI早报作为未单独配置来源时的默认 RSS；角色级资讯分享仍需单独开启。bilibili 需填 UID，rss/json 需填订阅地址。",
     "type": "object",
     "items": {
       "source_kind": {
         "description": "默认来源类型",
-        "hint": "host 表示使用环境变量 COMPANION_V2_NEWS_* 配置的源；disabled 关闭默认资讯。",
+        "hint": "默认使用橘鸦AI早报 RSS；host 保留旧环境变量来源兼容，disabled 关闭默认资讯。",
         "type": "string",
         "options": [
           "host",
@@ -733,7 +787,7 @@
           "search",
           "hot"
         ],
-        "default": "host"
+        "default": "rss"
       },
       "bilibili_uid": {
         "description": "B 站 UID",
@@ -745,7 +799,7 @@
         "description": "订阅/接口地址",
         "hint": "默认来源为 rss 或 json 时生效，须为 http(s) 地址。",
         "type": "string",
-        "default": ""
+        "default": "https://daily.juya.uk/rss.xml"
       },
       "hot_sources": {
         "description": "热点榜来源",
@@ -791,15 +845,9 @@
     "items": {
       "v1_root": {
         "description": "V1 数据目录（绝对路径）",
-        "hint": "留空时按 …/plugin_data/astrbot_plugin_private_companion 与 V2 数据目录的同级位置查找。找不到就报「没有找到 V1 数据目录」，不会创建任何东西。",
+        "hint": "只在你主动检查并确认迁移时读取。留空时按 …/plugin_data/astrbot_plugin_private_companion 与 V2 数据目录的同级位置查找；V1 只读，迁移结果写入当前 V2 目标。",
         "type": "text",
         "default": ""
-      },
-      "allow_auto_apply": {
-        "description": "允许在启动时自动执行一次迁移",
-        "hint": "默认关闭。开启后宿主在加载运行档时试算一次，若结论是「有可以迁移的来源」就自动写入 V2。V1 数据不受影响，但写入之后 V2 里就会多出这批设置，所以默认让人先看过试算结果再动手。",
-        "type": "bool",
-        "default": false
       }
     }
   }

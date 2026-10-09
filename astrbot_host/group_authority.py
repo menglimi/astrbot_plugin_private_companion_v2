@@ -12,7 +12,7 @@ from companion_v2.identity_policy.personas import PersonaBinding, SelectorKind
 from companion_v2.memory.group.access import CAPABILITIES as GROUP_MEMORY_CAPABILITIES
 
 
-OPTIONAL_CAPABILITIES = GROUP_MEMORY_CAPABILITIES | {"extension.tool.invoke"}
+OPTIONAL_CAPABILITIES = GROUP_MEMORY_CAPABILITIES | {"extension.tool.invoke", "role.expression.read"}
 
 
 class GroupAuthority:
@@ -25,6 +25,7 @@ class GroupAuthority:
 
     def select(self, target, captured):
         authority = self.authority
+        authority.remember_target(target)
         scope, role, principal = captured.route.scope, captured.role, captured.principal
         if (scope.kind is not ScopeKind.GROUP or scope.installation_id != authority.runtime.installation_id
                 or (scope.platform, scope.account_id, scope.bot_id, scope.native_scope_id)

@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="courtyard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自我页 · 方向B 角色手帐（终稿 · 可移植预览）</title>
+<!--
+  自我页重设计 · 方向 B「角色手帐」终稿 docs/page-designs/self-page-20261007/B-手帐式.html
+  ═══════════════════════════════════════════════════════════════════════════
+  已选定方向。本稿是「直接移植替换」的蓝图：字段与分区一一对应后端 spec，
+  并埋入真页钩子（容器 id、data-profile-* 汇报点、persona 挂载点）。
+
+  覆盖面（与 config-editor.js / reply 契约逐字对应）：
+  · role_profile 46 字段 = 8 章（identity 9 / appearance 6 / personality 2 /
+    voice 7 / motivations 4 / boundaries 2 / world 8 / platform_names 8）
+  · relationship_profile 7 字段（私聊限定，含群聊空态注释）
+  · knowledge 14 字段 = import 7 / inject 3 / members 4
+  · 人格底稿 = product.workspace("persona") 嵌入工作区，位置不变
+
+  移植映射（预览 → 真页，四处改动点）：
+  1. app.js renderGovernanceOriginal → 按本稿骨架重排；
+     容器 id 不变：roleProfileConfigWorkspace / relationshipProfileConfigWorkspace /
+     knowledgeConfigWorkspace；persona 页签仍是 product.workspace("persona")。
+  2. self-page.css → 换成本稿 <style> 的「页面本体」段（保留 reduce-motion 覆盖）。
+  3. workbench-page.js → inputs 增加四种形态：date（生日：日期+农历+年份可选）、
+     chips（性别/种族/自称/关系/爱好/标志语：词条+自定义）、quotes（口吻示例气泡）、
+     seg（世界观适配模式分段条）；role_profile / relationship_profile spec 增加
+     inputs 声明。注册表这些字段仍是 TEXT，值按字符串保存，后端合同不动。
+  4. role-profile-draft.js → 「角色自述」画布与「从人格底稿整理」共用既有 dialog：
+     画布内容写入 supplement，再走原 generate 端点；入口从横幅改为卷末卡。
+
+  汇报钩子（updateRoleProfileSummary 只改选择器，语义不变）：
+  data-profile-name / data-profile-emblem / data-profile-count /
+  data-profile-progress + data-profile-fill / data-profile-status；
+  速览贴纸 = 原 data-profile-signal 的五条信号（身份/识别点/性格/口吻/世界）。
+
+  「切换不跳」的实现要点（移植时保留）：
+  · 四页签与章节词条都吸顶（sticky），切换只替换下方卡区；
+  · 卡区保底高度（.deck-panels min-height），滚动条长度不突变；
+  · 页签切换时若视口已越过页签区，只吸附回页签顶部，不做整页 scrollTo；
+  · 章节切换完全不动滚动位置（词条条吸着，卡片在原位换）。
+-->
+<style>
+/* ===== tokens（与真页 tokens.css 同源，庭院 + 夜读两套；真页读 tokens.css 不带这段） ===== */
+[data-theme="courtyard"]{
+  --t-canvas:#eef3ec;--t-surface:#fdfefb;--t-surface-soft:#f5f9f3;--t-surface-raised:#ffffff;
+  --t-surface-sunken:#e3ebe0;--t-veil:rgba(253,254,251,.72);
+  --t-text:#333a33;--t-text-strong:#212822;--t-text-soft:#616b60;--t-text-faint:#828c80;--t-text-invert:#fdfefb;
+  --t-accent:#4a7c50;--t-accent-hover:#3a6540;--t-accent-quiet:#e6efe4;--t-accent-ink:#3b6541;
+  --t-accent-solid:#46754c;--t-on-solid:#fdfefb;
+  --t-line:rgba(74,90,74,.14);--t-line-firm:rgba(74,90,74,.26);
+  --t-ok:#4a7c50;--t-ok-quiet:#e4efe2;--t-ok-ink:#3b6541;
+  --t-warn:#9c7422;--t-warn-quiet:#f7f0dc;--t-warn-ink:#7d5c17;
+  --t-risk:#a5524a;--t-risk-quiet:#f7e9e6;--t-risk-ink:#874139;
+  --t-focus:rgba(74,124,80,.24);--t-shadow:0 8px 28px rgba(58,80,60,.06);
+  --t-shadow-lift:0 14px 36px rgba(58,80,60,.12);
+  color-scheme:light;
+}
+[data-theme="night"]{
+  --t-canvas:#15171f;--t-surface:#22252f;--t-surface-soft:#1c1f28;--t-surface-raised:#282c38;
+  --t-surface-sunken:#181a22;--t-veil:rgba(28,30,39,.82);
+  --t-text:#e5e6ec;--t-text-strong:#f5f5f9;--t-text-soft:#a5a8b8;--t-text-faint:#7b7f90;--t-text-invert:#171920;
+  --t-accent:#93a8d8;--t-accent-hover:#7b92c8;--t-accent-quiet:#252a3a;--t-accent-ink:#b3c3e8;
+  --t-accent-solid:#61749f;--t-on-solid:#12141b;
+  --t-line:rgba(255,255,255,.10);--t-line-firm:rgba(255,255,255,.20);
+  --t-ok:#6fbf9a;--t-ok-quiet:#1c3029;--t-ok-ink:#87d0ad;
+  --t-warn:#d9ae6d;--t-warn-quiet:#312818;--t-warn-ink:#e6c287;
+  --t-risk:#d18f98;--t-risk-quiet:#301f23;--t-risk-ink:#dda1aa;
+  --t-focus:rgba(147,168,216,.30);--t-shadow:0 10px 26px rgba(0,0,0,.32);
+  --t-shadow-lift:0 14px 32px rgba(0,0,0,.46);
+  color-scheme:dark;
+}
+:root{
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:24px;--sp-6:32px;
+  --fs-micro:11px;--fs-tiny:12px;--fs-body:14px;--fs-lead:16px;--fs-title:19px;--fs-head:22px;--fs-hero:26px;
+  --r-2xs:4px;--r-xs:6px;--r-sm:9px;--r-md:12px;--r-lg:16px;
+  --numeric-font:ui-monospace,"SF Mono",Consolas,monospace;
+  --dur-fast:.16s;--dur:.28s;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--t-canvas);color:var(--t-text);
+  font:14px/1.7 MiSans,"Microsoft YaHei","PingFang SC",system-ui,sans-serif;padding:20px;
+  transition:background .3s,color .3s}
+
+/* ===== 预览工具条（不属于页面本体） ===== */
+.bar{display:flex;align-items:center;gap:10px;margin:0 auto 14px;flex-wrap:wrap;max-width:1240px}
+.bar h1{font-size:14px;font-weight:600;margin:0 auto 0 0;color:var(--t-text-strong)}
+.bar button{font:inherit;font-size:12px;padding:6px 11px;border-radius:6px;cursor:pointer;
+  color:var(--t-text);background:var(--t-surface);border:1px solid var(--t-line-firm)}
+.bar button:hover{background:var(--t-surface-soft)}
+.bar .hint{width:100%;margin:0;font-size:11px;color:var(--t-text-faint)}
+#viewportWrap{max-width:1240px;margin:0 auto;transition:max-width .3s ease}
+#viewportWrap[data-w="1366"]{max-width:1366px}
+#viewportWrap[data-w="900"]{max-width:900px}
+#viewportWrap[data-w="650"]{max-width:650px}
+#viewportWrap[data-w="390"]{max-width:390px}
+#viewportWrap[data-w="320"]{max-width:320px}
+.bar button.active{border-color:var(--t-accent);color:var(--t-accent-ink);background:var(--t-accent-quiet)}
+#selfPage{border:1px dashed var(--t-line-firm);border-radius:var(--r-md);padding:var(--sp-5);
+  background:var(--t-canvas)}
+
+/* ══════════ 页面本体（移植段开始） ══════════ */
+.self-page{display:grid;gap:var(--sp-5);max-width:1120px;margin:0 auto;min-width:0}
+
+/* ---- 角色卡片 · 紧凑页头（self-atlas 的替换；一行放名字、状态与完成度） ---- */
+.journal-cover{position:relative;overflow:hidden;min-width:0;display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;gap:var(--sp-3);align-items:center;
+  padding:var(--sp-3) var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:
+    linear-gradient(160deg,color-mix(in srgb,var(--t-accent-quiet) 55%,transparent),transparent 55%),
+    var(--t-surface);
+  box-shadow:var(--t-shadow)}
+.portrait{position:relative;flex:none;width:64px;aspect-ratio:1;border-radius:var(--r-sm);
+  border:1px solid var(--t-line-firm);background:
+    radial-gradient(circle at 30% 25%,color-mix(in srgb,var(--t-accent) 22%,transparent),transparent 60%),
+    var(--t-surface-soft);display:grid;place-items:center;color:var(--t-accent-ink);
+  font-size:var(--fs-title);font-weight:650;box-shadow:inset 0 0 0 4px var(--t-surface-raised)}
+.journal-id{display:grid;gap:6px;min-width:0}
+.journal-name-row{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;min-width:0}
+.journal-name-row h2{margin:0;color:var(--t-text-strong);font-size:var(--fs-title);font-weight:650;line-height:1.25;
+  overflow-wrap:anywhere}
+.stickers{display:flex;flex-wrap:wrap;gap:6px}
+.sticker{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;flex:none;
+  white-space:nowrap;border-radius:99px;background:var(--t-surface-raised);border:1px solid var(--t-line);
+  color:var(--t-text-soft);font-size:var(--fs-micro);box-shadow:0 1px 4px rgba(0,0,0,.05)}
+.sticker b{color:var(--t-text-strong);font-weight:650}
+.ring{position:relative;display:grid;place-items:center;width:40px;aspect-ratio:1;flex:none}
+.ring svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.journal-side{display:flex;align-items:center;gap:var(--sp-2);flex:none}
+.ring-num{color:var(--t-text-faint);font-size:var(--fs-micro);white-space:nowrap}
+.ring-num b{color:var(--t-accent-ink);font-family:var(--numeric-font);font-size:var(--fs-body)}
+.live{display:inline-flex;align-items:center;gap:6px;padding:1px 9px;border-radius:99px;
+  background:var(--t-ok-quiet);color:var(--t-ok-ink);font-size:var(--fs-micro);white-space:nowrap}
+.live i{width:6px;height:6px;border-radius:50%;background:currentColor}
+.live[data-state="checking"]{background:var(--t-warn-quiet);color:var(--t-warn-ink)}
+.live[data-state="unavailable"]{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
+
+/* ---- 四工作区页签 ---- */
+.deck-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-1);
+  padding:var(--sp-1);border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:var(--t-veil);backdrop-filter:blur(8px)}
+.deck-tabs button{display:flex;align-items:center;justify-content:center;gap:6px;min-height:34px;
+  border:1px solid transparent;border-radius:var(--r-xs);background:transparent;color:var(--t-text-soft);
+  font:inherit;font-size:var(--fs-tiny);font-weight:600;cursor:pointer;white-space:nowrap}
+.deck-tabs button.active{background:var(--t-surface-raised);color:var(--t-accent-ink);
+  border-color:var(--t-line);box-shadow:var(--t-shadow)}
+
+/* ---- 章节词条条（sticky） ---- */
+.section-chips{position:sticky;top:8px;z-index:20;display:flex;gap:6px;overflow-x:auto;
+  padding:6px;margin:0 -2px;border-radius:var(--r-md);background:var(--t-veil);backdrop-filter:blur(8px);
+  border:1px solid var(--t-line);scrollbar-width:none}
+.section-chips::-webkit-scrollbar{display:none}
+.section-chips button{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 var(--sp-3);
+  border:1px solid transparent;border-radius:99px;background:var(--t-surface);color:var(--t-text-soft);
+  font:inherit;font-size:var(--fs-tiny);cursor:pointer;transition:all var(--dur-fast) ease;white-space:nowrap}
+.section-chips button .no{font-family:var(--numeric-font);font-size:var(--fs-micro);color:var(--t-text-faint)}
+.section-chips button:hover{border-color:var(--t-line-firm);color:var(--t-accent-ink)}
+.section-chips button.active{border-color:color-mix(in srgb,var(--t-accent) 55%,var(--t-line));
+  background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+.section-chips button .dot{width:6px;height:6px;border-radius:50%;background:var(--t-line-firm)}
+.section-chips button .dot.done{background:var(--t-ok);box-shadow:0 0 0 2px var(--t-ok-quiet)}
+
+/* ---- 卡区：保底高度 + 单卡替换 ---- */
+.deck-panels{display:grid}
+.deck-panels.level1{min-height:560px;margin-top:var(--sp-4)}
+.deck-panels.level2{min-height:480px}
+.deck-panel{min-width:0}
+/* :not(.active) 抬高优先级：章节卡同时挂 journal-card / selfwrite 等展示类，
+   不能被它们后来的 display 覆盖。 */
+.deck-panel:not(.active){display:none}
+.deck-panel.active{display:block;animation:page-turn .32s cubic-bezier(.16,1,.3,1) both}
+@keyframes page-turn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* ---- 手帐卡 ---- */
+.journal-card{position:relative;display:grid;gap:var(--sp-4);padding:var(--sp-5);
+  border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--t-surface);box-shadow:var(--t-shadow)}
+.card-head{display:grid;gap:var(--sp-1);padding-bottom:var(--sp-3);border-bottom:1px dashed var(--t-line-firm)}
+.card-head small{color:var(--t-accent-ink);font-size:var(--fs-micro);font-weight:750;font-variant-numeric:tabular-nums}
+.card-head h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:650}
+.card-head p{margin:0;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+
+/* ---- 字段格 ---- */
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-3)}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-3)}
+.cell{display:grid;gap:5px;align-content:start;min-width:0;padding:var(--sp-3);
+  border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-soft)}
+.cell.wide{grid-column:1 / -1}
+.cell>label{display:flex;align-items:baseline;gap:6px;color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:650}
+.cell>label small{color:var(--t-text-faint);font-weight:400;font-size:var(--fs-micro)}
+.cell .help{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.cell .meta{display:flex;justify-content:space-between;gap:var(--sp-2);color:var(--t-text-faint);font-size:var(--fs-micro)}
+.cell .meta span[data-over="true"]{color:var(--t-risk-ink)}
+/* 输入框安静化：常态只留底色，悬停浮现细边，聚焦才亮描边；身份证卡内的输入框同样接管。 */
+.cell :is(input,textarea),.id-row :is(input,textarea){
+  width:100%;min-width:0;border:1px solid transparent;border-radius:var(--r-xs);
+  background:var(--t-surface);color:var(--t-text);font:inherit;font-size:var(--fs-tiny);padding:7px 10px;
+  transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease}
+.cell :is(input,textarea):hover,.id-row :is(input,textarea):hover{border-color:var(--t-line)}
+.cell textarea,.id-row textarea{resize:vertical;min-height:56px;line-height:1.6}
+.cell :is(input,textarea):focus,.id-row :is(input,textarea):focus{
+  outline:none;border-color:var(--t-accent);box-shadow:0 0 0 3px var(--t-focus)}
+.sparklet{display:inline-flex;align-items:center;gap:4px;margin-left:auto;border:0;background:transparent;
+  color:var(--t-accent-ink);font:inherit;font-size:var(--fs-micro);cursor:pointer;padding:0;white-space:nowrap}
+.sparklet:hover{text-decoration:underline}
+
+/* ---- 证件卡（身份 / 相处资料的证件排布） ---- */
+.id-card{display:grid;grid-template-columns:96px minmax(0,1fr);gap:var(--sp-4);padding:var(--sp-4);
+  border:1px solid var(--t-line-firm);border-radius:var(--r-sm);
+  background:linear-gradient(150deg,var(--t-surface-soft),transparent 70%),var(--t-surface-soft)}
+.id-photo{display:grid;place-items:center;aspect-ratio:1;border:1px dashed var(--t-line-firm);border-radius:var(--r-xs);
+  color:var(--t-text-faint);font-size:var(--fs-micro);text-align:center;background:var(--t-surface)}
+.id-rows{display:grid;gap:var(--sp-2);min-width:0}
+.id-row{display:grid;grid-template-columns:76px minmax(0,1fr);gap:var(--sp-2);align-items:center}
+.id-row>span{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.id-row :is(input,.chips,.date-row){min-height:32px}
+
+/* ---- 新控件形态 ---- */
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;min-height:28px;padding:3px 12px;border:1px solid var(--t-line-firm);
+  border-radius:99px;background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);
+  cursor:pointer;transition:all var(--dur-fast) ease;white-space:nowrap}
+.chip:hover{border-color:var(--t-accent);color:var(--t-accent-ink)}
+.chip.on{border-color:var(--t-accent);background:var(--t-accent-quiet);color:var(--t-accent-ink);font-weight:600}
+.chip-input{flex:1 1 90px;min-width:88px;min-height:28px;border:1px dashed var(--t-line);border-radius:99px;
+  background:transparent;color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);padding:3px 12px}
+.chip-input:focus{outline:none;border-color:var(--t-accent);border-style:solid;color:var(--t-text)}
+.date-row{display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center}
+.date-row input[type=date]{flex:1 1 130px;min-height:32px;border:1px solid transparent;border-radius:var(--r-xs);
+  background:var(--t-surface);color:var(--t-text);font:inherit;font-size:var(--fs-tiny);padding:4px 10px;
+  transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease}
+.date-row input[type=date]:hover{border-color:var(--t-line)}
+.date-row input[type=date]:focus{outline:none;border-color:var(--t-accent);box-shadow:0 0 0 3px var(--t-focus)}
+.mini-toggle{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--t-line-firm);
+  border-radius:var(--r-xs);background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);
+  cursor:pointer;user-select:none;white-space:nowrap}
+.mini-toggle input{accent-color:var(--t-accent);margin:0}
+.bubble-list{display:grid;gap:var(--sp-2)}
+.bubble{position:relative;max-width:88%;padding:8px 12px;border:1px solid var(--t-line);
+  border-radius:var(--r-sm);border-bottom-left-radius:3px;background:var(--t-surface);box-shadow:var(--t-shadow)}
+.bubble p{margin:0;font-size:var(--fs-tiny);line-height:1.6;overflow-wrap:anywhere}
+.bubble .who{display:flex;gap:6px;color:var(--t-text-faint);font-size:var(--fs-micro);margin-bottom:2px}
+.bubble .who b{color:var(--t-accent-ink)}
+.bubble .ops{position:absolute;top:-9px;right:8px;display:none;gap:4px}
+.bubble:hover .ops{display:flex}
+.bubble .ops button{border:1px solid var(--t-line-firm);border-radius:99px;background:var(--t-surface);
+  color:var(--t-text-faint);font-size:10px;padding:1px 8px;cursor:pointer;white-space:nowrap}
+.bubble.add{max-width:none;border-style:dashed;background:transparent;color:var(--t-text-faint);display:flex;
+  align-items:center;justify-content:center;min-height:38px;cursor:pointer;font-size:var(--fs-tiny)}
+.bubble.add:hover{border-color:var(--t-accent);color:var(--t-accent-ink)}
+.slips{display:flex;flex-wrap:wrap;gap:8px}
+.slip{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;background:var(--t-surface-raised);
+  border:1px solid var(--t-line);border-radius:var(--r-xs);font-size:var(--fs-tiny);color:var(--t-text-soft);
+  box-shadow:0 1px 4px rgba(0,0,0,.05)}
+.slip i{font-style:normal;cursor:pointer;color:var(--t-text-faint)}
+.slip i:hover{color:var(--t-risk-ink)}
+
+/* ---- 角色自述（创意表达核心；接 role-profile-draft） ---- */
+.selfwrite{display:grid;gap:var(--sp-3);padding:var(--sp-5);border:1px dashed color-mix(in srgb,var(--t-accent) 45%,var(--t-line-firm));
+  border-radius:var(--r-md);background:
+    linear-gradient(0deg,var(--t-surface-soft),var(--t-surface-soft)),
+    repeating-linear-gradient(0deg,transparent,transparent 27px,color-mix(in srgb,var(--t-line-firm) 60%,transparent) 27px,color-mix(in srgb,var(--t-line-firm) 60%,transparent) 28px)}
+.selfwrite h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:650}
+.selfwrite p{margin:0;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.selfwrite textarea{width:100%;min-width:0;min-height:150px;resize:vertical;border:1px solid transparent;
+  border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text);font:inherit;font-size:var(--fs-tiny);
+  line-height:28px;padding:0 var(--sp-3);
+  transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease}
+.selfwrite textarea:hover{border-color:var(--t-line)}
+.selfwrite textarea:focus{outline:none;border-color:var(--t-accent);box-shadow:0 0 0 3px var(--t-focus)}
+.selfwrite-foot{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
+.selfwrite-foot small{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.selfwrite-actions{display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.selfwrite-actions .button{display:inline-flex;align-items:center;gap:6px;min-height:38px;padding:0 var(--sp-4);
+  border:0;border-radius:99px;background:var(--t-accent-solid);color:var(--t-on-solid);font:inherit;
+  font-size:var(--fs-tiny);font-weight:650;cursor:pointer;white-space:nowrap}
+.selfwrite-actions .button:hover{filter:brightness(1.06)}
+.selfwrite-actions .button.ghost{background:var(--t-surface);color:var(--t-text-soft);border:1px solid var(--t-line-firm)}
+
+/* ---- 空态 / 挂载槽 ---- */
+.slot-note{display:grid;gap:6px;padding:var(--sp-4);border:1px solid var(--t-warn-quiet);border-left:3px solid var(--t-warn);
+  border-radius:var(--r-sm);background:var(--t-surface)}
+.slot-note strong{font-size:var(--fs-tiny);color:var(--t-text-strong)}
+.slot-note span{font-size:var(--fs-micro);color:var(--t-text-faint);line-height:1.55}
+.slot-note .button{justify-self:start;display:inline-flex;align-items:center;min-height:34px;padding:0 var(--sp-3);
+  border:1px solid var(--t-line-firm);border-radius:var(--r-xs);background:var(--t-surface);
+  color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer}
+.iframe-slot{display:grid;place-items:center;min-height:300px;border:1px dashed var(--t-line-firm);
+  border-radius:var(--r-md);background:var(--t-surface-soft);color:var(--t-text-faint);font-size:var(--fs-tiny);
+  text-align:center;padding:var(--sp-4)}
+.know-cards{display:grid;gap:var(--sp-4)}
+
+/* ---- 响应式 ---- */
+@media(max-width:900px){
+  .grid3{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:650px){
+  #selfPage{padding:var(--sp-3)}
+  .self-page{gap:var(--sp-4)}
+  .journal-cover{padding:var(--sp-2) var(--sp-3)}
+  .portrait{width:56px;font-size:var(--fs-lead)}
+  .stickers{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+  .stickers::-webkit-scrollbar{display:none}
+  .ring{width:34px}
+  .grid2,.grid3{grid-template-columns:minmax(0,1fr)}
+  .id-card{grid-template-columns:minmax(0,1fr)}
+  .id-photo{max-width:120px}
+  .deck-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .bubble{max-width:100%}
+  .id-row{grid-template-columns:minmax(0,1fr);gap:var(--sp-1)}
+  .id-row>span{padding-top:2px}
+}
+@media(max-width:380px){
+  .portrait{width:48px}
+  .ring{width:30px}
+  .ring-num{display:none}
+  .deck-tabs button{min-height:44px}
+}
+@media(prefers-reduced-motion:reduce){.deck-panel.active{animation:none}}
+:root:is([data-motion="low"],[data-motion="off"]) .deck-panel.active{animation:none}
+body.reduce-motion .deck-panel.active{animation:none}
+/* 移植段结束 */
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>自我页 · 方向B 角色手帐 — 终稿预览（示例数据：澄汐）</h1>
+  <button id="themeBtn">夜读</button>
+  <span style="width:1px;height:18px;background:var(--t-line-firm)"></span>
+  <button data-w="1366" class="active">1366</button>
+  <button data-w="900">900</button>
+  <button data-w="650">650</button>
+  <button data-w="390">390</button>
+  <button data-w="320">320</button>
+  <p class="hint">切换宽度模拟页面尺寸；八个章节同卡位替换、滚动条长度不突变。虚线框内为页面本体；字段分区与真页 spec 一一对应。</p>
+</div>
+<div id="viewportWrap" data-w="1366">
+<div id="selfPage">
+<div class="self-page">
+
+  <!-- ═══ 角色卡片 · 紧凑页头（替换 self-atlas；钩子：data-profile-*） ═══ -->
+  <section class="journal-cover" aria-label="当前角色卡片">
+    <div class="portrait"><span data-profile-emblem data-profile-fallback="设" aria-hidden="true">澄</span></div>
+    <div class="journal-id">
+      <div class="journal-name-row">
+        <h2 data-profile-name data-profile-fallback="当前角色">澄汐</h2>
+        <span class="live" data-state="connected"><i></i><span data-profile-status>已连接 · 私聊 · 小航</span></span>
+      </div>
+      <!-- 速览贴纸 = 原 data-profile-signal 五条信号；各贴纸点击直达对应章节 -->
+      <div class="stickers" aria-label="档案速览">
+        <button class="sticker" type="button" data-goto="voice" data-tab="profile"><b>自称</b>我</button>
+        <button class="sticker" type="button" data-goto="identity" data-tab="profile"><b>性别</b>女</button>
+        <button class="sticker" type="button" data-goto="identity" data-tab="profile"><b>生日</b>4月17日 · 公历</button>
+        <button class="sticker" type="button" data-goto="identity" data-tab="profile"><b>职业</b>旧书店店员</button>
+        <button class="sticker" type="button" data-goto="world" data-tab="profile"><b>世界</b>海雾小城 · 现代</button>
+      </div>
+    </div>
+    <div class="journal-side" data-profile-progress role="img" aria-label="档案完成度">
+      <span class="ring" aria-hidden="true">
+        <svg viewBox="0 0 36 36">
+          <circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--t-line-firm)" stroke-width="3.5"/>
+          <circle data-profile-fill cx="18" cy="18" r="15.5" fill="none" stroke="var(--t-accent)" stroke-width="3.5"
+            stroke-linecap="round" stroke-dasharray="60 97.4"/>
+        </svg>
+      </span>
+      <span class="ring-num"><b data-profile-count>27</b> / 44 项</span>
+    </div>
+  </section>
+
+  <!-- ═══ 四工作区页签（self-workspace-tabs 替换；pane 语义不变） ═══ -->
+  <nav class="deck-tabs" role="tablist" aria-label="自我设定分区">
+    <button role="tab" class="active" data-pane="profile" aria-selected="true">角色档案</button>
+    <button role="tab" data-pane="relationship" aria-selected="false">相处资料</button>
+    <button role="tab" data-pane="questionnaire" aria-selected="false">人格底稿</button>
+    <button role="tab" data-pane="knowledge" aria-selected="false">世界知识</button>
+  </nav>
+
+  <div class="deck-panels level1">
+
+    <!-- ═══ 角色档案（roleProfileConfigWorkspace 所在页签） ═══ -->
+    <section class="deck-panel active" data-pane-panel="profile">
+      <!-- 章节词条条 = wb-section 页签组的手帐化替代；done 点由档案完成度驱动 -->
+      <nav class="section-chips" aria-label="档案章节">
+        <button class="active" data-chapter="identity"><span class="no">01</span>身份<span class="dot done"></span></button>
+        <button data-chapter="appearance"><span class="no">02</span>外貌<span class="dot done"></span></button>
+        <button data-chapter="personality"><span class="no">03</span>性格<span class="dot"></span></button>
+        <button data-chapter="voice"><span class="no">04</span>口吻<span class="dot done"></span></button>
+        <button data-chapter="motivation"><span class="no">05</span>动机<span class="dot"></span></button>
+        <button data-chapter="boundary"><span class="no">06</span>边界<span class="dot done"></span></button>
+        <button data-chapter="world"><span class="no">07</span>世界<span class="dot done"></span></button>
+        <button data-chapter="platform"><span class="no">08</span>称呼<span class="dot"></span></button>
+        <button data-chapter="selfwrite"><span class="no">✦</span>角色自述</button>
+      </nav>
+
+      <div class="deck-panels level2">
+
+        <!-- 01 身份 = spec section "identity"（name/species/birthday/age/gender/occupation/identity/key_lore/character_extra） -->
+        <section class="deck-panel active journal-card" data-chapter-panel="identity">
+          <div class="card-head"><small>01 / IDENTITY</small><h3>基础身份</h3>
+            <p>像填一张证件：姓名与关键属性一行一个，不确定的可以空着。</p></div>
+          <div class="id-card">
+            <div class="id-photo">头像位<br>（可换成角色图）</div>
+            <div class="id-rows">
+              <div class="id-row"><span>姓名</span><input type="text" value="澄汐" data-wb-field="name" aria-label="姓名"></div>
+              <div class="id-row"><span>性别</span>
+                <div class="chips" data-radio>
+                  <button class="chip on" type="button">女</button><button class="chip" type="button">男</button>
+                  <button class="chip" type="button">非二元</button><button class="chip" type="button">不重要 / 留空</button>
+                  <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义性别">
+                </div></div>
+              <div class="id-row"><span>生日</span>
+                <div class="date-row">
+                  <input type="date" value="2007-04-17" aria-label="生日日期">
+                  <label class="mini-toggle"><input type="checkbox">农历</label>
+                  <label class="mini-toggle"><input type="checkbox" checked>不确定年份</label>
+                </div></div>
+              <div class="id-row"><span>年龄感</span><input type="text" value="看起来二十出头" aria-label="年龄感"></div>
+              <div class="id-row"><span>种族</span>
+                <div class="chips">
+                  <button class="chip on" type="button">人类</button><button class="chip" type="button">精灵</button>
+                  <button class="chip" type="button">仿生人</button><button class="chip" type="button">AI</button>
+                  <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义种族">
+                </div></div>
+              <div class="id-row"><span>职业</span><input type="text" value="旧书店店员 / 陪伴者" aria-label="职业"></div>
+            </div>
+          </div>
+          <span class="help">生日勾选「不确定年份」时保存为“4月17日”，年份不写进设定；种族、性别没有合适的就留空。</span>
+          <div class="grid2">
+            <div class="cell wide"><label>关键设定
+              <button class="sparklet" type="button">✦ 她身上有什么只有一两个人知道的秘密？</button></label>
+              <textarea>生日「4月17日」其实是书店进货的日期，她把那天当作自己的生日；这件事只有店长知道。</textarea>
+              <span class="meta"><span>41 / 2000 字</span><span></span></span></div>
+            <div class="cell wide"><label>身份经历补充（原有设定）</label>
+              <textarea>在城市海边经营一间旧书店，习惯把客人的故事记在便签上，夹进对应的书里。</textarea></div>
+            <div class="cell wide"><label>其他角色补充</label>
+              <textarea>无法归入上方细项、但需要长期记住的角色补充。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 02 外貌 = spec section "appearance" -->
+        <section class="deck-panel journal-card" data-chapter-panel="appearance">
+          <div class="card-head"><small>02 / APPEARANCE</small><h3>外貌与识别</h3>
+            <p>挑一个远处也能认出的特征，写具体——它会在成图与转述里被反复用到。</p></div>
+          <div class="grid2">
+            <div class="cell"><label>外貌识别点
+              <button class="sparklet" type="button">✦ 朋友如何在人堆里一眼找到她？</button></label>
+              <input type="text" value="耳后的月形痣，低头看书时露出来"></div>
+            <div class="cell"><label>发型 / 发色</label><input type="text" value="过肩黑发，工作日松松挽起"></div>
+            <div class="cell"><label>瞳色</label><input type="text" value="深褐，灯光下偏琥珀"></div>
+            <div class="cell"><label>服饰风格 <small>具体衣物在「产出 · 衣柜」管理</small></label>
+              <input type="text" value="亚麻围裙 + 灰蓝针织衫"></div>
+            <div class="cell wide"><label>头像与图像识别线索 <small>头像、截图昵称、OC 别名、水印等</small></label>
+              <input type="text" value="OC 别名“汐”；截图里常带一杯海水蓝的马克杯"></div>
+            <div class="cell wide"><label>外貌补充（原有设定）</label>
+              <textarea>身形偏瘦，走路很轻；手上常有旧书蹭到的铅笔灰。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 03 性格 = spec section "personality" -->
+        <section class="deck-panel journal-card" data-chapter-panel="personality">
+          <div class="card-head"><small>03 / PERSONALITY</small><h3>性格与日常</h3>
+            <p>写「遇到具体的事会怎么做」，比概括形容词更有用。</p></div>
+          <div class="grid2">
+            <div class="cell wide"><label>性格描述（原有设定）</label>
+              <textarea>安静、慢热，熟人面前话会变多。观察力好，先听再说；不擅长被打断。</textarea></div>
+            <div class="cell wide"><label>日常习惯
+              <button class="sparklet" type="button">✦ 她每天做的第一件小事是什么？</button></label>
+              <textarea>打烊后留一盏灯整理书；雨天把椅子搬到窗边。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 04 口吻 = spec section "voice"（口吻示例 = quotes 气泡；标志性表达 = tags） -->
+        <section class="deck-panel journal-card" data-chapter-panel="voice">
+          <div class="card-head"><small>04 / VOICE</small><h3>口吻与反应</h3>
+            <p>气泡是发给模型的口吻样本；纸条是偶尔才会说的标志性表达。</p></div>
+          <div class="grid2">
+            <div class="cell wide"><label>口吻示例
+              <button class="sparklet" type="button">✦ 她今天会怎么跟我打招呼？</button></label>
+              <div class="bubble-list">
+                <div class="bubble"><span class="ops"><button type="button">试听</button><button type="button">删除</button></span>
+                  <span class="who"><b>澄汐</b>日常</span><p>今天的风有点像海边的。</p></div>
+                <div class="bubble"><span class="ops"><button type="button">试听</button><button type="button">删除</button></span>
+                  <span class="who"><b>澄汐</b>答应事情</span><p>嗯…让我想想——好，就这么定了。</p></div>
+                <div class="bubble"><span class="ops"><button type="button">试听</button><button type="button">删除</button></span>
+                  <span class="who"><b>澄汐</b>倾听</span><p>你先说，我听着。</p></div>
+                <div class="bubble add">＋ 新增一句台词</div>
+              </div></div>
+            <div class="cell"><label>标志性表达 <small>偶尔用；也记下要避免的</small></label>
+              <div class="slips">
+                <span class="slip">慢慢来<i title="删除">×</i></span>
+                <span class="slip">我在呢<i title="删除">×</i></span>
+                <span class="slip">先把杯子放好<i title="删除">×</i></span>
+                <input class="chip-input" type="text" placeholder="＋ 再贴一张…" aria-label="添加标志性表达">
+              </div></div>
+            <div class="cell"><label>自称与代词 <small>需要稳定使用的自称</small></label>
+              <div class="chips">
+                <button class="chip on" type="button">我</button><button class="chip" type="button">人家</button>
+                <button class="chip" type="button">吾</button>
+                <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义自称">
+              </div></div>
+            <div class="cell"><label>说话方式 <small>语速、句长、玩笑方式</small></label>
+              <textarea>语速平缓，句子短；玩笑偏冷，先愣一拍再笑。</textarea></div>
+            <div class="cell"><label>情绪表达 <small>写成倾向，不是固定台词</small></label>
+              <textarea>开心时尾音上扬；担心不直说，会变成“记得吃饭”。</textarea></div>
+            <div class="cell"><label>社交距离与熟悉后的变化</label>
+              <textarea>对陌生人客气但保持一段距离；熟了之后会先开口，也会主动分享书里的话。</textarea></div>
+            <div class="cell wide"><label>典型反应倾向 <small>遇到夸奖、批评、冷场、意见不合时</small></label>
+              <textarea>被夸：把书挡住半张脸。冷场：不救场，陪着安静。意见不合：先复述对方的意思。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 05 动机 = spec section "motivations" -->
+        <section class="deck-panel journal-card" data-chapter-panel="motivation">
+          <div class="card-head"><small>05 / MOTIVATION</small><h3>价值与目标</h3>
+            <p>她做选择时最看重什么，长期想要什么。</p></div>
+          <div class="grid2">
+            <div class="cell"><label>重视的事
+              <button class="sparklet" type="button">✦ 她做选择时最不肯让步的一件事？</button></label>
+              <textarea>把合适的话递给合适的人；不催促任何事。</textarea></div>
+            <div class="cell"><label>核心欲望 / 长期目标</label>
+              <textarea>攒够钱把书店的阁楼修好，做成雨天的读书角。</textarea></div>
+            <div class="cell wide"><label>爱好 <small>兴趣、收藏、擅长或愿意主动聊起的事</small></label>
+              <div class="chips">
+                <button class="chip on" type="button">植物随笔</button><button class="chip on" type="button">手冲茶</button>
+                <button class="chip on" type="button">听雨</button>
+                <input class="chip-input" type="text" placeholder="＋ 添加…" aria-label="添加爱好">
+              </div></div>
+            <div class="cell wide"><label>价值与目标补充（原有设定）</label>
+              <textarea>相信旧书会等来对的人。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 06 边界 = spec section "boundaries" -->
+        <section class="deck-panel journal-card" data-chapter-panel="boundary">
+          <div class="card-head"><small>06 / BOUNDARY</small><h3>相处边界</h3>
+            <p>边界写得越具体，角色拒绝得越自然；关系与用户的具体资料在「相处资料」。</p></div>
+          <div class="grid2">
+            <div class="cell wide"><label>互动边界（原有设定）</label>
+              <textarea>不代替用户做重大决定；被要求“必须同意”时会先说明自己的看法。</textarea></div>
+            <div class="cell wide"><label>禁忌 <small>会避开的主题、行为或情境</small></label>
+              <textarea>不评价他人的身体与家境；不参与网络骂战。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 07 世界 = spec section "world" -->
+        <section class="deck-panel journal-card" data-chapter-panel="world">
+          <div class="card-head"><small>07 / WORLD</small><h3>世界蓝图</h3>
+            <p>先写「天气如何影响这条街」，世界感会比设定集更早成立。</p></div>
+          <div class="grid2">
+            <div class="cell"><label>所处世界</label><input type="text" value="海雾小城"></div>
+            <div class="cell"><label>时代背景</label><input type="text" value="现代 · 近未来"></div>
+            <div class="cell wide"><label>基本法则 / 基调</label>
+              <input type="text" value="温暖、安静，带一点潮湿的海雾感"></div>
+            <div class="cell"><label>特殊规则 <small>魔法、科技、社会制度等</small></label>
+              <textarea>没有超自然力量；潮汐与海雾影响全城作息。</textarea></div>
+            <div class="cell"><label>主要活动场景</label>
+              <textarea>旧书店「汐屋」、海边堤岸、傍晚的菜市场。</textarea></div>
+            <div class="cell"><label>世界观关系网</label>
+              <textarea>店长是唯一知道她生日来历的人；邮差每周三来一次。</textarea></div>
+            <div class="cell wide"><label>其他世界补充</label>
+              <textarea>无法归入前面字段、但需要保持一致的背景。</textarea></div>
+            <div class="cell wide"><label>世界设定补充（原有设定）</label>
+              <textarea>保留原来整段世界观文字；上方细项不会覆盖它。</textarea></div>
+          </div>
+        </section>
+
+        <!-- 08 称呼 = spec section "platform_names"（含 world_adaptation_mode / world_adaptation） -->
+        <section class="deck-panel journal-card" data-chapter-panel="platform">
+          <div class="card-head"><small>08 / PLATFORM</small><h3>平台称呼与世界观适配</h3>
+            <p>角色世界里的平台叫什么；普通群聊可以留空。</p></div>
+          <div class="grid3">
+            <div class="cell"><label>群聊</label><input type="text" value="茶话会"></div>
+            <div class="cell"><label>识屏</label><input type="text" value="水镜"></div>
+            <div class="cell"><label>B站</label><input type="text" value="映像馆"></div>
+            <div class="cell"><label>QQ空间</label><input type="text" value="留言墙"></div>
+            <div class="cell"><label>资料柜</label><input type="text" value="书架"></div>
+          </div>
+          <div class="grid2">
+            <div class="cell wide"><label>平台称呼补充（原有设定）</label>
+              <textarea>保留原来的平台转写文字；逐个平台的对应称呼在上方填写。</textarea></div>
+            <div class="cell wide"><label>世界观适配模式</label>
+              <div class="chips" data-radio>
+                <button class="chip on" type="button">自动</button><button class="chip" type="button">现代日常</button>
+                <button class="chip" type="button">幻想世界</button><button class="chip" type="button">科幻世界</button>
+                <button class="chip" type="button">自定义</button><button class="chip" type="button">关闭</button>
+              </div>
+              <span class="help">自动参考世界设定；选「自定义」时用下方指引说明转写方式。</span></div>
+            <div class="cell wide"><label>世界观适配指引</label>
+              <textarea>日程、资料柜、屏幕和外部平台尽量用书店与海城的说法自然带出；现代日常角色可留空。</textarea></div>
+          </div>
+        </section>
+
+        <!-- ✦ 角色自述 = 创意表达核心；两个入口都接 role-profile-draft 既有 dialog -->
+        <section class="deck-panel selfwrite" data-chapter-panel="selfwrite">
+          <div>
+            <h3>角色自述</h3>
+            <p>用她自己的口吻写一页——一段话、一篇小传、几句对话都行。整理时只补充空白字段，不覆盖已确认内容。</p>
+          </div>
+          <textarea id="selfwriteCanvas" aria-label="角色自述画布" placeholder="我是澄汐，在汐屋看店。要说我最喜欢什么，大概是雨声——不对，也许是雨天来店里躲雨的人……"></textarea>
+          <div class="selfwrite-foot">
+            <small>整理只读人格底稿、当前档案与范围内资料；草稿会先给你过目，不会自动保存。</small>
+            <div class="selfwrite-actions">
+              <button class="button ghost" type="button" data-role-profile-draft-open>从人格底稿整理</button>
+              <button class="button" type="button" data-role-profile-draft-open data-selfwrite-source>✦ 交给整理资料</button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </section>
+
+    <!-- ═══ 相处资料（relationshipProfileConfigWorkspace；私聊限定） ═══ -->
+    <section class="deck-panel" data-pane-panel="relationship">
+      <!-- 群聊对象时替换为空态（沿用现有 scope-note 文案与「选择私聊对象」按钮）：
+      <div class="slot-note" role="status"><strong>关系资料只对私聊用户生效</strong>
+        <span>切换到一个已初始化的私聊对象后，可以分别设置称呼、关系和相处方式；群聊成员不会读取这份资料。</span>
+        <button class="button" type="button">选择私聊对象</button></div>
+      -->
+      <section class="journal-card">
+        <div class="card-head"><small>RELATIONSHIP · 私聊 · 小航</small><h3>这位用户 · 你们的相处</h3>
+          <p>按「当前角色 × 当前用户」保存，不会带到其他用户或群聊；只填对方明确提供的内容。</p></div>
+        <div class="id-card" style="margin-bottom:var(--sp-3)">
+          <div class="id-photo">对方<br>头像位</div>
+          <div class="id-rows">
+            <div class="id-row"><span>称呼</span><input type="text" value="小航" aria-label="对用户的称呼"></div>
+            <div class="id-row"><span>性别</span>
+              <div class="chips" data-radio>
+                <button class="chip" type="button">女</button><button class="chip" type="button">男</button>
+                <button class="chip on" type="button">未说明</button>
+                <input class="chip-input" type="text" placeholder="自定义…" aria-label="自定义用户性别">
+              </div></div>
+            <div class="id-row"><span>生日</span>
+              <div class="date-row">
+                <input type="date" aria-label="用户生日">
+                <label class="mini-toggle"><input type="checkbox">农历</label>
+                <label class="mini-toggle"><input type="checkbox">不确定年份</label>
+              </div></div>
+            <div class="id-row"><span>职业</span><input type="text" value="在读研究生" aria-label="用户职业"></div>
+            <div class="id-row"><span>关系</span>
+              <div class="chips">
+                <button class="chip on" type="button">朋友</button><button class="chip" type="button">搭档</button>
+                <button class="chip" type="button">家人</button><button class="chip" type="button">恋人</button>
+                <input class="chip-input" type="text" value="书店常客" aria-label="自定义关系">
+              </div></div>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="cell"><label>相处方式
+            <button class="sparklet" type="button">✦ 你们最固定的一件小事？</button></label>
+            <textarea>每周来店里两三次，聊聊最近读的书；不追问工作上的压力。</textarea></div>
+          <div class="cell"><label>其他补充 <small>只对当前用户有效</small></label>
+            <textarea>对薄荷过敏，推荐饮料时要避开。</textarea></div>
+        </div>
+      </section>
+    </section>
+
+    <!-- ═══ 人格底稿（product.workspace("persona") 嵌入工作区，位置不变） ═══ -->
+    <section class="deck-panel" data-pane-panel="questionnaire">
+      <div class="slot-note" style="margin-bottom:var(--sp-4)">
+        <strong>人格底稿保持现有「人物设定工坊」工作区</strong>
+        <span>版本历史、草稿与恢复都在嵌入的工作区里完成；这里的排版只为它留出稳定的位置。</span>
+      </div>
+      <div class="iframe-slot">人物设定工坊工作区（嵌入 iframe · product.workspace("persona") 挂载点）</div>
+    </section>
+
+    <!-- ═══ 世界知识（knowledgeConfigWorkspace；import 7 / inject 3 / members 4） ═══ -->
+    <section class="deck-panel" data-pane-panel="knowledge">
+      <div class="know-cards">
+        <section class="journal-card">
+          <div class="card-head"><small>KNOWLEDGE / IMPORT</small><h3>世界书与资料来源</h3>
+            <p>只做增量导入，不覆盖已有条目；关闭导入总闸时，下面几项不起作用。</p></div>
+          <div class="grid2">
+            <div class="cell"><label>允许导入本机知识来源</label>
+              <div class="chips" data-radio><button class="chip on" type="button">开启</button><button class="chip" type="button">关闭</button></div></div>
+            <div class="cell"><label>单次导入条目上限</label><input type="text" inputmode="numeric" value="200"></div>
+            <div class="cell wide"><label>世界书文件路径 <small>换行、逗号或分号分隔；留空按 AstrBot 常规位置查找</small></label>
+              <textarea>data/world_book/haiwu.txt</textarea></div>
+            <div class="cell wide"><label>知识库 / 文档标识 <small>形如 kb:&lt;ID&gt; 或 doc:&lt;ID&gt;:&lt;文档ID&gt;；写错的项会被跳过</small></label>
+              <textarea>kb:haiwu-lore</textarea></div>
+            <div class="cell"><label>单条素材最长字数</label><input type="text" inputmode="numeric" value="1200"></div>
+            <div class="cell"><label>来源数量上限</label><input type="text" inputmode="numeric" value="8"></div>
+            <div class="cell wide"><label>单轮候选字符预算 <small>检索阶段可扫描的字符总量，不是最终注入量</small></label>
+              <input type="text" inputmode="numeric" value="6000"></div>
+          </div>
+        </section>
+        <section class="journal-card">
+          <div class="card-head"><small>KNOWLEDGE / INJECT</small><h3>在对话中引用</h3>
+            <p>只决定是否把已导入的知识作为背景材料；关闭时下面几项不起作用，已导入的内容仍然保留。</p></div>
+          <div class="grid2">
+            <div class="cell"><label>允许在对话中引用知识</label>
+              <div class="chips" data-radio><button class="chip on" type="button">开启</button><button class="chip" type="button">关闭</button></div></div>
+            <div class="cell"><label>每轮最多引用条数</label><input type="text" inputmode="numeric" value="4"></div>
+            <div class="cell wide"><label>每轮引用字符上限</label><input type="text" inputmode="numeric" value="1200"></div>
+          </div>
+        </section>
+        <section class="journal-card">
+          <div class="card-head"><small>KNOWLEDGE / MEMBERS</small><h3>群聊成员线索</h3>
+            <p>只用于群聊中的显示归因，不会写成成员事实，也不改变权限。</p></div>
+          <div class="grid2">
+            <div class="cell"><label>启用成员线索</label>
+              <div class="chips" data-radio><button class="chip on" type="button">开启</button><button class="chip" type="button">关闭</button></div></div>
+            <div class="cell"><label>成员线索匹配别名</label>
+              <div class="chips" data-radio><button class="chip on" type="button">开启</button><button class="chip" type="button">关闭</button></div></div>
+            <div class="cell"><label>每轮成员线索条数</label><input type="text" inputmode="numeric" value="3"></div>
+            <div class="cell"><label>单条成员线索字数</label><input type="text" inputmode="numeric" value="160"></div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+  </div>
+</div>
+</div>
+</div>
+
+<script>
+"use strict";
+/* 预览行为：主题、宽度模拟、双层页签（单卡替换 + 保底高度，视口不跳）、
+   贴纸直达。移植时由 app.js / workbench-page.js 承担。 */
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+$("#themeBtn").addEventListener("click",()=>{
+  const html=document.documentElement;
+  html.dataset.theme=html.dataset.theme==="courtyard"?"night":"courtyard";
+  $("#themeBtn").textContent=html.dataset.theme==="courtyard"?"夜读":"庭院";
+});
+$$("[data-w]").forEach(b=>b.addEventListener("click",()=>{
+  $$("[data-w]").forEach(x=>x.classList.toggle("active",x===b));
+  $("#viewportWrap").dataset.w=b.dataset.w;
+}));
+/* 四页签：只换面板；若视口已越过页签区，吸附回页签顶部，否则原地不动。 */
+function showPane(name){
+  $$(".deck-tabs [data-pane]").forEach(x=>{
+    x.classList.toggle("active",x.dataset.pane===name);
+    x.setAttribute("aria-selected",String(x.dataset.pane===name));
+  });
+  $$(".deck-panels.level1 > .deck-panel").forEach(p=>p.classList.toggle("active",p.dataset.panePanel===name));
+  const tabs=$(".deck-tabs");
+  if(tabs.getBoundingClientRect().top<0)tabs.scrollIntoView({behavior:"instant",block:"start"});
+}
+$$(".deck-tabs [data-pane]").forEach(btn=>btn.addEventListener("click",()=>showPane(btn.dataset.pane)));
+/* 章节词条：单卡替换，不动滚动位置。 */
+function showChapter(id){
+  $$(".section-chips [data-chapter]").forEach(x=>x.classList.toggle("active",x.dataset.chapter===id));
+  $$("[data-chapter-panel]").forEach(p=>p.classList.toggle("active",p.dataset.chapterPanel===id));
+}
+$$(".section-chips [data-chapter]").forEach(btn=>btn.addEventListener("click",()=>showChapter(btn.dataset.chapter)));
+/* 贴纸 / 速览直达：跨页签 + 指定章节。 */
+$$("[data-goto]").forEach(btn=>btn.addEventListener("click",()=>{
+  showPane(btn.dataset.tab);
+  if(btn.dataset.goto)showChapter(btn.dataset.goto);
+}));
+/* 词条交互：data-radio 组单选，其余组可多选切换。 */
+$$(".chips").forEach(group=>{
+  const radio=group.hasAttribute("data-radio");
+  $$(".chip",group).forEach(chip=>chip.addEventListener("click",()=>{
+    if(radio)$$(".chip",group).forEach(x=>x.classList.toggle("on",x===chip));
+    else chip.classList.toggle("on");
+  }));
+});
+</script>
+</body>
+</html>

@@ -160,6 +160,23 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request())["data"]["settings"]["group_air_guard_max_bot_replies"], 5)
         self.assertEqual((await self.request(query="session_id=201_300"))["data"]["settings"]["group_air_guard_max_bot_replies"], 7)
 
+    async def test_expression_learning_settings_use_the_same_group_session_scope(self):
+        await self.start_host()
+        status = await self.request("/expression")
+        self.assertEqual(status["status"], "ok", status)
+        self.assertEqual(status["data"]["group_id"], "expression.learning")
+        self.assertFalse(status["data"]["settings"]["group_learning_enabled"])
+        member = await self.request("/expression", query="session_id=201_300")
+        command = {"operation_key": "group-learning-bounds", "edit_token": member["data"]["edit_token"],
+                   "changes": {"group_learning_enabled": True, "rotation_decay_hours": 48}}
+        saved = await self.request("/expression/configure", query="session_id=201_300", data=command)
+        self.assertEqual(saved["status"], "ok", saved)
+        self.assertTrue(saved["data"]["status"]["settings"]["group_learning_enabled"])
+        replayed = await self.request("/expression/configure", query="session_id=201_300", data=command)
+        self.assertTrue(replayed["data"]["replayed"])
+        self.assertFalse((await self.request("/expression"))["data"]["settings"]["group_learning_enabled"])
+        self.assertFalse((await self.request("/expression", query="session_id=202_300"))["data"]["settings"]["group_learning_enabled"])
+
     async def test_short_fragment_waits_then_merges_only_the_same_member(self):
         config = group_config()
         config["runtime"].update(quiet_seconds=1, maximum_wait_seconds=3)
@@ -170,6 +187,7 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         app = self.controller.session.application
         first = self.group_event(identifier="fragment", text="瓦")
         batch = (await self.controller.receive_claimed(first)).unwrap()
+        first_due = app.flow.row(batch)["due_at"]
         self.assertEqual(datetime.fromisoformat(app.flow.row(batch)["due_at"]), self.clock.now() + timedelta(seconds=15))
         self.clock.advance(timedelta(seconds=1))
         app.notify()
@@ -179,12 +197,12 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         followup = self.group_event(identifier="fragment-followup", text="我想问刚才那道题")
         self.assertEqual((await self.controller.receive_claimed(followup)).unwrap(), batch)
         due = app.flow.row(batch)["due_at"]
-        self.assertEqual(datetime.fromisoformat(due), self.clock.now() + timedelta(seconds=1))
+        self.assertEqual(due, first_due)
         other = (await self.controller.receive_claimed(self.group_event(identifier="other-member", sender="201"))).unwrap()
         self.assertNotEqual(other, batch)
         self.assertEqual((await self.controller.receive_claimed(first)).unwrap(), batch)
         self.assertEqual(app.flow.row(batch)["due_at"], due)
-        self.clock.advance(timedelta(seconds=1))
+        self.clock.advance(timedelta(seconds=14))
         app.notify()
         await wait_for_batch(self.controller.session, batch)
         await wait_for_batch(self.controller.session, other)

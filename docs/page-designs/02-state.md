@@ -1,5 +1,7 @@
 # 02 · 状态页（`life/state`，侧栏「生活」组）
 
+> **2026-10-06 更新：** 已按 [状态子页设计图](status-page-20261006/IMPLEMENTATION.md) 完成 12 个子页面的配置区域并接入小屋：直接编辑、分组控件、相关设置与保存操作条。以下 2026-09-29 记录中的占位页、范围和行号为当时状态；本轮实际呈现与验证以新实施记录为准。
+
 > **状态：部分实施（2026-09-29）。** 视图更名（`life/state`）与侧栏入口已落地；同日的「内容暂清」把**状态视图正文**也换成了占位说明（侧栏入口与视图本身保留；小屋「生活挂历」家具仍承载同一状态工作台，内容仍可达）。`role.state` 的归属迁移、决策 B3 引用卡与 `role.life` 迁日记页**未实施**（原 `renderRoleState` 工作台与 `renderViewPanel` 原文分别保留在 `app.js` 与备份 `data/companion_v2_page_backups/20260929-before-page-clear/`）。本稿取代原「02 · 日程」稿。
 
 代码现状位置：视图分发 `renderViewPanel('schedule')`（`pages/陪伴小屋/app.js:423-427`）→ `renderRoleState()`（`app.js:1059`，挂载点 `#roleStateWorkspace`）→ `mountPanelWorkspaces` 挂 `CompanionStatePage`（`app.js:467`）。模块：`state-page.js`（宿主）、`calendar-editor.js`（日历编辑器）、`state-editor.js` + `state-maintenance.js`（编辑编排与字段库）。
@@ -35,6 +37,8 @@
 
 数据端点：目标目录 `GET page/targets`（`state-page.js:207`）；状态本体 `GET {state_api}`（带 `after_id` 游标，`:221`；15 秒自动刷新，仅读、页面可见、编辑器不在交互，`:194-197`）。
 
+状态看板中的睡眠与忙碌入口会导航到「主动联系 → 开口闸门」，并自动切换到当前闸门判定及其设置区；睡眠作息仍在「日记与生活」维护。
+
 ## 四、配置部分
 
 ### `role.state`（61 项）— window 作用域，立即生效 — **唯一可写归属：本页**（设计变更）
@@ -46,7 +50,7 @@
 | 功能组 | 内容 | 代表字段 |
 | --- | --- | --- |
 | 状态维护 | 后台维护开关与间隔、日程读写开关、**饥饿与健康模拟** | `enabled`、`maintenance_minutes`、`calendar_enabled`、`hunger_enabled`（默认开）、`health_enabled`（默认开） |
-| 自动规划 | 规划开关/时区/范围/细化时间/单次项数/偏好 | `planning_*` 6 项 |
+| 日程与规划 | 角色全局日程开关、连续/编排模式、自动规划参数、年度日历、天气开关/地点/坐标/预警区域/时效与生活偏好；统一由本工作区编辑 | `calendar_enabled`、`schedule_simulation_mode`、`planning_*` |
 | 生理期 | 模拟开关（默认关）、阶段模式（基础三阶段/六阶段）、周期时区、首次定位、波动与不适、表达偏好、六阶段 ×（天数/精力偏移 -50~30/表达引导 ≤512 字） | `cycle_*` 26 项；`cycle.align` 周期校准单独 action（`state-maintenance.js:119-127`） |
 | 心情动力学 | 总闸、更新概率、单轮最大幅度、回归基线半衰期 | `mood_*` 4 项 |
 | 每日巡视 | 开关、巡视时刻、记录保留天数 | `daily_state_patrol_*` 3 项（`humanized.py` 消费） |
@@ -66,6 +70,7 @@
 
 ## 五、边界与空态
 
+- 状态页移除「人格状态归属」独立说明栏，当前角色名称保留在状态看板。配置开关只显示「已开启/已关闭」；看板底部读取真实维护回执，显示排队过期、执行失败、取消或结果未确认，避免把开关开启误报为维护正常。维护关闭或宿主暂停时不显示下次更新时间。
 - 对象无 `state_api`：「该对象没有角色状态」（`state-page.js:163-164`）；授权类错误码清空目录并停表（`:198-203`）；桥超时 `bridge_unavailable`（`:269-279`）。
 - 同一工作区组件挂两处会各自持草稿（`app.js:1177-1187` 注释结论）——本设计把 `#roleStateWorkspace`（state 段）收敛为**只在本页挂载**；contact 段只在主动与联系页。
 

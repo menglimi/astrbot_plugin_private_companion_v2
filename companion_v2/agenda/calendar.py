@@ -5,9 +5,10 @@ import json
 
 from companion_v2.execution.models import TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import OperationRef, VersionRef
-from companion_v2.identity_policy.private_domain import PrivateDomainAccess, source_ref
-from companion_v2.storage.versioned_records import VersionedRecords
+from companion_v2.identity_policy.private_domain import source_ref
+from .calendar_access import CalendarAccess
 from .models import AgendaTarget, Schedule
+from .records import CalendarRecords
 
 
 INSTRUCTION = (
@@ -39,38 +40,50 @@ def event_data(data):
 
 
 class CalendarService:
-    def __init__(self, tasks, agenda):
+    def __init__(self, tasks, agenda, role_state):
         self.tasks, self.runtime, self.agenda = tasks, tasks.runtime, agenda
-        self.access = PrivateDomainAccess(tasks)
-        self.records = VersionedRecords(self.runtime, "calendar")
+        self.access = CalendarAccess(tasks, role_state)
+        self.records = CalendarRecords(self.runtime, tasks.identity)
+
+    def _evidence(self, context, sources, *, at=None):
+        for item in sources:
+            ref = source_ref(item) if isinstance(item, dict) else item
+            if ref.scope != context.scope:
+                raise TaskError("calendar_unavailable", "event is unavailable")
+        self.access.evidence(context, sources, at=at)
 
     def read(self, context, identifier, *, operator=None):
         self.access.check(context, "calendar.read", operator=operator)
         record = self.records.get(context, identifier)
         if record is None:
             raise TaskError("calendar_unavailable", "event is unavailable")
-        self.access.evidence(context, record["sources"])
+        self._evidence(context, record["sources"])
         return record
 
     def command(self, context, *, identifier, action, expected_revision, operation_key,
                 data=None, sources=(), operator=None, planning=None):
         with self.runtime.transaction():
             self.access.check(context, "calendar.write", operator=operator)
-            self.access.evidence(context, sources)
+            self._evidence(context, sources)
             actor = operator.subject if operator else context.role_binding.role
+            current_record = self.records.get(context, identifier)
+            write_kind = (event_data(data)["kind"] if action == "create" else
+                          current_record["kind"] if current_record else "user_report")
+            storage_key = self.records.storage_key_for_change(context, identifier, write_kind)
 
             def transform(current):
                 if action == "create":
-                    if current:
+                    if current or self.records.get(context, identifier):
                         raise TaskError("calendar_exists", "event already exists")
                     fields = event_data(data)
                     return {**fields, **({"planning": planning} if planning is not None else {}),
                         "state": "accepted" if fields["kind"] == "role_plan" else "proposed",
                         "sources": json.loads(encode(sources)), "exceptions": {}, "accepted_by": [],
-                        "changed_by": json.loads(encode(actor)), "reminder_id": None}
+                        "changed_by": json.loads(encode(actor)), "reminder_id": None,
+                        "reminder_context_key": None}
                 if current is None or current["state"] == "cancelled":
                     raise TaskError("calendar_closed", "event is missing or cancelled")
-                self.access.evidence(context, current["sources"])
+                self._evidence(context, current["sources"])
                 result = {**current, "changed_by": json.loads(encode(actor))}
                 if action == "revise":
                     fields = event_data(data)
@@ -122,34 +135,34 @@ class CalendarService:
                 if planning is not None:
                     result["planning"] = planning
                 if current.get("reminder_id") and action not in ("presence", "refine"):
-                    self._cancel_reminder(context, current["reminder_id"], operation_key)
-                    result["reminder_id"] = None
+                    self._cancel_reminder(context, current, operation_key)
+                    result.update(reminder_id=None, reminder_context_key=None)
                 return result
 
             return self.records.change(context, identifier, operation_key=operation_key,
                 expected_revision=expected_revision, parameters=[action, data, sources, actor] + ([planning] if planning is not None else []),
-                transform=transform, at=self.tasks.now())
+                transform=transform, at=self.tasks.now(), storage_key=storage_key)
 
-    def inventory(self, context, *, after_id="", limit=30, operator=None):
+    def inventory(self, context, *, after_id="", limit=30, operator=None, kinds=None):
         self.access.check(context, "calendar.read", operator=operator)
-        rows = self.records.list(context, after_id=after_id, limit=limit)
+        rows = self.records.list(context, after_id=after_id, limit=limit, kinds=kinds)
         items, skipped = [], 0
         for row in rows:
             try:
-                self.access.evidence(context, row["sources"])
+                self._evidence(context, row["sources"])
                 items.append(row)
             except TaskError:
                 skipped += 1
         return {"items": items, "skipped": skipped,
                 "next_cursor": rows[-1]["id"] if len(rows) == limit else None}
 
-    def occurrences(self, context, *, start, end, operator=None):
+    def occurrences(self, context, *, start, end, operator=None, kinds=None):
         if not start < end or end - start > timedelta(days=31):
             raise TaskError("calendar_window_invalid", "query a positive window no longer than 31 days")
         self.access.check(context, "calendar.read", operator=operator)
         items, cursor, skipped, scanned = [], "", 0, 0
         while scanned < 200:
-            page = self.inventory(context, after_id=cursor, limit=50, operator=operator)
+            page = self.inventory(context, after_id=cursor, limit=50, operator=operator, kinds=kinds)
             skipped += page["skipped"]
             for row in page["items"]:
                 if row["state"] == "cancelled":
@@ -192,7 +205,14 @@ class CalendarService:
         identifier = "calendar-reminder-" + digest([context.key, key])
         return OperationRef(identifier, "agenda", context.scope, VersionRef(identifier, 1), identifier)
 
-    def _cancel_reminder(self, context, identifier, key):
+    def _cancel_reminder(self, context, record, key):
+        owner_context = record.get("reminder_context_key")
+        storage_key = self.records.storage_key_for(context, record["id"])
+        if ((owner_context is not None and owner_context != context.key)
+                or (owner_context is None and storage_key == self.records.role_key(context))):
+            raise TaskError("calendar_reminder_context_mismatch",
+                            "change this reminder from the conversation that created it")
+        identifier = record["reminder_id"]
         reminder = self.agenda.repository.reminder(identifier)
         if reminder and reminder.state not in ("cancelled", "completed"):
             require(self.agenda.change_reminder(context.actor, target=self._target(context), reminder_id=identifier, action="cancel",
@@ -202,10 +222,13 @@ class CalendarService:
     def remind(self, context, *, identifier, expected_revision, operation_key, sequence=0, operator=None):
         with self.runtime.transaction():
             self.access.check(context, "calendar.write", operator=operator)
+            current_record = self.records.get(context, identifier)
+            write_kind = current_record["kind"] if current_record else "user_report"
+            storage_key = self.records.storage_key_for_change(context, identifier, write_kind)
             def transform(current):
                 if current is None or current["state"] != "accepted":
                     raise TaskError("calendar_not_accepted", "only accepted events can schedule a reminder")
-                self.access.evidence(context, current["sources"])
+                self._evidence(context, current["sources"])
                 due = Schedule.restore(current["schedule"]).at(sequence)
                 if str(sequence) in current["exceptions"]:
                     value = current["exceptions"][str(sequence)]
@@ -213,27 +236,29 @@ class CalendarService:
                 if due is None or due <= self.tasks.now():
                     raise TaskError("calendar_reminder_past", "choose an existing future occurrence")
                 if current.get("reminder_id"):
-                    self._cancel_reminder(context, current["reminder_id"], operation_key)
+                    self._cancel_reminder(context, current, operation_key)
                 rid = "calendar-reminder-" + digest([context.key, operation_key])
                 require(self.agenda.create_reminder(context.actor, target=self._target(context), reminder_id=rid,
                     message="日历提醒：" + current["title"], schedule=Schedule(due, current["schedule"]["timezone_name"]),
                     operation=self._operation(context, operation_key), expected_role_revision=context.role_binding.revision,
                     observed_at=self.tasks.now()))
-                return {**current, "reminder_id": rid}
+                return {**current, "reminder_id": rid, "reminder_context_key": context.key}
             return self.records.change(context, identifier, operation_key=operation_key,
                 expected_revision=expected_revision, parameters=["remind", sequence, operator.subject if operator else None],
-                transform=transform, at=self.tasks.now())
+                transform=transform, at=self.tasks.now(), storage_key=storage_key)
 
     def validate_reminder(self, context, reminder_id, at):
         if not reminder_id.startswith("calendar-reminder-"):
             return
-        from companion_v2.storage.versioned_records import owner_key
-        rows = self.runtime.read_all("SELECT record_json FROM calendar_records WHERE owner_key = ? AND json_extract(record_json, '$.reminder_id') = ?",
-                                     (owner_key(context), reminder_id))
+        rows = self.runtime.read_all("""SELECT record_json FROM calendar_records
+            WHERE owner_key IN (?, ?) AND json_extract(record_json, '$.reminder_id') = ?""",
+            (self.records.role_key(context), self.records.conversation_key(context), reminder_id))
         if len(rows) != 1:
             raise TaskError("calendar_reminder_changed", "original event no longer owns this reminder")
         record = json.loads(rows[0]["record_json"])
+        if record.get("reminder_context_key", context.key) != context.key:
+            raise TaskError("calendar_reminder_changed", "original reminder belongs to another conversation")
         self.access.check(context, "calendar.read", at=at)
-        self.access.evidence(context, record["sources"], at=at)
+        self._evidence(context, record["sources"], at=at)
         if record["state"] != "accepted":
             raise TaskError("calendar_reminder_changed", "original event is no longer accepted")

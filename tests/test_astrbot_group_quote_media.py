@@ -8,13 +8,23 @@ from astrbot_host.audio.loader import load_native_audio
 from astrbot_host.media import load_native_image
 from astrbot_host.video.loader import load_native_video
 from companion_v2.adapters.astrbot.group_quotes import read_group_quote
+from companion_v2.execution.models import TaskContext
+import json
 from tests.animation_support import animation_bytes
 from tests.audio_support import audio_bytes
 from tests.forward_support import node_raw
 from tests.group_quote_media_support import GroupQuoteMediaFixture, Forward, Reply, FakeRecord, FakeVideo
-from tests.group_media_support import sdk_image
+from tests.group_media_support import Plain, sdk_image
+from tests.staging_bootstrap_support import wait_for_batch
 from tests.test_conversation_images import image_bytes
 from tests.video_support import video_bytes
+
+
+def current_request_text(wire):
+    message = next(item for item in wire["messages"] if item["role"] == "user")
+    materials = json.loads(message["content"])["materials"]
+    return "\n".join(item["text"] for item in materials
+                     if item["content_class"] == "current_user_request")
 
 
 class AstrBotGroupQuoteMediaTests(GroupQuoteMediaFixture, unittest.IsolatedAsyncioTestCase):
@@ -62,19 +72,45 @@ class AstrBotGroupQuoteMediaTests(GroupQuoteMediaFixture, unittest.IsolatedAsync
         loader.assert_not_awaited()
         self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0], 0)
 
-    async def test_missing_decoder_or_invalid_nested_tree_fails_before_images(self):
+    async def test_missing_quote_media_needs_user_text_before_fallback(self):
         await self.start_host()
         loader = AsyncMock(side_effect=AssertionError("freeze and validate before downloading"))
         bridge = self.controller.session.bridge.groups
         bridge.quote_loader = partial(read_group_quote, reverse_api_type=type(self.api), image_loader=loader)
         for media in (FakeRecord(), FakeVideo()):
             self.store(parts=[sdk_image(), media])
+            before_inputs = self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0]
+            before_calls = len(self.native.provider.client.state.calls)
             result = await self.controller.receive_claimed(self.media_event([Reply(id="345")]))
+            self.assertFalse(result.is_success)
             self.assertEqual(result.failure.code, "host_quote_unsupported")
+            self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0], before_inputs)
+            self.assertEqual(len(self.native.provider.client.state.calls), before_calls)
+
+            result = await self.controller.receive_claimed(
+                self.media_event([Reply(id="345"), Plain("这条引用的附件无法读取，请按现有文字回答")]))
+            self.assertTrue(result.is_success, result.failure)
+            batch = result.unwrap()
+            await wait_for_batch(self.controller.session, batch)
+            context = TaskContext.restore(json.loads(self.app.messages.batch(batch)["context_json"]))
+            captured = self.input(context, batch)
+            self.assertEqual(type(captured).__name__, "InboundConversationEvent")
+            current_text = current_request_text(self.native.provider.client.state.calls[-1][0])
+            self.assertIn("[引用消息不可用]", current_text)
+            self.assertIn("这条引用的附件无法读取", current_text)
         self.store(parts=[sdk_image(), Forward(id="group-quoted-forward")], nodes=[node_raw()])
         self.records["345"]["message"][1]["data"]["content"][0]["message"].append({"type": "reply", "data": {"id": "100"}})
-        result = await self.controller.receive_claimed(self.media_event([Reply(id="345")]))
-        self.assertEqual(result.failure.code, "host_forward_unsupported")
+        result = await self.controller.receive_claimed(
+            self.media_event([Reply(id="345"), Plain("请基于可见上下文回应这条转发")]))
+        self.assertTrue(result.is_success, result.failure)
+        batch = result.unwrap()
+        await wait_for_batch(self.controller.session, batch)
+        context = TaskContext.restore(json.loads(self.app.messages.batch(batch)["context_json"]))
+        captured = self.input(context, batch)
+        self.assertEqual(type(captured).__name__, "InboundConversationEvent")
+        current_text = current_request_text(self.native.provider.client.state.calls[-1][0])
+        self.assertIn("[引用消息不可用]", current_text)
+        self.assertIn("请基于可见上下文回应这条转发", current_text)
         loader.assert_not_awaited()
 
     async def test_connection_replacement_during_direct_or_node_media_stops_capture(self):

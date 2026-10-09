@@ -1,4 +1,4 @@
-/* Browser acceptance for the action matrix. Uses a synthetic read-only AstrBot bridge. */
+/* Browser acceptance for the action workspace; Qzone write controls are not exercised. */
 "use strict";
 const assert=require("node:assert/strict");
 const fs=require("node:fs/promises");
@@ -23,7 +23,7 @@ function syntheticBridge(){
       }]};
       throw new Error("unexpected read: "+endpoint);
     },
-    apiPost:async()=>{throw new Error("action overview must remain read-only");},
+    apiPost:async()=>{throw new Error("unexpected API write in browser acceptance");},
   };
 }
 
@@ -48,51 +48,39 @@ async function run(){
   }).then(clear=>assert.equal(clear,true,"configuration panel must clear the navigation rail"));
   try{
     await page.goto(pathToFileURL(pagePath).href+"#manage/action");
-    const matrix=page.locator(".action-page");
-    await matrix.waitFor();
-    await page.locator('.action-route-node[data-state="degraded"]').waitFor();
-    const firstCard=page.locator(".action-config-card").first();
-    await page.emulateMedia({reducedMotion:"no-preference"});
-    assert.equal(await firstCard.evaluate(element=>getComputedStyle(element).animationName),"action-arrive");
-    await page.emulateMedia({reducedMotion:"reduce"});
-    assert.equal(await firstCard.evaluate(element=>getComputedStyle(element).animationName),"none");
-    await page.evaluate(()=>{document.documentElement.dataset.motion="off";});
-    assert.equal(await firstCard.evaluate(element=>getComputedStyle(element).animationName),"none");
-    await page.evaluate(()=>{document.documentElement.dataset.motion="full";});
-    checks.push("入场动画按正常偏好播放，系统减少动态和页面关闭动效时停止");
-    assert.equal(await page.locator(".action-route-node").count(),3);
-    assert.match(await matrix.innerText(),/01\s*\/\s*03/);
-    assert.match(await matrix.innerText(),/状态全部正常|项需要留意/);
-    assert.equal(await page.locator(".action-config-card").count(),3);
+    const actionPage=page.locator(".action-page");
+    await actionPage.waitFor();
+    await page.locator("#actionQzoneBody").waitFor();
+    await page.locator('.action-capability-row[data-state="degraded"]').waitFor();
+    const capabilities=page.locator(".action-capability-row");
+    assert.equal(await capabilities.count(),3);
+    assert.equal(await page.locator('.action-capability-row[data-state="connected"]').count(),1);
+    assert.equal(await page.locator('.action-capability-row[data-state="missing"]').count(),1);
+    assert.equal(await page.locator('.action-capability-row[data-state="degraded"]').count(),1);
+    assert.equal(await page.locator(".action-overview, .action-config-card").count(),0);
+    assert.match(await page.locator(".action-capabilities-count").innerText(),/1\s*\/\s*3 已接入/);
+    assert.equal(await actionPage.evaluate(root=>Boolean(root.querySelector("#action-qzone").compareDocumentPosition(root.querySelector(".action-capabilities"))&Node.DOCUMENT_POSITION_FOLLOWING)),true);
     await checkWidth();
     await capture("desktop");
-    checks.push("提供方清单映射三项状态，显示连接计数与三张配置归属卡片");
-
-    const reality=page.locator('.action-route-node[data-action-focus="reality"]');
-    await reality.click();
-    const realityCard=page.locator("#action-config-reality");
-    await realityCard.waitFor({state:"visible"});
-    assert.equal(await realityCard.evaluate(el=>el.classList.contains("is-focused")),true);
-    assert.equal(await page.locator("#action-config-reality .action-settings-button").evaluate(el=>el===document.activeElement),true);
-    checks.push("状态节点滚动到对应配置卡片，并将键盘焦点交给设置入口");
+    checks.push("QQ 空间工作区位于首位，三个外接能力按真实状态呈现");
 
     await page.locator("#action-config-reality .action-provider-button").click();
     await page.locator("#detailDialog[open]").waitFor();
     assert.match(await page.locator("#dialogContent").innerText(),/等待设备授权/);
     await page.keyboard.press("Escape");
-    checks.push("拓展详情从真实能力清单呈现状态与原因");
+    checks.push("能力详情从提供方清单呈现状态与原因");
 
     for(const [width,height] of [[960,900],[390,844],[320,740]]){
       await page.setViewportSize({width,height});
       await checkWidth();
       await checkPanelClearance();
-      const wrappedTitles=await matrix.locator(".action-config-card h3").evaluateAll(elements=>elements
+      const wrappedTitles=await capabilities.locator("h3").evaluateAll(elements=>elements
         .filter(element=>element.getBoundingClientRect().height>parseFloat(getComputedStyle(element).lineHeight)+2)
         .map(element=>element.textContent.trim()));
-      assert.deepEqual(wrappedTitles,[],"short action titles should stay on one line");
+      assert.deepEqual(wrappedTitles,[],"capability titles should stay on one line");
       await capture("width-"+width);
     }
-    checks.push("960、390、320 像素下无横向溢出，平板面板不被导航栏遮挡");
+    checks.push("960、390、320 像素下无横向溢出，能力名称完整显示");
 
     await page.setViewportSize({width:1366,height:1000});
     await page.locator("#action-config-game .action-settings-button").click();

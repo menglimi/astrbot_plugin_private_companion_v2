@@ -13,9 +13,9 @@ from companion_v2.sources.models import SourceRecord
 from companion_v2.role_work.models import RoleActivity, RoleActivityState as State
 from companion_v2.role_work.work_models import RoleWorkSpec
 from companion_v2.role_work.journal.models import JournalKind
-from companion_v2.role_work.journal.scheduling import next_daily
 
 from .configuration import GROUP, target_for, values
+from .scheduling import next_bedtime
 
 
 class RoleLifeRuntime:
@@ -128,7 +128,8 @@ class RoleLifeRuntime:
             require(self.app.journal_schedule.register_daily(self.schedule_id, self.context, event,
                 role_instruction=self.instruction, timezone=settings["timezone"], local_time=settings["diary_time"]))
         if settings["sleep_enabled"]:
-            self._next_sleep = next_daily(self.app.now(), settings["sleep_timezone"], time.fromisoformat(settings["sleep_time"]))
+            self._next_sleep = next_bedtime(self.app.now(), self.owner, settings["sleep_timezone"],
+                time.fromisoformat(settings["sleep_time"]), settings["sleep_variation_minutes"])
             self._next_wake = self._next_sleep + timedelta(minutes=settings["sleep_minutes"])
         require(self.app.configuration.report_application(self.context.actor, snapshot=snapshot,
             generation=generation, succeeded=True, observed_at=self.app.now()))
@@ -298,7 +299,8 @@ class RoleLifeRuntime:
                 zone = self.settings["sleep_timezone"]
                 local_now = now.astimezone(ZoneInfo(zone))
                 due_day = self._next_sleep.astimezone(ZoneInfo(zone)).date()
-                self._next_sleep = next_daily(now + timedelta(microseconds=1), zone, time.fromisoformat(self.settings["sleep_time"]))
+                self._next_sleep = next_bedtime(now + timedelta(microseconds=1), self.owner, zone,
+                    time.fromisoformat(self.settings["sleep_time"]), self.settings["sleep_variation_minutes"])
                 self._next_wake = self._next_sleep + timedelta(minutes=self.settings["sleep_minutes"])
                 if due_day != local_now.date() and local_now.time().replace(tzinfo=None) < time.fromisoformat(self.settings["sleep_time"]):
                     return

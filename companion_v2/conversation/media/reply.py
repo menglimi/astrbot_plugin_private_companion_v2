@@ -16,6 +16,8 @@ from .models import MAX_INPUT_IMAGES
 OWNER = "conversation.reply_images"
 INSTRUCTION = (
     "需要给用户附上本轮已经提供的原图时，可在最终 JSON 增加 images 数组，按发送顺序填写 sendable_image 句柄。"
+    "轻松、即时且图片本身足以回应时，可以只发送图片：text 设为空字符串、claims 设为空数组，并填写 images。"
+    "文字仍有必要时应完整自然表达，不要为了只发图而漏掉问题答案、安慰或重要信息。"
     "不需要附图时省略 images 或使用空数组。只选择任务需要的图片，避免无意义地把收到的图片全部发回。"
     "这会随回复发送已提供的完整原件；需要生成或编辑时先调用本轮已授权图片工具，再选择实际返回的产物。"
     "generated 图片保留工具生成或编辑归因；动画发送原文件，模型所见仍只是列出的抽帧。"
@@ -30,14 +32,21 @@ class ImageReplyDraft(ModelDraft):
     images: tuple[SourceRef, ...] = ()
 
     def __post_init__(self):
-        super().__post_init__()
+        if not isinstance(self.text, str) or (self.text == "" and self.claims):
+            raise TaskError("reply_images_invalid", "image-only replies require empty text and claims")
+        if self.text:
+            super().__post_init__()
         if (not isinstance(self.images, tuple) or not 1 <= len(self.images) <= MAX_INPUT_IMAGES
                 or any(not isinstance(i, SourceRef) for i in self.images) or len(set(self.images)) != len(self.images)):
             raise TaskError("reply_images_invalid", "reply images require unique original image references")
 
 
-def reply_manifest(batch_id, call_id, parts, images=(), *, image_position="after_text"):
+def reply_manifest(batch_id, call_id, parts, images=(), *, image_position="after_text", action="text"):
+    if action not in ("text", "image", "voice_only", "poke", "silent"):
+        raise ValueError("reply manifest action is unsupported")
     items = [batch_id, call_id, parts]
+    if action != "text":
+        items.append({"action": action})
     if images:
         items.extend((VERSION, [image_manifest(i) for i in images]))
         if image_position != "after_text":
@@ -137,7 +146,8 @@ class ConversationReplyImages:
                     or any(payload_hash(p["text"], images if p["part_id"] == data["part_id"] else (),
                                         image_position=image_position) != p["payload_hash"] for p in parts)
                     or reply_manifest(batch["batch_id"], batch["call_id"], tuple(p["text"] for p in parts), images,
-                                      image_position=image_position) != batch["manifest_hash"]):
+                                      image_position=image_position,
+                                      action=batch["presentation_action"]) != batch["manifest_hash"]):
                 raise ValueError("changed manifest")
         except TaskError:
             raise

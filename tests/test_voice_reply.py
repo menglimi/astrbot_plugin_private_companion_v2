@@ -10,7 +10,8 @@ import unittest
 
 from companion_v2.conversation.segmentation import LLM_SEGMENT_MARKER, SegmentationPolicy
 from companion_v2.conversation.voice_reply import (
-    VoiceReplyDelivery, VoiceReplyPolicy, capability_instruction, eligible, planned_speech, separate_spoken, speech_decisions,
+    VoiceReplyDelivery, VoiceReplyPolicy, capability_instruction, eligible, planned_speech,
+    requested_voice_language, separate_spoken, speech_decisions, voice_policy_for_turn,
 )
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectKind, SubjectRef
 from companion_v2.storage.runtime import StorageRuntime
@@ -40,12 +41,43 @@ class VoicePolicyTests(unittest.TestCase):
         self.assertIn("退回文字", instruction)
         self.assertNotIn("private-provider", instruction)
 
+    def test_turn_language_override_is_explicit_temporary_and_selects_matching_provider(self):
+        saved = VoiceReplyPolicy(language="zh", provider_id="fallback", en_provider_id="english-tts",
+                                 ja_provider_id="japanese-tts")
+        for text, language, provider in (
+            ("这次请用英语回答我", "en", "english-tts"),
+            ("请用日语朗读", "ja", "japanese-tts"),
+            ("Please reply in English", "en", "english-tts"),
+            ("英語で答えてください", "en", "english-tts"),
+        ):
+            with self.subTest(text=text):
+                current = voice_policy_for_turn(saved, text)
+                self.assertEqual((current.language, current.provider_for_language()), (language, provider))
+        self.assertEqual(saved.language, "zh")
+
+    def test_turn_language_override_ignores_negation_and_translation_questions(self):
+        for text in (
+            "不要用英语回答",
+            "Don't reply in English",
+            "帮我翻译成英语",
+            "Translate this sentence into Japanese",
+            "英语单词怎么读",
+            "请解释‘用英语回答’是什么意思",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(requested_voice_language(text), "")
+
+    def test_translation_prompt_pairs_each_foreign_span_with_a_complete_chinese_translation(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="en", foreign_text_mode="translation")
+        self.assertIn("每个语音标签后紧接", policy.instruction)
+        self.assertIn("完整对应", policy.instruction)
+
     def test_model_tag_translation_keeps_spoken_spans_with_explicit_boundaries(self):
         policy = VoiceReplyPolicy(trigger_mode="adaptive", language="ja", foreign_text_mode="translation")
         source = (f"<pc_tts>こんにちは。</pc_tts>你好。\n{LLM_SEGMENT_MARKER}\n"
                   "<pc_tts>またね。</pc_tts>再见。")
         visible, spans = separate_spoken(source, policy)
-        parts = SegmentationPolicy(enabled=True).parts(visible)
+        parts = SegmentationPolicy(enabled=True, llm_controlled=True).parts(visible)
         self.assertEqual(parts, ("你好。\n", "再见。"))
         self.assertEqual(planned_speech(visible, parts, spans, policy), ("こんにちは。", "またね。"))
         self.assertEqual(planned_speech(visible, parts, spans, replace(policy, segment_mode="last")),
@@ -55,20 +87,31 @@ class VoicePolicyTests(unittest.TestCase):
         policy = VoiceReplyPolicy(generation_mode="model_tag", language="en", foreign_text_mode="translation")
         source = f"<pc_tts>Hello.</pc_tts>\n{LLM_SEGMENT_MARKER}"
         visible, spans = separate_spoken(source, policy)
-        self.assertEqual(SegmentationPolicy(enabled=True).parts(visible), ("Hello.\n",))
+        self.assertEqual(SegmentationPolicy(enabled=True, llm_controlled=True).parts(visible), ("Hello.\n",))
         self.assertEqual(planned_speech(visible, ("Hello.\n",), spans, policy), ("Hello.",))
+        visible, _ = separate_spoken("<pc_tts>Hello.</pc_tts>English continuation.", policy)
+        self.assertEqual(visible, "Hello.English continuation.")
+        visible, _ = separate_spoken("<pc_tts>Hello.</pc_tts>こんにちは。", policy)
+        self.assertEqual(visible, "Hello.こんにちは。")
+        visible, _ = separate_spoken("<pc_tts>Hello.</pc_tts>你好。", policy)
+        self.assertEqual(visible, "你好。")
         source = f"stray </pc_tts>\n{LLM_SEGMENT_MARKER}\n<pc_tts>Goodbye.</pc_tts>再见。"
         visible, spans = separate_spoken(source, policy)
         self.assertNotIn("<pc_tts>", visible)
-        self.assertEqual(planned_speech(visible, SegmentationPolicy(enabled=True).parts(visible), spans, policy)[-1],
-                         "Goodbye.")
+        self.assertEqual(planned_speech(visible, SegmentationPolicy(enabled=True, llm_controlled=True).parts(visible),
+                                        spans, policy)[-1], "Goodbye.")
+
+    def test_voice_wrappers_are_removed_when_voice_is_inactive_and_malformed_tags_are_unwrapped(self):
+        source = "<pc_tts locale='en'>Hello.</pc_tts> &#x3C;pc_tts&#x3E;再见。&#x3C;/pc_tts&#x3E;"
+        self.assertEqual(separate_spoken(source, None), ("Hello. 再见。", ()))
+        self.assertEqual(separate_spoken("<pc_tts>普通正文。", VoiceReplyPolicy()), ("普通正文。", ()))
 
     def test_translation_fallback_is_per_tag_even_when_earlier_tag_has_translation(self):
         policy = VoiceReplyPolicy(generation_mode="model_tag", language="en", foreign_text_mode="translation")
         source = ("<pc_tts>Hello.</pc_tts>你好。\n" + LLM_SEGMENT_MARKER +
                   "\n<pc_tts>Goodbye.</pc_tts>")
         visible, spans = separate_spoken(source, policy)
-        parts = SegmentationPolicy(enabled=True).parts(visible)
+        parts = SegmentationPolicy(enabled=True, llm_controlled=True).parts(visible)
         self.assertEqual(parts, ("你好。\n", "Goodbye."))
         self.assertEqual(planned_speech(visible, parts, spans, policy), ("Hello.", "Goodbye."))
 

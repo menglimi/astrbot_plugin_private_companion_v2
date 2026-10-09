@@ -1,0 +1,41 @@
+"""Group trigger facts from the authenticated native message components."""
+
+from collections.abc import Mapping
+
+
+def group_trigger_facts(event, account_id):
+    message = event.message_obj
+    raw = getattr(message, "raw_message", None)
+    segments = raw.get("message") if isinstance(raw, Mapping) else None
+    parts = segments if isinstance(segments, list) else getattr(message, "message", ())
+    mentioned, mentions_others, mentions_all, has_image, replies = False, False, False, False, []
+    for part in parts:
+        if isinstance(part, Mapping):
+            kind, data = part.get("type"), part.get("data", {})
+            if not isinstance(data, Mapping):
+                continue
+            qq, identifier = data.get("qq"), data.get("id")
+        else:
+            kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
+            qq, identifier = getattr(part, "qq", None), getattr(part, "id", None)
+        if kind in ("at", "At"):
+            if str(qq) == account_id:
+                mentioned = True
+            elif str(qq) == "all":
+                mentions_all = True
+            else:
+                mentions_others = True
+        elif kind in ("reply", "Reply") and identifier is not None:
+            replies.append(str(identifier))
+        elif kind in ("image", "Image"):
+            has_image = True
+    quoted_bot = any(
+        getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Reply"
+        and str(getattr(part, "id", "")) in replies
+        and str(getattr(part, "sender_id", "")) == account_id
+        for part in getattr(message, "message", ()))
+    # is_wake also means an event listener activated, so it is not a reply trigger.
+    return {"mentioned": mentioned,
+            "native_wakeup": getattr(event, "is_at_or_wake_command", False) is True,
+            "mentions_others": mentions_others, "reply_ids": tuple(dict.fromkeys(replies)),
+            "mentions_all": mentions_all, "quoted_bot": quoted_bot, "has_image": has_image}

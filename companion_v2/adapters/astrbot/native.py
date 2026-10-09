@@ -7,6 +7,8 @@ Async host reads finish before the SQLite intake transaction starts.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -20,9 +22,42 @@ from companion_v2.conversation.quotes.models import CapturedQuote, message_numbe
 from companion_v2.conversation.forwards.models import CapturedForward, ForwardIntakePolicy, fits_forwards
 from companion_v2.conversation.media.audio.models import CapturedAudio, MAX_INPUT_AUDIOS, fits_audio_budget
 from companion_v2.conversation.media.video.models import CapturedVideo, MAX_VIDEOS, fits_video_budget
+from .files import file_locator, prepare_file_text, MAX_FILES
 
 
 SUPPORTED_VERSION = "4.27.2"
+NATIVE_LOOKUP_TIMEOUT_SECONDS = 20
+NATIVE_LOOKUP_SLOW_SECONDS = 2
+NATIVE_LOOKUP_STAGES = {
+    "session_directory": "会话目录",
+    "conversation_id": "当前会话编号",
+    "conversation": "会话人格绑定",
+    "session_settings": "会话服务设置",
+    "persona": "会话生效人格",
+    "conversation_verify": "会话切换校验",
+}
+logger = logging.getLogger(__name__)
+
+
+async def bounded_native_lookup(awaitable, *, operation=""):
+    started = time.perf_counter()
+    try:
+        result = await asyncio.wait_for(awaitable, timeout=NATIVE_LOOKUP_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as error:
+        stage = NATIVE_LOOKUP_STAGES.get(operation)
+        code = "host_native_lookup_timeout" + ("__" + operation if stage else "")
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        timeout_ms = round(NATIVE_LOOKUP_TIMEOUT_SECONDS * 1000)
+        logger.warning("AstrBot native lookup timed out operation=%s elapsed_ms=%d timeout_ms=%d timeout_overrun_ms=%d",
+                       operation or "unknown", elapsed_ms, timeout_ms, max(0, elapsed_ms - timeout_ms))
+        raise TaskError(code, "AstrBot 读取" + (stage or "原生状态") + "超时，未取得可验证的结果。") from error
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
+    if elapsed_ms >= NATIVE_LOOKUP_SLOW_SECONDS * 1000:
+        logger.warning("AstrBot native lookup slow operation=%s elapsed_ms=%d timeout_ms=%d outcome=ok",
+                       operation or "unknown", elapsed_ms, round(NATIVE_LOOKUP_TIMEOUT_SECONDS * 1000))
+    return result
+
+
 MEDIA_PREPARE_TIMEOUT = 25
 
 
@@ -166,7 +201,7 @@ class NativePrivateBridge:
                  accounts: tuple[HostAccount, ...], personas: tuple[HostPersona, ...], image_type=None, image_loader=None,
                  reply_type=None, quote_loader=None, forward_type=None, forward_loader=None, now=None,
                  audio_type=None, audio_loader=None, component_reader=None, video_type=None, video_loader=None,
-                 forward_intake=None):
+                 forward_intake=None, file_type=None, file_loader=None, file_settings=None):
         check_version(version)
         self.context, self.event_type, self.identities = context, event_type, identities
         self.installation_id, self.host_id = installation_id, host_id
@@ -199,6 +234,12 @@ class NativePrivateBridge:
                 not isinstance(video_type, type) or not callable(video_loader))):
             raise ValueError("video intake needs an explicit native type and a trusted loader")
         self.video_type, self.video_loader = video_type, video_loader
+        if (file_type is None) != (file_loader is None) or (file_type is not None and (
+                not isinstance(file_type, type) or not callable(file_loader))):
+            raise ValueError("file intake needs an explicit native type and a trusted loader")
+        if file_settings is not None and not callable(file_settings):
+            raise ValueError("file preferences must come from trusted host assembly")
+        self.file_type, self.file_loader, self.file_settings = file_type, file_loader, file_settings
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.accounts = {(a.platform_id, a.self_id): a for a in accounts}
         self.personas = {(p.bot_id, p.persona_id): p for p in personas}
@@ -209,8 +250,11 @@ class NativePrivateBridge:
         self.platforms = {}
         for account in accounts:
             platform = context.get_platform_inst(account.platform_id)
-            if platform is None or platform.meta().name != "aiocqhttp" or platform.meta().id != account.platform_id:
-                raise ValueError("account projection requires its current OneBot platform")
+            if platform is None:
+                raise TaskError("host_platform_unavailable", "the configured OneBot platform has not loaded")
+            meta = platform.meta()
+            if meta.name != "aiocqhttp" or meta.id != account.platform_id:
+                raise TaskError("host_platform_changed", "the configured platform no longer matches its OneBot account")
             self.platforms[account.platform_id] = (platform, platform.get_client())
         self.ports = NativeInputPorts()
 
@@ -251,15 +295,17 @@ class NativePrivateBridge:
         one role's voice to another conversation.
         """
         manager = self.context.conversation_manager
-        cid = await manager.get_curr_conversation_id(umo)
-        conversation = await manager.get_conversation(umo, cid, create_if_not_exists=False) if cid is not None else None
+        cid = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
+        conversation = (await bounded_native_lookup(
+            manager.get_conversation(umo, cid, create_if_not_exists=False), operation="conversation")
+            if cid is not None else None)
         if cid is not None and conversation is None:
             raise TaskError("host_conversation_missing", "selected host conversation is unavailable")
         settings = self.context.get_config(umo=umo).get("provider_settings", {})
-        selected, persona, _, special = await self.context.persona_manager.resolve_selected_persona(
+        selected, persona, _, special = await bounded_native_lookup(self.context.persona_manager.resolve_selected_persona(
             umo=umo, conversation_persona_id=conversation.persona_id if conversation is not None else None,
-            platform_name="aiocqhttp", provider_settings=settings)
-        if await manager.get_curr_conversation_id(umo) != cid:
+            platform_name="aiocqhttp", provider_settings=settings), operation="persona")
+        if await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_verify") != cid:
             raise TaskError("host_conversation_changed", "host conversation changed during capture")
         return cid, selected, persona, special
 
@@ -275,7 +321,7 @@ class NativePrivateBridge:
             raise TaskError("host_persona_changed", "persona prompt/examples changed; refresh the trusted projection")
         return self._conversation_key(umo, cid), projection.role, instruction
 
-    async def persona_snapshot(self, scope):
+    async def persona_snapshot(self, scope, *, persona_id=None):
         """The host persona text behind one private scope, for the workshop page.
 
         Deliberately narrower than ``_role``: it neither compares the text against
@@ -293,7 +339,26 @@ class NativePrivateBridge:
         """
         account = self.account(scope)
         sender = account_number(scope.native_scope_id)
-        _, selected, persona, _ = await self._selected_persona(account, self._umo(account.platform_id, sender))
+        umo = self._umo(account.platform_id, sender)
+        conversation_id, selected, persona, _ = await self._selected_persona(account, umo)
+        if persona_id is not None:
+            if type(persona_id) is not str or not persona_id.strip() or persona_id == "[%None]":
+                raise TaskError("host_persona_invalid", "a concrete AstrBot persona must be selected")
+            manager = self.context.persona_manager
+            resolver = getattr(manager, "get_persona_v3_by_id", None)
+            if callable(resolver):
+                persona = resolver(persona_id)
+            else:
+                persona = next((item for item in getattr(manager, "personas_v3", ())
+                                if isinstance(item, dict) and item.get("name") == persona_id), None)
+            selected = persona_id
+            if persona is None:
+                raise TaskError("host_persona_unavailable", "the selected AstrBot persona no longer exists")
+            conversation_manager = self.context.conversation_manager
+            current_id = await bounded_native_lookup(conversation_manager.get_curr_conversation_id(umo),
+                                                     operation="conversation_verify")
+            if current_id != conversation_id:
+                raise TaskError("host_conversation_changed", "host conversation changed during persona lookup")
         if persona is not None and persona.get("name") != selected:
             raise TaskError("host_persona_invalid", "host returned a different persona")
         name = persona.get("name") if persona is not None else ""
@@ -332,6 +397,7 @@ class NativePrivateBridge:
         return tuple(images)
 
     async def capture(self, event):
+        intake = self.forward_intake
         try:
             from .quotes import NativeQuoteLocator, image_locator
             from .forwards import NativeForwardLocator, resource_id
@@ -353,6 +419,7 @@ class NativePrivateBridge:
             if not parts or len(parts) > 128:
                 raise TaskError("host_media_unsupported", "message components are empty or exceed the intake budget")
             text_parts, locators, quote_locators, forward_locators, audio_locators, video_locators = [], [], [], [], [], []
+            file_locators = []
             for position, part in enumerate(parts):
                 kind = getattr(part.type, "value", part.type)
                 if kind == "Plain" and isinstance(part.text, str):
@@ -378,6 +445,10 @@ class NativePrivateBridge:
                         raise TaskError("host_video_unavailable", "video has no original host attachment")
                     video_locators.append(NativeVideoLocator(position, value))
                     text_parts.append("\n[视频 " + str(len(video_locators)) + "]\n")
+                elif kind == "File" and self.file_type is not None and type(part) is self.file_type:
+                    if len(file_locators) < MAX_FILES:
+                        file_locators.append(file_locator(position, part))
+                    text_parts.append("\n[文件附件，正文尚未读取]\n")
                 else:
                     raise TaskError("host_media_unsupported", "this component needs its own governed source adapter")
             if len(locators) > MAX_INPUT_IMAGES:
@@ -388,7 +459,7 @@ class NativePrivateBridge:
                 raise TaskError("host_audio_limit", "too many voice attachments in one input")
             if len(quote_locators) > 1:
                 raise TaskError("host_quote_unsupported", "one original reply component is supported per input")
-            if len(forward_locators) > self.forward_intake.max_forwards:
+            if len(forward_locators) > intake.max_forwards:
                 raise TaskError("host_forward_limit", "too many forwarded records in one input")
             text = "".join(text_parts)
             if not text.strip() or len(text) > 65536:
@@ -405,6 +476,9 @@ class NativePrivateBridge:
                 raise TaskError("host_client_mismatch", "event did not originate from the registered account client")
             frozen_images, frozen_quotes, frozen_forwards = tuple(locators), tuple(quote_locators), tuple(forward_locators)
             frozen_audios, frozen_videos = tuple(audio_locators), tuple(video_locators)
+            frozen_files = tuple(file_locators)
+            from companion_v2.conversation.media.understanding import settings as understanding_settings
+            file_preferences = understanding_settings(self.file_settings(scope, role) if self.file_settings else {})
             async def prepare():
                 images = await self._capture_images(frozen_images)
                 audios = []
@@ -420,14 +494,14 @@ class NativePrivateBridge:
                     if locator.message_id == event_id:
                         raise TaskError("host_quote_invalid", "an input cannot quote itself")
                     quote = await self.quote_loader(locator, client=event_client, scope=scope,
-                                                    intake=self.forward_intake)
+                                                    intake=intake)
                     if (not isinstance(quote, CapturedQuote) or quote.position != locator.position
                             or quote.message_id != locator.message_id
                             or quote.sender_id not in (sender, login)):
                         raise TaskError("host_quote_invalid", "quote loader changed original attribution")
                     quotes.append(quote)
                 forwards = await self.forward_loader(frozen_forwards, message_id=event_id, client=event_client, scope=scope,
-                                                     intake=self.forward_intake) if frozen_forwards else ()
+                                                     intake=intake) if frozen_forwards else ()
                 if (not isinstance(forwards, tuple) or len(forwards) != len(frozen_forwards)
                         or any(type(f) is not CapturedForward or (f.position, f.resource_hash) != (l.position, digest(l.resource))
                                for f, l in zip(forwards, frozen_forwards)) or not fits_forwards(forwards)):
@@ -463,7 +537,11 @@ class NativePrivateBridge:
                     images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
                 except asyncio.TimeoutError:
                     raise TaskError("host_media_timeout", "attachment preparation exceeded its bounded intake time") from None
-            if images or quotes or forwards or audios or videos:
+            if frozen_files:
+                file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
+                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)))
+                text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
+            if images or quotes or forwards or audios or videos or frozen_files:
                 # Network/image preparation is outside SQLite; host changes during
                 # that await must not let a stale role or revoked human be admitted.
                 fresh_cid, fresh_role, fresh_instruction = await self._role(account, sender)

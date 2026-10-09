@@ -1,7 +1,8 @@
 """Dashboard model task settings for one authorized private role context."""
 
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date
+from collections import deque
 import json
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
@@ -10,12 +11,29 @@ from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import OperationRef, VersionRef
 from companion_v2.role_work.life.management import RoleLifeManagement
 from .budget import effective_soft
+from .cache_diagnostics import checked_signature, event_severity, signature_changes, signature_snapshot
+from .reply_efficiency import reply_efficiency_report
 from .replacement_rules import checked_rules, validate_targets
+from .usage import MAIN_CHAIN_KIND, ModelUsageReport, usage_source
 
 
 FIELDS = ("provider", "fallback", "prompt", "max_output_tokens", "replacement_rules", "fallback_on_refusal",
           "timeout_seconds", "replacement_scope")
 OWNER = "configuration"
+PROMPT_LAYERS = (
+    {"key": "role_instruction", "label": "角色指令", "editable": False,
+     "description": "当前角色的人格与身份设定，作为独立系统消息发送。"},
+    {"key": "request_instruction", "label": "业务任务指令", "editable": False,
+     "description": "由业务流程按任务和本轮场景生成；此处不读取或展示单次请求正文。"},
+    {"key": "task_prompt", "label": "模型任务提示", "editable": True,
+     "description": "本页编辑的提示字段，运行时接在业务任务指令之后；自定义值替换该字段的内置默认值。"},
+    {"key": "output_contract", "label": "输出合同", "editable": False,
+     "description": "按任务类型加入自然语言、JSON 字段及证据等格式约束。"},
+    {"key": "capability_instruction", "label": "能力指令", "editable": False,
+     "description": "需要工具、图片等模型能力时，由运行端追加对应协议。"},
+    {"key": "terminal_prompt_guard", "label": "请求末尾约束", "editable": False,
+     "description": "每轮请求最后追加的简短安全边界；不插入材料前缀，保留服务商可复用的稳定提示前缀。"},
+)
 
 
 def _target(context, layer):
@@ -29,6 +47,237 @@ def _field(value, inherited):
             "source": value.source.layer.value if value.source else "default",
             "inherited_source": inherited.source.layer.value if inherited.source else "default",
             "explicit": value.explicit}
+
+
+def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key):
+    def empty_day(day):
+        result = {"day": day, "signature_calls": 0, "compared_calls": 0, "baseline_calls": 0,
+                "changed_calls": 0, "high_severity_events": 0, "medium_severity_events": 0,
+                "low_severity_events": 0, "system_prompt_changes": 0, "system_order_drifts": 0,
+                "tool_definition_changes": 0, "tool_order_drifts": 0, "model_changes": 0,
+                "provider_changes": 0,
+                "context_resets": 0, "context_order_drifts": 0, "context_prefix_changes": 0,
+                "context_tail_trims": 0, "context_availability_changes": 0,
+                "cache_hit_comparable_changes": 0, "cache_hit_drop_after_change_calls": 0,
+                "cache_hit_delta_points_total": 0.0,
+                "context_stats_calls": 0, "context_text_stats_calls": 0,
+                "context_availability_calls": 0,
+                "request_stats_calls": 0, "context_estimate_calls": 0, "system_estimate_calls": 0,
+                "tool_estimate_calls": 0, "message_estimate_calls": 0, "request_estimate_calls": 0,
+                "context_est_tokens_total": 0, "system_est_tokens_total": 0,
+                "tool_est_tokens_total": 0, "message_est_tokens_total": 0, "request_est_tokens_total": 0,
+                "request_profile_calls": 0, "profile_context_est_tokens_total": 0,
+                "profile_message_est_tokens_total": 0, "profile_system_est_tokens_total": 0,
+                "profile_tool_est_tokens_total": 0, "profile_request_est_tokens_total": 0,
+                "context_materials_total": 0, "context_chars_total": 0,
+                "context_bytes_total": 0, "message_chars_total": 0, "message_bytes_total": 0,
+                "deferred_materials_total": 0, "unavailable_materials_total": 0,
+                "messages_total": 0, "system_messages_total": 0,
+                "system_chars_total": 0, "system_bytes_total": 0, "tools_total": 0,
+                "tool_bytes_total": 0, "images_total": 0, "audio_total": 0, "video_total": 0}
+        for dimension in ("route", "prefix", "system", "tools", "materials", "availability"):
+            result.update({f"{dimension}_compared_calls": 0, f"{dimension}_stable_calls": 0,
+                           f"{dimension}_cache_calls": 0,
+                           f"{dimension}_cache_input_tokens_total": 0,
+                           f"{dimension}_cached_input_tokens_total": 0})
+        return result
+
+    daily = {key: {} for key in ("all", "conversation", "plugin")}
+    events = {key: deque(maxlen=80) for key in daily}
+    previous_by_scope = {}
+    change_fields = {
+        "provider_change": "provider_changes",
+        "model_change": "model_changes",
+        "system_prompt_change": "system_prompt_changes",
+        "system_order_drift": "system_order_drifts",
+        "tool_definition_change": "tool_definition_changes",
+        "tool_order_drift": "tool_order_drifts",
+        "context_reset": "context_resets",
+        "context_order_drift": "context_order_drifts",
+        "context_prefix_change": "context_prefix_changes",
+        "context_tail_trim": "context_tail_trims",
+        "context_availability_change": "context_availability_changes",
+    }
+    ordered_days = sorted(all_days)
+    for offset in range(0, len(ordered_days), 30):
+        batch_days = ordered_days[offset:offset + 30]
+        account_keys = tuple(role_accounts[period] for period in batch_days)
+        placeholders = ",".join("?" for _ in account_keys)
+        rows = runtime.read_all(f"""SELECT c.call_id, c.position, c.input_tokens,
+                c.cached_input_tokens, c.finished_at, c.started_at, r.created_at, t.kind,
+                t.origin_key, c.provider_json, s.signature_json,
+                CASE WHEN json_valid(t.record_json)
+                    THEN json_extract(t.record_json, '$.spec.context.audience.scope')
+                    ELSE NULL END AS audience_scope_json
+            FROM model_calls c
+            JOIN model_call_cache_signatures s ON s.call_id = c.call_id
+            JOIN model_requests r ON r.task_id = c.task_id
+            JOIN execution_tasks t ON t.task_id = c.task_id
+            WHERE (EXISTS (SELECT 1 FROM model_call_accounts ca
+                           WHERE ca.call_id = c.call_id AND ca.account_key IN ({placeholders}))
+                   OR (t.kind = ? AND t.origin_key = ?))
+            ORDER BY COALESCE(c.finished_at, c.started_at, r.created_at), c.position""",
+            account_keys + (MAIN_CHAIN_KIND, origin_key))
+        for row in rows:
+            signature = checked_signature(row["signature_json"])
+            if signature is None:
+                continue
+            at = row["finished_at"] or row["started_at"] or row["created_at"]
+            day = at[:10] if type(at) is str else ""
+            if day not in all_days:
+                continue
+            source = usage_source(row["kind"])
+            counts = [daily[key].setdefault(day, empty_day(day)) for key in ("all", source)]
+            for item in counts:
+                item["signature_calls"] += 1
+                if signature.context_observed:
+                    item["context_stats_calls"] += 1
+                    item["context_materials_total"] += signature.context_material_count
+                    item["context_bytes_total"] += signature.context_bytes
+                    if signature.request_stats_observed:
+                        item["context_text_stats_calls"] += 1
+                        item["context_chars_total"] += signature.context_chars
+                    if signature.estimates_observed and signature.request_estimate_observed:
+                        item["context_estimate_calls"] += 1
+                        item["context_est_tokens_total"] += signature.context_est_tokens
+                if signature.context_availability_observed:
+                    item["context_availability_calls"] += 1
+                    item["deferred_materials_total"] += signature.deferred_material_count
+                    item["unavailable_materials_total"] += signature.unavailable_material_count
+                if signature.request_stats_observed:
+                    item["request_stats_calls"] += 1
+                    item["messages_total"] += signature.message_count
+                    item["system_messages_total"] += signature.system_message_count
+                    item["system_chars_total"] += signature.system_chars
+                    item["system_bytes_total"] += signature.system_bytes
+                    item["tools_total"] += signature.tool_count
+                    item["tool_bytes_total"] += signature.tool_bytes
+                    item["images_total"] += signature.image_count
+                    item["audio_total"] += signature.audio_count
+                    item["video_total"] += signature.video_count
+                    if signature.estimates_observed and signature.request_estimate_observed:
+                        item["system_estimate_calls"] += 1
+                        item["tool_estimate_calls"] += 1
+                        item["system_est_tokens_total"] += signature.system_est_tokens
+                        item["tool_est_tokens_total"] += signature.tool_est_tokens
+                if signature.message_estimates_observed:
+                    item["message_estimate_calls"] += 1
+                    item["message_est_tokens_total"] += signature.message_est_tokens
+                    item["message_chars_total"] += signature.message_chars
+                    item["message_bytes_total"] += signature.message_bytes
+                if signature.request_estimate_observed:
+                    item["request_estimate_calls"] += 1
+                    item["request_est_tokens_total"] += signature.request_est_tokens
+                if (signature.context_observed and signature.estimates_observed
+                        and signature.message_estimates_observed and signature.request_estimate_observed):
+                    item["request_profile_calls"] += 1
+                    item["profile_context_est_tokens_total"] += signature.context_est_tokens
+                    item["profile_message_est_tokens_total"] += signature.message_est_tokens
+                    item["profile_system_est_tokens_total"] += signature.system_est_tokens
+                    item["profile_tool_est_tokens_total"] += signature.tool_est_tokens
+                    item["profile_request_est_tokens_total"] += signature.request_est_tokens
+            try:
+                provider_record = json.loads(row["provider_json"])
+            except (TypeError, ValueError):
+                provider_record = None
+            provider_id = provider_record.get("provider", "") if isinstance(provider_record, dict) else ""
+            if type(provider_id) is not str:
+                provider_id = ""
+            try:
+                raw_scope = row["audience_scope_json"]
+                scope = json.loads(raw_scope) if type(raw_scope) is str else raw_scope
+            except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+                scope = None
+            scope_fields = ("installation_id", "platform", "kind", "native_scope_id", "bot_id",
+                            "account_id", "conversation_id", "session_id")
+            scope = ({name: scope[name] for name in scope_fields}
+                     if type(scope) is dict and all(type(scope.get(name)) is str and scope[name]
+                                                    for name in scope_fields)
+                     else None)
+            scope_fingerprint = digest(scope) if scope is not None else None
+            try:
+                call_id = row["call_id"]
+            except (KeyError, IndexError, TypeError):
+                call_id = digest([row["origin_key"], row["kind"], at, row["position"]])
+            partition = (digest(row["origin_key"]), row["kind"], scope_fingerprint,
+                         None if scope_fingerprint else call_id)
+            previous_entry = previous_by_scope.get(partition)
+            previous = previous_entry[0] if previous_entry else None
+            input_tokens, cached_tokens = row["input_tokens"], row["cached_input_tokens"]
+            hit_rate = (round(cached_tokens * 100 / input_tokens, 1)
+                        if input_tokens and cached_tokens is not None else None)
+            previous_provider = previous_entry[2] if previous_entry else None
+            same_cache_route = (previous_entry is not None and previous_provider == provider_id
+                                and previous.model_hash == signature.model_hash)
+            previous_hit_rate = previous_entry[1] if same_cache_route else None
+            previous_by_scope[partition] = (signature, hit_rate, provider_id)
+            if previous is None:
+                for item in counts:
+                    item["baseline_calls"] += 1
+                continue
+            for item in counts:
+                item["compared_calls"] += 1
+            stable_dimensions = {
+                "route": (previous_provider == provider_id and previous.model_hash == signature.model_hash
+                    if previous_provider and provider_id else None),
+                "system": previous.system_hash == signature.system_hash,
+                "tools": previous.tools_hash == signature.tools_hash,
+                "materials": (previous.context_sequence_hash == signature.context_sequence_hash
+                    if previous.context_observed and signature.context_observed else None),
+                "availability": (previous.context_availability_hash == signature.context_availability_hash
+                    if previous.context_availability_observed and signature.context_availability_observed else None),
+            }
+            stable_dimensions["prefix"] = (all(value is True for value in stable_dimensions.values())
+                                            if all(value is not None for value in stable_dimensions.values())
+                                            else None)
+            comparable_route = stable_dimensions["route"] is True
+            for dimension, stable in stable_dimensions.items():
+                if stable is None:
+                    continue
+                for item in counts:
+                    item[f"{dimension}_compared_calls"] += 1
+                    if stable:
+                        item[f"{dimension}_stable_calls"] += 1
+                        if (comparable_route and type(input_tokens) is int and input_tokens > 0
+                                and type(cached_tokens) is int):
+                            item[f"{dimension}_cache_calls"] += 1
+                            item[f"{dimension}_cache_input_tokens_total"] += input_tokens
+                            item[f"{dimension}_cached_input_tokens_total"] += cached_tokens
+            changes = list(signature_changes(signature, previous))
+            if previous_provider != provider_id:
+                changes.insert(0, "provider_change")
+            changes = tuple(changes)
+            if not changes:
+                continue
+            severity = event_severity(changes)
+            for item in counts:
+                item["changed_calls"] += 1
+                item[f"{severity}_severity_events"] += 1
+                for change in changes:
+                    item[change_fields[change]] += 1
+                if hit_rate is not None and previous_hit_rate is not None:
+                    delta = round(hit_rate - previous_hit_rate, 1)
+                    item["cache_hit_comparable_changes"] += 1
+                    item["cache_hit_delta_points_total"] += delta
+                    if delta < 0:
+                        item["cache_hit_drop_after_change_calls"] += 1
+            session_ref = digest(["cache-diagnostics-session", scope_fingerprint])[:8] \
+                if scope_fingerprint else None
+            event = {"day": day, "at": at, "kind": row["kind"], "provider": provider_id,
+                     "previous_provider": previous_provider,
+                     "session_ref": session_ref, "severity": severity,
+                     "changes": list(changes), "input_tokens": input_tokens, "cache_hit_rate": hit_rate,
+                     "previous_cache_hit_rate": previous_hit_rate,
+                     "cache_hit_delta": (round(hit_rate - previous_hit_rate, 1)
+                                         if hit_rate is not None and previous_hit_rate is not None else None),
+                     "before": signature_snapshot(previous), "after": signature_snapshot(signature)}
+            for key in ("all", source):
+                events[key].append(event)
+
+    return {key: {"daily": [days[day] for day in sorted(days)], "recent_events": list(reversed(events[key])),
+                  "event_sample_limit": 80, "scope": "current_role",
+                  "signature_storage": "hashes_sizes_estimates_no_prompt_text"}
+            for key, days in daily.items()}
 
 
 class ModelManagement:
@@ -47,16 +296,64 @@ class ModelManagement:
                                                       group_id=profile.group, observed_at=now))
         inherited = require(self.app.configuration.read(operator, target=_target(self.context, ConfigLayer.ROLE),
                                                         group_id=profile.group, observed_at=now))
+        provider_default = self.app.router.provider_default(self.context, profile, current)
+        return (self.app.router.apply_provider_default(profile, current, provider_default),
+                self.app.router.apply_provider_default(profile, inherited, provider_default), provider_default)
+
+    def _section_snapshots(self, operator, section):
+        definitions = self.app.configuration.registry.group(section.config_group)
+        relationship = ConfigLayer.RELATIONSHIP in definitions[0].layers
+        target = ConfigTarget(self.context.scope.installation_id, ConfigLayer.WINDOW,
+            self.context.role_binding.role, self.context.scope,
+            subject=self.context.actor.subject if relationship else None)
+        inherited_target = target.chain()[-2]
+        now = self.app.now()
+        current = require(self.app.configuration.read(operator, target=target,
+            group_id=section.config_group, observed_at=now))
+        inherited = require(self.app.configuration.read(operator, target=inherited_target,
+            group_id=section.config_group, observed_at=now))
         return current, inherited
 
+    def _prompt_sections(self, operator, profile):
+        snapshots, result = {}, []
+        for section in profile.prompt_sections:
+            item = {"key": section.key, "label": section.label, "condition": section.condition,
+                    "default_prompt": section.default_prompt, "editable": section.editable,
+                    "variables": list(section.variables)}
+            if section.editable:
+                if section.config_group not in snapshots:
+                    snapshots[section.config_group] = self._section_snapshots(operator, section)
+                current, inherited = snapshots[section.config_group]
+                field_id = section.config_group + "." + section.field
+                field = _field(current.fields[field_id], inherited.fields[field_id])
+                item.update(field=field, edit_token=current.edit_token, config_field=field_id,
+                            prompt=field["value"], inheritance_label="上级继承值")
+            else:
+                item["prompt"] = section.default_prompt
+            result.append(item)
+        return result
+
     def _project(self, operator, profile):
-        current, inherited = self._snapshots(operator, profile)
+        current, inherited, provider_default = self._snapshots(operator, profile)
         fields = {name: _field(current.fields[profile.group + "." + name],
                                inherited.fields[profile.group + "." + name]) for name in FIELDS}
+        if provider_default is not None:
+            for name in ("provider", "fallback"):
+                if name == "fallback" and profile.default_fallback:
+                    continue
+                if fields[name]["source"] == "default":
+                    fields[name]["source"] = "host_conversation"
+                if fields[name]["inherited_source"] == "default":
+                    fields[name]["inherited_source"] = "host_conversation"
         application = require(self.app.configuration.application_status(operator,
             target=_target(self.context, ConfigLayer.WINDOW), group_id=profile.group, observed_at=self.app.now()))
+        sections = self._prompt_sections(operator, profile)
+        layers = [dict(layer) for layer in PROMPT_LAYERS]
+        if any(section["editable"] for section in sections):
+            layers[1].update(editable=True, description="完整业务模板在下方按场景查看；表达模板可编辑，事实与协议规则固定保留。")
         return {"kind": profile.kind, "lane": profile.lane.value, "capabilities": list(profile.capabilities),
                 "default_prompt": profile.default_prompt, "prompt_version": profile.version,
+                "prompt_layers": layers, "prompt_sections": sections,
                 "fields": fields, "edit_token": current.edit_token, "application_state": application.state,
                 "apply_mode": current.apply_mode.value, "revision": current.revision}
 
@@ -92,13 +389,29 @@ class ModelManagement:
             WHERE b.origin_key = ?
             GROUP BY b.batch_id
             ORDER BY b.created_at DESC LIMIT 12""", (context_key,))
-        conversation = [{
-            "created_at": row["created_at"], "batch_state": row["batch_state"],
-            "flow_state": row["flow_state"] or "not_started", "flow_reason": row["reason"] or "",
-            "input_count": row["input_count"] or 0, "part_count": row["part_count"] or 0,
-            "delivered_parts": row["delivered_parts"] or 0, "failed_parts": row["failed_parts"] or 0,
-            "unknown_parts": row["unknown_parts"] or 0, "pending_parts": row["pending_parts"] or 0,
-        } for row in batches]
+        conversation = []
+        for row in batches:
+            flow_state = row["flow_state"] or "not_started"
+            part_count = row["part_count"] or 0
+            delivered = row["delivered_parts"] or 0
+            failed = row["failed_parts"] or 0
+            unknown = row["unknown_parts"] or 0
+            pending = row["pending_parts"] or 0
+            no_reply = (not delivered and not unknown and not pending and
+                        (failed > 0 or flow_state in ("blocked", "closed") or
+                         (flow_state == "complete" and part_count == 0)))
+            reply_outcome = ("partial_reply" if delivered and (failed or unknown) else
+                             "replied" if delivered else "unknown" if unknown else
+                             "pending" if pending or flow_state in ("collecting", "generating", "delivering") else
+                             "no_reply" if no_reply else "unresolved")
+            conversation.append({
+                "created_at": row["created_at"], "batch_state": row["batch_state"],
+                "flow_state": flow_state, "flow_reason": row["reason"] or "",
+                "input_count": row["input_count"] or 0, "part_count": part_count,
+                "delivered_parts": delivered, "failed_parts": failed,
+                "unknown_parts": unknown, "pending_parts": pending,
+                "reply_outcome": reply_outcome, "no_reply": bool(no_reply),
+            })
         flow_rows = runtime.read_all("""SELECT b.created_at, b.state AS batch_state, b.part_count,
                 f.state AS flow_state, f.due_at, f.merge_until, f.deadline_at, f.policy_json, f.reason,
                 COUNT(DISTINCT i.event_key) AS input_count
@@ -146,8 +459,19 @@ class ModelManagement:
                       "state": row["state"], "uses": row["uses"]} for row in material_rows]
         proactive = runtime.read_one("""SELECT COUNT(*) AS calls, MAX(created_at) AS latest_at
             FROM proactive_contacts WHERE origin_key = ?""", (context_key,))
+        no_reply_rows = runtime.read_all("""SELECT event_ref, channel, reason_code, code, observed_at,
+                CASE WHEN origin_key IS NULL THEN 'unmatched' ELSE 'current_role' END AS scope
+            FROM inbound_no_replies
+            WHERE origin_key = ? OR origin_key IS NULL
+            ORDER BY observed_at DESC, rowid DESC LIMIT 24""", (context_key,))
+        inbound_no_replies = [{
+            "event_ref": row["event_ref"], "channel": row["channel"],
+            "reason_code": row["reason_code"], "code": row["code"], "observed_at": row["observed_at"],
+            "scope": row["scope"],
+        } for row in no_reply_rows]
         return {"storage": storage, "conversation": conversation, "prompt_materials": materials,
                 "identity_scope": identity_scope, "debounce_trace": debounce_trace,
+                "inbound_no_replies": inbound_no_replies,
                 "proactive": {"calls": proactive["calls"] if proactive else 0,
                               "latest_at": proactive["latest_at"] if proactive else None}}
 
@@ -173,7 +497,6 @@ class ModelManagement:
             scope = self.context.scope
             role_address = [scope.installation_id, scope.bot_id, asdict(self.context.role_binding.role)]
             today = now.date().isoformat()
-            periods = [(now.date() - timedelta(days=offset)).isoformat() for offset in range(29, -1, -1)]
             candidate_days = self.app.runtime.read_all("""SELECT DISTINCT
                     substr(COALESCE(c.finished_at, c.started_at, r.created_at), 1, 10) AS day
                 FROM model_calls c JOIN model_requests r ON r.task_id = c.task_id
@@ -188,23 +511,7 @@ class ModelManagement:
                 if parsed.isoformat() == value:
                     all_days.add(value)
             role_accounts = {period: digest(["role", role_address, period]) for period in all_days}
-            usage_fields = (
-                "calls", "tokens", "cost_microusd", "unconfirmed_calls", "failures", "unknown_calls",
-                "active_calls", "cache_reported_calls", "cache_telemetry_calls", "cache_input_tokens",
-                "cached_input_tokens", "cache_creation_tokens", "cache_other_input_tokens", "input_tokens",
-                "output_tokens", "latency_total_ms", "latency_samples",
-            )
-
-            def empty_usage():
-                return dict.fromkeys(usage_fields, 0)
-
-            def add_usage(target, row):
-                for name in usage_fields:
-                    target[name] += row.get(name, 0) or 0
-
-            by_day, by_provider, by_task = {}, {}, {}
-            day_provider, day_task, hourly = {}, {}, {}
-            recent_rows = []
+            reports = {key: ModelUsageReport() for key in ("all", "conversation", "plugin")}
             ordered_days = sorted(all_days)
             batch_size = 300
             for offset in range(0, len(ordered_days), batch_size):
@@ -235,170 +542,84 @@ class ModelManagement:
                             ELSE 0 END) AS cache_other_input_tokens,
                         SUM(CASE WHEN c.cached_input_tokens IS NOT NULL OR c.cache_creation_tokens IS NOT NULL THEN 1 ELSE 0 END)
                             AS cache_telemetry_calls,
+                        SUM(CASE WHEN c.input_tokens >= 1000 AND c.cached_input_tokens IS NOT NULL
+                            AND c.cached_input_tokens * 5 < c.input_tokens
+                            THEN 1 ELSE 0 END) AS cache_low_calls,
                         SUM(COALESCE(c.input_tokens, 0)) AS input_tokens,
                         SUM(COALESCE(c.output_tokens, 0)) AS output_tokens,
                         SUM(COALESCE(c.latency_ms, 0)) AS latency_total_ms,
                         SUM(CASE WHEN c.latency_ms IS NULL THEN 0 ELSE 1 END) AS latency_samples
                     FROM model_calls c
-                    JOIN model_call_accounts ca ON ca.call_id = c.call_id
                     JOIN model_requests r ON r.task_id = c.task_id
                     JOIN execution_tasks t ON t.task_id = c.task_id
                     LEFT JOIN model_call_failures f ON f.call_id = c.call_id
-                    WHERE ca.account_key IN ({placeholders})
-                    GROUP BY day, provider, kind""", account_keys)
+                    WHERE (EXISTS (SELECT 1 FROM model_call_accounts ca
+                                   WHERE ca.call_id = c.call_id AND ca.account_key IN ({placeholders}))
+                           OR (t.kind = ? AND t.origin_key = ?))
+                     GROUP BY day, provider, kind""", account_keys + (MAIN_CHAIN_KIND, self.context.key))
+
                 for row in grouped_rows:
-                    day = row["day"]
-                    provider = row["provider"] if type(row["provider"]) is str and row["provider"] else "未知 Provider"
-                    kind = row["kind"] if type(row["kind"]) is str and row["kind"] else "unknown"
-                    values = {name: row[name] or 0 for name in usage_fields}
-                    add_usage(by_day.setdefault(day, empty_usage()), values)
-                    add_usage(by_provider.setdefault(provider, empty_usage()), values)
-                    add_usage(by_task.setdefault(kind, empty_usage()), values)
-                    add_usage(day_provider.setdefault((day, provider), empty_usage()), values)
-                    add_usage(day_task.setdefault((day, kind), empty_usage()), values)
+                    for key in ("all", usage_source(row["kind"])):
+                        reports[key].add_group(row)
                 hour_rows = self.app.runtime.read_all(f"""SELECT
                         substr(COALESCE(c.finished_at, c.started_at, r.created_at), 1, 10) AS day,
                         substr(COALESCE(c.finished_at, c.started_at, r.created_at), 12, 2) AS hour,
+                        t.kind AS kind,
                         COUNT(*) AS calls, SUM(COALESCE(c.actual_tokens, 0)) AS tokens,
                         SUM(COALESCE(c.actual_cost, 0)) AS cost_microusd
                     FROM model_calls c
-                    JOIN model_call_accounts ca ON ca.call_id = c.call_id
                     JOIN model_requests r ON r.task_id = c.task_id
-                    WHERE ca.account_key IN ({placeholders})
-                    GROUP BY day, hour ORDER BY day, hour""", account_keys)
+                    JOIN execution_tasks t ON t.task_id = c.task_id
+                    WHERE (EXISTS (SELECT 1 FROM model_call_accounts ca
+                                   WHERE ca.call_id = c.call_id AND ca.account_key IN ({placeholders}))
+                           OR (t.kind = ? AND t.origin_key = ?))
+                    GROUP BY day, hour, kind ORDER BY day, hour""",
+                    account_keys + (MAIN_CHAIN_KIND, self.context.key))
                 for row in hour_rows:
-                    hourly[(row["day"], row["hour"])] = {name: row[name] or 0
-                        for name in ("calls", "tokens", "cost_microusd")}
-                recent_rows.extend(self.app.runtime.read_all(f"""SELECT c.state, c.position, c.actual_tokens,
+                    for key in ("all", usage_source(row["kind"])):
+                        reports[key].add_hour(row)
+                recent_rows = self.app.runtime.read_all(f"""WITH samples AS (
+                    SELECT c.state, c.position, c.actual_tokens,
                         c.actual_cost, c.input_tokens, c.cached_input_tokens, c.cache_creation_tokens, c.output_tokens,
                         c.latency_ms, c.finished_at, c.started_at, r.created_at, t.kind, c.provider_json,
-                        f.code AS failure_code
+                        f.code AS failure_code, d.summary_json AS response_summary_json,
+                        ROW_NUMBER() OVER (PARTITION BY CASE WHEN t.kind = 'conversation.reply'
+                            THEN 'conversation' ELSE 'plugin' END
+                            ORDER BY COALESCE(c.finished_at, c.started_at, r.created_at) DESC, c.position DESC)
+                            AS source_position
                     FROM model_calls c
-                    JOIN model_call_accounts ca ON ca.call_id = c.call_id
                     JOIN model_requests r ON r.task_id = c.task_id
                     JOIN execution_tasks t ON t.task_id = c.task_id
                     LEFT JOIN model_call_failures f ON f.call_id = c.call_id
-                    WHERE ca.account_key IN ({placeholders})
-                    ORDER BY COALESCE(c.finished_at, c.started_at, r.created_at) DESC, c.position DESC LIMIT 80""",
-                    account_keys))
-
-            def project_usage(row, key=None):
-                projected = {name: int(row.get(name) or 0) for name in usage_fields
-                             if name not in ("latency_total_ms", "latency_samples")}
-                latency_count = int(row.get("latency_samples") or 0)
-                projected["avg_latency_ms"] = (round(row["latency_total_ms"] / latency_count)
-                                                if latency_count else None)
-                if key is not None:
-                    projected["key"] = key
-                return projected
-
-            def ranked(rows):
-                return sorted(rows, key=lambda item: (-item["tokens"], item["key"]))
-
-            def dimension_rows(source, *, day=None, limit=8):
-                entries = []
-                for key, values in source.items():
-                    if day is not None and key[0] != day:
-                        continue
-                    name = key[1] if day is not None else key
-                    entries.append(project_usage(values, name))
-                return ranked(entries)[:limit]
-
-            windows = {}
-            for label, length in (("7d", 7), ("30d", 30)):
-                start = (now.date() - timedelta(days=length - 1)).isoformat()
-                totals = empty_usage()
-                providers_in_window, tasks_in_window = {}, {}
-                for period, values in by_day.items():
-                    if start <= period <= today:
-                        add_usage(totals, values)
-                for (period, provider), values in day_provider.items():
-                    if start <= period <= today:
-                        add_usage(providers_in_window.setdefault(provider, empty_usage()), values)
-                for (period, kind), values in day_task.items():
-                    if start <= period <= today:
-                        add_usage(tasks_in_window.setdefault(kind, empty_usage()), values)
-                windows[label] = {"start_day": start, "end_day": today,
-                    "totals": project_usage(totals),
-                    "providers": dimension_rows(providers_in_window, limit=100),
-                    "tasks": dimension_rows(tasks_in_window, limit=100)}
-
-            history = []
-            for period in sorted(by_day):
-                entry = project_usage(by_day[period], period)
-                entry["providers"] = dimension_rows(day_provider, day=period)
-                entry["tasks"] = dimension_rows(day_task, day=period)
-                history.append(entry)
-            history_by_day = {row["key"]: row for row in history}
-            daily = []
-            for period in periods:
-                entry = history_by_day.get(period, project_usage(empty_usage(), period))
-                daily.append(entry)
-            all_time = project_usage({name: sum(row[name] for row in by_day.values()) for name in usage_fields})
-            all_time["providers"] = dimension_rows(by_provider, limit=12)
-            all_time["tasks"] = dimension_rows(by_task, limit=16)
-            all_time["days"] = len(history)
-            hourly_rows = [{"day": day, "hour": hour, **values}
-                           for (day, hour), values in sorted(hourly.items())]
-            provider_rows = dimension_rows(by_provider, limit=100)
-            task_rows = dimension_rows(by_task, limit=100)
-
-            # Keep the latest samples bounded while merging results from account-key batches.
-            recent_rows.sort(key=lambda row: (row["finished_at"] or row["started_at"] or row["created_at"] or "",
-                                              row["position"] or 0), reverse=True)
-            recent_rows = recent_rows[:80]
-            recent = []
-            for row in recent_rows:
-                try:
-                    provider_record = json.loads(row["provider_json"])
-                except (TypeError, ValueError):
-                    provider_record = None
-                provider_id = provider_record.get("provider", "") if isinstance(provider_record, dict) else ""
-                if type(provider_id) is not str:
-                    provider_id = ""
-                input_tokens = row["input_tokens"]
-                cached_tokens = row["cached_input_tokens"]
-                cache_rate = (round(cached_tokens * 100 / input_tokens, 1)
-                              if cached_tokens is not None and input_tokens is not None and input_tokens > 0 else None)
-                recent.append({"kind": row["kind"], "provider": provider_id, "state": row["state"],
-                    "tokens": row["actual_tokens"], "cost_microusd": row["actual_cost"],
-                    "input_tokens": input_tokens, "cached_input_tokens": cached_tokens,
-                    "cache_creation_tokens": row["cache_creation_tokens"], "output_tokens": row["output_tokens"],
-                    "cache_hit_rate": cache_rate, "latency_ms": row["latency_ms"],
-                    "failure": row["failure_code"],
-                    "at": row["finished_at"] or row["started_at"] or row["created_at"]})
+                    LEFT JOIN model_call_diagnostics d ON d.call_id = c.call_id
+                    WHERE (EXISTS (SELECT 1 FROM model_call_accounts ca
+                                   WHERE ca.call_id = c.call_id AND ca.account_key IN ({placeholders}))
+                           OR (t.kind = ? AND t.origin_key = ?)))
+                     SELECT * FROM samples WHERE source_position <= 80""",
+                    account_keys + (MAIN_CHAIN_KIND, self.context.key))
+                for row in recent_rows:
+                    for key in ("all", usage_source(row["kind"])):
+                        reports[key].add_recent(row)
+            cache_reports = _cache_diagnostic_summary(self.app.runtime, role_accounts, all_days, self.context.key)
+            usage_reports = {key: {**report.project(now), "cache_diagnostics": cache_reports[key]}
+                             for key, report in reports.items()}
             today_account = role_accounts[now.date().isoformat()]
             budget_row = self.app.runtime.read_one(
                 "SELECT token_limit, held_tokens, spent_tokens FROM model_budget_accounts WHERE account_key = ?",
                 (today_account,))
+            plugin_usage = self.app.gateway.ledger.plugin_account_usage(today_account)
             policy = self.app.gateway.ledger.policy
             budget = {"limit_tokens": budget_row["token_limit"] if budget_row else policy.role.tokens,
-                      "spent_tokens": budget_row["spent_tokens"] if budget_row else 0,
-                      "held_tokens": budget_row["held_tokens"] if budget_row else 0}
+                      "spent_tokens": plugin_usage["spent_tokens"],
+                      "held_tokens": plugin_usage["held_tokens"]}
             soft = effective_soft(self.app.runtime, self.context, self.app.gateway.ledger.soft)
-            summary = project_usage({name: sum(by_day.get(period, empty_usage())[name] for period in periods)
-                                     for name in usage_fields})
-            known_calls = summary["calls"] - summary["unconfirmed_calls"]
-            cache_reported = summary["cache_reported_calls"]
-            cache_telemetry = summary["cache_telemetry_calls"]
-            cached = summary["cached_input_tokens"]
-            cache_input = summary["cache_input_tokens"]
-            cache_creation = summary["cache_creation_tokens"]
-            cache_other = summary["cache_other_input_tokens"]
-            cache_denominator = cache_input
-            summary.update({"cache_reported_calls": cache_reported, "cache_telemetry_calls": cache_telemetry,
-                "known_calls": known_calls,
-                "cache_coverage_pct": round(cache_reported * 100 / known_calls, 1) if known_calls else None,
-                "cache_input_tokens": cache_input, "cached_input_tokens": cached,
-                "cache_creation_tokens": cache_creation, "cache_other_input_tokens": cache_other,
-                "cache_hit_rate": round(cached * 100 / cache_denominator, 1) if cache_denominator else None})
             budget.update({"soft_limit_enabled": bool(soft and soft.enabled),
                            "soft_limit_tokens": soft.tokens if soft else 0})
             providers = [{"id": item.binding.provider, "model": item.model}
                          for item in self.app.router.providers.values()]
-            return {"generated_at": now.isoformat(), "summary": summary, "daily": daily,
-                    "history": history, "totals": all_time, "windows": windows, "by_provider": provider_rows,
-                    "by_task": task_rows, "hourly": hourly_rows, "recent": recent,
+            return {"generated_at": now.isoformat(), **usage_reports["all"],
+                    "usage_sources": {key: usage_reports[key] for key in ("conversation", "plugin")},
+                    "reply_efficiency": reply_efficiency_report(self.app.runtime, self.context.key, now),
                     "budget": budget, "providers": providers, "window_days": 30,
                     "ledger_scope": "current_role", "runtime": runtime_diagnostics}
 
@@ -433,7 +654,9 @@ class ModelManagement:
                 or values["replacement_scope"] not in ("all", "plugin", "conversation")):
             raise TaskError("model_configuration_invalid", "check task prompt and output token limit")
         selected = [values["provider"]] + ([values["fallback"]] if values["fallback"] else [])
-        if len(set(selected)) != len(selected):
+        fallback_explicit = ("fallback" in changes or
+                             ("fallback" not in reset and current.fields[profile.group + ".fallback"].explicit))
+        if fallback_explicit and len(set(selected)) != len(selected):
             raise TaskError("model_fallback_duplicate", "fallback must differ from the primary provider")
         for provider_id in selected:
             provider = self.app.router.providers.get(provider_id)
@@ -453,7 +676,8 @@ class ModelManagement:
 
     @outcome
     def configure(self, operator, data):
-        if type(data) is not dict or set(data) != {"kind", "operation_key", "edit_token", "changes", "reset"}:
+        keys = {"kind", "operation_key", "edit_token", "changes", "reset"}
+        if type(data) is not dict or set(data) not in (keys, keys | {"section"}):
             raise TaskError("model_configuration_invalid", "provide one complete model task patch")
         kind, key, token = data["kind"], data["operation_key"], data["edit_token"]
         if (type(key) is not str or not key.strip() or len(key) > 128
@@ -462,7 +686,9 @@ class ModelManagement:
         with self.app.runtime.transaction():
             self.access.authorize(operator)
             profile = self._profile(kind)
-            current, inherited = self._snapshots(operator, profile)
+            if "section" in data:
+                return self._configure_section(operator, profile, data)
+            current, inherited, _ = self._snapshots(operator, profile)
             changes, reset = self._changes(profile, data, current, inherited)
             op_id = "model-settings:" + digest([operator.subject, self.context.key, kind, key])
             receipt = require(self.app.configuration.patch(operator,
@@ -471,3 +697,23 @@ class ModelManagement:
                 expected_edit_token=token, changes=changes, reset_to_inherit=reset,
                 observed_at=self.app.now()))
             return {"replayed": receipt.replayed, "operation_id": op_id, "task": self._project(operator, profile)}
+
+    def _configure_section(self, operator, profile, data):
+        section = next((item for item in profile.prompt_sections if item.key == data["section"]), None)
+        if section is None or not section.editable:
+            raise TaskError("model_prompt_section_readonly", "select a registered editable expression template")
+        changes, reset = data["changes"], data["reset"]
+        if not (type(changes) is dict and type(reset) is list
+                and ((set(changes) == {"prompt"} and not reset and type(changes["prompt"]) is str
+                      and len(changes["prompt"]) <= 8000) or (not changes and reset == ["prompt"]))):
+            raise TaskError("model_configuration_invalid", "save one expression template or restore its inherited value")
+        current, _ = self._section_snapshots(operator, section)
+        field_id = section.config_group + "." + section.field
+        owner = self.app.configuration.registry.group(section.config_group)[0].owner_id
+        op_id = "model-prompt:" + digest([operator.subject, self.context.key, profile.kind, section.key, data["operation_key"]])
+        receipt = require(self.app.configuration.patch(operator,
+            target=current.target, group_id=section.config_group,
+            operation=OperationRef(op_id, owner, current.target.authorization_scope, VersionRef(op_id, 1), op_id),
+            expected_edit_token=data["edit_token"], changes={field_id: changes["prompt"]} if changes else {},
+            reset_to_inherit=(field_id,) if reset else (), observed_at=self.app.now()))
+        return {"replayed": receipt.replayed, "operation_id": op_id, "task": self._project(operator, profile)}

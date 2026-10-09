@@ -13,7 +13,7 @@
 | 1 | 小屋总览 | `life/home` | [01-cottage-home.md](01-cottage-home.md) |
 | 2 | 状态 | `life` 视图 `state`（设计；现状 id 为 `schedule`） | [02-state.md](02-state.md) |
 | 3 | 日记 | `life` 视图 `diary` | [03-diary.md](03-diary.md) |
-| 4 | 记忆与经历 | `memories` 整页 + `manage/memory` | [04-memories.md](04-memories.md) |
+| 4 | 事实与经历 | `memories` 整页 + `manage/memory` | [04-memories.md](04-memories.md) |
 | 5 | 感知 | `manage/perception` | [06-perception.md](06-perception.md) |
 | 6 | 决策 | `manage/decision` | [07-decision.md](07-decision.md) |
 | 7 | 行动 | `manage/action` | [08-action.md](08-action.md) |
@@ -71,7 +71,7 @@
 | `conversation.recall` | 4 | window | next_task | 表达 D4 | ① | conversation/recall_settings.py:16 → 撤回读取 |
 | `conversation.group_participation` | 20 | installation+role+window | immediate | 决策 B5 | ① | conversation/participation.py:49 → participation.py、group_interjection.py |
 | `conversation.busy_gate` | 7 | window | immediate | 主动与联系 | ① | conversation/busy_gate.py:146 → busy_gate.py |
-| `proactive.contact` | 158 | installation+role+relationship+window | immediate | 主动与联系 | ① | proactive/configuration.py:220 → proactive/service.py、scheduling.py |
+| `proactive.contact` | 160 | installation+role+relationship+window | immediate | 主动与联系 | ① | proactive/configuration.py:220 → proactive/service.py、scheduling.py |
 | `role.state` | 61 | window | immediate | 状态页（设计变更；现状决策 B3） | ② 状态工作台 | role_work/state/configuration.py:18 → state/maintenance.py、humanized.py |
 | `role.life` | 23 | window+role(共享) | immediate | 日记页（设计变更；现状决策 B3 编辑器 + 工作区表单双入口） | ① | role_work/life/configuration.py:27 → life/rest_gate.py、journal |
 | `role.growth` | 2 | window | immediate | 学习与反思 L1 | ① | role_work/growth/configuration.py:41 → growth/progress.py |

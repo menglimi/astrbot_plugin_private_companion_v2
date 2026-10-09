@@ -22,8 +22,9 @@ from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.conversation.group_interjection import (ACKNOWLEDGED_STEP, IGNORED_STEP, INTERJECTION,
                                                           REPEAT_FOLLOW, REPEAT_INTERRUPT, WEIGHT_MAX,
                                                           WEIGHT_MIN, WEIGHT_START)
-from companion_v2.conversation.group_observation import PREFIX
-from companion_v2.conversation.group_timing import RepeatPolicy, repeat_burst, repeat_signature
+from companion_v2.conversation.group_observation import (PREFIX, fold_mood, joke_guard, moment_candidates,
+                                                          moment_portrait)
+from companion_v2.conversation.group_timing import RepeatPolicy, clean_group_text, repeat_burst, repeat_signature
 from companion_v2.conversation.participation import (CONFIG_GROUP, CONFIG_LIMITS, GroupParticipation,
                                                      GroupParticipationConfigurationOwner,
                                                      configuration_fields)
@@ -148,8 +149,10 @@ class GroupRhythmFixture(unittest.TestCase):
 
 class RepeatFollowTests(GroupRhythmFixture):
     def test_signature_and_burst_stay_inside_their_declared_bounds(self):
-        for text in ("[图片]", "【语音】", "", "   ", "x" * 31):
+        for text in ("[图片]", "[图片 1]", "【语音】", "[合并转发 2]", "", "   ", "x" * 31):
             self.assertEqual(repeat_signature(text), "", text)
+        self.assertEqual(clean_group_text("哈哈 [图片 1]"), "哈哈")
+        self.assertEqual(repeat_signature("哈哈 [图片 1]"), "哈哈")
         self.assertEqual(repeat_signature("[提及机器人] 哈哈！"), "哈哈")
         self.assertEqual(repeat_signature("  哈哈  哈  "), "哈哈 哈")
         items = burst_history("哈哈", count=3)
@@ -162,6 +165,45 @@ class RepeatFollowTests(GroupRhythmFixture):
         self.assertEqual(repeat_burst("哈哈", bot, at=TURN, window_seconds=120)["count"], 3)
         four = repeat_burst("哈哈", burst_history("哈哈", count=4), at=TURN, window_seconds=120)
         self.assertEqual((four["count"], four["distinct"]), (4, 4))
+
+    def test_media_placeholders_do_not_enter_group_expression_or_moments(self):
+        placeholders = burst_history("[图片 1]", count=4)
+        self.assertEqual(moment_candidates(placeholders, TURN), ())
+        self.assertEqual(fold_mood(None, placeholders, TURN)["message_count"], 0)
+        self.assertEqual(joke_guard(placeholders, TURN)["objections"], 0)
+        self.assertEqual(moment_portrait(placeholders, "200"), {})
+        self.configure(enable_group_interjection=True)
+        turn = self.turn(["[图片 1]"])
+        self.assertIsNone(turn["act"])
+
+    def test_nightly_cleanup_removes_legacy_placeholder_moments_and_repeat_signatures(self):
+        owner = self.owner()
+        with self.runtime.transaction() as connection:
+            self.participation.records.write(connection, owner, "moments", {"moments": [
+                {"hash": "old-image", "text": "[图片 1]", "at": TURN.isoformat(), "score": 2,
+                 "reasons": ["burst"], "created_at": TURN.isoformat(), "expires_at": NOW.isoformat()},
+                {"hash": "old-mixed", "text": "哈哈 [图片 1]", "at": TURN.isoformat(), "score": 2,
+                 "reasons": ["spark"], "created_at": TURN.isoformat(), "expires_at": NOW.isoformat()}],
+                "updated_at": NOW.isoformat()})
+            self.participation.records.write(connection, owner, "mood", {"mood_scores": {
+                "tease": 10, "banter": 0, "serious": 0, "tension": 0, "confession": 0, "dead_silence": 2},
+                "top_mood": "tease", "social_tension": 3.8, "updated_at": NOW.isoformat(),
+                "message_count": 1, "processed_keys": []})
+            self.participation.records.write(connection, owner, "speech", {"repeat": {
+                "signature": "[图片 1]", "acts": 2, "last_act_at": NOW.isoformat()},
+                "pending": {"kind": REPEAT_FOLLOW, "signature": "[图片 1]", "batch_id": "old", "at": NOW.isoformat()}})
+        self.assertEqual(self.participation.advance_reflection(), 3)
+        self.assertEqual(self.participation.advance_reflection(), 0)
+        moments = self.participation.records.read(owner, "moments")["moments"]
+        self.assertEqual([item["text"] for item in moments], ["哈哈"])
+        mood = self.participation.records.read(owner, "mood")
+        self.assertEqual(mood["mood_scores"]["dead_silence"], 0)
+        self.assertEqual(mood["top_mood"], "tease")
+        self.assertEqual(mood["message_count"], 0)
+        speech = self.participation.records.read(owner, "speech")
+        self.assertEqual(speech["repeat"]["signature"], "")
+        self.assertEqual(speech["repeat"]["acts"], 0)
+        self.assertIsNone(speech["pending"])
 
     def test_the_reference_appears_only_for_a_real_burst(self):
         turn = self.turn(["哈哈"], recent=burst_history("哈哈", count=3))

@@ -13,6 +13,7 @@ from companion_v2.configuration.registry import FieldDefinition, FieldRegistry, 
 from companion_v2.foundation.refs import ScopeKind, normalize_utc
 
 from .news_sources import NewsSource, SOURCE_KINDS, news_uid, news_url
+from .prompt_templates import PROMPT_DEFAULTS, checked_template
 
 
 GROUP = "proactive.contact"
@@ -210,6 +211,9 @@ class ContactField(FieldDefinition):
             if self.field_id.endswith(".web_exploration_interests"):
                 if len(value) > 512 or any(ord(character) < 32 and character not in "\t\n\r" for character in value):
                     raise ValueError("web exploration interests are too long or contain control characters")
+            prompt_field = self.field_id.removeprefix(GROUP + ".")
+            if prompt_field in PROMPT_DEFAULTS:
+                value = checked_template(prompt_field, value)
             if self.kind is ValueKind.TEXT and len(value) > 8192:
                 raise ValueError("contact preference text is too long")
         except (ValueError, ZoneInfoNotFoundError) as error:
@@ -262,6 +266,7 @@ def configuration_fields():
                 # Appointment execution (T39) and the post-draft persona judge (T41).
                 "enable_llm_proactive_persona_judge": False,
                 "proactive_persona_judge_exempt_purposes": ""}
+    defaults.update(PROMPT_DEFAULTS)
     for purpose in PURPOSES:
         defaults.update({purpose + ".enabled": True, purpose + ".weight": 1.0, purpose + ".pause_until": ""})
     fields = tuple(ContactField(GROUP + "." + name, GROUP, GROUP,
@@ -293,6 +298,8 @@ def configuration_fields():
             ("screen_glance_goodnight_delay_minutes", 45, 1, 180),
             ("screen_glance_followup_after_minutes", 45, 10, 240),
             ("screen_glance_followup_cooldown_minutes", 180, 30, 1440),
+            ("contact_followup_after_minutes", 45, 10, 1440),
+            ("contact_followup_cooldown_minutes", 180, 30, 2880),
             ("balance_message_cooldown_hours", 24, 1, 168),
             # C2-5: how many days ahead an upcoming anniversary may be noticed.
             # 0 keeps the V1 behaviour exactly — same-day greeting only. Named after

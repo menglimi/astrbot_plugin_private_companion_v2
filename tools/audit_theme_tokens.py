@@ -57,11 +57,8 @@ HARDCODED_BASELINE = {
     "styles.css": 274,          # 外壳 + 未迁移旧页面的共用样式，最大一块，留到最后
     "product-page.css": 22,
     "navigation.css": 20,
-    "reply-page.css": 9,
-    "config-editor.css": 2,
     "shell.css": 2,
     "contact-page.css": 1,
-    "workbench.css": 1,
 }
 
 # tokens.css 本身是色值的唯一来源，不参与第 4 条。

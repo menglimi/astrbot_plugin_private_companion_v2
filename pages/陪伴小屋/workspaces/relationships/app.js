@@ -8,7 +8,7 @@
     revise: "已保存更正，记录已回到待审阅状态。", retract: "已撤回，后续对话不再使用这条记录。" };
   const errors = {
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开本页面。",
-    staging_not_initialized: "页面已连接 AstrBot，但 V2 运行实例尚未加载。请在 V2 管理页显式启用并初始化配置，再刷新。",
+    staging_not_initialized: "角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
     staging_host_terminated: "插件已经停止，请重新打开管理页面。",
     core_access_required: "当前账号没有本体管理权限。", binding_revoked: "当前管理身份已被撤销。",
     relationship_view_stale: "管理范围或权限已经变化，请刷新记录后再操作。",
@@ -21,6 +21,7 @@
   let bridge, inventory = [], selected = null, context = null, hostStatus = null;
   let availabilityCode = null, busy = false;
   let cursors = [null], page = 0, nextCursor = null, editAction = null, pending = null, requestSequence = 0;
+  const display = () => bridge?.getContext?.()?.display || {};
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
     if (text !== undefined) element.textContent = text;
@@ -58,15 +59,13 @@
   }
   function localizedError(value, fallback = "操作未完成，请刷新确认记录状态后重试。") {
     const code = errorCode(value);
-    const message = [value?.message, value?.reason, value?.response?.message]
-      .find(item => typeof item === "string" && item);
-    const error = new Error(errors[code] || message || fallback);
+    const error = new Error(errors[code] || fallback);
     error.code = code || "";
     return error;
   }
   function unwrap(response) {
-    const wrapped = ["ok", "error"].includes(response?.status) ? response
-      : ["ok", "error"].includes(response?.data?.status) ? response.data : null;
+    const wrapped = ["ok", "error"].includes(response?.status) && response?.data !== undefined ? response
+      : ["ok", "error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
     if (wrapped?.status === "error") throw localizedError(wrapped);
     const data = wrapped ? wrapped.data : response;
     if (!data || typeof data !== "object") throw localizedError(null, "未收到服务结果，请刷新确认后重试。");
@@ -87,7 +86,7 @@
   }
   function unavailableCopy() {
     if (availabilityCode === "staging_not_initialized") {
-      return ["V2 运行实例尚未加载", "当前页面已连接到 AstrBot，但 V2 运行实例还没有加载。请在 V2 管理页显式启用并初始化配置，再回到这里刷新。"];
+      return ["角色数据尚未就绪", "请在「账号与会话」保存角色映射；已保存可重新读取状态。"];
     }
     return ["暂时无法读取关系记录", "请确认已从 AstrBot 管理界面打开本页，然后刷新记录。"];
   }
@@ -102,8 +101,8 @@
         card.append(node("strong", title), node("p", message));
         if (availabilityCode === "staging_not_initialized" && hostStatus) {
           const status = hostStatus.enabled === false ? "当前配置开关未启用。"
-            : hostStatus.configured === false ? "当前配置还没有完成初始化。"
-              : "当前运行实例尚未载入。";
+            : hostStatus.configured === false ? "角色数据正在自动准备。"
+              : "角色状态暂未读到。";
           card.append(node("small", status));
         }
         $("list").append(card);
@@ -150,8 +149,11 @@
     Object.entries(names).forEach(([field, label]) => {
       const id = item.attribution[field];
       if (id) {
-        const name = id === context.operator_id ? context.operator_name : id.startsWith("dashboard:") ? "其他管理员" : id;
-        const entry = node("span", `${label}：${name}`); entry.title = id; attribution.append(entry);
+        const name = id === context.operator_id ? context.operator_name || "当前管理员"
+          : id === context.role_id ? display().role_name || "当前角色"
+            : id === context.subject_id ? display().subject_name || "当前聊天对象"
+              : id.startsWith("dashboard:") ? "其他管理员" : "其他操作者";
+        attribution.append(node("span", `${label}：${name}`));
       }
     });
     const actions = node("div", undefined, "actions");
@@ -176,9 +178,9 @@
       availabilityCode = null;
       context = result; inventory = result.items; nextCursor = result.next_cursor;
       selected = inventory.find((item) => item.memory_id === preferredId) ?? null;
-      $("role").textContent = result.role_id;
-      $("subject").textContent = result.subject_id;
-      $("scope").textContent = result.scope_label;
+      $("role").textContent = display().role_name || result.role_name || "当前角色";
+      $("subject").textContent = display().subject_name || result.subject_name || "当前聊天对象";
+      $("scope").textContent = display().target_label || "当前私聊窗口";
       $("operator").textContent = result.operator_name;
       renderList(); renderDetail();
     } catch (error) {
@@ -230,13 +232,22 @@
   $("change-form").addEventListener("submit", (event) => { event.preventDefault(); submit(editAction); });
   for (const id of ["close-dialog", "cancel-dialog"]) $(id).addEventListener("click", () => { if (!busy) $("editor").close(); });
   $("editor").addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
+  document.addEventListener("companion-mappings-change", () => {
+    if (!bridge || busy) return;
+    if (bridge.getContext?.()?.display?.scope_kind === "group") $("refresh")?.click();
+    else void load(selected?.memory_id);
+  });
   async function start() {
     bridge = window.AstrBotPluginPage;
     if (!bridge) {
       availabilityCode = "dashboard_identity_required";
       controls(true); renderList(); renderDetail(); notice(errors.dashboard_identity_required, true); return;
     }
-    try { await bridge.ready(); await load(); }
+    try {
+      const context = await bridge.ready();
+      if (context?.display?.scope_kind === "group") { window.CompanionGroupMemoryPage?.mount(bridge, context); return; }
+      await load();
+    }
     catch (error) {
       availabilityCode = errorCode(error) || "dashboard_identity_required";
       controls(true); renderList(); renderDetail();

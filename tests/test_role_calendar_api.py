@@ -70,13 +70,15 @@ class CalendarAPITests(unittest.IsolatedAsyncioTestCase):
                 valid_from=NOW, expected_revision=identity.revision)
 
     def no_external_calls(self):
-        self.assertIsNone(self.app.presence)
+        self.assertEqual(self.app.presence.active_handles, ())
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
 
     async def test_complete_role_plan_lifecycle_preserves_sources_and_replaces_reminders(self):
-        # Core management remains available while automatic role calendar access is off.
-        self.assertFalse(self.ok(await self.request())["settings"]["calendar_enabled"])
+        # Role calendar access is on by default; automatic planning remains independent.
+        status = self.ok(await self.request())
+        self.assertTrue(status["settings"]["calendar_enabled"])
+        self.assertFalse(status["settings"]["planning_enabled"])
         original = await self.create()
         self.assertEqual(original["state"], "accepted")
         denied = await self.request(data=await self.body("remind", sequence=2))

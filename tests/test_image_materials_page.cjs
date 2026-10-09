@@ -17,13 +17,13 @@ const image = id => ({
   thumbnail: "data:image/jpeg;base64,ZmFrZQ==",
 });
 
-function inventory({enabled = true, label = "已登记参考图", wardrobe = []} = {}) {
+function inventory({enabled = true, label = "已登记参考图", wardrobe = [], references} = {}) {
   return {
     settings: {
       references: {enabled, daily_outfit_enabled: enabled},
       wardrobe: {enabled},
     },
-    references: label ? [{asset_id: "asset-1", label, roles: ["outfit"], state: "active", mime_type: "image/jpeg"}] : [],
+    references: references || (label ? [{asset_id: "asset-1", label, roles: ["outfit"], state: "active", mime_type: "image/jpeg", revision: 1}] : []),
     wardrobe,
     daily_outfit: null,
   };
@@ -36,7 +36,7 @@ function makeNode() {
   const targetFor = (selector, dataset = {}, extra = {}) => ({
     ...extra,
     dataset,
-    matches: candidate => candidate === selector,
+    matches: candidate => candidate === selector || (candidate === "input[type=text]" && extra.type === "text"),
     closest: candidate => candidate.split(",").map(value => value.trim()).includes(selector) ? target : null,
   });
   let target;
@@ -80,6 +80,9 @@ function harness({role = () => ({image_material_api: "image-materials"}), scope 
   const context = {
     window: {CompanionProduct: product, crypto: {randomUUID: () => `uuid-${requests.length}`}},
     console, AbortController, setTimeout, clearTimeout, Promise, Math, Date, Error,
+    FileReader: class {
+      readAsDataURL(file) { this.result = file.dataUrl; setImmediate(() => this.onload?.()); }
+    },
     Object, String, Array, Set, JSON,
   };
   vm.runInNewContext(SOURCE, context, {filename: "image-materials-page.js"});
@@ -101,8 +104,150 @@ test("关闭配置时参考图和衣柜控件保持禁用，路由使用插件�
   await tick();
   fixture.node.click("[data-im-select]", {imSelect: "img-1"});
   assert.match(fixture.node.innerHTML, /data-im-register[^>]*disabled/);
+  assert.match(fixture.node.innerHTML, /data-im-upload[^>]*disabled/);
   assert.match(fixture.node.innerHTML, /data-im-wardrobe-submit[^>]*disabled/);
   assert.ok(fixture.requests.every(request => !request.pathname.startsWith("/astrbot_plugin_")));
+});
+
+test("本地图片可预览后加入当前角色的参考图库", async () => {
+  const posted = [];
+  const fixture = harness({response: request => {
+    if (request.method === "GET" && request.pathname.endsWith("/album")) return Promise.resolve(ok({items: [], next_cursor: null}));
+    if (request.method === "GET") return Promise.resolve(ok(inventory({label: ""})));
+    posted.push(request);
+    return Promise.resolve(ok({asset_id: "asset-uploaded"}));
+  }});
+  fixture.page.mount(fixture.node);
+  await tick();
+  const file = {
+    name: "春日形象.png", type: "image/png", size: 24,
+    dataUrl: "data:image/png;base64,aGVsbG8=",
+  };
+  fixture.node.change("[data-im-upload-file]", {}, {files: [file]});
+  await tick();
+  assert.match(fixture.node.innerHTML, /春日形象\.png/);
+  fixture.node.click("[data-im-upload]");
+  await tick();
+  assert.equal(posted[0].pathname, "image-materials/references/upload");
+  assert.equal(posted[0].body.label, "春日形象");
+  assert.equal(posted[0].body.data_url, file.dataUrl);
+  assert.deepEqual([...posted[0].body.roles], ["identity"]);
+});
+
+test("图库支持搜索、用途筛选和带修订号的编辑", async () => {
+  const posted = [];
+  const references = [
+    {asset_id: "asset-face", label: "春日形象", roles: ["identity"], state: "active", mime_type: "image/jpeg", revision: 7, thumbnail: "data:image/jpeg;base64,ZmFrZQ=="},
+    {asset_id: "asset-outfit", label: "米白穿搭", roles: ["outfit"], state: "active", mime_type: "image/png", revision: 3, thumbnail: "data:image/jpeg;base64,ZmFrZQ=="},
+  ];
+  const fixture = harness({response: request => {
+    if (request.method === "GET" && request.pathname.endsWith("/album")) return Promise.resolve(ok({items: [], next_cursor: null}));
+    if (request.method === "GET") return Promise.resolve(ok(inventory({label: "", references})));
+    posted.push(request);
+    return Promise.resolve(ok({}));
+  }});
+  fixture.page.mount(fixture.node);
+  await tick();
+  assert.match(fixture.node.innerHTML, /data-im-reference-card="asset-face"/);
+  fixture.node.input("[data-im-search]", "春日");
+  assert.match(fixture.node.innerHTML, /data-im-reference-card="asset-face"/);
+  assert.doesNotMatch(fixture.node.innerHTML, /data-im-reference-card="asset-outfit"/);
+  fixture.node.input("[data-im-search]", "");
+  fixture.node.change("[data-im-filter-role]", {}, {value: "outfit"});
+  assert.doesNotMatch(fixture.node.innerHTML, /data-im-reference-card="asset-face"/);
+  assert.match(fixture.node.innerHTML, /data-im-reference-card="asset-outfit"/);
+  fixture.node.change("[data-im-filter-role]", {}, {value: ""});
+  fixture.node.click("[data-im-edit-ref]", {imEditRef: "asset-face"});
+  fixture.node.input("[data-im-edit-label]", "春日头像");
+  fixture.node.change("[data-im-edit-role]", {imEditRole: "pose"}, {checked: true});
+  fixture.node.click("[data-im-save-ref]", {imSaveRef: "asset-face"});
+  await tick();
+  assert.equal(posted[0].pathname, "image-materials/references/update");
+  assert.equal(posted[0].body.expected_revision, 7);
+  assert.equal(posted[0].body.label, "春日头像");
+  assert.deepEqual([...posted[0].body.roles].sort(), ["identity", "pose"]);
+});
+
+test("素材适用条件失焦时保留保存按钮，点击后提交最新文本", async () => {
+  const posted = [];
+  const fixture = harness({response: request => {
+    if (request.method === "GET") return Promise.resolve(ok(request.pathname.endsWith("/album")
+      ? {items: [], next_cursor: null} : inventory()));
+    posted.push(request);
+    return Promise.resolve(ok({}));
+  }});
+  fixture.page.mount(fixture.node);
+  await tick();
+  fixture.node.click("[data-im-edit-ref]", {imEditRef: "asset-1"});
+  const markup = fixture.node.innerHTML;
+  fixture.node.change("[data-im-edit-usage]", {imEditUsage: "scenes"}, {
+    type: "text", tagName: "INPUT", value: "卧室，居家",
+  });
+  assert.equal(fixture.node.innerHTML, markup, "blur must not replace the button receiving the click");
+  fixture.node.click("[data-im-save-ref]", {imSaveRef: "asset-1"});
+  await tick();
+  assert.equal(posted.length, 1);
+  assert.deepEqual([...posted[0].body.usage.scenes], ["卧室", "居家"]);
+});
+
+test("图库排序会提交完整顺序，并在保存后成为新的基线", async () => {
+  const posted = [];
+  const references = ["asset-a", "asset-b", "asset-c"].map((asset_id, index) => ({
+    asset_id, label: `参考图 ${index + 1}`, roles: ["identity"], state: "active",
+    mime_type: "image/jpeg", revision: 1,
+  }));
+  const fixture = harness({response: request => {
+    if (request.method === "GET" && request.pathname.endsWith("/album")) return Promise.resolve(ok({items: [], next_cursor: null}));
+    if (request.method === "GET") return Promise.resolve(ok(inventory({label: "", references})));
+    posted.push(request);
+    return Promise.resolve(ok({asset_ids: request.body.asset_ids}));
+  }});
+  fixture.page.mount(fixture.node);
+  await tick();
+
+  fixture.node.click("[data-im-move-ref]", {imMoveRef: "down", imAsset: "asset-a"});
+  const moved = fixture.node.innerHTML;
+  assert.ok(moved.indexOf('data-im-reference-card="asset-b"') < moved.indexOf('data-im-reference-card="asset-a"'));
+  assert.match(moved, /顺序未保存/);
+  fixture.node.click("[data-im-save-gallery]");
+  await tick();
+
+  assert.equal(posted[0].pathname, "image-materials/references/order");
+  assert.deepEqual([...posted[0].body.expected_asset_ids], ["asset-a", "asset-b", "asset-c"]);
+  assert.deepEqual([...posted[0].body.asset_ids], ["asset-b", "asset-a", "asset-c"]);
+  assert.doesNotMatch(fixture.node.innerHTML, /顺序未保存/);
+  assert.match(fixture.node.innerHTML, /data-im-save-gallery disabled/);
+});
+
+test("图库并发变化时保留可用排序并基于最新内容重试", async () => {
+  const posted = [];
+  let orderConflict = true;
+  const references = ids => ids.map((asset_id, index) => ({
+    asset_id, label: asset_id, roles: ["identity"], state: "active", revision: index + 1,
+  }));
+  const fixture = harness({response: request => {
+    if (request.method === "GET" && request.pathname.endsWith("/album")) return Promise.resolve(ok({items: [], next_cursor: null}));
+    if (request.method === "GET") return Promise.resolve(ok(inventory({label: "", references: references(["asset-a", "asset-b"])})));
+    posted.push(request);
+    if (orderConflict) {
+      orderConflict = false;
+      return Promise.reject(Object.assign(new Error("reference_order_conflict"), {code: "reference_order_conflict"}));
+    }
+    return Promise.resolve(ok({asset_ids: request.body.asset_ids}));
+  }});
+  fixture.page.mount(fixture.node);
+  await tick();
+  fixture.node.click("[data-im-move-ref]", {imMoveRef: "down", imAsset: "asset-a"});
+  fixture.node.click("[data-im-save-gallery]");
+  await tick();
+  assert.match(fixture.node.innerHTML, /图库内容已更新/);
+  assert.match(fixture.node.innerHTML, /顺序未保存/);
+
+  fixture.node.click("[data-im-save-gallery]");
+  await tick();
+  assert.deepEqual([...posted[1].body.expected_asset_ids], ["asset-a", "asset-b"]);
+  assert.deepEqual([...posted[1].body.asset_ids], ["asset-b", "asset-a"]);
+  assert.doesNotMatch(fixture.node.innerHTML, /顺序未保存/);
 });
 
 test("角色切换后旧请求不能覆盖新角色", async () => {
@@ -183,6 +328,14 @@ test("后端错误码翻译成页面提示，窄屏样式收拢为单列", async
   fixture.node.click("[data-im-register]");
   await tick();
   assert.match(fixture.node.innerHTML, /参考图功能当前关闭/);
-  assert.match(CSS, /@media\(max-width:900px\)\s*\{\s*\.image-materials-columns\{grid-template-columns:minmax\(0,1fr\)\}/);
-  assert.match(CSS, /@media\(max-width:620px\)/);
+  assert.match(CSS, /@media\(max-width:1050px\)\{[^}]*\}[\s\S]*?\.image-materials-columns\{grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(CSS, /@media\(max-width:430px\)/);
+});
+
+test("未知服务异常使用操作提示且不回显内部消息", async () => {
+  const fixture = harness({response: () => Promise.reject(new Error("internal failure at dashboard:synthetic-admin"))});
+  fixture.page.mount(fixture.node);
+  await tick();
+  assert.doesNotMatch(fixture.node.innerHTML, /internal failure|dashboard:synthetic-admin/);
+  assert.match(fixture.node.innerHTML, /未读到|读取|刷新/);
 });

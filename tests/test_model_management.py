@@ -6,8 +6,10 @@ from dataclasses import asdict
 from datetime import timedelta
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
-from companion_v2.execution.models import digest
+from companion_v2.diagnostics.inbound import InboundNoReplyLedger
+from companion_v2.execution.models import digest, encode
 from companion_v2.model_gateway.management import ModelManagement
+from companion_v2.model_gateway.response_diagnostics import ResponseDiagnostics, ResponseTextSummary
 from tests.test_host_application import HostFixture
 
 
@@ -27,6 +29,163 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         return {"kind": task["kind"], "operation_key": key, "edit_token": task["edit_token"],
                 "changes": changes or {}, "reset": reset or []}
 
+    async def test_maintenance_includes_body_free_response_stage_summaries(self):
+        summary = ResponseDiagnostics(True, "stop", "native_parsed",
+            raw=ResponseTextSummary.from_text("private raw model content"),
+            parsed=ResponseTextSummary.from_text("[]"))
+        call = self.app.runtime.read_one("SELECT call_id FROM model_calls LIMIT 1", ())
+        with self.app.runtime.transaction() as connection:
+            connection.execute("INSERT INTO model_call_diagnostics VALUES (?, ?, ?)",
+                (call["call_id"], encode(summary.to_record()), self.app.now().isoformat()))
+        data = self.manager.maintenance(self.core).unwrap()
+        self.assertEqual(data["recent"][0]["response_diagnostics"], summary.to_record())
+        self.assertEqual(data["usage_sources"]["conversation"]["recent"][0]["response_diagnostics"], summary.to_record())
+        self.assertNotIn("private raw model content", json.dumps(data))
+
+    async def test_reply_efficiency_uses_platform_receipts_for_end_to_end_latency(self):
+        batch = self.app.runtime.read_one("SELECT batch_id, generation_task_id FROM conversation_batches LIMIT 1", ())
+        parts = self.app.runtime.read_all("SELECT part_id FROM conversation_parts WHERE batch_id = ?",
+                                          (batch["batch_id"],))
+        self.assertTrue(parts)
+        now = self.app.now()
+        received = (now - timedelta(seconds=10)).isoformat()
+        model_started = (now - timedelta(seconds=8)).isoformat()
+        model_finished = (now - timedelta(seconds=7)).isoformat()
+        dispatched = (now - timedelta(seconds=6)).isoformat()
+        delivered = (now - timedelta(seconds=5)).isoformat()
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE conversation_batches SET created_at = ?, part_count = ? WHERE batch_id = ?",
+                               (received, len(parts), batch["batch_id"]))
+            connection.execute("UPDATE conversation_inputs SET event_json = json_set(event_json, '$.received_at', ?) "
+                               "WHERE batch_id = ?", (received, batch["batch_id"]))
+            connection.execute("UPDATE model_calls SET started_at = ?, finished_at = ? WHERE task_id = ?",
+                               (model_started, model_finished, batch["generation_task_id"]))
+            connection.execute("""UPDATE conversation_parts SET state = 'delivered', dispatched_at = ?, delivered_at = ?
+                WHERE batch_id = ?""", (dispatched, delivered, batch["batch_id"]))
+
+        report = self.manager.maintenance(self.core).unwrap()["reply_efficiency"]
+        sample = report["recent"][0]
+        self.assertEqual(report["window_days"], 7)
+        self.assertEqual(report["summary"]["samples"], 1)
+        self.assertEqual(report["coverage"]["received"], 1)
+        self.assertEqual(sample["outcome"], "completed")
+        self.assertEqual(sample["stages"], {"pre_model_ms": 2000, "last_input_to_model_ms": 2000, "model_ms": 1000,
+            "post_model_ms": 1000, "first_reply_ms": 5000, "delivery_ms": 1000, "end_to_end_ms": 5000})
+        self.assertEqual(report["coverage"]["final_delivered"], 1)
+        self.assertNotIn("text", sample)
+
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE conversation_parts SET state = 'unknown', delivered_at = NULL WHERE batch_id = ?",
+                               (batch["batch_id"],))
+        unresolved = self.manager.maintenance(self.core).unwrap()["reply_efficiency"]["recent"][0]
+        self.assertEqual(unresolved["outcome"], "unknown")
+        self.assertIsNone(unresolved["stages"]["first_reply_ms"])
+        self.assertIsNone(unresolved["stages"]["end_to_end_ms"])
+        self.assertTrue(unresolved["observed"]["model_finished"])
+        self.assertFalse(unresolved["observed"]["first_delivered"])
+        self.assertEqual(self.manager.maintenance(self.core).unwrap()["reply_efficiency"]["coverage"]["final_delivered"], 0)
+
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE model_calls SET state = 'dispatched', finished_at = NULL WHERE task_id = ?",
+                               (batch["generation_task_id"],))
+        active = self.manager.maintenance(self.core).unwrap()["reply_efficiency"]["recent"][0]
+        self.assertEqual(active["active_model_calls"], 1)
+        self.assertFalse(active["observed"]["model_finished"])
+        self.assertIsNone(active["stages"]["model_ms"])
+
+    async def test_reply_efficiency_projects_injections_and_extension_timing_without_payloads(self):
+        batch = self.app.runtime.read_one("SELECT batch_id, generation_task_id, contributions_json "
+                                           "FROM conversation_batches LIMIT 1", ())
+        call = self.app.runtime.read_one("SELECT call_id, attempt_id FROM model_calls WHERE task_id = ? LIMIT 1",
+                                         (batch["generation_task_id"],))
+        self.assertIsNotNone(call)
+        parts = self.app.runtime.read_all("SELECT part_id FROM conversation_parts WHERE batch_id = ?",
+                                          (batch["batch_id"],))
+        now = self.app.now()
+        received = (now - timedelta(seconds=10)).isoformat()
+        flow_due = (now - timedelta(seconds=8500 / 1000)).isoformat()
+        worker_started = (now - timedelta(seconds=8)).isoformat()
+        model_started = (now - timedelta(seconds=7500 / 1000)).isoformat()
+        model_finished = (now - timedelta(seconds=6500 / 1000)).isoformat()
+        plugin_started = (now - timedelta(seconds=7)).isoformat()
+        plugin_finished = (now - timedelta(seconds=6800 / 1000)).isoformat()
+        tool_started = (now - timedelta(seconds=7100 / 1000)).isoformat()
+        tool_finished = (now - timedelta(seconds=6700 / 1000)).isoformat()
+        dispatched = (now - timedelta(seconds=6)).isoformat()
+        delivered = (now - timedelta(seconds=5)).isoformat()
+        contributions = json.loads(batch["contributions_json"] or "{}")
+        contributions["materials"] = [{"owner": "calendar.extension", "purpose": "daily_agenda",
+                                        "state": "ready", "payload": "private injected content"}]
+        plan = {"tool_actions": ["calendar.query", "memory.search"], "prompt": "private model prompt"}
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE conversation_batches SET created_at = ?, part_count = ?, contributions_json = ? "
+                               "WHERE batch_id = ?",
+                               (received, len(parts), encode(contributions), batch["batch_id"]))
+            connection.execute("UPDATE conversation_inputs SET event_json = json_set(event_json, '$.received_at', ?) "
+                               "WHERE batch_id = ?", (received, batch["batch_id"]))
+            connection.execute("UPDATE conversation_flows SET due_at = ? WHERE batch_id = ?",
+                               (flow_due, batch["batch_id"]))
+            connection.execute("UPDATE execution_events SET observed_at = ? WHERE task_id = ? AND state = 'running'",
+                               (worker_started, batch["generation_task_id"]))
+            connection.execute("UPDATE model_requests SET plan_json = ? WHERE task_id = ?",
+                               (encode(plan), batch["generation_task_id"]))
+            connection.execute("UPDATE model_calls SET started_at = ?, finished_at = ?, latency_ms = NULL "
+                               "WHERE task_id = ?", (model_started, model_finished, batch["generation_task_id"]))
+            connection.execute("""UPDATE conversation_parts SET state = 'delivered', dispatched_at = ?, delivered_at = ?
+                WHERE batch_id = ?""", (dispatched, delivered, batch["batch_id"]))
+            connection.execute("""INSERT INTO conversation_tool_calls
+                (task_id, tool_call_id, batch_id, sequence, model_call_id, attempt_id, action, arguments_json,
+                 state, effect, created_at, finished_at)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, 'succeeded', 'none', ?, ?)""",
+                (batch["generation_task_id"], "trace-tool-call", batch["batch_id"], call["call_id"],
+                 call["attempt_id"], "calendar.query", encode({"secret": "private tool arguments"}),
+                 tool_started, tool_finished))
+            connection.execute("""INSERT INTO extension_tool_invocations
+                (invocation_id, parent_task_id, tool_call_id, batch_id, task_id, action, descriptor_json,
+                 provider_json, arguments_json, state, effect, created_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', 'none', ?, ?)""",
+                ("trace-extension", batch["generation_task_id"], "trace-tool-call", batch["batch_id"],
+                 "trace-extension-task", "calendar.query", encode({"action": "calendar.query"}),
+                 encode({"provider": "calendar"}), encode({"secret": "private tool arguments"}),
+                 plugin_started, plugin_finished))
+
+        report = self.manager.maintenance(self.core).unwrap()["reply_efficiency"]
+        sample = report["recent"][0]
+        trace = sample["trace"]
+        self.assertEqual(trace["materials"], [{"owner": "calendar.extension", "purpose": "daily_agenda",
+                                               "state": "ready"}])
+        self.assertEqual(trace["offered_tool_count"], 2)
+        self.assertEqual(trace["offered_tools"], ["calendar.query", "memory.search"])
+        self.assertEqual(len(trace["model_calls"]), 1)
+        self.assertEqual(trace["tool_calls"][0]["kind"], "extension")
+        self.assertEqual(trace["tool_calls"][0]["state"], "succeeded")
+        self.assertEqual(trace["tool_calls"][0]["elapsed_ms"], 400)
+        self.assertEqual(trace["tool_calls"][0]["extension_elapsed_ms"], 200)
+        body_free_report = json.dumps(report, ensure_ascii=False)
+        for private_value in ("private injected content", "private model prompt", "private tool arguments"):
+            self.assertNotIn(private_value, body_free_report)
+
+    async def test_maintenance_exposes_current_role_and_unmatched_no_reply_reasons_only(self):
+        ledger = InboundNoReplyLedger(self.app.runtime)
+        at = self.app.now()
+        ledger.record(reason_code="staging_not_accepting", observed_at=at,
+                      channel="private", origin_key=None, event_ref="a" * 32)
+        ledger.record(reason_code="session_reply_disabled", observed_at=at,
+                      channel="private", origin_key=self.role_context.key, event_ref="b" * 32,
+                      code="model_budget_exhausted")
+        ledger.record(reason_code="provider_request_failed", observed_at=at,
+                      channel="private", origin_key="another-role", event_ref="c" * 32)
+
+        data = self.manager.maintenance(self.core).unwrap()
+
+        records = data["runtime"]["inbound_no_replies"]
+        self.assertEqual({row["event_ref"] for row in records}, {"a" * 32, "b" * 32})
+        self.assertEqual({row["scope"] for row in records}, {"unmatched", "current_role"})
+        self.assertEqual(next(row["code"] for row in records if row["event_ref"] == "b" * 32),
+                         "model_budget_exhausted")
+        self.assertTrue(all(set(row) == {"event_ref", "channel", "reason_code", "code", "observed_at", "scope"}
+                            for row in records))
+
     async def test_status_projects_the_provider_model_name(self):
         """管理面列出 Provider 时必须带上模型名。
 
@@ -39,6 +198,15 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         """
         before = self.manager.status(self.core).unwrap()
         self.assertEqual(before["providers"][0]["model"], "")
+
+    async def test_status_explains_the_prompt_layers_and_editable_field(self):
+        task = self.manager.status(self.core).unwrap()["tasks"][0]
+        layers = task["prompt_layers"]
+        self.assertEqual([layer["key"] for layer in layers], [
+            "role_instruction", "request_instruction", "task_prompt", "output_contract", "capability_instruction",
+            "terminal_prompt_guard"])
+        self.assertEqual([layer["key"] for layer in layers if layer["editable"]], ["task_prompt"])
+        self.assertIn("单次请求正文", layers[1]["description"])
 
     async def test_storage_check_reports_integrity_without_mutating_runtime(self):
         page_count = self.app.runtime.read_one("PRAGMA page_count", ())[0]
@@ -123,10 +291,129 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["windows"]["30d"]["totals"]["calls"], 1)
         self.assertEqual(data["history"][0]["key"], old_day.isoformat())
 
+    async def test_cache_diagnostics_use_exact_period_counts_and_safe_signature_records(self):
+        call = self.app.runtime.read_one("SELECT call_id FROM model_calls LIMIT 1", ())
+        signature = {"version": 1, "model_hash": "a" * 64, "system_hash": "b" * 64,
+            "system_parts": ["b" * 64], "tools_hash": "c" * 64, "tool_parts": [],
+            "context_hashes": [], "context_bytes": 0, "context_observed": True}
+        signature_json = json.dumps(signature, sort_keys=True)
+        with self.app.runtime.transaction() as connection:
+            connection.execute("""UPDATE model_calls SET input_tokens = 1200, cached_input_tokens = 100,
+                cache_creation_tokens = 0, provider_json = ? WHERE call_id = ?""",
+                (json.dumps({"provider": "primary"}), call["call_id"]))
+            connection.execute("INSERT INTO model_call_cache_signatures(call_id, signature_json) VALUES (?, ?)",
+                               (call["call_id"], signature_json))
+
+        data = self.manager.maintenance(self.core).unwrap()
+        self.assertEqual(data["summary"]["cache_low_calls"], 1)
+        self.assertEqual(data["history"][-1]["cache_low_calls"], 1)
+        daily = data["cache_diagnostics"]["daily"][-1]
+        self.assertEqual((daily["signature_calls"], daily["baseline_calls"], daily["compared_calls"]), (1, 1, 0))
+        self.assertEqual(data["cache_diagnostics"]["recent_events"], [])
+        self.assertNotIn("prompt", data["cache_diagnostics"])
+
+    async def test_maintenance_splits_dialogue_and_plugin_usage_without_changing_receipts(self):
+        calls = [dict(self.app.runtime.read_one("SELECT * FROM model_calls LIMIT 1", ()))]
+        for identifier in ("plugin-usage", "unknown-dialogue-usage"):
+            batch = self.host_instance.receive(self.event(identifier)).unwrap()
+            self.advance(self.app)
+            await self.done(self.app, batch)
+            calls.append(dict(self.app.runtime.read_one("SELECT * FROM model_calls ORDER BY finished_at DESC LIMIT 1", ())))
+        signature = {"version": 1, "model_hash": "a" * 64, "system_hash": "b" * 64,
+            "system_parts": ["b" * 64], "tools_hash": "c" * 64, "tool_parts": [],
+            "context_hashes": [], "context_bytes": 0, "context_observed": True}
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE execution_tasks SET kind = 'conversation.image_review' WHERE task_id = ?",
+                               (calls[1]["task_id"],))
+            for row, tokens, input_tokens, cached, cost in ((calls[0], 120, 100, 40, 12),
+                                                          (calls[1], 220, 200, 10, 22),
+                                                          (calls[2], None, None, None, None)):
+                connection.execute("""UPDATE model_calls SET actual_tokens = ?, actual_cost = ?,
+                    input_tokens = ?, cached_input_tokens = ?, output_tokens = ?, cache_creation_tokens = 0,
+                    provider_json = ?, state = ? WHERE call_id = ?""",
+                    (tokens, cost, input_tokens, cached, 20 if tokens is not None else None,
+                     json.dumps({"provider": "primary"}), "unknown" if tokens is None else "generated", row["call_id"]))
+                record = signature if row != calls[2] else {**signature, "system_hash": "d" * 64, "system_parts": ["d" * 64]}
+                connection.execute("INSERT INTO model_call_cache_signatures(call_id, signature_json) VALUES (?, ?)",
+                                   (row["call_id"], json.dumps(record)))
+        before = [dict(row) for row in self.app.runtime.read_all("SELECT * FROM model_calls ORDER BY call_id", ())]
+        budget_before = [dict(row) for row in self.app.runtime.read_all("SELECT * FROM model_budget_accounts", ())]
+
+        data = self.manager.maintenance(self.core).unwrap()
+        dialogue, plugin = (data["usage_sources"][key] for key in ("conversation", "plugin"))
+        self.assertEqual((dialogue["totals"]["tokens"], plugin["totals"]["tokens"], data["totals"]["tokens"]),
+                         (120, 220, 340))
+        self.assertEqual((dialogue["totals"]["cost_microusd"], plugin["totals"]["cost_microusd"]), (12, 22))
+        self.assertEqual((dialogue["totals"]["calls"], plugin["totals"]["calls"]), (2, 1))
+        self.assertEqual((dialogue["totals"]["unconfirmed_calls"], plugin["totals"]["unconfirmed_calls"]), (1, 0))
+        self.assertEqual((dialogue["totals"]["unknown_calls"], plugin["totals"]["unknown_calls"]), (1, 0))
+        self.assertEqual((dialogue["summary"]["cache_hit_rate"], plugin["summary"]["cache_hit_rate"]), (40, 5))
+        self.assertEqual(dialogue["by_task"][0]["key"], "conversation.reply")
+        self.assertEqual(plugin["by_task"][0]["key"], "conversation.image_review")
+        for report, tokens in ((dialogue, 120), (plugin, 220)):
+            self.assertEqual(report["by_provider"][0]["tokens"], tokens)
+            self.assertEqual(report["history"][-1]["tokens"], tokens)
+            self.assertEqual(report["daily"][-1]["tokens"], tokens)
+            self.assertEqual(sum(row["tokens"] for row in report["hourly"]), tokens)
+            for period in ("7d", "30d"):
+                self.assertEqual(report["windows"][period]["totals"]["tokens"], tokens)
+        self.assertTrue(all(row["kind"] == "conversation.reply" for row in dialogue["recent"]))
+        self.assertTrue(all(row["kind"] == "conversation.image_review" for row in plugin["recent"]))
+        self.assertEqual(dialogue["cache_diagnostics"]["daily"][-1]["signature_calls"], 2)
+        self.assertEqual(dialogue["cache_diagnostics"]["daily"][-1]["changed_calls"], 1)
+        self.assertEqual(plugin["cache_diagnostics"]["daily"][-1]["signature_calls"], 1)
+        self.assertEqual(plugin["cache_diagnostics"]["recent_events"], [])
+        self.assertEqual(before, [dict(row) for row in self.app.runtime.read_all("SELECT * FROM model_calls ORDER BY call_id", ())])
+        self.assertEqual(budget_before, [dict(row) for row in self.app.runtime.read_all("SELECT * FROM model_budget_accounts", ())])
+        self.assertEqual(self.manager.maintenance(self.important).failure.code, "core_access_required")
+
+    async def test_recent_samples_are_bounded_per_source_and_exclude_other_role_accounts(self):
+        call = dict(self.app.runtime.read_one("SELECT * FROM model_calls LIMIT 1", ()))
+        task = dict(self.app.runtime.read_one("SELECT * FROM execution_tasks WHERE task_id = ?", (call["task_id"],)))
+        attempt = dict(self.app.runtime.read_one("SELECT * FROM execution_attempts WHERE attempt_id = ?", (call["attempt_id"],)))
+        request = dict(self.app.runtime.read_one("SELECT * FROM model_requests WHERE task_id = ?", (call["task_id"],)))
+        scope = self.role_context.scope
+        role_address = [scope.installation_id, scope.bot_id, asdict(self.role_context.role_binding.role)]
+        role_account = digest(["role", role_address, self.app.now().date().isoformat()])
+        with self.app.runtime.transaction() as connection:
+            def insert(table, row):
+                connection.execute(f"INSERT INTO {table} ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
+                                   tuple(row.values()))
+
+            other_account = dict(connection.execute("SELECT * FROM model_budget_accounts WHERE account_key = ?",
+                                                    (role_account,)).fetchone())
+            insert("model_budget_accounts", {**other_account, "account_key": "another-role"})
+            connection.execute("UPDATE execution_tasks SET kind = 'proactive.compose' WHERE task_id = ?", (task["task_id"],))
+            for index in range(86):
+                task_id, attempt_id, call_id = (f"usage-{label}-{index}" for label in ("task", "attempt", "call"))
+                at = (self.app.now() + timedelta(seconds=index + 1)).isoformat()
+                origin_key = "another-role" if index == 85 else task["origin_key"]
+                insert("execution_tasks", {**task, "task_id": task_id, "attempt_id": attempt_id,
+                                            "origin_key": origin_key, "dedupe_key": task_id})
+                insert("execution_attempts", {**attempt, "attempt_id": attempt_id, "task_id": task_id,
+                                               "origin_key": origin_key})
+                insert("model_requests", {**request, "task_id": task_id})
+                insert("model_calls", {**call, "call_id": call_id, "task_id": task_id, "attempt_id": attempt_id,
+                                       "started_at": at, "finished_at": at})
+                insert("model_call_accounts", {"call_id": call_id, "account_key": "another-role" if index == 85 else role_account})
+
+        data = self.manager.maintenance(self.core).unwrap()
+        dialogue, plugin = (data["usage_sources"][key] for key in ("conversation", "plugin"))
+        self.assertEqual((data["totals"]["calls"], dialogue["totals"]["calls"], plugin["totals"]["calls"]),
+                         (86, 85, 1))
+        self.assertEqual(len(data["recent"]), 80)
+        self.assertEqual(len(dialogue["recent"]), 80)
+        self.assertEqual(len(plugin["recent"]), 1)
+        self.assertEqual(plugin["recent"][0]["kind"], "proactive.compose")
+        other_at = (self.app.now() + timedelta(seconds=86)).isoformat()
+        self.assertTrue(all(row["at"] != other_at for row in dialogue["recent"]))
+
     async def test_save_replay_inherit_and_upstream_source(self):
         before = self.manager.status(self.core).unwrap()
         task = before["tasks"][0]
         self.assertEqual(task["fields"]["prompt"]["inherited_source"], "default")
+        self.assertEqual(task["fields"]["fallback"]["value"], "primary")
+        self.assertEqual(task["fields"]["fallback"]["inherited_source"], "default")
         self.assertEqual([provider["id"] for provider in before["providers"]], ["primary"])
 
         role = ConfigTarget(self.role_context.scope.installation_id, ConfigLayer.ROLE,
@@ -160,6 +447,7 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         status = self.manager.status(self.core).unwrap()
         for invalid in (None, {}, {"kind": "conversation.reply"},
                         self.request(status, changes={"provider": "primary"}, reset=["provider"]),
+                        self.request(status, changes={"fallback": "primary"}, key="duplicate-fallback"),
                         self.request(status, changes={"provider": "unregistered"})):
             result = self.manager.configure(self.core, invalid)
             self.assertIsNotNone(result.failure)

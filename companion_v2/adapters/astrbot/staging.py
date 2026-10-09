@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass, replace
 
+
 from companion_v2.adapters.astrbot.memory_owner import memory_owner_provider
 from companion_v2.adapters.astrbot.memory_push import memory_push_provider
 from companion_v2.adapters.astrbot.onebot import OneBotPrivateSender
@@ -39,7 +40,13 @@ from companion_v2.memory.reflection import reflection_profile
 from companion_v2.role_work.state.maintenance import state_profile
 from companion_v2.agenda.planning import planning_profile
 from companion_v2.role_work.growth.progress import growth_progress_profile
+from companion_v2.role_work.journal.self_review_service import self_review_profile
+from companion_v2.expression.style_service import expression_learning_profile
+from companion_v2.expression.review import expression_review_profile
 from companion_v2.screen.interpretation import screen_interpretation_profile
+from companion_v2.conversation.media.image_narration import image_narration_profile
+from companion_v2.conversation.media.video.narration import video_narration_profile
+from companion_v2.conversation.media.understanding import intake_settings as file_intake_settings
 from .presence import OneBotPresencePort
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
@@ -47,7 +54,7 @@ from companion_v2.storage.repositories import OperationRepository
 from .application import AstrBotCompanionHost
 from .native import HostAccount, HostPersona, NativePrivateBridge, account_number, check_version, persona_instruction
 from .provider import AstrBotTextProvider, UsageTariff, provider_fingerprint
-from .provider_catalog import assemble_providers
+from .provider_catalog import TextProviderSettings, assemble_providers, loaded_routing
 from .staging_config import DELIVERY_CAPABILITY, DELIVERY_GRANT_ID
 from .staging_delivery import delivery_grants, require_delivery_access
 
@@ -74,9 +81,20 @@ class NativeAdapterTypes:
     video: type | None = None
     video_loader: object | None = None
     group_component_reader: object | None = None
+    file: type | None = None
+    file_loader: object | None = None
+    video_provider_type: type | None = None
+    video_provider_factory: object | None = None
 
     def __post_init__(self):
         check_version(self.version)
+        if (self.file is None) != (self.file_loader is None) or (self.file is not None and (
+                not isinstance(self.file, type) or not callable(self.file_loader))):
+            raise ValueError("file intake requires an explicit native type and loader")
+        if ((self.video_provider_type is None) != (self.video_provider_factory is None)
+                or self.video_provider_type is not None and (
+                    not isinstance(self.video_provider_type, type) or not callable(self.video_provider_factory))):
+            raise ValueError("native video provider requires an explicit type and adapter factory")
         if (self.video is None) != (self.video_loader is None) or (self.video is not None and (
                 not isinstance(self.video, type) or not callable(self.video_loader))):
             raise ValueError("video intake requires an explicit native type and loader")
@@ -189,7 +207,7 @@ class AstrBotStagingSession:
                  native_tool_port=None, now=None, voice=None, voice_policy=None, weather_port=None,
                  weather_alert_port=None, balance_port=None, news_port=None, solar_term_port=None, qzone_transport=None, additional_providers=(), fallback_provider_id="", replacement_rules="[]",
                  fallback_on_refusal=False, review_only=False, profile_field_shapes=None,
-                 bootstrap_receipt_validated=False):
+                 bootstrap_receipt_validated=False, default_provider_resolver=None):
         if runtime.installation_id != profile.target.scope.installation_id:
             raise ValueError("staging storage and target must have the same installation")
         self.runtime, self.profile, self.native_types = runtime, profile, native_types
@@ -209,7 +227,9 @@ class AstrBotStagingSession:
             forward_type=native_types.forward, forward_loader=native_types.forward_loader, now=now,
             audio_type=native_types.audio, audio_loader=native_types.audio_loader, component_reader=native_types.component_reader,
             video_type=native_types.video, video_loader=native_types.video_loader,
-            forward_intake=profile.forward_intake)
+            forward_intake=profile.forward_intake,
+            file_type=native_types.file, file_loader=native_types.file_loader,
+            file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
         self.identity = PersistentIdentityDirectory(runtime)
         # These identities are stable across a restart of the same native config.
         native = context.get_provider_by_id(profile.provider_id)
@@ -227,7 +247,15 @@ class AstrBotStagingSession:
             raise TaskError("host_provider_changed", "native provider changed during staging assembly")
         self.model._current()
         self.models = (self.model,) + assemble_providers(context, bridge=self.bridge, native_types=native_types,
-            primary_id=profile.provider_id, additional=additional_providers)
+            primary_id=profile.provider_id, additional=additional_providers,
+            defaults=TextProviderSettings(profile.provider_id, profile.tariff, profile.max_output_tokens,
+                profile.maximum_input_estimate, profile.output_parameter, profile.streaming))
+        fallback_provider_id, replacement_rules = loaded_routing(fallback_provider_id, replacement_rules,
+            (model.binding.provider for model in self.models))
+        narration_profiles = tuple(image_narration_profile(model.binding.provider)
+            for model in self.models if "image" in model.local_provider().capabilities)[:1]
+        native_video_profiles = tuple(video_narration_profile(model.binding.provider)
+            for model in self.models if "video" in model.local_provider().capabilities)[:1]
         self.model_profile = ModelTaskProfile(REPLY_KIND, Lane.FOREGROUND, profile.provider_id,
             profile.task_prompt, default_fallback=fallback_provider_id, replacement_rules=replacement_rules,
             fallback_on_refusal=fallback_on_refusal,
@@ -240,7 +268,12 @@ class AstrBotStagingSession:
                     state_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
                     planning_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
                     growth_progress_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
-                    screen_interpretation_profile(profile.provider_id)) + self.writing_profiles + (self.reading_profile,) + authoring_profiles(
+                    self_review_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
+                    expression_learning_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
+                    expression_review_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
+                    expression_review_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens, contact=True),
+                    screen_interpretation_profile(profile.provider_id), *narration_profiles,
+                    *native_video_profiles) + self.writing_profiles + (self.reading_profile,) + authoring_profiles(
                         profile.provider_id, draft_tokens=profile.max_output_tokens)
         registry = FieldRegistry(version="astrbot-staging.v1", fields=configuration_fields(profiles))
         self.sender_binding = ProviderBinding("message.delivery", "astrbot-staging.onebot_private",
@@ -258,6 +291,7 @@ class AstrBotStagingSession:
             role_port=self.bridge.ports, runtime_identity=profile.runtime_identity, registry=registry,
             profiles=profiles, providers=tuple(model.local_provider() for model in self.models), budget=profile.budget,
             budget_soft=profile.budget_soft,
+            default_provider_resolver=default_provider_resolver,
             sender=sender, policy=profile.policy, limits=profile.limits, now=now,
             tool_port=native_tool_port, segmentation=profile.segmentation, voice_policy=voice_policy,
             # 记忆归属读的是别家插件自己公开的声明；适配层的这一个函数是唯一的跨插件
@@ -312,7 +346,7 @@ class AstrBotStagingSession:
         policy = {key: policy[key] for key in shapes.get("policy", policy)}
         segmentation = {key: segmentation[key] for key in shapes.get("segmentation", segmentation)}
         legacy_model = asdict(replace(self.model_profile, default_fallback="", replacement_rules="[]"))
-        for name in ("replacement_rules", "fallback_on_refusal", "timeout_seconds", "replacement_scope"):
+        for name in ("replacement_rules", "fallback_on_refusal", "timeout_seconds", "replacement_scope", "prompt_sections"):
             legacy_model.pop(name)
         self._legacy_profile_hash = digest({"target": target.key, "host": profile.runtime_identity.host_id,
             "ecosystem": profile.runtime_identity.ecosystem_id, "persona": profile.persona,
@@ -407,6 +441,7 @@ class AstrBotStagingSession:
                 self._configuration()
                 self.application.life_runtime.bind(self.profile.target, instruction, guard=self.bridge.verify_role)
                 self.application.state_maintenance.bind(self.profile.target, instruction, guard=self.bridge.verify_role)
+                self.application.contact_schedule.bind_context(self.profile.target)
                 if self.application.presence is not None:
                     self.application.presence.bind(self.profile.target)
                 self._pin()
@@ -428,6 +463,22 @@ class AstrBotStagingSession:
         # from allowing the next message to overtake its original input.
         async with self._intake:
             return await self._receive(host_event)
+
+    async def plan_calendar(self, host_event, *, mode, refresh=False):
+        async with self._intake:
+            self.application.require_running()
+            self.require_intake_authorization()
+            self._configuration()
+            captured = require(await self.bridge.capture(host_event))
+            target = self.profile.target
+            if (captured.principal != target.actor.principal or captured.route.scope != target.scope
+                    or captured.recipients != target.audience or captured.role != target.role_binding.role):
+                raise TaskError("staging_target_mismatch", "event differs from the explicitly selected staging target")
+            binding = self.application.state_maintenance.bindings.get(target.key)
+            if binding is None:
+                raise TaskError("planning_role_changed", "original role binding is unavailable")
+            return await self.application.calendar_planning.run(target, binding[1], mode=mode,
+                slot="manual:" + mode + ":" + captured.event_id, manual=True, refresh=refresh)
 
     async def _receive(self, host_event):
         try:

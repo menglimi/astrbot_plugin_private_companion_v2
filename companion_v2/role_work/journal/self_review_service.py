@@ -33,12 +33,16 @@ from .self_review_evidence import SelfReviewEvidenceCatalog, evidence_handles, w
 KIND = "role.self_review"
 OWNER = "role.self_review"
 CURSOR_PREFIX = "role.self_review.cursor.v1:"
+AUTO_APPLY_KINDS = frozenset({"try_next_time", "keep"})
+AUTO_ACTOR = "system:self-review"
 MIN_EVIDENCE = 2
 TERMINAL_AVAILABLE = frozenset({"self_review_private_audience_required"})
 PROMPT = (
-    "复盘上一段时间里角色自己在这段私聊中的可观察行为，只依据提供的证据条目。"
-    "可以检查：是否回应了对方真正提出的请求、是否在不确定时说明了不确定性、"
-    "是否尊重了来源与授权、是否把提议或计划说成了已经完成的事。"
+    "复盘最近一天角色在这段私聊里留下的工作、产出和结论，只依据提供的证据条目。"
+    "先核对已经完成的生活或工作记录、日记与阅读回执，以及确认送达的回复；"
+    "检查记录是否有依据、结论是否与产出一致、是否回应了对方真正提出的请求、"
+    "是否在不确定时说明了不确定性、是否尊重来源与授权、是否把提议或计划说成了已经完成的事。"
+    "这些材料只代表本窗口中成功留痕的部分工作，不代表插件或角色全天的完整工作。"
     "不要评价用户或第三方，不要给角色贴人格标签，不要把一次失误写成稳定事实，"
     "也不要因为材料里没有出现就断言某件事没有发生。"
     "证据不足时给出较少的条目，或使用 no_change。"
@@ -64,7 +68,9 @@ def parse_output(raw, *, allowed_evidence, now):
 
 class SelfReviewService:
     page_size = 16
-    scan_seconds = 3600
+    scan_seconds = 86400
+    empty_retry_seconds = 3600
+    minimum_evidence = 1
 
     def __init__(self, runtime, *, window_hours=24):
         self.runtime = runtime
@@ -87,8 +93,8 @@ class SelfReviewService:
                                       waiting=app.background_waiting)
 
     @staticmethod
-    def identifier(context, operation_id):
-        return "self-review:" + digest([context.scope, context.role_binding.role, operation_id])
+    def identifier(context, request_key):
+        return "self-review:" + digest([context.scope, context.role_binding.role, request_key])
 
     def _bound(self, context, instruction):
         bound = self.app.state_maintenance.bindings.get(context.key)
@@ -130,13 +136,13 @@ class SelfReviewService:
         if KIND not in self.gateway.router.profiles:
             raise TaskError("model_task_unregistered", "self-review needs its background profile")
         await self.guard(context, instruction)
-        identifier = self.identifier(context, self._slot(context))
-        if self.operations.get(identifier).is_success:
-            return {"state": "already_attempted", "task_id": identifier}
         job = self.prepare(context, instruction, self.tasks.now())
         if job is None:
-            return {"state": "no_reviewable_window", "task_id": identifier}
+            return {"state": "no_reviewable_window"}
         request_key = digest([job["material_hash"], job["window_document"]])
+        identifier = self.identifier(context, request_key)
+        if self.operations.get(identifier).is_success:
+            return {"state": "already_attempted", "task_id": identifier}
         with self.runtime.transaction():
             reservation = require(self.operations.reserve(OperationRef(identifier, OWNER, context.scope,
                 VersionRef(identifier, 1), identifier),
@@ -161,9 +167,15 @@ class SelfReviewService:
             self.pending.pop(identifier, None)
             self.committed.discard(identifier)
 
-    @staticmethod
-    def _slot(context):
-        return context.key
+    async def _run_scheduled(self, context, instruction, cursor_key, at):
+        result = await self.run(context, instruction)
+        if result["state"] in {"succeeded", "completed", "already_attempted"}:
+            self._advance_cursor(cursor_key, at)
+        elif result["state"] == "no_reviewable_window":
+            self.next_checks[context.key] = self.tasks.now() + timedelta(seconds=self.empty_retry_seconds)
+        else:
+            self.next_checks[context.key] = self.tasks.now() + timedelta(minutes=5)
+        return result
 
     async def generate(self, run):
         job = self.pending[run.task.task_id]
@@ -187,16 +199,26 @@ class SelfReviewService:
                 run.begin_effect()
                 run_id = "self-review:" + digest([context.key, job["request_key"]])
                 at = stamp(self.tasks.now())
+                has_questions = any(item.kind == "ask_user" for item in output.guidance)
                 connection.execute("""INSERT INTO role_self_review_runs VALUES
-                    (?, ?, ?, ?, ?, ?, 'pending', ?, NULL)""",
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (run_id, digest(self.evidence.receipts.life.owner(context)), digest(context.scope),
-                     encode(job["window_document"]), job["material_hash"], output.summary, at))
+                     encode(job["window_document"]), job["material_hash"], output.summary,
+                     "pending" if has_questions else "decided", at, None if has_questions else at))
                 for ordinal, item in enumerate(output.guidance):
+                    if item.kind == "no_change":
+                        continue
+                    automatic = item.kind in AUTO_APPLY_KINDS
+                    state = "accepted" if automatic else "pending"
+                    decided_at = at if automatic else None
+                    decided_by = AUTO_ACTOR if automatic else None
+                    decision_key = digest([run_id, ordinal, "automatic"]) if automatic else None
                     connection.execute("""INSERT INTO role_self_review_items VALUES
-                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, ?)""",
+                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (run_id + ":item:" + str(ordinal), run_id, digest(self.evidence.receipts.life.owner(context)),
                          digest(context.scope), item.kind, item.observation, item.next_action,
-                         item.confidence, encode(sorted(item.evidence_handles)), stamp(item.expires_at), at, ordinal))
+                         item.confidence, encode(sorted(item.evidence_handles)), stamp(item.expires_at),
+                         state, at, decided_at, decided_by, decision_key, ordinal))
                 require(self.operations.transition(run.task.task_id, expected_state=OperationState.ACCEPTED,
                     next_state=OperationState.COMPLETED, observed_at=self.tasks.now()))
                 self.committed.add(run.task.task_id)
@@ -246,6 +268,7 @@ class SelfReviewService:
                     error = worker.exception()
                     if error:
                         self.results[key] = {"state": "failed", "code": getattr(error, "code", "self_review_failed")}
+                        self.next_checks[key] = self.tasks.now() + timedelta(minutes=5)
         if self.workers or KIND not in self.gateway.router.profiles:
             return
         bindings = tuple(self.app.state_maintenance.bindings.values())
@@ -264,11 +287,11 @@ class SelfReviewService:
                     continue
                 job = self.prepare(context, instruction, at)
                 if job is None:
+                    self.next_checks[context.key] = at + timedelta(hours=1)
                     continue
                 key, _ = self._cursor(context)
-                self._advance_cursor(key, at)
                 self.workers[context.key] = asyncio.create_task(
-                    self.run(context, instruction), name="companion:self-review")
+                    self._run_scheduled(context, instruction, key, at), name="companion:self-review")
                 self.workers[context.key].add_done_callback(lambda done: self.app.notify())
                 return
             except TaskError as error:

@@ -140,6 +140,35 @@ class BackupTests(unittest.TestCase):
                 reopened.close()
             self.assertEqual(outcome["snapshot_id"], manifest["snapshot_id"])
 
+    def test_restore_can_read_a_snapshot_from_the_configured_external_directory(self) -> None:
+        with TemporaryDirectory(prefix="companion-v2-backup-external-") as temporary:
+            runtime = _open(temporary)
+            external = Path(temporary) / "other-disk" / "snapshots"
+            try:
+                with runtime.transaction() as connection:
+                    connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?)",
+                                       ("probe", "before"))
+                backup = InstallationBackup(runtime, now=lambda: NOW, directory=external)
+                manifest = backup.create(note="外置磁盘快照").unwrap()
+                with runtime.transaction() as connection:
+                    connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ?",
+                                       ("after", "probe"))
+                self.assertTrue(backup.restore(snapshot_id=manifest["snapshot_id"],
+                                               confirmed_hash=manifest["content_hash"]).is_success)
+                schema_version = manifest["schema_version"]
+            finally:
+                runtime.close()
+
+            outcome = apply_pending(Path(temporary) / "data", installation_id=INSTALLATION_ID,
+                                    schema_version=schema_version, backup_directory=external)
+            self.assertTrue(outcome["applied"])
+            reopened = _open(temporary)
+            try:
+                self.assertEqual(reopened.read_one("SELECT value FROM runtime_metadata WHERE key = 'probe'", ())[
+                    "value"], "before")
+            finally:
+                reopened.close()
+
     def test_apply_pending_reports_absence_instead_of_raising(self) -> None:
         with TemporaryDirectory(prefix="companion-v2-backup-") as temporary:
             runtime = _open(temporary)

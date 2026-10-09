@@ -113,6 +113,28 @@ class OfficialAlertContactTests(ContactScheduleFixture, unittest.IsolatedAsyncio
         self.assertEqual(json.loads(self.contacts(app)[0]["record_json"])["decision"], "skip")
         self.assertEqual(app.runtime.read_one("SELECT COUNT(*) FROM background_deliveries", ())[0], 0)
 
+    async def test_confirmed_diagnostic_keeps_official_alert_coverage_guard(self):
+        app, context = await self.setup_alerts()
+        app.contact_schedule.official_alert_events.port = AlertPort(self.clock, [[self.alert()]])
+        async def wrong_coverage(_envelope):
+            return answered(json.dumps({"decision": "send", "text": "请留意预警。",
+                "coverage": "covered", "coverage_quote": "请注意安全"}, ensure_ascii=False))
+        self.model_behavior = wrong_coverage
+        self.advance(app, 60)
+
+        candidate = await app.contact_schedule.diagnostic_candidate(context, "environment", at=self.clock.now())
+        self.assertEqual(candidate["route"]["id"], "official_alert_event")
+        result = await app.proactive.contact(context, candidate["opportunity"], candidate["intents"],
+            role_instruction=candidate["role_instruction"], selection_seed="confirmed-alert-diagnostic",
+            administrator_test=True, diagnostic_source_backed=True,
+            diagnostic_origin=candidate["diagnostic_origin"])
+
+        self.assertIsNone(result.failure, result.failure)
+        await self.until(lambda: len(self.contacts(app)) == 1)
+        saved = json.loads(self.contacts(app)[0]["record_json"])
+        self.assertEqual(saved["skip_reason"], "source_coverage")
+        self.assertEqual(app.runtime.read_one("SELECT COUNT(*) FROM background_deliveries", ())[0], 0)
+
     async def test_opt_in_and_attribution_is_program_added(self):
         app, _ = await self.setup_alerts(enabled=False)
         port = AlertPort(self.clock, [[self.alert()]])

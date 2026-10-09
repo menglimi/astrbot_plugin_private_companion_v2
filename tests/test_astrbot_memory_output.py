@@ -23,7 +23,7 @@ class NativeMemoryOutputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.draft)
         self.assertEqual(response.captured_output.text, '```json\n{"summary":')
         self.assertEqual(response.captured_output.finish_reason, "stop")
-        self.assertEqual(response.usage, Amount(40, 90))
+        self.assertEqual(response.usage, Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_tokens=10))
         self.assertEqual(len(self.native.provider.client.state.calls), 1)
 
     async def test_completion_reasons_are_kept_without_native_json_repair(self):

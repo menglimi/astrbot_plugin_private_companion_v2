@@ -16,6 +16,7 @@ from companion_v2.execution.models import TaskContext, digest
 from companion_v2.foundation.refs import AudienceRef, ScopeKind, SubjectKind
 from companion_v2.identity_policy.personas import PersonaDirectory
 from companion_v2.memory.models import AtomRef
+from astrbot.core.message.components import File
 from astrbot_host.group_authority import GroupAuthority
 from astrbot_host.multi_api import PREFIX
 from astrbot_host.multi_settings import MultiHostSettings
@@ -23,6 +24,16 @@ from astrbot_host.settings import HostControlError
 
 
 class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_unregistered_group_persona_is_not_mapped_to_a_character(self):
+        await self.start_host()
+        event = self.group_event()
+        self.native.selections["qq-main"] = "unregistered"
+        self.assertIsNone(await self.controller.persona_mapping_for_event(event))
+
+        self.native.selections["qq-main"] = "original"
+        mapping = await self.controller.persona_mapping_for_event(event)
+        self.assertEqual(mapping.role_id, "role-a")
+
     async def accept_group(self, *args, **kwargs):
         event = self.group_event(*args, **kwargs)
         result = await self.controller.receive_claimed(event)
@@ -138,6 +149,28 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.controller.receive_claimed(self.group_event(sender="777"))).failure.code,
                          "host_persona_unmapped")
         self.assertEqual(database_contents(app.runtime), before)
+
+    async def test_group_file_is_retained_as_an_explicit_unread_attachment(self):
+        async def unexpected_file_read(*_args, **_kwargs):
+            raise AssertionError("file reading is disabled in this intake test")
+
+        self.types = replace(self.types, file=File, file_loader=unexpected_file_read)
+        self.controller = self.make_controller(group_config())
+        await self.start_host()
+        event = self.group_event(identifier="group-file")
+        event.message_obj.raw_message["message"] = [
+            {"type": "file", "data": {"file_name": "notes.txt", "file_id": "native-file-id"}}
+        ]
+        event.message_obj.message = [File(name="notes.txt", file="native-file-id")]
+
+        observed = await self.controller.session.bridge.capture_text_only(event)
+        captured = await self.controller.session.bridge.capture(event)
+
+        self.assertTrue(observed.is_success, observed.failure)
+        self.assertIn("文件附件，正文尚未读取", observed.unwrap().text)
+        self.assertTrue(captured.is_success, captured.failure)
+        self.assertIn('"status"', captured.unwrap().text)
+        self.assertIn("未读取正文", captured.unwrap().text)
 
     async def test_private_memory_never_enters_group_prompt_or_group_tools(self):
         app = await self.start_host()

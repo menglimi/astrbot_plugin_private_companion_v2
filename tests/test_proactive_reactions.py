@@ -5,6 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.delivery.media import ImageDeliveryEnvelope, image_manifest
 from companion_v2.delivery.service import DeliveryRequest
 from tests.proactive_support import ContactFixture
@@ -23,6 +24,18 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.semantic.store.configure({"reactions_proactive_enabled": proactive,
                                        "reactions_trigger_probability": 1.0,
                                        "reactions_cooldown_seconds": 0}, 0)
+        from companion_v2.conversation.media.output_settings import GROUP as IMAGE_OUTPUT_GROUP
+        context = self.contact_context()
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE,
+                              context.role_binding.role, bot_id=context.scope.bot_id)
+        snapshot = app.configuration.read(self.core, target=target, group_id=IMAGE_OUTPUT_GROUP,
+                                          observed_at=self.clock.now()).unwrap()
+        app.configuration.patch(self.core, target=target, group_id=IMAGE_OUTPUT_GROUP,
+            expected_edit_token=snapshot.edit_token,
+            changes={IMAGE_OUTPUT_GROUP + ".proactive_probability": 1.0,
+                     IMAGE_OUTPUT_GROUP + ".proactive_max_daily": 1},
+            operation=self.operation(target.authorization_scope, owner=IMAGE_OUTPUT_GROUP),
+            observed_at=self.clock.now()).unwrap()
         return app
 
     def import_reaction(self, image=None, *, label="安慰"):

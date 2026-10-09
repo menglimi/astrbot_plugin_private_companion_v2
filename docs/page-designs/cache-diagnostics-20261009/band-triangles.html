@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>棱镜 · 三角形拼接试验</title>
+<style>
+  :root {
+    --bg: #05080F;
+    --card: #0F1725;
+    --line: rgba(148, 163, 184, .14);
+    --text: #E9EFFA;
+    --text-2: #93A4C0;
+    --text-3: #5C6C88;
+    --teal: #3EE0D0;
+    --green: #3FE0A6;
+    --purple: #A17BFF;
+    --amber: #FFC258;
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(1100px 460px at 75% -10%, rgba(161,123,255,.06), transparent 60%),
+      var(--bg);
+    font-family: var(--sans); color: var(--text);
+    padding: 36px 24px 72px;
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page-head { width: 100%; max-width: 880px; margin-bottom: 4px; }
+  .page-head h1 { font-size: 17px; font-weight: 700; }
+  .page-head p { margin-top: 5px; font-size: 11.5px; color: var(--text-2); line-height: 1.7; }
+
+  .variant {
+    width: 100%; max-width: 880px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 16px 20px 15px;
+  }
+  .v-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .v-badge {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    color: var(--purple); background: rgba(161,123,255,.1);
+    border: 1px solid rgba(161,123,255,.28); border-radius: 999px; padding: 2px 9px;
+  }
+  .v-head h2 { font-size: 13px; font-weight: 700; }
+  .v-head .tail { margin-left: auto; font-size: 10px; color: var(--text-3); }
+  .v-note { font-size: 10.5px; color: var(--text-2); line-height: 1.6; margin-bottom: 14px; }
+  .v-note b { color: var(--text); }
+
+  .c-hit { color: var(--green); } .c-write { color: var(--teal); }
+  .c-plain { color: var(--purple); } .c-out { color: var(--amber); }
+
+  /* ===== T1 山脊：四座大三角，底边 = 份额 ===== */
+  .ridge { display: flex; align-items: flex-end; height: 64px; }
+  .ridge > span {
+    height: 100%;
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+    transition: filter 140ms ease, transform 140ms ease;
+  }
+  .ridge > span:hover { filter: brightness(1.18); transform: translateY(-3px); }
+  .ridge-reflection {
+    display: flex; align-items: flex-start; height: 22px; margin-top: 2px;
+    transform: scaleY(-1); opacity: .16;
+    -webkit-mask-image: linear-gradient(0deg, transparent 30%, #000 100%);
+    mask-image: linear-gradient(0deg, transparent 30%, #000 100%);
+    pointer-events: none;
+  }
+  .ridge-reflection > span { height: 100%; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .ridge-meta { display: flex; margin-top: 8px; font-size: 10px; font-weight: 650; }
+  .ridge-meta span { white-space: nowrap; overflow: hidden; text-align: center; }
+  .ridge-hint { margin-top: 5px; font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+
+  /* ===== T2 拉链旗带：小三角上下咬合，颜色按数据段切换 ===== */
+  .zip-row { position: relative; display: flex; gap: 3px; height: 34px; padding: 0 2px; }
+  .zip-row::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1px;
+    background: rgba(148,163,184,.18);
+  }
+  .zip-row > i { flex: 1; min-width: 0; transition: filter 120ms ease, transform 120ms ease; }
+  .zip-row > i.up   { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .zip-row > i.down { clip-path: polygon(0 0, 100% 0, 50% 100%); }
+  .zip-row > i:hover { filter: brightness(1.3); transform: translateY(-2px); }
+  .zip-cuts { position: relative; height: 0; }
+  .zip-cuts i {
+    position: absolute; top: -40px; height: 40px; width: 1px;
+    background: repeating-linear-gradient(180deg, rgba(233,239,250,.4) 0 3px, transparent 3px 7px);
+  }
+  .zip-meta { display: flex; margin-top: 9px; font-size: 10px; font-weight: 650; }
+  .zip-meta span { white-space: nowrap; overflow: hidden; }
+  .zip-caps { display: flex; justify-content: space-between; margin-top: 5px; font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+
+  .g-hit   { background-image: linear-gradient(180deg, #3FE0A6, #16A36C); }
+  .g-write { background-image: linear-gradient(180deg, #3EE0D0, #129C93); }
+  .g-plain { background-image: linear-gradient(180deg, #A17BFF, #6340D6); }
+  .g-out   { background-image: linear-gradient(180deg, #FFC258, #D98A0C); }
+  .ridge > span, .ridge-reflection > span {
+    filter: drop-shadow(0 1px 0 rgba(255,255,255,.22));
+  }
+</style>
+</head>
+<body>
+
+  <div class="page-head">
+    <h1>棱镜 · 三角形拼接两种解法</h1>
+    <p>数据同前：命中 42.7 / 写入 18.3 / 普通 28.6 / 输出 10.4（占总量），界线 42.7% / 61% / 89.6%。三角化有两条路：<b>少而大</b>（一段一座峰）与<b>多而小</b>（拉链咬合、颜色按段切换）。</p>
+  </div>
+
+  <!-- ===== T1 山脊 ===== -->
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">T1</span><h2>山脊 · 一段一座峰</h2><span class="tail">底边严格等比 · 倒影收尾</span></div>
+    <p class="v-note">四段各变成一座三角峰，<b>底边宽度 = 份额</b>，峰高等同。面积即数据（底×高÷2 等比），山脊线把四段的相对体量直接"画"了出来。峰体渐变 + 发丝边缘，脚下压一层 16% 透明度的倒影，晶面感收尾。</p>
+
+    <div class="ridge" role="img" aria-label="Token 构成山脊：缓存命中 42.7%，缓存写入 18.3%，普通输入 28.6%，输出 10.4%，三角形底边宽度等于占比">
+      <span class="g-hit"   style="flex:42.7"></span>
+      <span class="g-write" style="flex:18.3"></span>
+      <span class="g-plain" style="flex:28.6"></span>
+      <span class="g-out"   style="flex:10.4"></span>
+    </div>
+    <div class="ridge-reflection" aria-hidden="true">
+      <span class="g-hit"   style="flex:42.7"></span>
+      <span class="g-write" style="flex:18.3"></span>
+      <span class="g-plain" style="flex:28.6"></span>
+      <span class="g-out"   style="flex:10.4"></span>
+    </div>
+    <div class="ridge-meta">
+      <span class="c-hit" style="flex:42.7">命中 42.7%</span>
+      <span class="c-write" style="flex:18.3">写入 18.3%</span>
+      <span class="c-plain" style="flex:28.6">普通 28.6%</span>
+      <span class="c-out" style="flex:10.4">输出 10.4%</span>
+    </div>
+    <div class="ridge-hint">AREA ∝ TOKENS · base = share · height = const</div>
+  </section>
+
+  <!-- ===== T2 拉链 ===== -->
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">T2</span><h2>拉链旗带 · 小三角咬合</h2><span class="tail">颜色按段切换 · 虚线为数据界线</span></div>
+    <p class="v-note">把带子拆成 <b>26 枚小三角，上下交替咬合成一条拉链</b>：中轴线贯穿，峰朝上、谷朝下。颜色仍严格按数据段切换（42.7% / 61% / 89.6% 三条虚线即界线），小三角让"边界"重新变得锋利可感。悬停任意三角会上浮。</p>
+
+    <div style="position:relative">
+      <div class="zip-row" id="zipBand" role="img" aria-label="Token 构成拉链旗带：26 枚交替三角形，颜色按缓存命中、缓存写入、普通输入、输出分段切换"></div>
+      <div class="zip-cuts" aria-hidden="true">
+        <i style="left:42.7%"></i><i style="left:61%"></i><i style="left:89.6%"></i>
+      </div>
+    </div>
+    <div class="zip-meta">
+      <span class="c-hit">命中 42.7%</span>
+      <span class="c-write" style="margin-left:13%">写入 18.3%</span>
+      <span class="c-plain" style="margin-left:11%">普通 28.6%</span>
+      <span class="c-out" style="margin-left:auto">输出 10.4%</span>
+    </div>
+    <div class="zip-caps"><span>▸ 42.7% 写入接管</span><span>▸ 61% 普通输入接管</span><span>▸ 89.6% 输出接管</span></div>
+  </section>
+
+<script>
+  (function () {
+    var cuts = [0.427, 0.61, 0.896];
+    var colors = ["#3FE0A6", "#3EE0D0", "#A17BFF", "#FFC258"];
+    var band = document.getElementById("zipBand");
+    var n = 26;
+    for (var i = 0; i < n; i++) {
+      var x = (i + 0.5) / n;
+      var bar = document.createElement("i");
+      var ci = x < cuts[0] ? 0 : x < cuts[1] ? 1 : x < cuts[2] ? 2 : 3;
+      bar.className = i % 2 ? "down" : "up";
+      bar.style.backgroundImage = "linear-gradient(180deg," + colors[ci] + ",rgba(5,8,15,.25))";
+      band.appendChild(bar);
+    }
+  })();
+</script>
+</body>
+</html>

@@ -17,6 +17,7 @@ from .experiences import MemoryExperiences
 from .recall_objects import RecallObjects
 from .recall_index import RecallIndex
 from .recall_query import RecallQuery
+from .legacy_materials import LegacyMemoryMaterials
 
 
 class MemoryQuery:
@@ -30,6 +31,7 @@ class MemoryQuery:
         self.objects = RecallObjects(self)
         self.recall_index = RecallIndex(self, self.objects)
         self.recall = RecallQuery(self, self.recall_index, self.objects)
+        self.legacy = LegacyMemoryMaterials(writer)
 
     def begin(self, context, session_id, *, expires_at=None):
         self.access.check(context)
@@ -222,6 +224,24 @@ class MemoryQuery:
                     vector=vector, model=model, candidate_limit=candidate_limit)
             except sqlite3.DatabaseError as error:
                 raise index_failure(error) from None
+
+    @outcome
+    def legacy_materials(self, context, session_id, *, query_intent="", material_kind="all", limit=None,
+                         cursor=None, time_start=None, time_end=None):
+        """Read imported V1 history under this query session's access and budget.
+
+        This result is explicitly historical: it contains no V2 evidence handle
+        and cannot be submitted as a source-backed memory mutation.
+        """
+        policy = self.access.policy_for(context)
+        with self.runtime.transaction():
+            self._session(context, session_id)
+            result = require(self.legacy.query(context, query_intent=query_intent,
+                material_kind=material_kind, limit=limit, cursor=cursor,
+                time_start=time_start, time_end=time_end))
+            result["remaining_calls"] = max(0, policy.turn_calls - self._session(context, session_id)["calls"] - 1)
+            return self._charge(context, session_id, result,
+                                read={"profile": result["profile"], "count": len(result["items"])})
 
     @outcome
     def source(self, context, session_id, *, handle, start=None, max_chars=None):

@@ -15,7 +15,7 @@ window.CompanionCalendarEditor = (() => {
     core_access_required:"当前账号没有日程管理权限。",authorization_denied:"当前授权不足，请刷新核对。",
     dashboard_identity_required:"请重新登录 AstrBot 管理界面。",binding_revoked:"当前身份授权已撤销，请重新进入。",
     binding_rebound:"当前身份绑定已变化，请重新进入。",role_binding_changed:"角色绑定已变化，请重新进入。",
-    staging_host_terminated:"宿主已停止，请重新打开页面。"};
+    staging_host_terminated:"插件已停止，请重新打开页面。"};
   const staleCodes=new Set(["record_revision_conflict","state_view_stale","calendar_occurrence_missing","calendar_closed"]);
   const deniedCodes=new Set(["core_access_required","authorization_denied","dashboard_identity_required","binding_revoked","binding_rebound","role_binding_changed","staging_host_terminated"]);
   const exact=(value,keys)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
@@ -89,6 +89,11 @@ window.CompanionCalendarEditor = (() => {
     let scope=null,status=null,draft=null,pending=null,busy=false,loading=false,alive=true,messageText="",error=false;
     const emit=()=>{if(alive)changed();};
     const say=(value,bad=false)=>{messageText=value;error=bad;};
+    const sameValue=(left,right)=>Array.isArray(left)||Array.isArray(right)
+      ?JSON.stringify(left)===JSON.stringify(right)
+      :left===right||typeof left==="number"&&typeof right==="string"&&right.trim()!==""&&left===Number(right)
+        ||typeof right==="number"&&typeof left==="string"&&left.trim()!==""&&right===Number(left);
+    function draftDirty(){return !!draft&&Object.keys(draft.values).some(key=>!sameValue(draft.values[key],draft.initial?.[key]));}
     // A successful state read carries the core operator's view token. Automatic
     // role access is separate from the authenticated manager's calendar access.
     const canManage=()=>typeof status?.create_token==="string"&&!!status.create_token;
@@ -99,14 +104,14 @@ window.CompanionCalendarEditor = (() => {
     function open(kind,index){
       if(busy||loading||pending||!status||!canManage())return;
       if(kind==="create"){
-        if(typeof status.create_token!=="string")return;draft={kind,base:null,token:status.create_token,values:blankValues(),stale:false};
+        if(typeof status.create_token!=="string")return;const values=blankValues();draft={kind,base:null,token:status.create_token,values,initial:{...values},stale:false};
       }else{
         const item=status.calendar?.items?.[index];if(!usable(item))return;const base=structuredClone(item);
-        if(kind==="revise")draft={kind,base,values:blankValues(base),stale:false};
+        if(kind==="revise"){const values=blankValues(base);draft={kind,base,values,initial:{...values},stale:false};}
         else if(kind==="exception"){
-          if(base.schedule?.frequency==="once")return;const values=scheduleValues(base.schedule);draft={kind,base,values:{sequence:1,mode:"move",start:values.start,timezone:values.timezone},stale:false};
-        }else if(kind==="cancel")draft={kind,base,values:{},stale:false};
-        else if(kind==="remind")draft={kind,base,values:{sequence:1},stale:false};
+          if(base.schedule?.frequency==="once")return;const schedule=scheduleValues(base.schedule),values={sequence:1,mode:"move",start:schedule.start,timezone:schedule.timezone};draft={kind,base,values,initial:{...values},stale:false};
+        }else if(kind==="cancel")draft={kind,base,values:{},initial:{},stale:false};
+        else if(kind==="remind")draft={kind,base,values:{sequence:1},initial:{sequence:1},stale:false};
       }
       say("");emit();
     }
@@ -169,6 +174,7 @@ window.CompanionCalendarEditor = (() => {
           draft={...previous,base:structuredClone(current),values:{...previous.values,timezone:current.schedule.timezone_name},stale:false};
         }else draft={...previous,base:structuredClone(current),stale:false};}
       say("已读取当前日程并保留你的修改，请核对后保存。");emit();}
+    function discardIfPristine(){if(busy||pending||draftDirty())return false;if(draft){draft=null;say("");emit();}return true;}
     function click(event){const button=event.target.closest("[data-calendar-edit]");if(!button)return false;const action=button.dataset.calendarEdit;
       if(["create","revise","exception","cancel","remind"].includes(action))open(action,Number(button.dataset.index));
       if(action==="close"&&!busy){draft=null;say("");emit();}
@@ -201,7 +207,9 @@ window.CompanionCalendarEditor = (() => {
       const start=isoToWall(s.anchor,s.timezone_name),exceptions=Object.keys(item.exceptions||{}).length;
       return `${start?start.replace("T"," ")+" · "+s.timezone_name+" · ":""}${repeat}${exceptions?` · 已有 ${exceptions} 次例外`:""}${item.reminder_id?" · 已安排提醒":""}`;}
     function markup({items=[],locked=false,escape=e}={}){if(!status||!scope)return "";const can=canManage(),messageMarkup=messageText?`<p class="memory-notice ${error?"error":""}" role="status" aria-live="polite">${escape(messageText)}</p>`:"";
-      const pendingMarkup=pending?`<div class="state-pending" role="status"><strong>${busy?"请求处理中":"有一笔日程保存尚待核对"}</strong><p>原请求：${escape(pending.action.replace("calendar.",""))} · ${escape(pending.id||"新计划")}</p><div class="state-edit-actions"><button type="button" class="memory-button" data-calendar-edit="recover" ${busy||loading?"disabled":""}>用原请求核对</button><button type="button" class="memory-button" data-calendar-edit="dismiss" ${busy?"disabled":""}>结束核对</button></div></div>`:"";
+      const pendingAction={"calendar.create":"创建计划","calendar.revise":"修改日程","calendar.cancel":"取消日程","calendar.remind":"安排提醒","calendar.exception":"调整本次安排"}[pending?.action]||"保存日程";
+      const pendingTitle=pending?.data?.title||status.calendar?.items?.find(item=>item.id===pending?.id)?.title||"当前日程";
+      const pendingMarkup=pending?`<div class="state-pending" role="status"><strong>${busy?"请求处理中":"有一笔日程保存尚待核对"}</strong><p>待核对：${escape(pendingAction)} · ${escape(pendingTitle)}</p><div class="state-edit-actions"><button type="button" class="memory-button" data-calendar-edit="recover" ${busy||loading?"disabled":""}>用原请求核对</button><button type="button" class="memory-button" data-calendar-edit="dismiss" ${busy?"disabled":""}>结束核对</button></div></div>`:"";
       const body=draft?`<form id="state-calendar-form"><fieldset ${busy||pending?"disabled":""}><legend>${draft.kind==="create"?"创建角色计划":draft.kind==="revise"?"修改整个日程":draft.kind==="exception"?"修改这一次发生":draft.kind==="remind"?"安排日程提醒":"取消整组日程"}</legend>${form()}</fieldset><div class="state-edit-actions"><button type="submit" class="memory-button" ${busy||pending||draft.stale?"disabled":""}>${busy?"正在保存…":draft.kind==="create"?"创建角色计划":draft.kind==="revise"?"保存整个日程":draft.kind==="exception"?"保存这次修改":draft.kind==="remind"?"安排提醒":"确认取消"}</button>${draft.stale?`<button type="button" class="memory-button" data-calendar-edit="rebase" ${busy||pending?"disabled":""}>读取当前版本继续编辑</button>`:""}<button type="button" class="memory-button" data-calendar-edit="close" ${busy?"disabled":""}>取消编辑</button></div></form>`:
         `<div class="state-edit-actions"><button type="button" class="memory-button" data-calendar-edit="create" ${locked||!can?"disabled":""}>创建角色计划</button>${!can?"<span class=\"state-edit-help\">当前日程管理权限尚未确认，请刷新核对。</span>":""}</div>`;
       const itemMarkup=({item,index})=>{
@@ -209,10 +217,12 @@ window.CompanionCalendarEditor = (() => {
           recurring=item.schedule?.frequency!=="once",disabled=locked||!can||!usable(item),wordingDisabled=locked||!usable(item);
         return `<li><div><strong>${escape(item.title)}</strong><p>${wording}</p><small class="state-calendar-meta">${escape(itemSummary(item))}</small></div><div class="state-calendar-actions"><button type="button" class="memory-button" data-state-edit="wording" data-index="${index}" ${wordingDisabled?"disabled":""}>编辑文案</button><button type="button" class="memory-button" data-calendar-edit="revise" data-index="${index}" ${disabled?"disabled":""}>修改整个日程</button>${recurring?`<button type="button" class="memory-button" data-calendar-edit="exception" data-index="${index}" ${disabled?"disabled":""}>仅改这次</button>`:""}<button type="button" class="memory-button" data-calendar-edit="remind" data-index="${index}" ${disabled?"disabled":""}>安排提醒</button><button type="button" class="memory-button" data-calendar-edit="cancel" data-index="${index}" ${disabled?"disabled":""}>取消整组</button></div></li>`;
       };
-      const list=items.length?`<ul class="state-plan-list">${items.map(itemMarkup).join("")}</ul>`:"<p class=\"state-edit-help\">本批暂无角色计划。</p>";
-      return `<section class="panel state-edit-panel state-calendar-section"><div class="state-plan-heading"><h4>角色计划与日程</h4></div>${messageMarkup}${pendingMarkup}${body}${list}${status.calendar?.skipped?"<p class=\"state-edit-help\">部分日程的来源当前不可读取。</p>":""}<div class="state-edit-actions"><button type="button" class="memory-button" data-state-page="" ${locked?"disabled":""}>返回首批日程</button>${status.calendar?.next_cursor?`<button type="button" class="memory-button" data-state-page="${escape(status.calendar.next_cursor)}" ${locked?"disabled":""}>下一批日程</button>`:""}</div></section>`;
+      const list=items.length?`<ul class="state-plan-list">${items.map(itemMarkup).join("")}</ul>`:`<div class="state-calendar-empty"><i data-lucide="calendar-plus" aria-hidden="true"></i><div><strong>本批暂无角色计划</strong><p>创建一项安排，让角色在连续日程中接续它。</p></div></div>`;
+      const pagination=`${status.request_cursor?`<button type="button" class="memory-button" data-state-page="" ${locked?"disabled":""}>返回首批</button>`:""}${status.calendar?.next_cursor?`<button type="button" class="memory-button" data-state-page="${escape(status.calendar.next_cursor)}" ${locked?"disabled":""}>下一批</button>`:""}`;
+      return `<section class="panel state-edit-panel state-calendar-section"><div class="state-plan-heading"><div><h4>角色计划与日程</h4><p>已接受的安排会作为角色回复时的日程依据。</p></div>${items.length?`<span class="state-calendar-count">${items.length} 项</span>`:""}</div>${messageMarkup}${pendingMarkup}<div class="state-calendar-create">${body}</div>${list}${status.calendar?.skipped?"<p class=\"state-calendar-warning\">部分日程的来源当前不可读取。</p>":""}${pagination?`<nav class="state-calendar-pagination" aria-label="日程分页">${pagination}</nav>`:""}</section>`;
     }
-    return {setScope,setStatus,invalidate,open,markup,click,input,change:input,submit,get interacting(){return busy||!!draft||!!pending;},get busy(){return busy;},destroy(){alive=false;draft=status=null;}};
+    return {setScope,setStatus,invalidate,open,markup,click,input,change:input,submit,discardIfPristine,
+      get dirty(){return busy||!!pending||draftDirty();},get interacting(){return busy||!!draft||!!pending;},get busy(){return busy;},destroy(){alive=false;draft=status=null;}};
   }
   return {create};
 })();

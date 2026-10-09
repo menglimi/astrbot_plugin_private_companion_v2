@@ -1,13 +1,13 @@
-/* Product navigation and read-only overview. All target paths come from the host directory. */
+/* Product navigation and integration status. All target paths come from the host directory. */
 "use strict";
 window.CompanionProduct = (() => {
   const HOST = "astrbot_plugin_private_companion_v2", PREFIX = "/" + HOST + "/";
   const e = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  const labels = {connected:"扩展状态已读取", installed:"已安装 · 未上报状态", missing:"未安装", disabled:"已停用",
-    waiting:"已安装 · 尚未就绪", degraded:"状态读取失败 · 可重新检查", conflict:"重复安装", stopped:"宿主已停止", unknown:"状态未知"};
+  const labels = {connected:"已连接", installed:"已安装 · 未上报状态", missing:"未安装", disabled:"已停用",
+    waiting:"已安装 · 尚未就绪", degraded:"状态读取失败 · 可重新检查", conflict:"重复安装", stopped:"插件已停止", unknown:"状态未知"};
   const states = {planned:"待开始", active:"进行中", paused:"已暂停", completed:"已完成", cancelled:"已取消",
     written:"已保存", proposed:"待确认", achieved:"已达成", retired:"已归档", running:"运行中", new:"尚未启动", stopped:"已停止"};
-  const errors = {staging_not_initialized:"还没完成首次设置，请从「开始使用」继续。", staging_host_terminated:"角色已停止，重新打开插件页面即可恢复。",
+  const errors = {staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；首次设置已保留，已保存可重新读取状态。", staging_host_terminated:"角色已停止，重新打开插件页面即可恢复。",
     dashboard_identity_required:"请从已登录的 AstrBot 管理界面打开陪伴小屋。", core_access_required:"当前账号没有管理权限。",
     bridge_timeout:"连接超时，请刷新核对。", invalid_response:"数据不完整，请刷新核对。", scope_changed:"对象已切换，请重新打开工作区。",
     /* labels 是「这一项现在能不能用」，不是开发进度。
@@ -25,11 +25,13 @@ window.CompanionProduct = (() => {
     setup_connect_failed:"连接没有完成，请检查上面的提示后重试。",
     setup_status_unavailable:"读取不到设置进度，请重新打开插件页面。",
     setup_conversation_unavailable:"还没有跟它说过话，先在这个对象的私聊里发一条消息。",
+    setup_test_confirmation_invalid:"测试记录已变化，请刷新后确认收到的是本次测试消息。",
+    setup_test_non_replayable:"这次测试已经发送过，请在收到后确认；本次不会重发。",
     staging_delivery_not_enabled:"这个运行实例没有可用的 OneBot 私聊通道。请核对绑定的 Bot 账号、私聊对象和人格。",
     staging_delivery_window_invalid:"当前 OneBot 投递通道配置无效，请核对账号与目标。",
-    staging_delivery_profile_required:"请为该目标配置独立的运行档。",
+    staging_delivery_profile_required:"这个窗口的角色配置尚未就绪，请重新读取账号与会话。",
     staging_delivery_session_active:"当前运行实例正在接收消息，请先停止再修改目标。",
-    staging_delivery_expiry_invalid:"运行档配置无效，请重新读取连接状态。",
+    staging_delivery_expiry_invalid:"角色配置无效，请重新读取连接状态。",
     staging_delivery_unauthorized:"该目标没有可用的发送通道，请核对账号与目标配置。",
     staging_delivery_authorization_failed:"发送通道校验失败，请检查目标与会话。",
     authorization_denied:"当前关系设置不允许在这个会话中回复。",
@@ -42,10 +44,19 @@ window.CompanionProduct = (() => {
     staging_session_mode_conflict:"当前运行实例正在接收消息，请先停止后再切换模式。",
     staging_session_still_stopping:"上一会话仍在收尾，请稍后重新完成连接。",
     capability_descriptor_conflict:"拓展的能力声明与保留版本冲突，请更新扩展的包版本后重新确认启用。",
+    capability_revision_conflict:"拓展状态已被其他操作更新，已重新读取当前状态。",
+    capability_not_installed:"这件拓展尚未装配，请刷新家具状态后重试。",
+    capability_not_active:"这件拓展当前不能暂停，请刷新后核对状态。",
+    capability_not_paused:"这件拓展当前不能恢复，请刷新后核对状态。",
+    capability_not_discardable:"这件拓展当前不能卸载，请刷新后核对状态。",
+    integration_extension_unavailable:"V2 内置拓展暂不可用，请重新读取家具状态。",
+    integration_lifecycle_request_invalid:"拓展操作无效，请刷新后重试。",
     host_not_running:"角色还没开始接收消息，请先点「开始连接」。",
     staging_preview_disabled:"当前运行实例只保留正式投递确认，没有可查看的草稿。",
     staging_draft_unavailable:"那一条回复已经失效，请再发一条消息。",
     staging_profile_conflict:"固定运行实例的绑定发生变化。请检查账号、私聊对象或人格；模型参数变化不会阻止连接。",
+    staging_settings_invalid:"运行设置无效，请核对账号、私聊对象、人格与模型。",
+    staging_settings_incomplete:"运行设置尚未填写完整，请补齐账号、私聊对象、人格与模型。",
     /* V1 迁移：每个码说清「卡在哪、下一步做什么」。迁移块自己会先把缺的生效范围
        列出来，所以这几句多半出现在「数据变过了」或「V1 目录不在了」这类真实意外上。 */
     legacy_root_missing:"没有找到 V1 的数据目录。它通常与 V2 的数据目录平级；也可以在插件配置的「兼容｜从 V1 迁移数据」里直接填绝对路径。",
@@ -223,8 +234,10 @@ window.CompanionProduct = (() => {
       tick();
     });
   }
-  const fail = code => Object.assign(new Error(errors[code] || "暂不可读取，请刷新核对。"), {code});
-  let bridge, catalog, manifest, data = {}, failures = {}, selected = {target_id:null,role_id:null};
+  const fail = (code, confirmed = false) => Object.assign(new Error(errors[code] || "暂不可读取，请刷新核对。"),
+    {code, ...(confirmed ? {confirmed:true} : {})});
+  let bridge, catalog, manifest, data = {}, failures = {}, failureCodes = {}, selected = {target_id:null,role_id:null};
+  let bridgeReady = false;
   let releaseAppearanceContext = null;
   let generation = 0, changed = () => {}, loading = false, notice = "";
   const workspaceFrames = new Map();
@@ -320,7 +333,30 @@ window.CompanionProduct = (() => {
     }
   }
   const target = () => catalog?.targets.find(item => item.target_id === selected.target_id);
-  const role = () => target()?.roles.find(item => item.role_id === selected.role_id);
+  const roleChoices = () => {
+    const choices = new Map();
+    for (const item of catalog?.targets || []) for (const persona of item.roles || []) {
+      const previous = choices.get(persona.role_id);
+      if (!previous || item.scope_kind === "private" && previous.target.scope_kind !== "private") {
+        choices.set(persona.role_id, {target:item, role:persona});
+      }
+    }
+    return [...choices.values()].sort((a,b) => roleLabel(a.role).localeCompare(roleLabel(b.role), "zh-CN")
+      || accountLabel(a.target).localeCompare(accountLabel(b.target), "zh-CN"));
+  };
+  const roleTarget = () => {
+    const current = target();
+    if (current?.scope_kind === "private" && current.roles.some(item => item.role_id === selected.role_id)) return current;
+    return roleChoices().find(item => item.role.role_id === selected.role_id)?.target || null;
+  };
+  const role = () => {
+    const current = target()?.roles.find(item => item.role_id === selected.role_id);
+    const owner = roleTarget()?.roles.find(item => item.role_id === selected.role_id);
+    if (!current) return owner;
+    if (target()?.scope_kind !== "group" || !owner || owner === current) return current;
+    return {...owner, reply_api:current.reply_api || owner.reply_api,
+      group_memory_api:current.group_memory_api || null};
+  };
   const scopeKey = () => JSON.stringify([catalog?.installation_id, selected.target_id, selected.role_id]);
   /* 后端 outcome_response() 把机器码同时放在 message 与 data.code 上，因为页面桥
      只转发 message、会丢掉信封其余字段。所以取码要看两处，不能只认 data.code；
@@ -328,29 +364,58 @@ window.CompanionProduct = (() => {
   const CODE = /^[a-z][a-z0-9_]{2,60}$/;
   const codeOf = wrapped => wrapped?.data?.code
     || (CODE.test(wrapped?.message || "") ? wrapped.message : "") || "";
+  /* The current Dashboard bridge resolves the inner ``data`` object.  Older
+     bridges can still return the whole envelope, while some legitimate inner
+     payloads use ``status: "ok"`` for their own diagnostic state.  Envelope
+     detection therefore also checks the key shape before unwrapping. */
+  const ENVELOPE_KEYS = new Set(["status", "message", "reason", "data", "error", "code"]);
+  const hasOwn = (value, name) => !!value && typeof value === "object"
+    && Object.prototype.hasOwnProperty.call(value, name);
+  const isEnvelope = value => !!value && typeof value === "object" && !Array.isArray(value)
+    && ["ok", "error"].includes(value.status) && hasOwn(value, "data")
+    && Object.keys(value).every(name => ENVELOPE_KEYS.has(name));
   function unwrap(response) {
-    const wrapped = ["ok","error"].includes(response?.status) ? response : ["ok","error"].includes(response?.data?.status) ? response.data : null;
-    if (wrapped?.status === "error") throw fail(codeOf(wrapped) || "invalid_response");
-    const value = wrapped ? wrapped.data : response;
+    const wrapped = isEnvelope(response) ? response : isEnvelope(response?.data) ? response.data : null;
+    if (wrapped?.status === "error") throw fail(codeOf(wrapped) || "invalid_response", true);
+    let value = wrapped ? wrapped.data : response;
+    /* A bridge shim may preserve one anonymous data layer without the
+       envelope fields.  Only unwrap the exact {data: ...} shape. */
+    if (!wrapped && response && typeof response === "object" && !Array.isArray(response)
+        && !hasOwn(response, "status") && hasOwn(response, "data")
+        && response.data && typeof response.data === "object" && !Array.isArray(response.data)) value = response.data;
     if (!value || typeof value !== "object" || Array.isArray(value)) throw fail("invalid_response");
     return value;
   }
-  async function bounded(promise) {
+  const DEFAULT_API_TIMEOUT_MS = 15000;
+  const MAX_API_TIMEOUT_MS = 300000;
+  const requestTimeout = options => Number.isInteger(options?.timeoutMs)
+    && options.timeoutMs >= 1000
+    ? Math.min(options.timeoutMs, MAX_API_TIMEOUT_MS) : DEFAULT_API_TIMEOUT_MS;
+  const diagnosticEndpoint = value => String(value || "").split("?", 1)[0]
+    .replace(/(^|\/)targets\/[^/]+/g, "$1targets/:target")
+    .replace(/(^|\/)roles\/[^/]+/g, "$1roles/:role");
+  async function bounded(promise, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
     let timer;
-    try { return await Promise.race([promise, new Promise((_,reject) => {timer = setTimeout(() => reject(fail("bridge_timeout")),15000);})]); }
+    try { return await Promise.race([promise, new Promise((_,reject) => {timer = setTimeout(() => reject(fail("bridge_timeout")),timeoutMs);})]); }
     finally { clearTimeout(timer); }
   }
-  async function api(method, path, body) {
-    try { return unwrap(await bounded(method === "GET" ? bridge.apiGet(path,body) : bridge.apiPost(path,body))); }
+  async function api(method, path, body, options) {
+    const timeoutMs = requestTimeout(options), startedAt = Date.now();
+    try { return unwrap(await bounded(method === "GET" ? bridge.apiGet(path,body) : bridge.apiPost(path,body), timeoutMs)); }
     catch(error) {
+      if (error?.code === "bridge_timeout") {
+        console.warn("[CompanionV2] Dashboard request timed out", {
+          method, endpoint: diagnosticEndpoint(path), elapsed_ms: Date.now() - startedAt, timeout_ms: timeoutMs,
+        });
+      }
       /* 老版页面桥会把机器码放在 Error.message 或 Error.code 上，未必经过
          unwrap()。先把已知码送回同一张表，避免 setup-guide 直接显示英文串。 */
-      if (error.code && errors[error.code]) throw fail(error.code);
-      if (CODE.test(error.message || "") && errors[error.message]) throw fail(error.message);
-      if (error.code) throw error;
+      if (error.code && errors[error.code]) throw fail(error.code, error.confirmed === true);
+      if (CODE.test(error.message || "") && errors[error.message]) throw fail(error.message, error.confirmed === true);
+      if (error.code) throw fail(error.code, error.confirmed === true);
       if (/initialized|explicit V2 profile/i.test(error.message)) throw fail("staging_not_initialized");
       if (/Dashboard|sign in/i.test(error.message)) throw fail("dashboard_identity_required");
-      throw error;
+      throw fail(CODE.test(error.message || "") ? error.message : "invalid_response");
     }
   }
   /* 桥的 endpoint 是**插件相对**路径：不带前导斜杠，也**不带插件目录名**。
@@ -380,22 +445,48 @@ window.CompanionProduct = (() => {
   }
 
   function chooseDefault() {
-    const current = target() || catalog?.targets.find(t => t.scope_kind === "private") || catalog?.targets[0];
-    selected = {target_id:current?.target_id ?? null, role_id:current?.roles.find(r => r.role_id === selected.role_id)?.role_id ?? current?.roles[0]?.role_id ?? null};
+    const choices = roleChoices();
+    const choice = choices.find(item => item.role.role_id === selected.role_id) || choices[0];
+    const current = target();
+    const context = current?.roles.some(item => item.role_id === choice?.role.role_id)
+      ? current : choice?.target;
+    selected = {target_id:context?.target_id ?? null, role_id:choice?.role.role_id ?? null};
   }
+  let summaryRequest = 0;
   async function loadSummary(ticket) {
+    const request = ++summaryRequest;
     const current = role();
-    const names = ["life","state","growth","memory","relationships"].filter(name => current?.[name+"_api"]);
+    const names = ["life","state","growth"].filter(name => current?.[name+"_api"]);
+    if (target()?.scope_kind === "private") {
+      names.push(...["memory","relationships"].filter(name => current?.[name+"_api"]));
+    }
     const results = await Promise.allSettled(names.map(name => api("GET",relative(current[name+"_api"]),["memory","relationships","growth"].includes(name)?{limit:3}:undefined)));
-    if (ticket !== generation) return;
-    const fresh = {}, rejected = {};
-    results.forEach((result,index) => {if(result.status === "fulfilled") fresh[names[index]] = result.value; else rejected[names[index]] = errors[result.reason?.code] || "暂不可读取";});
-    data = fresh; failures = rejected;  }
+    if (ticket !== generation || request !== summaryRequest) return false;
+    const fresh = {}, rejected = {}, rejectedCodes = {};
+    results.forEach((result,index) => {
+      if(result.status === "fulfilled") fresh[names[index]] = result.value;
+      else {
+        const code = result.reason?.code || "";
+        rejected[names[index]] = errors[code] || "暂不可读取";
+        rejectedCodes[names[index]] = code;
+      }
+    });
+    data = fresh; failures = rejected; failureCodes = rejectedCodes;
+    return true;
+  }
+  async function refreshSummary() {
+    if(!bridgeReady||!catalog||!role())return false;
+    const ticket=generation;
+    const refreshed=await loadSummary(ticket);
+    if(!refreshed||ticket!==generation)return false;
+    changed({kind:"state-refresh"});
+    return true;
+  }
   async function connect(callback) {
     if (callback) changed = callback;
     const ticket = ++generation;
-    loading = true; notice = "正在读取 V2 宿主…"; data = {}; failures = {};
-    catalog = manifest = null; growthPage = null;
+    loading = true; notice = "正在读取角色与会话…"; data = {}; failures = {}; failureCodes = {};
+    catalog = manifest = null; growthPage = null; bridgeReady = false;
     changed();
     try {
       /* 先等桥出现，而不是直接判断 hosted() 然后放弃。
@@ -405,6 +496,7 @@ window.CompanionProduct = (() => {
       const context = await bounded(bridge.ready());
       if (ticket !== generation) return;
       if (context?.pluginName !== HOST) throw fail("dashboard_identity_required");
+      bridgeReady = true;
       // The SDK writes its light/dark alias on every context update. Restore the
       // cottage's browser preference after that write, including future updates.
       releaseAppearanceContext?.();
@@ -424,19 +516,70 @@ window.CompanionProduct = (() => {
         await loadSummary(ticket);
       } else notice = errors[results[1].reason?.code] || "暂时无法读取授权对象。请在账号与会话中检查连接。";
       if (!manifest && !notice) notice = "核心工作区已连接，插件能力目录暂不可读取。";
-    } catch(error) {if(ticket === generation) {notice = errors[error.code] || "连接失败，请刷新核对。";catalog = manifest = null;data = {};}}
+    } catch(error) {if(ticket === generation) {notice = errors[error.code] || "连接失败，请刷新核对。";catalog = manifest = null;data = {};failures = {};failureCodes = {};}}
     finally {if(ticket === generation) {loading = false; changed();}}
+  }
+  async function refreshDirectoryAfterMapping() {
+    if (!bridgeReady || !bridge) return;
+    const ticket = ++generation;
+    const previous = {...selected};
+    const results = await Promise.allSettled([api("GET", "page/targets"), api("GET", "integration/manifest")]);
+    if (ticket !== generation) return;
+    if (results[0].status !== "fulfilled") throw results[0].reason;
+    const directory = results[0].value;
+    if (!Array.isArray(directory.targets) || !directory.installation_id
+        || directory.targets.some(item => !Array.isArray(item.roles))) throw fail("invalid_response");
+    catalog = directory;
+    if (results[1].status === "fulfilled") manifest = results[1].value;
+    const retained = catalog.targets.find(item => item.target_id === previous.target_id
+      && item.roles.some(roleItem => roleItem.role_id === previous.role_id));
+    if (retained) selected = previous;
+    else chooseDefault();
+    growthPage = null; growthCursor = null;
+    rebindWorkspaceContexts();
+    await loadSummary(ticket);
+    if (ticket !== generation) return;
+    loading = false;
+    notice = results[1].status === "fulfilled" ? "" : "角色映射已更新，能力目录暂未读到。";
+    renderScope();
+    sendWorkspace({kind:"host-mappings-refreshed", selection:{...selected}});
+    changed({kind:"host-mappings", selection:{...selected}});
+  }
+  async function manageExtension(capabilityId, action, expectedRevision, operationKey) {
+    const bundled = {image:"image", screen:"companion.screen.native"};
+    const item = manifest?.providers?.find(provider => provider.capability_id === capabilityId);
+    if (!item || item.owner !== "companion_v2" || item.extension_id !== bundled[capabilityId]
+        || !["assemble","update","pause","resume","uninstall"].includes(action)
+        || !Number.isInteger(expectedRevision) || expectedRevision < 0
+        || typeof operationKey !== "string" || !operationKey) throw fail("integration_lifecycle_request_invalid");
+    const result = await api("POST", "integration/lifecycle", {
+      extension_id: item.extension_id, action, expected_revision: expectedRevision, operation_key: operationKey,
+    });
+    manifest = await api("GET", "integration/manifest");
+    changed({kind:"integration-refresh"});
+    return result;
+  }
+  function acquaintanceDirectory() {
+    if (typeof catalog?.acquaintance_api !== "string") return Promise.reject(fail("invalid_response"));
+    return api("GET", relative(catalog.acquaintance_api));
   }
   async function choose(targetId, roleId, quiet=false) {
     const next = catalog?.targets.find(t => t.target_id === targetId);
     if (!next?.roles.some(r => r.role_id === roleId)) return;
     if (selected.target_id === targetId && selected.role_id === roleId) return;
     const ticket = ++generation;
-    selected = {target_id:targetId,role_id:roleId}; data = {}; failures = {}; growthPage = null; growthCursor = null;
+    selected = {target_id:targetId,role_id:roleId}; data = {}; failures = {}; failureCodes = {}; growthPage = null; growthCursor = null;
+    rebindWorkspaceContexts();
     loading = true;
     if (!quiet) changed();
     await loadSummary(ticket);
     if(ticket === generation) {loading = false; if(!quiet) changed(); else renderScope();}
+  }
+  function chooseRole(roleId, quiet=false) {
+    const current = target();
+    const context = current?.roles.some(item => item.role_id === roleId)
+      ? current : roleChoices().find(item => item.role.role_id === roleId)?.target;
+    if (context) return choose(context.target_id, roleId, quiet);
   }
   /* 连接状态。这里**不再有 preview 分支**——「设计预览」曾经是个永久状态，
      一旦进去就无限显示「连接 AstrBot 后显示真实角色」，而桥往往只是还没注入。
@@ -447,22 +590,62 @@ window.CompanionProduct = (() => {
       detail:notice || `已读取 ${catalog?.targets.length||0} 个管理对象 · ${(manifest?.summary?.connected_count)||0} 项拓展状态已读取`};
   }
   function identity() { return {installation_id: catalog?.installation_id || null, operator_id: catalog?.operator_id || null}; }
-  /* 会话对象与角色选择条。
-     单目标模式下整条隐藏——单 Bot 单人格的安装里，后端只知道一个对象一个角色，
-     却还要求操作员再选一遍，是纯粹的噪音。多目标模式才需要选择器。
-     role() 与 target() 在单目标下仍然可用（catalog 里就那一项），
-     所以隐藏的是「选择 UI」而不是「选择能力」。 */
+  /* Show selectors only when the loaded directory has a real choice to make. */
   function scoped() {
-    return hosted() && catalog?.mode === "multi";
+    return hosted() && Boolean(catalog && roleChoices().length > 1);
   }
-  function renderScope() {
-    const root = document.getElementById("productScope"); if(!root) return;
-    root.hidden = !scoped();
-    if(!scoped()){ root.innerHTML=""; return; }
-    root.innerHTML = `<div class="product-scope-fields"><label>会话对象<select id="product-target" ${!catalog||loading?"disabled":""}>${catalog?.targets.map(t=>`<option value="${e(t.target_id)}" ${t.target_id===selected.target_id?"selected":""}>${e((t.scope_kind==="group"?"群聊 ":"私聊 ")+(t.participant_id||t.group_id||t.target_id)+" · "+t.platform_id+" / "+t.account_id)}</option>`).join("")||"<option>尚未读取</option>"}</select></label><label>当前角色<select id="product-role" ${!role()||loading?"disabled":""}>${target()?.roles.map(r=>`<option value="${e(r.role_id)}" ${r.role_id===selected.role_id?"selected":""}>${e(r.role_id)}</option>`).join("")||"<option>尚未选择</option>"}</select></label></div><div class="product-scope-actions"><span role="status">${e(notice|| (loading?"正在更新…":""))}</span><button class="button small" data-product-refresh ${loading?"disabled":""}>刷新</button><button class="button small" data-go="manage" data-manage="host">账号与会话</button></div>`;
+  function scopeVisible() {
+    return scoped() || hosted() && !catalog && Boolean(loading || notice);
+  }
+  function targetLabel(item) {
+    const kind = item.scope_kind === "group" || item.group_id ? "群聊" : "私聊";
+    const id = nativeId(item.group_id || item.participant_id);
+    return `${kind} ${item.display_name ? item.display_name + (id ? `（${id}）` : "") : id || "当前对象"}`;
+  }
+  const nativeId = value => /^\d+$/.test(String(value || "")) ? String(value) : "";
+  const subjectLabel = item => item?.display_name || nativeId(item?.group_id || item?.participant_id) || "当前聊天对象";
+  const platformLabel = item => ({qq:"QQ · OneBot",default:"QQ · OneBot",aiocqhttp:"QQ · OneBot",onebot:"QQ · OneBot"})[item?.platform_id] || "当前平台";
+  const accountLabel = item => {
+    const id = nativeId(item.account_id);
+    return item.account_name ? item.account_name + (id ? `（${id}）` : "") : id ? `QQ ${id}` : "当前账号";
+  };
+  function readableLabel(value, fallback) {
+    const text = typeof value === "string" ? value.trim() : "";
+    return !text || /^(?:role[-_:]|staging[-_:]|dashboard:|onebot-user:)/i.test(text)
+      || /^[a-f0-9]{24,}$/i.test(text) ? fallback : text;
+  }
+  function roleLabel(item = role(), index = null) {
+    if (!item) return "当前角色";
+    const personas = Array.isArray(item.persona_ids) ? item.persona_ids.filter(Boolean).map(name => name === "[%None]" ? "默认人格" : name) : [];
+    return item.role_name || personas.join("、") || readableLabel(item.role_id, Number.isInteger(index) ? `角色 ${index + 1}` : "当前角色");
+  }
+  function scopeLabel() {
+    const owner = roleTarget();
+    return owner ? roleLabel() : "尚未选择角色";
+  }
+  function actorLabel(id) {
+    if (!id) return "";
+    if (id === catalog?.operator_id) return catalog.operator_name || "当前管理员";
+    const actorRole = target()?.roles.find(item => item.role_id === id);
+    if (actorRole) return roleLabel(actorRole);
+    if (id === "onebot-user:" + target()?.participant_id) return target().display_name || "当前聊天对象";
+    return id.startsWith("dashboard:") ? "其他管理员" : id.startsWith("onebot-user:") ? "授权用户" : "其他操作者";
+  }
+  function executorLabel(plan) {
+    return plan.executor_is_current ? "当前私聊窗口" : "同一角色的其他私聊窗口";
+  }
+  function renderScope(fallbackRole = "陪伴") {
+    const root = document.getElementById("stageRole"); if(!root) return;
+    const choices = roleChoices();
+    const currentLabel = role() ? roleLabel() : fallbackRole;
+    if (catalog && role() && choices.length > 1) {
+      root.innerHTML = `<label class="stage-role-picker"><span class="stage-role-title"><i data-lucide="house" aria-hidden="true"></i><span>${e(currentLabel)}的小屋</span></span><i class="stage-role-caret" data-lucide="chevron-down" aria-hidden="true"></i><select id="product-role" aria-label="切换人格或角色" ${loading?"disabled":""}>${choices.map(item=>`<option value="${e(item.role.role_id)}" ${item.role.role_id===selected.role_id?"selected":""}>${e(roleLabel(item.role))}</option>`).join("")}</select></label>`;
+      return;
+    }
+    root.innerHTML = `<h2 class="stage-role-title"><i data-lucide="house" aria-hidden="true"></i><span>${e(currentLabel)}的小屋</span></h2>`;
   }
   const empty = text => `<div class="product-empty">${e(text)}</div>`;
-  function unavailable(name) {return loading?"正在读取…":failures[name] || (!catalog?notice:!role()?.[name+"_api"]?"当前对象没有此私聊工作区":"尚无记录");}
+  function unavailable(name) {return loading?"正在读取…":failures[name] || (!catalog?notice:!role()?.[name+"_api"]?"当前角色尚未提供这个工作区":"尚无记录");}
   const when = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN", {month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "未安排";
   /* 首页概览行。
    *
@@ -482,10 +665,12 @@ window.CompanionProduct = (() => {
      事件委托在 app.js，不因为换了外壳而失效。 */
   const link = (text, attrs) => `<button class="button small" ${attrs}>${text}</button>`;
   function stateCard() {
-    return window.CompanionHomeSidebar.renderState({state:data.state,life:data.life,loading,unavailable});
+    return window.CompanionHomeSidebar.renderState({state:data.state,life:data.life,loading,unavailable,
+      unavailableCode:name=>failureCodes[name]||""});
   }
   function scheduleCard() {
-    return window.CompanionHomeSidebar.renderSchedule({state:data.state,life:data.life,loading,unavailable});
+    return window.CompanionHomeSidebar.renderSchedule({state:data.state,life:data.life,loading,unavailable,
+      unavailableCode:name=>failureCodes[name]||""});
   }
   function capabilityCard() {
     const summary = manifest?.summary;
@@ -494,7 +679,7 @@ window.CompanionProduct = (() => {
     return rows([
       row("状态可用", "扩展自报状态正常，功能由它自己执行。",
         `<span class="home-row-value"><b>${summary.connected_count}</b><small>项</small></span>`),
-      row("已安装", "装在宿主里，但还没上报运行状态。",
+      row("已安装", "已安装，但运行状态尚未更新。",
         `<span class="home-row-value"><b>${summary.installed_count}</b><small>项</small></span>`),
       row("能力目录", "", link("打开", 'data-home-section="furniture"')),
     ]);
@@ -502,12 +687,12 @@ window.CompanionProduct = (() => {
   function growthCard() {
     const items = data.growth?.items||[];
     if(!items.length) return rows([row("目标与成长", e(unavailable("growth")),
-      link("查看成长", 'data-go="manage" data-manage="growth"'))]);
+      link("查看成长", 'data-go="manage" data-manage="learning"'))]);
     return rows([
       ...items.map(item => row(e(item.title||"来源暂不可用"),
         e(item.progress_note||item.description||""),
-        `<span class="home-row-value"><small>${e(states[item.state]||item.state)}</small></span>`)),
-      row("全部记录", "", link("查看成长", 'data-go="manage" data-manage="growth"')),
+        `<span class="home-row-value"><small>${e(states[item.state]||"状态待核对")}</small></span>`)),
+      row("全部记录", "", link("查看成长", 'data-go="manage" data-manage="learning"')),
     ]);
   }
   function memoryCard() {
@@ -541,44 +726,72 @@ window.CompanionProduct = (() => {
    * 于是「没有宿主」直接呈现成「一块空框」。空框不表达任何东西：它不说明
    * 发生了什么，也不给下一步。
    *
-   * 判定顺序要紧：**先看有没有目录，再看这个对象有没有该工作区**。
-   * 反过来的话，缺目录时 life / relationships / identity 会先落进
-   * empty(unavailable(name)) 那条极简占位——一句「正在读取…」，
-   * 同样不说发生了什么、也没有出口，四个工作区的观感还不一致。
+   * 账号与会话负责初始化目录，因此只依赖已验证的宿主桥。
+   * 其余工作区先检查目录，再检查当前对象对应的入口。
    */
   function workspace(name, tab="") {
     if(!["host","life","relationships","identity","persona"].includes(name)) return "";
-    const title = {host:"账号与会话",life:"日记与生活",relationships:"人物与关系",identity:"关系与权限",persona:"人格问卷"}[name];
+    const title = name === "identity"
+      ? ({network:"关系网",people:"用户",groups:"群聊"}[tab] || "关系管理")
+      : {host:"账号与会话",life:"日记与生活",relationships:"人物与关系",persona:"人格问卷"}[name];
     if(!window.CompanionWorkspaceBundle?.[name]) return empty("工作区资源未发布，请更新插件页面。");
-    if(loading || !catalog) {
+    const available = name === "host" ? bridgeReady : !loading && !!catalog;
+    if(!available) {
       /* 不用 I()：那是 app.js 里的顶层 const，product-page.js 是独立 IIFE，
          访问不到。这一块也不需要图标——一句状态加两个出口就够了。 */
       return `<section class="product-workspace-blank">
-        <div><strong>${title}</strong><p>${loading?"正在读取宿主目录…":"未读取到宿主目录。"}</p></div>
+        <div><strong>${title}</strong><p>${loading?"正在读取角色与会话…":"角色与会话目录暂未读到，这个功能页暂时无法加载。"}</p></div>
         <div class="product-workspace-blank-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button><button class="button small" type="button" data-go="manage" data-manage="host">账号与会话</button></div>
       </section>`;
     }
-    if(name==="identity" && !catalog.acquaintance_api) return empty("相识目录入口尚未加载，请刷新宿主目录。");
+    if(name==="identity" && !catalog.acquaintance_api) return empty("关系网入口尚未加载，请重新读取角色与会话。");
     if(name!=="host" && name!=="identity" && !role()?.[name+"_api"]) return empty(unavailable(name));
     return `<section class="product-workspace" data-workspace="${name}" data-workspace-tab="${e(tab)}"><iframe title="${title}工作区" class="product-workspace-frame" sandbox="allow-scripts allow-forms"></iframe></section>`;
   }
-  /* 工作区的直连地址。它只在「宿主目录没读到、挂不上工作区」时用，
-     让用户还能自己开一个标签页过去，而不是被一句提示挡住。 */
+  /* 工作区仍由唯一公开页面承载，页内路由保留原有宿主桥上下文。 */
   function workspaceAddress(name, tab="") {
-    if(!["host","life","relationships","identity","persona"].includes(name)) return "";
-    const path=`/#/plugin-page/${encodeURIComponent(HOST)}/${encodeURIComponent("陪伴小屋")}`;
-    try { return new URL(path + (tab?`?workspace=${encodeURIComponent(name)}&tab=${encodeURIComponent(tab)}`:""), location.href).href; }
-    catch (_) { return ""; }
+    return {host:"#manage",life:"#life/diary"+(["reading","sleep","receipts"].includes(tab)?"/"+tab:""),
+      relationships:"#manage/governance/relationship",identity:"#manage/identity",persona:"#manage/governance/questionnaire"}[name]||"";
   }
   function unmountWorkspace() {workspaceFrames.clear();}
+  function workspaceContext(owner) {
+    const kind=owner.parentElement.dataset.workspace;
+    const selectedTarget=target(),selectedRole=role();
+    const groupArchive=kind==="relationships"&&selectedTarget?.scope_kind==="group";
+    return {key:scopeKey(),kind,tab:owner.parentElement.dataset.workspaceTab,
+      scope_kind:selectedTarget?.scope_kind,
+      accounts_api:catalog?.accounts_api,
+      api:kind==="identity"?catalog?.acquaintance_api
+        :groupArchive?selectedRole?.group_memory_api:selectedRole?.[kind+"_api"]};
+  }
+  function sendWorkspaceContext(owner, context) {
+    owner.contentWindow.postMessage({channel:"companion-workspace",kind:"context",
+      context:{pluginName:HOST,pageName:context.kind,tab:context.tab,
+        display:{role_name:roleLabel(),subject_name:subjectLabel(target()),scope_kind:context.scope_kind,
+          target_label:target()?targetLabel(target()):"当前会话"}}},"*");
+  }
+  function rebindWorkspaceContexts() {
+    for (const [owner, previous] of workspaceFrames) {
+      if (!owner.isConnected) {workspaceFrames.delete(owner);continue;}
+      const context=workspaceContext(owner);
+      context.lifetime=previous.lifetime;
+      // Account and person directories have installation scope. Keep their DOM
+      // and in-flight reads while the selected role's routing context changes.
+      if (["host","identity"].includes(context.kind)) Object.assign(previous,context);
+      else workspaceFrames.set(owner,context);
+      if (!["host","identity"].includes(context.kind) && previous.key!==context.key)
+        owner.srcdoc=window.CompanionWorkspaceBundle[context.kind];
+      else sendWorkspaceContext(owner,context);
+    }
+  }
   function mountWorkspace() {
     unmountWorkspace();
+    if(!bridgeReady) return;
     for (const owner of document.querySelectorAll(".product-workspace-frame")) {
-      const kind=owner.parentElement.dataset.workspace;
-      const context={key:scopeKey(),kind,tab:owner.parentElement.dataset.workspaceTab,
-        api:kind==="identity"?catalog?.acquaintance_api:role()?.[kind+"_api"]};
+      const context=workspaceContext(owner);
+      context.lifetime={};
       workspaceFrames.set(owner,context);
-      owner.srcdoc=window.CompanionWorkspaceBundle[kind];
+      owner.srcdoc=window.CompanionWorkspaceBundle[context.kind];
     }
   }
   window.addEventListener("message",async event=>{
@@ -587,10 +800,54 @@ window.CompanionProduct = (() => {
     const owner=[...workspaceFrames.keys()].find(frame=>event.source===frame.contentWindow);
     if(!owner)return;
     const context=workspaceFrames.get(owner);
-    const valid=()=>{if(workspaceFrames.get(owner)!==context||!owner.isConnected||scopeKey()!==context.key)throw fail("scope_changed");};
-    const send=payload=>{if(workspaceFrames.get(owner)===context&&owner.isConnected)owner.contentWindow.postMessage({channel:"companion-workspace",...payload},"*");};
-    if(message.kind==="ready"){send({kind:"context",context:{pluginName:HOST,pageName:context.kind,tab:context.tab}});send({kind:"appearance",appearance:{...appearance}});return;}
+    const valid=()=>{if(!bridgeReady||workspaceFrames.get(owner)!==context||!owner.isConnected
+      || (!["host","identity"].includes(context.kind)&&scopeKey()!==context.key))throw fail("scope_changed");};
+    const send=payload=>{if(workspaceFrames.get(owner)?.lifetime===context.lifetime&&owner.isConnected)
+      owner.contentWindow.postMessage({channel:"companion-workspace",...payload},"*");};
+    if(message.kind==="ready"){
+      // Display labels never participate in identity checks or request routing.
+      sendWorkspaceContext(owner,context);
+      send({kind:"appearance",appearance:{...appearance}});return;
+    }
     if(message.kind==="resize"){if(Number.isFinite(message.height))owner.style.height=Math.max(620,Math.min(2400,message.height+12))+"px";return;}
+    if(message.kind==="host-mappings-updated"){
+      if(context.kind!=="host")return;
+      try { valid();await refreshDirectoryAfterMapping(); }
+      catch(error) { send({kind:"host-mappings-refresh-failed",code:error?.code||"invalid_response"}); }
+      return;
+    }
+    if(message.kind==="navigate"){
+      valid();
+      const target=message.target;
+      if(["group-reply","group-memory"].includes(target?.tab)){
+        const destination=catalog?.targets.find(item=>item.scope_kind==="group"
+          &&item.platform_id===target.platform_id&&item.bot_id===target.bot_id
+          &&item.account_id===target.account_id&&item.group_id===target.group_id);
+        const role=destination?.roles.find(item=>item.role_id===target.role_id);
+        const api=target.tab==="group-reply"?role?.reply_api:role?.group_memory_api;
+        if(typeof api!=="string")return;
+        await choose(destination.target_id,target.role_id,true);
+        if(selected.target_id===destination.target_id&&selected.role_id===target.role_id
+          &&typeof window.navigate==="function")window.navigate("manage",
+            target.tab==="group-reply"?"decision":"governance",
+            target.tab==="group-reply"?"":"relationship");
+        return;
+      }
+      const routes={
+        host:{tab:"host"},
+        setup:{tab:"setup"},
+        models:{tab:"models"},
+        perception:{tab:"perception",subtab:"config-screen"},
+        selfProfile:{tab:"governance",subtab:"profile"},
+      };
+      const route=routes[target?.tab];
+      if(!route) return;
+      // Workspace actions are constrained to known cottage destinations. This
+      // keeps an embedded member page from turning a display hint into an
+      // arbitrary top-level navigation.
+      if(typeof window.navigate==="function") window.navigate("manage", route.tab, route.subtab || "");
+      return;
+    }
     if(message.kind!=="request"||typeof message.requestId!=="string"||message.requestId.length>80)return;
     try {
       valid();
@@ -598,27 +855,40 @@ window.CompanionProduct = (() => {
       if(!["GET","POST"].includes(method)||typeof path!=="string")throw fail("invalid_response");
       let mapped;
       if(context.kind==="host") {
-        if(!/^(staging|host)\/(status|probe|initialize|start|stop)$/.test(path)||(method==="GET")!==path.endsWith("/status"))throw fail("invalid_response");
-        mapped=path;
-      } else if(context.kind==="identity") {
-        /* 相识目录只读；授权面板要写，所以这一条通道放行**它自己的**写地址。
-           放开的是地址，不是权限：真正能不能改仍由宿主路由按操作员身份与
-           grant 来源判定（配置派生的授权在那边被明确拒绝）。
-           后半段写成字面量而不是从 context 里拼：workspace 的 api 是目录端点，
-           拼出来的第二段会随目录地址变形。 */
-        const allowed=(method==="GET"&&(path==="acquaintance"||path==="acquaintance/authorization"))
-          ||(method==="POST"&&path==="acquaintance/authorization");
+        const allowed=(method==="GET"&&path==="host/status") || path==="accounts"
+          || (method==="GET"&&path==="acquaintance"&&typeof catalog?.acquaintance_api==="string");
         if(!allowed)throw fail("invalid_response");
-        mapped=relative(context.api)+(path==="acquaintance"?"":"/authorization");
+        mapped=path==="acquaintance"?relative(catalog.acquaintance_api):path;
+      } else if(context.kind==="identity") {
+        const allowed=(method==="GET"&&["acquaintance","acquaintance/authorization","acquaintance/settings"].includes(path))
+           ||(method==="POST"&&["acquaintance/authorization","acquaintance/settings","acquaintance/identity","acquaintance/admin-name"].includes(path));
+        if(!allowed)throw fail("invalid_response");
+        mapped=relative(context.api)+path.slice("acquaintance".length);
+      } else if(context.kind==="relationships"&&context.scope_kind==="group") {
+        const suffix=path.slice("group-memory".length);
+        const allowed=(method==="GET"&&["", "/safety", "/operation"].includes(suffix))
+          ||(method==="POST"&&["/detail", "/retract", "/safety/review"].includes(suffix));
+        if(!path.startsWith("group-memory")||!allowed)throw fail("invalid_response");
+        mapped=relative(context.api)+suffix;
       } else {
         const name=context.kind;
-        if((path!==name&&path!==name+"/command")||(method==="GET")!==(path===name))throw fail("invalid_response");
-        mapped=relative(context.api)+(path===name?"":"/command");
+        const personaStandardize=name==="persona"&&path==="persona/standardize"&&method==="POST";
+        if(!personaStandardize&&((path!==name&&path!==name+"/command")||(method==="GET")!==(path===name)))
+          throw fail("invalid_response");
+        mapped=relative(context.api)+(personaStandardize?"/standardize":path===name?"":"/command");
       }
       // Preserve original response envelopes and error reasons for each workspace.
-      const result=await bounded(method==="GET"?bridge.apiGet(mapped,message.body):bridge.apiPost(mapped,message.body));valid();
+      const timeoutMs=requestTimeout({timeoutMs:message.timeoutMs});
+      const result=await bounded(method==="GET"?bridge.apiGet(mapped,message.body):bridge.apiPost(mapped,message.body),timeoutMs);valid();
       send({kind:"response",requestId:message.requestId,ok:true,data:result});
-    } catch(error){send({kind:"response",requestId:message.requestId,ok:false,error:errors[error.code]||error.message||"请求失败，请刷新核对。",code:error.code});}
+    } catch(error){
+      const code=typeof error?.code==="string"?error.code.slice(0,80):"";
+      const rawReason=[error?.reason,error?.message].find(value=>typeof value==="string"&&value.trim());
+      const reason=rawReason?rawReason.replace(/[\u0000-\u001f\u007f]/g," ").slice(0,1200):"";
+      send({kind:"response",requestId:message.requestId,ok:false,
+        error:errors[code]||reason||"请求未完成，请刷新核对当前状态后重试。",
+        code:code||undefined,reason:reason||undefined,confirmed:error?.confirmed===true});
+    }
   });
   function providersMarkup(ids) {
     const providers = manifest?.providers?.filter(p=>!ids||ids.includes(p.capability_id))||[];
@@ -626,23 +896,39 @@ window.CompanionProduct = (() => {
     return `<div class="capabilities-grid">${providers.map(p=>`<article class="panel capability"><div class="capability-top"><div><h3>${e(p.label)}</h3><small>${e(p.version||"未安装")}</small></div><span class="pill ${p.integration_state==="connected"?"":"gray"}">${e(labels[p.integration_state]||"状态未知")}</span></div><p>${e(p.description)}</p><div class="capability-footer"><span>${e(p.reason)}</span><button class="button small" data-product-provider="${e(p.capability_id)}">查看入口</button></div></article>`).join("")}</div>`;
   }
   function capabilitiesMarkup() {
-    return `<div class="settings-heading"><div><h2>能力目录</h2></div></div><div class="product-domain-grid">${(manifest?.core||[]).map(item=>`<article><strong>${e(item.label)}</strong><p>${e(item.description)}</p><span>已包含</span></article>`).join("")}</div><h3 class="product-section-title">已安装的拓展</h3>${providersMarkup()}`;
+    return `<div class="settings-heading"><div><h2>能力目录</h2></div></div><div class="product-domain-grid">${(manifest?.core||[]).map(item=>`<article><strong>${e(item.label)}</strong><p>${e(item.description)}</p><span>已包含</span></article>`).join("")}</div><h3 class="product-section-title">拓展能力状态</h3>${providersMarkup()}`;
+  }
+  function providerAddress(id, preferredPage="") {
+    const item=manifest?.providers?.find(p=>p.capability_id===id);
+    if(!item?.installed||item.owner==="companion_v2"||typeof item.plugin_id!=="string"||!item.plugin_id)return "";
+    const pages=(Array.isArray(item.pages)?item.pages:[]).filter(page=>typeof page==="string"&&page.trim());
+    const page=pages.includes(preferredPage)?preferredPage:pages[0];
+    const route=page?`/#/plugin-page/${encodeURIComponent(item.plugin_id)}/${encodeURIComponent(page)}`:"/#/extension/plugins";
+    try{return new URL(route,window.location.href).href;}catch(_){return "";}
   }
   function providerLinks(item) {
     if(!item.installed)return "";
-    return `<p>在 AstrBot「插件」中选择「${e(item.label)}」${item.pages?.length?`，打开拓展页 ${item.pages.map(e).join("、")}`:"，进入插件配置"}。</p>`;
+    if(item.owner==="companion_v2")return "";
+    const pages=Array.isArray(item.pages)?item.pages.filter(page=>typeof page==="string"&&page.trim()):[];
+    if(!pages.length&&["content","image"].includes(item.capability_id)) {
+      const image=item.capability_id==="image";
+      return `<div class="dialog-actions"><button type="button" class="button small" data-go="manage" data-manage="output" data-output-target="${image?"materials":"creation"}"><i data-lucide="${image?"images":"notebook-pen"}" aria-hidden="true"></i>${image?"产出相册与衣柜":"创作与作品"}</button></div>`;
+    }
+    const entries=pages.length?pages:[""];
+    return entries.map((page,index)=>{
+      const address=providerAddress(item.capability_id,page);
+      const id=`provider-page-${item.capability_id}-${index}`;
+      return address?`<div class="perception-address"><label for="${e(id)}">${page?e(page):"插件管理"}页面地址</label><div><input id="${e(id)}" readonly value="${e(address)}" aria-label="${page?e(page):"插件管理"}页面地址"><button type="button" class="button small" data-copy-address="${e(id)}" title="复制页面地址"><i data-lucide="copy" aria-hidden="true"></i><span>复制地址</span></button></div></div>`:"";
+    }).join("");
   }
   function providerDetail(id) {
     const item=manifest?.providers?.find(p=>p.capability_id===id);
-    return {title:item?.label||"拓展能力",body:item?`<p>${e(item.description)}</p><p class="product-muted">${e(item.reason)}</p><dl class="definition-list"><div><dt>插件版本</dt><dd>${e(item.version||"未安装")}</dd></div><div><dt>配置开关</dt><dd>${item.enabled===true?"开启":item.enabled===false?"关闭":"尚未读取"}</dd></div><div><dt>执行就绪</dt><dd>${item.runtime_ready===true?"扩展报告已就绪":item.runtime_ready===false?"尚未就绪":"由扩展工作台确认"}</dd></div></dl>${providerLinks(item)}`:empty("尚未读取此插件状态，请刷新能力目录。")};
-  }
-  function identityMarkup() {
-    const t=target();
-    return `<div class="settings-heading"><div><h2>身份与范围</h2></div></div><section class="panel content-panel"><dl class="definition-list">${[["安装",catalog?.installation_id],["操作者",catalog?.operator_id],["平台",t?.platform_id],["Bot",t?.account_id],["对象",t?.participant_id||t?.group_id],["角色",role()?.role_id]].map(([label,value])=>`<div class="definition-row"><dt>${label}</dt><dd>${e(value||"尚未读取")}</dd></div>`).join("")}</dl></section>`;
+    const bundled=item?.owner==="companion_v2";
+    return {title:item?.label||"拓展能力",body:item?`<p>${e(item.description)}</p><p class="product-muted">${e(item.reason)}</p><dl class="definition-list"><div><dt>${bundled?"V2 内置版本":"插件版本"}</dt><dd>${e(item.version||"未安装")}</dd></div>${bundled?`<div><dt>已装配版本</dt><dd>${e(item.installed_package_version||"未装配")}</dd></div>`:""}<div><dt>配置开关</dt><dd>${item.enabled===true?"开启":item.enabled===false?"关闭":"尚未读取"}</dd></div><div><dt>执行就绪</dt><dd>${item.runtime_ready===true?"扩展报告已就绪":item.runtime_ready===false?"尚未就绪":"由扩展工作台确认"}</dd></div></dl>${providerLinks(item)}`:empty("尚未读取此插件状态，请刷新能力目录。")};
   }
   function growthMarkup() {
     const page=growthPage||data.growth;
-    return `<div class="settings-heading"><div><h2>目标与成长</h2></div><button class="button small" data-growth-load ${growthBusy?"disabled":""}>刷新</button></div><p id="growth-notice" role="status"></p>${page?`<div class="product-growth-list">${page.items.map((item,index)=>`<article class="panel content-panel"><div class="section-toolbar"><h3>${e(item.title||"来源暂不可用")}</h3><span class="pill">${e(states[item.state]||item.state)}</span></div><p>${e(item.description||"")}</p><p>${e(item.progress_note||"")}</p><p class="product-muted">${item.kind==="goal"?"目标":"技能"} · ${item.source_count} 个来源 · 版本 ${item.revision}</p><div class="dialog-actions">${item.actions.map(action=>`<button class="button small" data-growth-index="${index}" data-growth-action="${action}" ${growthBusy?"disabled":""}>${({confirm:"确认",revise:"修订",pause:"暂停",resume:"继续",complete:"已完成",withdraw:"撤回",retire:"归档"})[action]||e(action)}</button>`).join("")}</div></article>`).join("")||empty("暂无目标或技能记录。")}</div><div class="dialog-actions"><button class="button small" data-growth-first>返回首批</button><button class="button small" data-growth-next ${!page.next_cursor||growthBusy?"disabled":""}>下一批</button></div>`:empty(unavailable("growth"))}<dialog id="growth-confirm" class="detail-dialog"><form id="growth-form" class="product-growth-form"><h2 id="growth-confirm-title"></h2><p id="growth-confirm-description"></p><div id="growth-edit-fields"><label>标题<input name="title" maxlength="200" required></label><label>描述<textarea name="description" rows="3"></textarea></label><label>进展<textarea name="progress_note" rows="3"></textarea></label></div><p id="growth-command-error" role="status"></p><div class="dialog-actions"><button type="submit" class="button primary">确认保存</button><button type="button" class="button" data-growth-close>取消</button></div></form></dialog>`;
+    return `<div class="settings-heading"><div><h2>目标与成长</h2></div><button class="button small" data-growth-load ${growthBusy?"disabled":""}>刷新</button></div><p id="growth-notice" role="status"></p>${page?`<div class="product-growth-list">${page.items.map((item,index)=>`<article class="panel content-panel"><div class="section-toolbar"><h3>${e(item.title||"来源暂不可用")}</h3><span class="pill">${e(states[item.state]||"状态待核对")}</span></div><p>${e(item.description||"")}</p><p>${e(item.progress_note||"")}</p><p class="product-muted">${item.kind==="goal"?"目标":"技能"} · ${item.source_count} 个来源 · 版本 ${item.revision}</p><div class="dialog-actions">${item.actions.map(action=>`<button class="button small" data-growth-index="${index}" data-growth-action="${action}" ${growthBusy?"disabled":""}>${({confirm:"确认",revise:"修订",pause:"暂停",resume:"继续",complete:"已完成",withdraw:"撤回",retire:"归档"})[action]||"其他操作"}</button>`).join("")}</div></article>`).join("")||empty("暂无目标或技能记录。")}</div><div class="dialog-actions"><button class="button small" data-growth-first>返回首批</button><button class="button small" data-growth-next ${!page.next_cursor||growthBusy?"disabled":""}>下一批</button></div>`:empty(unavailable("growth"))}<dialog id="growth-confirm" class="detail-dialog"><form id="growth-form" class="product-growth-form"><h2 id="growth-confirm-title"></h2><p id="growth-confirm-description"></p><div id="growth-edit-fields"><label>标题<input name="title" maxlength="200" required></label><label>描述<textarea name="description" rows="3"></textarea></label><label>进展<textarea name="progress_note" rows="3"></textarea></label></div><p id="growth-command-error" role="status"></p><div class="dialog-actions"><button type="submit" class="button primary">确认保存</button><button type="button" class="button" data-growth-close>取消</button></div></form></dialog>`;
   }
   async function loadGrowth(cursor=null) {
     if(growthBusy||!role()?.growth_api)return;
@@ -676,12 +962,10 @@ window.CompanionProduct = (() => {
     finally{growthBusy=false;form.querySelectorAll("button").forEach(el=>el.disabled=false);}
   });
   document.addEventListener("change",event=>{
-    if(event.target.id==="product-target") {const t=catalog.targets.find(t=>t.target_id===event.target.value);choose(t.target_id,t.roles[0]?.role_id);}
-    if(event.target.id==="product-role")choose(selected.target_id,event.target.value);
+    if(event.target.id==="product-role")chooseRole(event.target.value);
   });
   document.addEventListener("click",event=>{
     const el=event.target.closest("button");if(!el)return;
-    if(el.hasAttribute("data-product-refresh"))connect();
     if(el.hasAttribute("data-growth-load"))loadGrowth(growthCursor);
     if(el.hasAttribute("data-growth-first"))loadGrowth();
     if(el.hasAttribute("data-growth-next"))loadGrowth((growthPage||data.growth)?.next_cursor);
@@ -697,16 +981,18 @@ window.CompanionProduct = (() => {
   const stateValues   = () => data.state?.state?.values || null;
   const stateLabel = value => states[value] || "";
   const unavailableReason = name => unavailable(name);
-  return {hosted,unwrap,connect,choose,selection:()=>({...selected}),scopeKey,role,target,identity,connection,renderScope,
+  return {hosted,unwrap,connect,refreshSummary,manageExtension,choose,chooseRole,selection:()=>({...selected}),scopeKey,role,target,roleTarget,roleChoices,identity,connection,renderScope,scopeVisible,
     /* 首次使用引导走同一套桥接与错误翻译，别让它自己再实现一遍超时与判据。 */
-    request:api,
+    request:api,acquaintanceDirectory,
+    errorLabel:code=>errors[code]||"当前设置未能确认，请刷新并核对账号、人格与模型。",
     theme:currentTheme,setTheme,appearance:()=>({...appearance}),setAppearance,resetAppearance,dimensions,
     themeLight,lightOf:id=>themeLight[id]||"day",followLight:()=>followLight,setFollowLight,syncLight,
-    targetsMode:()=>catalog?.mode||null,targets:()=>catalog?.targets||[],
+    targets:()=>catalog?.targets||[],targetLabel,subjectLabel,platformLabel,accountLabel,roleLabel,scopeLabel,actorLabel,executorLabel,
     get manifest(){return manifest;},get data(){return data;},stateCard,scheduleCard,capabilityCard,growthCard,memoryCard,
-    workspace,unmountWorkspace,mountWorkspace,workspaceAddress,providersMarkup,capabilitiesMarkup,providerDetail,identityMarkup,growthMarkup,
+    workspace,unmountWorkspace,mountWorkspace,workspaceAddress,providerAddress,providersMarkup,capabilitiesMarkup,providerDetail,growthMarkup,
     provider:id=>manifest?.providers?.find(p=>p.capability_id===id),statusLabel:id=>labels[id]||"状态未知",unavailable,
     when,lifeActivities,lifeJournals,stateValues,stateLabel,unavailableReason,
+    unavailableCode:name=>failureCodes[name]||"",
     /* 各页共用一个「等桥注进来」的实现。桥的注入晚于脚本执行是正常时序，
        谁都不该自己再写一遍超时与判据——写岔一次就是一个假性未连接。 */
     whenBridgeReady,bridgeNow,bridgeFor,

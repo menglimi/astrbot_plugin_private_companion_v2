@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import re
 import time
+import unicodedata
 
 from companion_v2.execution.models import TaskContext, TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
@@ -10,6 +12,8 @@ from .access import owner_key
 
 
 INSTRUCTION = ("群内词义来自本群样例，自动整理的释义仍是推断。相似度只表示相关程度；"
+    "exact_term 表示原句确实出现了词条，不证明释义唯一或正确。recent_group_member 的词来自最近群友上文，"
+    "只用于补全当前省略的主题；本轮明确换题或纠正优先，不按群名或角色自己的旧话补猜专名。"
     "结合原句、否定和语气决定是否采用，不把近似当成确定含义。不懂的暗号可以询问。"
     "可以用 slang.search 查当前语境，用 slang.learn 记录本轮有明确证据的词义或用户纠正，"
     "保留来源，不凭常识替群成员创造用法。本轮明确纠正优先于回合开始时的词义参考，superseded 结果不可继续采用。")
@@ -37,6 +41,78 @@ class GroupSlang:
             return bool(payload["evidence"])
         except (TaskError, KeyError, ValueError):
             return False
+
+    def _available(self, item, context):
+        try:
+            return bool(item["enabled"]) and self.service.validate_item(item, context)
+        except TaskError as error:
+            if error.code == "semantic_item_missing":
+                return False
+            raise
+
+    async def search(self, context, query, *, recent_texts=(), limit=5):
+        """Keep literal terms from current group wording ahead of approximate recall."""
+        self.service.check(context)
+        self.memory.access.check(context, "group.memory.read")
+        if type(query) is not str or type(limit) is not int or not 1 <= limit <= 8:
+            raise ValueError("group vocabulary recall requires text and a bounded result count")
+        owner = self.service.owner(context)
+        recent = tuple(text[-500:] for text in recent_texts[-4:] if type(text) is str and text.strip())
+        # Never match across two messages. Current wording and the newest member
+        # message take precedence, including when a topic changes in this turn.
+        candidates = [("current_input", 0, query[-2000:]),
+                      *(("recent_group_member", index, text) for index, text in enumerate(reversed(recent)))]
+        candidates = [(kind, index, unicodedata.normalize("NFKC", text).casefold())
+                      for kind, index, text in candidates]
+        exact, after = [], ""
+        while True:
+            page = self.store.list(owner, "slang", after=after)
+            if not page:
+                break
+            after = page[-1]["id"]
+            for item in page:
+                if not self._available(item, context):
+                    continue
+                term = item["payload"].get("term", "")
+                if type(term) is not str or not term.strip():
+                    continue
+                term = unicodedata.normalize("NFKC", term.strip()).casefold()
+                pattern = re.escape(term)
+                if term[0].isascii() and term[0].isalnum():
+                    pattern = r"(?<![a-z0-9_])" + pattern
+                if term[-1].isascii() and term[-1].isalnum():
+                    pattern += r"(?![a-z0-9_])"
+                for kind, index, text in candidates:
+                    if re.search(pattern, text):
+                        exact.append((kind != "current_input", index, -len(term), item, kind))
+                        break
+            await asyncio.sleep(0)
+        self.service.check(context)
+        self.memory.access.check(context, "group.memory.read")
+        exact.sort(key=lambda match: (*match[:3], match[3]["id"]))
+        items = [{"id": item["id"], "revision": item["revision"], "payload": item["payload"],
+                  "score": 1.0, "similarity": None, "basis": "exact_term", "clusters": [], "matched_in": kind}
+                 for _, _, _, item, kind in exact if self._available(item, context)][:limit]
+        result = {"items": [], "mode": "exact_term", "embedded": 0, "ranking": "exact_term_first",
+                  "eligible": len(exact), "complete": True, "fallback_reason": None}
+        if len(items) < limit:
+            intent = "\n".join((*recent, query))[-2000:]
+            result = await self.service.search.search(owner, "slang", intent, context=context, limit=limit)
+            self.service.check(context)
+            self.memory.access.check(context, "group.memory.read")
+            # Exact evidence can change while embedding/reranking awaits I/O.
+            retained = []
+            for item in items:
+                try:
+                    current = self.store.get(owner, "slang", item["id"])
+                except TaskError:
+                    continue
+                if current["revision"] == item["revision"] and self._available(current, context):
+                    retained.append(item)
+            items = retained
+        exact_ids = {item["id"] for item in items}
+        return {**result, "items": (items + [item for item in result["items"] if item["id"] not in exact_ids])[:limit],
+                "ranking": "exact_term_first" if items else result["ranking"], "exact_matches": len(items)}
 
     def learn(self, context, batch_id, *, term, meaning, usage="", input_handle, correction=False):
         self.memory.access.check(context, "group.memory.write")

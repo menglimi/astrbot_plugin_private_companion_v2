@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import closing
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
@@ -10,13 +10,21 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from astrbot_host.news import NewsJsonPort, configured_news_port
+from astrbot_host.news import (DEFAULT_AI_NEWS_FEED_LABEL, DEFAULT_AI_NEWS_FEED_URL,
+                               NewsJsonPort, NewsRssPort, configured_news_port)
+from astrbot_host.news_parsing import parse_rss_news
 from companion_v2.proactive.external_materials import parse_news_response
 from companion_v2.proactive.news_events import SOURCE_OWNER
+from companion_v2.proactive.inspirations import SNAPSHOT_KEY
+from companion_v2.conversation.messages import source_from_document
+from companion_v2.conversation.reply_management import ReplyManagement
+from companion_v2.conversation.segment_control import LLM_SEGMENT_MARKER
+from companion_v2.conversation.text_processing import TEXT_DEFAULTS
+from companion_v2.execution.models import TaskError, encode
 from companion_v2.storage.runtime import StorageOpenError, StorageRuntime
-from companion_v2.storage.schema import (REQUIRED_TABLES, SCHEMA_VERSION, SCHEMA_VERSION_V37,
-                                         V37_REQUIRED_TABLES)
+from companion_v2.storage.schema import SCHEMA_VERSION, SCHEMA_VERSION_V37, V37_SCHEMA_STATEMENTS
 from tests.contact_schedule_support import ContactScheduleFixture
+from tests.test_role_tool_loop import answered
 
 
 class NewsPort:
@@ -45,6 +53,7 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
 
     async def setup_news(self, port, *, enabled=True):
         host, batch = await self.scheduled(news_port=port)
+        self.news_host = host
         app = host.application
         self.settings(app, {"news_share_enabled": enabled, "chat.enabled": False}).unwrap()
         return app, self.context(app, batch)
@@ -66,15 +75,435 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(body["source"], "示例媒体")
         self.assertEqual(body["url"], "https://news.example/story-a")
         self.assertNotIn("_receipt", body)
+        contact_body = self.contacts(app)[0]["body"]
+        self.assertNotIn("https://", contact_body)
+        saved = json.loads(self.contacts(app)[0]["record_json"])
+        self.assertEqual(saved["news_provenance"]["source"], "示例媒体")
+        self.assertEqual(saved["news_provenance"]["url"], body["url"])
+        self.assertEqual(datetime.fromisoformat(saved["news_provenance"]["published_at"]),
+                         datetime.fromisoformat(body["published_at"]))
         self.assertIn("news_event", json.loads(self.contacts(app)[0]["record_json"])["automatic_origin"])
         self.settings(app, {"news_share_enabled": False}).unwrap()
         self.assertFalse(app.proactive.sources.validate_reference_for_audience(
             material.source, recipient=context.actor.subject, observed_at=self.clock.now()).is_success)
 
+    async def test_confirmed_diagnostic_keeps_news_origin_prompt_and_program_attribution(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, context = await self.setup_news(port)
+        self.settings(app, {"external_event_self_link_enabled": False}).unwrap()
+        self.advance(app, 60)
+
+        candidate = await app.contact_schedule.diagnostic_candidate(context, "news", at=self.clock.now())
+        result = await app.proactive.contact(context, candidate["opportunity"], candidate["intents"],
+            role_instruction=candidate["role_instruction"], selection_seed="confirmed-news-diagnostic",
+            administrator_test=True, diagnostic_source_backed=True,
+            diagnostic_origin=candidate["diagnostic_origin"])
+
+        self.assertIsNone(result.failure, result.failure)
+        await self.automatic_delivery(app)
+        contact = self.contacts(app)[0]
+        self.assertNotIn("https://", contact["body"])
+        saved = json.loads(contact["record_json"])
+        self.assertEqual(saved["news_provenance"]["url"], "https://news.example/story-a")
+        self.assertIn("news_event", saved["diagnostic_origin"])
+        request = self.contact_calls()[0].original
+        self.assertIn("资讯只按来源提供的标题、摘要和发布时间转述", request.instruction)
+        self.assertIn("孩子看到新鲜事后兴冲冲来分享", request.instruction)
+        self.assertTrue(any(item.owner == SOURCE_OWNER for item in request.context.materials))
+
+    async def test_news_sharing_prompt_and_natural_punctuation_create_separate_parts(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, _ = await self.setup_news(port)
+        self.configure_presentation(app, {"enabled": True, "llm_controlled": False,
+            "part_gap_mode": "fixed", "part_gap_ms": 0, **TEXT_DEFAULTS,
+            "content_cleanup_enabled": True, "content_cleanup_scope": "all",
+            "content_cleanup_words": '["。", "！", "<newline>"]'}, "news-rule-parts")
+        self.settings(app, {"proactive_intensity_body_chars": 120}).unwrap()
+
+        async def excited_sharing(envelope):
+            self.assertIn("像刚碰到一件有趣的事", envelope.original.instruction)
+            self.assertIn("孩子看到新鲜事后兴冲冲来分享", envelope.original.instruction)
+            self.assertIn("无需压成一句", envelope.original.instruction)
+            self.assertIn("已配置规则分段", envelope.original.instruction)
+            self.assertNotIn(LLM_SEGMENT_MARKER, envelope.original.instruction)
+            return answered(json.dumps({
+                "decision": "send",
+                "text": "这个变化好有意思！\n\n我有点好奇后面会怎样。",
+            }, ensure_ascii=False))
+
+        self.model_behavior = excited_sharing
+        sent_before = len(self.sent)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+
+        contact = self.contacts(app)[0]
+        await self.until(lambda: len(app.proactive._delivery_rows(contact["task_id"])) == 2
+                         and all(row["state"] == "delivered"
+                                 for row in app.proactive._delivery_rows(contact["task_id"])))
+        saved = json.loads(contact["record_json"])
+        parts = [part["text"] for part in saved["parts"]]
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0], "这个变化好有意思")
+        self.assertEqual(parts[1], "我有点好奇后面会怎样")
+        self.assertEqual([item.text for item in self.sent[sent_before:]], parts)
+        self.assertEqual([item.sequence for item in self.sent[sent_before:]], [0, 1])
+        self.assertEqual(contact["body"], "".join(parts))
+        self.assertNotIn("出处", contact["body"])
+        self.assertNotIn("https://", contact["body"])
+        self.assertEqual(saved["news_provenance"]["url"], "https://news.example/story-a")
+
+    def configure_presentation(self, app, changes, key):
+        manager = ReplyManagement(app, self.contact_context())
+        status = manager.status(self.core).unwrap()
+        return manager.configure(self.core, {"operation_key": key, "edit_token": status["edit_token"],
+                                             "changes": changes}).unwrap()
+
+    async def test_news_model_boundaries_survive_cleanup_and_later_settings_changes(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, _ = await self.setup_news(port)
+        self.configure_presentation(app, {"enabled": True, "llm_controlled": True,
+            "part_gap_mode": "fixed", "part_gap_ms": 0, **TEXT_DEFAULTS,
+            "content_cleanup_enabled": True, "content_cleanup_scope": "all",
+            "content_cleanup_words": '["<newline>", "。", "！"]'}, "news-model-parts")
+
+        async def model(envelope):
+            self.assertIn("即使正文偏好少标点", envelope.original.instruction)
+            self.assertIn(LLM_SEGMENT_MARKER, envelope.original.instruction)
+            self.configure_presentation(app, {"enabled": False}, "news-next-turn-disabled")
+            return answered(json.dumps({"decision": "send",
+                "text": "我看到一个有趣的点\n" + LLM_SEGMENT_MARKER + "\n有点想知道接下来会怎样"},
+                ensure_ascii=False))
+
+        self.model_behavior = model
+        sent_before = len(self.sent)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        contact = self.contacts(app)[0]
+        await self.until(lambda: len(app.proactive._delivery_rows(contact["task_id"])) == 2
+                         and all(row["state"] == "delivered"
+                                 for row in app.proactive._delivery_rows(contact["task_id"])))
+        saved = json.loads(contact["record_json"])
+        self.assertTrue(saved["segmentation_settings"]["enabled"])
+        self.assertEqual([item.text for item in self.sent[sent_before:]],
+                         [part["text"] for part in saved["parts"]])
+        self.assertEqual(saved["parts"][0]["text"], "我看到一个有趣的点")
+        self.assertEqual(saved["parts"][1]["text"], "有点想知道接下来会怎样")
+        self.assertNotIn(LLM_SEGMENT_MARKER, contact["body"])
+        self.assertNotIn("https://", contact["body"])
+
+    async def test_disabled_news_segmentation_keeps_paragraphs_in_one_message(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, _ = await self.setup_news(port)
+        self.configure_presentation(app, {"enabled": False, **TEXT_DEFAULTS,
+                                         "content_cleanup_enabled": False}, "news-single-message")
+        body = "看到这个消息就想分享给你。\n\n我有点好奇它接下来会怎样。"
+
+        async def model(envelope):
+            self.assertIn("作为一条消息发送", envelope.original.instruction)
+            self.assertNotIn(LLM_SEGMENT_MARKER, envelope.original.instruction)
+            return answered(json.dumps({"decision": "send", "text": body}, ensure_ascii=False))
+
+        self.model_behavior = model
+        sent_before = len(self.sent)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        contact = self.contacts(app)[0]
+        saved = json.loads(contact["record_json"])
+        self.assertEqual(len(saved["parts"]), 1)
+        self.assertEqual(saved["parts"][0]["text"], body)
+        self.assertEqual([item.text for item in self.sent[sent_before:]], [contact["body"]])
+
+    async def test_source_followup_after_restart_uses_the_original_receipt_backed_archive(self):
+        from tests.test_semantic_integration import SemanticPort
+
+        port = NewsPort(self.clock, [[self.article()]])
+        app, context = await self.setup_news(port)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        self.settings(app, {"automatic_enabled": False, "news_share_enabled": False}).unwrap()
+        original = self.contacts(app)[0]
+        saved = json.loads(original["record_json"])
+        reference = next(source_from_document(item) for item in saved["sources"]
+                         if item["owner"] == SOURCE_OWNER)
+        await app.close()
+        self.clock.advance(timedelta(hours=1))
+
+        host = await self.start(self.host(runtime=self.open_runtime(), news_port=port), 1, 1)
+        restarted = host.application
+        restarted.attach_semantics(SemanticPort()).store.configure({"enabled": False}, 0)
+        # The share's live evidence cannot be renewed into a current send or read.
+        current = restarted.proactive.sources.read(reference, resolved=context.actor, capability="text",
+            observed_at=self.clock.now(), authorizer=restarted.tasks.identity)
+        self.assertEqual(current.failure.code, "source_expired")
+
+        async def reply(envelope):
+            history = [json.loads(item.payload) for item in envelope.original.context.materials
+                       if item.owner == "delivery.history"]
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["text"], original["body"])
+            self.assertNotIn("provenance", history[0])
+            inspirations = [json.loads(item.payload) for item in envelope.original.context.materials
+                            if item.owner == "proactive.inspirations"]
+            self.assertEqual(len(inspirations), 1)
+            items = inspirations[0]["items"]
+            item = next(item for item in items if item["contact_id"] == original["contact_id"])
+            self.assertEqual(item["text"], original["body"])
+            self.assertEqual(item["thought"], saved["thought_summary"])
+            self.assertEqual(item["provenance"], saved["news_provenance"])
+            self.assertIn("主动灵感清单只属于当前私聊窗口", envelope.original.instruction)
+            self.assertNotIn("conversation.news", {item.owner for item in envelope.original.context.materials})
+            news = item["provenance"]
+            return answered(news["source"] + " · " + news["published_at"][:10] + "\n" + news["url"])
+
+        self.model_behavior = reply
+        sent_before = len(self.sent)
+        batch = host.receive(self.event("news-source-followup", text="这条AI新闻的原文链接在哪？")).unwrap()
+        self.advance(restarted)
+        self.assertEqual((await self.done(restarted, batch))["state"], "complete")
+        self.assertEqual(port.calls, 1)
+        reply_text = "".join(item.text for item in self.sent[sent_before:])
+        self.assertIn("示例媒体", reply_text)
+        self.assertIn(saved["news_provenance"]["published_at"][:10], reply_text)
+        self.assertIn("https://news.example/story-a", reply_text)
+        sealed = json.loads(restarted.messages.batch(batch)["contributions_json"])[SNAPSHOT_KEY]
+        self.assertNotIn("https://", encode(sealed))
+        await restarted.close()
+        again = (await self.start(self.host(runtime=self.open_runtime(), news_port=port), 2, 2)).application
+        # The dependency survives even when semantic recall is not attached.
+        restored = again.messages.batch(batch)
+        request = again.messages._request(restored, context, self.clock.now(), include_tools=False, historical=True)
+        self.assertIn("proactive.inspirations", {item.owner for item in request.context.materials})
+        again.proactive.sources.revoke(reference, expected_governance_revision=1,
+                                       observed_at=self.clock.now()).unwrap()
+        with self.assertRaises(TaskError):
+            again.messages._request(restored, context, self.clock.now(), include_tools=False, historical=True)
+
+    async def test_unknown_share_has_no_recallable_provenance(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, context = await self.setup_news(port)
+
+        async def unconfirmed(envelope):
+            return self.receipt(envelope, "unknown")
+
+        self.send_behavior = unconfirmed
+        self.advance(app, 60)
+        await self.until(lambda: len(self.contacts(app)) == 1)
+        contact = self.contacts(app)[0]
+        await self.delivery_state(app, contact["task_id"], "unknown")
+        self.assertIn("news_provenance", json.loads(contact["record_json"]))
+        self.assertEqual(app.background_history.recent(context).unwrap(), ())
+        inspirations = app.proactive.inspirations
+        self.assertEqual(inspirations.read(inspirations.capture(context, self.clock.now()), context, self.clock.now()), ())
+        sent_count = len(self.sent)
+        app.record_receipt(self.receipt(self.sent[-1])).unwrap()
+        items = inspirations.read(inspirations.capture(context, self.clock.now()), context, self.clock.now())
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["provenance"]["url"], "https://news.example/story-a")
+        self.assertEqual(len(self.sent), sent_count)
+
+    async def test_changed_or_revoked_news_provenance_is_hidden_from_history(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, context = await self.setup_news(port)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        contact = self.contacts(app)[0]
+        self.assertEqual(len(app.background_history.recent(context).unwrap()), 1)
+        inspirations = app.proactive.inspirations
+        snapshot = inspirations.capture(context, self.clock.now())
+        self.assertEqual(len(inspirations.read(snapshot, context, self.clock.now())), 1)
+        saved = json.loads(contact["record_json"])
+        reference = next(source_from_document(item) for item in saved["sources"]
+                         if item["owner"] == SOURCE_OWNER)
+        saved["news_provenance"]["url"] = "https://news.example/another-story"
+        with app.runtime.transaction() as connection:
+            connection.execute("UPDATE proactive_contacts SET record_json = ? WHERE contact_id = ?",
+                               (encode(saved), contact["contact_id"]))
+        self.assertEqual(app.background_history.recent(context).unwrap(), ())
+        self.assertEqual(inspirations.capture(context, self.clock.now())["entries"], [])
+        with self.assertRaises(TaskError):
+            inspirations.read(snapshot, context, self.clock.now())
+        with app.runtime.transaction() as connection:
+            connection.execute("UPDATE proactive_contacts SET record_json = ? WHERE contact_id = ?",
+                               (contact["record_json"], contact["contact_id"]))
+        self.clock.advance(timedelta(hours=1))
+        self.assertEqual(len(app.background_history.recent(context).unwrap()), 1)
+        app.proactive.sources.revoke(reference, expected_governance_revision=1,
+                                    observed_at=self.clock.now()).unwrap()
+        self.assertEqual(app.background_history.recent(context).unwrap(), ())
+        self.assertEqual(inspirations.capture(context, self.clock.now())["entries"], [])
+        with self.assertRaises(TaskError):
+            inspirations.read(snapshot, context, self.clock.now())
+
+    async def test_casual_reply_does_not_receive_private_source_details(self):
+        from tests.test_semantic_integration import SemanticPort
+
+        port = NewsPort(self.clock, [[self.article()]])
+        app, _ = await self.setup_news(port)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        self.settings(app, {"automatic_enabled": False}).unwrap()
+        app.attach_semantics(SemanticPort()).store.configure({"enabled": False}, 0)
+
+        async def casual(envelope):
+            owners = {item.owner for item in envelope.original.context.materials}
+            self.assertNotIn("proactive.inspirations", owners)
+            self.assertNotIn("conversation.news", owners)
+            history = [json.loads(item.payload) for item in envelope.original.context.materials
+                       if item.owner == "delivery.history"]
+            self.assertTrue(history)
+            self.assertTrue(all("provenance" not in item for item in history))
+            return answered("对，我也想看看它接下来会怎么发展。")
+
+        self.model_behavior = casual
+        batch = self.news_host.receive(self.event("news-casual-followup", text="这个变化还挺有意思的。")).unwrap()
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertNotIn(SNAPSHOT_KEY, json.loads(app.messages.batch(batch)["contributions_json"]))
+        self.assertEqual(port.calls, 1)
+
+    async def test_window_list_preserves_multiple_shares_for_an_earlier_source_followup(self):
+        from tests.test_semantic_integration import SemanticPort
+
+        port = NewsPort(self.clock, [[self.article()], lambda: [self.article("story-b")]])
+        app, context = await self.setup_news(port)
+        self.settings(app, {"external_event_self_link_enabled": False}).unwrap()
+
+        async def share(envelope):
+            material = next(item for item in envelope.original.context.materials if item.owner == SOURCE_OWNER)
+            title = json.loads(material.payload)["title"]
+            return answered(json.dumps({"decision": "send", "text": "这个点让我挺好奇的：" + title}, ensure_ascii=False))
+
+        self.model_behavior = share
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        self.advance(app, 180 * 60)
+        await self.automatic_delivery(app, count=2)
+        self.settings(app, {"automatic_enabled": False}).unwrap()
+        inspirations = app.proactive.inspirations
+        snapshot = inspirations.capture(context, self.clock.now())
+        items = inspirations.read(snapshot, context, self.clock.now())
+        self.assertEqual({item["provenance"]["url"] for item in items},
+                         {"https://news.example/story-a", "https://news.example/story-b"})
+        other = self.other_window_context()
+        self.grant(self.important, other.scope, "text")
+        self.assertEqual(inspirations.capture(other, self.clock.now())["entries"], [])
+        with self.assertRaises(TaskError):
+            inspirations.read(snapshot, other, self.clock.now())
+        app.attach_semantics(SemanticPort()).store.configure({"enabled": False}, 0)
+
+        async def earlier_source(envelope):
+            material = next(item for item in envelope.original.context.materials if item.owner == "proactive.inspirations")
+            entries = json.loads(material.payload)["items"]
+            self.assertEqual(len(entries), 2)
+            self.assertIn("不能默认拿最新一条顶替", envelope.original.instruction)
+            earlier = next(item for item in entries if item["provenance"]["title"].endswith("story-a"))
+            return answered(earlier["provenance"]["url"])
+
+        self.model_behavior = earlier_source
+        sent_before = len(self.sent)
+        batch = self.news_host.receive(self.event("earlier-news-source", text="前面那条 story-a 的原文在哪？")).unwrap()
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertEqual("".join(item.text for item in self.sent[sent_before:]), "https://news.example/story-a")
+        self.assertEqual(port.calls, 2)
+
+    async def test_missing_original_share_does_not_fetch_another_article(self):
+        from tests.test_semantic_integration import SemanticPort
+
+        port = NewsPort(self.clock, [])
+        app, _ = await self.setup_news(port)
+        self.settings(app, {"automatic_enabled": False}).unwrap()
+        app.attach_semantics(SemanticPort()).store.configure({"enabled": False}, 0)
+
+        async def missing(envelope):
+            material = next(item for item in envelope.original.context.materials if item.owner == "proactive.inspirations")
+            self.assertEqual(json.loads(material.payload)["items"], [])
+            self.assertIn("不拿新拉取的另一条资讯替代原出处", envelope.original.instruction)
+            self.assertNotIn("conversation.news", {item.owner for item in envelope.original.context.materials})
+            return answered("这边没有留下那条分享的出处，你指的是哪一条？")
+
+        self.model_behavior = missing
+        batch = self.news_host.receive(self.event("missing-news-source", text="你刚提到最新那条AI新闻的原文链接在哪？")).unwrap()
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertEqual(port.calls, 0)
+
+    async def test_partially_confirmed_share_lists_only_the_confirmed_bubble(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, context = await self.setup_news(port)
+        self.configure_presentation(app, {"enabled": True, "llm_controlled": True,
+            "part_gap_mode": "fixed", "part_gap_ms": 0, "content_cleanup_enabled": False}, "news-partial-share")
+
+        async def share(envelope):
+            return answered(json.dumps({"decision": "send", "text": "看到一个有趣的变化\n" +
+                LLM_SEGMENT_MARKER + "\n我还想看看后续怎样"}, ensure_ascii=False))
+
+        async def partial(envelope):
+            return self.receipt(envelope, "unknown" if envelope.sequence == 1 else "delivered")
+
+        self.model_behavior, self.send_behavior = share, partial
+        self.advance(app, 60)
+        await self.until(lambda: len(self.contacts(app)) == 1)
+        contact = self.contacts(app)[0]
+        await self.delivery_state(app, contact["task_id"], "unknown")
+        snapshot = app.proactive.inspirations.capture(context, self.clock.now())
+        items = app.proactive.inspirations.read(snapshot, context, self.clock.now())
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], json.loads(contact["record_json"])["parts"][0]["text"])
+        self.assertNotIn("我还想看看后续怎样", items[0]["text"])
+        self.assertEqual((items[0]["confirmed_parts"], items[0]["part_count"]), (1, 2))
+        self.assertEqual(items[0]["provenance"]["url"], "https://news.example/story-a")
+
+    async def test_withdrawal_during_source_followup_discards_the_derived_reply(self):
+        from tests.test_semantic_integration import SemanticPort
+
+        port = NewsPort(self.clock, [[self.article()]])
+        app, _ = await self.setup_news(port)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        self.settings(app, {"automatic_enabled": False}).unwrap()
+        saved = json.loads(self.contacts(app)[0]["record_json"])
+        reference = next(source_from_document(item) for item in saved["sources"] if item["owner"] == SOURCE_OWNER)
+        app.attach_semantics(SemanticPort()).store.configure({"enabled": False}, 0)
+
+        async def withdrawn(envelope):
+            self.assertIn("proactive.inspirations", {item.owner for item in envelope.original.context.materials})
+            app.proactive.sources.revoke(reference, expected_governance_revision=1,
+                                        observed_at=self.clock.now()).unwrap()
+            return answered(saved["news_provenance"]["url"])
+
+        self.model_behavior = withdrawn
+        sent_before = len(self.sent)
+        batch = self.news_host.receive(self.event("withdrawn-news-source", text="这条消息的出处呢？")).unwrap()
+        self.assertEqual((await self.done(app, batch))["state"], "blocked")
+        self.assertEqual(len(self.sent), sent_before)
+        self.assertEqual(app.runtime.read_one("SELECT state FROM model_calls ORDER BY rowid DESC LIMIT 1", ())[0], "discarded")
+
+    async def test_news_self_link_cooldown_blocks_cached_candidates_and_allows_current_delivery(self):
+        port = NewsPort(self.clock, [[self.article()], []])
+        app, context = await self.setup_news(port)
+        self.settings(app, {"external_event_self_link_enabled": True,
+                            "external_event_self_link_cooldown_hours": 12}).unwrap()
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+
+        events = app.contact_schedule.news_events
+        at = self.clock.now()
+        preferences = app.proactive.preferences.read(context, observed_at=at).unwrap()
+        settings_hash = events._settings(context, preferences)
+        event = {"id": "news-cached-cooldown-test", "opened_at": at.isoformat(),
+                 "expires_at": (at + timedelta(minutes=30)).isoformat(),
+                 "settings_hash": settings_hash, "key": "cached-key", "feed": "news.example",
+                 "article": {"source": "示例媒体", "title": "缓存资讯", "summary": "摘要",
+                             "url": "https://news.example/cached", "published_at": at.isoformat()}}
+        events._save(context, settings_hash, at, checked=True, event=event)
+
+        self.assertIsNone(events.select(context, preferences, at))
+        self.assertIsNone(await events.prepare(context, {"settings_hash": settings_hash}))
+        self.assertEqual(len(self.contacts(app)), 1)
+
     async def test_restart_deduplicates_article_and_accepts_new_one(self):
         old = self.article()
         port = NewsPort(self.clock, [[old], [old], lambda: [self.article("story-b")]])
         app, _ = await self.setup_news(port)
+        self.settings(app, {"external_event_self_link_enabled": False}).unwrap()
         self.advance(app, 60)
         await self.automatic_delivery(app)
         await app.close()
@@ -153,7 +582,7 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.contacts(app), ())
         self.assertIsNone(app.runtime.read_one("SELECT * FROM proactive_news_polls", ()))
 
-    async def test_stale_dated_news_is_refused_but_undated_news_reaches_the_model(self):
+    async def test_stale_and_undated_news_are_refused(self):
         old = self.article(age=timedelta(hours=25))
         undated = self.article("undated")
         del undated["published_at"]
@@ -161,16 +590,11 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         app, _ = await self.setup_news(port)
         self.advance(app, 60)
         await self.until(lambda: port.calls == 1 and not app.contact_schedule.active_handles)
-        # 超过 24 小时的带日期条目仍然被拒；没有发布日期的条目交给模型
-        # 按"只保留可用日期"的材料规则自行取舍。
         calls = self.contact_calls()
-        self.assertEqual(len(calls), 1)
-        material = next(m for m in calls[0].original.context.materials if m.owner == SOURCE_OWNER)
-        payload = json.loads(material.payload)
-        self.assertEqual(payload["title"], "有日期的资讯 undated")
-        self.assertIsNone(payload["published_at"])
-        self.assertNotIn("story-a", json.dumps(payload))
-        self.assertEqual(len(self.contacts(app)), 1)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.contacts(app), ())
+        row = app.runtime.read_one("SELECT event_json FROM proactive_news_polls", ())
+        self.assertIsNone(row["event_json"] if row else None)
 
 
 class NewsAdapterTests(unittest.TestCase):
@@ -184,6 +608,35 @@ class NewsAdapterTests(unittest.TestCase):
         self.assertEqual(port.source_label, "news.example")
         self.assertEqual(port.headers, {})
 
+    def test_core_ai_news_rss_is_the_host_default_without_forwarding_environment_secrets(self):
+        with patch.dict("os.environ", {"COMPANION_V2_NEWS_API_KEY": "unrelated-secret"}, clear=True):
+            router = configured_news_port({"news": {"source_kind": "host"}})
+        port = router.for_settings({"news_source_kind": "host"})
+        self.assertIsInstance(port, NewsRssPort)
+        self.assertEqual(port.url, DEFAULT_AI_NEWS_FEED_URL)
+        self.assertEqual(port.source_label, DEFAULT_AI_NEWS_FEED_LABEL)
+        self.assertEqual(port.headers, {})
+
+    def test_core_ai_news_rss_schema_and_parser_match_the_daily_feed(self):
+        schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(schema["news"]["items"]["source_kind"]["default"], "rss")
+        self.assertEqual(schema["news"]["items"]["feed_url"]["default"], DEFAULT_AI_NEWS_FEED_URL)
+        payload = """<?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0"><channel><title>橘鸦AI早报</title><item>
+        <guid>2026-10-02</guid><title>2026-10-02</title>
+        <link>https://daily.juya.uk/issues/2026-10-02/</link>
+        <pubDate>Fri, 02 Oct 2026 02:01:50 GMT</pubDate>
+        <description>OpenAI 发布新模型与工具。</description>
+        </item></channel></rss>""".encode("utf-8")
+        batch = parse_rss_news(payload, source_label="daily.juya.uk")
+        self.assertEqual(len(batch.items), 1)
+        item = batch.items[0]
+        self.assertEqual(item.source, DEFAULT_AI_NEWS_FEED_LABEL)
+        self.assertEqual(item.title, "2026-10-02")
+        self.assertEqual(item.url, "https://daily.juya.uk/issues/2026-10-02/")
+        self.assertEqual(item.summary, "OpenAI 发布新模型与工具。")
+        self.assertEqual(item.published_at.isoformat(), "2026-10-02T02:01:50+00:00")
+
 
 class NewsStorageTests(unittest.TestCase):
     def test_v37_upgrade_and_partial_migration(self):
@@ -195,24 +648,19 @@ class NewsStorageTests(unittest.TestCase):
             database = runtime.database_path
             runtime.close()
             with closing(sqlite3.connect(database)) as connection:
-                connection.execute("PRAGMA foreign_keys=OFF")
-                connection.execute('DROP TABLE "proactive_news_polls"')
-                connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v37-to-v38'")
-                # 模拟一份真实的 v37 库：v37 之后新增的表、迁移记录，以及 v46
-                # 追加到 model_calls 的用量列都必须先退场，否则降级副本会被
-                # v37 校验当作半截迁移或降级拷贝拒绝。
-                for table in sorted(REQUIRED_TABLES - V37_REQUIRED_TABLES - {"proactive_news_polls"}):
-                    connection.execute(f'DROP TABLE "{table}"')
-                # 用数值比较删 v37 及以后的记录：字典序会把 v5 排到 v37 之后。
-                connection.execute("DELETE FROM schema_migrations WHERE "
-                                   "CAST(substr(from_version, length('companion-v2.storage.v') + 1) AS INTEGER) >= 37",
-                                   ())
-                for column in ("input_tokens", "cached_input_tokens", "cache_creation_tokens",
-                               "output_tokens"):
-                    connection.execute(f"ALTER TABLE model_calls DROP COLUMN {column}")
-                connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
-                                   (SCHEMA_VERSION_V37,))
-                connection.commit()
+                metadata = [(key, SCHEMA_VERSION_V37 if key == "schema_version" else value)
+                            for key, value in connection.execute("SELECT key, value FROM runtime_metadata")]
+                migrations = connection.execute("SELECT * FROM schema_migrations WHERE "
+                    "CAST(substr(from_version, length('companion-v2.storage.v') + 1) AS INTEGER) < 37").fetchall()
+                # Recreate this empty synthetic fixture from the actual v37
+                # schema; later ALTERs must not leak into a supposed old database.
+                with closing(sqlite3.connect(":memory:")) as legacy:
+                    for statement in V37_SCHEMA_STATEMENTS:
+                        legacy.execute(statement)
+                    legacy.executemany("INSERT INTO runtime_metadata VALUES (?, ?)", metadata)
+                    legacy.executemany("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", migrations)
+                    legacy.commit()
+                    legacy.backup(connection)
             upgraded = StorageRuntime.open(data_root=root, installation_id="news-test")
             self.assertEqual(upgraded.read_one("SELECT value FROM runtime_metadata WHERE key = ?",
                                                ("schema_version",))[0], SCHEMA_VERSION)

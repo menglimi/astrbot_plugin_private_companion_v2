@@ -35,6 +35,9 @@ from .screen_access_api import ScreenAccessWebAPI
 from .account_session_api import AccountSessionWebAPI
 from .image_material_api import ImageMaterialsWebAPI
 from .qzone_api import QzoneWebAPI
+from .host_options_api import HostOptionsWebAPI
+from .storage_api import StorageWebAPI
+from .display_names import display_names
 
 if TYPE_CHECKING:
     from .controller import AstrBotStagingController
@@ -123,6 +126,8 @@ class StagingWebAPI:
             all_routes += AccountSessionWebAPI(self.controller).routes()
             all_routes += ImageMaterialsWebAPI(self.controller).routes()
             all_routes += QzoneWebAPI(self.controller).routes()
+            all_routes += HostOptionsWebAPI(self.controller).routes()
+            all_routes += StorageWebAPI(self.controller).routes()
             for route, handler, methods, description in all_routes:
                 register(route, handler, methods, description)
                 self._registered_routes.append((route, handler))
@@ -151,7 +156,16 @@ class StagingWebAPI:
         self._registered_routes.clear()
 
     async def api_status(self) -> dict[str, Any]:
-        return {"status": "ok", "data": self.controller.status()}
+        status = self.controller.status()
+        try:
+            username = request.username
+        except RuntimeError:
+            username = None
+        if type(username) is str and username.strip() and not username.startswith("api_key:"):
+            status["targets"] = await display_names(self.controller).targets(status.get("targets", []))
+            if self.controller._terminated:
+                status = self.controller.status()
+        return {"status": "ok", "data": status}
 
     async def api_probe(self) -> dict[str, Any]:
         return outcome_response(await self.controller.probe())

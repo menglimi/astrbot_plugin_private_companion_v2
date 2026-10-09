@@ -14,7 +14,6 @@ from __future__ import annotations
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
-from companion_v2.execution.models import require
 
 
 GROUP = "photo.reference"
@@ -24,6 +23,8 @@ LAYER = (ConfigLayer.ROLE,)
 DEFAULTS = {
     # Off until an operator turns reference material on for this role.
     "enabled": False,
+    # Group exposure is a separate opt-in; private use does not depend on it.
+    "group_enabled": False,
     # The daily-outfit path stays separate: agreeing to reference pictures is not
     # agreement to a picture every day.
     "daily_outfit_enabled": False,
@@ -31,7 +32,7 @@ DEFAULTS = {
     "daily_outfit_rotation_days": 14,
 }
 LIMITS = {"daily_outfit_rotation_days": (1, 365)}
-BOOLEAN_FIELDS = ("enabled", "daily_outfit_enabled")
+BOOLEAN_FIELDS = ("enabled", "group_enabled", "daily_outfit_enabled")
 INTEGER_FIELDS = tuple(LIMITS)
 
 
@@ -82,15 +83,18 @@ class ReferenceConfigurationOwner(SparseConfigurationOwner):
 
 
 class ReferenceSettings:
-    """Read one role's reference options without inventing a second scope."""
+    """Read the role-owned switches after the reference service authorizes use."""
 
-    def __init__(self, configuration):
-        self.configuration = configuration
+    def __init__(self, owner):
+        if not isinstance(owner, ReferenceConfigurationOwner):
+            raise TypeError("reference settings require their registered configuration owner")
+        self.owner = owner
 
     def read(self, context, at):
-        snapshot = require(self.configuration.read(context.actor, target=target_for(context),
-                                                  group_id=GROUP, observed_at=at))
-        return validate({key.removeprefix(GROUP + "."): value for key, value in snapshot.values.items()})
+        with self.owner.runtime.read_snapshot():
+            snapshot = self.owner.read(target_for(context), configuration_fields())
+        return validate({key.removeprefix(GROUP + "."): item.value
+                         for key, item in snapshot.fields.items()})
 
 
 __all__ = ["DEFAULTS", "GROUP", "LAYER", "LIMITS", "OWNER", "ReferenceConfigurationOwner",

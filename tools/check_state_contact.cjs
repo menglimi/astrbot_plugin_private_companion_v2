@@ -164,7 +164,7 @@ test("the only public page loads contact before its editor and routes preference
      容器在就挂、不在就卸，两条路都要有。 */
   assert.match(shell,/\$\('#contactWorkspace'\)[\s\S]{0,120}CompanionContactPage\?\.mount/,
     "容器在就挂上联系页");
-  assert.match(shell,/else window\.CompanionContactPage\?\.unmount\(\)/,
+  assert.match(shell,/contactHost\s*\?\s*window\.CompanionContactPage\?\.mount\(contactHost\)\s*:\s*window\.CompanionContactPage\?\.unmount\(\)/,
     "容器不在就要卸载，否则 80ms 涟漪链会继续往已丢弃的节点上写");
   /* 只否掉**调用**，不否掉注释：app.js 里有一段注释专门说明这个函数当年
      从未定义、整页因此崩过，那段历史要留着。 */

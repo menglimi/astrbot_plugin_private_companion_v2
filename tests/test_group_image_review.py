@@ -8,6 +8,7 @@ the group audience.
 """
 
 from dataclasses import replace
+from types import SimpleNamespace
 import unittest
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget
@@ -17,6 +18,7 @@ from companion_v2.conversation.media.review import (ALLOW, BLOCK, DEFAULTS, DUAL
                                                     WITHHOLD, check_verdict, configuration_fields, decide,
                                                     merge_answers, normalize_label, parse_answer, review_prompt,
                                                     review_settings, verdict_document)
+from companion_v2.conversation.media.fallback import ImageReviewFallback
 from companion_v2.execution.models import TaskError, stamp
 from tests.test_conversation_messages import MessageFixture
 from tests.test_management_access import NOW
@@ -128,6 +130,31 @@ class ReviewDecisionTests(unittest.TestCase):
             decision, reason = decide(label, self.settings(), ran=True)
             self.assertIn(decision, (ALLOW, WITHHOLD, BLOCK))
             self.assertTrue(reason)
+
+
+class ReviewFallbackPolicyTests(unittest.TestCase):
+    @staticmethod
+    def fallback(action):
+        owner = ImageReviewFallback.__new__(ImageReviewFallback)
+        owner.messages = SimpleNamespace(image_review=SimpleNamespace(
+            settings_for=lambda _context: {"group_nsfw_image_review_failure_action": action}))
+        owner._group_context = lambda _row: object()
+        return owner
+
+    def test_inconclusive_private_fallback_obeys_the_failure_action(self):
+        inconclusive = {"state": "reviewed", "label": "uncertain"}
+        unavailable = {"state": "unavailable", "label": "uncertain"}
+        unsafe = {"state": "reviewed", "label": "adult_nsfw"}
+        safe = {"state": "reviewed", "label": "safe"}
+
+        private = self.fallback("private")
+        text_only = self.fallback("block")
+        self.assertTrue(private._private_fallback_allowed({}, inconclusive))
+        self.assertTrue(private._private_fallback_allowed({}, unavailable))
+        self.assertFalse(text_only._private_fallback_allowed({}, inconclusive))
+        self.assertTrue(text_only._private_fallback_allowed({}, unsafe),
+                        "a definite unsafe verdict still uses the independent private route")
+        self.assertFalse(private._private_fallback_allowed({}, safe))
 
 
 class ReviewVerdictTests(unittest.TestCase):

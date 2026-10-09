@@ -1,0 +1,186 @@
+{
+  "maintenance": {
+    "generated_at": "2026-10-10T14:00:00+08:00",
+    "summary": {
+      "calls": 146,
+      "tokens": 186420,
+      "input_tokens": 151930,
+      "output_tokens": 34490,
+      "cost_microusd": 864200,
+      "failures": 3
+    },
+    "totals": {},
+    "daily": [],
+    "history": [],
+    "recent": [],
+    "reply_efficiency": {
+      "generated_at": "2026-10-10T14:00:00+08:00",
+      "window_days": 7,
+      "summary": {
+        "samples": 126,
+        "completed": 112,
+        "partial": 8,
+        "median_end_to_end_ms": 5120,
+        "p95_end_to_end_ms": 18400,
+        "median_first_reply_ms": 3680,
+        "median_pre_model_ms": 1450,
+        "median_last_input_to_model_ms": 670,
+        "median_model_ms": 2180,
+        "median_post_model_ms": 510,
+        "median_delivery_ms": 620
+      },
+      "coverage": {
+        "received": 126,
+        "model_started": 124,
+        "model_finished": 120,
+        "first_dispatched": 118,
+        "first_delivered": 116,
+        "final_delivered": 112
+      },
+      "daily": [
+        {"day": "2026-10-04", "samples": 14, "completed": 13, "median_end_to_end_ms": 5680},
+        {"day": "2026-10-05", "samples": 17, "completed": 16, "median_end_to_end_ms": 4930},
+        {"day": "2026-10-06", "samples": 19, "completed": 18, "median_end_to_end_ms": 5310},
+        {"day": "2026-10-07", "samples": 16, "completed": 14, "median_end_to_end_ms": 6240},
+        {"day": "2026-10-08", "samples": 21, "completed": 19, "median_end_to_end_ms": 4760},
+        {"day": "2026-10-09", "samples": 20, "completed": 18, "median_end_to_end_ms": 4480},
+        {"day": "2026-10-10", "samples": 19, "completed": 14, "median_end_to_end_ms": 5120}
+      ],
+      "recent": [
+        {
+          "received_at": "2026-10-10T13:42:15+08:00",
+          "received_time_source": "input_event",
+          "outcome": "completed",
+          "input_count": 1,
+          "part_count": 2,
+          "delivered_parts": 2,
+          "model_calls": 2,
+          "timestamps": {
+            "received_at": "2026-10-10T13:42:15+08:00",
+            "last_input_received_at": "2026-10-10T13:42:15+08:00",
+            "flow_due_at": "2026-10-10T13:42:15.300+08:00",
+            "generation_started_at": "2026-10-10T13:42:15.500+08:00",
+            "first_model_started_at": "2026-10-10T13:42:16.120+08:00",
+            "last_model_finished_at": "2026-10-10T13:42:18.305+08:00",
+            "first_dispatched_at": "2026-10-10T13:42:18.620+08:00",
+            "first_delivered_at": "2026-10-10T13:42:18.940+08:00",
+            "last_delivered_at": "2026-10-10T13:42:19.410+08:00"
+          },
+          "stages": {
+            "pre_model_ms": 1120,
+            "last_input_to_model_ms": 1120,
+            "model_ms": 2185,
+            "post_model_ms": 315,
+            "delivery_ms": 790,
+            "first_reply_ms": 6725,
+            "end_to_end_ms": 7195
+          },
+          "trace": {
+            "input_wait_ms": 300,
+            "queue_wait_ms": 200,
+            "preparation_ms": 620,
+            "materials": [
+              {"owner": "memory.recall", "purpose": "long_term_memory", "state": "ready"},
+              {"owner": "relationship.context", "purpose": "recent_relation_state", "state": "ready"},
+              {"owner": "agenda", "purpose": "daily_agenda", "state": "deferred"}
+            ],
+            "offered_tool_count": 3,
+            "offered_tools": ["calendar.query", "memory.search", "weather.current"],
+            "model_calls": [
+              {"position": 0, "state": "generated", "started_at": "2026-10-10T13:42:16.120+08:00",
+                "finished_at": "2026-10-10T13:42:17.050+08:00", "elapsed_ms": 930},
+              {"position": 1, "state": "generated", "started_at": "2026-10-10T13:42:18.000+08:00",
+                "finished_at": "2026-10-10T13:42:18.305+08:00", "elapsed_ms": 305}
+            ],
+            "tool_calls": [
+              {"sequence": 1, "action": "calendar.query", "kind": "extension", "state": "succeeded",
+                "started_at": "2026-10-10T13:42:17.300+08:00", "finished_at": "2026-10-10T13:42:18.000+08:00",
+                "elapsed_ms": 700, "extension_started_at": "2026-10-10T13:42:17.400+08:00",
+                "extension_finished_at": "2026-10-10T13:42:17.980+08:00", "extension_elapsed_ms": 580}
+            ]
+          }
+        },
+        {
+          "received_at": "2026-10-10T13:26:04+08:00",
+          "received_time_source": "input_event",
+          "outcome": "completed",
+          "input_count": 3,
+          "part_count": 1,
+          "delivered_parts": 1,
+          "model_calls": 2,
+          "timestamps": {
+            "received_at": "2026-10-10T13:26:04+08:00",
+            "last_input_received_at": "2026-10-10T13:26:07+08:00",
+            "first_model_started_at": "2026-10-10T13:26:08.240+08:00",
+            "last_model_finished_at": "2026-10-10T13:26:11.600+08:00",
+            "first_dispatched_at": "2026-10-10T13:26:12.020+08:00",
+            "first_delivered_at": "2026-10-10T13:26:12.510+08:00",
+            "last_delivered_at": "2026-10-10T13:26:12.510+08:00"
+          },
+          "stages": {
+            "pre_model_ms": 2240,
+            "last_input_to_model_ms": 1240,
+            "model_ms": 3360,
+            "post_model_ms": 420,
+            "delivery_ms": 490,
+            "first_reply_ms": 8510,
+            "end_to_end_ms": 8510
+          }
+        },
+        {
+          "received_at": "2026-10-10T12:58:41+08:00",
+          "received_time_source": "input_event",
+          "outcome": "partial",
+          "input_count": 2,
+          "part_count": 3,
+          "delivered_parts": 2,
+          "model_calls": 1,
+          "timestamps": {
+            "received_at": "2026-10-10T12:58:41+08:00",
+            "last_input_received_at": "2026-10-10T12:58:42+08:00",
+            "first_model_started_at": "2026-10-10T12:58:43.510+08:00",
+            "last_model_finished_at": "2026-10-10T12:58:45.050+08:00",
+            "first_dispatched_at": "2026-10-10T12:58:45.480+08:00",
+            "first_delivered_at": "2026-10-10T12:58:45.920+08:00"
+          },
+          "stages": {
+            "pre_model_ms": 2510,
+            "last_input_to_model_ms": 1510,
+            "model_ms": 1540,
+            "post_model_ms": 430,
+            "delivery_ms": null,
+            "first_reply_ms": 7280,
+            "end_to_end_ms": null
+          }
+        },
+        {
+          "received_at": "2026-10-10T12:32:09+08:00",
+          "received_time_source": "batch_created",
+          "outcome": "unknown",
+          "input_count": 1,
+          "part_count": 1,
+          "delivered_parts": 0,
+          "model_calls": 1,
+          "active_model_calls": 1,
+          "timestamps": {
+            "received_at": "2026-10-10T12:32:09+08:00",
+            "first_model_started_at": "2026-10-10T12:32:10.900+08:00"
+          },
+          "stages": {
+            "pre_model_ms": 1900,
+            "last_input_to_model_ms": null,
+            "model_ms": null,
+            "post_model_ms": null,
+            "delivery_ms": null,
+            "first_reply_ms": null,
+            "end_to_end_ms": null
+          }
+        }
+      ]
+    }
+  },
+  "voice": {"providers": []},
+  "image": {"actions": []},
+  "model": {"providers": [], "tasks": [], "summary": {}, "totals": {}, "daily": [], "history": [], "recent": []},
+  "balance": {"configured": false, "available": false, "state": "unavailable"}
+}

@@ -58,7 +58,8 @@ class CatalogSearch:
                      vector_led_min_candidates=None,
                      relevance_floor_delta=None,
                      minimum_relevance=0.0,
-                     shared_clusters=None):
+                     shared_clusters=None,
+                     query_terms_fn=None):
         """Rank one owner's catalog for ``text``.
 
         ``embedding_candidate_limit`` caps how many items take part in vector
@@ -81,7 +82,7 @@ class CatalogSearch:
                 query_vector = values[0]
             except Exception as exc:
                 error = getattr(exc, "code", type(exc).__name__)
-        query_terms = set(terms(text))
+        query_terms = set(query_terms_fn(text) if query_terms_fn else terms(text))
         scored, after, scanned, embedded, compared = [], "", 0, 0, 0
         # Keyset pages ensure old items can be selected; only model work is batched.
         while True:

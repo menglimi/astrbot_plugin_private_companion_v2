@@ -6,7 +6,8 @@ from astrbot.api.web import request
 from companion_v2.adapters.astrbot.native import account_number
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.conversation.reply_management import ReplyManagement
-from companion_v2.execution.models import TaskError
+from companion_v2.execution.models import TaskContext, TaskError
+from companion_v2.expression.style_management import ExpressionStyleManagement
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 
@@ -22,12 +23,25 @@ class GroupReplyWebAPI:
     def routes(self, prefix):
         return [(prefix, self.status, ["GET"], "Read this group's reply preferences"),
                 (prefix + "/preview", self.preview, ["POST"], "Preview this group's reply without model access"),
-                (prefix + "/configure", self.configure, ["POST"], "Save this group's reply preferences")]
+                (prefix + "/configure", self.configure, ["POST"], "Save this group's reply preferences"),
+                (prefix + "/expression", self.expression, ["GET"], "Read this group's expression-learning bounds"),
+                (prefix + "/expression/configure", self.expression_configure, ["POST"],
+                 "Save this group's expression-learning bounds"),
+                (prefix + "/style", self.style, ["GET"], "Review this group's learned expression signals"),
+                (prefix + "/style/samples", self.style_samples, ["GET"], "Review this group's writing samples"),
+                (prefix + "/style/samples/command", self.style_sample_command, ["POST"], "Decide a group writing sample"),
+                (prefix + "/style/learn", self.style_learn, ["POST"], "Learn from eligible group samples"),
+                (prefix + "/style/export", self.style_export, ["POST"], "Export this group's adopted rules"),
+                (prefix + "/style/import/preview", self.style_import_preview, ["POST"], "Preview group rule import"),
+                (prefix + "/style/import/apply", self.style_import_apply, ["POST"], "Import group rules for review"),
+                (prefix + "/style/command", self.style_command, ["POST"],
+                 "Decide a group expression signal")]
 
     @staticmethod
-    def _session(group_id):
+    def _session(group_id, *, allowed=()):
         query = request.query
-        if set(query.keys()) - {"session_id"} or any(len(query.getlist(key)) != 1 for key in query.keys()):
+        if set(query.keys()) - {"session_id", *allowed} or any(
+                len(query.getlist(key)) != 1 for key in query.keys()):
             raise ValueError("unexpected group reply query")
         session_id = query.get("session_id", group_id)
         parts = session_id.split("_") if type(session_id) is str else ()
@@ -93,10 +107,14 @@ class GroupReplyWebAPI:
                     result = manager.status(operator)
                 elif action == "preview":
                     result = manager.preview(operator, data["settings"], data["text"], data.get("image_count", 0))
+                elif action == "expression":
+                    result = manager.expression_status(operator)
+                elif action == "expression_configure":
+                    result = manager.expression_configure(operator, data)
                 else:
                     result = manager.configure(operator, data)
                 if result.is_success and action != "preview":
-                    status = result.value if action == "status" else result.value["status"]
+                    status = result.value if action in ("status", "expression") else result.value["status"]
                     status.update(target_id=self.target_id, role_id=self.role_id, session_id=session_id,
                                   scope_kind="group")
                 return outcome_response(result)
@@ -121,3 +139,156 @@ class GroupReplyWebAPI:
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             return outcome_response(Outcome.failed("group_reply_request_invalid", "invalid UTF-8 group reply settings request"))
         return await self._run("configure", data)
+
+    async def expression(self):
+        return await self._run("expression")
+
+    async def expression_configure(self):
+        try:
+            data = await self._body("configure")
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("group_reply_request_invalid", "invalid UTF-8 expression settings request"))
+        return await self._run("expression_configure", data)
+
+    def _style_context(self, controller, session_id, binding, scope):
+        rows = controller.runtime.read_all("""SELECT origin_key, context_json FROM conversation_batches b
+            WHERE json_extract(b.context_json, '$.role_binding.scope.installation_id') = ?
+              AND json_extract(b.context_json, '$.role_binding.scope.platform') = ?
+              AND json_extract(b.context_json, '$.role_binding.scope.native_scope_id') = ?
+              AND json_extract(b.context_json, '$.role_binding.scope.bot_id') = ?
+              AND json_extract(b.context_json, '$.role_binding.scope.account_id') = ?
+              AND json_extract(b.context_json, '$.role_binding.scope.conversation_id') = ?
+              AND json_extract(b.context_json, '$.role_binding.scope.session_id') = ?
+              AND json_extract(b.context_json, '$.role_binding.scope.kind') = ?
+              AND json_extract(b.context_json, '$.role_binding.role.subject_id') = ?
+              AND json_extract(b.context_json, '$.role_binding.revision') = ?
+            ORDER BY b.rowid DESC LIMIT 100""",
+            (scope.installation_id, scope.platform, scope.native_scope_id, scope.bot_id, scope.account_id,
+             scope.conversation_id, session_id, scope.kind.value, binding.role.subject_id, binding.revision))
+        for row in rows:
+            try:
+                context = TaskContext.restore(json.loads(row["context_json"]))
+            except (TypeError, ValueError, KeyError):
+                continue
+            if context.key == row["origin_key"] and context.scope == scope and context.role_binding == binding:
+                return context
+        raise TaskError("expression_group_context_required", "this group session has no original conversation yet")
+
+    async def _style(self, *, command=False, method=None):
+        try:
+            method = method or ("command" if command else "list")
+            query = request.query
+            allowed = {"session_id"} if command else {"session_id", "state", "dimension", "limit", "after_id"}
+            if method == "list_samples":
+                allowed.discard("dimension")
+            if set(query.keys()) - allowed or any(len(query.getlist(key)) != 1 for key in query.keys()):
+                raise ValueError("unexpected or repeated style query fields")
+            data = None
+            if command:
+                raw = await request.body()
+                if len(raw) > (300000 if method in ("preview_import", "import_pack") else 100000):
+                    raise ValueError("command too large")
+
+                def unique(pairs):
+                    values = {}
+                    for key, value in pairs:
+                        if key in values:
+                            raise ValueError("duplicate field")
+                        values[key] = value
+                    return values
+
+                def finite(_value):
+                    raise ValueError("nonfinite value")
+
+                data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=finite)
+                fields = {
+                    "command": {"signal_id", "action", "view_token", "operation_key"},
+                    "sample_command": {"handle", "action", "view_token", "operation_key"},
+                    "learn": set(), "export_pack": {"signal_ids"},
+                    "preview_import": {"package_json"},
+                    "import_pack": {"package_json", "preview_token", "operation_key"},
+                }[method]
+                if type(data) is not dict or (set(data) != fields and not (method == "export_pack" and not data)):
+                    raise ValueError("unexpected style decision fields")
+                if method in ("preview_import", "import_pack"):
+                    package = data.pop("package_json")
+                    if type(package) is not str or len(package.encode("utf-8")) > 250000:
+                        raise ValueError("invalid expression pack")
+                    data["raw_pack"] = json.loads(package, object_pairs_hook=unique, parse_constant=finite)
+            elif not command:
+                int(query.get("limit", "20"))
+
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                username = request.username
+                if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                    raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load the V2 profile first")
+                selected = controller.settings.target(self.target_id)
+                if not isinstance(selected, GroupTarget) or not any(
+                        p.bot_id == selected.bot_id and p.role_id == self.role_id for p in controller.settings.personas):
+                    raise TaskError("group_reply_target_required", "the configured group/role is unavailable")
+                session_id = self._session(selected.group_id, allowed=allowed - {"session_id"})
+                bridge = session.bridge.groups
+                account = bridge.accounts[(selected.platform_id, selected.account_id)]
+                conversation_id, role, _ = await bridge._role(account, session_id)
+                if role.subject_id != self.role_id or role.installation_id != controller.runtime.installation_id:
+                    raise TaskError("group_reply_role_changed", "the native group session selected another role")
+                scope = ScopeRef(controller.runtime.installation_id, selected.platform_id, ScopeKind.GROUP,
+                                 selected.group_id, selected.bot_id, selected.account_id, conversation_id, session_id)
+                if bridge.target_for_scope(scope) != selected:
+                    raise TaskError("group_reply_target_required", "the native group target changed")
+                current = session.application.tasks.identity.resolve_role(scope, observed_at=controller.now())
+                if current.failure:
+                    raise TaskError("expression_group_context_required", "this group session has no original conversation yet")
+                binding = current.unwrap()
+                if binding.role != role:
+                    raise TaskError("group_reply_role_changed", "the native group session selected another role")
+                context = self._style_context(controller, session_id, binding, scope)
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                manager = ExpressionStyleManagement(session.application)
+                if command:
+                    result = getattr(manager, method)(operator=operator, context=context, **data)
+                else:
+                    try:
+                        limit = int(query.get("limit", "20"))
+                    except (TypeError, ValueError):
+                        raise ValueError("invalid page size") from None
+                    arguments = {"state": query.get("state") or ("all" if method == "list_samples" else "pending"),
+                                 "limit": limit, "after_id": query.get("after_id") or None}
+                    if method == "list":
+                        arguments["dimension"] = query.get("dimension") or None
+                    result = getattr(manager, method)(operator=operator, context=context, **arguments)
+                return outcome_response(result)
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("expression_query_invalid", "invalid group style request"))
+
+    async def style(self):
+        return await self._style()
+
+    async def style_command(self):
+        return await self._style(command=True)
+
+    async def style_samples(self):
+        return await self._style(method="list_samples")
+
+    async def style_sample_command(self):
+        return await self._style(command=True, method="sample_command")
+
+    async def style_learn(self):
+        return await self._style(command=True, method="learn")
+
+    async def style_export(self):
+        return await self._style(command=True, method="export_pack")
+
+    async def style_import_preview(self):
+        return await self._style(command=True, method="preview_import")
+
+    async def style_import_apply(self):
+        return await self._style(command=True, method="import_pack")

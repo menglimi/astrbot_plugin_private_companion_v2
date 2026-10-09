@@ -7,6 +7,8 @@ const vm = require('node:vm');
 const PAGE = '../pages/陪伴小屋/';
 const workbench = fs.readFileSync(path.resolve(__dirname, PAGE + 'workbench-page.js'), 'utf8');
 const adapter = fs.readFileSync(path.resolve(__dirname, PAGE + 'config-editor.js'), 'utf8');
+const selfStyle = fs.readFileSync(path.resolve(__dirname, PAGE + 'self-page.css'), 'utf8');
+const app = fs.readFileSync(path.resolve(__dirname, PAGE + 'app.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 /* 每次 await 只推进一层微任务；refresh 里有多层 await，用 drains 让它走完。 */
 const drains = async (times = 6) => { for (let index = 0; index < times; index += 1) await flush(); };
@@ -94,11 +96,24 @@ const NEW_KINDS = {
   },
   'role.growth.skills': {
     group: 'role.growth.skills',
-    settings: {custom_skills: '[]', schedule_influence_strength: 0},
-    fields: {custom_skills: ['text'], schedule_influence_strength: ['integer', 0, 3]},
+    settings: {enabled: true, custom_skills: '[]', schedule_influence_strength: 0},
+    fields: {enabled: ['boolean'], custom_skills: ['text'], schedule_influence_strength: ['integer', 0, 3]},
     /* 双层组：窗口为默认落点，角色级可写，最后一段仍是 window。 */
     layers: ['installation', 'role', 'window'],
     scope: 'window',
+  },
+  /* 自我页的子集夹具：只放吃到专用控件的字段，其余字段按 order 过滤后不渲染。
+     生日/性别等在注册表里都是 TEXT——专用控件不改变值形状。 */
+  role_profile: {
+    group: 'role_profile',
+    scope: 'role', layers: ['installation', 'role'],
+    settings: {name: '澄汐', birthday: '4月17日', gender: '女', species: '人类',
+      first_person: '我', voice_examples: '今天的风有点像海边的。\n你先说，我听着。',
+      signature_phrases: '慢慢来、我在呢', hobbies: '植物随笔、听雨',
+      world_adaptation_mode: 'auto'},
+    fields: {name: ['text'], birthday: ['text'], gender: ['text'], species: ['text'],
+      first_person: ['text'], voice_examples: ['text'], signature_phrases: ['text'],
+      hobbies: ['text'], world_adaptation_mode: ['text']},
   },
   knowledge: {
     group: 'knowledge',
@@ -117,7 +132,7 @@ const NEW_KINDS = {
   life: {
     group: 'role.life',
     settings: {enabled: false, diary_enabled: true, diary_time: '23:50', timezone: 'Asia/Shanghai',
-      sleep_enabled: false, sleep_time: '00:30', sleep_timezone: 'Asia/Shanghai', sleep_minutes: 480,
+      sleep_enabled: false, sleep_time: '00:30', sleep_timezone: 'Asia/Shanghai', sleep_variation_minutes: 20, sleep_minutes: 480,
       reading_enabled: false, derive_enabled: true,
       diary_style_prompt: '', dream_theme_candidates: '', dream_mixed_themes_enabled: false,
       dream_intimate_theme_enabled: false, dream_afterglow_mode: 'auto',
@@ -127,7 +142,7 @@ const NEW_KINDS = {
       rest_backlog_max_messages: 4},
     fields: {enabled: ['boolean'], diary_enabled: ['boolean'], diary_time: ['text'],
       timezone: ['text'], sleep_enabled: ['boolean'], sleep_time: ['text'],
-      sleep_timezone: ['text'], sleep_minutes: ['integer', 1, 1440], reading_enabled: ['boolean'],
+      sleep_timezone: ['text'], sleep_variation_minutes: ['integer', 0, 120], sleep_minutes: ['integer', 1, 1440], reading_enabled: ['boolean'],
       derive_enabled: ['boolean'],
       diary_style_prompt: ['text'], dream_theme_candidates: ['text'],
       dream_mixed_themes_enabled: ['boolean'], dream_intimate_theme_enabled: ['boolean'],
@@ -166,8 +181,8 @@ const NEW_KINDS = {
     group: 'photo.reference',
     scope: 'role',
     layers: ['installation', 'role'],
-    settings: {enabled: false, daily_outfit_enabled: false, daily_outfit_rotation_days: 14},
-    fields: {enabled: ['boolean'], daily_outfit_enabled: ['boolean'],
+    settings: {enabled: false, group_enabled: false, daily_outfit_enabled: false, daily_outfit_rotation_days: 14},
+    fields: {enabled: ['boolean'], group_enabled: ['boolean'], daily_outfit_enabled: ['boolean'],
       daily_outfit_rotation_days: ['integer', 1, 365]},
   },
   group_participation: {
@@ -227,12 +242,21 @@ function newSection(kind, changes = {}, token = TOKEN('a')) {
 }
 
 /* The route answers with every requested section wrapped in `sections`. */
-const payload = (kind, changes, token) =>
-  ({sections: {[kind]: Object.hasOwn(NEW_KINDS, kind)
-    ? newSection(kind, changes, token) : section(kind, changes, token)}});
+const payload = (kind, changes, token) => {
+  const value = Object.hasOwn(NEW_KINDS, kind)
+    ? newSection(kind, changes, token) : section(kind, changes, token);
+  if (kind === 'knowledge') {
+    value.knowledge_sources_available = true;
+    value.knowledge_sources = [{id: 'kb:kb-1', type: 'knowledge_base', kb_id: 'kb-1',
+      name: '星河设定', emoji: '📚', doc_count: 1, chunk_count: 2,
+      documents: [{id: 'doc:kb-1:doc-1', doc_id: 'doc-1', name: '角色资料.md',
+        file_type: 'md', chunk_count: 2}]}];
+  }
+  return {sections: {[kind]: value}};
+};
 
-function harness(kinds = ['quota', 'image_review'], views = {}) {
-  const requests = [], store = new Map(), holders = {}, painted = {};
+function harness(kinds = ['quota', 'image_review'], views = {}, endpointOverride = '', options = {}) {
+  const requests = [], store = options.store || new Map(), holders = {}, painted = {};
   const root = {
     isConnected: true, dataset: {}, textContent: '', classList: {add() {}},
     appendChild(node) {
@@ -252,9 +276,11 @@ function harness(kinds = ['quota', 'image_review'], views = {}) {
     setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key),
   };
   const window = {
+    addEventListener() {}, removeEventListener() {},
     CompanionProduct: {
       hosted: () => true, role: () => ({reply_api: PREFIX + 'reply'}),
       identity: () => ({installation_id: 'inst', operator_id: 'admin'}),
+      scopeKey: () => options.scopeKey || 'scope-a',
     },
     AstrBotPluginPage: {
       apiGet: (route, body) => new Promise((resolve, reject) =>
@@ -263,20 +289,23 @@ function harness(kinds = ['quota', 'image_review'], views = {}) {
         requests.push({method: 'POST', route, body, resolve, reject})),
     },
   };
-  /* 适配层用 document.createElement 造分区挂载点；这里只要一个带 dataset 的壳。 */
+  /* 适配层用 document.createElement 造分区挂载点；这里只要一个带 dataset 的壳。
+     document 级 querySelector(All) 返回空：档案汇报（onStatus）在 VM 里
+     查不到页面元素是常态，不能让它把 refresh 拖进 catch。 */
   const document = {
     createElement: () => ({
       dataset: {}, classList: {add() {}}, textContent: '',
       innerHTML: '', appendChild() {}, querySelector: () => null, querySelectorAll: () => [],
       addEventListener() {}, removeEventListener() {},
     }),
+    querySelector: () => null, querySelectorAll: () => [],
     hidden: false,
   };
   const sandbox = {window, sessionStorage, document, crypto: {randomUUID: () => 'config-key'},
     setTimeout, clearTimeout, URLSearchParams, Math, Number, Object, JSON, Array, String};
   vm.runInNewContext(workbench, sandbox);
   vm.runInNewContext(adapter, sandbox);
-  const editors = window.CompanionConfigEditors.create(kinds, () => root, views);
+  const editors = window.CompanionConfigEditors.create(kinds, () => root, views, endpointOverride);
   return {editors, root, holders, requests, store, window, painted, workbench: window.CompanionWorkbench};
 }
 
@@ -322,6 +351,32 @@ test('the role dossier exposes the V1 character and world detail fields in one g
   assert.ok(profile.sections.flatMap(section => section.fields).includes('world_adaptation'));
 });
 
+test('the settings search catalogue exposes field metadata without reading configuration values', () => {
+  const {window} = harness(['proactive.contact', 'knowledge']);
+  const entries = plain(window.CompanionConfigEditors.searchEntries());
+  const contact = entries.filter(item => item.group === 'proactive.contact');
+  assert.equal(contact.length, 164);
+  assert.equal(new Set(contact.map(item => item.field)).size, 164);
+  assert.ok(contact.some(item => item.field === 'balance_awareness_enabled'
+    && item.label === '允许因余额变化联系' && item.sectionTitle === '余额感知'));
+  assert.ok(entries.some(item => item.group === 'knowledge' && item.section === 'members'
+    && item.field === 'member_clue_chars'));
+  assert.ok(entries.every(item => !Object.hasOwn(item, 'value') && !Object.hasOwn(item, 'settings')));
+});
+
+test('weather cooldown belongs to the weather section with the other V1 weather settings', () => {
+  const {window} = harness(['proactive.contact']);
+  const sections = window.CompanionConfigEditors.spec['proactive.contact'].sections;
+  const weather = sections.find(item => item.id === 'weather');
+  const dedup = sections.find(item => item.id === 'dedup');
+  assert.ok(weather.fields.includes('dedup_weather_window_minutes'));
+  assert.ok(weather.fields.includes('weather_sample_minutes'));
+  assert.ok(weather.fields.includes('official_alert_poll_minutes'));
+  assert.ok(!dedup.fields.includes('dedup_weather_window_minutes'));
+  const grouped = sections.flatMap(item => item.fields);
+  assert.equal(grouped.length, new Set(grouped).size, 'each contact field belongs to exactly one section');
+});
+
 test('each section reads its own route and keeps its own edit token', async () => {
   const harnessed = harness();
   const [quotaInstance, reviewInstance] = await loaded(harnessed);
@@ -331,6 +386,13 @@ test('each section reads its own route and keeps its own edit token', async () =
   assert.equal(reviewInstance.state.status.group_id, 'conversation.image_review');
   assert.deepEqual(plain(quotaInstance.state.draft), quota);
   assert.deepEqual(plain(reviewInstance.state.draft), review);
+});
+
+test('initial successful reads do not show a redundant status banner', async () => {
+  const harnessed = harness(['quota']);
+  const [instance] = await loaded(harnessed, ['quota']);
+  assert.equal(instance.state.notice, '');
+  assert.doesNotMatch(harnessed.painted.quota, /class="wb-notice/);
 });
 
 test('the server publishes the inheritance chain and per-field provenance', async () => {
@@ -368,7 +430,7 @@ test('a machine code delivered only in message is translated on read failure', a
   await drains();
   const [instance] = harnessed.editors.state.instances;
   assert.equal(instance.state.denied, true);
-  assert.match(instance.state.notice, /请先在账号与会话中加载 V2 运行实例/);
+  assert.match(instance.state.notice, /角色数据尚未加载/);
   assert.doesNotMatch(String(instance.state.notice), /staging_not_initialized/);
   assert.doesNotMatch(harnessed.painted.quota || '', /staging_not_initialized/);
 });
@@ -384,6 +446,22 @@ test('a reason sentence that is not a machine code is kept verbatim', async () =
   await drains();
   const [instance] = harnessed.editors.state.instances;
   assert.match(instance.state.notice, /unsupported reaction delivery settings/);
+});
+
+test('a failed reread removes the previous workbench configuration from the page', async () => {
+  const harnessed = harness(['quota']);
+  const [instance] = await loaded(harnessed, ['quota']);
+  assert.ok(instance.state.status);
+  assert.ok(instance.state.container);
+  harnessed.editors.read();
+  await drains();
+  harnessed.requests[1].reject(new Error('staging_not_initialized'));
+  await drains();
+  assert.equal(instance.state.status, null);
+  assert.equal(instance.state.container, null);
+  assert.equal(instance.state.draft, null);
+  assert.match(harnessed.painted.quota, /角色数据尚未加载/);
+  assert.doesNotMatch(harnessed.painted.quota, /group_max_daily/);
 });
 
 test('an out-of-range draft is refused before any write is dispatched', async () => {
@@ -405,14 +483,73 @@ test('saving sends only the changed fields with the section edit token', async (
     JSON.stringify(harnessed.requests.map(item => [item.method, item.route])));
   assert.equal(harnessed.requests[1].route, 'config/configure');
   assert.deepEqual(plain(harnessed.requests[1].body), {
-    operation_key: 'config-key', edit_token: TOKEN('a'), changes: {group_max_daily: 5},
+    section: 'quota', operation_key: 'config-key', edit_token: TOKEN('a'), changes: {group_max_daily: 5},
   });
-  harnessed.requests[1].resolve({result: {operation_id: 'op-1', replayed: false},
-    status: payload('quota', {group_max_daily: 5}, TOKEN('b'))});
+  harnessed.requests[1].resolve({result: {operation_id: 'op-1', replayed: false}});
   await saving;
+  await drains();
+  assert.equal(harnessed.requests[2].method, 'GET', 'refresh is independent from the committed write');
+  harnessed.requests[2].resolve(payload('quota', {group_max_daily: 5}, TOKEN('b')));
   await drains();
   assert.equal(instance.state.status.settings.group_max_daily, 5);
   assert.equal(instance.state.pending, null);
+});
+
+test('explicit field saves compare with the stored baseline and can retry a rejected draft', async () => {
+  const harnessed = harness(['quota']);
+  const [instance] = await loaded(harnessed, ['quota']);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.equal((await harnessed.editors.saveField('quota', 'group_max_daily', 101)).state, 'rejected');
+    assert.equal(harnessed.requests.length, 1);
+  }
+  instance.state.draft.group_max_daily = 5;
+  const saving = harnessed.editors.saveField('quota', 'group_max_daily', 5);
+  await drains();
+  assert.equal(harnessed.requests.length, 2, 'an unsaved matching draft still reaches the backend');
+  harnessed.requests[1].resolve({result: {operation_id: 'field-save', replayed: false},
+    status: payload('quota', {group_max_daily: 5}, TOKEN('b'))});
+  assert.equal((await saving).state, 'saved');
+  assert.equal((await harnessed.editors.saveField('quota', 'group_max_daily', 5)).state, 'unchanged');
+  assert.equal(harnessed.requests.length, 2);
+});
+
+test('explicit field saves retain conflicts and reconcile unknown writes through the original operation', async () => {
+  const harnessed = harness(['quota']);
+  const [instance] = await loaded(harnessed, ['quota']);
+  let saving = instance.saveField('group_max_daily', 5);
+  await drains();
+  harnessed.requests[1].resolve({status: 'error', data: {code: 'configuration_revision_conflict'}});
+  assert.equal((await saving).state, 'conflict');
+  assert.equal((await instance.saveField('group_max_daily', 5)).state, 'conflict');
+  assert.equal(harnessed.requests.length, 2);
+  const reading = instance.refresh();
+  await drains();
+  harnessed.requests[2].resolve(payload('quota', {}, TOKEN('b')));
+  await reading;
+  assert.equal(instance.state.stale, false, 'a successfully reread version can be edited immediately');
+  saving = instance.saveField('group_max_daily', 5);
+  await drains();
+  const original = plain(harnessed.requests[3].body);
+  harnessed.requests[3].reject(Object.assign(new Error('bridge down'), {code: 'bridge_timeout'}));
+  assert.equal((await saving).state, 'unknown');
+  assert.equal((await instance.saveField('group_max_daily', 5)).state, 'unknown');
+  assert.equal(harnessed.requests.length, 4, 'the field editor must not repeat an unconfirmed write');
+  const reconciling = instance.save(true);
+  await drains();
+  assert.deepEqual(plain(harnessed.requests[4].body), original);
+  harnessed.requests[4].resolve({result: {operation_id: 'field-save', replayed: true},
+    status: payload('quota', {group_max_daily: 5}, TOKEN('b'))});
+  await reconciling;
+  assert.equal((await instance.saveField('group_max_daily', 5)).state, 'unchanged');
+});
+
+test('explicit field saves preserve unrelated configuration drafts', async () => {
+  const harnessed = harness(['quota']);
+  const [instance] = await loaded(harnessed, ['quota']);
+  instance.state.draft.proactive_max_daily = 3;
+  assert.equal((await instance.saveField('group_max_daily', 5)).state, 'dirty');
+  assert.equal(instance.state.draft.group_max_daily, -1);
+  assert.equal(harnessed.requests.length, 1);
 });
 
 test('an enum-valued text field is edited as a select, not a free-text box', async () => {
@@ -426,6 +563,24 @@ test('an enum-valued text field is edited as a select, not a free-text box', asy
   assert.doesNotMatch(markup, /<textarea data-wb-field="group_nsfw_image_review_mode"/);
   /* 未声明选项的文本字段仍是自由输入。 */
   assert.equal(instance.state.container.fields.group_nsfw_image_review_custom_prompt.choices, null);
+});
+
+test('the group image review switch is distinct from inconclusive-result handling', async () => {
+  const harnessed = harness(['image_review']);
+  const [instance] = await loaded(harnessed, ['image_review']);
+  const spec = harnessed.window.CompanionConfigEditors.spec.image_review;
+  assert.equal(spec.labels.enable_group_nsfw_private_fallback, '启用群聊成图审核');
+  assert.match(spec.helps.enable_group_nsfw_private_fallback, /关闭时跳过审核/);
+  assert.equal(spec.labels.group_nsfw_image_review_failure_action, '审核未得到有效结论时');
+  assert.equal(spec.choices.group_nsfw_image_review_sensitivity.relaxed, '宽松');
+  assert.equal(spec.choices.group_nsfw_image_review_sensitivity.lenient, undefined);
+  assert.match(spec.helps.group_nsfw_image_review_failure_action, /请求者私聊已授权时尝试投递原图/);
+  assert.deepEqual(plain(instance.state.container.fields.group_nsfw_image_review_failure_action.choices), {
+    private: '尝试私聊投递原图', block: '群聊仅发送文字',
+  });
+  assert.match(harnessed.painted.image_review, /启用群聊成图审核/);
+  assert.match(harnessed.painted.image_review, /审核未得到有效结论时/);
+  assert.doesNotMatch(harnessed.painted.image_review, /审核不通过时降级私聊投递|改走私聊投递|整条阻止/);
 });
 
 test('a value outside the declared options is refused before any write', async () => {
@@ -462,7 +617,7 @@ test('a save the server answered but refused stops being pending', async () => {
   assert.equal(harnessed.store.size, 0, 'the draft receipt must not survive a refusal');
 });
 
-test('an unconfirmed save stays pending and a replay reuses the same request', async () => {
+test('an unconfirmed save is automatically replayed once with the original request', async () => {
   const harnessed = harness(['image_review']);
   const [instance] = await loaded(harnessed, ['image_review']);
   instance.state.draft.group_nsfw_image_review_mode = 'dual';
@@ -474,17 +629,76 @@ test('an unconfirmed save stays pending and a replay reuses the same request', a
   await saving;
   await drains();
   assert.equal(instance.state.pending.operation_key, 'config-key');
-  const retrying = instance.save(true);
-  await drains();
+  assert.equal(instance.state.notice, '', 'the actionable pending block replaces the duplicate top warning');
+  assert.match(harnessed.painted.image_review, /保存结果尚未确认（连接超时，请核对连接后重试。）。可能已经写入/);
+  assert.equal((harnessed.painted.image_review.match(/保存结果尚未确认/g) || []).length, 1,
+    'an unconfirmed save is explained once');
+  const persisted = JSON.parse([...harnessed.store.values()][0]);
+  assert.equal(persisted.pending_reason, '连接超时，请核对连接后重试。',
+    'the reason survives a page reload with the pending operation');
+  await new Promise(resolve => setTimeout(resolve, 450));
   assert.deepEqual(plain(harnessed.requests[2].body), original,
-    'review must reuse the original request instead of minting a second operation');
+    'automatic recovery must reuse the original request instead of minting a second operation');
   harnessed.requests[2].resolve({result: {operation_id: 'op-2', replayed: true},
     status: payload('image_review', {group_nsfw_image_review_mode: 'dual'}, TOKEN('b'))});
   await drains();
-  await Promise.all([saving, retrying]);
+  await saving;
   assert.equal(instance.state.pending, null);
   assert.match(instance.state.savedState, /is-replayed/);
   assert.match(instance.state.notice, /没有重复写入/);
+});
+
+test('a restored pending config request is automatically replayed with its original section and key', async () => {
+  const store = new Map([[`companion-workbench.v1:${JSON.stringify(['inst', 'admin', 'scope-a', 'screen'])}`,
+    JSON.stringify({operation_key: 'legacy-screen-save', edit_token: TOKEN('a'),
+      changes: {interpretation_enabled: true}, reset_to_inherit: []})]]);
+  const harnessed = harness(['screen'], {}, '', {store});
+  const [instance] = await loaded(harnessed, ['screen']);
+  assert.equal(instance.state.pending.operation_key, 'legacy-screen-save');
+  await new Promise(resolve => setTimeout(resolve, 450));
+  const retrying = harnessed.requests[1];
+  assert.equal(retrying.method, 'POST');
+  assert.equal(retrying.route, 'config/configure');
+  assert.deepEqual(plain(harnessed.requests[1].body), {
+    section: 'screen', operation_key: 'legacy-screen-save', edit_token: TOKEN('a'),
+    changes: {interpretation_enabled: true},
+  });
+  harnessed.requests[1].resolve({result: {operation_id: 'legacy-screen-save', replayed: true},
+    status: payload('screen', {interpretation_enabled: true}, TOKEN('b'))});
+  await drains();
+  assert.equal(instance.state.pending, null);
+});
+
+test('a nested host error envelope is a confirmed refusal, not an unknown save', async () => {
+  const harnessed = harness(['screen']);
+  const [instance] = await loaded(harnessed, ['screen']);
+  instance.state.draft.interpretation_enabled = true;
+  const saving = instance.save(false);
+  await drains();
+  harnessed.requests[1].resolve({data: {status: 'error', message: 'invalid_response',
+    reason: 'request was rejected'}});
+  await saving;
+  assert.equal(instance.state.pending, null);
+  assert.match(instance.state.notice, /返回数据不完整/);
+});
+
+test('a pending save is isolated to the selected object and role', async () => {
+  const store = new Map();
+  const first = harness(['image_review'], {}, '', {store, scopeKey: 'target-a:role-a'});
+  const [firstInstance] = await loaded(first, ['image_review']);
+  firstInstance.state.draft.group_nsfw_image_review_mode = 'dual';
+  const saving = firstInstance.save(false);
+  await drains();
+  first.requests[1].reject(Object.assign(new Error('bridge down'), {code: 'bridge_timeout'}));
+  await saving;
+  await drains();
+  assert.equal(store.size, 1);
+
+  const second = harness(['image_review'], {}, '', {store, scopeKey: 'target-b:role-b'});
+  const [secondInstance] = await loaded(second, ['image_review']);
+  assert.equal(secondInstance.state.pending, null,
+    'a pending receipt from another target must not appear in this editor');
+  firstInstance.unmount();
 });
 
 test('the endpoint falls back to the reply route family when the manifest has no config_api', () => {
@@ -492,6 +706,22 @@ test('the endpoint falls back to the reply route family when the manifest has no
   assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct), PREFIX + 'config');
   window.CompanionProduct.role = () => ({reply_api: '/other', config_api: PREFIX + 'x/config'});
   assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct), PREFIX + 'x/config');
+  assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct,
+    PREFIX + 'targets/profile-b/roles/role-b/config'), PREFIX + 'targets/profile-b/roles/role-b/config');
+  assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct, '/other/config'), null);
+});
+
+test('a selected learning role config route overrides the active chat route', async () => {
+  const endpoint = PREFIX + 'targets/profile-b/roles/role-b/config';
+  const harnessed = harness(['role.growth.skills'], {}, endpoint);
+  harnessed.editors.restore();
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+  assert.equal(harnessed.requests.length, 1);
+  assert.equal(harnessed.requests[0].route, 'targets/profile-b/roles/role-b/config');
+  harnessed.requests[0].resolve(payload('role.growth.skills'));
+  await drains();
 });
 
 /* ==== 2026-09-28 新接入的四个分区 ==== */
@@ -535,7 +765,7 @@ test('a new section saves only the changed fields with its own token', async () 
   const saving = instance.save(false);
   await drains();
   assert.deepEqual(plain(harnessed.requests[1].body), {
-    operation_key: 'config-key', edit_token: TOKEN('a'), changes: {transcribe_enabled: true},
+    section: 'recall', operation_key: 'config-key', edit_token: TOKEN('a'), changes: {transcribe_enabled: true},
   });
   harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
     status: newSection('recall', {transcribe_enabled: true}, TOKEN('b'))});
@@ -611,20 +841,20 @@ test('knowledge reads its own group and saves only the changed field', async () 
   const [instance] = harnessed.editors.state.instances;
   assert.equal(instance.state.status.group_id, 'knowledge');
   assert.equal(instance.state.status.scope, 'window');
-  instance.state.draft.import_enabled = true;
+  instance.state.draft.source_ids = 'kb:kb-1';
   const saving = instance.save(false);
   await drains();
   assert.deepEqual(plain(harnessed.requests[1].body), {
-    operation_key: 'config-key', edit_token: TOKEN('a'), changes: {import_enabled: true},
+    section: 'knowledge', operation_key: 'config-key', edit_token: TOKEN('a'), changes: {source_ids: 'kb:kb-1'},
   });
   harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
-    status: newSection('knowledge', {import_enabled: true}, TOKEN('b'))});
+    status: newSection('knowledge', {source_ids: 'kb:kb-1'}, TOKEN('b'))});
   await saving;
   await drains();
-  assert.equal(instance.state.base.import_enabled, true);
+  assert.equal(instance.state.base.source_ids, 'kb:kb-1');
 });
 
-test('the knowledge path and source lists are edited as free text with their hint', async () => {
+test('knowledge sources are selected from the official AstrBot catalogue', async () => {
   const harnessed = harness(['knowledge']);
   harnessed.editors.restore();
   harnessed.editors.paint();
@@ -634,12 +864,37 @@ test('the knowledge path and source lists are edited as free text with their hin
   await drains();
   const [instance] = harnessed.editors.state.instances;
   const painted = harnessed.painted.knowledge;
-  /* 这两项填错不会报错、只是静默不生效，所以帮助文案必须留在界面上，
-     且它们不能被渲染成下拉或数字框。 */
-  assert.match(painted, /相对 AstrBot 数据根解析/);
-  assert.match(painted, /只接受本机确实存在的标识/);
+  assert.match(painted, /星河设定/);
+  assert.match(painted, /角色资料\.md/);
+  assert.match(painted, /data-wb-source-base="kb-1"/);
+  assert.match(painted, /data-wb-source-document="kb-1"/);
+  assert.doesNotMatch(painted, /import_paths/);
   assert.equal(instance.state.container.fields.source_ids.kind, 'text');
-  assert.equal(instance.state.container.fields.import_paths.kind, 'text');
+  assert.equal(instance.state.container.fields.source_ids.input, 'source-checklist');
+});
+
+test('knowledge source checkmarks survive saving and rereading newline-separated ids', async () => {
+  const harnessed = harness(['knowledge']);
+  const [instance] = await loaded(harnessed, ['knowledge']);
+  const selected = 'doc:kb-1:doc-1\nkb:missing';
+  instance.state.draft.source_ids = selected;
+  const saving = instance.save(false);
+  await drains();
+  const status = payload('knowledge', {source_ids: selected}, TOKEN('b'));
+  status.sections.knowledge.knowledge_sources.push({id: 'kb:missing', type: 'missing', name: '已移除的资料'});
+  harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false}, status});
+  await saving;
+  instance.attach();
+
+  assert.match(harnessed.painted.knowledge, /data-wb-source-id="doc:kb-1:doc-1"[^>]*checked/);
+  assert.match(harnessed.painted.knowledge, /data-wb-source-id="kb:missing"[^>]*checked/);
+  assert.match(harnessed.painted.knowledge, /已选 2 \/ 16 项/);
+  assert.doesNotMatch(harnessed.painted.knowledge, /data-wb-source-id="kb:kb-1"[^>]*checked/);
+  const reading = instance.refresh(true);
+  await drains();
+  harnessed.requests[2].resolve(status);
+  await reading;
+  assert.match(harnessed.painted.knowledge, /data-wb-source-id="doc:kb-1:doc-1"[^>]*checked/);
 });
 
 test('the rest gate mode and dream afterglow are edited as selects, not free text', async () => {
@@ -719,7 +974,7 @@ test('an integer field with named steps keeps its choices and accepts them', () 
 
 /* 有依赖关系的字段靠段落分组说明条件；漏传 sections 时内核会退回单段渲染，
    分组与依赖说明被静默丢掉——看起来正常，只是少了几段。 */
-test('the knowledge section groups import, injection and member clues', async () => {
+test('the knowledge section groups official sources, injection and member clues', async () => {
   const harnessed = harness(['knowledge']);
   harnessed.editors.restore();
   harnessed.editors.paint();
@@ -731,9 +986,8 @@ test('the knowledge section groups import, injection and member clues', async ()
   assert.match(painted, /data-wb-group="import"/);
   assert.match(painted, /data-wb-group="inject"/);
   assert.match(painted, /data-wb-group="members"/);
-  /* 依赖说明要留在界面上，否则总闸关着时调下面几项看不出为什么没反应。 */
-  assert.match(painted, /关闭导入总闸时，下面几项不起作用/);
-  assert.match(painted, /关闭时下面几项不起作用/);
+  assert.match(painted, /AstrBot 官方知识库/);
+  assert.match(painted, /在对话中引用所选资料/);
 });
 
 test('the life section separates routines, writing, the rest gate and the backlog', async () => {
@@ -758,7 +1012,7 @@ test('the life section separates routines, writing, the rest gate and the backlo
   /* 时区是单行文本，不是多行框——TEXT 且没声明 rows 时内核会画成 textarea。 */
   assert.match(painted, /<input type="text" data-wb-field="timezone"/);
   assert.match(painted, /<input type="text" data-wb-field="sleep_timezone"/);
-  /* 分组不能把没提到的字段弄丢：全部 23 项都要在界面上。 */
+  /* 分组不能把没提到的字段弄丢：全部 24 项都要在界面上。 */
   const container = harnessed.editors.state.instances[0].state.container;
   const rendered = plain(container.groups.flatMap(group => group.fields));
   assert.deepEqual(rendered.sort(), plain(Object.keys(NEW_KINDS.life.settings)).sort());
@@ -781,8 +1035,13 @@ test('the life audit blocks a malformed clock or timezone before any request', a
   await instance.save(false);
   assert.equal(posts(), before, '无效时区不该发请求');
   assert.match(instance.state.notice, /IANA 时区/);
-  /* 合法的组合应当放行。 */
   instance.state.draft.timezone = 'Asia/Tokyo';
+  instance.state.draft.sleep_variation_minutes = 121;
+  await instance.save(false);
+  assert.equal(posts(), before, '超过 120 分钟的浮动不该发请求');
+  assert.match(instance.state.notice, /数值类型与范围/);
+  /* 合法的组合应当放行。 */
+  instance.state.draft.sleep_variation_minutes = 120;
   await instance.save(false);
   assert.equal(posts(), before + 1);
 });
@@ -849,6 +1108,7 @@ test('the reference section keeps the daily outfit switch independent', async ()
   assert.match(painted, /data-wb-group="rotation"/);
   /* 同意参考图不等于同意每天出穿搭图，文案必须说清这一点。 */
   assert.match(painted, /不等于同意每天都出一张穿搭图/);
+  assert.match(painted, /允许群聊使用参考图/);
   assert.match(painted, /配置里不存文件路径/);
   assert.match(painted, /安装与角色/);
   const container = harnessed.editors.state.instances[0].state.container;
@@ -922,12 +1182,10 @@ test('the group participation section splits the three independent chains', asyn
   harnessed.requests[0].resolve(payload('group_participation'));
   await drains();
   const painted = harnessed.painted.group_participation;
-  for (const id of ['atmosphere', 'denoise', 'interjection', 'repeat'])
+  for (const id of ['atmosphere', 'joke_guard', 'denoise', 'interjection', 'repeat'])
     assert.match(painted, new RegExp(`data-wb-group="${id}"`), id);
-  /* 三条链各有一层总闸，关掉后下面的数字不起作用——必须在界面上说清楚。 */
-  assert.match(painted, /关闭这一项时，下面五项都不起作用/);
-  assert.match(painted, /关闭总闸时下面四项不起作用/);
-  assert.match(painted, /关闭总闸时下面七项都不起作用/);
+  assert.match(painted, /玩笑护栏/);
+  assert.doesNotMatch(painted, /关闭这一项时，下面五项都不起作用|关闭总闸时下面四项不起作用|关闭总闸时下面七项都不起作用/);
   /* 分组不能把没提到的字段弄丢：全部 20 项都要在界面上。 */
   const container = harnessed.editors.state.instances[0].state.container;
   const rendered = plain(container.groups.flatMap(group => group.fields));
@@ -936,12 +1194,13 @@ test('the group participation section splits the three independent chains', asyn
 
 test('group participation fields can be filtered by page without duplicating the shared contract', async () => {
   const decisionView = harness(['group_participation'], {group_participation:{
-    sectionIds:['atmosphere', 'interjection', 'repeat'],
+    sectionIds:['atmosphere', 'joke_guard', 'interjection', 'repeat'], navigationLimit:0,
   }});
   const [decision] = await loaded(decisionView, ['group_participation']);
   const decisionFields = plain(decision.state.container.groups.flatMap(group => group.fields));
   assert.deepEqual(plain(decision.state.container.groups.map(group => group.id)),
-    ['atmosphere', 'interjection', 'repeat']);
+    ['atmosphere', 'joke_guard', 'interjection', 'repeat']);
+  assert.deepEqual(decisionFields.includes('enable_group_joke_guard'), true);
   assert.equal(decisionFields.includes('enable_group_persona_denoise'), false);
 
   const expressionView = harness(['group_participation'], {group_participation:{
@@ -976,7 +1235,9 @@ test('world knowledge and member clues can live on separate page views of one co
 
   const exposed = [...worldFields, ...clueFields];
   assert.equal(exposed.length, new Set(exposed).size);
-  assert.deepEqual([...exposed].sort(), plain(Object.keys(NEW_KINDS.knowledge.settings)).sort());
+  const visibleKnowledgeFields = Object.keys(NEW_KINDS.knowledge.settings)
+    .filter(name => !['import_enabled', 'import_paths'].includes(name));
+  assert.deepEqual([...exposed].sort(), plain(visibleKnowledgeFields).sort());
 });
 
 test('probability fields keep decimals because the registry declares a fraction', async () => {
@@ -1011,14 +1272,14 @@ test('a group participation refusal is translated instead of shown raw', async (
   assert.match(markup, /打断语只能是一行/);
 });
 
-/* ==== 主动联系偏好（proactive.contact）：158 项、四层、22 段 ====
+/* ==== 主动联系偏好（proactive.contact）：164 项、四层、24 段 ====
  *
  * 这一组此前四个触点全缺（编辑器 / SECTIONS / spec / 挂载点），158 项里 92 项
  * 在任何页面上都点不到。字段名与类型按注册表抄成独立的一份：页面与它逐项对齐
  * 才算「没有字段被丢掉」，而页面与**注册表**的对齐由
  * tools/audit_page_config_coverage.py 的 MODULES 表保证。
  *
- * 数量本身就是断言：42 boolean / 54 integer / 42 text / 17 weight / 3 probability。
+ * 数量本身就是断言：42 boolean / 56 integer / 46 text / 17 weight / 3 probability。
  */
 const CONTACT_KINDS = {
   boolean: [
@@ -1039,6 +1300,7 @@ const CONTACT_KINDS = {
     "appointment_lag_minutes", "appointment_lead_minutes", "appointment_pre_silence_minutes",
     "balance_check_interval_minutes", "balance_critical_percent_threshold", "balance_critical_threshold",
     "balance_low_percent_threshold", "balance_low_threshold", "balance_message_cooldown_hours",
+    "contact_followup_after_minutes", "contact_followup_cooldown_minutes",
     "dedup_last_message_window_minutes", "dedup_min_shared_tokens", "dedup_sent_window_minutes",
     "dedup_weather_window_minutes", "event_max_age_seconds", "external_event_self_link_cooldown_hours",
     "generation_history_limit", "greeting_idle_minutes", "history_max_chars", "idle_seconds",
@@ -1069,6 +1331,7 @@ const CONTACT_KINDS = {
     "proactive_persona_judge_exempt_purposes", "quiet_end", "quiet_start", "quiet_timezone",
     "reminder.pause_until", "repair.pause_until", "screen.pause_until", "style_prompt",
     "weather_checkin_time", "web_exploration_interests",
+    "expression_prompt", "news_sharing_prompt", "length_prompt", "news_length_prompt",
   ],
   weight: [
     "affection.weight", "care.weight", "chat.weight", "creation.weight", "environment.weight",
@@ -1086,10 +1349,15 @@ const CONTACT_DEFAULTS = {
   greeting_morning_window: '07:45-10:20', greeting_noon_window: '12:05-13:35',
   greeting_evening_window: '20:10-21:20',
   important_dates: '[]', dedup_policies: 'semantic,content_fingerprint,life_event,event_revision',
+  contact_followup_after_minutes: 45, contact_followup_cooldown_minutes: 180,
   news_source_kind: 'host', news_hot_sources: 'weibo,hackernews', official_alert_min_severity: '',
   proactive_intensity_preset: 'off', balance_currency_label: '元',
   proactive_hour_activity_curve: '0.22,0.16,0.12,0.10,0.10,0.14,0.28,0.50,0.66,0.72,0.78,0.92,'
     + '1.0,0.94,0.82,0.74,0.78,0.92,1.0,0.98,0.88,0.70,0.48,0.32',
+};
+const CONTACT_BOUNDS = {
+  contact_followup_after_minutes: [10, 1440],
+  contact_followup_cooldown_minutes: [30, 2880],
 };
 const CONTACT_SETTINGS = {};
 const CONTACT_FIELDS = {};
@@ -1101,7 +1369,7 @@ for (const [kind, names] of Object.entries(CONTACT_KINDS)) {
     else if (kind === 'integer') CONTACT_SETTINGS[name] = 0;
     else if (kind === 'weight') CONTACT_SETTINGS[name] = 1;
     else CONTACT_SETTINGS[name] = 0.5;
-    CONTACT_FIELDS[name] = [kind];
+    CONTACT_FIELDS[name] = [kind, ...(CONTACT_BOUNDS[name] || [])];
   }
 }
 const CONTACT_LAYERS = ['installation', 'role', 'relationship', 'window'];
@@ -1114,8 +1382,8 @@ NEW_KINDS['proactive.contact'] = {
     [name, CONTACT_LAYERS.filter(layer => layer !== 'window')])),
 };
 const CONTACT_SECTIONS = ['master', 'rhythm', 'intensity', 'relationship_budget', 'quiet', 'dedup',
-  'judgement', 'bond', 'daily', 'share', 'greeting', 'meal', 'date', 'weather', 'news', 'web',
-  'selflink', 'balance', 'screen', 'action', 'appointment', 'context'];
+  'judgement', 'bond', 'daily', 'followup', 'share', 'greeting', 'meal', 'date', 'weather', 'news', 'web',
+  'selflink', 'balance', 'screen', 'action', 'appointment', 'context', 'prompts'];
 
 async function contactLoaded(changes = {}, token = TOKEN('a')) {
   const harnessed = harness(['proactive.contact']);
@@ -1136,21 +1404,25 @@ function fieldRow(markup, name) {
   return markup.slice(start, end === -1 ? markup.length : end);
 }
 
-test('the contact section renders all 158 fields exactly once', async () => {
+test('the contact section renders all 164 fields exactly once', async () => {
   const harnessed = await contactLoaded();
   const painted = harnessed.painted['proactive.contact'];
   assert.ok(painted, '主动联系偏好必须画进自己的挂载点');
   const container = harnessed.editors.state.instances[0].state.container;
   const rendered = plain(container.groups.flatMap(group => group.fields));
   const expected = plain(Object.keys(CONTACT_FIELDS));
-  assert.equal(rendered.length, 158, '158 项一个都不能少');
-  assert.equal(new Set(rendered).size, 158, '同一个字段不能出现在两段里');
+  assert.equal(rendered.length, 164, '164 项一个都不能少');
+  assert.equal(new Set(rendered).size, 164, '同一个字段不能出现在两段里');
   assert.deepEqual(rendered.slice().sort(), expected.slice().sort());
   assert.deepEqual(plain(container.order).slice().sort(), expected.slice().sort());
-  /* 22 段全部画出来，段落 id 是测试能定位依赖说明的锚点。 */
+  /* 24 段全部画出来，段落 id 是测试能定位依赖说明的锚点。 */
   for (const id of CONTACT_SECTIONS) {
     assert.match(painted, new RegExp(`data-wb-group="${id}"`), id);
   }
+  assert.equal(container.fields.contact_followup_after_minutes.minimum, 10);
+  assert.equal(container.fields.contact_followup_after_minutes.maximum, 1440);
+  assert.equal(container.fields.contact_followup_cooldown_minutes.minimum, 30);
+  assert.equal(container.fields.contact_followup_cooldown_minutes.maximum, 2880);
   /* 四层链要画全：安装 · 角色 · 关系 · 窗口；关系层是这个组独有的。 */
   assert.deepEqual(plain(container.layers), CONTACT_LAYERS);
   assert.match(painted, /<b>关系<\/b>/);
@@ -1231,4 +1503,109 @@ test('a relationship-budget refusal is translated instead of shown raw', async (
   assert.equal(instance.state.bad, true);
   assert.match(instance.state.notice, /不能按会话保存/);
   assert.doesNotMatch(instance.state.notice, /contact_relationship_budget_scope/);
+});
+
+test('the role dossier maps profile fields onto the purpose-built controls', () => {
+  const {window} = harness(['role_profile']);
+  const profile = window.CompanionConfigEditors.spec.role_profile;
+  /* 值仍是 TEXT；inputs/chipOptions 只声明控件形态，漏传时内核退回普通文本框。 */
+  /* 一行放得下的事实字段声明为单行输入；没有声明的保持多行文本框。 */
+  assert.deepEqual(plain(profile.inputs),
+    {birthday: 'date', gender: 'chips', species: 'chips', first_person: 'chips',
+      voice_examples: 'quotes', signature_phrases: 'tags', hobbies: 'tags',
+      name: 'line', age: 'line', occupation: 'line', appearance_points: 'line',
+      hair: 'line', eyes: 'line', clothing: 'line', image_identity_hint: 'line',
+      world_name: 'line', era: 'line', tone: 'line',
+      platform_group_chat: 'line', platform_screen: 'line', platform_bilibili: 'line',
+      platform_qzone: 'line', platform_library: 'line'});
+  assert.equal(profile.chipOptions.gender.mode, 'single');
+  assert.deepEqual(plain(profile.chipOptions.gender.options), ['女', '男', '无性别']);
+  assert.deepEqual(plain(profile.chipOptions.species.options),
+    ['人类', '精灵', '仿生人', 'AI', '兽人']);
+  assert.deepEqual(plain(profile.segmentedChoices), ['world_adaptation_mode']);
+  const relationship = window.CompanionConfigEditors.spec.relationship_profile;
+  assert.equal(relationship.inputs.user_birthday, 'date');
+  assert.equal(relationship.inputs.user_gender, 'chips');
+  assert.equal(relationship.inputs.default_nickname, 'line');
+  assert.deepEqual(plain(relationship.chipOptions.user_gender.options), ['女', '男', '未说明']);
+});
+
+test('role profile controls render as date, chips, quotes, tags and a segmented mode', async () => {
+  const harnessed = harness(['role_profile']);
+  harnessed.editors.restore();
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+  assert.equal(harnessed.requests.length, 1);
+  harnessed.requests[0].resolve(payload('role_profile'));
+  await drains();
+  const html = harnessed.painted['role_profile'];
+  assert.match(html, /data-wb-date-group="birthday"/);
+  assert.match(html, /data-wb-date-role="picker"[^>]*>/);
+  /* “4月17日”没有年份：选择器落在占位年份上，「不确定年份」默认勾选。 */
+  assert.match(html, /value="2000-04-17"/);
+  assert.match(html, /data-wb-date-role="noyear"[^>]* checked/);
+  assert.match(html, /class="wb-chip-opt is-on" data-wb-chip="gender" data-wb-chip-value="女"/);
+  assert.match(html, /class="wb-chip-opt" data-wb-chip="gender" data-wb-chip-value="男"/);
+  assert.match(html, /data-wb-quotes="voice_examples"/);
+  assert.match(html, /今天的风有点像海边的。/);
+  assert.match(html, /data-wb-tagset="signature_phrases"/);
+  assert.match(html, /data-wb-tag-remove="signature_phrases" data-wb-tag-index="1"/);
+  assert.match(html, /type="hidden" data-wb-field="hobbies"/);
+  /* 世界观适配模式走分段条：六个档位一档不少，auto 选中。 */
+  assert.match(html, /name="wb-world_adaptation_mode" value="auto" checked/);
+  assert.match(html, /name="wb-world_adaptation_mode" value="off"/);
+  assert.match(html, /现代日常/);
+});
+
+test('journal presentation swaps chapter panels without repainting or losing the draft', async () => {
+  const harnessed = harness(['role_profile'], {role_profile: {
+    presentation: 'journal', sectionTabPrefix: 'self-chapter-', initialSection: 'voice',
+  }});
+  const [instance] = await loaded(harnessed, ['role_profile']);
+  const before = harnessed.painted.role_profile;
+  assert.match(before, /class="wb-card wb-journal"/);
+  assert.match(before, /id="self-chapter-panel-voice"/);
+  assert.match(before, /aria-labelledby="self-chapter-tab-voice"[^>]*data-wb-section-panel="voice"/);
+  assert.doesNotMatch(before, /class="wb-rail/);
+  assert.doesNotMatch(before, /class="wb-help"/);
+  instance.state.draft.name = '临时草稿';
+  harnessed.editors.selectSection('identity');
+  assert.equal(instance.state.activeGroupId, 'identity');
+  assert.equal(instance.state.draft.name, '临时草稿');
+  assert.equal(harnessed.painted.role_profile, before, 'changing chapters keeps the mounted controls intact');
+});
+
+test('a removed gender preset stays editable as a saved custom value', async () => {
+  const harnessed = harness(['role_profile']);
+  harnessed.editors.restore();
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+  harnessed.requests[0].resolve(payload('role_profile', {gender: '非二元'}));
+  await drains();
+  const html = harnessed.painted.role_profile;
+  assert.doesNotMatch(html, /data-wb-chip="gender" data-wb-chip-value="非二元"/);
+  assert.match(html, /data-wb-field="gender" value="非二元"/);
+});
+
+test('the self journal reflows to its container width and wraps long controls', () => {
+  assert.match(selfStyle, /\.self-page\{[^}]*margin-inline:auto/);
+  assert.match(selfStyle, /container:self-journal \/ inline-size/);
+  assert.match(selfStyle, /@container self-journal \(max-width:650px\)/);
+  assert.match(selfStyle, /\.self-page \.wb-journal \.wb-fields\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)/);
+  assert.match(selfStyle, /@container self-journal \(max-width:650px\)\{[\s\S]*?\.self-page \.wb-journal \.wb-fields,[\s\S]*?grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(selfStyle, /overflow-wrap:anywhere/);
+  assert.match(selfStyle, /\.section-chips\{[^}]*overflow-x:auto/s);
+});
+
+test('the live self profile uses journal panels and its chapter navigation stays connected', () => {
+  assert.match(app, /roleProfileConfigMount=mountConfigEditor\('roleProfileConfigWorkspace',\['role_profile'\],\{\s*role_profile:\{presentation:'journal',sectionTabPrefix:'self-chapter-',initialSection:selfProfileSection\}/);
+  assert.match(app, /function selectSelfProfileSection\(section\)\{[\s\S]*?roleProfileConfigMount\?\.selectSection\?\.\(section\)/);
+  assert.match(app, /id="self-chapter-tab-\$\{id\}" aria-controls="self-chapter-panel-\$\{id\}"/);
+  assert.match(app, /<button type="button" class="section-chip" data-role-profile-organize-jump><span class="section-chip-no">✦<\/span>通过已有人格整理<\/button>/);
+  assert.match(app, /<h3>通过已有人格整理<\/h3>/);
+  assert.match(app, /data-role-profile-draft-open="role_profile"/);
+  assert.match(app, /从当前人格整理角色档案/);
+  assert.doesNotMatch(app, /selfwriteCanvas|data-selfwrite-source|角色自述/);
 });

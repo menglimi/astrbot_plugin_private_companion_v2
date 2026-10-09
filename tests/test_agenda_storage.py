@@ -18,10 +18,16 @@ from companion_v2.storage.schema import (
     MIGRATION_V2_TO_V3_ID, MIGRATION_V2_TO_V3_FINGERPRINT,
     MIGRATION_V3_TO_V4_ID, MIGRATION_V3_TO_V4_FINGERPRINT,
     MIGRATION_V45_TO_V46_ID, MIGRATION_V45_TO_V46_FINGERPRINT,
-    SCHEMA_VERSION, SCHEMA_VERSION_V1, SCHEMA_VERSION_V2, SCHEMA_VERSION_V3, SCHEMA_VERSION_V45, SCHEMA_VERSION_V46,
+    MIGRATION_V46_TO_V47_ID, MIGRATION_V46_TO_V47_FINGERPRINT,
+    MIGRATION_V47_TO_V48_ID, MIGRATION_V47_TO_V48_FINGERPRINT,
+    MIGRATION_V48_TO_V49_ID, MIGRATION_V48_TO_V49_FINGERPRINT,
+    MIGRATION_V49_TO_V50_ID, MIGRATION_V49_TO_V50_FINGERPRINT,
+    SCHEMA_VERSION, SCHEMA_VERSION_V1, SCHEMA_VERSION_V2, SCHEMA_VERSION_V3, SCHEMA_VERSION_V45,
+    SCHEMA_VERSION_V46, SCHEMA_VERSION_V47, SCHEMA_VERSION_V48, SCHEMA_VERSION_V49, SCHEMA_VERSION_V50,
     V1_SCHEMA_STATEMENTS, V2_MIGRATION_STATEMENTS, V3_MIGRATION_STATEMENTS, V4_MIGRATION_STATEMENTS,
 )
 from tests.test_configuration import INSTALLATION, NOW, PRINCIPAL, USER, ROLE_A, WINDOW, WINDOW_TARGET, registry
+from tests.execution_support import remove_v50
 
 
 class AgendaStorageTests(unittest.TestCase):
@@ -78,7 +84,7 @@ class AgendaStorageTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT revision FROM role_bindings").fetchone()[0], 7)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM configuration_values").fetchone()[0], 3)
 
-    def test_empty_data_root_reaches_latest_schema_and_records_v46(self):
+    def test_empty_data_root_reaches_latest_schema_and_records_v46_through_v50(self):
         fresh_root = Path(self.temporary.name) / "fresh-data"
         runtime = StorageRuntime.open(data_root=fresh_root, installation_id=INSTALLATION)
         self.addCleanup(runtime.close)
@@ -86,13 +92,57 @@ class AgendaStorageTests(unittest.TestCase):
         version = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = 'schema_version'", ())["value"]
         migration = runtime.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
                                      (MIGRATION_V45_TO_V46_ID,))
+        previous_migration = runtime.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                              (MIGRATION_V47_TO_V48_ID,))
+        latest_migration = runtime.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                            (MIGRATION_V48_TO_V49_ID,))
+        current_migration = runtime.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                             (MIGRATION_V49_TO_V50_ID,))
         columns = {row["name"] for row in runtime.read_all("PRAGMA table_info(model_calls)", ())}
 
-        self.assertEqual(version, SCHEMA_VERSION_V46)
+        self.assertEqual(version, SCHEMA_VERSION)
         self.assertEqual(migration["from_version"], SCHEMA_VERSION_V45)
         self.assertEqual(migration["fingerprint"], MIGRATION_V45_TO_V46_FINGERPRINT)
+        self.assertEqual(previous_migration["from_version"], SCHEMA_VERSION_V47)
+        self.assertEqual(previous_migration["to_version"], SCHEMA_VERSION_V48)
+        self.assertEqual(previous_migration["fingerprint"], MIGRATION_V47_TO_V48_FINGERPRINT)
+        self.assertEqual(latest_migration["from_version"], SCHEMA_VERSION_V48)
+        self.assertEqual(latest_migration["to_version"], SCHEMA_VERSION_V49)
+        self.assertEqual(latest_migration["fingerprint"], MIGRATION_V48_TO_V49_FINGERPRINT)
+        self.assertEqual(current_migration["from_version"], SCHEMA_VERSION_V49)
+        self.assertEqual(current_migration["to_version"], SCHEMA_VERSION_V50)
+        self.assertEqual(current_migration["fingerprint"], MIGRATION_V49_TO_V50_FINGERPRINT)
+        self.assertIsNotNone(runtime.read_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                                              ("model_call_cache_signatures",)))
+        self.assertIsNotNone(runtime.read_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                                              ("inbound_no_replies",)))
+        self.assertIn("code", {row["name"] for row in runtime.read_all("PRAGMA table_info(inbound_no_replies)", ())})
         self.assertTrue({"input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens"}.issubset(columns))
         self.assertEqual(len(runtime.read_all("SELECT * FROM schema_migrations", ())), migration_count())
+
+    def test_v49_no_reply_rows_survive_v50_error_code_migration(self):
+        root = Path(self.temporary.name) / "v49-data"
+        runtime = StorageRuntime.open(data_root=root, installation_id=INSTALLATION)
+        runtime.read_one("SELECT 1", ())
+        with runtime.transaction() as connection:
+            connection.execute("""INSERT INTO inbound_no_replies
+                (event_ref, origin_key, channel, reason_code, observed_at)
+                VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'role-a', 'private', 'conversation_task_failed', ?)""",
+                (stamp(NOW),))
+            remove_v50(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V49,))
+            connection.execute("DELETE FROM schema_migrations WHERE migration_id = ?",
+                               (MIGRATION_V49_TO_V50_ID,))
+        runtime.close()
+
+        upgraded = StorageRuntime.open(data_root=root, installation_id=INSTALLATION)
+        self.addCleanup(upgraded.close)
+        row = upgraded.read_one("SELECT reason_code, code FROM inbound_no_replies "
+                                "WHERE event_ref = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'", ())
+        self.assertEqual((row["reason_code"], row["code"]), ("conversation_task_failed", None))
+        self.assertEqual(upgraded.read_one("SELECT value FROM runtime_metadata WHERE key = 'schema_version'", ())["value"],
+                         SCHEMA_VERSION)
 
     def test_nonempty_v3_upgrade_preserves_identity_zero_false_empty_and_revisions(self):
         runtime = self.open_runtime()

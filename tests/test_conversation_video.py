@@ -11,27 +11,36 @@ from unittest.mock import patch
 from companion_v2.adapters.astrbot.model_wire import build_wire, tool_alias, decode_response
 from companion_v2.execution.models import TaskError
 from companion_v2.identity_policy.personas import RuntimeIdentity
-from companion_v2.model_gateway.models import ModelEnvelope
+from companion_v2.conversation.foreground import ModelDraft
+from companion_v2.configuration.registry import FieldRegistry
+from companion_v2.model_gateway.models import Amount, Lane, ModelEnvelope, ModelTaskProfile, ProviderResponse, ToolCall
+from companion_v2.model_gateway.routing import configuration_fields
 from companion_v2.sources.dependencies import key
 from tests.audio_support import FakeRecord
 from tests.animation_support import animation_bytes
 from tests.native_adapter_support import completion, final_text
 from tests.test_conversation_images import FakeImage
 from tests.video_support import VideoFixture, FakeVideo, video_bytes
+from companion_v2.conversation.media.video.narration import video_narration_profile
 
 
 class ConversationVideoTests(VideoFixture, unittest.IsolatedAsyncioTestCase):
-    async def test_video_only_and_tool_continuation_preserve_sampled_evidence_and_confirmed_history(self):
+    async def test_unavailable_native_video_is_explained_and_status_survives_tool_continuation(self):
         views = []
         async def respond(payload, _):
             content = payload["messages"][2]["content"]
-            views.append(content[1:])
-            materials = json.loads(content[0]["text"])["materials"]
-            video = next(m for m in materials if m["owner"] == "conversation.video")
-            self.assertEqual(json.loads(video["text"])["audio_status"], "not_inspected")
+            if isinstance(content, list):
+                views.append(content[1:])
+                user_text = content[0]["text"]
+            else:
+                views.append([])
+                user_text = content
+            materials = json.loads(user_text)["materials"]
+            video = next(m for m in materials if m["owner"] == "conversation.video_narration")
+            self.assertIn("没有可用的原生视频理解模型", video["text"])
             if len(views) == 1:
                 return completion(tools=[NS(id="video-read", type="function", function=NS(name=tool_alias("memo.list"), arguments="{}"))])
-            return completion(final_text("采样画面有颜色变化。", evidence=video["evidence"]))
+            return completion(final_text("我这边没有可用的原生视频模型，还没能读取视频。", evidence=video["evidence"]))
         self.native.provider.client.state.behavior = respond
         host = await self.setup_host()
         batch = host.receive(await self.capture(self.video_event())).unwrap()
@@ -39,8 +48,9 @@ class ConversationVideoTests(VideoFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.done(app, batch))["state"], "complete")
         self.assertEqual(len(views), 2)
         self.assertEqual(views[0], views[1])
-        self.assertEqual(len([part for part in views[0] if part["type"] == "image_url"]), 4)
-        self.assertEqual(app.messages.history(context).unwrap()["items"][0]["text"], "采样画面有颜色变化。")
+        self.assertFalse(any(part["type"] in ("image_url", "video_data") for part in views[0]))
+        self.assertEqual(app.messages.history(context).unwrap()["items"][0]["text"],
+                         "我这边没有可用的原生视频模型，还没能读取视频。")
         event = self.original(app, batch)
         source, asset = app.messages.videos.references(event, event.videos[0])
         access = app.memory.writer.access.sent_sources
@@ -69,7 +79,49 @@ class ConversationVideoTests(VideoFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tuple(wire.reply_images.values()), (request.images[0].source,))
         for source in (request.videos[0].source, request.videos[0].frames[0].source):
             self.assertNotIn(source, wire.reply_images.values())
-        self.assertIn("音轨均未检查", request.instruction)
+        wire_content = next(message["content"] for message in wire.messages if message["role"] == "user")
+        video_parts = wire_content if isinstance(wire_content, list) else []
+        video_metadata = [json.loads(item["text"]) for item in video_parts if item.get("type") == "text"]
+        self.assertTrue(any(item.get("audio_status") == "not_inspected" for item in video_metadata))
+
+    async def test_same_video_route_sends_original_video_to_reply_model_without_narration(self):
+        seen = []
+
+        async def reply(envelope):
+            seen.append(envelope)
+            if len(seen) == 1:
+                return ProviderResponse("generated", usage=Amount(15, 40), receipt_ref="direct-video-tool",
+                    tool_calls=(ToolCall("direct-video-memo", "memo.list", "{}"),))
+            return ProviderResponse("generated", ModelDraft("画面里有连续变化。", ()),
+                                    Amount(15, 40), "direct-video-final")
+
+        provider = self.native_model.local_provider()
+        provider = replace(provider,
+            capabilities=tuple(dict.fromkeys((*provider.capabilities, "video"))),
+            generate=reply)
+        self.profiles += (video_narration_profile(provider.binding.provider, max_output_tokens=100),)
+        self.registry = FieldRegistry(version="video-direct.v1",
+            fields=tuple(self.registry.fields.values()) + configuration_fields((self.profiles[-1],)))
+        host = await self.setup_host(providers=(provider,))
+        batch = host.receive(await self.capture(self.video_event())).unwrap()
+        with patch.object(host.application.video_narration, "summarize",
+                          side_effect=AssertionError("same-route video must bypass narration")):
+            self.assertEqual((await self.done(host.application, batch))["state"], "complete")
+        self.assertEqual(len(seen), 2)
+        request = seen[0].original
+        continued = seen[1]
+        self.assertEqual(len(continued.tool_history), 1)
+        self.assertTrue(continued.original.native_video_input)
+        self.assertEqual(continued.original.videos, request.videos)
+        self.assertTrue(request.native_video_input)
+        self.assertEqual(len(request.videos), 1)
+        self.assertEqual(request.videos[0].content, video_bytes())
+        wire = build_wire(ModelEnvelope(request, "fixture", 100, "fixture"))
+        user_content = next(message["content"] for message in wire.messages if message["role"] == "user")
+        self.assertTrue(any(item.get("type") == "video_data" for item in user_content))
+        self.assertFalse(any(item.get("type") == "image_url" for item in user_content))
+        materials = json.loads(user_content[0]["text"])["materials"]
+        self.assertFalse(any(item["purpose"].startswith("video_frame:") for item in materials))
 
     async def test_video_count_and_combined_frame_budget_split_batches(self):
         host = await self.quiet_host()
@@ -155,12 +207,20 @@ class ConversationVideoTests(VideoFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.request(new.application, batch).videos, before)
             self.assertEqual(new.receive(captured).unwrap(), batch)
 
-    async def test_visual_capability_is_required_and_unknown_model_calls_are_not_repeated(self):
+    async def test_text_only_reply_receives_status_without_video_media(self):
         provider = replace(self.native_model.local_provider(), capabilities=("text", "tools", "audio"))
         host = await self.setup_host(providers=(provider,))
         batch = host.receive(await self.capture(self.video_event())).unwrap()
-        await self.done(host.application, batch)
-        self.assertEqual(self.native.provider.client.state.calls, [])
+        self.assertEqual((await self.done(host.application, batch))["state"], "complete")
+        calls = self.native.provider.client.state.calls
+        self.assertEqual(len(calls), 1)
+        content = calls[0][0]["messages"][2]["content"]
+        parts = content if isinstance(content, list) else []
+        self.assertFalse(any(part.get("type") in ("image_url", "video_data") for part in parts))
+        user_text = parts[0]["text"] if parts else content
+        materials = json.loads(user_text)["materials"]
+        status = next(item for item in materials if item["owner"] == "conversation.video_narration")
+        self.assertIn("没有可用的原生视频理解模型", status["text"])
 
     async def test_unknown_video_model_result_does_not_repeat_on_replay(self):
         async def timeout(payload, _):

@@ -25,27 +25,57 @@ LIMITS = {
     "window_hours": (1, 720),
     "sample_limit": (4, 64),
     "min_samples": (1, 16),
+    "group_min_samples": (5, 64),
     "sample_chars": (40, 4000),
+    "active_signal_limit": (12, 240),
     "rules_per_turn": (1, 16),
     "payload_chars": (500, 16000),
     "rotation_candidate_limit": (1, 64),
     "rotation_decay_hours": (1, 8760),
     "scan_interval_minutes": (5, 10080),
+    "group_daily_batch_limit": (1, 50),
+    "group_new_messages": (5, 80),
 }
 DEFAULTS = {
+    "private_learning_enabled": True,
     "group_learning_enabled": False,
     "window_hours": 168,
     "sample_limit": 24,
-    "min_samples": 4,
+    "min_samples": 5,
+    "group_min_samples": 20,
     "sample_chars": 800,
+    "active_signal_limit": 60,
     "rules_per_turn": 8,
     "payload_chars": 4000,
     "rotation_candidate_limit": 24,
     "rotation_decay_hours": 336,
     "scan_interval_minutes": 1440,
+    "learning_mode": "balanced",
+    "private_application_enabled": True,
+    "group_application_enabled": True,
+    "sample_review_enabled": False,
+    "style_review_enabled": True,
+    "group_daily_batch_limit": 6,
+    "group_new_messages": 20,
+    "group_member_mode": "all",
+    "group_member_ids": "",
 }
-BOOLEAN_FIELDS = ("group_learning_enabled",)
-INTEGER_FIELDS = tuple(name for name in DEFAULTS if name not in BOOLEAN_FIELDS)
+BOOLEAN_FIELDS = ("private_learning_enabled", "group_learning_enabled", "private_application_enabled",
+                  "group_application_enabled", "sample_review_enabled", "style_review_enabled")
+TEXT_FIELDS = {"learning_mode": 16, "group_member_mode": 16, "group_member_ids": 4000}
+INTEGER_FIELDS = tuple(LIMITS)
+MODES = ("light", "balanced", "aggressive")
+
+
+def member_ids(value):
+    """Member IDs are interpreted only inside the selected exact group scope."""
+    if type(value) is not str:
+        raise ConfigurationError("expression_settings_invalid", "group member IDs must be text")
+    values = value.replace("，", ",").replace("\n", ",").split(",")
+    result = tuple(dict.fromkeys(item.strip() for item in values if item.strip()))
+    if len(result) > 100 or any(len(item) > 128 or any(ch.isspace() for ch in item) for item in result):
+        raise ConfigurationError("expression_settings_invalid", "group member IDs are invalid")
+    return result
 
 
 def configuration_fields():
@@ -55,6 +85,9 @@ def configuration_fields():
         minimum, maximum = LIMITS[name]
         definitions.append(FieldDefinition(GROUP + "." + name, GROUP, GROUP, ValueKind.INTEGER, DEFAULTS[name],
             minimum=minimum, maximum=maximum, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=OWNER))
+    for name, maximum in TEXT_FIELDS.items():
+        definitions.append(FieldDefinition(GROUP + "." + name, GROUP, GROUP, ValueKind.TEXT, DEFAULTS[name],
+            maximum_chars=maximum, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=OWNER))
     return tuple(definitions)
 
 
@@ -70,28 +103,46 @@ def target_for(context):
 
 @dataclass(frozen=True)
 class ExpressionLearningSettings:
+    private_learning_enabled: bool
     group_learning_enabled: bool
     window_hours: int
     sample_limit: int
     min_samples: int
+    group_min_samples: int
     sample_chars: int
+    active_signal_limit: int
     rules_per_turn: int
     payload_chars: int
     rotation_candidate_limit: int
     rotation_decay_hours: int
     scan_interval_minutes: int
+    learning_mode: str = "balanced"
+    private_application_enabled: bool = True
+    group_application_enabled: bool = True
+    sample_review_enabled: bool = False
+    style_review_enabled: bool = True
+    group_daily_batch_limit: int = 6
+    group_new_messages: int = 20
+    group_member_mode: str = "all"
+    group_member_ids: str = ""
 
     def __post_init__(self):
-        if type(self.group_learning_enabled) is not bool:
-            raise ConfigurationError("expression_settings_invalid", "group learning switch must be boolean")
+        if any(type(getattr(self, name)) is not bool for name in BOOLEAN_FIELDS):
+            raise ConfigurationError("expression_settings_invalid", "expression learning switches must be boolean")
+        if self.learning_mode not in MODES or self.group_member_mode not in ("all", "selected"):
+            raise ConfigurationError("expression_settings_invalid", "unknown expression learning mode")
+        for name, maximum in TEXT_FIELDS.items():
+            if type(getattr(self, name)) is not str or len(getattr(self, name)) > maximum:
+                raise ConfigurationError("expression_settings_invalid", "expression text setting is invalid")
+        member_ids(self.group_member_ids)
         for name, (minimum, maximum) in LIMITS.items():
             value = getattr(self, name)
             if type(value) is not int or not minimum <= value <= maximum:
                 raise ConfigurationError("expression_settings_invalid",
                                          f"{name} is outside its registered range")
-        if self.sample_limit < self.min_samples:
+        if self.sample_limit < max(self.min_samples, self.group_min_samples):
             raise ConfigurationError("expression_settings_invalid",
-                                     "the sample batch cannot be smaller than the minimum sample count")
+                                     "the sample batch cannot be smaller than either scope's minimum sample count")
         if self.rotation_candidate_limit < self.rules_per_turn:
             raise ConfigurationError("expression_settings_invalid",
                                      "the rotation candidate pool cannot be smaller than one turn's rules")
@@ -103,6 +154,13 @@ class ExpressionLearningSettings:
 
     def with_group_learning(self, enabled):
         return ExpressionLearningSettings(**{**self.__dict__, "group_learning_enabled": enabled})
+
+    def applies_to(self, context):
+        return self.group_application_enabled if context.scope.kind.value == "group" else self.private_application_enabled
+
+    @property
+    def selected_members(self):
+        return member_ids(self.group_member_ids) if self.group_member_mode == "selected" else None
 
 
 def read_settings(runtime, context, *, override=None):
@@ -145,6 +203,9 @@ class ExpressionConfigurationOwner(SparseConfigurationOwner):
     def write(self, target, fields, *, changes, reset, expected_revision, observed_at):
         # The generic patch path only enforces each field's own range, so the
         # cross-field rules are applied here before anything is persisted.
-        self._validate_combination(fields, self.preview_set(target, fields, changes=changes))
+        defaults = {field.field_id: field.default for field in fields}
+        prospective = self.preview_set(target, fields,
+            changes={**{key: defaults[key] for key in reset}, **changes})
+        self._validate_combination(fields, prospective)
         return super().write(target, fields, changes=changes, reset=reset,
             expected_revision=expected_revision, observed_at=observed_at)

@@ -112,8 +112,8 @@ test("桥已经在时读得到列表，直接渲染内容", async () => {
   page.mount(root);
   await settle();
 
-  assert.match(root.innerHTML, /还没有任何快照/,
-    "读到空列表是正常状态，应当给出「怎么让它不空」");
+  assert.match(root.innerHTML, /暂无快照/,
+    "读到空列表时使用简洁空态");
   assert.doesNotMatch(root.innerHTML, /data-backup-retry/,
     "读到了就不该摆重试按钮");
 });

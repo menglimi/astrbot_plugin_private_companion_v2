@@ -121,6 +121,23 @@ class CapabilityManagementService:
             parameters={"expected_revision": expected_revision},
             mutate=lambda: methods[action](extension_id=extension_id, expected_revision=expected_revision, observed_at=observed_at))
 
+    def uninstall(
+        self, actor: ResolvedIdentity, *, extension_id: str, expected_revision: int,
+        operation: OperationRef, observed_at: datetime,
+    ) -> Outcome[CapabilityCommandReceipt]:
+        """Detach an extension atomically while retaining its V2-owned records."""
+        def detach():
+            requested = self.repository.request_discard(
+                extension_id=extension_id, expected_revision=expected_revision, observed_at=observed_at)
+            if requested.failure is not None:
+                return requested
+            return self.repository.complete_discard(
+                extension_id=extension_id, expected_revision=requested.unwrap().revision, observed_at=observed_at)
+
+        return self._command(actor, extension_id=extension_id, action="capability.discard.request",
+            scope=self.management_scope(extension_id), operation=operation, observed_at=observed_at,
+            parameters={"expected_revision": expected_revision, "uninstall": True}, mutate=detach)
+
     def role_scope(self, extension_id: str, role: SubjectRef, bot_id: str) -> ScopeRef:
         _opaque(extension_id, field="extension_id")
         _opaque(bot_id, field="bot_id")

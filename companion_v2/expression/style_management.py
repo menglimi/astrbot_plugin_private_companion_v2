@@ -1,10 +1,10 @@
 """Dashboard review of model-suggested expression-style signals.
 
 Adopting a signal is the only way it can influence later replies, and it is
-always reversible: `retire` returns an adopted signal to inactive without
-deleting the record or its evidence, so the history of what was once adopted
-stays auditable. Rejecting is available even when the sampled writing has since
-been withdrawn, so an operator is never left with an undecidable row.
+always reversible: ``retire`` pauses an adopted rule while keeping its history
+and ``restore`` can bring it back after the original evidence is checked
+again. Rejecting is available even when the sampled writing has since been
+withdrawn, so an operator is never left with an undecidable row.
 """
 
 from __future__ import annotations
@@ -12,12 +12,20 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from companion_v2.execution.models import TaskError, digest, stamp
+from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.execution.service import outcome
+from companion_v2.foundation.refs import RoleOwnerRef, ScopeKind
+from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 
 from ..role_work.growth.management import RoleGrowthManagement
+from . import feedback as style_feedback
 from . import style_rotation
-from .learning import DIMENSIONS
+from .configuration import read_settings
+from .learning import DIMENSIONS, candidate_signature
+from .sharing import MAX_IMPORT_SIGNALS, build_pack, normalize_pack
+
+
+SHARE_PACK_SOURCE = "shared_pack"
 
 
 class ExpressionStyleManagement:
@@ -27,11 +35,23 @@ class ExpressionStyleManagement:
         self.samples = app.expression_samples
         self.management = RoleGrowthManagement(app.role_growth)
 
+    def list_samples(self, **arguments):
+        from .sample_management import ExpressionSampleManagement
+        return ExpressionSampleManagement(self).list(**arguments)
+
+    def sample_command(self, **arguments):
+        from .sample_management import ExpressionSampleManagement
+        return ExpressionSampleManagement(self).command(**arguments)
+
+    def learn(self, **arguments):
+        from .sample_management import ExpressionSampleManagement
+        return ExpressionSampleManagement(self).learn(**arguments)
+
     @staticmethod
     def _token(operator, context, row, policy_revision):
-        return digest(["expression-style-decision.v1", operator.subject, operator.binding_id,
+        return digest(["expression-style-decision.v2", operator.subject, operator.binding_id,
             operator.binding_revision, context.key, row["signal_id"], row["run_id"],
-            row["state"], policy_revision])
+            row["state"], row["decision_key"], row["decided_at"], policy_revision])
 
     def _row(self, signal_id, owner, context):
         if (type(signal_id) is not str or not signal_id.strip() or len(signal_id) > 512
@@ -55,11 +75,55 @@ class ExpressionStyleManagement:
             handles = json.loads(row["evidence_json"])
         except (TypeError, ValueError):
             raise TaskError("expression_sample_changed", "stored style samples are invalid") from None
-        if (type(window) is not dict or set(window) != {"opened_at", "closed_at", "handles", "characters"}
-                or type(handles) is not list or not handles
+        required = {"opened_at", "closed_at", "handles", "characters"}
+        if (type(window) is not dict or not required <= set(window)
+                or set(window) - required - {"context_key", "source_kind"}
+                or ("context_key" in window and (type(window["context_key"]) is not str
+                    or len(window["context_key"]) != 64))
+                or window.get("source_kind", "confirmed_reply") not in
+                   ("confirmed_reply", "conversation_input", SHARE_PACK_SOURCE)
+                or type(window.get("handles")) is not list
+                or type(window.get("characters")) is not int or window["characters"] < 0
+                or type(handles) is not list
+                or (window.get("source_kind") == SHARE_PACK_SOURCE and (handles or window["handles"] or window["characters"] != 0))
+                or (window.get("source_kind") != SHARE_PACK_SOURCE and not handles)
                 or any(type(value) is not str or value not in window["handles"] for value in handles)):
             raise TaskError("expression_sample_changed", "stored style samples are invalid")
         return run, window, handles
+
+    def _authorize(self, operator, context, at):
+        if context.scope.kind is ScopeKind.PRIVATE:
+            return self.management._authorize(operator, context, at)
+        if context.scope.kind is not ScopeKind.GROUP:
+            raise TaskError("expression_scope_required", "select a private or group conversation")
+        self.samples._authorize(context, at)
+        current = require(self.app.tasks.identity.resolve_role(context.scope, observed_at=at))
+        if current != context.role_binding:
+            raise TaskError("expression_binding_changed", "the original group role is no longer bound")
+        access = require(ObjectAccessPolicy(self.runtime).scope_access(operator, scope=context.scope,
+            action="configuration.read", observed_at=at, core_only=True))
+        owner = RoleOwnerRef(context.scope.installation_id, context.scope.bot_id,
+                             context.role_binding.role.subject_id)
+        return owner, access.policy_revision
+
+    def _evidence_context(self, window, context):
+        context_key = window.get("context_key")
+        if context_key is None:
+            if context.scope.kind is ScopeKind.GROUP:
+                raise TaskError("expression_sample_changed", "original group sample context is unavailable")
+            return context
+        row = self.runtime.read_one("""SELECT context_json FROM conversation_batches
+            WHERE origin_key = ? ORDER BY rowid DESC LIMIT 1""", (context_key,))
+        if row is None:
+            raise TaskError("expression_sample_changed", "original sample context is unavailable")
+        try:
+            original = TaskContext.restore(json.loads(row["context_json"]))
+        except (TypeError, ValueError, KeyError):
+            raise TaskError("expression_sample_changed", "original sample context is invalid") from None
+        if (original.key != context_key or original.scope != context.scope
+                or original.role_binding != context.role_binding):
+            raise TaskError("expression_sample_changed", "original sample belongs to another role or window")
+        return original
 
     def _window(self, window, at):
         try:
@@ -78,11 +142,16 @@ class ExpressionStyleManagement:
         """Recheck only the samples this signal cites."""
         _, window, handles = self._run(row, owner, context)
         opened_at, closed_at = self._window(window, at)
+        if window.get("source_kind") == SHARE_PACK_SOURCE:
+            return []
+        if window.get("source_kind") == "conversation_input" and not self.samples.reviews.allows_handles(context, handles):
+            raise TaskError("expression_sample_changed", "sample approval was revoked")
         try:
-            self.samples.resolve_handles(handles, opened_at, closed_at, context, at)
+            sample_context = self._evidence_context(window, context)
+            return self.samples.describe_handles(handles, opened_at, closed_at, sample_context, at,
+                source_kind=window.get("source_kind", "confirmed_reply"))
         except TaskError as error:
             raise TaskError("expression_sample_changed", error.reason) from None
-        return handles
 
     @outcome
     def list(self, *, operator, context, state="pending", dimension=None, limit=20, after_id=None):
@@ -95,7 +164,7 @@ class ExpressionStyleManagement:
             raise TaskError("expression_query_invalid", "invalid style page")
         at = self.management.ledger.now()
         with self.runtime.read_snapshot():
-            owner, policy_revision = self.management._authorize(operator, context, at)
+            owner, policy_revision = self._authorize(operator, context, at)
             rows = self.runtime.read_all("""SELECT * FROM expression_style_signals
                 WHERE owner_key = ? AND scope_key = ? AND state = ?
                   AND (? IS NULL OR dimension = ?)
@@ -107,53 +176,88 @@ class ExpressionStyleManagement:
             # review view reports that ledger: a rule used on every turn while
             # others wait is exactly the distribution this page has to show.
             usage_map = style_rotation.usage(self.runtime, digest(owner), digest(context.scope)) \
-                if state == "adopted" else {}
+                if state in ("adopted", "retired") else {}
+            feedback_map = style_feedback.usage(self.runtime, digest(owner), digest(context.scope))
+            active_count = self.runtime.read_one("""SELECT COUNT(*) AS count FROM expression_style_signals
+                WHERE owner_key = ? AND scope_key = ? AND state IN ('pending', 'adopted')""",
+                (digest(owner), digest(context.scope)))
+            capacity = {"active": int(active_count["count"]) if active_count is not None else 0,
+                        "limit": read_settings(self.runtime, context).active_signal_limit}
             for row in rows[:limit]:
-                unavailable = None
-                if state in ("pending", "adopted"):
+                unavailable, evidence = None, []
+                source_kind = "confirmed_reply"
+                if state in ("pending", "adopted", "retired", "rejected"):
                     try:
-                        self._basis(row, owner, context, at)
+                        run, window, handles = self._run(row, owner, context)
+                        source_kind = window.get("source_kind", "confirmed_reply")
+                        opened_at, closed_at = self._window(window, at)
+                        if source_kind != SHARE_PACK_SOURCE:
+                            if source_kind == "conversation_input" and not self.samples.reviews.allows_handles(context, handles):
+                                raise TaskError("expression_sample_changed", "sample approval was revoked")
+                            sample_context = self._evidence_context(window, context)
+                            evidence = self.samples.describe_handles(handles, opened_at, closed_at,
+                                sample_context, at, source_kind=source_kind)
                     except TaskError as error:
                         unavailable = error.code
-                actions = ["reject"]
-                if unavailable is None:
-                    actions.append("adopt")
-                if state == "adopted":
-                    actions.append("retire")
+                if state == "pending":
+                    actions = ["reject"] if unavailable is not None else ["adopt", "reject"]
+                elif state == "adopted":
+                    # A rule can always be paused, even if the source has
+                    # since become unavailable. The pause itself does not
+                    # depend on re-reading the old evidence.
+                    actions = ["retire"]
+                elif state == "retired":
+                    actions = [] if unavailable is not None else ["restore"]
+                else:
+                    actions = []
                 injections, last = usage_map.get(row["signal_id"], (0, None))
+                feedback = feedback_map.get(row["signal_id"], {})
                 items.append({"signal_id": row["signal_id"], "run_id": row["run_id"],
-                    "dimension": row["dimension"],
+                    "dimension": row["dimension"], "source_kind": source_kind,
                     "observation": row["observation"] if unavailable is None else None,
                     "proposal": row["proposal"] if unavailable is None else None,
+                    "evidence": evidence if unavailable is None else [],
                     "confidence": row["confidence"], "state": row["state"],
                     "created_at": row["created_at"], "decided_at": row["decided_at"],
                     "injections": injections,
                     "last_injected_at": last.isoformat() if last is not None else None,
+                    "positive_feedback": feedback.get("positive_count", 0),
+                    "negative_feedback": feedback.get("negative_count", 0),
+                    "last_feedback": feedback.get("last_feedback"),
+                    "last_feedback_at": feedback.get("last_feedback_at"),
+                    "review_reason": feedback.get("review_reason"),
+                    "source_title": run["summary"] if unavailable is None and source_kind == SHARE_PACK_SOURCE else None,
                     "unavailable_reason": unavailable, "actions": actions,
                     "view_token": self._token(operator, context, row, policy_revision)})
             return {"items": items, "state": state,
                 "next_cursor": rows[limit - 1]["signal_id"] if len(rows) > limit else None,
-                "context_key": context.key, "role_id": owner.persona_id}
+                "context_key": context.key, "role_id": owner.persona_id, "capacity": capacity}
 
     @outcome
     def command(self, *, operator, context, signal_id, action, view_token, operation_key):
-        if action not in ("adopt", "reject", "retire"):
-            raise TaskError("expression_command_invalid", "select adopt, reject or retire")
+        if action not in ("adopt", "reject", "retire", "restore"):
+            raise TaskError("expression_command_invalid", "select adopt, reject, retire or restore")
         self.management._validate_operation_key(operation_key)
         at = self.management.ledger.now()
         with self.runtime.transaction() as connection:
-            owner, policy_revision = self.management._authorize(operator, context, at)
+            owner, policy_revision = self._authorize(operator, context, at)
             row = self._row(signal_id, owner, context)
-            if type(view_token) is not str or view_token != self._token(operator, context, row, policy_revision):
-                raise TaskError("expression_view_stale", "refresh the style signal before deciding")
             decision_key = digest([operator.subject, context.key, operation_key, signal_id, action])
             if row["decision_key"] == decision_key and row["state"] == self._target(action):
                 return {"signal_id": signal_id, "state": row["state"], "replayed": True}
-            if row["state"] != "pending" and action in ("adopt", "reject"):
-                raise TaskError("expression_decided", "style signal has already been decided")
-            if action == "retire" and row["state"] != "adopted":
-                raise TaskError("expression_command_invalid", "only an adopted signal can be retired")
-            if action == "adopt":
+            if type(view_token) is not str or view_token != self._token(operator, context, row, policy_revision):
+                raise TaskError("expression_view_stale", "refresh the style signal before deciding")
+            allowed = {
+                "pending": {"adopt", "reject"},
+                "adopted": {"retire"},
+                "retired": {"restore"},
+                "rejected": set(),
+            }
+            if action not in allowed.get(row["state"], set()):
+                if row["state"] == "rejected":
+                    raise TaskError("expression_decided", "style signal has already been rejected")
+                raise TaskError("expression_command_invalid", "this style signal cannot use that action")
+            if action in ("adopt", "restore"):
                 self._basis(row, owner, context, at)
             changed = connection.execute("""UPDATE expression_style_signals
                 SET state = ?, decided_at = ?, decided_by = ?, decision_key = ?
@@ -165,6 +269,152 @@ class ExpressionStyleManagement:
             self.app.notify()
             return {"signal_id": signal_id, "state": self._target(action), "replayed": False}
 
+    def _share_preview(self, *, operator, context, owner, policy_revision, pack):
+        owner_key, scope_key = digest(owner), digest(context.scope)
+        active = self.runtime.read_one("""SELECT COUNT(*) AS count FROM expression_style_signals
+            WHERE owner_key = ? AND scope_key = ? AND state IN ('pending', 'adopted')""",
+            (owner_key, scope_key))
+        active_count = int(active["count"]) if active is not None else 0
+        limit = read_settings(self.runtime, context).active_signal_limit
+        rows = self.runtime.read_all("""SELECT dimension, observation, proposal FROM expression_style_signals
+            WHERE owner_key = ? AND scope_key = ? AND state IN ('pending', 'adopted')""",
+            (owner_key, scope_key))
+        existing = {candidate_signature(row["dimension"], row["observation"], row["proposal"])
+                    for row in rows}
+        rejected = list(pack["rejected"])
+        in_pack_duplicates = sum(item["reason"] == "duplicate_in_pack" for item in rejected)
+        candidates, duplicate_count, blocked_count = [], in_pack_duplicates, 0
+        remaining = max(0, limit - active_count)
+        for signal in pack["signals"]:
+            signature = candidate_signature(signal["dimension"], signal["observation"], signal["proposal"])
+            if signature in existing:
+                duplicate_count += 1
+                continue
+            existing.add(signature)
+            if len(candidates) < remaining:
+                candidates.append(signal)
+            else:
+                blocked_count += 1
+        invalid_count = len(rejected) - in_pack_duplicates
+        token = digest(["expression-share-preview.v1", operator.subject, operator.binding_id,
+            operator.binding_revision, context.key, owner, policy_revision, pack, active_count,
+            limit, candidates, duplicate_count, blocked_count])
+        return {"title": pack["title"], "group_count": pack["group_count"],
+            "rule_count": len(pack["signals"]) + in_pack_duplicates + invalid_count,
+            "importable_group_count": len(candidates), "importable_rule_count": len(candidates),
+            "duplicate_rule_count": duplicate_count, "capacity_blocked_count": blocked_count,
+            "rejected_count": invalid_count, "rejected": rejected[:20], "candidates": candidates,
+            "capacity": {"active": active_count, "limit": limit}, "preview_token": token}
+
+    @outcome
+    def export_pack(self, *, operator, context, signal_ids=None):
+        if signal_ids is not None and (type(signal_ids) is not list or not signal_ids
+                or len(signal_ids) > MAX_IMPORT_SIGNALS
+                or any(type(value) is not str or not value.strip() or len(value) > 512 for value in signal_ids)
+                or len(set(signal_ids)) != len(signal_ids)):
+            raise TaskError("expression_export_invalid", "select up to 200 unique adopted rules")
+        at = self.management.ledger.now()
+        with self.runtime.read_snapshot():
+            owner, _ = self._authorize(operator, context, at)
+            rows = self.runtime.read_all("""SELECT * FROM expression_style_signals
+                WHERE owner_key = ? AND scope_key = ? AND state = 'adopted' ORDER BY signal_id""",
+                (digest(owner), digest(context.scope)))
+            if signal_ids is not None:
+                selected = set(signal_ids)
+                rows = [row for row in rows if row["signal_id"] in selected]
+            if signal_ids is not None and len(rows) != len(signal_ids):
+                raise TaskError("expression_signal_unavailable", "some selected rules are not adopted in this role")
+            if len(rows) > MAX_IMPORT_SIGNALS:
+                raise TaskError("expression_export_limit", "select no more than 200 adopted rules to export")
+            signals, excluded = [], 0
+            for row in rows:
+                try:
+                    _, window, _ = self._run(row, owner, context)
+                    self._window(window, at)
+                    if window.get("source_kind") != SHARE_PACK_SOURCE:
+                        self._basis(row, owner, context, at)
+                except TaskError:
+                    excluded += 1
+                    continue
+                signals.append({"dimension": row["dimension"], "observation": row["observation"],
+                                "proposal": row["proposal"], "confidence": row["confidence"]})
+        if not signals:
+            raise TaskError("expression_export_empty", "there are no adopted rules with usable sources to export")
+        package = build_pack(signals, title="陪伴表达分享", exported_at=stamp(at))
+        return {"package": package, "rule_count": len(signals), "excluded_count": excluded}
+
+    @outcome
+    def preview_import(self, *, operator, context, raw_pack):
+        try:
+            pack = normalize_pack(raw_pack)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise TaskError("expression_pack_invalid", "the expression share pack is invalid or unsupported") from error
+        at = self.management.ledger.now()
+        with self.runtime.read_snapshot():
+            owner, policy_revision = self._authorize(operator, context, at)
+            return self._share_preview(operator=operator, context=context, owner=owner,
+                                       policy_revision=policy_revision, pack=pack)
+
+    @outcome
+    def import_pack(self, *, operator, context, raw_pack, preview_token, operation_key):
+        self.management._validate_operation_key(operation_key)
+        try:
+            pack = normalize_pack(raw_pack)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise TaskError("expression_pack_invalid", "the expression share pack is invalid or unsupported") from error
+        at = self.management.ledger.now()
+        material_hash = digest(["expression-share-pack.v1", pack])
+        run_id = "expression-share-import:" + digest([operator.subject, context.key, operation_key])
+        inserted = 0
+        with self.runtime.transaction() as connection:
+            owner, policy_revision = self._authorize(operator, context, at)
+            existing_run = connection.execute("""SELECT material_hash FROM expression_style_runs
+                WHERE run_id = ? AND owner_key = ? AND scope_key = ?""",
+                (run_id, digest(owner), digest(context.scope))).fetchone()
+            if existing_run is not None:
+                if existing_run["material_hash"] != material_hash:
+                    raise TaskError("expression_operation_conflict", "the import operation key was used for another pack")
+                count = connection.execute("SELECT COUNT(*) AS count FROM expression_style_signals WHERE run_id = ?",
+                                          (run_id,)).fetchone()["count"]
+                return {"imported_count": int(count), "state": "pending_review", "replayed": True,
+                        "capacity": {"active": int(connection.execute("""SELECT COUNT(*) AS count
+                            FROM expression_style_signals WHERE owner_key = ? AND scope_key = ?
+                              AND state IN ('pending', 'adopted')""",
+                            (digest(owner), digest(context.scope))).fetchone()["count"]),
+                            "limit": read_settings(self.runtime, context).active_signal_limit}}
+            if type(preview_token) is not str or len(preview_token) != 64:
+                raise TaskError("expression_import_stale", "preview this share pack again before importing")
+            preview = self._share_preview(operator=operator, context=context, owner=owner,
+                                          policy_revision=policy_revision, pack=pack)
+            if preview["preview_token"] != preview_token:
+                raise TaskError("expression_import_stale", "the target or import preview changed; preview again")
+            candidates = preview["candidates"]
+            if not candidates:
+                return {"imported_count": 0, "state": "pending_review", "replayed": False,
+                        "capacity": preview["capacity"]}
+            window = {"opened_at": stamp(at), "closed_at": stamp(at), "handles": [],
+                      "characters": 0, "source_kind": SHARE_PACK_SOURCE}
+            connection.execute("""INSERT INTO expression_style_runs
+                (run_id, owner_key, scope_key, sample_json, material_hash, summary, state, created_at, decided_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL)""",
+                (run_id, digest(owner), digest(context.scope), encode(window), material_hash,
+                 pack["title"], stamp(at)))
+            for ordinal, signal in enumerate(candidates):
+                signal_id = "expression-share-signal:" + digest([run_id, ordinal])
+                connection.execute("""INSERT INTO expression_style_signals
+                    (signal_id, run_id, owner_key, scope_key, dimension, observation, proposal,
+                     confidence, evidence_json, state, created_at, decided_at, decided_by, decision_key, ordinal)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, ?)""",
+                    (signal_id, run_id, digest(owner), digest(context.scope), signal["dimension"],
+                     signal["observation"], signal["proposal"], signal["confidence"], encode([]),
+                     stamp(at), ordinal))
+                inserted += 1
+        self.app.notify()
+        return {"imported_count": inserted, "state": "pending_review", "replayed": False,
+                "capacity": {"active": preview["capacity"]["active"] + inserted,
+                             "limit": preview["capacity"]["limit"]}}
+
     @staticmethod
     def _target(action):
-        return {"adopt": "adopted", "reject": "rejected", "retire": "retired"}[action]
+        return {"adopt": "adopted", "reject": "rejected", "retire": "retired",
+                "restore": "adopted"}[action]

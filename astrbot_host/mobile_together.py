@@ -73,7 +73,14 @@ class MobileTogetherBridge:
             settings, authority = getattr(controller, "settings", None), getattr(controller, "authority", None)
             if settings is None:
                 raise TaskError("mobile_v2_host_not_ready", "the V2 private target is not ready")
-            matches = [target for target in settings.targets if target.participant_id == user_id]
+            # A wildcard private target is the persisted account mapping. Resolve
+            # the current person through the same route resolver used by inbound
+            # messages instead of requiring one stored row per person.
+            matches = []
+            for account in settings.accounts:
+                target = settings.private_target(account.platform_id, account.self_id, user_id)
+                if target is not None:
+                    matches.append(target)
             if not matches:
                 return None
             if len(matches) != 1:

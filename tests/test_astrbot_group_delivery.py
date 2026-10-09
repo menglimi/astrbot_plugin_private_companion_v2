@@ -1,12 +1,14 @@
 """Group delivery isolation, dispatch fencing, durable receipts and recovery."""
 
 from dataclasses import asdict, replace
+from copy import deepcopy
 from datetime import timedelta
 import json
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from astrbot_host.account_session_api import AccountSessionWebAPI
 from astrbot_host.group_authority import GroupAuthority
 from astrbot_host.group_delivery import GRANT_PREFIX, INTENT_PREFIX
 from astrbot_host.multi_api import PREFIX
@@ -37,6 +39,68 @@ class GroupDeliveryTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         result = await self.controller.authorize_group_delivery(target)
         self.assertTrue(result.is_success, result.failure)
         return result.unwrap()
+
+    async def test_relationship_group_target_control_changes_only_the_selected_group(self):
+        api = AccountSessionWebAPI(self.controller)
+        api._discovered = AsyncMock(return_value={"targets": [{"scope_kind": "group", "platform_id": "qq-main",
+            "account_id": "100", "group_id": "399"}]})
+
+        def save(candidate):
+            self.controller.config = deepcopy(candidate)
+
+        self.controller.save_plugin_config = save
+
+        async def change(enabled, group_id="399", account_id="100", bot_id="bot-a"):
+            body = {"platform_id": "qq-main", "account_id": account_id, "bot_id": bot_id,
+                    "group_id": group_id, "enabled": enabled}
+            request = NS(username="dashboard-admin", query=Query(),
+                         body=AsyncMock(return_value=json.dumps(body).encode("utf-8")))
+            with patch("astrbot_host.account_session_api.request", request):
+                return await api.save_group_target()
+
+        before = deepcopy(self.controller.config["multi_host"]["group_targets"])
+        enabled = await change(True)
+        self.assertEqual(enabled["status"], "ok", enabled)
+        self.assertTrue(enabled["data"]["requires_initialize"])
+        self.assertFalse(enabled["data"]["requires_reload"])
+        target_id = enabled["data"]["target_id"]
+        self.assertEqual(target_id, "group-" + digest(("qq-main", "100", "399"))[:20])
+        rows = self.controller.config["multi_host"]["group_targets"]
+        self.assertEqual(len(rows), len(before) + 1)
+        self.assertEqual([row["group_id"] for row in rows[:-1]], [row["group_id"] for row in before])
+        self.assertEqual(rows[-1]["target_id"], target_id)
+
+        removed = await change(False)
+        self.assertEqual(removed["status"], "ok", removed)
+        self.assertFalse(removed["data"]["configured"])
+        self.assertTrue(removed["data"]["requires_initialize"])
+        self.assertFalse(removed["data"]["requires_reload"])
+        self.assertEqual(self.controller.config["multi_host"]["group_targets"], before)
+
+        unavailable = await change(True, "999")
+        self.assertEqual(unavailable["data"]["code"], "account_group_target_unavailable")
+        self.assertEqual(self.controller.config["multi_host"]["group_targets"], before)
+
+        unresolved = await change(True, account_id="", bot_id="")
+        self.assertEqual(unresolved["data"]["code"], "account_group_target_route_unresolved")
+        self.assertEqual(self.controller.config["multi_host"]["group_targets"], before)
+
+    async def test_unexpected_group_target_write_error_keeps_the_backend_reason(self):
+        api = AccountSessionWebAPI(self.controller)
+        api._discovered = AsyncMock(return_value={"targets": [{"scope_kind": "group", "platform_id": "qq-main",
+            "account_id": "100", "group_id": "399"}]})
+        self.controller.apply_bindings = AsyncMock(side_effect=RuntimeError("simulated config writer failure"))
+        body = {"platform_id": "qq-main", "account_id": "100", "bot_id": "bot-a",
+                "group_id": "399", "enabled": True}
+        request = NS(username="dashboard-admin", query=Query(),
+                     body=AsyncMock(return_value=json.dumps(body).encode("utf-8")))
+
+        with patch("astrbot_host.account_session_api.request", request):
+            result = await api.save_group_target()
+
+        self.assertEqual(result["status"], "error", result)
+        self.assertEqual(result["data"]["code"], "account_group_target_apply_failed")
+        self.assertIn("RuntimeError: simulated config writer failure", result["reason"])
 
     def test_mode_defaults_and_existing_fingerprints_remain_compatible(self):
         old = MultiHostSettings.parse(group_config())
@@ -83,9 +147,10 @@ class GroupDeliveryTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertTrue((await self.reply(target=target))["sent"])
             await self.accepted()
             api = self.native.platform.client._api._wsr_api
-            self.assertEqual([action for action, _ in api.calls],
+            self.assertEqual([action for action, _ in api.calls if action.startswith("send_")],
                              ["send_group_msg", "send_group_msg", "send_private_msg"])
-            self.assertEqual([action for action, _ in self.native.platforms["qq-second"].client._api._wsr_api.calls],
+            self.assertEqual([action for action, _ in self.native.platforms["qq-second"].client._api._wsr_api.calls
+                              if action.startswith("send_")],
                              ["send_group_msg"])
             request.query = Query(target_id="group-a")
             self.assertEqual((await routes[PREFIX + "/revoke-group-delivery"]())["status"], "ok")

@@ -36,13 +36,14 @@ class KnowledgeContext:
     """Per-installation knowledge collaborator for the conversation turn."""
 
     def __init__(self, retriever=None, *, catalog=None, runtime=None, settings_reader=None,
-                 installation_id=None) -> None:
+                 installation_id=None, official_candidate_reader=None) -> None:
         if retriever is not None and not isinstance(retriever, KnowledgeRetriever):
             retriever = KnowledgeRetriever(retriever)
         self.retriever = retriever
         self.catalog = catalog
         self.runtime = runtime
         self.settings_reader = settings_reader
+        self.official_candidate_reader = official_candidate_reader
         self.installation_id = installation_id if installation_id is not None else getattr(
             runtime, "installation_id", None)
 
@@ -83,9 +84,28 @@ class KnowledgeContext:
         return tuple(materials)
 
     def _background(self, context, settings, *, text, at, batch_id, sources, audience):
-        if self.retriever is None or not settings.inject_enabled:
+        if not settings.inject_enabled:
             return ()
         self._apply_provider_limits(settings)
+        retriever = self.retriever
+        if self.official_candidate_reader is not None and settings.source_ids:
+            try:
+                base_candidates = retriever.candidates() if retriever is not None else ()
+                used_chars = sum(len(item.text) for item in base_candidates)
+                official_candidates = self.official_candidate_reader(
+                    settings.knowledge_source_ids(),
+                    source_limit=settings.source_limit,
+                    entry_limit=settings.entry_limit,
+                    entry_char_limit=settings.entry_char_limit,
+                    char_budget=max(0, settings.candidate_char_budget - used_chars),
+                )
+                retriever = KnowledgeRetriever((*base_candidates, *official_candidates))
+            except Exception:
+                # Official knowledge is optional context. A missing or busy host
+                # index must not prevent the underlying conversation from sealing.
+                official_candidates = ()
+        if retriever is None:
+            return ()
         query = query_for_context(
             str(text or "")[:MAX_QUERY_CHARS],
             scope=context.scope,
@@ -97,8 +117,8 @@ class KnowledgeContext:
             max_chars=settings.inject_max_chars,
             max_per_document=2,
         )
-        selection = self.retriever.retrieve(query, sources=sources, audience=audience, observed_at=at,
-                                            source_prefix="knowledge:" + batch_id)
+        selection = retriever.retrieve(query, sources=sources, audience=audience, observed_at=at,
+                                       source_prefix="knowledge:" + batch_id)
         return tuple(
             ContextContribution(
                 "knowledge:" + batch_id + ":" + hit.candidate.candidate_id,
@@ -120,7 +140,8 @@ class KnowledgeContext:
             entries = self.catalog.member_entries(
                 installation_id=self.installation_id, source_limit=settings.source_limit,
                 role_id=context.role_binding.role.subject_id,
-                scope_ids=(context.scope.native_scope_id,), scope_kind=context.scope.kind)
+                scope_ids=(context.scope.native_scope_id,), scope_kind=context.scope.kind,
+                scope=context.scope)
             if not entries:
                 return None
             selection = select_member_clues(
@@ -159,7 +180,7 @@ def as_knowledge_context(value, *, runtime=None, catalog=None, settings_reader=N
     return KnowledgeContext(value, catalog=catalog, runtime=runtime, settings_reader=settings_reader)
 
 
-def knowledge_context(runtime, *, settings_reader=None, catalog=None):
+def knowledge_context(runtime, *, settings_reader=None, catalog=None, official_candidate_reader=None):
     """Catalogue-backed context: imported sources plus member clues."""
     catalog = catalog if catalog is not None else KnowledgeCatalog(runtime)
     settings = KnowledgeSettings.from_values(DEFAULTS)
@@ -167,7 +188,8 @@ def knowledge_context(runtime, *, settings_reader=None, catalog=None):
                                         source_limit=settings.source_limit,
                                         char_budget=settings.candidate_char_budget)
     return KnowledgeContext(KnowledgeRetriever(provider), catalog=catalog, runtime=runtime,
-                            settings_reader=settings_reader)
+                            settings_reader=settings_reader,
+                            official_candidate_reader=official_candidate_reader)
 
 
 __all__ = [

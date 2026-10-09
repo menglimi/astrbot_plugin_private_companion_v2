@@ -1,17 +1,20 @@
 """Shared-installation lifecycle and explicit native multi-target admission."""
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+import traceback
 from uuid import uuid4
 
-from companion_v2.adapters.astrbot.native import HostPersona, NativePrivateBridge, account_number, persona_instruction
+from companion_v2.adapters.astrbot.native import (
+    HostPersona, NativePrivateBridge, account_number, persona_instruction,
+)
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
-from companion_v2.adapters.astrbot.provider_catalog import assemble_providers
+from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
 from companion_v2.execution.models import TaskContext, TaskError, digest, require
 from companion_v2.conversation.pokes import PokePolicy
 from companion_v2.foundation.outcome import Outcome
@@ -24,16 +27,31 @@ from .multi_settings import MultiHostSettings
 from .group_settings import GroupTarget
 from .native import installed_native_types
 from .backup_api import apply_staged_restore
+from .storage_location import selected_backup_directory
 from .native_extensions import NativeExtensionRegistry, together_execution_binding
-from .settings import DELIVERY_AUTHORIZATION_TTL, HostControlError
+from .native_extensions.builtins import MANAGED_EXTENSIONS, create_bundled_extensions
+from .settings import DELIVERY_AUTHORIZATION_TTL, INSTALLATION_PREFIX, PROFILE_PATTERN, HostControlError
 from .binding import describe_pin, event_identity, is_private_message, message_text, parse_bind_command
+from .calendar_command import receive_calendar_command
 from .binding_store import PendingBinding, binding_path, clear_binding, read_binding, write_binding
 from .news import configured_news_port
+from .service_balance import configured_balance_port
+from .weather_settings import configured_weather_ports
 from .qzone_transport import build_qzone_transport
 from .solar_terms import configured_solar_term_port
+from .session_topology import SessionTopology
+from .shared_host_migration import recover_repeated_single_target
 
 
 logger = logging.getLogger(__name__)
+
+
+def laya_target_id_for_scope(settings, scope):
+    if getattr(scope, "kind", None) is not ScopeKind.PRIVATE:
+        return "installation"
+    target = settings.private_target(scope.platform, scope.account_id, scope.native_scope_id)
+    configured_target = settings.template_for(target) if target is not None else None
+    return configured_target.target_id if configured_target is not None else "installation"
 
 
 class AstrBotMultiController:
@@ -44,16 +62,22 @@ class AstrBotMultiController:
         self.native_types = native_types or installed_native_types()
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.runtime = self.authority = self.session = self.last_session = None
-        # 上一次开库时应用过的暂存还原（可能为空）。与单目标控制器同名同义，
-        # 让「还原到底生效了没有」在两个模式下读法一致。
+        # The dashboard can report whether a staged restore was applied at open.
         self.last_restore = None
         self.native_extensions = None
         self._accepting = self._terminated = False
+        # Lifecycle work may wait on AstrBot; keep that wait out of the lock
+        # shared by Dashboard data APIs.
         self._control_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self.session_topology = SessionTopology(self)
+        self._storage_profile_root = None
+        self._adopting_legacy_profile = False
         self.last_failure = None
+        self._termination_task = None
         self.poke_policy = PokePolicy()
         try:
-            self.settings = MultiHostSettings.parse(config)
+            self.settings, self._storage_profile_root, self._adopting_legacy_profile = self._resolve_settings(config)
             self.poke_policy = PokePolicy.parse(config.get("poke"))
             self.settings_error = None
         except (HostControlError, ValueError) as error:
@@ -65,13 +89,29 @@ class AstrBotMultiController:
 
     def refresh_settings(self):
         try:
-            self.settings = MultiHostSettings.parse(self.config)
+            self.settings, self._storage_profile_root, self._adopting_legacy_profile = self._resolve_settings(self.config)
             self.poke_policy = PokePolicy.parse(self.config.get("poke"))
             self.settings_error = None
         except (HostControlError, ValueError) as error:
             self.settings = None
+            self._storage_profile_root = None
+            self._adopting_legacy_profile = False
             self.settings_error = (error if isinstance(error, HostControlError) else
                                    HostControlError("host_poke_settings_invalid", str(error)))
+
+    def _resolve_settings(self, config):
+        settings = MultiHostSettings.parse(config)
+        shared_root = self.data_root / "installations" / settings.installation_key
+        legacy = config.get("staging", {}) if isinstance(config, dict) else {}
+        legacy_id = legacy.get("profile_id") if isinstance(legacy, dict) else None
+        if type(legacy_id) is str and PROFILE_PATTERN.fullmatch(legacy_id):
+            legacy_root = self.data_root / "profiles" / legacy_id
+            legacy_database = legacy_root / "runtime" / StorageRuntime.DATABASE_FILENAME
+            shared_database = shared_root / "runtime" / StorageRuntime.DATABASE_FILENAME
+            if legacy_database.is_file() and not shared_database.is_file():
+                return (replace(settings, _storage_installation_id=INSTALLATION_PREFIX + legacy_id),
+                        legacy_root, True)
+        return settings, shared_root, False
 
     def _settings(self):
         if self._terminated:
@@ -81,9 +121,23 @@ class AstrBotMultiController:
         self.settings.require_ready()
         return self.settings
 
+    def startup_readiness(self):
+        """Return a retryable readiness code until every configured Bot is online."""
+        for account in self._settings().accounts:
+            platform = self.context.get_platform_inst(account.platform_id)
+            if platform is None:
+                return "host_platform_unavailable"
+            meta = platform.meta()
+            if meta.name != "aiocqhttp" or meta.id != account.platform_id:
+                return "host_platform_changed"
+            client = platform.get_client()
+            if not getattr(client, "_wsr_api_clients", {}).get(account.self_id):
+                return "host_account_unavailable"
+        return None
+
     @property
     def profile_root(self):
-        return self.data_root / "installations" / self.settings.installation_key if self.settings else None
+        return self._storage_profile_root if self.settings else None
 
     @property
     def _multi_host(self):
@@ -143,10 +197,11 @@ class AstrBotMultiController:
         if not isinstance(self.config, dict):
             raise TaskError("setup_config_unavailable", "the plugin configuration cannot be edited here")
 
-        candidate = deepcopy(self.config)
+        candidate = deepcopy(dict(self.config))
         section = candidate.setdefault("multi_host", {})
         if type(section) is not dict:
             raise TaskError("setup_config_invalid", "the shared host settings have an invalid shape")
+        section["enabled"] = True
         targets = section.setdefault("targets", [])
         personas = section.setdefault("personas", [])
         group_targets = section.setdefault("group_targets", [])
@@ -268,13 +323,27 @@ class AstrBotMultiController:
                 parked.participant_id, parked.persona_id, confirmed=True))
         return {"confirmed": True, "binding": self.binding_state()}
 
-    def _failure(self, error):
-        code = error.code if isinstance(error, (TaskError, HostControlError)) else "host_control_failed"
-        self.last_failure = {"code": code}
-        return Outcome.failed(code, "shared host configuration, native route or authority could not be verified")
+    def _failure(self, error, *, operation=""):
+        code = (error.code if isinstance(error, (TaskError, HostControlError)) else
+                "host_module_unavailable" if isinstance(error, ImportError) else "host_control_failed")
+        if code in ("host_control_failed", "host_module_unavailable"):
+            # Keep the failing source locations, without logging exception values
+            # or locals that may contain native credentials or conversation text.
+            logger.error("[CompanionV2] 宿主操作异常 operation=%s code=%s error_type=%s\n%s",
+                         operation or "control", code, type(error).__name__,
+                         "".join(traceback.format_tb(error.__traceback__)))
+        reason = ("插件模块未能导入，请重新加载 V2 插件；若仍失败，请检查安装包是否完整并查看 AstrBot 日志。"
+                  if code == "host_module_unavailable" else
+                  str(error) if code.split("__", 1)[0] == "host_native_lookup_timeout"
+                  or code in ("host_binding_changed", "account_config_save_failed", "account_config_persistence_unavailable") else
+                  "shared host configuration, native route or authority could not be verified")
+        self.last_failure = {"code": code, "reason": reason}
+        if operation:
+            self.last_failure["operation"] = operation
+        return Outcome.failed(code, reason)
 
-    async def _probe(self):
-        settings = self._settings()
+    async def _probe(self, settings=None, *, include_conversations=True):
+        settings = settings or self._settings()
         personas = []
         for mapping in settings.personas:
             native = (None if mapping.persona_id == "[%None]" else
@@ -287,21 +356,52 @@ class AstrBotMultiController:
             installation_id=settings.installation_id, host_id=HOST_ID, identities=None,
             accounts=settings.accounts, personas=tuple(personas), now=self.now)
         conversations = {}
-        for target in settings.all_targets:
-            account = bridge.accounts[(target.platform_id, target.account_id)]
-            client = bridge.platforms[target.platform_id][1]
-            if not getattr(client, "_wsr_api_clients", {}).get(target.account_id):
+        for account in settings.accounts:
+            platform = self.context.get_platform_inst(account.platform_id)
+            client = bridge.platforms[account.platform_id][1]
+            if (platform is None or platform.get_client() is not client
+                    or not getattr(client, "_wsr_api_clients", {}).get(account.self_id)):
                 raise TaskError("host_account_unavailable", "a configured account is not connected")
+        for target in (settings.all_targets if include_conversations else ()):
+            account = bridge.accounts[(target.platform_id, target.account_id)]
+            peer = target.participant_id if hasattr(target, "participant_id") else target.group_id
+            if peer == "*":
+                continue
             if target in settings.targets:
-                conversation, _, _ = await bridge._role(account, target.participant_id)
-                conversations[target.target_id] = conversation
+                umo = bridge._umo(target.platform_id, target.participant_id)
+                conversation_id, _, _, _ = await bridge._selected_persona(account, umo)
+                conversations[target.target_id] = {
+                    "target": target, "conversation_id": bridge._conversation_key(umo, conversation_id),
+                    "role_ids": tuple(sorted({item.role_id for item in settings.personas if item.bot_id == target.bot_id})),
+                }
             # Groups resolve the actual event's UMO, including member sessions,
             # at admission. No human speaker is fabricated during startup.
+        if include_conversations and any(target.participant_id == "*" for target in settings.targets):
+            inventory = await self.session_topology.inventory(settings=settings, scope_kind="private")
+            for window in inventory:
+                if window.get("native") is not True or window.get("scope_kind") != "private":
+                    continue
+                target = settings.private_target(window.get("platform_id"), window.get("account_id"),
+                                                 window.get("participant_id"))
+                if target is None or target.participant_id == "*" or window.get("bot_id") != target.bot_id:
+                    continue
+                mapping = next((item for item in settings.personas if item.bot_id == target.bot_id
+                                and item.persona_id == window.get("persona_id")), None)
+                if mapping is None:
+                    continue
+                conversations[target.target_id] = {
+                    "target": target,
+                    "conversation_id": bridge._conversation_key(window["unified_msg_origin"], window.get("conversation_id")),
+                    "role_ids": (mapping.role_id,),
+                }
         provider = self.context.get_provider_by_id(settings.common.provider_id)
         if type(provider) is not self.native_types.provider:
             raise TaskError("host_provider_unavailable", "the configured model has no verified native adapter")
         assemble_providers(self.context, bridge=None, native_types=self.native_types,
-                           primary_id=settings.common.provider_id, additional=settings.common.additional_providers)
+                           primary_id=settings.common.provider_id, additional=settings.common.additional_providers,
+                           defaults=TextProviderSettings(settings.common.provider_id, settings.common.tariff,
+                               settings.common.max_output_tokens, settings.common.maximum_input_estimate,
+                               settings.common.output_parameter, settings.common.streaming))
         manifest = {"binding_contract": settings.binding_contract,
                     "settings_fingerprint": settings.fingerprint, "provider_fingerprint": provider_fingerprint(provider),
                     "personas": [asdict(persona) for persona in personas]}
@@ -315,11 +415,15 @@ class AstrBotMultiController:
             root = self.profile_root
             if root is None:
                 raise HostControlError("staging_settings_invalid", "a profile directory could not be resolved")
-            # 暂存还原在这里生效，和单目标控制器同一处、同一个函数、同一个理由：
-            # 这是数据库文件唯一能在不留下孤儿连接的情况下被替换的时刻（开库之前）。
-            # 少了这一步，多目标下「还原暂存成功、重启永远不生效」——比入口点不动更糟。
-            self.last_restore = apply_staged_restore(root / "runtime", installation_id=settings.installation_id)
+            # Apply restores before opening SQLite, while replacing the database is safe.
+            storage = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
+            backup_directory = selected_backup_directory(
+                root / "runtime", storage.get("backup_path", "") if isinstance(storage, dict) else "",
+                settings.installation_id, plugin_root=self.data_root)
+            self.last_restore = apply_staged_restore(root / "runtime", installation_id=settings.installation_id,
+                                                     backup_directory=backup_directory)
             self.runtime = StorageRuntime.open(data_root=root / "runtime", installation_id=settings.installation_id)
+            self.runtime.backup_directory = backup_directory
             self.authority = MultiAuthority(self.runtime, settings, now=self.now)
 
     def _assemble(self, manifest):
@@ -328,26 +432,49 @@ class AstrBotMultiController:
             for item in manifest["personas"])
         if self.native_extensions is not None:
             self.native_extensions.close()
+        bundled_extensions, bundled_issues = create_bundled_extensions(self.runtime.data_root, now=self.now)
         self.native_extensions = NativeExtensionRegistry(self.context, now=self.now,
             together_execution=together_execution_binding(self.settings.common),
-            image_settings_path=self.data_root / "model_image_routes.json")
+            image_settings_path=self.data_root / "model_image_routes.json",
+            bundled_extensions=bundled_extensions, bundled_issues=bundled_issues,
+            managed_extensions=MANAGED_EXTENSIONS)
         self.session = MultiHostSession(self.runtime, self.context, settings=self.settings, personas=personas,
             authority=self.authority, native_types=self.native_types, provider_fingerprint=manifest["provider_fingerprint"],
             runtime_instance_id="astrbot-multi-" + uuid4().hex, native_tool_port=self.native_extensions, now=self.now,
             news_port=configured_news_port(self.config),
+            balance_port=configured_balance_port(self.config),
+            weather_ports=configured_weather_ports(self.config),
             qzone_transport=build_qzone_transport(self.context, data_root=self.data_root),
             solar_term_port=configured_solar_term_port(
                 self.config.get("solar_terms") if isinstance(self.config, dict) else None))
+        from .worker_lifecycle import AstrBotWorkerLifecycle
+        self.session.application.tasks.bind_worker_lifecycle(AstrBotWorkerLifecycle())
+        from .knowledge_sources import attach_official_knowledge
+        attach_official_knowledge(self.session.application, self.context)
         from .semantic_models import NativeSemanticModels, configured_slang_search_port
         self.session.application.attach_semantics(NativeSemanticModels(self.context, self.settings.common.provider_id,
                                                                       configured_slang_search_port()))
+        from companion_v2.decision import LayaDecisionService, LayaSettingsStore
+
+        def laya_for_context(context):
+            scope = context.scope
+            role = context.role_binding.role
+            # `native_scope_id` identifies the peer, while the Dashboard
+            # persists settings under the configured target id.  Resolve the
+            # same target mapping used during admission, including templates.
+            target_id = laya_target_id_for_scope(self.settings, scope)
+            return LayaDecisionService(LayaSettingsStore(
+                self.data_root, target_id,
+                getattr(role, "subject_id", "default")))
+
+        self.session.application.attach_laya_decision(laya_for_context)
 
     def _idle(self):
         if self.session is not None and self.session.application.state not in ("new", "stopped"):
             raise TaskError("host_must_stop", "stop the shared host and its outstanding work before changing configuration")
 
     async def probe(self):
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 manifest, _ = await self._probe()
                 return Outcome.success({"installation_id": self.settings.installation_id,
@@ -355,73 +482,218 @@ class AstrBotMultiController:
                     "group_targets": len(self.settings.group_targets),
                     "personas": len(self.settings.personas), "model_request_sent": False, "platform_message_sent": False})
             except Exception as error:
-                return self._failure(error)
+                return self._failure(error, operation="probe")
 
     async def initialize_profile(self):
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 self._idle()
                 manifest, conversations = await self._probe()
-                self._open()
-                with self.runtime.transaction():
-                    receipt = self.authority.initialize(manifest)
-                    for target in self.settings.targets:
-                        for item in manifest["personas"]:
-                            if item["bot_id"] != target.bot_id:
-                                continue
-                            role = SubjectRef(self.settings.installation_id, SubjectKind.BOT, item["role"]["subject_id"])
-                            from companion_v2.foundation.refs import ScopeKind, ScopeRef
-                            scope = ScopeRef(self.settings.installation_id, target.platform_id, ScopeKind.PRIVATE,
-                                target.participant_id, target.bot_id, target.account_id,
-                                persona_conversation(conversations[target.target_id], role), target.participant_id)
-                            self.authority.provision_scope(target, scope, role)
-                self._assemble(manifest)
+                async with self._control_lock:
+                    if self._terminated:
+                        raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                    self._idle()
+                    receipt = self._initialize_manifest_locked(manifest, conversations)
                 self.last_failure = None
                 return Outcome.success(receipt)
             except Exception as error:
-                return self._failure(error)
+                return self._failure(error, operation="initialize_profile")
+
+    def _initialize_manifest_locked(self, manifest, conversations):
+        self._open()
+        with self.runtime.transaction():
+            receipt = self.authority.initialize(manifest, allow_legacy_staging=self._adopting_legacy_profile)
+            for conversation in conversations.values():
+                target = conversation["target"]
+                for role_id in conversation["role_ids"]:
+                    role = SubjectRef(self.settings.installation_id, SubjectKind.BOT, role_id)
+                    from companion_v2.foundation.refs import ScopeKind, ScopeRef
+                    scope = ScopeRef(self.settings.installation_id, target.platform_id, ScopeKind.PRIVATE,
+                        target.participant_id, target.bot_id, target.account_id,
+                        persona_conversation(conversation["conversation_id"], role), target.participant_id)
+                    self.authority.provision_scope(target, scope, role)
+        self._assemble(manifest)
+        return receipt
+
+    async def apply_bindings(self, candidate):
+        """Apply Dashboard-reviewed routes while retaining existing native owners."""
+        result = None
+        settings = None
+        async with self._lifecycle_lock:
+            # A reviewed mapping change is itself a lifecycle operation.  Stop
+            # the current runtime inside this operation and bring the new
+            # mapping back up before returning to the page, so a save never
+            # leaves the Dashboard showing a stale or half-loaded host.
+            async with self._control_lock:
+                if self._terminated:
+                    raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                settings, profile_root, adopting_legacy_profile = self._resolve_settings(candidate)
+                save = getattr(self, "save_plugin_config", None)
+                if not callable(save):
+                    raise TaskError("account_config_persistence_unavailable", "the host has no plugin configuration writer")
+            manifest, _ = await self._probe(settings, include_conversations=False)
+            self._accepting = False
+            session = self.session
+            if session is not None:
+                report = await session.close(grace_seconds=2)
+                if report.state != "stopped":
+                    raise TaskError("host_must_stop", "the current session is still stopping")
+            async with self._control_lock:
+                if self._terminated:
+                    raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                self._idle()
+                root = profile_root / "runtime"
+                if self.runtime is not None and (self.runtime.data_root != root.resolve()
+                        or self.runtime.installation_id != settings.installation_id):
+                    raise TaskError("host_storage_changed", "stop and reload before changing the active V2 data installation")
+                opened_here = self.runtime is None
+                if self.runtime is None and (root / StorageRuntime.DATABASE_FILENAME).is_file():
+                    self.runtime = StorageRuntime.open(data_root=root, installation_id=settings.installation_id)
+                    storage = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
+                    self.runtime.backup_directory = selected_backup_directory(
+                        root, storage.get("backup_path", "") if isinstance(storage, dict) else "",
+                        settings.installation_id, plugin_root=self.data_root)
+                try:
+                    if self.runtime is not None:
+                        authority = MultiAuthority(self.runtime, settings, now=self.now)
+                        with self.runtime.transaction():
+                            authority.initialize(manifest, reviewed=True,
+                                                 allow_legacy_staging=adopting_legacy_profile)
+                            save(candidate)
+                        self.runtime.close()
+                        self.runtime = self.authority = None
+                    else:
+                        save(candidate)
+                except Exception:
+                    if opened_here and self.runtime is not None:
+                        self.runtime.close()
+                        self.runtime = self.authority = None
+                    raise
+                if self.native_extensions is not None:
+                    self.native_extensions.close()
+                    self.native_extensions = None
+                self.session = self.last_session = None
+                self.refresh_settings()
+                self._accepting = False
+                self.last_failure = None
+                registered = bool(self.web_api._registered_routes)
+                if registered:
+                    self.unregister_routes()
+                    self.register_routes()
+                result = {"saved": True, "requires_reload": False, "requires_initialize": False,
+                          "started": False}
+        # The old runtime is released before this point.  Re-enter the public
+        # lifecycle methods only after the apply lock has been released; both
+        # methods acquire the same lifecycle lock themselves.
+        if settings.enabled:
+            initialized = await self.initialize_profile()
+            if initialized.failure is not None:
+                result.update(requires_initialize=True, started=False,
+                              startup_error=initialized.failure.code)
+                return result
+            started = await self.start()
+            if started.failure is not None:
+                result.update(started=False, startup_error=started.failure.code)
+                return result
+            result["started"] = True
+        return result
 
     async def load_existing(self):
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 self._settings()
                 if not (self.profile_root / "runtime" / StorageRuntime.DATABASE_FILENAME).is_file():
                     return Outcome.success({"loaded": False, "started": False})
                 self._idle()
-                self._open()
-                manifest = self.authority.require_manifest()
-                probed, _ = await self._probe()
-                self.authority.require_manifest(probed)
-                self._assemble(probed)
+                # Loading verifies the saved account/persona manifest. Window
+                # provisioning belongs to start(), after the host is assembled.
+                probed, _ = await self._probe(include_conversations=False)
+                async with self._control_lock:
+                    if self._terminated:
+                        raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                    self._idle()
+                    self._open()
+                    try:
+                        self.authority.require_manifest(probed)
+                    except TaskError as error:
+                        if error.code != "host_binding_changed":
+                            raise
+                        saved = self.authority.require_manifest()
+                        candidate, repaired = recover_repeated_single_target(self.config, saved.get("binding_contract"))
+                        if not repaired:
+                            raise
+                        probed = self._recover_saved_mapping(candidate, probed)
+                    self._assemble(probed)
+                self.last_failure = None
                 return Outcome.success({"loaded": True, "started": False})
             except Exception as error:
-                return self._failure(error)
+                return self._failure(error, operation="load_existing")
+
+    def _recover_saved_mapping(self, candidate, manifest):
+        """Restore a migration-generated extra route to the durable reviewed map."""
+        settings, root, adopting_legacy_profile = self._resolve_settings(candidate)
+        if (root / "runtime" != self.runtime.data_root or settings.installation_id != self.runtime.installation_id):
+            raise TaskError("host_storage_changed", "the recovered mapping must keep the existing V2 installation")
+        restored = {**manifest, "binding_contract": settings.binding_contract,
+                    "settings_fingerprint": settings.fingerprint}
+        restored.pop("fingerprint", None)
+        restored["fingerprint"] = digest(restored)
+        self.authority.require_manifest(restored)
+        save = getattr(self, "save_plugin_config", None)
+        if not callable(save):
+            raise TaskError("account_config_persistence_unavailable", "恢复已保存映射需要可用的插件配置保存接口。")
+        try:
+            save(candidate)
+        except Exception as error:
+            raise TaskError("account_config_save_failed", "自动恢复角色映射时保存失败，请检查插件配置文件是否可写。") from error
+        self.settings, self.settings_error = settings, None
+        self._storage_profile_root, self._adopting_legacy_profile = root, adopting_legacy_profile
+        self.authority.settings = settings
+        if self.web_api._registered_routes:
+            self.unregister_routes()
+            self.register_routes()
+        logger.info("[CompanionV2] 已移除重复迁移的旧私聊目标，恢复已保存的角色映射")
+        return restored
 
     async def start(self):
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             try:
                 self._settings()
                 if self.session is not None and self.session.application.state == "running":
                     return Outcome.success({"state": "running", "replayed": True})
                 self._idle()
-                if not (self.profile_root / "runtime" / StorageRuntime.DATABASE_FILENAME).is_file():
-                    raise TaskError("host_not_initialized", "initialize the shared installation first")
-                self._open()
-                manifest, _ = await self._probe()
-                self.authority.require_manifest(manifest)
-                if self.session is None or self.session.application.state != "new":
-                    self._assemble(manifest)
-                task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
-                model = self.runtime.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?", ("model_gateway",))
-                result = await self.session.start(expected_task_generation=task["generation"] if task else 0,
-                                                  expected_model_generation=model["generation"] if model else 0)
+                manifest, conversations = await self._probe()
+                async with self._control_lock:
+                    if self._terminated:
+                        raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                    self._settings()
+                    self._idle()
+                    self._open()
+                    try:
+                        self.authority.require_manifest(manifest)
+                    except TaskError as error:
+                        if error.code != "host_not_initialized":
+                            raise
+                        self._initialize_manifest_locked(manifest, conversations)
+                        self.authority.require_manifest(manifest)
+                    if self.session is None or self.session.application.state != "new":
+                        self._assemble(manifest)
+                    session = self.session
+                    task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
+                    model = self.runtime.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?", ("model_gateway",))
+                    task_generation = task["generation"] if task else 0
+                    model_generation = model["generation"] if model else 0
+                result = await session.start(expected_task_generation=task_generation,
+                                             expected_model_generation=model_generation)
                 require(result)
-                self._settings()
-                self._accepting, self.last_failure = True, None
-                return Outcome.success({"state": "running", "targets": len(self.settings.all_targets), "startup": result.unwrap()})
+                async with self._control_lock:
+                    self._settings()
+                    self._accepting, self.last_failure = True, None
+                    targets = len(self.settings.all_targets)
+                return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
             except Exception as error:
                 self._accepting = False
-                return self._failure(error)
+                return self._failure(error, operation="start")
 
     def target_for_event(self, event):
         if type(event) is not self.native_types.event or self.settings is None:
@@ -430,7 +702,7 @@ class AstrBotMultiController:
             message, session, meta = event.message_obj, event.session, event.platform_meta
             if getattr(message.type, "value", None) == "GroupMessage":
                 route = group_event_route(event)
-                target = next((t for t in self.settings.group_targets if t.route_key == route.route_key), None)
+                target = self.settings.group_target(route.platform_id, route.account_id, route.group_id)
                 platform = self.context.get_platform_inst(meta.id)
                 if (target is None or platform is None or platform.get_client() is not event.bot
                         or not event.bot._wsr_api_clients.get(route.account_id)):
@@ -442,12 +714,36 @@ class AstrBotMultiController:
                     or meta.name != "aiocqhttp" or session.platform_id != meta.id or session.platform_name != meta.id
                     or session.session_id != sender or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
                 return None
-            target = next((target for target in self.settings.targets if target.route_key == (meta.id, login, sender)), None)
-            if target is None or self.context.get_platform_inst(meta.id).get_client() is not event.bot:
+            target = self.settings.private_target(meta.id, login, sender)
+            platform = self.context.get_platform_inst(meta.id)
+            if target is None or platform is None or platform.get_client() is not event.bot:
                 return None
             return target
         except (ValueError, AttributeError, TypeError):
             return None
+
+    async def persona_mapping_for_event(self, event):
+        """Return the registered character for this event's current AstrBot persona."""
+        target = self.target_for_event(event)
+        session = self.session
+        if target is None or session is None:
+            return None
+        if isinstance(target, GroupTarget):
+            route = group_event_route(event)
+            bridge = session.bridge.groups
+            native_scope_id = route.session_id
+        else:
+            bridge = session.bridge
+            native_scope_id = target.participant_id
+        account = bridge.accounts.get((target.platform_id, target.account_id))
+        if account is None or account.bot_id != target.bot_id:
+            return None
+        umo = bridge._umo(target.platform_id, native_scope_id)
+        _, persona_id, _, special = await bridge._selected_persona(account, umo)
+        if special or type(persona_id) is not str:
+            return None
+        return next((mapping for mapping in self.settings.personas
+                     if mapping.bot_id == target.bot_id and mapping.persona_id == persona_id), None)
 
     def claims(self, event):
         from .recalls import is_notice_event
@@ -463,15 +759,52 @@ class AstrBotMultiController:
         from .recalls import receive_notice
         return await receive_notice(self, event)
 
-    async def receive_claimed(self, event):
+    async def observe_context_reset(self, event):
+        from .conversation_reset import observe_context_reset
+        return await observe_context_reset(self, event)
+
+    async def observe_group_early(self, event):
+        """Run the V1-style group preflight before reply admission.
+
+        The early hook is deliberately limited to an exact configured,
+        authenticated group route.  It only captures the bounded text
+        skeleton and materializes the group persona binding; attachment
+        preparation, model generation and delivery remain in ``receive``.
+        """
+        from .group_settings import GroupTarget
+
+        if (not self._accepting or self._terminated or self.session is None
+                or self.session.application.state != "running"):
+            return Outcome.failed("host_not_claimed", "the shared host is not accepting group input")
+        try:
+            target = self.target_for_event(event)
+        except (TaskError, ValueError, AttributeError, TypeError):
+            target = None
+        if not isinstance(target, GroupTarget):
+            return Outcome.failed("host_target_unavailable", "the native group route is not configured")
+        return await self.session.prepare_group(event, target)
+
+    async def group_reply_candidate(self, event):
+        session, target = self.session, self.target_for_event(event)
+        if not self.claims(event) or session is None or not isinstance(target, GroupTarget):
+            return Outcome.failed("host_not_claimed", "group reply candidate requires an active configured target")
+        return await session.prepare_group(event, target, reply_candidate=True)
+
+    async def receive_claimed(self, event, *, on_refusal=None, group_admission=None):
         session, target = self.session, self.target_for_event(event)
         if not self.claims(event) or session is None or target is None:
             return Outcome.failed("host_not_claimed", "the native event is outside the active configured targets")
         try:
-            result = await session.receive(event, target)
+            command_result = await receive_calendar_command(self, event, session,
+                target=target if is_private_message(event) else None)
+            if command_result is not None:
+                return command_result
+            result = await session.receive(event, target, group_admission=group_admission)
             if result.failure is not None and result.failure.code == "private_access_dialogue_denied":
                 # 没有对话权限：按配置回一句（真实投递模式才发）。发送失败不影响"拒绝"本身。
-                await self._refuse_private(session, event)
+                receipt = await self._refuse_private(session, event)
+                if callable(on_refusal):
+                    on_refusal(receipt)
             return result
         except Exception as error:
             return self._failure(error)
@@ -588,14 +921,17 @@ class AstrBotMultiController:
 
     async def stop(self, *, grace_seconds=0.5):
         self._accepting = False
-        async with self._control_lock:
+        async with self._lifecycle_lock:
             self._accepting = False
             try:
-                if self.session is None:
+                async with self._control_lock:
+                    session = self.session
+                if session is None:
                     return Outcome.success({"state": "stopped", "pending_handles": []})
-                report = await self.session.close(grace_seconds=grace_seconds)
-                if report.state == "stopped":
-                    self.last_session, self.session = self.session, None
+                report = await session.close(grace_seconds=grace_seconds)
+                async with self._control_lock:
+                    if report.state == "stopped" and self.session is session:
+                        self.last_session, self.session = session, None
                 return Outcome.success(report)
             except Exception as error:
                 return self._failure(error)
@@ -609,7 +945,10 @@ class AstrBotMultiController:
                 "group_delivery_mode": (
                     self.settings.group_delivery_mode if self.settings else None
                 ),
-                "state": session.application.state if session else "uninitialized", "accepting": self._accepting,
+                "state": session.application.state if session else "uninitialized",
+                "accepting": self._accepting and session is not None and session.application.state == "running",
+                "failure_code": session.application.failure_code if session else None,
+                "failure_detail": session.application.failure_detail if session else None,
                 "targets": self.web_api.target_inventory(), "last_failure": self.last_failure,
                 "settings_error": getattr(self.settings_error, "code", None)}
 
@@ -621,6 +960,8 @@ class AstrBotMultiController:
 
     async def terminate(self):
         self._terminated, self._accepting = True, False
+        if self._termination_task is not None:
+            return
         try:
             result = await self.stop(grace_seconds=2)
             if result.is_success:
@@ -628,15 +969,34 @@ class AstrBotMultiController:
                 state = report.get("state") if isinstance(report, dict) else report.state
             else:
                 state = None
-            if self.runtime is not None:
-                if state != "stopped":
-                    # 卸载时把 SQLite 句柄留在进程里，会让下一次 staged 还原的
-                    # os.replace 在 Windows 上永久失败，所以未达 stopped 也必须关。
-                    logger.warning("[CompanionV2] multi 停机未达 stopped，仍关闭存储 runtime 释放文件句柄")
-                self.runtime.close()
-                self.runtime = None
+            if state != "stopped" and self.session is not None:
+                logger.warning("[CompanionV2] 工作任务仍在退出，保留存储直到停止证明写入完成")
+                self._termination_task = asyncio.create_task(self._finish_termination(),
+                    name="companion:host-drain")
+            else:
+                await self._release_runtime()
         finally:
+            self.unregister_routes()
+
+    async def _release_runtime(self):
+        async with self._control_lock:
+            if self.runtime is not None:
+                self.runtime.close()
+                self.runtime = self.authority = None
             if self.native_extensions is not None:
                 self.native_extensions.close()
                 self.native_extensions = None
-            self.unregister_routes()
+
+    async def _finish_termination(self):
+        try:
+            while True:
+                report = await self.session.close(grace_seconds=0)
+                if report.state == "stopped":
+                    self.last_session, self.session = self.session, None
+                    await self._release_runtime()
+                    logger.info("[CompanionV2] 延迟停机完成，工作任务停止证明已保存")
+                    return
+                await asyncio.sleep(0.25)
+        except Exception as error:
+            self._failure(error, operation="terminate_drain")
+            self._termination_task = None

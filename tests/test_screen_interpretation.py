@@ -17,9 +17,10 @@ import json
 import unittest
 
 from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
+from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.configuration.registry import FieldRegistry
-from companion_v2.execution.models import digest, stamp
+from companion_v2.execution.models import TaskError, digest, stamp
 from companion_v2.foundation.refs import (AssetRef, AudienceRef, OperationRef, RoleOwnerRef, SourceRef, VersionRef)
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.model_gateway.models import Amount, ProviderBinding, LocalProvider
@@ -196,6 +197,87 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
         withdrawn = app.screen_repository.latest_analysis(scope=context.scope, resolved=context.actor,
                                                           observed_at=self.clock.now())
         self.assertEqual(withdrawn.failure.code, "capability_consent_revoked")
+
+    async def test_authorized_screen_producer_validates_and_rejects_revocation(self):
+        async def interpret(envelope):
+            return answered(INTERPRETATION)
+
+        self.model_behavior = interpret
+        app = (await self.start()).application
+        self.window_settings(app, {"interpretation_enabled": True}).unwrap()
+        self.settings(app, {"enabled": True, "automatic_enabled": True, "screen.enabled": True,
+                            "screen_glance_enabled": True,
+                            "chat.enabled": False}).unwrap()
+        context = self.contact_context()
+        capture = self.publish_capture(app)
+        self.assertIsNotNone(app.screen_interpretation.submit(
+            context, capture.reference, purpose="glance", role_instruction="保持这个角色。"))
+        await self.until(lambda: self._anchors() == 1)
+
+        preferences = self.preferences(app, context)
+        events = app.contact_schedule.screen_events
+        candidate = events.select(context, preferences, self.clock.now())
+        self.assertIsNotNone(candidate)
+        _opportunity, intents, marker = candidate
+        self.assertEqual(intents[0].purpose, "screen")
+        events.validate(context, marker, self.clock.now())
+        source = intents[0].thought.evidence.sources[0]
+        self.assertTrue(app.proactive.sources.validate_reference_for_audience(
+            source, recipient=context.actor.subject, observed_at=self.clock.now()).is_success)
+
+        CapabilityRepository(self.runtime).set_authorization(extension_id=SCREEN_EXTENSION,
+            capability_id=SCREEN_READ, subject=self.important.subject, scope=SCOPE,
+            state=CapabilityAuthorizationState.REVOKED, expected_revision=1,
+            observed_at=self.clock.now()).unwrap()
+        with self.assertRaises(TaskError):
+            events.validate(context, marker, self.clock.now())
+
+    async def test_screen_observation_reaches_contact_composition_and_confirmed_delivery(self):
+        async def respond(envelope):
+            if envelope.original.output_format == "screen_interpretation":
+                return answered(INTERPRETATION)
+            if envelope.original.output_format == "proactive_contact":
+                return answered('{"decision":"send","text":"看起来你还在查看代码编辑器。"}')
+            return answered("收到。")
+
+        self.model_behavior = respond
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        app.contact_schedule.advance = lambda: None
+        self.window_settings(app, {"interpretation_enabled": True}).unwrap()
+        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 0,
+                            "screen.enabled": True, "screen_glance_enabled": True,
+                            "chat.enabled": False}).unwrap()
+        context = self.contact_context()
+        capture = self.publish_capture(app)
+        self.assertIsNotNone(app.screen_interpretation.submit(
+            context, capture.reference, purpose="glance", role_instruction="保持这个角色。"))
+        await self.until(lambda: self._anchors() == 1)
+
+        batch = host.receive(self.event("screen-contact-input", text="我准备继续处理代码。")).unwrap()
+        await self.done(app, batch)
+        row = app.runtime.read_one("""SELECT f.sequence, b.* FROM conversation_flows f
+            JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
+            ORDER BY f.sequence DESC LIMIT 1""",
+            (context.scope.key,))
+        plan = app.contact_schedule._plan(row, self.clock.now())
+        self.assertIsNotNone(plan, app.runtime.read_all("""SELECT task_id, kind, state FROM execution_tasks
+            WHERE kind LIKE 'proactive.%' ORDER BY created_at DESC""", ()))
+        self.assertIn("screen_event", plan[4])
+        self.assertEqual([intent.purpose for intent in plan[2]], ["screen"])
+        self.assertTrue(any(source.owner == "proactive.screen" for source in plan[2][0].thought.evidence.sources))
+
+        await app.contact_schedule._run(plan)
+        contact = app.runtime.read_one("SELECT * FROM proactive_contacts WHERE origin_key = ?",
+                                       (context.key,))
+        self.assertIsNotNone(contact)
+        self.assertEqual(json.loads(contact["record_json"])["purpose"], "screen")
+        await self.delivery_state(app, contact["task_id"], "delivered")
+        compose = [call.original for call in self.called if call.original.output_format == "proactive_contact"]
+        self.assertEqual(len(compose), 1)
+        evidence = [item.payload for item in compose[0].context.materials if item.purpose == "contact_evidence"]
+        self.assertTrue(any("代码编辑器" in item for item in evidence))
+        self.assertEqual(app.proactive.observe(context, contact["task_id"]).unwrap()["delivery"], "delivered")
 
     async def test_disabled_window_never_calls_the_model(self):
         host = await self.start()

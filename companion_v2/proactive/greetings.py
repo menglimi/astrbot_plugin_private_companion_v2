@@ -28,9 +28,9 @@ ANCHOR_PURPOSE = "greeting"
 INSOMNIA_PURPOSE = "care"
 DAY_ANCHORS = ("morning_greeting", "noon_greeting", "evening_greeting")
 ANCHOR_MEANING = {
-    "morning_greeting": ("刚睡醒，想打个招呼", "刚醒"),
-    "noon_greeting": ("中午有些犯困，想打个招呼", "午饭后那会儿"),
-    "evening_greeting": ("晚上闲下来时，想打个招呼", "天暗下来那会儿")}
+    "morning_greeting": ("早上有一个轻轻碰面的机会", "早上"),
+    "noon_greeting": ("午间有一个自然开口的机会", "午间"),
+    "evening_greeting": ("晚上有一个轻轻碰面的机会", "晚上")}
 
 
 def window_bounds(value):
@@ -168,13 +168,13 @@ class GreetingContactEvents:
             return None
         if marker["kind"] == "insomnia_night":
             hint = self._sleep_hint(context, at)
-            summary = ("角色此刻处在夜里还醒着的时段，可以留一句低压力的话；不报时、不追问、不要求回应。"
+            summary = ("现在落在配置的夜间低压力问候窗口，可以留一句轻的话；不把时段当成事实，不报时、不追问、不要求回应。"
                        + ("角色状态里有一条睡眠相关的临时状况：" + hint if hint else ""))
             purpose = INSOMNIA_PURPOSE
         else:
             why, topic = ANCHOR_MEANING[marker["anchor"]]
             summary = (f"按已配置时区，现在的本地日期是{marker['local_date']}，这是「{topic}」的问候窗口：{why}。"
-                       "这是低压力问候，不代表对方刚醒、刚吃完饭或已经空闲；没有自然说法就跳过。")
+                       "窗口只提供一个可以自然碰面的时机，不代表对方刚醒、刚吃完饭或已经空闲；没有合适的具体话头就跳过。")
             purpose = ANCHOR_PURPOSE
         thought = Thought("greeting-event-" + digest(marker), opportunity, ThoughtKind.CONVERSATION,
                           summary, EvidenceSnapshot(context.scope, at), 1.0)

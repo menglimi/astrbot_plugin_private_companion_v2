@@ -308,12 +308,11 @@
      层级就只剩下噪音。字号收敛成八档之后，"哪一行是标题"由档位回答，
      不再靠 0.5px 的差别暗示。
 
-     小字只留 micro / tiny 两档：曾经还有一档 --fs-small(12.5px)，
-     与 --fs-body(13.5px) 只差 1px，读起来是同一级却各占一档，
-     反而让"标签 vs 正文"的界线变模糊，因此合并进 body。 */
-  --fs-micro:calc(10.5px * var(--font-scale));
-  --fs-tiny:calc(11.5px * var(--font-scale));
-  --fs-body:calc(13.5px * var(--font-scale));
+     辅助信息使用 12 / 13px，正文使用 14px；全部随字号与密度偏好同步。
+     避免大量说明低于 12px，让配置页的次要信息仍然可读。 */
+  --fs-micro:calc(12px * var(--font-scale));
+  --fs-tiny:calc(13px * var(--font-scale));
+  --fs-body:calc(14px * var(--font-scale));
   --fs-lead:calc(15px * var(--font-scale));
   --fs-title:calc(17px * var(--font-scale));
   --fs-head:calc(21px * var(--font-scale));
@@ -350,6 +349,21 @@
 
 /* === 组件级令牌 === */
 :root{
+  --room-swatch-default:linear-gradient(145deg, #c7b79c 0 40%, #768c81 40% 72%, #eee5d4 72%);
+  --room-swatch-house-classic:linear-gradient(145deg, #b78554 0 42%, #6d8a78 42% 72%, #ede2c7 72%);
+  --room-swatch-house-washitsu:linear-gradient(145deg, #b7b185 0 42%, #788369 42% 72%, #e4dfc9 72%);
+  --room-swatch-house-loft:linear-gradient(145deg, #a96e57 0 42%, #596d70 42% 72%, #a7aaa1 72%);
+  --room-swatch-house-french:linear-gradient(145deg, #f2e9da 0 42%, #b8b89e 42% 72%, #d1b18b 72%);
+  --room-swatch-house-coastal:linear-gradient(145deg, #f0f0df 0 42%, #5e8d9b 42% 72%, #e5dfc7 72%);
+  --room-swatch-house-cabin:linear-gradient(145deg, #7e5c3f 0 42%, #799079 42% 72%, #c6a173 72%);
+  --finish-swatch-oak:linear-gradient(145deg, #d0a574 0 42%, #507e7a 42% 72%, #f5ecd9 72%);
+  --finish-swatch-cream:linear-gradient(145deg, #efe2c8 0 42%, #c7b897 42% 72%, #f8f2e8 72%);
+  --finish-swatch-ink:linear-gradient(145deg, #435369 0 42%, #d7b66c 42% 72%, #aebbc0 72%);
+  --finish-swatch-rattan:linear-gradient(145deg, #c6a16a 0 42%, #91a17a 42% 72%, #d6c59c 72%);
+  --finish-swatch-walnut:linear-gradient(145deg, #76503a 0 42%, #986d46 42% 72%, #bc996e 72%);
+  --finish-swatch-loft:linear-gradient(145deg, #38474b 0 42%, #72888a 42% 72%, #b9c4bf 72%);
+  --finish-swatch-blossom:linear-gradient(145deg, #d99fac 0 42%, #9c6c80 42% 72%, #f0c6ca 72%);
+  --finish-swatch-nordic:linear-gradient(145deg, #d0b589 0 42%, #91a899 42% 72%, #e4eadb 72%);
   --card-bg:var(--t-surface);
   --card-border:var(--t-line);
   --card-radius:var(--r-md);

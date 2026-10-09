@@ -289,8 +289,12 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
             return answered('{"decision":"skip","text":""}')
         self.model_behavior = skip
         self.assertEqual((await self.contact(app)).unwrap().task.state, "succeeded")
+        usage = app.proactive.budget.attempt_usage(self.contact_context(), self.preferences(app), self.clock.now())
+        self.assertEqual(usage["session"], {"used": 1, "limit": 1, "window_hours": 24})
         self.assertEqual((await self.contact(app, self.opportunity("next"))).failure.code, "contact_attempt_budget")
         self.clock.advance(timedelta(hours=24))
+        usage = app.proactive.budget.attempt_usage(self.contact_context(), self.preferences(app), self.clock.now())
+        self.assertEqual(usage["session"]["used"], 0)
         self.assertEqual((await self.contact(app, self.opportunity("next"))).unwrap().task.state, "succeeded")
         self.assertEqual(self.sent, [])
 

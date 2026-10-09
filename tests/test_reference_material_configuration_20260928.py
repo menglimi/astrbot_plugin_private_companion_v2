@@ -107,7 +107,7 @@ class MaterialFieldContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(reference[name].minimum, low)
                 self.assertEqual(reference[name].maximum, high)
-        for name in ("enabled", "daily_outfit_enabled"):
+        for name in ("enabled", "group_enabled", "daily_outfit_enabled"):
             with self.subTest(name=name):
                 self.assertIsNone(reference[name].minimum)
                 self.assertIsNone(reference[name].maximum)

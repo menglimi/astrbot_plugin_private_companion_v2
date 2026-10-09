@@ -186,10 +186,13 @@ class DeliveryContent:
     plan: OutboundPlan | None = None
     voice: VoicePlan | None = None
     poke: PokePlan | None = None
+    allow_cross_scope_images: bool = False
 
     def __post_init__(self):
         if type(self.text) is not str or type(self.images) is not tuple:
             raise ValueError("delivery content requires text and an ordered image tuple")
+        if type(self.allow_cross_scope_images) is not bool:
+            raise ValueError("delivery image scope authorization must be explicit")
         for name in ("plan", "voice", "poke"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, (OutboundPlan, VoicePlan, PokePlan)):

@@ -175,7 +175,8 @@ class MoodStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
                              operation_key="one")
         self.configure(manager, mood_enabled=False)
         read = app.role_state.read(context)
-        self.assertEqual(read["values"]["mood"]["joy"], 7)
+        self.assertIsNone(read["values"]["mood"])
+        self.assertEqual(app.role_state.records.get(context, "current")["values"]["mood"]["joy"], 7)
         self.assertNotIn("mood_dynamics", read)
 
 

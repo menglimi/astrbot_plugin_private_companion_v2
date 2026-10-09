@@ -625,8 +625,8 @@ test("全屏阶段不交互，标题与按钮仍保留布局空间", () => {
     path.join(__dirname, "..", "pages", "陪伴小屋", "entrance.css"), "utf8");
   assert.ok(/\.is-entrance\s+\.stage-region\s+\.voxel-room\s*\{[^}]*pointer-events\s*:\s*none/
     .test(css), "全屏阶段没有关掉指针事件，开场会被拖动打断");
-  assert.match(css, /\.is-entrance\s+\.stage-region\s+\.stage-bar,[\s\S]*?opacity\s*:\s*0/,
-    "标题与按钮应当用透明度收起，不能改变场景布局");
+  assert.match(css, /\.is-entrance\s+\.stage-region\s+\.stage-role,[\s\S]*?opacity\s*:\s*0/,
+    "场景内标题应当用透明度收起，不能改变场景布局");
   assert.doesNotMatch(css, /display\s*:\s*none/,
     "入口样式不能拿走标题、家具条的布局空间");
 });
@@ -810,7 +810,7 @@ test("冷启动打开完整小屋时也从底部搭建", () => {
     path.join(__dirname, "..", "pages", "陪伴小屋", "app.js"), "utf8");
   const mount = APP.match(/function mountStage\(\)\{([\s\S]*?)\n\}/);
   assert.ok(mount, "app.js 里找不到 mountStage()");
-  const startup = mount[1].match(/queueMicrotask\(\(\)=>\{([\s\S]*?)\n    \}\);/);
+  const startup = mount[1].match(/queueMicrotask\(\(\)=>\{([\s\S]*?)\n\s+\}\);/);
   assert.ok(startup, "首次挂载没有等待本轮 DOM 更新后再启动入场");
   assert.match(startup[1], /if\(shell\?\.view==='state'\)scheduleStatusBuild\(mount\);/,
     "状态深链接应安排自下而上搭建");

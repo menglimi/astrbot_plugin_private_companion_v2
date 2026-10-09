@@ -49,6 +49,8 @@ def normalize_open_meteo(payload, location):
 
 
 class OpenMeteoWeatherPort:
+    provider = "open-meteo"
+
     async def _coordinates(self, location, session):
         if location.latitude is not None and location.longitude is not None:
             return location.latitude, location.longitude

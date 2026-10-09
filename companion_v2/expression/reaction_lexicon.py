@@ -44,11 +44,6 @@ def normalize(value):
     return re.sub(r"[\W_]+", "", str(value or "").casefold())
 
 
-def _token(value):
-    """Encode one literal with the same scheme as :func:`terms`."""
-    return "t" + value.encode("utf-8").hex()
-
-
 def blocked_aliases(value):
     """Aliases preceded by a negation such as "不开心" or "并不高兴"."""
     text = normalize(value)
@@ -78,7 +73,8 @@ def clusters(value):
 def _query_side(value):
     """Per-query features; the scan path asks for the same query once per item."""
     text = normalize(value)
-    return (clusters(value), tuple(_token(alias) for alias in blocked_aliases(value)), text)
+    blocked = {token for alias in blocked_aliases(value) for token in terms(alias)}
+    return (clusters(value), frozenset(blocked), text)
 
 
 def shared_clusters(query, document):
@@ -105,4 +101,4 @@ def query_terms(value):
     """
     _clusters, blocked, _text = _query_side(value)
     return tuple(token for token in dict.fromkeys(terms(value))
-                 if not any(alias in token for alias in blocked))
+                 if token not in blocked)

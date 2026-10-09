@@ -8,6 +8,7 @@ from .models import (
     RelationshipMemoryState,
 )
 from .service import RelationshipMemoryService
+from .group_network import GroupRelationshipStore, project_document
 
 __all__ = [
     "EmotionSubject",
@@ -16,4 +17,6 @@ __all__ = [
     "RelationshipMemoryKind",
     "RelationshipMemoryState",
     "RelationshipMemoryService",
+    "GroupRelationshipStore",
+    "project_document",
 ]

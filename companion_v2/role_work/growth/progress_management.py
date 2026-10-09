@@ -80,9 +80,10 @@ class GrowthProgressManagement:
                 (digest(owner), digest(context.scope), after_id, after_id, limit + 1))
             items = []
             for row in rows[:limit]:
-                unavailable = None
+                unavailable, evidence = None, []
                 try:
-                    source, _, record = self._basis(row, owner, context, at)
+                    source, experience, record = self._basis(row, owner, context, at)
+                    evidence = [value[:2000] for value in (experience.title, *experience.statements)[:8]]
                 except TaskError as error:
                     unavailable = error.code
                     source = None
@@ -90,6 +91,7 @@ class GrowthProgressManagement:
                 items.append({"review_id": row["review_id"], "growth_id": row["growth_id"],
                     "base_revision": row["base_revision"], "growth_title": record.title if record else None,
                     "progress_note": row["progress_note"] if unavailable is None else None,
+                    "evidence": evidence if unavailable is None else [],
                     "receipt_stream": source["stream"] if source else None,
                     "created_at": row["created_at"], "unavailable_reason": unavailable,
                     "actions": ["accept", "reject"] if unavailable is None else ["reject"],

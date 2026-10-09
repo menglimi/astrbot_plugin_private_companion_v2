@@ -10,16 +10,17 @@ const adapter = fs.readFileSync(path.resolve(__dirname, PAGE + 'reply-page.js'),
 const appPage = fs.readFileSync(path.resolve(__dirname, PAGE + 'app.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const drains = async (times = 8) => { for (let index = 0; index < times; index += 1) await flush(); };
+const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const TOKEN = 'a'.repeat(64);
 const PREFIX = '/astrbot_plugin_private_companion_v2/';
 const plain = value => JSON.parse(JSON.stringify(value));
 
 /* The registered group is window-scoped; these are the fields the page edits. */
 const DEFAULTS = {
-  enabled: false, llm_controlled: true, rules_enabled: false, rule_mode: 'words',
+  enabled: false, llm_controlled: false, rules_enabled: true, rule_mode: 'words',
   split_words: '["。","？","！","~","…","“","\\n"]', match_width_variants: true,
   rule_regex: '.*?[。？！~…\\n]+|.+$',
-  threshold: 120, min_segment_chars: 12, max_segments: 4, prompt: '', streaming: false,
+  threshold: 500, min_segment_chars: 5, max_segments: 5, prompt: '', streaming: false, streaming_mode: 'buffered',
   part_gap_mode: 'fixed', part_gap_ms: 0, part_gap_min_ms: 1500, part_gap_max_ms: 3500,
   part_gap_log_base: 1.8, image_position: 'after_text', voice_enabled: false,
   group_wakeup_enabled: true, group_wakeup_direct_words: '[]',
@@ -38,14 +39,27 @@ const DEFAULTS = {
   group_air_guard_max_bot_replies: 3, group_air_guard_polite_loop_limit: 2,
   enable_group_injection_guard: true, enable_group_privacy_guard: true,
   enable_group_reality_promise_guard: true, enable_context_image_captioning: false,
-  context_image_caption_max_items: 2,
+  context_image_caption_max_items: 2, enable_private_image_self_recognition: false,
+  image_understanding_private_enabled: true, image_understanding_group_enabled: true,
+  enable_private_image_vision_cache: true, private_image_vision_cache_max_items: 300,
+  private_image_vision_custom_prompt: '', private_image_vision_max_chars: 1200,
+  private_image_vision_wait_seconds: 8, private_image_provider_failure_cooldown_seconds: 60,
+  video_understanding_enabled: true, video_understanding_max_chars: 2400,
+  video_understanding_private_enabled: true, video_understanding_group_enabled: true,
+  video_understanding_wait_seconds: 20, video_understanding_prompt: '',
+  file_understanding_enabled: false, file_understanding_formats: 'text_and_documents',
+  file_understanding_format_groups: '["文本","PDF","Word（DOCX）","Excel（XLSX）","PowerPoint（PPTX）"]',
+  file_understanding_private_enabled: true, file_understanding_group_enabled: true,
+  file_understanding_max_size_mb: 8, file_understanding_max_chars: 24000,
+  file_understanding_timeout_seconds: 15, file_understanding_prompt: '',
   style_prompt: '', content_cleanup_enabled: false, content_cleanup_mode: 'words',
   content_cleanup_scope: 'all', content_cleanup_rule: '[\\n]', content_cleanup_words: '["\\n"]',
   content_replacement_enabled: false, content_replacements: '[]', framework_error_guard_enabled: true,
   enable_forbidden_word_recall: false, recall_forbidden_words: '[]', recall_forbidden_scope: 'bot_and_group',
-  recall_forbidden_word_case_sensitive: false, component_order: '[]', reply_quote_enabled: false,
+  recall_forbidden_word_case_sensitive: false, forward_message_adaptation_enabled: true,
+  component_order: '[]', reply_quote_enabled: false,
   reply_quote_group_enabled: true, reply_quote_first_part_only: true, reply_quote_skip_chars: 0,
-  reply_mention_speaker_enabled: false,
+  reply_mention_speaker_enabled: false, reply_diagnostic_limit: 80,
   voice_trigger_mode: 'always', voice_generation_mode: 'plain', voice_segment_mode: 'each',
   voice_delivery_mode: 'voice_and_text', voice_position: 'after_media', voice_language: 'zh',
   voice_foreign_text_mode: 'original', voice_probability: 1, voice_cooldown_seconds: 0,
@@ -66,14 +80,25 @@ const LIMITS = {
   group_wakeup_short_text_wait_ms: [0, 30000], group_wakeup_log_limit: [10, 300],
   group_air_guard_window_seconds: [30, 1800], group_air_guard_max_bot_replies: [1, 20],
   group_air_guard_polite_loop_limit: [1, 10], context_image_caption_max_items: [0, 8],
+  private_image_vision_cache_max_items: [0, 2000], private_image_vision_max_chars: [120, 4000],
+  private_image_vision_wait_seconds: [1, 30], private_image_provider_failure_cooldown_seconds: [0, 3600],
+  video_understanding_max_chars: [200, 6000], video_understanding_wait_seconds: [1, 60],
+  file_understanding_max_size_mb: [1, 16], file_understanding_max_chars: [1000, 48000],
+  file_understanding_timeout_seconds: [1, 30],
+  reply_diagnostic_limit: [10, 300],
 };
 const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) => {
   const kind = name === 'part_gap_log_base' ? 'weight'
     : ['voice_probability', 'group_wakeup_interest_probability', 'group_wakeup_image_weight'].includes(name)
     ? 'probability'
     : typeof value === 'boolean' ? 'boolean' : typeof value === 'string' ? 'text' : 'integer';
+  const roleShared = new Set([
+    'image_understanding_private_enabled', 'image_understanding_group_enabled',
+    'video_understanding_private_enabled', 'video_understanding_group_enabled',
+    'file_understanding_private_enabled', 'file_understanding_group_enabled',
+  ]);
   const entry = {kind, default: value, apply_mode: 'immediate',
-    editable_layers: ['installation', 'role', 'window']};
+    editable_layers: roleShared.has(name) ? ['role', 'window'] : ['window']};
   if (LIMITS[name]) [entry.minimum, entry.maximum] = LIMITS[name];
   if (kind === 'probability') Object.assign(entry, {minimum: 0, maximum: 1, decimal_places: 2});
   if (kind === 'weight') entry.decimal_places = 1;
@@ -102,8 +127,19 @@ const PREVIEW = {mode: 'offline_preview', parts: ['example'], count: 1, characte
 
 function harness() {
   const requests = [], store = new Map(), listeners = {}, inner = {}, slots = {};
-  const sectionIds = ['segment', 'style', 'cleanup', 'wakeup', 'wakeup_timing', 'group_safety',
-    'context_image', 'voice', 'components', 'checks', 'timing'];
+  const previewInputs = {
+    example: {value: '', dataset: {replyPartInput: 'example'}},
+    'image-count': {value: '0', valueAsNumber: 0, dataset: {replyPartInput: 'image-count'}},
+  };
+  const exampleButtons = ['simple', 'complex'].map(replyExample => {
+    const classes = new Set(), attributes = {};
+    return {dataset: {replyExample}, classes, attributes,
+      classList: {toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); }},
+      setAttribute(name, value) { attributes[name] = value; }};
+  });
+  const sectionIds = ['segment', 'style', 'cleanup', 'wakeup_direct', 'wakeup_interest', 'wakeup_members',
+    'wakeup_cold_group', 'wakeup_fatigue', 'group_air_guard', 'group_content_safety',
+    'context_image', 'image_narration', 'video_narration', 'file_understanding', 'forwards', 'voice', 'components', 'checks'];
   const sectionTabs = sectionIds.map(id => {
     const tab = {dataset: {wbSection: id}, focus() {}, click() {
       listeners['settings:click']?.({target: {closest: selector => selector === '[data-wb-section]' ? tab : null}});
@@ -113,7 +149,7 @@ function harness() {
   const make = name => {
     const node = {
       dataset: {}, isConnected: true, textContent: '',
-      classList: {add() {}, remove() {}, contains: () => false},
+      classList: {add() {}, remove() {}, toggle() {}, contains: () => false},
       querySelectorAll: selector => selector === '[data-wb-section]' ? sectionTabs : [], querySelector: () => null,
       scrollIntoView() {},
       addEventListener: (type, handler) => {listeners[name + ':' + type] = handler;},
@@ -127,28 +163,36 @@ function harness() {
     });
     return node;
   };
-  /* Holders are created by the adapter's innerHTML, and the preview/diagnostics
-     sections resolve through root.querySelector('[data-reply-part="..."]'). */
+/* Holders are created by the adapter's innerHTML, and the preview section
+   resolves through root.querySelector('[data-reply-part="..."]'). */
   const syncSlots = () => {
     for (const part of ['settings', 'preview', 'diagnostics']) {
       if (!slots[part]) slots[part] = make(part);
     }
     slots.preview.querySelector = selector => {
       if (selector === '#reply-preview-result') return slots['preview-result'] || (slots['preview-result'] = make('preview-result'));
+      const inputMatch = /^\[data-reply-part-input="(.+)"\]$/.exec(selector);
+      if (inputMatch) return previewInputs[inputMatch[1]] || null;
       return null;
     };
+    slots.preview.querySelectorAll = selector => selector === '[data-reply-example]' ? exampleButtons : [];
   };
   const root = make('root');
-  root.querySelectorAll = selector => selector === '[data-wb-section]' ? sectionTabs : [];
+  root.querySelectorAll = selector => selector === '[data-wb-section]' ? sectionTabs
+    : selector === '[data-reply-example]' ? exampleButtons : [];
   root.querySelector = selector => {
     const match = /^\[data-reply-part="(.+)"\]$/.exec(selector);
     if (match) return slots[match[1]] || null;
-    if (selector === '#reply-preview-result') return slots['preview-result'] || null;
+    const inputMatch = /^\[data-reply-part-input="(.+)"\]$/.exec(selector);
+    if (inputMatch) return previewInputs[inputMatch[1]] || null;
+    if (selector === '#reply-preview-result') return slots['preview-result'] || (slots['preview-result'] = make('preview-result'));
+    if (selector === '#reply-preview-status') return slots['preview-status'] || (slots['preview-status'] = make('preview-status'));
     return null;
   };
   const sessionStorage = {getItem: key => store.get(key) || null,
     setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key)};
   const window = {
+    addEventListener() {}, removeEventListener() {},
     CompanionProduct: {
       hosted: () => true, role: () => ({reply_api: PREFIX + 'group/reply'}),
       identity: () => ({installation_id: 'inst', operator_id: 'admin'}),
@@ -168,7 +212,8 @@ function harness() {
   vm.runInNewContext(workbench, sandbox);
   vm.runInNewContext(adapter, sandbox);
   return {page: window.CompanionReplyPage, workbench: window.CompanionWorkbench,
-    root, slots, requests, store, listeners, get previewHtml() { return inner.preview || ''; }};
+    root, slots, requests, store, listeners, previewInputs, exampleButtons,
+    get previewHtml() { return inner.preview || ''; }};
 }
 
 async function loaded(harnessed, view = 'expression') {
@@ -208,9 +253,11 @@ test('the card is split into labelled groups but keeps one save', async () => {
   const instance = live(harnessed);
   /* vm 上下文里的数组与宿主 realm 不同，比较前先过 plain()。 */
   const ids = plain(instance.state.container.groups.map(group => group.id));
-  assert.deepEqual(ids, ['segment', 'style', 'cleanup', 'voice', 'components', 'checks', 'timing']);
-  assert.ok(plain(instance.state.container.groups[3].fields).includes('voice_provider_id'));
-  assert.ok(!ids.includes('wakeup') && !ids.includes('wakeup_timing') && !ids.includes('group_safety'));
+  assert.deepEqual(ids, ['segment', 'style', 'cleanup', 'voice', 'components', 'checks']);
+  assert.ok(plain(instance.state.container.groups.find(group => group.id === 'voice').fields)
+    .includes('voice_provider_id'));
+  assert.ok(!ids.some(id => ['wakeup_direct', 'wakeup_interest', 'wakeup_members', 'wakeup_cold_group',
+    'wakeup_fatigue', 'group_air_guard', 'group_content_safety'].includes(id)));
   assert.deepEqual(Object.keys(plain(instance.state.container.fields.rule_mode.choices)),
     ['words', 'regex', 'sentences', 'paragraphs']);
   assert.equal(instance.state.draft.rule_mode, 'words');
@@ -219,40 +266,173 @@ test('the card is split into labelled groups but keeps one save', async () => {
     'framework_error_guard_enabled', 'enable_forbidden_word_recall', 'part_gap_ms']) {
     assert.ok(instance.state.container.fields[name], `${name} is available in the editor`);
   }
+  assert.equal(instance.state.container.fields.forward_message_adaptation_enabled, undefined);
   /* 段落只是阅读顺序：仍然只有一个 edit_token、一次保存。 */
   assert.equal(instance.state.container.fields.enabled.editable.includes('window'), true);
+  assert.ok(plain(instance.state.container.groups.find(group => group.id === 'segment').fields)
+    .includes('part_gap_mode'), 'message spacing is part of the segmentation workspace');
+  assert.equal(harnessed.page.selectSection('timing'), true, 'the old timing jump resolves to segmentation');
+  assert.equal(instance.state.activeGroupId, 'segment');
 });
 
-test('segmentation defaults to words and only shows controls for the active rule mode', async () => {
+test('segmentation keeps rule choices visible while the legacy rules switch is absent', async () => {
   const harnessed = await loaded(harness());
   const instance = live(harnessed);
   assert.equal(instance.state.draft.rule_mode, 'words');
+  assert.equal(instance.state.draft.forward_message_adaptation_enabled, true);
+  assert.equal(instance.state.draft.llm_controlled, false);
+  assert.equal(instance.state.draft.rules_enabled, true);
   let html = harnessed.slots.settings.innerHTML;
-  assert.match(html, /词列表（默认）/);
-  assert.match(html, /data-wb-row="split_words" hidden/);
-  assert.match(html, /data-wb-row="rule_regex" hidden/);
-  assert.doesNotMatch(html, /<textarea data-wb-field="split_words"/);
-
-  const enabled = {dataset: {wbField: 'rules_enabled'}, tagName: 'INPUT', checked: true,
-    closest: () => null};
-  harnessed.listeners['settings:input']({target: enabled});
-  html = harnessed.slots.settings.innerHTML;
+  assert.doesNotMatch(html, /data-wb-row="rules_enabled"|启用规则补充分段/);
+  assert.match(html, /value="words" checked><span>词列表<\/span>/);
   assert.match(html, /data-wb-word-list="split_words"/);
+  assert.doesNotMatch(html, /data-wb-line-list="split_words"/);
+  assert.doesNotMatch(html, /data-wb-row="split_words" hidden/);
+  assert.doesNotMatch(html, /data-wb-row="match_width_variants" hidden/);
   assert.match(html, /data-wb-row="rule_regex" hidden/);
+  assert.doesNotMatch(html, /data-wb-row="threshold" hidden/);
+  assert.doesNotMatch(html, /data-wb-row="min_segment_chars" hidden/);
 
-  const regex = {dataset: {wbField: 'rule_mode'}, tagName: 'INPUT', value: 'regex',
+  const regex = {dataset: {wbField: 'rule_mode'}, tagName: 'INPUT', type: 'radio', value: 'regex',
     closest: () => null};
-  harnessed.listeners['settings:input']({target: regex});
+  harnessed.listeners['settings:input']({type: 'input', target: regex});
+  assert.equal(instance.state.draft.rule_mode, 'words', 'radio input does not repaint before change');
+  harnessed.listeners['settings:change']({type: 'change', target: regex});
   html = harnessed.slots.settings.innerHTML;
   assert.match(html, /data-wb-row="split_words" hidden/);
+  assert.match(html, /data-wb-row="match_width_variants" hidden/);
   assert.doesNotMatch(html, /data-wb-row="rule_regex" hidden/);
+});
+
+test('stream delivery mode is editable when model streaming is enabled', async () => {
+  const harnessed = await loaded(harness());
+  const instance = live(harnessed);
+  assert.deepEqual(plain(instance.state.container.fields.streaming_mode.choices),
+    {buffered: '收齐后分段发送', incremental: '边生成边分段发送'});
+  assert.match(harnessed.slots.settings.innerHTML, /data-wb-row="streaming_mode" hidden/);
+  harnessed.listeners['settings:change']({type: 'change', target: {
+    dataset: {wbField: 'streaming'}, type: 'checkbox', checked: true, closest: () => null}});
+  assert.doesNotMatch(harnessed.slots.settings.innerHTML, /data-wb-row="streaming_mode" hidden/);
+  harnessed.listeners['settings:change']({type: 'change', target: {
+    dataset: {wbField: 'streaming_mode'}, tagName: 'INPUT', type: 'radio', value: 'incremental', closest: () => null}});
+  assert.equal(instance.state.draft.streaming_mode, 'incremental');
+});
+
+test('cleanup mode only shows the control used by the selected mode', async () => {
+  const harnessed = await loaded(harness());
+  const instance = live(harnessed);
+  let html = harnessed.slots.settings.innerHTML;
+  assert.equal(instance.state.draft.content_cleanup_mode, 'words');
+  assert.match(html, /data-wb-row="content_cleanup_rule" hidden/);
+  assert.doesNotMatch(html, /data-wb-row="content_cleanup_words" hidden/);
+
+  const mode = {dataset: {wbField: 'content_cleanup_mode'}, tagName: 'SELECT', value: 'regex',
+    closest: () => null};
+  harnessed.listeners['settings:change']({type: 'change', target: mode});
+  html = harnessed.slots.settings.innerHTML;
+  assert.match(html, /data-wb-row="content_cleanup_rule"/);
+  assert.doesNotMatch(html, /data-wb-row="content_cleanup_rule" hidden/);
+  assert.match(html, /data-wb-row="content_cleanup_words" hidden/);
+});
+
+test('regex and word-list modes both expose editable controls and save their own values', async () => {
+  const h = await loaded(harness());
+  const instance = live(h);
+  const choose = value => h.listeners['settings:change']({type: 'change', target: {
+    dataset: {wbField: 'rule_mode'}, tagName: 'INPUT', type: 'radio', value, closest: () => null,
+  }});
+  choose('regex');
+  assert.match(h.slots.settings.innerHTML, /data-wb-row="rule_regex"/);
+  assert.doesNotMatch(h.slots.settings.innerHTML, /data-wb-row="rule_regex" hidden/);
+  assert.match(h.slots.settings.innerHTML, /data-wb-row="split_words" hidden/);
+  assert.match(h.slots.settings.innerHTML, /data-wb-row="match_width_variants" hidden/);
+  const regex = {dataset: {wbField: 'rule_regex'}, tagName: 'TEXTAREA', value: '。|！',
+    closest: () => null, setAttribute() {}};
+  h.listeners['settings:input']({target: regex});
+  assert.equal(instance.state.draft.rule_regex, '。|！');
+
+  const regexSave = instance.save(false);
+  await drains();
+  assert.equal(h.requests[1].body.changes.rule_mode, 'regex');
+  assert.equal(h.requests[1].body.changes.rule_regex, '。|！');
+  h.requests[1].resolve({result: {operation_id: 'regex-op', replayed: false},
+    status: status({rule_mode: 'regex', rule_regex: '。|！'}, 'e'.repeat(64))});
+  await regexSave;
+  await drains();
+
+  choose('words');
+  assert.match(h.slots.settings.innerHTML, /data-wb-word-list="split_words"/);
+  assert.doesNotMatch(h.slots.settings.innerHTML, /data-wb-row="split_words" hidden/);
+  assert.doesNotMatch(h.slots.settings.innerHTML, /data-wb-row="match_width_variants" hidden/);
+  assert.match(h.slots.settings.innerHTML, /data-wb-row="rule_regex" hidden/);
+  assert.match(h.slots.settings.innerHTML, /data-wb-word-value="。"/);
+  for (const value of ['sentences', 'paragraphs']) {
+    choose(value);
+    assert.match(h.slots.settings.innerHTML, /data-wb-row="split_words" hidden/);
+    assert.match(h.slots.settings.innerHTML, /data-wb-row="match_width_variants" hidden/);
+    assert.match(h.slots.settings.innerHTML, /data-wb-row="rule_regex" hidden/);
+  }
+  h.page.unmount();
+});
+
+test('segmentation words use editable chips and save the existing JSON list', async () => {
+  const harnessed = await loaded(harness());
+  const instance = live(harnessed);
+  assert.equal(instance.state.container.fields.split_words.input, 'word-list');
+  assert.match(instance.state.container.fields.split_words.help, /回车添加/);
+  assert.match(harnessed.slots.settings.innerHTML, /data-wb-word-list="split_words"/);
+  assert.match(harnessed.slots.settings.innerHTML, /data-wb-word-special="newline"/);
+  assert.match(harnessed.slots.settings.innerHTML, /data-wb-word-value="。"/);
+  const input = {value: '，', dataset: {wbWordInput: 'split_words'}, focus() {}};
+  const addButton = {dataset: {wbWordAdd: 'split_words'},
+    closest: selector => selector === '.wb-field' ? {querySelector: () => input} : null};
+  const addTarget = {closest: selector => selector === '[data-wb-word-add]' ? addButton : null};
+  harnessed.listeners['settings:click']({target: addTarget});
+  assert.deepEqual(plain(JSON.parse(instance.state.draft.split_words)), ['。', '？', '！', '~', '…', '“', '\n', '，']);
+
+  const saving = instance.save(false);
+  await drains();
+  assert.equal(harnessed.requests[1].body.changes.split_words, JSON.stringify(['。', '？', '！', '~', '…', '“', '\n', '，']));
+  harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
+    status: status({split_words: JSON.stringify(['。', '？', '！', '~', '…', '“', '\n', '，'])}, 'd'.repeat(64))});
+  await saving;
+  await drains();
+  assert.match(harnessed.slots.settings.innerHTML, /<span>换行<\/span>/);
+});
+
+test('expression modules render only their own navigation and panels after every switch', async () => {
+  const h = await loaded(harness());
+  const instance = live(h);
+  h.page.setExpressionModule('expression-text');
+  let html = h.slots.settings.innerHTML;
+  assert.match(html, /data-wb-section="segment"/);
+  assert.match(html, /data-wb-section="style"/);
+  assert.match(html, /data-wb-section="cleanup"/);
+  assert.doesNotMatch(html, /data-wb-section="voice"|data-wb-section="components"|data-wb-section="checks"/);
+  assert.doesNotMatch(html, /data-wb-section-panel="voice"|data-wb-section-panel="components"|data-wb-section-panel="checks"/);
+  assert.equal(h.page.selectSection('voice'), false, 'hidden modules cannot be selected by a stale jump');
+
+  h.page.setExpressionModule('expression-platform');
+  html = h.slots.settings.innerHTML;
+  assert.match(html, /data-wb-section="components"/);
+  assert.match(html, /data-wb-section="checks"/);
+  assert.doesNotMatch(html, /data-wb-section="segment"|data-wb-section="voice"/);
+  assert.equal(instance.state.activeGroupId, 'components');
+  assert.equal(h.page.selectSection('checks'), true);
+  assert.equal(instance.state.activeGroupId, 'checks');
+
+  h.page.setExpressionModule('expression-voice');
+  html = h.slots.settings.innerHTML;
+  assert.doesNotMatch(html, /data-wb-section=|data-wb-section-panel=/);
+  assert.match(html, /data-wb-row="voice_enabled"/);
+  assert.doesNotMatch(html, /data-wb-row="reply_quote_enabled"|data-wb-row="enabled"/);
+  h.page.unmount();
 });
 
 test('word-list chips add and remove entries while saving the existing wire format', async () => {
   const harnessed = await loaded(harness());
   const instance = live(harnessed);
-  for (const name of ['split_words', 'content_cleanup_words', 'recall_forbidden_words',
-    ]) {
+  for (const name of ['content_cleanup_words', 'recall_forbidden_words']) {
     assert.equal(instance.state.container.fields[name].input, 'word-list', name + ' uses the list editor');
     assert.doesNotMatch(instance.state.container.fields[name].help, /JSON/i);
   }
@@ -261,30 +441,26 @@ test('word-list chips add and remove entries while saving the existing wire form
     'group_wakeup_interest_keywords', 'group_wakeup_primary_member_ids', 'group_wakeup_owner_direct_words']) {
     assert.equal(live(decision).state.container.fields[name].input, 'word-list', name + ' uses the list editor');
   }
-  const enabled = {dataset: {wbField: 'rules_enabled'}, tagName: 'INPUT', checked: true,
-    closest: () => null};
-  harnessed.listeners['settings:input']({target: enabled});
-
-  const original = JSON.parse(instance.state.draft.split_words);
-  const input = {value: '♪', dataset: {wbWordInput: 'split_words'}, focus() {}};
-  const addButton = {dataset: {wbWordAdd: 'split_words'},
+  const original = JSON.parse(instance.state.draft.content_cleanup_words);
+  const input = {value: '♪', dataset: {wbWordInput: 'content_cleanup_words'}, focus() {}};
+  const addButton = {dataset: {wbWordAdd: 'content_cleanup_words'},
     closest: selector => selector === '.wb-field' ? {querySelector: () => input} : null};
   const addTarget = {closest: selector => selector === '[data-wb-word-add]' ? addButton : null};
   harnessed.listeners['settings:click']({target: addTarget});
-  assert.deepEqual(plain(JSON.parse(instance.state.draft.split_words)), [...original, '♪']);
+  assert.deepEqual(plain(JSON.parse(instance.state.draft.content_cleanup_words)), [...original, '♪']);
 
   const saving = instance.save(false);
   await drains();
-  assert.equal(harnessed.requests[1].body.changes.split_words, JSON.stringify([...original, '♪']));
+  assert.equal(harnessed.requests[1].body.changes.content_cleanup_words, JSON.stringify([...original, '♪']));
   harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
-    status: status({rules_enabled: true, split_words: JSON.stringify([...original, '♪'])}, 'd'.repeat(64))});
+    status: status({content_cleanup_words: JSON.stringify([...original, '♪'])}, 'd'.repeat(64))});
   await saving;
   await drains();
 
-  const removeButton = {dataset: {wbWordRemove: 'split_words', wbWordIndex: String(original.length)}};
+  const removeButton = {dataset: {wbWordRemove: 'content_cleanup_words', wbWordIndex: String(original.length)}};
   const removeTarget = {closest: selector => selector === '[data-wb-word-remove]' ? removeButton : null};
   harnessed.listeners['settings:click']({target: removeTarget});
-  assert.deepEqual(plain(JSON.parse(instance.state.draft.split_words)), original);
+  assert.deepEqual(plain(JSON.parse(instance.state.draft.content_cleanup_words)), original);
 });
 
 test('replacement pairs and component order are edited without JSON controls', async () => {
@@ -337,21 +513,36 @@ test('reply expression, perception, and decision settings partition every field 
   await drains();
   const decision = plain(live(harnessed).state.container.groups.flatMap(group => group.fields));
   assert.deepEqual(plain(live(harnessed).state.container.groups.map(group => group.id)),
-    ['wakeup', 'wakeup_timing', 'group_safety']);
+    ['wakeup_direct', 'wakeup_interest', 'wakeup_members', 'wakeup_cold_group', 'wakeup_fatigue',
+      'group_air_guard', 'group_content_safety']);
   harnessed.page.mount(harnessed.root, {view: 'perception'});
   await drains();
   harnessed.requests[2].resolve(status());
   await drains();
   const perception = plain(live(harnessed).state.container.groups.flatMap(group => group.fields));
   const exposed = [...expression, ...perception, ...decision];
-  assert.equal(Object.keys(DEFAULTS).length, 90);
   assert.equal(exposed.length, new Set(exposed).size, 'a setting must not be duplicated across modules');
-  assert.deepEqual([...exposed].sort(), Object.keys(DEFAULTS).sort());
+  assert.deepEqual([...exposed].sort(), Object.keys(DEFAULTS)
+    .filter(name => name !== 'rules_enabled' && name !== 'file_understanding_formats').sort());
   assert.deepEqual(plain(live(harnessed).state.container.groups.map(group => group.id)),
-    ['context_image']);
-  assert.deepEqual(perception, ['enable_context_image_captioning', 'context_image_caption_max_items']);
+    ['media_permissions', 'context_image', 'image_narration', 'video_narration', 'file_understanding', 'forwards']);
+  assert.deepEqual(perception, ['image_understanding_private_enabled', 'image_understanding_group_enabled',
+    'video_understanding_private_enabled', 'video_understanding_group_enabled',
+    'file_understanding_private_enabled', 'file_understanding_group_enabled',
+    'enable_context_image_captioning', 'context_image_caption_max_items', 'enable_private_image_self_recognition',
+    'enable_private_image_vision_cache',
+    'private_image_vision_cache_max_items', 'private_image_vision_custom_prompt',
+    'private_image_vision_max_chars', 'private_image_vision_wait_seconds',
+    'private_image_provider_failure_cooldown_seconds',
+    'video_understanding_enabled', 'video_understanding_max_chars',
+    'video_understanding_wait_seconds', 'video_understanding_prompt',
+    'file_understanding_enabled',
+    'file_understanding_format_groups', 'file_understanding_max_size_mb',
+    'file_understanding_max_chars', 'file_understanding_timeout_seconds', 'file_understanding_prompt',
+    'forward_message_adaptation_enabled']);
   assert.equal(harnessed.page.selectSection('segment'), false);
   assert.equal(harnessed.page.selectSection('context_image'), true);
+  assert.equal(harnessed.page.selectSection('forwards'), true);
   harnessed.page.unmount();
 });
 
@@ -359,7 +550,8 @@ test('decision view edits the same reply route and omits expression-only tools',
   const harnessed = await loaded(harness(), 'decision');
   assert.equal(harnessed.requests[0].route, 'group/reply');
   assert.match(harnessed.root.innerHTML, /data-reply-part="settings"/);
-  assert.doesNotMatch(harnessed.root.innerHTML, /data-reply-part="preview"|data-reply-part="diagnostics"/);
+  assert.doesNotMatch(harnessed.root.innerHTML, /data-reply-part="preview"/);
+  assert.match(harnessed.root.innerHTML, /data-reply-part="diagnostics"/);
   assert.equal(harnessed.page.selectSection('voice'), false);
   const instance = live(harnessed);
   instance.state.draft.group_wakeup_enabled = false;
@@ -374,25 +566,67 @@ test('decision view edits the same reply route and omits expression-only tools',
   harnessed.page.unmount();
 });
 
-test('the expression page can open its reply modules but leaves image understanding to perception', async () => {
+test('the expression page leaves image and forward understanding to the understanding page', async () => {
   const harnessed = await loaded(harness());
   assert.equal(harnessed.page.selectSection('voice'), true);
   assert.equal(live(harnessed).state.activeGroupId, 'voice');
   assert.equal(harnessed.page.selectSection('context_image'), false);
+  assert.equal(harnessed.page.selectSection('image_narration'), false);
+  assert.equal(harnessed.page.selectSection('forwards'), false);
   assert.equal(harnessed.page.selectSection('components'), true);
   assert.equal(live(harnessed).state.activeGroupId, 'components');
   assert.equal(harnessed.page.selectSection('unknown'), false);
 });
 
-test('the perception view edits image understanding without reply preview or diagnostics', async () => {
+test('a voice tab can select its TTS section before settings finish loading', async () => {
+  const h = harness();
+  const diversitySwitch = h.page.searchEntries().find(item => item.field === 'enable_humanized_expression');
+  const diversityPrompt = h.page.searchEntries().find(item => item.field === 'humanized_expression_prompt');
+  assert.equal(diversitySwitch.label, '启用拟人及多样表达 Prompt');
+  assert.match(diversitySwitch.help, /只发已提供的表情图/);
+  assert.match(diversitySwitch.help, /安静旁听/);
+  assert.match(diversitySwitch.help, /戳一戳只在当前流程开放时考虑/);
+  assert.equal(diversityPrompt.label, '拟人及多样表达 Prompt 正文');
+  h.page.mount(h.root, {view: 'expression'});
+  await drains();
+  assert.equal(h.page.selectSection('voice'), true);
+  h.requests[0].resolve(status());
+  await drains();
+  assert.equal(live(h).state.activeGroupId, 'voice');
+  h.page.selectSection('components');
+  live(h).attach();
+  assert.equal(live(h).state.activeGroupId, 'components', 'a later redraw keeps the user selection');
+  h.page.unmount();
+});
+
+test('the perception view edits image, native video and file understanding without reply preview or diagnostics', async () => {
   const harnessed = await loaded(harness(), 'perception');
   assert.equal(harnessed.requests[0].route, 'group/reply');
   assert.match(harnessed.root.innerHTML, /data-reply-part="settings"/);
   assert.doesNotMatch(harnessed.root.innerHTML, /data-reply-part="preview"|data-reply-part="diagnostics"/);
   const instance = live(harnessed);
   assert.deepEqual(plain(instance.state.container.order),
-    ['enable_context_image_captioning', 'context_image_caption_max_items']);
-  assert.equal(harnessed.page.selectSection('context_image'), true);
+    ['image_understanding_private_enabled', 'image_understanding_group_enabled',
+      'video_understanding_private_enabled', 'video_understanding_group_enabled',
+      'file_understanding_private_enabled', 'file_understanding_group_enabled',
+      'enable_context_image_captioning', 'context_image_caption_max_items',
+      'enable_private_image_self_recognition', 'enable_private_image_vision_cache',
+      'private_image_vision_cache_max_items', 'private_image_vision_custom_prompt',
+      'private_image_vision_max_chars', 'private_image_vision_wait_seconds',
+      'private_image_provider_failure_cooldown_seconds',
+      'video_understanding_enabled', 'video_understanding_max_chars',
+      'video_understanding_wait_seconds', 'video_understanding_prompt',
+      'file_understanding_enabled',
+      'file_understanding_format_groups', 'file_understanding_max_size_mb',
+      'file_understanding_max_chars', 'file_understanding_timeout_seconds', 'file_understanding_prompt',
+      'forward_message_adaptation_enabled']);
+  assert.equal(harnessed.page.selectSection('image_narration'), true);
+  assert.equal(harnessed.page.selectSection('video_narration'), true);
+  assert.equal(harnessed.page.selectSection('file_understanding'), true);
+  assert.equal(live(harnessed).state.container.fields.file_understanding_format_groups.listPolicy.minItems, 1);
+  assert.equal(live(harnessed).state.container.fields.file_understanding_format_groups.listPolicy.quickAddLabel, '支持格式');
+  assert.match(harnessed.slots.settings.innerHTML, /支持格式/);
+  assert.equal(harnessed.page.selectSection('forwards'), true);
   harnessed.page.unmount();
 });
 
@@ -404,7 +638,23 @@ test('expression D1-D6 links reach current settings owners', () => {
   }
   assert.ok(appPage.includes('data-expression-life-tab="${tab}"'));
   assert.ok(appPage.includes("navigate('life',el.dataset.expressionLifeTab)"));
-  assert.ok(appPage.includes("settingsJump('主动语音与戳一戳','contact')"));
+  assert.ok(appPage.includes('settingsJump('));
+});
+
+test('expression voice tab hosts the shared reply editor with only TTS settings visible', () => {
+  const expressionCss = fs.readFileSync(path.resolve(__dirname, PAGE + 'expression-config.css'), 'utf8');
+  assert.ok(appPage.includes('id="expressionVoiceReplyHost"'));
+  assert.ok(appPage.includes('function syncExpressionReplyWorkspace'));
+  assert.ok(appPage.includes('voiceHost.append(reply)'));
+  assert.ok(appPage.includes('syncExpressionReplyWorkspace(expressionModule)'));
+  assert.ok(appPage.includes("voice:'expression-voice'"));
+  assert.ok(appPage.includes("text:'expression-text'"));
+  assert.ok(appPage.includes('activateExpressionModule(module)'));
+  assert.ok(adapter.includes('setVisibleGroups'));
+  assert.ok(expressionCss.includes('expression-platform-focus .wb-section-sidebar{display:block}'));
+  for (const field of ['voice_trigger_mode', 'voice_provider_id', 'voice_delivery_mode']) {
+    assert.ok(adapter.includes(field), `missing TTS setting ${field}`);
+  }
 });
 
 test('the TTS provider catalog comes from the read result, not a page-local list', async () => {
@@ -432,7 +682,121 @@ test('offline preview submits the current draft and renders the result', async (
   assert.equal(request.body.image_count, 0);
   request.resolve(PREVIEW);
   await drains();
-  assert.match(harnessed.previewHtml, /离线预览/);
+  assert.match(harnessed.slots['preview-result'].innerHTML, /预览结果/);
+  assert.match(harnessed.slots['preview-status'].textContent, /使用当前窗口的设置草稿/);
+});
+
+test('offline preview shows each segment component plan and its attachment rules', async () => {
+  const harnessed = await loaded(harness());
+  harnessed.listeners['root:click']({target: {closest: selector =>
+    selector === '[data-reply-preview-session]' ? {dataset: {replyPreviewSession: 'group'}} : null}});
+  harnessed.listeners['root:click']({target: {closest: () => ({dataset: {replyAction: 'preview'}})}});
+  await drains();
+  harnessed.requests[1].resolve({...PREVIEW, parts: ['看这条 https://example.com/notes', '带图的末段'], count: 2,
+    image_count: 2, quote: {enabled: true, group_enabled: true, first_part_only: true,
+      skip_chars: 8, mention_speaker: true}, component_order: ['face'], image_position: 'after_text',
+    components: [
+      {speech: '第一段朗读', success_order: ['voice'], fallback_order: ['text'], text_hidden: true},
+      {speech: '末段朗读', success_order: ['voice', 'image'], fallback_order: ['text', 'image'], text_hidden: true},
+    ], voice: {enabled: true, provider_id: 'tts-a', instruction: ''}});
+  await drains();
+  const html = harnessed.slots['preview-result'].innerHTML;
+  assert.match(html, /朗读成功/);
+  assert.match(html, /未触发或合成失败/);
+  assert.match(html, /文字由语音替代/);
+  assert.match(html, /图片/);
+  assert.match(html, /引用 · 固定第一段/);
+  assert.match(html, /@ · 跟随第一段/);
+  assert.match(html, /平台表情 · 跟随第一段/);
+  assert.match(html, /2 张图片 · 文字后/);
+  assert.match(html, /语音 · 按请求插入/);
+  assert.match(html, /网址保护 · 链接整段保留/);
+  assert.match(html, /组件挂载 · 预览模拟/);
+
+  const positionInput = (key, value) => harnessed.listeners['root:input']({target: {
+    dataset: {replyPreviewOption: key}, value,
+  }});
+  positionInput('image', 'first');
+  positionInput('mention', 'each');
+  positionInput('reaction', 'last');
+  positionInput('voice', 'before');
+  positionInput('media', 'last');
+  const moved = harnessed.previewHtml;
+  assert.match(moved, /2 张图片 · 文字后/);
+  assert.equal((moved.match(/@ · 每一段/g) || []).length, 2);
+  assert.match(moved, /平台表情 · 跟随末段/);
+  assert.match(moved, /语音 · 文字前/);
+  assert.match(moved, /表情包\/附件：跟随末段/);
+  assert.match(moved, /表情包\/附件 · 跟随末段/);
+  assert.doesNotMatch(moved, /分段回复后单独发送/);
+  assert.equal(harnessed.requests.length, 2, 'preview placement controls only re-render local results');
+  positionInput('media', 'single');
+  const independent = harnessed.previewHtml;
+  assert.match(independent, /表情包\/附件/);
+  assert.match(independent, /分段回复后单独发送 · 预览模拟/);
+  harnessed.page.unmount();
+});
+
+test('the first preview runs automatically with the simple example', async () => {
+  const harnessed = await loaded(harness());
+  assert.match(harnessed.previewHtml, /data-reply-example="simple" aria-pressed="true"/);
+  assert.match(harnessed.previewHtml, /data-reply-example="complex" aria-pressed="false"/);
+  assert.match(harnessed.previewHtml, /data-reply-example="marker" aria-pressed="false"/);
+  await wait(300);
+  assert.equal(harnessed.requests.length, 2);
+  assert.equal(harnessed.requests[1].route, 'group/reply/preview');
+  assert.match(harnessed.requests[1].body.text, /玻璃上都是细细的水线/);
+  assert.equal(harnessed.requests[1].body.settings.enabled, false);
+  harnessed.requests[1].resolve(PREVIEW);
+  await drains();
+  assert.match(harnessed.slots['preview-result'].innerHTML, /预览结果/);
+  harnessed.page.unmount();
+});
+
+test('editing a draft field schedules an offline preview with the updated value', async () => {
+  const harnessed = await loaded(harness());
+  const control = {dataset: {wbField: 'max_segments'}, tagName: 'INPUT', valueAsNumber: 3,
+    closest: () => null, setAttribute() {}};
+  harnessed.listeners['settings:input']({target: control});
+  harnessed.listeners['root:input']({target: control});
+  await wait(300);
+  assert.equal(harnessed.requests.length, 2);
+  assert.equal(harnessed.requests[1].body.settings.max_segments, 3);
+  harnessed.requests[1].resolve(PREVIEW);
+  await drains();
+  harnessed.page.unmount();
+});
+
+test('the complex example button previews through the V2 offline endpoint', async () => {
+  const harnessed = await loaded(harness());
+  const button = harnessed.exampleButtons[1];
+  harnessed.listeners['root:click']({target: {closest: selector =>
+    selector === '[data-reply-example]' ? button : null}});
+  assert.match(harnessed.previewInputs.example.value, /https:\/\/example\.com\/notes/);
+  assert.equal(button.attributes['aria-pressed'], 'true');
+  assert.ok(button.classes.has('is-selected'));
+  assert.equal(harnessed.exampleButtons[0].attributes['aria-pressed'], 'false');
+  assert.equal(harnessed.exampleButtons[0].classes.has('is-selected'), false);
+  harnessed.listeners['root:click']({target: {closest: selector => selector === '[data-reply-action]'
+    ? {dataset: {replyAction: 'preview'}} : null}});
+  await drains();
+  assert.equal(harnessed.requests.length, 2);
+  assert.match(harnessed.requests[1].body.text, /https:\/\/example\.com\/notes/);
+  harnessed.requests[1].resolve(PREVIEW);
+  await drains();
+  harnessed.page.unmount();
+});
+
+test('typing in the example clears the selected preset state', async () => {
+  const harnessed = await loaded(harness());
+  const input = harnessed.previewInputs.example;
+  input.value = '手动编辑的正文';
+  harnessed.listeners['root:input']({target: input});
+  assert.equal(harnessed.exampleButtons[0].attributes['aria-pressed'], 'false');
+  assert.equal(harnessed.exampleButtons[1].attributes['aria-pressed'], 'false');
+  assert.equal(harnessed.exampleButtons[0].classes.has('is-selected'), false);
+  assert.equal(harnessed.exampleButtons[1].classes.has('is-selected'), false);
+  harnessed.page.unmount();
 });
 
 /* 页面桥只转发信封的 message，机器码到前端时没有 code 字段；这类只带码的
@@ -444,7 +808,7 @@ test('a machine code delivered only in message is translated on load', async () 
   harnessed.requests[0].reject(new Error('staging_not_initialized'));
   await drains();
   const html = harnessed.slots.settings.innerHTML;
-  assert.match(html, /请先在账号与会话中加载 V2 运行实例/);
+  assert.match(html, /角色数据尚未加载/);
   assert.doesNotMatch(html, /staging_not_initialized/);
 });
 
@@ -455,9 +819,10 @@ test('a machine code delivered only in message is translated on preview failure'
   await drains();
   harnessed.requests[1].reject(new Error('reply_preview_invalid'));
   await drains();
-  assert.equal(harnessed.page.state.notice, '请填写 1–65536 字的有效正文。');
-  assert.equal(harnessed.page.state.bad, true);
-  assert.doesNotMatch(String(harnessed.page.state.notice), /reply_preview_invalid/);
+  const message = harnessed.slots['preview-status'].textContent;
+  assert.equal(message, '请填写 1–65536 字的有效正文。');
+  assert.doesNotMatch(message, /reply_preview_invalid/);
+  assert.match(harnessed.slots['preview-result'].innerHTML, /预览失败/);
 });
 
 test('an unconfirmed save stays pending and the retry reuses the operation', async () => {
@@ -500,16 +865,36 @@ test('an over-long prompt and an out-of-range value never dispatch', async () =>
   assert.equal(instance.state.bad, true);
 });
 
-test('the diagnostics block renders the recent batches the route returned', async () => {
+test('reply diagnostics show bounded metadata without batch IDs or prompt text', async () => {
   const harnessed = harness();
   harnessed.page.mount(harnessed.root);
   await drains();
   harnessed.requests[0].resolve({...status(),
-    recent: [{batch_id: 'b1', created_at: '2026-09-27 10:00', state: 'complete', reason: '',
-      captured: null, parts: [], calls: []}]});
+    recent: [{batch_id: 'batch-internal', created_at: '2026-09-27 10:00', state: 'complete', reason: 'confirmed_delivery',
+      captured: {settings: {custom_prompt: 'NEVER-RENDER-PRIVATE-PROMPT'}},
+      parts: [{sequence: 1, chars: 8, state: 'unmapped_part_state'}],
+      response_type: 'text_or_mixed', group_history_items: 3,
+      injected_materials: [{owner: 'conversation.group_context', purpose: 'group_conversation_history', state: 'ready'}],
+      offered_tools: ['slang.search'], rounds: [{round_no: 0, state: 'tools', tool_actions: ['slang.search']}],
+      tool_calls: [{action: 'slang.search', state: 'succeeded', effect: 'none'}],
+      turn_type: 'conversation.reply', current_inputs: 1,
+      calls: [{position: 0, state: 'generated', failure_code: 'native_response_parse_failed', actual_tokens: null,
+        latency_ms: null, response_diagnostics: {completion_present: true, parse_state: 'native_rejected', finish_reason: 'stop',
+          raw: {chars: 2, shape: 'json_array', sha256: 'a'.repeat(64), has_internal_markers: true}, parsed: null, visible: null}}]}]});
   await drains();
-  assert.match(harnessed.slots.diagnostics.innerHTML, /最近回复诊断/);
-  assert.match(harnessed.slots.diagnostics.innerHTML, /b1/);
+  const rendered = harnessed.slots.diagnostics.innerHTML;
+  assert.match(rendered, /回复诊断/);
+  assert.match(rendered, /group_conversation_history/);
+  assert.match(rendered, /slang\.search/);
+  assert.match(rendered, /native_response_parse_failed/);
+  assert.match(rendered, /conversation\.reply/);
+  assert.match(rendered, /有效输入 1 条/);
+  assert.match(rendered, /宿主解析失败/);
+  assert.match(rendered, /原始 2 字 · JSON 数组/);
+  assert.match(rendered, /含标签样式标记/);
+  assert.match(rendered, /a{64}/);
+  assert.doesNotMatch(rendered, /batch-internal|confirmed_delivery|NEVER-RENDER-PRIVATE-PROMPT/);
+  assert.match(rendered, /不含提示词正文与消息原文/);
 });
 
 test('a route outside the plugin prefix is refused instead of half-mounting', async () => {

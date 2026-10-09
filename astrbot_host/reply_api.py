@@ -7,6 +7,7 @@ from companion_v2.configuration.models import ConfigurationError
 from companion_v2.conversation.recall_management import RecallManagement
 from companion_v2.conversation.reply_management import ReplyManagement
 from companion_v2.execution.models import TaskError
+from companion_v2.expression.style_management import ExpressionStyleManagement
 from companion_v2.foundation.outcome import Outcome
 from .management_identity import dashboard_operator
 
@@ -25,6 +26,17 @@ class ReplyWebAPI:
                 (PREFIX + "/expression", self.expression, ["GET"], "Read the expression-learning bounds"),
                 (PREFIX + "/expression/configure", self.expression_configure, ["POST"],
                  "Save the expression-learning bounds"),
+                (PREFIX + "/style", self.style, ["GET"], "Review learned expression signals"),
+                (PREFIX + "/style/samples", self.style_samples, ["GET"], "Review original expression samples"),
+                (PREFIX + "/style/samples/command", self.style_sample_command, ["POST"], "Decide an expression sample"),
+                (PREFIX + "/style/learn", self.style_learn, ["POST"], "Learn from this window's eligible samples"),
+                (PREFIX + "/style/export", self.style_export, ["POST"], "Export adopted expression rules"),
+                (PREFIX + "/style/import/preview", self.style_import_preview, ["POST"],
+                 "Preview an expression rule-pack import"),
+                (PREFIX + "/style/import/apply", self.style_import_apply, ["POST"],
+                 "Import expression rules into the review queue"),
+                (PREFIX + "/style/command", self.style_command, ["POST"],
+                 "Decide a learned expression signal"),
                 (PREFIX + "/recalls", self.recalls, ["GET"],
                  "Read this window's withdrawn messages within the configured bound")]
 
@@ -33,15 +45,20 @@ class ReplyWebAPI:
             providers = tuple(self.controller.context.get_all_tts_providers())
         except Exception:
             return {"state": "unavailable", "providers": []}
-        identifiers = set()
+        entries = {}
         for provider in providers:
             try:
-                identifier = provider.meta().id
+                metadata = provider.meta()
+                identifier = metadata.id
             except Exception:
                 continue
             if type(identifier) is str and identifier.strip() and len(identifier) <= 128:
-                identifiers.add(identifier)
-        return {"state": "ready", "providers": [{"id": identifier} for identifier in sorted(identifiers)]}
+                item = {"id": identifier}
+                model = getattr(metadata, "model", None)
+                if type(model) is str and model.strip():
+                    item["model"] = model.strip()
+                entries[identifier] = item
+        return {"state": "ready", "providers": [entries[identifier] for identifier in sorted(entries)]}
 
     async def _run(self, action):
         from .web_api import outcome_response
@@ -112,6 +129,157 @@ class ReplyWebAPI:
 
     async def expression_configure(self):
         return await self._run("expression_configure")
+
+    async def _style(self, arguments, method):
+        from .web_api import outcome_response
+        try:
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load an initialized V2 profile first")
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                manager = ExpressionStyleManagement(session.application)
+                result = getattr(manager, method)(operator=operator, context=session.profile.target, **arguments)
+                return outcome_response(result)
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+
+    async def style(self):
+        from .web_api import outcome_response
+        query = request.query
+        if set(query.keys()) - {"state", "dimension", "limit", "after_id"} or any(
+                len(query.getlist(key)) != 1 for key in query.keys()):
+            return outcome_response(Outcome.failed("expression_query_invalid", "unknown or repeated query fields"))
+        try:
+            limit = int(query.get("limit", "20"))
+        except (TypeError, ValueError):
+            return outcome_response(Outcome.failed("expression_query_invalid", "invalid page size"))
+        return await self._style(dict(state=query.get("state") or "pending",
+            dimension=query.get("dimension") or None, limit=limit,
+            after_id=query.get("after_id") or None), "list")
+
+    async def style_command(self):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 100000:
+                raise ValueError("command too large")
+            def unique(pairs):
+                values = {}
+                for key, value in pairs:
+                    if key in values:
+                        raise ValueError("duplicate field")
+                    values[key] = value
+                return values
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+            fields = {"signal_id", "action", "view_token", "operation_key"}
+            if type(data) is not dict or set(data) != fields:
+                raise ValueError("unexpected style decision fields")
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("expression_command_invalid", "invalid UTF-8 style decision"))
+        return await self._style(data, "command")
+
+    async def style_samples(self):
+        from .web_api import outcome_response
+        query = request.query
+        try:
+            if set(query.keys()) - {"state", "limit", "after_id"} or any(
+                    len(query.getlist(key)) != 1 for key in query.keys()):
+                raise ValueError
+            return await self._style({"state": query.get("state") or "all",
+                "limit": int(query.get("limit", "24")), "after_id": query.get("after_id") or None}, "list_samples")
+        except (ValueError, TypeError):
+            return outcome_response(Outcome.failed("expression_query_invalid", "invalid sample query"))
+
+    async def _sample_action(self, fields, method):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 8192 or request.query:
+                raise ValueError
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=self._unique_json_pairs,
+                              parse_constant=self._reject_nonfinite_json)
+            if type(data) is not dict or set(data) != fields:
+                raise ValueError
+            return await self._style(data, method)
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("expression_command_invalid", "invalid sample action"))
+
+    async def style_sample_command(self):
+        return await self._sample_action({"handle", "action", "view_token", "operation_key"}, "sample_command")
+
+    async def style_learn(self):
+        return await self._sample_action(set(), "learn")
+
+    @staticmethod
+    def _unique_json_pairs(pairs):
+        values = {}
+        for key, value in pairs:
+            if key in values:
+                raise ValueError("duplicate JSON field")
+            values[key] = value
+        return values
+
+    @staticmethod
+    def _reject_nonfinite_json(value):
+        raise ValueError("nonfinite JSON value")
+
+    async def _expression_pack_body(self, expected_fields):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 300000:
+                raise ValueError("share pack is too large")
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=self._unique_json_pairs,
+                              parse_constant=self._reject_nonfinite_json)
+            if type(data) is not dict or set(data) != expected_fields:
+                raise ValueError("unexpected share pack fields")
+            package_text = data.get("package_json")
+            if type(package_text) is not str or len(package_text.encode("utf-8")) > 250000:
+                raise ValueError("share pack must be UTF-8 JSON under 250 KB")
+            package = json.loads(package_text, object_pairs_hook=self._unique_json_pairs,
+                                 parse_constant=self._reject_nonfinite_json)
+            if type(package) is not dict:
+                raise ValueError("share pack must be a JSON object")
+            return data, package, None
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return None, None, outcome_response(Outcome.failed(
+                "expression_pack_invalid", "invalid or unsupported UTF-8 expression share pack"))
+
+    async def style_export(self):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 50000:
+                raise ValueError("export request too large")
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=self._unique_json_pairs,
+                              parse_constant=self._reject_nonfinite_json)
+            if type(data) is not dict or set(data) not in (set(), {"signal_ids"}):
+                raise ValueError("unexpected export fields")
+            signal_ids = data.get("signal_ids")
+            return await self._style({"signal_ids": signal_ids}, "export_pack")
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("expression_export_invalid", "invalid expression export request"))
+
+    async def style_import_preview(self):
+        data, package, error = await self._expression_pack_body({"package_json"})
+        if error is not None:
+            return error
+        return await self._style({"raw_pack": package}, "preview_import")
+
+    async def style_import_apply(self):
+        data, package, error = await self._expression_pack_body(
+            {"package_json", "preview_token", "operation_key"})
+        if error is not None:
+            return error
+        return await self._style({"raw_pack": package, "preview_token": data["preview_token"],
+                                  "operation_key": data["operation_key"]}, "import_pack")
 
     async def recalls(self):
         from .web_api import outcome_response

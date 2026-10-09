@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN" data-theme-ready data-room-ready>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>缓存诊断 · 合成数据预览</title>
+  <link rel="stylesheet" href="../pages/陪伴小屋/tokens.css">
+  <link rel="stylesheet" href="../pages/陪伴小屋/tokens-bridge.css">
+  <link rel="stylesheet" href="../pages/陪伴小屋/maintenance-page.css">
+  <style>
+    body { margin: 0; padding: 24px; color: var(--t-text); background: var(--t-canvas); font-family: MiSans, sans-serif; }
+    #maintenance-preview { max-width: 1400px; margin: 0 auto; }
+    @media (max-width: 740px) { body { padding: 12px; } }
+  </style>
+</head>
+<body>
+  <main id="maintenance-preview"></main>
+  <script>
+    const today = "2026-10-10";
+    const stamp = today + "T13:40:00+08:00";
+    const provider = {key: "synthetic/text-provider", calls: 17, tokens: 234800, cost_microusd: 0,
+      failures: 0, input_tokens: 220000, output_tokens: 14800, cache_reported_calls: 17,
+      cache_telemetry_calls: 17, cache_input_tokens: 220000, cached_input_tokens: 83600,
+      cache_creation_tokens: 12400, cache_other_input_tokens: 124000, cache_low_calls: 2,
+      avg_latency_ms: 840};
+    const task = {...provider, key: "conversation.reply"};
+    const day = {day: today, ...provider, calls: 17, providers: [provider], tasks: [task]};
+    const maintenance = {
+      generated_at: stamp,
+      summary: {...day}, totals: {...day}, daily: [day], history: [day],
+      windows: {"7d": {totals: {...day}, providers: [provider], tasks: [task]},
+        "30d": {totals: {...day}, providers: [provider], tasks: [task]}},
+      by_provider: [provider], by_task: [task], hourly: [],
+      recent: [{kind: "conversation.reply", provider: provider.key, state: "generated", tokens: 1750,
+        input_tokens: 22000, cached_input_tokens: 2500, cache_creation_tokens: 0,
+        output_tokens: 900, cache_hit_rate: 11.4, latency_ms: 840, at: stamp}],
+      cache_diagnostics: {daily: [{day: today, signature_calls: 17, compared_calls: 15, baseline_calls: 2,
+        changed_calls: 3, provider_changes: 1, system_prompt_changes: 1, system_order_drifts: 0,
+        tool_definition_changes: 1, tool_order_drifts: 0, context_resets: 1,
+        context_order_drifts: 0, context_prefix_changes: 0, context_tail_trims: 0,
+        context_availability_changes: 1, context_stats_calls: 17, context_text_stats_calls: 17,
+        cache_hit_comparable_changes: 2, cache_hit_drop_after_change_calls: 1,
+        cache_hit_delta_points_total: -18.2,
+        request_stats_calls: 17, context_availability_calls: 17,
+        context_estimate_calls: 17, system_estimate_calls: 17, tool_estimate_calls: 17,
+        message_estimate_calls: 17, request_estimate_calls: 17,
+        context_est_tokens_total: 146200, system_est_tokens_total: 238000, tool_est_tokens_total: 44200,
+        message_est_tokens_total: 202300, request_est_tokens_total: 630700,
+        request_profile_calls: 17, profile_context_est_tokens_total: 146200,
+        profile_message_est_tokens_total: 202300, profile_system_est_tokens_total: 238000,
+        profile_tool_est_tokens_total: 44200, profile_request_est_tokens_total: 630700,
+        context_materials_total: 174, context_chars_total: 151300, context_bytes_total: 205700,
+        message_chars_total: 328440, message_bytes_total: 359000, deferred_materials_total: 6,
+        unavailable_materials_total: 3, messages_total: 68, system_messages_total: 17,
+        system_bytes_total: 285000, tools_total: 34, tool_bytes_total: 77500,
+        images_total: 0, audio_total: 0, video_total: 0}],
+        recent_events: [{day: today, at: stamp, kind: "conversation.reply", previous_provider: "synthetic/previous-provider", provider: provider.key,
+          session_ref: "a1b2c3d4", severity: "high",
+          changes: ["provider_change", "system_prompt_change", "context_reset", "context_availability_change"], input_tokens: 22000, cache_hit_rate: 11.4,
+          cache_hit_delta: null,
+          before: {context_materials: 12, context_chars: 8900, context_bytes: 12100, context_est_tokens: 6100,
+            message_est_tokens: 12200, message_chars: 19200, message_bytes: 26000, request_est_tokens: 34900,
+            system_fingerprint: "11111111", context_fingerprint: "33333333",
+            deferred_materials: 0, unavailable_materials: 0,
+            system_est_tokens: 14000, tool_est_tokens: 2600, messages: 4, images: 0, audio: 0, video: 0},
+          after: {context_materials: 3, context_chars: 1800, context_bytes: 3200, context_est_tokens: 1100,
+            message_est_tokens: 3200, message_chars: 5500, message_bytes: 7200, request_est_tokens: 20900,
+            system_fingerprint: "22222222", context_fingerprint: "44444444",
+            deferred_materials: 2, unavailable_materials: 1,
+            system_est_tokens: 14000, tool_est_tokens: 2600, messages: 4, images: 0, audio: 0, video: 0}}],
+        event_sample_limit: 80},
+      budget: {limit_tokens: 500000, spent_tokens: 234800, held_tokens: 0},
+      providers: [{id: provider.key, model: "synthetic-model"}], runtime: {},
+    };
+    const diagnosticDay = maintenance.cache_diagnostics.daily[0];
+    for (const [dimension, stable] of [["prefix", 12], ["route", 14], ["system", 14],
+      ["tools", 14], ["materials", 14], ["availability", 14]]) {
+      Object.assign(diagnosticDay, {[dimension + "_compared_calls"]: 15, [dimension + "_stable_calls"]: stable,
+        [dimension + "_cache_calls"]: stable, [dimension + "_cache_input_tokens_total"]: stable * 12000,
+        [dimension + "_cached_input_tokens_total"]: stable * 8000});
+    }
+    const bridge = {apiGet: async route => {
+      if (route.endsWith("/maintenance")) return maintenance;
+      if (route.endsWith("/voice")) return {providers: []};
+      if (route.endsWith("/image")) return {actions: []};
+      if (route.endsWith("/balance")) return {configured: false, available: false, state: "not_configured"};
+      if (route === "/model") return {tasks: [], providers: maintenance.providers};
+      throw new Error("unexpected preview route: " + route);
+    }};
+    window.CompanionProduct = {role: () => ({model_api: "/astrbot_plugin_private_companion_v2/model"}),
+      bridgeNow: () => bridge};
+    window.lucide = {createIcons() {}};
+  </script>
+  <script src="../pages/陪伴小屋/maintenance-page.js"></script>
+  <script>window.CompanionMaintenancePage.mount(document.getElementById("maintenance-preview"), {activeView: "cache"});</script>
+</body>
+</html>

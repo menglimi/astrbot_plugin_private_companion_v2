@@ -9,7 +9,7 @@ from companion_v2.capabilities.native import json_document
 from companion_v2.conversation.content.access import (ACTIONS, ContentAccess, document, owner_for,
                                                        record_authoring_request)
 from companion_v2.conversation.content.sources import ContentSources
-from companion_v2.execution.models import TaskError
+from companion_v2.execution.models import TaskContext, TaskError, encode
 
 
 class ContentConsumer:
@@ -87,6 +87,41 @@ class ContentConsumer:
         if type(result["next_after"]) is not int or result["next_after"] != cursor:
             raise TaskError("content_event_invalid", "Content event cursor cannot skip unseen withdrawal events")
         return result
+
+    def dashboard_summary(self, context, at):
+        """Project counts from governed Content anchors without copying work text."""
+        self.live()
+        self.application.messages.authorize(context, at)
+        self.sources.synchronize()
+        owner = owner_for(context)
+        rows = self.application.runtime.read_all(
+            """SELECT payload_json, created_at FROM sources WHERE owner=? AND installation_id=?
+               AND state='active' AND json_extract(json_extract(payload_json, '$'), '$.owner')=?""",
+            ("content.governance", self.application.runtime.installation_id, encode(owner)))
+        works = {}
+        latest_at = None
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+                if (payload.get("schema") != "companion.content-source.v1" or payload.get("owner") != owner
+                        or TaskContext.restore(payload["context"]).key != context.key
+                        or type(payload.get("work_id")) is not str or not payload["work_id"]):
+                    continue
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            works[payload["work_id"]] = max(works.get(payload["work_id"], ""), row["created_at"])
+            latest_at = max(latest_at or "", row["created_at"])
+        candidate = self.application.runtime.read_one(
+            """SELECT COUNT(*) AS total, MAX(COALESCE(i.finished_at, i.created_at)) AS updated_at
+               FROM extension_tool_invocations i JOIN conversation_batches b ON b.batch_id=i.batch_id
+               WHERE b.origin_key=? AND i.action='content.work.save_candidate' AND i.state='succeeded'""",
+            (context.key,))
+        candidate_count = int(candidate["total"] if candidate is not None else 0)
+        candidate_at = candidate["updated_at"] if candidate is not None else None
+        if candidate_at:
+            latest_at = max(latest_at or "", candidate_at)
+        return {"available": True, "works_count": len(works), "candidate_count": candidate_count,
+                "updated_at": latest_at or None}
 
     @contextmanager
     def bind(self, invocation, request, guard):

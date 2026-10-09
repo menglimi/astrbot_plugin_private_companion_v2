@@ -1,0 +1,79 @@
+.perception-config-workspace{display:grid;gap:var(--sp-3);min-width:0}
+.perception-config-nav{position:sticky;top:var(--sp-2);z-index:5;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;padding:3px;border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);box-shadow:var(--t-shadow)}
+.perception-config-nav button{display:flex;align-items:center;justify-content:center;gap:var(--sp-2);min-width:0;min-height:42px;padding:var(--sp-2) var(--sp-3);border:0;border-radius:var(--r-xs);background:transparent;color:var(--t-text-soft);font:inherit;font-size:var(--fs-body);cursor:pointer;transition:background .16s ease,color .16s ease}
+.perception-config-nav button svg{width:16px;height:16px;flex:none}
+.perception-config-nav button:hover{background:var(--t-surface-soft);color:var(--t-text-strong)}
+.perception-config-nav button.active{background:var(--t-accent-quiet);color:var(--t-accent);font-weight:650}
+.perception-config-nav button.active::after{display:none}
+.perception-config-nav button:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
+.perception-config-page{min-width:0;scroll-margin-top:72px}
+.perception-config-page[hidden]{display:none}
+.perception-config-page-heading{display:flex;align-items:baseline;gap:var(--sp-2);margin:0 0 var(--sp-3);padding:0 0 var(--sp-3);border-bottom:1px solid var(--t-line)}
+.perception-config-page-heading span{color:var(--t-accent);font-size:var(--fs-body);font-weight:700;font-variant-numeric:tabular-nums}
+.perception-config-page-heading h2{margin:0;color:var(--t-text-strong);font-size:var(--fs-title);line-height:1.35}
+.perception-config-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:var(--sp-3);min-width:0}
+.perception-config-zone{display:contents}
+.perception-config-zone[hidden]{display:none}
+.perception-subpanel{min-width:0;margin:0;overflow:clip;border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);box-shadow:var(--t-shadow)}
+.perception-subpanel[hidden]{display:none}
+.perception-subpanel>summary{grid-template-columns:minmax(0,1fr) 18px;min-height:48px;padding:var(--sp-3) var(--sp-4);color:var(--t-text-strong)}
+.perception-subpanel>summary>svg:last-child{color:var(--t-text-faint)}
+.perception-subpanel>summary span{display:block}
+.perception-subpanel>summary strong{font-size:var(--fs-lead);font-weight:650}
+.perception-subpanel>summary small{display:none}
+.perception-subpanel[open]>summary{background:var(--t-surface-soft)}
+.perception-subpanel-body{padding:var(--sp-3) var(--sp-4) var(--sp-4);animation:none}
+.perception-config-grid-environment #perception-detail-place{grid-column:1;grid-row:1 / span 2}
+.perception-config-grid-environment #perception-detail-calendar{grid-column:2;grid-row:1}
+.perception-config-grid-environment #perception-detail-important-days{grid-column:2;grid-row:2}
+.perception-config-grid-models #perception-detail-context{grid-column:1;grid-row:1}
+.perception-config-grid-models #perception-detail-model-route{grid-column:2;grid-row:1 / span 2}
+.perception-config-grid-models #perception-detail-injection{grid-column:1 / -1;grid-row:2}
+.perception-config-grid-reality #perception-detail-device-access{grid-column:1;grid-row:1}
+.perception-config-grid-reality #perception-detail-providers{grid-column:2;grid-row:1}
+.perception-config-grid-external #perception-detail-external{grid-column:1;grid-row:1}
+.perception-config-grid-external #perception-detail-balance-source{grid-column:2;grid-row:1}
+.perception-config-grid-external #perception-detail-balance{grid-column:2;grid-row:2}
+.perception-config-grid-external #perception-detail-recalls{grid-column:1;grid-row:2 / span 2}
+.perception-config-grid .perception-scope{margin-top:var(--sp-2)}
+.perception-config-grid .perception-settings-heading{margin-bottom:var(--sp-2)}
+.perception-config-grid .perception-settings-disclosure{margin:0;border:0;border-radius:0;background:transparent}
+.perception-config-grid .perception-settings-disclosure>summary{display:none}
+.perception-config-grid .perception-settings-disclosure[open]>summary{border:0}
+.perception-config-grid .perception-settings-disclosure .perception-settings-form{padding:0}
+.perception-config-grid .perception-model-route-note{justify-content:flex-end}
+.perception-config-grid .perception-access-block{margin-block:var(--sp-3);padding-block:var(--sp-3)}
+.perception-config-grid .perception-access-heading{margin-bottom:var(--sp-2)}
+.perception-config-grid .perception-access-heading .perception-section-index{display:none}
+.perception-config-grid .perception-mihome-subpanel{margin-top:var(--sp-3);box-shadow:none}
+.perception-config-grid-environment{--perception-page-accent:var(--t-ok)}
+.perception-config-grid-models{--perception-page-accent:var(--t-accent)}
+.perception-config-grid-reality{--perception-page-accent:var(--t-warn-ink)}
+.perception-config-grid-external{--perception-page-accent:var(--t-text-soft)}
+.perception-config-page-heading span{color:var(--perception-page-accent,var(--t-accent))}
+.perception-config-grid .button.small{min-height:34px}
+@media(max-width:850px){
+  .perception-config-grid{grid-template-columns:minmax(0,1fr)}
+  .perception-config-grid-environment #perception-detail-place,
+  .perception-config-grid-environment #perception-detail-calendar,
+  .perception-config-grid-environment #perception-detail-important-days,
+  .perception-config-grid-models #perception-detail-context,
+  .perception-config-grid-models #perception-detail-model-route,
+  .perception-config-grid-models #perception-detail-injection,
+  .perception-config-grid-reality #perception-detail-device-access,
+  .perception-config-grid-reality #perception-detail-providers,
+  .perception-config-grid-external #perception-detail-external,
+  .perception-config-grid-external #perception-detail-balance-source,
+  .perception-config-grid-external #perception-detail-balance,
+  .perception-config-grid-external #perception-detail-recalls{grid-column:1;grid-row:auto}
+}
+@media(max-width:560px){
+  .perception-config-nav{grid-template-columns:repeat(2,minmax(0,1fr));position:static}
+  .perception-config-nav button{justify-content:flex-start;padding-inline:var(--sp-2);font-size:var(--fs-tiny)}
+  .perception-config-page-heading{margin-bottom:var(--sp-2);padding-bottom:var(--sp-2)}
+  .perception-config-page-heading h2{font-size:var(--fs-lead)}
+  .perception-subpanel>summary{padding-inline:var(--sp-3)}
+  .perception-subpanel-body{padding-inline:var(--sp-3)}
+}
+@media(prefers-reduced-motion:reduce){.perception-config-nav button{transition:none}}
+:root[data-motion="off"] .perception-config-nav button{transition:none}

@@ -5,15 +5,21 @@ and are checked directly here. The preview/commit paths that need a live memory
 service are exercised by their own host-level tests.
 """
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 from companion_v2.execution.models import TaskContext, TaskError
 from companion_v2.foundation.refs import AudienceRef
+from companion_v2.foundation.outcome import Outcome
 from tests.test_management_access import SCOPE, ManagementFixture
 from companion_v2.memory.archive import (BUNDLE_FORMAT, DEFAULT_IDLE_DAYS, MAX_BUNDLE_ATOMS,
     ArchiveDecision, MemoryArchive, _idle_days)
+from companion_v2.memory.service import MemoryService
+from tests.memory_support import MemoryFixture
 
 
 NOW = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
@@ -121,6 +127,61 @@ class ArchiveTokenTests(ManagementFixture):
         self.assertNotEqual(self.token(base), self.token(bumped))
         self.assertNotEqual(self.token(base), self.token(extra))
 
+
+class ArchivePreviewLabelsTests(unittest.TestCase):
+    def test_labels_use_the_authorized_read_and_hide_unavailable_content(self):
+        archive = MemoryArchive.__new__(MemoryArchive)
+        reader = Mock(return_value=Outcome.success({"predicate": "饮用偏好", "representation": "喜欢茶" * 100}))
+        archive.writer = SimpleNamespace(read=reader)
+        context = object()
+        display = archive._preview_labels(context, "atom-internal", 4)
+        self.assertEqual(display["predicate"], "饮用偏好")
+        self.assertEqual(len(display["representation"]), 240)
+        args = reader.call_args.args
+        self.assertIs(args[0], context)
+        self.assertEqual((args[1].atom_id, args[1].revision), ("atom-internal", 4))
+        reader.return_value = Outcome.failed("source_revoked", "internal source detail")
+        self.assertEqual(archive._preview_labels(context, "atom-internal", 4), {"unavailable_reason": "source_revoked"})
+
+
+class ArchivePreviewWorkflowTests(MemoryFixture, unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        super().setUp()
+        self.archive = MemoryArchive(MemoryService(self.tasks), self.core)
+
+    def test_preview_labels_follow_the_original_record_through_archive_and_restore(self):
+        ref = self.remember(replace(self.proposed(), retention="durable"))
+        self.clock.advance(timedelta(days=DEFAULT_IDLE_DAYS + 1))
+        preview = self.archive.preview(context=self.context).unwrap()
+        self.assertEqual(preview["counts"]["eligible"], 1)
+        self.assertEqual(preview["items"][0]["atom_id"], ref.atom_id)
+        self.assertEqual(preview["items"][0]["predicate"], "饮用偏好")
+        self.archive.commit(context=self.context, expected_archive_token=preview["archive_token"],
+                            operation_key="archive").unwrap()
+        archived = self.archive.preview(context=self.context).unwrap()
+        self.assertEqual(archived["counts"]["eligible"], 0)
+        self.assertEqual(archived["archived_items"][0]["atom_id"], ref.atom_id)
+        self.assertEqual(archived["archived_items"][0]["representation"], "用户说自己不喝咖啡。")
+        result = self.archive.restore(context=self.context, atom_ids=(ref.atom_id,), operation_key="restore").unwrap()
+        self.assertEqual(result["items"], [{"atom_id": ref.atom_id, "revision": ref.revision}])
+        self.assertEqual(self.archive.restore(context=self.context, atom_ids=(ref.atom_id,), operation_key="restore").unwrap(), result)
+        conflict = self.archive.restore(context=self.context, atom_ids=("another-atom",), operation_key="restore")
+        self.assertEqual(conflict.failure.code, "memory_operation_conflict")
+        self.assertEqual(self.archive.preview(context=self.context).unwrap()["archived_items"], [])
+
+    def test_revoked_evidence_cannot_leak_content_into_archived_labels(self):
+        proposal = replace(self.proposed(), retention="durable")
+        self.remember(proposal)
+        self.clock.advance(timedelta(days=DEFAULT_IDLE_DAYS + 1))
+        preview = self.archive.preview(context=self.context).unwrap()
+        self.archive.commit(context=self.context, expected_archive_token=preview["archive_token"],
+                            operation_key="archive").unwrap()
+        self.memory.sources.revoke(proposal.evidence[0].source, expected_governance_revision=1,
+                                   observed_at=self.clock.now()).unwrap()
+        item = self.archive.preview(context=self.context).unwrap()["archived_items"][0]
+        self.assertIn("unavailable_reason", item)
+        self.assertNotIn("representation", item)
+        self.assertNotIn("predicate", item)
 
 class BundleValidationTests(unittest.TestCase):
     ARCHIVE = MemoryArchive.__new__(MemoryArchive)

@@ -298,6 +298,18 @@ class RankingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items["hug"]["clusters"], ["安慰陪伴"])
         self.assertEqual(items["literal"]["clusters"], [])
 
+    async def test_negated_emotion_does_not_retrieve_positive_emotion_assets(self):
+        self.port.failing = True
+        self.add("positive", "开心")
+        negative = await self.query("我不开心", shared_clusters=reaction_lexicon.shared_clusters,
+                                    query_terms_fn=reaction_lexicon.query_terms,
+                                    lexical_fallback_weight=0.0)
+        positive = await self.query("我很开心", shared_clusters=reaction_lexicon.shared_clusters,
+                                    query_terms_fn=reaction_lexicon.query_terms,
+                                    lexical_fallback_weight=0.0)
+        self.assertEqual(negative["items"], [])
+        self.assertEqual([item["id"] for item in positive["items"]], ["positive"])
+
 
 class LookupStub:
     def __init__(self):
@@ -538,7 +550,8 @@ class BackfillTests(unittest.IsolatedAsyncioTestCase):
         self.port = CatalogPort()
         self.service = SemanticService(
             SimpleNamespace(runtime=self.runtime, memory=None,
-                            messages=SimpleNamespace(group_memory=None)), self.port)
+                            messages=SimpleNamespace(group_memory=None),
+                            proactive=SimpleNamespace(sources=None)), self.port)
         self.owner = self.service.owner(CONTEXT)
         for index in range(5):
             self.service.store.put(self.owner, "reaction", f"i{index}",

@@ -5,7 +5,7 @@ import json
 import math
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError
-from companion_v2.configuration.owners import SparseConfigurationOwner
+from companion_v2.configuration.role_settings import RoleSharedSettingsOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
 from companion_v2.execution.models import require
 
@@ -14,10 +14,18 @@ from .segmentation import PART_GAP_MODES
 from .outbound_plan import component_order
 from .text_processing import TEXT_DEFAULTS, text_policy
 from .voice_reply import VoiceReplyPolicy
+from .media.understanding import (
+    DEFAULTS as UNDERSTANDING_DEFAULTS,
+    LIMITS as UNDERSTANDING_LIMITS,
+    format_groups_for_legacy,
+    SCOPE_PERMISSION_FIELDS,
+    settings as understanding_settings,
+)
 
 
 GROUP = "conversation.presentation"
 OWNER = "conversation.presentation"
+RULES_FIELD = GROUP + ".rules_enabled"
 IMAGE_POSITIONS = frozenset(("after_text", "before_text"))
 VOICE_FIELDS = tuple(key for key in asdict(VoiceReplyPolicy())
                      if key not in ("private_probability", "group_probability"))
@@ -82,11 +90,19 @@ OUTBOUND_DEFAULTS = {"component_order": "[]", "reply_quote_enabled": False,
 OUTBOUND_LIMITS = {"reply_quote_skip_chars": (0, 120)}
 OUTBOUND_BOOLEAN_FIELDS = ("reply_quote_enabled", "reply_quote_group_enabled",
                            "reply_quote_first_part_only", "reply_mention_speaker_enabled")
-SPACING_DEFAULTS = {"part_gap_mode": "fixed", "part_gap_min_ms": 1500,
-                    "part_gap_max_ms": 3500, "part_gap_log_base": 1.8}
+FORWARD_DEFAULTS = {"forward_message_adaptation_enabled": True}
+SPACING_DEFAULTS = {"part_gap_mode": "log", "part_gap_min_ms": 1500,
+                    "part_gap_max_ms": 3500, "part_gap_log_base": 2.1}
 SPACING_FIELDS = frozenset(SPACING_DEFAULTS)
 CONTEXT_IMAGE_DEFAULTS = {"enable_context_image_captioning": False,
                           "context_image_caption_max_items": 2}
+IMAGE_NARRATION_DEFAULTS = {"enable_private_image_self_recognition": False,
+    "enable_private_image_vision_cache": True, "private_image_vision_cache_max_items": 300,
+    "private_image_vision_custom_prompt": "", "private_image_vision_max_chars": 1200,
+    "private_image_vision_wait_seconds": 8,
+    "private_image_provider_failure_cooldown_seconds": 60,
+    "private_image_self_recognition_hint": ""}
+DIAGNOSTIC_DEFAULTS = {"reply_diagnostic_limit": 80}
 
 
 def outbound_settings(values):
@@ -188,25 +204,33 @@ def validate(values):
         raise ConfigurationError("reply_configuration_invalid", "provide the declared reply settings")
     segmentation_defaults = asdict(SegmentationPolicy())
     expected = set(segmentation_defaults) | {"streaming", "part_gap_ms"}
-    legacy_required = expected - {"split_words", "match_width_variants", "rule_regex"}
+    legacy_required = expected - {"split_words", "match_width_variants", "rule_regex", "streaming_mode"}
     voice = set(voice_settings())
     air = set(GROUP_AIR_DEFAULTS)
     wakeup = set(GROUP_WAKEUP_DEFAULTS)
     safety = set(GROUP_SAFETY_DEFAULTS)
     outbound = set(OUTBOUND_DEFAULTS)
+    forward = set(FORWARD_DEFAULTS)
     presentation = set(TEXT_DEFAULTS)
     captions = set(CONTEXT_IMAGE_DEFAULTS)
+    image_narration = set(IMAGE_NARRATION_DEFAULTS)
+    understanding = set(UNDERSTANDING_DEFAULTS)
     spacing = set(SPACING_DEFAULTS)
+    diagnostics = set(DIAGNOSTIC_DEFAULTS)
     optional = set(values) - expected - {"image_position"}
     provided = set(values)
     if (not legacy_required <= provided
-            or optional - voice - air - wakeup - safety - presentation - outbound - captions - spacing
+            or optional - voice - air - wakeup - safety - presentation - outbound - forward - captions - image_narration - understanding - spacing - diagnostics
             or any(optional & block and not block <= optional for block in (voice, air, presentation))
             or optional & spacing not in (set(), spacing)
+            or optional & forward not in (set(), forward)
             or optional & wakeup not in (set(), set(GROUP_WAKEUP_LEGACY_FIELDS),
                                         set(GROUP_WAKEUP_PREVIOUS_FIELDS), set(GROUP_WAKEUP_PROMPT_FIELDS), wakeup)):
         raise ConfigurationError("reply_configuration_invalid", "provide the declared reply settings")
     try:
+        diagnostic_limit = values.get("reply_diagnostic_limit", DIAGNOSTIC_DEFAULTS["reply_diagnostic_limit"])
+        if type(diagnostic_limit) is not int or not 10 <= diagnostic_limit <= 300:
+            raise ValueError("invalid reply diagnostic limit")
         policy = SegmentationPolicy(**{key: values.get(key, default)
                                        for key, default in segmentation_defaults.items()})
         if type(values["streaming"]) is not bool or type(values["part_gap_ms"]) is not int or not 0 <= values["part_gap_ms"] <= 60000:
@@ -229,11 +253,32 @@ def validate(values):
         group_wakeup_settings(values)
         group_safety_settings(values)
         outbound_settings(values)
+        forward_values = {**FORWARD_DEFAULTS, **{name: values[name] for name in forward if name in values}}
+        if type(forward_values["forward_message_adaptation_enabled"]) is not bool:
+            raise ValueError("invalid forward message setting")
         text_policy(values)
+        understanding_settings(values)
         if (type(values.get("enable_context_image_captioning", False)) is not bool
                 or type(values.get("context_image_caption_max_items", 2)) is not int
                 or not 0 <= values.get("context_image_caption_max_items", 2) <= 8):
             raise ValueError("invalid historical image caption setting")
+        narration = {**IMAGE_NARRATION_DEFAULTS,
+                     **{name: values[name] for name in image_narration if name in values}}
+        if (type(narration["enable_private_image_self_recognition"]) is not bool
+                or type(narration["enable_private_image_vision_cache"]) is not bool
+                or type(narration["private_image_vision_cache_max_items"]) is not int
+                or not 0 <= narration["private_image_vision_cache_max_items"] <= 2000
+                or type(narration["private_image_vision_custom_prompt"]) is not str
+                or len(narration["private_image_vision_custom_prompt"]) > 4000
+                or type(narration["private_image_vision_max_chars"]) is not int
+                or not 120 <= narration["private_image_vision_max_chars"] <= 4000
+                or type(narration["private_image_vision_wait_seconds"]) is not int
+                or not 1 <= narration["private_image_vision_wait_seconds"] <= 30
+                or type(narration["private_image_provider_failure_cooldown_seconds"]) is not int
+                or not 0 <= narration["private_image_provider_failure_cooldown_seconds"] <= 3600
+                or type(narration["private_image_self_recognition_hint"]) is not str
+                or len(narration["private_image_self_recognition_hint"]) > 1200):
+            raise ValueError("invalid image narration setting")
     except (ValueError, TypeError) as error:
         raise ConfigurationError("reply_configuration_invalid", "invalid reply settings or prompt length") from error
     return policy
@@ -243,15 +288,29 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
     defaults = {**asdict(segmentation), "streaming": streaming, "part_gap_ms": round(gap * 1000),
               **SPACING_DEFAULTS, "image_position": "after_text", **voice_settings(voice), **GROUP_AIR_DEFAULTS,
               **GROUP_WAKEUP_DEFAULTS, **GROUP_SAFETY_DEFAULTS, **OUTBOUND_DEFAULTS, **TEXT_DEFAULTS}
+    # The field remains in the backend contract so older snapshots can still
+    # be read, but it is no longer a choice: deterministic rule completion is
+    # always active whenever segmentation itself is enabled.
+    defaults["rules_enabled"] = True
+    defaults.update(FORWARD_DEFAULTS)
     defaults.update(CONTEXT_IMAGE_DEFAULTS)
+    defaults.update(IMAGE_NARRATION_DEFAULTS)
+    defaults.update(UNDERSTANDING_DEFAULTS)
+    defaults.update(DIAGNOSTIC_DEFAULTS)
     validate(defaults)
     limits = {"threshold": (1, 65536), "min_segment_chars": (1, 65536), "max_segments": (1, 64),
               "part_gap_ms": (0, 60000), "voice_cooldown_seconds": (0, 86400),
               "part_gap_min_ms": (100, 60000), "part_gap_max_ms": (100, 60000),
               "part_gap_log_base": (1.1, 5.0),
               "voice_max_speech_chars": (1, 10000), "voice_timeout_seconds": (1, 120),
+              "reply_diagnostic_limit": (10, 300),
               **GROUP_AIR_LIMITS, **GROUP_WAKEUP_LIMITS, **OUTBOUND_LIMITS}
     limits["context_image_caption_max_items"] = (0, 8)
+    limits.update(UNDERSTANDING_LIMITS)
+    limits.update({"private_image_vision_cache_max_items": (0, 2000),
+                   "private_image_vision_max_chars": (120, 4000),
+                   "private_image_vision_wait_seconds": (1, 30),
+                   "private_image_provider_failure_cooldown_seconds": (0, 3600)})
     return tuple(FieldDefinition(GROUP + "." + name, GROUP, GROUP,
         ValueKind.WEIGHT if name == "part_gap_log_base" else
         ValueKind.PROBABILITY if name in ("voice_probability", "group_wakeup_interest_probability") else
@@ -262,8 +321,14 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
         for name, value in defaults.items())
 
 
-class ReplyConfigurationOwner(SparseConfigurationOwner):
+class ReplyConfigurationOwner(RoleSharedSettingsOwner):
     owner_id = OWNER
+
+    def is_shared(self, field):
+        return field.field_id.rsplit(".", 1)[-1] in SCOPE_PERMISSION_FIELDS
+
+    def role_value_overrides_window(self, field):
+        return self.is_shared(field)
 
     def __init__(self, runtime, voice=None):
         super().__init__(runtime)
@@ -271,21 +336,41 @@ class ReplyConfigurationOwner(SparseConfigurationOwner):
 
     def read(self, target, fields):
         snapshot = super().read(target, fields)
+        rules = snapshot.fields.get(RULES_FIELD)
+        if rules is not None and rules.value is not True:
+            snapshot = replace(snapshot, fields={**snapshot.fields,
+                RULES_FIELD: replace(rules, value=True)})
         key = GROUP + ".voice_probability"
         current = snapshot.fields.get(key)
         if current is not None and current.source is None and target.scope is not None:
             snapshot = replace(snapshot, fields={**snapshot.fields,
                 key: replace(current, value=self.voice.chance(target.scope.kind.value))})
+        formats_key = GROUP + ".file_understanding_formats"
+        groups_key = GROUP + ".file_understanding_format_groups"
+        legacy, groups = snapshot.fields.get(formats_key), snapshot.fields.get(groups_key)
+        if legacy is not None and groups is not None and not groups.explicit:
+            selected = format_groups_for_legacy(legacy.value)
+            if selected:
+                snapshot = replace(snapshot, fields={**snapshot.fields,
+                    groups_key: replace(groups, value="\n".join(selected),
+                        source=legacy.source, explicit=legacy.explicit,
+                        source_revision=legacy.source_revision)})
         return snapshot
 
     def preview_set(self, target, fields, *, changes):
-        result = super().preview_set(target, fields, changes=changes)
+        normalized = dict(changes)
+        if RULES_FIELD in normalized:
+            normalized[RULES_FIELD] = True
+        result = super().preview_set(target, fields, changes=normalized)
         validate({key.removeprefix(GROUP + "."): item.value for key, item in result.items()})
         return result
 
     def write(self, target, fields, *, changes, reset, expected_revision, observed_at):
+        normalized = dict(changes)
+        if RULES_FIELD in normalized:
+            normalized[RULES_FIELD] = True
         with self.runtime.transaction():
-            result = super().write(target, fields, changes=changes, reset=reset,
+            result = super().write(target, fields, changes=normalized, reset=reset,
                 expected_revision=expected_revision, observed_at=observed_at)
             validate({key.removeprefix(GROUP + "."): item.value for key, item in self.read(target, fields).fields.items()})
             return result

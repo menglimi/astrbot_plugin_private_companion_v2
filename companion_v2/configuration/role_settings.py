@@ -7,10 +7,13 @@ from .owners import OwnerSnapshot, OwnerWrite, SparseConfigurationOwner
 
 
 class RoleSharedSettingsOwner(SparseConfigurationOwner):
-    """Keep window values as a legacy fallback until a role value is written."""
+    """Share selected preferences across windows while retaining legacy fallbacks."""
 
     def is_shared(self, field):
         raise NotImplementedError
+
+    def role_value_overrides_window(self, field):
+        return False
 
     def role_target(self, target):
         return ConfigTarget(target.installation_id, ConfigLayer.ROLE, target.role, bot_id=target.bot_id)
@@ -25,10 +28,13 @@ class RoleSharedSettingsOwner(SparseConfigurationOwner):
         local = super().read(target, self.window_fields(fields))
         role = super().read(self.role_target(target), self.role_fields(fields))
         values = dict(local.fields)
-        for key, value in role.fields.items():
-            # A window that set its own value keeps it; the role value is shared by
-            # every window that did not, which is what "window as a fallback" means.
-            if value.source is not None and local.fields[key].source is None:
+        for field in self.role_fields(fields):
+            key = field.field_id
+            value = role.fields[key]
+            # Some role settings are authoritative even at their default, so an old
+            # window value cannot split their behavior across private conversations.
+            if self.role_value_overrides_window(field) or (
+                    value.source is not None and local.fields[key].source is None):
                 values[key] = value
         return OwnerSnapshot(local.revision + role.revision,
             tuple(dict.fromkeys((*local.dependencies, *role.dependencies))), values)

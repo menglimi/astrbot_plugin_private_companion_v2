@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from astrbot.core.message.components import At, Forward, Image, Plain, Record, Reply, Video
+from astrbot.core.message.components import At, Forward, Image, Plain, Record, Reply, Video, File
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.native import account_number, native_id
 from companion_v2.execution.models import TaskError
@@ -12,7 +12,7 @@ def private_components(event):
     message = event.message_obj
     raw = getattr(message, "raw_message", None)
     segments = raw.get("message") if isinstance(raw, Mapping) else None
-    if not isinstance(segments, list) or not any(isinstance(s, Mapping) and s.get("type") in ("record", "video") for s in segments):
+    if not isinstance(segments, list) or not any(isinstance(s, Mapping) and s.get("type") in ("record", "video", "file") for s in segments):
         return tuple(message.message)
     media = "audio" if any(s.get("type") == "record" for s in segments if isinstance(s, Mapping)) else "video"
     if (raw.get("post_type") != "message" or raw.get("message_type") != "private"
@@ -32,7 +32,7 @@ def group_components(event):
     message = event.message_obj
     segments = message.raw_message.get("message")
     if not isinstance(segments, list) or not any(
-            isinstance(s, Mapping) and s.get("type") in ("record", "video") for s in segments):
+            isinstance(s, Mapping) and s.get("type") in ("record", "video", "file") for s in segments):
         return tuple(message.message)
     return _restore_components(segments, "group_media", group=True)
 
@@ -55,6 +55,9 @@ def _restore_components(segments, media, *, group=False):
             result.append(Reply(id=str(data["id"])))
         elif kind == "forward":
             result.append(Forward(id=str(data["id"])))
+        elif kind == "file":
+            result.append(File(name=data.get("file_name") or data.get("name") or data.get("file") or "附件",
+                file=data.get("file_id") or data.get("id") or "", url=data.get("url") or ""))
         elif kind == "at" and group:
             result.append(At(qq=str(data["qq"])))
         else:

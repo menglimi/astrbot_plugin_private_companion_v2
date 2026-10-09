@@ -102,6 +102,7 @@ class GroupMemoryManagementTests(GroupMemoryManagementFixture, unittest.Isolated
         await self.start_host()
         context, _, saved = await self.conversation(remember=True)
         manager, target = self.manager(), self.target(context)
+        platform_calls_before_management = list(self.native.platform.client._api._wsr_api.calls)
         item = manager.list(target).unwrap()["items"][0]
         original = self.memory.row(context, saved["memory_id"])["document_json"]
         command = self.command(item, reason="保留原说法的归属，停止后续使用。")
@@ -124,7 +125,7 @@ class GroupMemoryManagementTests(GroupMemoryManagementFixture, unittest.Isolated
         self.assertEqual(other.operation(target, operation_id=result["operation_id"]).failure.code,
                          "group_memory_operation_unavailable")
         self.assertEqual(len(self.native.provider.client.state.calls), 2)
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assertEqual(self.native.platform.client._api._wsr_api.calls, platform_calls_before_management)
 
     async def test_permission_downgrade_denies_reads_and_replays_and_tokens_are_operator_bound(self):
         await self.start_host()

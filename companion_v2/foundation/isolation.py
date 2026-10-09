@@ -102,6 +102,27 @@ APPROVED_IO_BY_MODULE = {
     # writes and staging files only; no network and no V1 data access.
     "companion_v2.storage.backup": frozenset(
         {"connect", "glob", "mkdir", "open", "read_text", "unlink", "write_text"}),
+    # V2 storage inventory and manifest-paired backup retention/transfer only.
+    # Other storage modules retain the default filesystem prohibition.
+    "companion_v2.storage.management": frozenset(
+        {"glob", "mkdir", "open", "read_text", "rglob", "unlink"}),
+    # V1 reads are confined to the explicitly invoked, read-only migration planner.
+    # Migration writes still pass through the authenticated V2 configuration API.
+    "companion_v2.legacy.migration": frozenset({"connect", "read_text", "rglob"}),
+}
+
+# Reference uploads and stored generated images are decoded from bounded bytes,
+# never from caller-provided filesystem paths. Keep this exception narrower than
+# the general file-I/O allowlist so Image.open(path) remains a violation.
+APPROVED_IN_MEMORY_DECODERS_BY_MODULE = {
+    "companion_v2.references.management": frozenset({"Image.open"}),
+}
+
+# Fixed resources shipped with V2; arbitrary paths and writes remain forbidden.
+APPROVED_PACKAGE_RESOURCES_BY_MODULE = {
+    "companion_v2.legacy.configuration_migration": frozenset({
+        ("companion_v2.legacy", "configuration_rules.json"),
+    }),
 }
 
 # Named import policies: pure string/URL normalization with no network I/O.
@@ -114,6 +135,7 @@ APPROVED_IMPORTS_BY_MODULE = {
 APPROVED_CALLS_BY_MODULE = {
     # Local durability for the content-addressed screen original write above.
     "companion_v2.screen.originals": frozenset({"fsync", "link"}),
+    "companion_v2.storage.management": frozenset({"replace"}),
 }
 
 
@@ -177,7 +199,10 @@ class _IsolationVisitor(ast.NodeVisitor):
                     self._add("forbidden_platform_or_network_call", node, dotted_name)
             elif terminal in {"__import__", "import_module"}:
                 self._add("forbidden_dynamic_import", node, dotted_name)
-            elif terminal in DATA_ACCESS_TERMINALS and not self._is_approved_io(terminal):
+            elif (terminal in DATA_ACCESS_TERMINALS
+                  and not self._is_approved_io(terminal)
+                  and not self._is_approved_in_memory_decoder(dotted_name, node)
+                  and not self._is_approved_package_resource_read(node)):
                 code = (
                     "legacy_data_access"
                     if _contains_legacy_data_marker(node)
@@ -202,6 +227,30 @@ class _IsolationVisitor(ast.NodeVisitor):
 
     def _is_approved_io(self, terminal: str) -> bool:
         return terminal in APPROVED_IO_BY_MODULE.get(self._module_name, frozenset())
+
+    def _is_approved_in_memory_decoder(self, dotted_name: str, node: ast.Call) -> bool:
+        return (
+            dotted_name in APPROVED_IN_MEMORY_DECODERS_BY_MODULE.get(self._module_name, frozenset())
+            and bool(node.args)
+            and isinstance(node.args[0], ast.Call)
+            and _dotted_name(node.args[0].func) == "BytesIO"
+        )
+
+    def _is_approved_package_resource_read(self, node: ast.Call) -> bool:
+        policy = APPROVED_PACKAGE_RESOURCES_BY_MODULE.get(self._module_name, frozenset())
+        if not policy or not isinstance(node.func, ast.Attribute) or node.func.attr != "read_text":
+            return False
+        resource = node.func.value
+        if (not isinstance(resource, ast.Call) or not isinstance(resource.func, ast.Attribute)
+                or resource.func.attr != "joinpath" or len(resource.args) != 1 or resource.keywords):
+            return False
+        package = resource.func.value
+        if (not isinstance(package, ast.Call) or _dotted_name(package.func) != "files"
+                or len(package.args) != 1 or package.keywords):
+            return False
+        package_name, resource_name = package.args[0], resource.args[0]
+        return (isinstance(package_name, ast.Constant) and isinstance(resource_name, ast.Constant)
+                and (package_name.value, resource_name.value) in policy)
 
     def _add(self, code: str, node: ast.AST, detail: str) -> None:
         self.violations.append(

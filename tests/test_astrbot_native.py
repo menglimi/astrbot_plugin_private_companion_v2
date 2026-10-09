@@ -4,10 +4,18 @@ import asyncio
 from dataclasses import replace
 import json
 from types import SimpleNamespace as NS
+import time
 import unittest
+from unittest.mock import patch
 
-from companion_v2.adapters.astrbot.native import HostAccount, HostPersona, NativeInputPorts, persona_instruction
-from companion_v2.execution.models import digest
+from companion_v2.adapters.astrbot.native import (
+    HostAccount,
+    HostPersona,
+    NativeInputPorts,
+    bounded_native_lookup,
+    persona_instruction,
+)
+from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from companion_v2.identity_policy.personas import PersonaBinding, PersonaSelector, SelectorKind
 from tests.native_adapter_support import FakeEvent, FakePlatform, NativeFixture
@@ -15,12 +23,35 @@ from tests.test_management_access import INSTALLATION, NOW, ROLE
 
 
 class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_native_lookup_timeout_logs_elapsed_time_and_event_loop_overrun(self):
+        release = asyncio.Event()
+
+        async def pending_lookup():
+            await release.wait()
+
+        with patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.01):
+            with self.assertLogs("companion_v2.adapters.astrbot.native", level="WARNING") as captured:
+                task = asyncio.create_task(bounded_native_lookup(pending_lookup(), operation="persona"))
+                await asyncio.sleep(0)
+                time.sleep(0.03)
+                with self.assertRaises(TaskError) as raised:
+                    await task
+
+        self.assertEqual(raised.exception.code, "host_native_lookup_timeout__persona")
+        line = captured.output[0]
+        self.assertIn("operation=persona", line)
+        self.assertIn("timeout_ms=10", line)
+        self.assertIn("timeout_overrun_ms=", line)
+        self.assertGreaterEqual(int(line.rsplit("elapsed_ms=", 1)[1].split()[0]), 25)
+        self.assertNotIn("private host details", line)
+
     async def test_role_lookup_timeout_is_not_reported_as_an_image_failure(self):
         async def timeout(_):
             raise asyncio.TimeoutError("synthetic private host details")
         self.native.before_resolve = timeout
         result = await self.bridge.capture(FakeEvent(self.native))
-        self.assertEqual(result.failure.code, "host_capture_timeout")
+        self.assertEqual(result.failure.code, "host_native_lookup_timeout__persona")
+        self.assertIn("会话生效人格", result.failure.reason)
         self.assertNotIn("private host details", result.failure.reason)
 
     async def test_native_fields_keep_platform_login_sender_and_original_role(self):

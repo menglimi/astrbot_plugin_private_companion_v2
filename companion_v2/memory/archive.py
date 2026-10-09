@@ -111,6 +111,14 @@ class MemoryArchive:
         return digest([owner_key(context), self.operator, idle_days,
                        [(item.atom_id, item.revision, item.state) for item in decisions]])
 
+    def _preview_labels(self, context, atom_id, revision):
+        result = self.writer.read(context, _atom_ref({"atom_id": atom_id, "revision": revision}))
+        if not result.is_success:
+            return {"unavailable_reason": result.failure.code}
+        item = result.unwrap()
+        return {"predicate": item.get("predicate", ""),
+                "representation": (item.get("representation") or "")[:240]}
+
     @outcome
     def preview(self, *, context, idle_days=DEFAULT_IDLE_DAYS):
         self.writer.access.check(context, "memory.forget")
@@ -126,7 +134,11 @@ class MemoryArchive:
                        "retained": len(rows) - len(decisions)},
             "items": [{"atom_id": item.atom_id, "revision": item.revision,
                        "state": item.state, "idle_since": stamp(item.idle_since),
-                       "reason": item.reason} for item in decisions],
+                       "reason": item.reason,
+                       **self._preview_labels(context, item.atom_id, item.revision)} for item in decisions],
+            "archived_items": [{"atom_id": row["atom_id"], "revision": row["revision"],
+                                **self._preview_labels(context, row["atom_id"], row["revision"])}
+                               for row in rows if self._archived(json.loads(row["record_json"]))],
             "archive_token": self._token(context, decisions, idle_days),
             "preview_only": True,
             "erasure": "none",
@@ -159,6 +171,7 @@ class MemoryArchive:
             if self._token(context, decisions, idle_days) != expected_archive_token:
                 raise TaskError("memory_archive_stale",
                                 "refresh the archive preview before confirming")
+            self.writer._reserve(context, identifier, payload_hash)
             archived = []
             for item in decisions:
                 row = next(candidate for candidate in rows if candidate["atom_id"] == item.atom_id)
@@ -197,12 +210,16 @@ class MemoryArchive:
             raise TaskError("memory_archive_restore_invalid", "provide one to 512 unique atom IDs")
         owner, caller = owner_key(context), self.writer.caller(context)
         identifier = "memory-archive-restore-" + digest([owner, caller, operation_key])
+        payload_hash = digest(["management.archive.restore", atom_ids])
         at = self.writer.tasks.now()
         with self.runtime.transaction() as connection:
             existing = connection.execute("SELECT * FROM memory_operations WHERE operation_id = ?",
                                           (identifier,)).fetchone()
             if existing:
+                if existing["payload_hash"] != payload_hash:
+                    raise TaskError("memory_operation_conflict", "original restore selected different records")
                 return json.loads(existing["result_json"])
+            self.writer._reserve(context, identifier, payload_hash)
             restored = []
             for atom_id in atom_ids:
                 row = connection.execute("SELECT record_json, revision FROM memory_atoms "
@@ -223,7 +240,7 @@ class MemoryArchive:
                       "restored_count": len(restored), "items": restored}
             connection.execute("INSERT INTO memory_operations VALUES (?, ?, ?, ?, ?, NULL, ?, 'persisted', ?, ?, ?)",
                 (identifier, owner, caller, "management.archive.restore",
-                 digest(["management.archive.restore", atom_ids]),
+                 payload_hash,
                  encode(context), encode(result), stamp(at), stamp(at)))
             self.writer._complete(identifier)
             return result
@@ -310,12 +327,14 @@ class MemoryArchive:
             raise TaskError("memory_import_stale", "refresh the import preview before confirming")
         owner, caller = owner_key(context), self.writer.caller(context)
         identifier = "memory-import-" + digest([owner, caller, operation_key])
+        payload_hash = digest(["management.import", expected_import_token])
         at = self.writer.tasks.now()
         with self.runtime.transaction() as connection:
             existing = connection.execute("SELECT * FROM memory_operations WHERE operation_id = ?",
                                           (identifier,)).fetchone()
             if existing:
                 return json.loads(existing["result_json"])
+            self.writer._reserve(context, identifier, payload_hash)
             imported, skipped = [], 0
             for item in atoms:
                 present = connection.execute("SELECT 1 FROM memory_atoms WHERE atom_id = ? AND owner_key = ?",
@@ -362,7 +381,7 @@ class MemoryArchive:
                       "items": imported, "provenance": "bundle_reference_kept"}
             connection.execute("INSERT INTO memory_operations VALUES (?, ?, ?, ?, ?, NULL, ?, 'persisted', ?, ?, ?)",
                 (identifier, owner, caller, "management.import",
-                 digest(["management.import", expected_import_token]),
+                 payload_hash,
                  encode(context), encode(result), stamp(at), stamp(at)))
             self.writer._complete(identifier)
             return result

@@ -67,7 +67,7 @@ LIMITS = {
     "member_clue_chars": (200, 4000),
 }
 TEXT_FIELDS = ("import_paths", "source_ids")
-TEXT_LIMIT = 4000
+TEXT_LIMIT = 20000
 SEPARATORS = re.compile(r"[\r\n,;，；]+")
 
 

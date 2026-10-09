@@ -13,6 +13,7 @@ from companion_v2.execution.runner import ExactTaskRunner
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.model_gateway.models import ModelTaskProfile
+from .understanding import media_scope_enabled
 
 
 KIND = "conversation.context_image_caption"
@@ -105,6 +106,8 @@ class ContextImageCaptionService:
             return ""
         context = parent_run.task.spec.context
         if context.scope.kind is not ScopeKind.GROUP:
+            return ""
+        if not media_scope_enabled(settings, "image_understanding", context.scope):
             return ""
         limit = settings.get("context_image_caption_max_items", 2)
         images = self._images(context, batch_id, self.tasks.now(), limit)

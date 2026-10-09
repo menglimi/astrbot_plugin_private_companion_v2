@@ -4,7 +4,7 @@
 
 ## 一、页面功能
 
-两件事：各处记录的**入口汇集**（记忆整理、日记生活、宿主状态的跳转清单）+ **备份与还原**（安装级合同）。
+资料与维护页提供存储位置与清理策略、各处记录的**入口汇集**、**备份与还原**（安装级合同）以及 **V1 数据迁移**四个子页。
 
 ## 二、展示部分
 
@@ -14,6 +14,7 @@
 | 备份与还原 · 快照列表 | 创建时间倒序、备注、byte_size、schema_version、content_hash 前 12 位 | `backup-page.js:239-258` |
 | 备份与还原 · 还原预览 | 当前库三表行数：memory_atoms 记忆条目 / operations 操作记录 / configuration_values 配置项 + 确认摘要（哈希取自后端 manifest.content_hash，页面不自算） | `:262-289,81-85,186-188` |
 | 备份与还原 · 等待重启 | pending 块（含安全副本 id） | `:291-301` |
+| V1 数据迁移 | 独立的配置与运行数据工作区，不读取首次设置状态；迁移目标与人格由用户显式选择 | `app.js` 的 `renderDataOriginal` / `mountPanelWorkspaces`；`setup-guide.js` 的 `mountMigration` |
 
 ## 三、配置部分
 
@@ -40,7 +41,7 @@
 
 - 路由（`astrbot_host/backup_api.py:29-34`）：`GET /backup`、`POST /backup/create`、`GET /backup/inspect`、`GET /backup/restore/preview`、`POST /backup/restore`、`GET /backup/pending`。
 - 服务：`companion_v2/storage/backup.py` `InstallationBackup`、`apply_pending`（`backup_api.py:13-15`）；重启后由宿主应用 pending 恢复。
-- V1 迁移入口不在本页：`legacy_api.py:48-50`（discovery/plan/apply）挂在开始使用页（见 [16-setup.md](16-setup.md)）。
+- V1 迁移入口位于本页「V1 数据迁移」子页（`#manage/data/migration`）；`app.js` 将该路由挂到 `#legacyMigrationWorkspace`，并以迁移专用模式调用 `CompanionSetup.mountMigration`。发现、试算、配置应用以及运行数据试算/导入均由 `astrbot_host/legacy_api.py` 提供，用户逐步确认后才会写入 V2。
 
 ## 六、相关设计稿与复核
 

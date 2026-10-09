@@ -249,6 +249,8 @@ class KnowledgeImporter:
                                                    limit=max(1, len(plan.specs) * 8)):
                     if version.binding != binding or version.source_id in configured:
                         continue
+                    if version.code == "legacy_v1_imported":
+                        continue
                     if self.catalog.retire(version.binding, version.source_id, at=at,
                                            reason="source_removed"):
                         results.append(ImportResult(version.source_id, ImportStatus.MISSING,

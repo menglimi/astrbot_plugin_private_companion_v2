@@ -60,6 +60,12 @@ class GroupParticipationHintTests(unittest.TestCase):
         self.assertIn("参考权重 35%", hint)
         self.assertIn("不要求接话", hint)
 
+    def test_media_labels_and_thread_metadata_are_not_group_interest_evidence(self):
+        hint = self.hints()
+        self.assertIn("不是成员表达、兴趣词、情绪或复读内容", hint)
+        self.assertIn("话题标题、线程签名等路由元数据也不是兴趣证据", hint)
+        self.assertIn("图片只能在单独开启图片唤醒后作为额外线索", hint)
+
     def test_only_possible_plain_group_fragments_wait(self):
         event = NS(scope=NS(kind=ScopeKind.GROUP))
         self.assertEqual(short_input_wait(event, "[提及机器人] 瓦", {}), 15)

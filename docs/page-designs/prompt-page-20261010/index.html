@@ -1,0 +1,1568 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="courtyard">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>任务提示词 · 页面重设计稿 v1</title>
+<style>
+  /* === 主题色板：与 pages/陪伴小屋/tokens.css 第 12-283 行逐字一致 ===
+/* === 主题色板 ===
+   六套，按明暗分组，每套对应小屋的一个时段或一种陈设风格。
+   :root 不带 data-theme 时用庭院兜底，避免令牌为空。
+
+   每个色板写两条选择器：一条 :root[data-theme=...]（整站生效），
+   一条 [data-theme=...]（同块作用域）。后者是给主题色卡用的——
+   色卡预览元素带上 data-theme 就能取到那套主题的真实色值，
+   于是「色卡里画出来的」就是「选中后真实的」，不需要另抄一份色值。
+   两条选择器必须成对出现，audit_theme_tokens.py 会核对两边的令牌集合一致。 */
+:root,
+:root[data-theme="dawn"],
+[data-theme="dawn"],
+:root[data-theme="light"]{
+  /* 晨雾 · 清晨的浅暖米白，木色点缀 */
+  --t-canvas:#f4f1ea;
+  --t-surface:#fffdf8;
+  --t-surface-soft:#f9f6ef;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#ece7dc;
+  --t-veil:rgba(255,253,248,.72);
+  --t-text:#3b3730;
+  --t-text-strong:#282520;
+  --t-text-soft:#6d675b;
+  --t-text-faint:#8c857a;
+  --t-text-invert:#fffdf8;
+  --t-accent:#9a6f45;
+  --t-accent-hover:#7d5936;
+  --t-accent-quiet:#f2e8d9;
+  --t-accent-ink:#7a5636;
+  --t-accent-solid:#8a6540;
+  --t-accent-solid-hover:#725235;
+  --t-on-solid:#fffdf8;
+  --t-line:rgba(120,105,85,.16);
+  --t-line-firm:rgba(120,105,85,.28);
+  --t-ok:#5f7f52;
+  --t-ok-quiet:#eaf0e3;
+  --t-ok-ink:#4e6a43;
+  --t-warn:#a8802f;
+  --t-warn-quiet:#f8efda;
+  --t-warn-ink:#87661f;
+  --t-risk:#a86055;
+  --t-risk-quiet:#f7e9e5;
+  --t-risk-ink:#8a4c43;
+  --t-focus:rgba(154,111,69,.26);
+  --t-shadow:0 8px 28px rgba(96,80,60,.07);
+  --t-shadow-lift:0 14px 36px rgba(96,80,60,.13);
+  --t-brand:#a87d52;
+  /* 场景联动：界面用晨光时，小屋也走清晨光照 */
+  --t-scene-light:dawn;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:linear-gradient(90deg,color-mix(in srgb,var(--t-accent) 8%,transparent) 1px,transparent 1px),
+    repeating-linear-gradient(0deg,transparent 0 31px,color-mix(in srgb,var(--t-accent) 5%,transparent) 31px 32px);
+  --skin-canvas-size:40px 100%,auto;
+  --skin-r-2xs:2px;--skin-r-xs:5px;--skin-r-sm:8px;--skin-r-md:11px;--skin-r-lg:15px;--skin-r-xl:20px;
+}
+
+:root[data-theme="courtyard"],
+[data-theme="courtyard"]{
+  /* 庭院 · 日间的清爽草绿与天光，是默认主题 */
+  --t-canvas:#eef3ec;
+  --t-surface:#fdfefb;
+  --t-surface-soft:#f5f9f3;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#e3ebe0;
+  --t-veil:rgba(253,254,251,.72);
+  --t-text:#333a33;
+  --t-text-strong:#212822;
+  --t-text-soft:#616b60;
+  --t-text-faint:#828c80;
+  --t-text-invert:#fdfefb;
+  --t-accent:#4a7c50;
+  --t-accent-hover:#3a6540;
+  --t-accent-quiet:#e6efe4;
+  --t-accent-ink:#3b6541;
+  --t-accent-solid:#46754c;
+  --t-accent-solid-hover:#375e3d;
+  --t-on-solid:#fdfefb;
+  --t-line:rgba(74,90,74,.14);
+  --t-line-firm:rgba(74,90,74,.26);
+  --t-ok:#4a7c50;
+  --t-ok-quiet:#e4efe2;
+  --t-ok-ink:#3b6541;
+  --t-warn:#9c7422;
+  --t-warn-quiet:#f7f0dc;
+  --t-warn-ink:#7d5c17;
+  --t-risk:#a5524a;
+  --t-risk-quiet:#f7e9e6;
+  --t-risk-ink:#874139;
+  --t-focus:rgba(74,124,80,.24);
+  --t-shadow:0 8px 28px rgba(58,80,60,.06);
+  --t-shadow-lift:0 14px 36px rgba(58,80,60,.12);
+  --t-brand:#57875d;
+  --t-scene-light:day;
+  --skin-heading-font:"MiSans","Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  --skin-canvas-pattern:linear-gradient(90deg,transparent 0 63px,color-mix(in srgb,var(--t-accent) 5%,transparent) 63px 64px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:3px;--skin-r-xs:7px;--skin-r-sm:10px;--skin-r-md:14px;--skin-r-lg:19px;--skin-r-xl:26px;
+}
+
+:root[data-theme="dusk"],
+[data-theme="dusk"]{
+  /* 暮色 · 偏深暖的琥珀与陶土，傍晚 */
+  --t-canvas:#faf1e8;
+  --t-surface:#fffaf4;
+  --t-surface-soft:#fbf4ec;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#efe0d3;
+  --t-veil:rgba(255,250,244,.74);
+  --t-text:#453831;
+  --t-text-strong:#312721;
+  --t-text-soft:#7a685e;
+  --t-text-faint:#9b887c;
+  --t-text-invert:#fffaf4;
+  --t-accent:#b85f42;
+  --t-accent-hover:#9b4b32;
+  --t-accent-quiet:#fae5da;
+  --t-accent-ink:#964b33;
+  --t-accent-solid:#a8553b;
+  --t-accent-solid-hover:#8d452f;
+  --t-on-solid:#fffaf4;
+  --t-line:rgba(120,88,70,.16);
+  --t-line-firm:rgba(120,88,70,.28);
+  --t-ok:#5b7f5c;
+  --t-ok-quiet:#e9f0e5;
+  --t-ok-ink:#4a6a4b;
+  --t-warn:#a8792b;
+  --t-warn-quiet:#f9eed8;
+  --t-warn-ink:#89601d;
+  --t-risk:#ab4f45;
+  --t-risk-quiet:#fae7e4;
+  --t-risk-ink:#8d3f36;
+  --t-focus:rgba(184,95,66,.24);
+  --t-shadow:0 8px 28px rgba(110,74,54,.08);
+  --t-shadow-lift:0 14px 36px rgba(110,74,54,.14);
+  --t-brand:#c26c4d;
+  --t-scene-light:dusk;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(135deg,transparent 0 11px,color-mix(in srgb,var(--t-accent) 4%,transparent) 11px 12px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:2px;--skin-r-xs:4px;--skin-r-sm:7px;--skin-r-md:10px;--skin-r-lg:14px;--skin-r-xl:18px;
+}
+
+:root[data-theme="night"],
+[data-theme="night"],
+:root[data-theme="dark"],
+[data-theme="dark"]{
+  /* 夜读 · 低照度靛蓝与月白，夜间查看 */
+  --t-canvas:#15171f;
+  --t-surface:#22252f;
+  --t-surface-soft:#1c1f28;
+  --t-surface-raised:#282c38;
+  --t-surface-sunken:#181a22;
+  --t-veil:rgba(28,30,39,.82);
+  --t-text:#e5e6ec;
+  --t-text-strong:#f5f5f9;
+  --t-text-soft:#a5a8b8;
+  --t-text-faint:#7b7f90;
+  --t-text-invert:#171920;
+  --t-accent:#93a8d8;
+  --t-accent-hover:#7b92c8;
+  --t-accent-quiet:#252a3a;
+  --t-accent-ink:#b3c3e8;
+  --t-accent-solid:#61749f;
+  --t-accent-solid-hover:#7b92c8;
+  --t-on-solid:#12141b;
+  --t-line:rgba(255,255,255,.10);
+  --t-line-firm:rgba(255,255,255,.20);
+  --t-ok:#6fbf9a;
+  --t-ok-quiet:#1c3029;
+  --t-ok-ink:#87d0ad;
+  --t-warn:#d9ae6d;
+  --t-warn-quiet:#312818;
+  --t-warn-ink:#e6c287;
+  --t-risk:#d18f98;
+  --t-risk-quiet:#301f23;
+  --t-risk-ink:#dda1aa;
+  --t-focus:rgba(147,168,216,.30);
+  --t-shadow:0 10px 26px rgba(0,0,0,.32);
+  --t-shadow-lift:0 14px 32px rgba(0,0,0,.46);
+  --t-brand:#8b9ed0;
+  --t-scene-light:night;
+  --skin-heading-font:"Noto Serif SC","Songti SC","SimSun",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(0deg,transparent 0 35px,color-mix(in srgb,var(--t-accent) 5%,transparent) 35px 36px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:2px;--skin-r-xs:4px;--skin-r-sm:7px;--skin-r-md:10px;--skin-r-lg:14px;--skin-r-xl:18px;
+}
+
+:root[data-theme="walnut"],
+[data-theme="walnut"]{
+  /* 深林 · 胡桃木与苔绿的深色，暖而稳 */
+  --t-canvas:#1d1a16;
+  --t-surface:#2a2620;
+  --t-surface-soft:#242019;
+  --t-surface-raised:#332e26;
+  --t-surface-sunken:#1a1713;
+  --t-veil:rgba(36,32,25,.84);
+  --t-text:#e8e2d6;
+  --t-text-strong:#f5f0e6;
+  --t-text-soft:#b3aa99;
+  --t-text-faint:#8a8171;
+  --t-text-invert:#1a1713;
+  --t-accent:#b5926a;
+  --t-accent-hover:#c8a67f;
+  --t-accent-quiet:#332c22;
+  --t-accent-ink:#d0b28e;
+  --t-accent-solid:#8a6c4a;
+  --t-accent-solid-hover:#a3805a;
+  --t-on-solid:#1a1713;
+  --t-line:rgba(232,226,214,.12);
+  --t-line-firm:rgba(232,226,214,.22);
+  --t-ok:#8aa87a;
+  --t-ok-quiet:#262b1f;
+  --t-ok-ink:#a3bf92;
+  --t-warn:#cfa75f;
+  --t-warn-quiet:#2e2718;
+  --t-warn-ink:#ddba7b;
+  --t-risk:#c98a80;
+  --t-risk-quiet:#2f2220;
+  --t-risk-ink:#d79f96;
+  --t-focus:rgba(181,146,106,.28);
+  --t-shadow:0 10px 26px rgba(0,0,0,.34);
+  --t-shadow-lift:0 14px 32px rgba(0,0,0,.48);
+  --t-brand:#aa8a63;
+  --t-scene-light:dusk;
+  --skin-heading-font:"FangSong","STSong","Songti SC",serif;
+  --skin-canvas-pattern:repeating-linear-gradient(90deg,transparent 0 79px,color-mix(in srgb,var(--t-accent) 5%,transparent) 79px 80px);
+  --skin-canvas-size:auto;
+  --skin-r-2xs:1px;--skin-r-xs:3px;--skin-r-sm:5px;--skin-r-md:8px;--skin-r-lg:12px;--skin-r-xl:16px;
+}
+
+:root[data-theme="contrast"],
+[data-theme="contrast"]{
+  /* 高对比 · 纯黑白加单一高饱和强调，给弱视与强光环境 */
+  --t-canvas:#ffffff;
+  --t-surface:#ffffff;
+  --t-surface-soft:#f4f4f4;
+  --t-surface-raised:#ffffff;
+  --t-surface-sunken:#e8e8e8;
+  --t-veil:rgba(255,255,255,.92);
+  --t-text:#000000;
+  --t-text-strong:#000000;
+  --t-text-soft:#2b2b2b;
+  --t-text-faint:#444444;
+  --t-text-invert:#ffffff;
+  --t-accent:#0033cc;
+  --t-accent-hover:#002599;
+  --t-accent-quiet:#e0e8ff;
+  --t-accent-ink:#002599;
+  --t-accent-solid:#0033cc;
+  --t-accent-solid-hover:#002599;
+  --t-on-solid:#ffffff;
+  --t-line:rgba(0,0,0,.42);
+  --t-line-firm:rgba(0,0,0,.72);
+  --t-ok:#0a6b2f;
+  --t-ok-quiet:#dff5e5;
+  --t-ok-ink:#075423;
+  --t-warn:#8a5a00;
+  --t-warn-quiet:#fdf0d5;
+  --t-warn-ink:#6b4500;
+  --t-risk:#a80016;
+  --t-risk-quiet:#fde5e8;
+  --t-risk-ink:#840012;
+  --t-focus:rgba(0,51,204,.40);
+  --t-shadow:0 2px 0 rgba(0,0,0,.28);
+  --t-shadow-lift:0 3px 0 rgba(0,0,0,.42);
+  --t-brand:#0033cc;
+  --t-scene-light:day;
+  --skin-heading-font:"MiSans","Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  --skin-canvas-pattern:none;
+  --skin-canvas-size:auto;
+  --skin-r-2xs:0px;--skin-r-xs:1px;--skin-r-sm:2px;--skin-r-md:3px;--skin-r-lg:4px;--skin-r-xl:6px;
+}
+
+/* === 尺寸：圆角 / 间距 / 字号 === */
+:root{
+  --r-2xs:var(--skin-r-2xs,3px);
+  --r-xs:var(--skin-r-xs,6px);
+  --r-sm:var(--skin-r-sm,9px);
+  --r-md:var(--skin-r-md,12px);
+  --r-lg:var(--skin-r-lg,16px);
+  --r-pill:999px;
+
+  --r-xl:var(--skin-r-xl,22px);
+
+  --sp-1:4px;
+  --sp-2:8px;
+  --sp-3:12px;
+  --sp-4:16px;
+  --sp-5:22px;
+  --sp-6:30px;
+  --sp-7:40px;
+  --sp-8:54px;
+
+  /* 字号尺度：八档，步进约 1.18–1.25。
+     在此之前本文件根本没有字号令牌，页面各自取数，于是同一个界面上会同时存在
+     9.5/10.5/11.5/12.5/13.5 五种小数——每档差 1px，眼睛分辨不出，
+     层级就只剩下噪音。字号收敛成八档之后，"哪一行是标题"由档位回答，
+     不再靠 0.5px 的差别暗示。
+
+     辅助信息使用 12 / 13px，正文使用 14px；全部随字号与密度偏好同步。
+     避免大量说明低于 12px，让配置页的次要信息仍然可读。 */
+  --fs-micro:calc(12px * var(--font-scale));
+  --fs-tiny:calc(13px * var(--font-scale));
+  --fs-body:calc(14px * var(--font-scale));
+  --fs-lead:calc(15px * var(--font-scale));
+  --fs-title:calc(17px * var(--font-scale));
+  --fs-head:calc(21px * var(--font-scale));
+  --fs-display:calc(27px * var(--font-scale));
+  --fs-hero:calc(36px * var(--font-scale));
+
+  --gap:13px;
+  --pad:20px;
+  --pad-lg:26px;
+  --rail-w:92px;
+  --shell-pad:32px;
+  /* 两个独立维度相乘：type-scale 是用户的无障碍字号偏好，density 是版式疏密。
+     两者都作用到同一批 --fs-* 上，所以"字号调小 + 宽松排版"这种组合是对的。 */
+  --type-scale:1;
+  --density-scale:1;
+  --font-scale:calc(var(--type-scale) * var(--density-scale));
+  --motion:1;
+
+  --dur-fast:.16s;
+  --dur:.24s;
+  --dur-slow:.4s;
+  /* 主题叠化时长。比普通过渡慢，因为整页都在换色。 */
+  --dur-theme:.36s;
+}
+
+  /* === 本稿语义别名 ===
+     只做映射，不新造任何色值：所有颜色最终落到 --t-*，
+     于是六套主题切换时整页配色随令牌一起变。 */
+  :root{
+    --bg: var(--t-canvas);
+    /* 面板是卡片层，不是画布层：卡片要比页面亮一档，否则只剩一条边框在撑层次 */
+    --panel: var(--t-surface);
+    --card: var(--t-surface);
+    --card-2: var(--t-surface-soft);
+    --card-3: var(--t-surface-sunken);
+    --line: var(--t-line-firm);
+    --line-soft: var(--t-line);
+    --text: var(--t-text-strong);
+    --text-2: var(--t-text-soft);
+    --text-3: var(--t-text-faint);
+    --accent: var(--t-accent);
+    --accent-ink: var(--t-accent-ink);
+    --accent-quiet: var(--t-accent-quiet);
+    --accent-solid: var(--t-accent-solid);
+    --on-solid: var(--t-on-solid);
+    --ok: var(--t-ok-ink);
+    --ok-quiet: var(--t-ok-quiet);
+    --warn: var(--t-warn-ink);
+    --warn-quiet: var(--t-warn-quiet);
+    --risk: var(--t-risk-ink);
+    --risk-quiet: var(--t-risk-quiet);
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+    --lh-tight: 1.3;
+    --lh-body: 1.65;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* 键盘焦点统一走主题焦点环：本稿要让键盘也能走通，焦点必须看得见 */
+  :focus-visible { outline: 2px solid var(--t-focus); outline-offset: 2px; border-radius: var(--r-2xs); }
+  body {
+    background: var(--bg);
+    font-family: var(--sans);
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
+    color: var(--text);
+    padding: var(--sp-6) var(--sp-5) var(--sp-8);
+    display: flex; flex-direction: column; align-items: center; gap: var(--sp-5);
+    -webkit-font-smoothing: antialiased;
+  }
+  /* ---------- 页头：标题 + 主题切换（原「主题条 + 说明行」两条合一） ---------- */
+  .page-head {
+    width: 100%; max-width: 1660px;
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: var(--sp-5); flex-wrap: wrap;
+  }
+  .ph-id { min-width: 0; }
+  .ph-id .kicker {
+    font-size: var(--fs-micro); letter-spacing: .16em; text-transform: uppercase;
+    color: var(--text-3); font-weight: 700;
+  }
+  .ph-id h1 {
+    font-size: var(--fs-hero); font-weight: 800; letter-spacing: -.01em;
+    line-height: 1.1; margin: 2px 0 var(--sp-1); color: var(--t-text-strong);
+  }
+  .ph-id p { font-size: var(--fs-tiny); color: var(--text-2); line-height: 1.5; }
+
+  /* 主题切换：从整条工具栏压成页头右侧的一枚胶囊 */
+  .themebar {
+    display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap;
+    padding: var(--sp-1); flex: 0 0 auto;
+    background: var(--card); border: 1px solid var(--line-soft);
+    border-radius: var(--r-pill);
+  }
+  .themebar .tl { font-size: var(--fs-micro); color: var(--t-text-faint); letter-spacing: .08em; margin: 0 var(--sp-1); }
+  .themebar button {
+    border: 1px solid transparent; border-radius: var(--r-pill);
+    background: transparent; color: var(--t-text-soft);
+    font: inherit; font-size: var(--fs-micro); padding: 3px var(--sp-3); cursor: pointer;
+    transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  }
+  .themebar button:hover { color: var(--t-text-strong); background: var(--card-2); border-color: var(--t-accent); }
+  .themebar button:focus-visible { outline: 2px solid var(--t-focus); outline-offset: 1px; }
+  .themebar button.is-active {
+    background: var(--t-accent-solid); border-color: var(--t-accent-solid); color: var(--t-on-solid); font-weight: 700;
+  }
+
+  /* 脚注：由首屏说明行降级为页尾小字 */
+  .doc-note {
+    width: 100%; max-width: 1660px;
+    display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+    color: var(--text-3); font-size: var(--fs-micro); line-height: 1.7;
+    padding-top: var(--sp-3); border-top: 1px solid var(--line-soft);
+  }
+  .doc-note b { color: var(--text-2); font-weight: 600; }
+  .doc-note .sep { color: var(--t-line-firm); }
+  .doc-note code { font-family: var(--mono); font-size: var(--fs-micro); color: var(--accent-ink); }
+  .doc-note .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--warn); }
+  .board {
+    width: 100%; max-width: 1660px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: var(--r-lg);
+    padding: var(--sp-5); box-shadow: var(--t-shadow);
+  }
+
+  /* ---------- 通用卡头：带一条分隔线，把「标题区」与「内容区」切开 ---------- */
+  .card-head {
+    display: flex; align-items: flex-start; gap: var(--sp-3); min-width: 0;
+    padding-bottom: var(--sp-3); margin-bottom: var(--sp-4);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .card-head h3 {
+    font-size: var(--fs-title); font-weight: 700; letter-spacing: .01em; line-height: 1.25;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .card-head .sub { font-size: var(--fs-tiny); color: var(--text-2); margin-top: 3px; line-height: 1.5; }
+  .card-head .tail {
+    margin-left: auto; display: flex; align-items: center; gap: var(--sp-2);
+    font-size: var(--fs-micro); color: var(--text-3); white-space: nowrap; flex: 0 0 auto;
+  }
+  .card-head .tail #wsTask { color: var(--text-2); font-weight: 700; }
+
+  /* ---------- 01 覆盖链 ---------- */
+  .chain {
+    display: flex; align-items: stretch; height: 58px;
+  }
+  .chain-node {
+    position: relative; flex: 1 1 0; min-width: 0;
+    margin-right: -11px;
+    display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+    gap: 2px; padding: 0 var(--sp-5) 0 var(--sp-5);
+    clip-path: polygon(11px 0, 100% 0, calc(100% - 11px) 100%, 0 100%);
+    background: var(--card-2);
+    border: 0;
+    transition: filter .18s ease, background-color .18s ease;
+  }
+  .chain-node:last-child { margin-right: 0; }
+  .chain-node .nm {
+    font-size: var(--fs-tiny); font-weight: 700; letter-spacing: .02em;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chain-node .cd {
+    font-family: var(--mono); font-size: var(--fs-micro); opacity: .72;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 上游：已被覆盖 */
+  /* 上游节点走 sunken：board 底色就是 surface，用 --card 会与背景同色整段消失 */
+  .chain-node.is-covered { background: var(--card-3); color: var(--text-3); }
+  .chain-node.is-covered .nm { color: var(--text-3); font-weight: 600; }
+  /* 当前生效 */
+  .chain-node.is-active {
+    background: linear-gradient(180deg, var(--t-accent-quiet), var(--t-surface-soft));
+    box-shadow: inset 0 0 0 1px var(--t-accent), 0 8px 22px color-mix(in srgb, var(--t-accent) 22%, transparent);
+    z-index: 2;
+  }
+  .chain-node.is-active .nm { color: var(--t-text-strong); font-weight: 800; }
+  .chain-node.is-active .cd { color: var(--accent-ink); opacity: 1; }
+  /* 「当前生效」改成右上角胶囊：原来 absolute 压在节点底部，
+     和两行文字抢同一块地方，斜切边还会把字切掉。 */
+  .chain-node .flag {
+    position: absolute; right: 20px; top: 6px;
+    padding: 0 6px; border-radius: var(--r-pill);
+    background: var(--t-accent-solid); color: var(--t-on-solid);
+    font-size: var(--fs-micro); font-weight: 700; letter-spacing: .04em; line-height: 16px;
+  }
+  /* 下游：可覆盖，尚未设置 */
+  .chain-node.is-pending {
+    background: transparent; color: var(--text-3);
+    box-shadow: inset 0 0 0 1px var(--t-line-firm);
+  }
+  .chain-node.is-pending .nm { color: var(--text-2); font-weight: 600; }
+  /* hover 不用 brightness：浅色主题下提亮等于没变，深色调又过曝。
+     改用主题强调色描边，明暗两套都成立。 */
+  .chain-node:hover { z-index: 3; box-shadow: inset 0 0 0 1px var(--t-accent); }
+  .chain-node.is-active:hover {
+    box-shadow: inset 0 0 0 1px var(--t-accent), 0 8px 26px color-mix(in srgb, var(--t-accent) 30%, transparent);
+  }
+  /* 图例与 readout 并排一行：原来上下各占一行，这里省掉一整行高度 */
+  .chain-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--sp-4); margin-top: var(--sp-3); flex-wrap: wrap;
+  }
+  .chain-legend {
+    display: flex; align-items: center; gap: var(--sp-4); flex: 0 0 auto;
+    font-size: var(--fs-micro); color: var(--text-3);
+  }
+  .chain-legend i { display: inline-block; width: 8px; height: 8px; border-radius: var(--r-2xs); margin-right: 5px; vertical-align: -1px; }
+  .chain-readout {
+    flex: 1 1 440px; min-width: 0;
+    padding: var(--sp-2) var(--sp-3); border-radius: var(--r-sm);
+    background: var(--card-2); border: 1px solid var(--line-soft);
+    font-size: var(--fs-tiny); color: var(--text-2); line-height: 1.6;
+  }
+  .chain-readout b { color: var(--text); font-weight: 700; }
+  .chain-readout code { font-family: var(--mono); color: var(--accent-ink); }
+
+  /* ---------- 02 工作区 ---------- */
+  .ws { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: var(--sp-4); min-width: 0; align-items: start; }
+  /* 卡中卡已取消：board 是唯一外框。
+     之前 .catalog/.editor 都取 --card，而 --card 与 board 的 --panel 同指 --t-surface，
+     两层底色完全一样，只剩两条嵌套边框在撑层次——这是"乱"的主要来源。
+     现在：目录 = 凹陷侧栏(sunken)，编辑区 = 直接用 board 底色。 */
+  .catalog, .editor { min-width: 0; }
+  /* 两栏之间用一条发丝线分区，而不是靠留白猜边界 */
+  .editor { border-left: 1px solid var(--line-soft); padding-left: var(--sp-4); }
+  .catalog {
+    display: grid; grid-template-rows: auto auto auto auto minmax(0, auto);
+    align-content: start; gap: var(--sp-3); padding: var(--sp-4);
+    background: var(--card-3); border: 1px solid var(--line-soft); border-radius: var(--r-md);
+  }
+  .cat-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
+  .cat-head strong { font-size: var(--fs-tiny); color: var(--text-2); font-weight: 700; }
+  .cat-head span { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+  .search {
+    display: flex; align-items: center; gap: var(--sp-2); padding: 0 var(--sp-3); height: 33px;
+    background: var(--card); border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+  }
+  .search svg { width: 12px; height: 12px; color: var(--text-3); flex: 0 0 auto; }
+  .search input {
+    flex: 1 1 auto; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent;
+    color: var(--text); font: inherit; font-size: var(--fs-tiny);
+  }
+  .search .hit { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); flex: 0 0 auto; }
+  .chips { display: flex; gap: 4px; padding: var(--sp-1); background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-sm); }
+  /* 并排 / 差异切换复用同一套 chips，但不再铺满整行 */
+  .chips.seg { flex: 0 0 auto; width: auto; }
+  .chips.seg button { flex: 0 0 auto; padding: 0 10px; }
+  .chips button {
+    flex: 1 1 0; min-width: 0; min-height: 25px; padding: 0 6px;
+    border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text-2);
+    font: inherit; font-size: var(--fs-micro); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    transition: background-color .14s ease, color .14s ease;
+  }
+  .chips button b { font-family: var(--mono); font-size: var(--fs-micro); opacity: .8; }
+  .chips button:hover { color: var(--text); background: var(--card-3); }
+  .chips button.is-active { color: var(--t-text-strong); background: color-mix(in srgb, var(--t-accent) 20%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--t-accent) 40%, transparent); }
+  .groups { display: flex; flex-wrap: wrap; gap: 4px; }
+  .groups button {
+    display: inline-flex; align-items: center; gap: var(--sp-1); min-height: 24px; padding: 0 var(--sp-2);
+    border: 1px solid var(--line); border-radius: var(--r-pill); background: transparent;
+    color: var(--text-2); font: inherit; font-size: var(--fs-micro); cursor: pointer;
+    transition: color .14s ease, border-color .14s ease, background-color .14s ease;
+  }
+  .groups button b { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+  .groups button:hover { color: var(--text); border-color: var(--t-line-firm); }
+  .groups button.is-active { color: var(--t-text-strong); border-color: color-mix(in srgb, var(--t-accent) 50%, transparent); background: color-mix(in srgb, var(--t-accent) 14%, transparent); }
+  .groups button.is-active b { color: var(--accent-ink); }
+
+  /* 目录封顶 + 内部滚动：20 条全展开会把整行拉到一千多像素，
+     右栏只有六百多，于是一大片空白——左右失衡是本版最大的排版问题。 */
+  .task-list {
+    display: grid; align-content: start; gap: 4px;
+    min-height: 160px; max-height: 540px; overflow: auto;
+    padding-right: 2px; scrollbar-gutter: stable;
+  }
+  .task-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--sp-2);
+    width: 100%; min-height: 50px; padding: var(--sp-2) var(--sp-3);
+    border: 1px solid transparent; border-radius: var(--r-sm); background: transparent;
+    color: var(--text-2); font: inherit; text-align: left; cursor: pointer;
+    transition: background-color .14s ease, border-color .14s ease;
+  }
+  .task-row:hover { background: var(--card-2); border-color: var(--line); }
+  .task-row.is-active {
+    background: color-mix(in srgb, var(--t-accent) 14%, transparent); border-color: color-mix(in srgb, var(--t-accent) 50%, transparent);
+    box-shadow: inset 3px 0 0 var(--accent-ink);
+  }
+  .task-row .main { display: grid; gap: 3px; min-width: 0; }
+  .task-row .t1 { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+  .task-row .t1 strong {
+    font-size: var(--fs-tiny); font-weight: 700; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .task-row .t1 em {
+    font-style: normal; font-family: var(--mono); font-size: var(--fs-micro);
+    padding: 1px 5px; border-radius: var(--r-2xs); background: var(--card-2); color: var(--text-3);
+    flex: 0 0 auto; max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .task-row .t2 { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+  .task-row .t2 .meter { flex: 1 1 auto; height: 3px; border-radius: var(--r-2xs); background: var(--card-2); overflow: hidden; min-width: 24px; }
+  .task-row .t2 .meter i { display: block; height: 100%; background: var(--t-line-firm); }
+  .task-row .t2 .len { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); flex: 0 0 auto; }
+  .task-row .side { display: flex; align-items: center; gap: var(--sp-2); }
+  .task-row .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--t-line-firm); }
+  .task-row .dot[data-state="custom"] { background: var(--accent-ink); box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-accent) 22%, transparent); }
+  .task-row .seg-n { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+  .task-row mark { background: color-mix(in srgb, var(--t-warn) 30%, transparent); color: var(--t-text-strong); border-radius: var(--r-2xs); padding: 0 1px; }
+  .list-empty {
+    display: grid; place-items: center; min-height: 120px; padding: var(--sp-5);
+    color: var(--text-3); font-size: var(--fs-tiny); text-align: center;
+  }
+  /* 空结果给一个出口，否则筛错了只能自己逐个条件试回来 */
+  .list-empty button {
+    margin-top: var(--sp-2); min-height: 27px; padding: 0 var(--sp-3);
+    border: 1px solid var(--line); border-radius: var(--r-sm);
+    background: var(--card-2); color: var(--text-2);
+    font: inherit; font-size: var(--fs-micro); cursor: pointer;
+  }
+  .list-empty button:hover { color: var(--text); border-color: var(--t-line-firm); }
+
+  /* ---------- 编辑器 ---------- */
+  .editor { display: grid; align-content: start; gap: var(--sp-3); }
+  .ed-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); min-width: 0; }
+  .ed-head .left { min-width: 0; }
+  .eyebrow { font-size: var(--fs-micro); letter-spacing: .1em; color: var(--text-3); text-transform: uppercase; }
+  /* 任务名是本页真正的焦点：比卡头标题再大一级（head > title），
+     让人一眼先看到"在编辑谁"，再看卡头"这是什么"。 */
+  .ed-head h4 {
+    margin: 3px 0 5px; font-size: var(--fs-head); font-weight: 800; letter-spacing: -.005em;
+    line-height: 1.2; color: var(--t-text-strong);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ed-head p { font-size: var(--fs-micro); color: var(--text-3); line-height: 1.55; }
+  .ed-head .right { display: grid; gap: var(--sp-2); justify-items: end; flex: 0 0 auto; }
+  .badge {
+    padding: var(--sp-1) var(--sp-2); border-radius: var(--r-pill); font-size: var(--fs-micro); font-weight: 700;
+    color: var(--text-2); background: var(--card-2); white-space: nowrap;
+  }
+  .badge[data-state="custom"] { color: var(--t-text-strong); background: color-mix(in srgb, var(--t-accent) 20%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--t-accent) 40%, transparent); }
+  .kind-code { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+
+  .tabs { display: flex; gap: var(--sp-4); border-bottom: 1px solid var(--line); }
+  .tabs button {
+    min-height: 34px; padding: 0 0 6px; border: 0; border-bottom: 2px solid transparent;
+    background: transparent; color: var(--text-2); font: inherit; font-size: var(--fs-tiny);
+    cursor: pointer; display: inline-flex; align-items: center; gap: var(--sp-1);
+    transition: color .14s ease, border-color .14s ease;
+  }
+  .tabs button b { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+  .tabs button:hover { color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--t-text-strong); border-bottom-color: var(--accent-ink); }
+  .tabs button[aria-selected="true"] b { color: var(--accent-ink); }
+
+  .sec-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+  .sec-chips button {
+    display: inline-flex; align-items: center; gap: var(--sp-2); min-height: 27px; padding: 0 var(--sp-3);
+    border: 1px solid var(--line); border-radius: var(--r-pill); background: transparent;
+    color: var(--text-2); font: inherit; font-size: var(--fs-micro); cursor: pointer;
+    transition: color .14s ease, border-color .14s ease, background-color .14s ease;
+  }
+  .sec-chips button i { width: 5px; height: 5px; border-radius: 50%; background: var(--t-line-firm); }
+  .sec-chips button i[data-state="custom"] { background: var(--accent-ink); }
+  .sec-chips button:hover { color: var(--text); border-color: var(--t-line-firm); }
+  .sec-chips button.is-active { color: var(--t-text-strong); border-color: color-mix(in srgb, var(--t-accent) 50%, transparent); background: color-mix(in srgb, var(--t-accent) 14%, transparent); }
+  .cond { font-size: var(--fs-micro); color: var(--text-3); line-height: 1.6; }
+
+  /* 条件说明与动态字段并成一行：原来是三段小字连着堆，读起来碎 */
+  .meta {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: var(--sp-3); flex-wrap: wrap;
+  }
+  .meta .meta-l { display: grid; gap: 2px; min-width: 0; flex: 1 1 240px; }
+  .meta .hint { font-size: var(--fs-micro); color: var(--text-3); opacity: .85; }
+  .vars { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-left: auto; }
+  .vars .lbl { font-size: var(--fs-micro); color: var(--text-3); letter-spacing: .04em; }
+  .vars code {
+    font-family: var(--mono); font-size: var(--fs-micro); padding: 2px 7px; border-radius: var(--r-xs);
+    background: var(--card-2); color: var(--accent-ink); border: 1px solid var(--line-soft);
+  }
+
+  .cmp-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+  .cmp-head .t { font-size: var(--fs-micro); color: var(--text-3); }
+  .cmp { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-3); }
+  .cmp.single { grid-template-columns: minmax(0, 1fr); }
+  .pane { display: grid; align-content: start; gap: var(--sp-2); min-width: 0; }
+  .pane > .ph {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+    font-size: var(--fs-micro); color: var(--text-2); font-weight: 700;
+  }
+  .pane > .ph em { font-style: normal; font-weight: 500; color: var(--text-3); font-size: var(--fs-micro); }
+  .pane textarea, .pane pre {
+    min-height: 320px; max-height: 320px; overflow: auto;
+    padding: var(--sp-3) var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-sm);
+    background: var(--card-3); color: var(--text);
+    font-family: var(--mono); font-size: var(--fs-body); line-height: 1.75;
+    white-space: pre-wrap; overflow-wrap: anywhere; resize: none; outline: 0;
+  }
+  /* 只读区同样落在 sunken 层：比可编辑区再退一档，但不用画布色——
+     画布色在浅色主题里比卡片还浅，只读块会像被挖了个洞。 */
+  .pane.ro textarea, .pane.ro pre { background: var(--card-3); color: var(--text-2); }
+  .pane textarea:focus { border-color: var(--accent-ink); box-shadow: 0 0 0 2px color-mix(in srgb, var(--t-accent) 20%, transparent); }
+
+  .diff { border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--card-2); overflow: auto; max-height: 326px; }
+  .diff .row { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: var(--sp-2); padding: var(--sp-1) var(--sp-3); font-family: var(--mono); font-size: var(--fs-tiny); line-height: 1.7; }
+  .diff .row s { text-decoration: none; color: var(--text-3); }
+  .diff .row.add { background: color-mix(in srgb, var(--t-ok) 12%, transparent); }
+  .diff .row.add s { color: var(--ok); }
+  .diff .row.del { background: color-mix(in srgb, var(--t-risk) 12%, transparent); }
+  .diff .row.del s { color: var(--risk); }
+  .diff .row.keep s { color: var(--text-3); opacity: .55; }
+
+  .count { display: grid; gap: var(--sp-1); }
+  .count .bar { height: 4px; border-radius: var(--r-2xs); background: var(--card-3); overflow: hidden; }
+  .count .bar i { display: block; height: 100%; background: var(--accent-ink); }
+  .count .bar i.over { background: var(--risk); }
+  .count .txt { display: flex; justify-content: space-between; gap: var(--sp-2); font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+
+  .ed-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding-top: 4px; border-top: 1px solid var(--line); }
+  .status { min-width: 0; font-size: var(--fs-micro); color: var(--text-3); }
+  .status[data-state="dirty"] { color: var(--accent-ink); }
+  .status[data-state="warn"] { color: var(--warn); }
+  .actions { display: flex; gap: var(--sp-2); flex: 0 0 auto; }
+  .actions button {
+    display: inline-flex; align-items: center; gap: var(--sp-1); min-height: 29px; padding: 0 var(--sp-3);
+    border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--card-2);
+    color: var(--text-2); font: inherit; font-size: var(--fs-micro); font-weight: 700; cursor: pointer;
+    transition: filter .14s ease, color .14s ease, border-color .14s ease;
+  }
+  .actions button svg { width: 12px; height: 12px; }
+  .actions button:hover:not(:disabled) { color: var(--text); border-color: var(--t-line-firm); }
+  /* 主按钮走 solid 对：底色与文字色都来自主题，六套主题下对比度都成立 */
+  .actions button.primary { border-color: var(--t-accent-solid); background: var(--t-accent-solid); color: var(--t-on-solid); }
+  .actions button.primary:hover:not(:disabled) { background: var(--t-accent-solid-hover); border-color: var(--t-accent-solid-hover); }
+  .actions button:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* 固定规则视图 */
+  .rules { display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: var(--sp-3); min-width: 0; align-items: stretch; }
+  /* 左目录与右全文等高：之前目录 300、正文 232，两块底部对不齐 */
+  .rule-list { display: grid; align-content: start; gap: 4px; height: 320px; overflow: auto; scrollbar-gutter: stable; }
+  .rules .pane pre { min-height: 320px; max-height: 320px; }
+  .rule-list button {
+    display: grid; gap: 3px; min-width: 0; padding: var(--sp-2) var(--sp-3); text-align: left;
+    border: 1px solid transparent; border-radius: var(--r-sm); background: transparent;
+    color: var(--text-2); font: inherit; cursor: pointer;
+    transition: background-color .14s ease, border-color .14s ease;
+  }
+  .rule-list button:hover { background: var(--card-2); border-color: var(--line); }
+  .rule-list button.is-active { background: color-mix(in srgb, var(--t-accent) 14%, transparent); border-color: color-mix(in srgb, var(--t-accent) 50%, transparent); box-shadow: inset 3px 0 0 var(--accent-ink); }
+  .rule-list strong { font-size: var(--fs-tiny); color: var(--text); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rule-list span { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); }
+
+  /* 提示组成视图 */
+  .pipe { display: grid; gap: 0; }
+  .pipe .lay {
+    display: grid; grid-template-columns: 26px minmax(96px, .34fr) minmax(0, 1fr); gap: var(--sp-3);
+    align-items: start; padding: var(--sp-3) 0 var(--sp-3); border-bottom: 1px dashed var(--line);
+    min-width: 0;
+  }
+  .pipe .lay:last-child { border-bottom: 0; }
+  .pipe .idx { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); padding-top: 2px; }
+  .pipe .nm { min-width: 0; }
+  .pipe .nm strong { display: block; font-size: var(--fs-tiny); color: var(--text); font-weight: 700; }
+  .pipe .nm em { font-style: normal; font-size: var(--fs-micro); color: var(--text-3); }
+  .pipe .ds { font-size: var(--fs-micro); color: var(--text-2); line-height: 1.6; min-width: 0; }
+  .pipe .lay.mine { background: linear-gradient(90deg, color-mix(in srgb, var(--t-accent) 14%, transparent), transparent 62%); border-radius: var(--r-sm); padding-left: 8px; margin-left: -8px; }
+  .pipe .lay.mine .nm strong { color: var(--t-text-strong); }
+  .pipe .lay.mine .nm em { color: var(--accent-ink); }
+
+  /* ---------- 说明脚注 ---------- */
+  /* 说明：默认折叠，不占首屏 */
+  .notes { display: block; font-size: var(--fs-tiny); color: var(--text-2); }
+  .notes summary {
+    font-size: var(--fs-lead); font-weight: 700; color: var(--text);
+    cursor: pointer; list-style: none;
+    display: flex; align-items: center; gap: var(--sp-2);
+  }
+  .notes summary::-webkit-details-marker { display: none; }
+  .notes summary::before {
+    content: '\25B8'; display: inline-block; font-size: var(--fs-tiny); color: var(--text-3);
+    transition: transform var(--dur-fast) ease;
+  }
+  .notes[open] summary::before { transform: rotate(90deg); }
+  .notes summary:hover { color: var(--accent-ink); }
+  .notes summary:focus-visible { outline: 2px solid var(--t-focus); outline-offset: 2px; border-radius: var(--r-2xs); }
+  .notes ul { display: grid; gap: var(--sp-2); padding-left: 18px; margin-top: var(--sp-3); }
+  .notes li { line-height: 1.6; }
+  .notes b { color: var(--text); font-weight: 700; }
+  .notes code { font-family: var(--mono); font-size: var(--fs-micro); color: var(--accent-ink); }
+  .notes .warn { color: var(--warn); }
+
+  /* 目录行与卡头的「未保存」角标：不用切进去才知道哪个改过没存 */
+  .uns {
+    font-family: var(--mono); font-size: var(--fs-micro); color: var(--warn);
+    padding: 0 5px; border-radius: var(--r-2xs); white-space: nowrap;
+    background: color-mix(in srgb, var(--t-warn) 16%, transparent);
+  }
+
+  /* 操作反馈：保存 / 恢复继承值需要一个明确的落点 */
+  .toast {
+    position: fixed; right: var(--sp-5); bottom: var(--sp-5); z-index: 20;
+    display: flex; align-items: center; gap: var(--sp-2);
+    max-width: 380px; padding: var(--sp-3) var(--sp-4);
+    border: 1px solid var(--t-line-firm); border-radius: var(--r-sm);
+    background: var(--t-surface-raised); color: var(--t-text-strong);
+    box-shadow: var(--t-shadow-lift); font-size: var(--fs-tiny);
+    opacity: 0; transform: translateY(8px); pointer-events: none;
+    transition: opacity var(--dur) ease, transform var(--dur) ease;
+  }
+  .toast::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: 0 0 auto;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+
+  /* ---------- 窄屏：两栏改单栏，覆盖链改两列网格 ---------- */
+  @media (max-width: 1180px) {
+    .ws { grid-template-columns: minmax(0, 1fr); }
+    .editor {
+      border-left: 0; padding-left: 0;
+      border-top: 1px solid var(--line-soft); padding-top: var(--sp-4);
+    }
+    .task-list { max-height: 320px; }
+    .rules { grid-template-columns: 200px minmax(0, 1fr); }
+  }
+  @media (max-width: 820px) {
+    .cmp { grid-template-columns: minmax(0, 1fr); }
+    .rules { grid-template-columns: minmax(0, 1fr); }
+    .rule-list { height: auto; max-height: 200px; }
+    .rules .pane pre { min-height: 200px; max-height: 260px; }
+    .chain { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-1); height: auto; }
+    .chain-node {
+      flex: none; min-height: 52px; margin-right: 0; padding: var(--sp-2) var(--sp-3);
+      clip-path: none; border-radius: var(--r-sm); box-shadow: inset 0 0 0 1px var(--t-line);
+    }
+    .page-head { align-items: flex-start; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="page-head">
+  <div class="ph-id">
+    <div class="kicker">Maintenance · Task Prompts</div>
+    <h1>任务提示词</h1>
+    <p>20 个注册任务 · 六级覆盖链 · 修改后从下一次生成生效</p>
+  </div>
+  <div class="themebar" role="group" aria-label="主题切换">
+    <span class="tl">主题</span>
+    <button type="button" data-theme="dawn">晨雾</button>
+    <button type="button" data-theme="courtyard" class="is-active">庭院</button>
+    <button type="button" data-theme="dusk">暮色</button>
+    <button type="button" data-theme="night">夜读</button>
+    <button type="button" data-theme="walnut">深林</button>
+    <button type="button" data-theme="contrast">高对比</button>
+  </div>
+</header>
+
+<!-- ===== 01 覆盖链 ===== -->
+<section class="board" aria-label="提示词覆盖链">
+  <div class="card-head">
+    <div style="min-width:0">
+      <h3>提示词覆盖链</h3>
+      <div class="sub">同一个任务字段可以在六层被改写；这里回答「当前值到底来自哪一层、谁还能盖过它」</div>
+    </div>
+    <div class="tail">六级覆盖 · 当前值只取最下游一层</div>
+  </div>
+  <div class="chain" id="chain"></div>
+  <div class="chain-foot">
+    <div class="chain-readout" id="readout"></div>
+    <div class="chain-legend">
+      <span><i style="background:var(--card-3);box-shadow:inset 0 0 0 1px var(--t-line-firm)"></i>上游 · 已被覆盖</span>
+      <span><i style="background:var(--t-accent-quiet);box-shadow:inset 0 0 0 1px var(--t-accent)"></i>当前生效</span>
+      <span><i style="background:transparent;box-shadow:inset 0 0 0 1px var(--t-line-firm)"></i>下游 · 可覆盖</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 02 工作区 ===== -->
+<section class="board" aria-label="任务提示词工作区">
+  <div class="card-head">
+    <div style="min-width:0">
+      <h3>任务提示词</h3>
+      <div class="sub">当前窗口的任务提示与表达模板；事实和协议规则可查看，修改后从下一次生成生效</div>
+    </div>
+    <div class="tail"><span id="wsTask"></span><span id="statLine"></span><span class="uns" id="dirtyChip" hidden></span></div>
+  </div>
+
+  <div class="ws">
+    <!-- 左：目录 -->
+    <aside class="catalog" aria-label="任务目录">
+      <div class="cat-head"><strong>任务目录</strong><span id="catCount"></span></div>
+      <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="q" type="search" placeholder="查找任务名、kind 或提示正文" autocomplete="off">
+        <span class="hit" id="hit"></span>
+      </label>
+      <div class="chips" id="mode">
+        <button data-mode="all" class="is-active">全部 <b id="cAll"></b></button>
+        <button data-mode="custom">已自定义 <b id="cCustom"></b></button>
+        <button data-mode="builtin">内置默认 <b id="cBuiltin"></b></button>
+      </div>
+      <nav class="groups" id="groups" aria-label="任务分组"></nav>
+      <div class="task-list" id="list" role="list"></div>
+    </aside>
+
+    <!-- 右：编辑器 -->
+    <section class="editor" aria-label="提示词编辑器">
+      <div class="ed-head">
+        <div class="left">
+          <div class="eyebrow" id="edGroup"></div>
+          <h4 id="edName"></h4>
+          <p id="edDesc"></p>
+        </div>
+        <div class="right">
+          <span class="badge" id="edBadge"></span>
+          <span class="kind-code" id="edKind"></span>
+        </div>
+      </div>
+
+      <div class="tabs" id="tabs" role="tablist">
+        <button role="tab" data-view="edit" aria-selected="true">表达编辑</button>
+        <button role="tab" data-view="rules" aria-selected="false">固定规则 <b id="nRules"></b></button>
+        <button role="tab" data-view="composition" aria-selected="false">提示组成</button>
+      </div>
+
+      <div id="view"></div>
+    </section>
+  </div>
+</section>
+
+<!-- ===== 说明 ===== -->
+<details class="board notes">
+  <summary>这一版改了什么 / 为什么</summary>
+  <ul>
+    <li><b>新增覆盖链（核心改动）。</b>现状只用一行「当前：X · 上级：Y」交代来源，而真实合同是六级覆盖：<code>default → installation → role → relationship → window → host_conversation</code>。改成一条咬合链后，「值来自哪一层 / 上游被谁盖掉 / 下游谁能盖过它」三个问题一屏回答。</li>
+    <li><b>目录行从「名称+圆点」升级为「名称+长度条+段数」。</b>20 个任务里只有 6 个被改过，之前要逐个点进去才知道；现在长度条直接标出谁是空、谁写了长提示，段数标出有几个可编辑模板。</li>
+    <li><b>编辑区加「内置默认」对照。</b>现在默认值藏在最底下的折叠里；改为并排 / 差异双模式，改完能立刻看出偏离了什么。</li>
+    <li><b>可编辑模板从下拉改成 chips。</b><code>prompt_sections</code> 里可编辑段可能有多个（模型任务提示 + 分段表达等），下拉一次只能看一个，chips 能同时看到哪段被改过。</li>
+    <li><b>固定规则视图从「单个下拉」改成「左目录 + 右全文」。</b>固定规则（<code>editable=false</code> 的 sections）是只读契约，条数不一，目录化后才知道有几条、当前看的是哪条。</li>
+    <li><b>提示组成视图按装配顺序画成管线。</b>5 层（角色指令 / 业务任务指令 / 模型任务提示 / 输出合同 / 能力指令）中只有第 3 层可编辑，管线里高亮这一层，其余层标「运行端提供」。</li>
+    <li><b>状态筛选补齐「内置默认」。</b>现状只有「全部 / 已自定义」，想知道哪些还没动过只能靠排除。</li>
+    <li><b>排版再收敛（本轮）。</b>目录封顶 540px 内部滚动——20 条全展开会把整行拉到一千多像素，右栏只有六百多，那一大片空白就是「乱」的直接来源；两栏之间加一条发丝线分区，不再靠留白猜边界；编辑区与固定规则区统一到 320px，两块底部对齐；覆盖链「当前生效」从压在节点底部的绝对定位挪到右上角胶囊，不再和两行文字抢位置；条件说明与动态字段并成一行。</li>
+    <li><b>使用体验（本轮）。</b>输入时不再整块重绘，只刷新字数条与按钮，光标和滚动位置都不丢；保存 / 恢复继承值真实生效（写入草稿、长度条、状态与覆盖链）并给一次 toast；未保存在页头计数、在目录行标「未保存」；快捷键 <code>/</code> 定位搜索、<code>↑↓</code> 换任务、<code>Esc</code> 清空、<code>Ctrl+S</code> 保存；筛选无结果时给一键清除；窄屏两栏改单栏、覆盖链改两列网格。</li>
+    <li class="warn"><b>刻意没做：</b>不做「批量编辑 / 导入导出 / 版本历史」——后端 <code>savePrompt</code> 一次只提交一个 kind 且靠 <code>edit_token</code> 做冲突检测，批量能力需要先有后端合同；不做提示词效果预览——会引入真实请求正文，与本页「不展示任何请求正文」的隐私边界冲突。</li>
+  </ul>
+</details>
+
+<footer class="doc-note">
+  <b>任务提示词 · 重设计稿 v1</b>
+  <span class="sep">·</span>
+  <span>字段来自 <code>maintenance-page.js</code>：<code>promptTasks()</code> / <code>PROMPT_SOURCE_NAMES</code> / <code>DEFAULT_PROMPT_LAYERS</code>；任务为 20 个真实注册 kind，提示正文为演示值。</span>
+  <span class="sep">·</span>
+  <span>配色 / 圆角 / 间距 / 字号取自 <code>tokens.css</code> 六套主题 × <code>--t-*</code> 令牌，本稿不新造色值；板宽按真实内容宽（上限 1660）。</span>
+  <span class="sep">·</span>
+  <span>快捷键：<code>/</code> 定位搜索 · <code>↑↓</code> 换任务 · <code>Esc</code> 清空 · <code>Ctrl+S</code> 保存</span>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* ---------- 真实数据合同（字段与枚举来自插件源码） ---------- */
+var SOURCE_CHAIN = [
+  { key: "default",           name: "内置默认", desc: "V2 运行端内置" },
+  { key: "installation",      name: "安装设置", desc: "安装级覆盖" },
+  { key: "role",              name: "角色设置", desc: "当前角色级覆盖" },
+  { key: "relationship",      name: "关系偏好", desc: "按关系覆盖" },
+  { key: "window",            name: "窗口覆盖", desc: "临时窗口级覆盖" },
+  { key: "host_conversation", name: "宿主会话", desc: "宿主会话级覆盖" }
+];
+var PROMPT_LIMIT = 8000;
+var LAYERS = [
+  { key: "role_instruction",      label: "角色指令",     editable: false, description: "当前角色的人格与身份设定，作为独立系统消息发送。" },
+  { key: "request_instruction",   label: "业务任务指令", editable: false, description: "由业务流程按任务和本轮场景生成；此处不读取或展示单次请求正文。" },
+  { key: "task_prompt",           label: "模型任务提示", editable: true,  description: "本页编辑的提示字段，运行时接在业务任务指令之后；自定义值替换该字段的内置默认值。" },
+  { key: "output_contract",       label: "输出合同",     editable: false, description: "按任务类型加入自然语言、JSON 字段及证据等格式约束。" },
+  { key: "capability_instruction",label: "能力指令",    editable: false, description: "需要工具、图片等模型能力时，由运行端追加对应协议。" }
+];
+var GROUPS = ["对话", "主动与记忆", "生活与成长", "私人书写", "视觉与媒体", "内容工作"];
+
+/* 20 个真实注册 kind；source / inherited / sections / len 为演示值（落码时由后端字段决定） */
+var TASKS = [
+  { kind: "conversation.reply", group: "对话", label: "对话回复", desc: "当前私聊的正文生成",
+    source: "role", inherited: "installation", customized: true, len: 1240,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:true, cond:"接在业务任务指令之后"},
+               {key:"segment_opening", label:"开场表达", custom:true, cond:"本轮首段发送前附加"},
+               {key:"segment_closing", label:"收束表达", custom:false, cond:"本轮末段发送前附加"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实与已授权材料中的内容。\n不补写未被提供的时间、地点、人物与后果。\n无法确认的部分保持未知，不做推断性补全。"},
+            {key:"identity_boundary", label:"身份边界", cond:"所有任务共用", text:"不使用管理身份的口吻。\n不声称自己拥有超出当前角色的权限。\n涉及授权与拒绝时，只说明可执行的动作。"},
+            {key:"safety_boundary", label:"安全边界", cond:"所有任务共用", text:"不生成会造成现实风险的操作指引。\n涉及他人隐私时只使用已授权内容。"}],
+    vars: ["task_input", "persona_context", "conversation_context", "recent_history"],
+    draft: "你是当前角色，正在与对方进行私聊。\n\n请使用 {{persona_context}} 中的人格资料保持语气一致。\n参考 {{conversation_context}} 与 {{recent_history}} 理解当前语境。\n\n本次任务输入：\n{{task_input}}\n\n要求：\n- 只陈述已确认的事实；\n- 分段自然，先回应对方最关心的那一点；\n- 不做总结式收尾。",
+    builtin: "你是当前角色，正在与对方进行私聊。\n\n请使用 {{persona_context}} 中的人格资料保持语气一致。\n参考 {{conversation_context}} 理解当前语境。\n\n本次任务输入：\n{{task_input}}\n\n要求：\n- 只陈述已确认的事实；\n- 分段自然。" },
+
+  { kind: "proactive.compose", group: "主动与记忆", label: "主动联系", desc: "有真实契机时组织联系内容",
+    source: "installation", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input", "persona_context"],
+    draft: "", builtin: "在有真实契机时才组织联系内容。\n\n本次任务输入：\n{{task_input}}\n\n要求：契机不成立时直接说明无需联系。" },
+
+  { kind: "proactive.judge", group: "主动与记忆", label: "主动联系复核", desc: "复核是否符合当前人格与来源",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "复核待发送内容是否符合当前人格与来源。\n\n本次任务输入：\n{{task_input}}" },
+
+  { kind: "memory.reflect", group: "主动与记忆", label: "记忆整理", desc: "从已授权素材整理认识",
+    source: "role", inherited: "default", customized: true, len: 612,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:true, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"},
+            {key:"identity_boundary", label:"身份边界", cond:"所有任务共用", text:"不使用管理身份的口吻。"}],
+    vars: ["task_input", "persona_context"],
+    draft: "从已授权素材中整理对对方的认识。\n\n本次任务输入：\n{{task_input}}\n\n要求：只保留可回溯到素材的判断。",
+    builtin: "从已授权素材中整理对对方的认识。\n\n本次任务输入：\n{{task_input}}" },
+
+  { kind: "calendar.plan", group: "生活与成长", label: "日程规划", desc: "基于已有目标规划下一步",
+    source: "role", inherited: "installation", customized: true, len: 880,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:true, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "基于已有目标规划下一步。\n\n{{task_input}}", builtin: "基于已有目标规划下一步。\n\n{{task_input}}" },
+  { kind: "role.state.maintain", group: "生活与成长", label: "角色状态", desc: "维护角色的连续生活状态",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "维护角色的连续生活状态。\n\n{{task_input}}" },
+  { kind: "role.reading.consume", group: "生活与成长", label: "阅读理解", desc: "阅读实际提供的原文",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "阅读实际提供的原文并给出理解。\n\n{{task_input}}" },
+  { kind: "role.growth.progress", group: "生活与成长", label: "成长进展", desc: "根据已完成确认提出进展",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "根据已完成确认提出进展。\n\n{{task_input}}" },
+  { kind: "role.self_review", group: "生活与成长", label: "自我复盘", desc: "回看已完成的角色生活记录",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "回看已完成的角色生活记录。\n\n{{task_input}}" },
+  { kind: "role.expression.learn", group: "生活与成长", label: "表达学习", desc: "从已授权表达样本提炼风格",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "从已授权表达样本提炼风格。\n\n{{task_input}}" },
+
+  { kind: "role.journal.diary", group: "私人书写", label: "日记", desc: "保存私人书写",
+    source: "role", inherited: "default", customized: true, len: 1540,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:true, cond:"接在业务任务指令之后"},
+               {key:"chars_band", label:"强度档位", custom:true, cond:"按当前强度档位附加字数约束"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input", "chars"],
+    draft: "保存私人书写。\n\n本次任务输入：\n{{task_input}}\n\n本档位总字数约 {chars} 字，请在该范围内收束。",
+    builtin: "保存私人书写。\n\n本次任务输入：\n{{task_input}}" },
+  { kind: "role.journal.dream", group: "私人书写", label: "梦境", desc: "保存梦境记录",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "保存梦境记录。\n\n{{task_input}}" },
+  { kind: "role.journal.derive", group: "私人书写", label: "书写整理", desc: "整理已有文字素材",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "整理已有文字素材。\n\n{{task_input}}" },
+  { kind: "role.journal.select", group: "私人书写", label: "素材选择", desc: "选择本次书写素材",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "选择本次书写素材。\n\n{{task_input}}" },
+
+  { kind: "conversation.context_image_caption", group: "视觉与媒体", label: "图片摘要", desc: "从已授权图片提取可见事实",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input", "image_observations"], draft: "", builtin: "从已授权图片提取可见事实。\n\n{{image_observations}}" },
+  { kind: "image_review", group: "视觉与媒体", label: "图片审核", desc: "按合同检查图片内容",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "按合同检查图片内容。\n\n{{task_input}}" },
+  { kind: "conversation.image_review", group: "视觉与媒体", label: "图片审核", desc: "按合同检查图片内容",
+    source: "role", inherited: "default", customized: true, len: 430,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:true, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "按合同检查图片内容。\n\n{{task_input}}\n\n要求：只输出结论与依据。", builtin: "按合同检查图片内容。\n\n{{task_input}}" },
+  { kind: "screen.interpretation", group: "视觉与媒体", label: "屏幕理解", desc: "理解已授权屏幕画面",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "理解已授权屏幕画面。\n\n{{task_input}}" },
+  { kind: "screen.peek", group: "视觉与媒体", label: "屏幕速览", desc: "对已授权屏幕进行短摘要",
+    source: "default", inherited: "default", customized: false, len: 0,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:false, cond:"接在业务任务指令之后"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"}],
+    vars: ["task_input"], draft: "", builtin: "对已授权屏幕进行短摘要。\n\n{{task_input}}" },
+
+  { kind: "content.authoring.draft", group: "内容工作", label: "内容起草", desc: "根据已提供素材起草内容",
+    source: "role", inherited: "installation", customized: true, len: 2010,
+    sections: [{key:"task_prompt", label:"模型任务提示", custom:true, cond:"接在业务任务指令之后"},
+               {key:"style_band", label:"风格约束", custom:false, cond:"按项目已确认约束附加"}],
+    rules: [{key:"fact_boundary", label:"事实边界", cond:"所有任务共用", text:"只陈述已确认的事实。"},
+            {key:"identity_boundary", label:"身份边界", cond:"所有任务共用", text:"不使用管理身份的口吻。"}],
+    vars: ["task_input", "creative_project"],
+    draft: "根据已提供素材起草内容。\n\n项目与约束：\n{{creative_project}}\n\n本次任务输入：\n{{task_input}}\n\n要求：先给结构再给正文。",
+    builtin: "根据已提供素材起草内容。\n\n项目与约束：\n{{creative_project}}\n\n本次任务输入：\n{{task_input}}" }
+];
+
+var SEL = TASKS[0].kind;      // 选中任务
+var SEC = "task_prompt";      // 选中可编辑段
+var VIEW = "edit";            // 视图
+var MODE = "all";             // 全部 / 已自定义 / 内置默认
+var GRP = "all";              // 分组
+var RULE = "";                // 固定规则
+var CMP = "side";             // side | diff
+var QUERY = "";
+var DRAFTS = {};              // kind|section -> 草稿
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+function task(kind) { return TASKS.filter(function (t) { return t.kind === kind; })[0] || TASKS[0]; }
+function draftOf(t, sec) {
+  var k = t.kind + "|" + sec;
+  /* 非主段默认空：原来塞了一句占位说明，于是 dirty 判定永远为真，
+     一进来保存按钮就是亮的，反而看不出到底改没改。 */
+  if (!(k in DRAFTS)) DRAFTS[k] = sec === "task_prompt" ? t.draft : "";
+  return DRAFTS[k];
+}
+function baseOf(t, sec) { return sec === "task_prompt" ? t.draft : ""; }
+function currentSec(t) { return t.sections.filter(function (s) { return s.key === SEC; })[0] || t.sections[0]; }
+function hl(text) {
+  var out = esc(text);
+  if (!QUERY) return out;
+  var q = QUERY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return out.replace(new RegExp(q, "gi"), function (m) { return "<mark>" + m + "</mark>"; });
+}
+function num(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+function visible() {
+  var q = QUERY.trim().toLowerCase();
+  return TASKS.filter(function (t) {
+    if (MODE === "custom" && !t.customized) return false;
+    if (MODE === "builtin" && t.customized) return false;
+    if (GRP !== "all" && t.group !== GRP) return false;
+    if (!q) return true;
+    return [t.label, t.kind, t.group, t.desc, t.draft, t.builtin].join(" ").toLowerCase().indexOf(q) >= 0;
+  });
+}
+
+/* ---------- 覆盖链 ---------- */
+function renderChain() {
+  var t = task(SEL);
+  var ai = 0;
+  SOURCE_CHAIN.forEach(function (s, i) { if (s.key === t.source) ai = i; });
+  document.getElementById("chain").innerHTML = SOURCE_CHAIN.map(function (s, i) {
+    var cls = i < ai ? "is-covered" : i === ai ? "is-active" : "is-pending";
+    return '<div class="chain-node ' + cls + '" title="' + esc(s.desc) + '">' +
+      '<span class="nm">' + esc(s.name) + '</span>' +
+      '<span class="cd">' + esc(s.key) + '</span>' +
+      (i === ai ? '<span class="flag">当前生效</span>' : "") + "</div>";
+  }).join("");
+
+  var up = SOURCE_CHAIN.slice(0, ai).map(function (s) { return s.name; });
+  var down = SOURCE_CHAIN.slice(ai + 1).map(function (s) { return s.name; });
+  var inheritedName = "（无）";
+  SOURCE_CHAIN.forEach(function (s) { if (s.key === t.inherited) inheritedName = s.name; });
+  document.getElementById("readout").innerHTML =
+    "当前生效：<b>" + esc(SOURCE_CHAIN[ai].name) + "</b> <code>" + esc(t.source) + "</code>　·　" +
+    "继承来源：<b>" + esc(inheritedName) + "</b> <code>" + esc(t.inherited) + "</code><br>" +
+    "已覆盖上游：" + (up.length ? up.join(" / ") : "无（就是最底层）") + "　·　" +
+    "仍可被覆盖：" + (down.length ? down.join(" / ") : "无（已是最高层）") +
+    "<br>保存后从<b>下一次生成</b>生效；清空并保存即恢复 <code>" + esc(t.inherited) + "</code> 的继承值。";
+}
+
+/* ---------- 目录 ---------- */
+function renderCatalog() {
+  var all = TASKS.length;
+  var custom = TASKS.filter(function (t) { return t.customized; }).length;
+  document.getElementById("cAll").textContent = all;
+  document.getElementById("cCustom").textContent = custom;
+  document.getElementById("cBuiltin").textContent = all - custom;
+  document.getElementById("statLine").textContent = all + " 个注册任务 · 已自定义 " + custom + " · 内置默认 " + (all - custom);
+
+  var vis = visible();
+  document.getElementById("catCount").textContent = vis.length + " / " + all;
+  document.getElementById("hit").textContent = QUERY.trim() ? vis.length + " 命中" : "";
+
+  // 分组
+  var ghtml = '<button data-grp="all" class="' + (GRP === "all" ? "is-active" : "") + '">全部 <b>' + all + "</b></button>";
+  GROUPS.forEach(function (g) {
+    var n = TASKS.filter(function (t) {
+      if (t.group !== g) return false;
+      if (MODE === "custom" && !t.customized) return false;
+      if (MODE === "builtin" && t.customized) return false;
+      return true;
+    }).length;
+    if (!n) return;
+    ghtml += '<button data-grp="' + esc(g) + '" class="' + (GRP === g ? "is-active" : "") + '">' + esc(g) + " <b>" + n + "</b></button>";
+  });
+  document.getElementById("groups").innerHTML = ghtml;
+
+  // 列表
+  var list = document.getElementById("list");
+  if (!vis.length) {
+    list.innerHTML = '<div class="list-empty">当前筛选下没有匹配的任务。' +
+      '<button type="button" data-clear>清除筛选</button></div>';
+    return;
+  }
+  list.innerHTML = vis.map(function (t) {
+    var pct = Math.min(100, Math.round(t.len / PROMPT_LIMIT * 100));
+    var uns = t.sections.some(function (s) {
+      var k = t.kind + "|" + s.key;
+      return (k in DRAFTS) && DRAFTS[k] !== baseOf(t, s.key);
+    });
+    return '<button type="button" role="listitem" class="task-row' + (t.kind === SEL ? " is-active" : "") + '" data-kind="' + esc(t.kind) + '" aria-pressed="' + (t.kind === SEL) + '" title="' + esc(t.desc) + '">' +
+      '<span class="main">' +
+        '<span class="t1"><strong>' + hl(t.label) + '</strong><em>' + hl(t.kind) + '</em></span>' +
+        '<span class="t2"><span class="meter"><i style="width:' + pct + '%"></i></span>' +
+        '<span class="len">' + (t.len ? num(t.len) : "—") + "/" + num(PROMPT_LIMIT) + "</span></span>" +
+      "</span>" +
+      '<span class="side">' + (uns ? '<span class="uns">未保存</span>' : "") +
+        '<i class="dot" data-state="' + (t.customized ? "custom" : "default") + '" title="' + (t.customized ? "已自定义" : "内置默认") + '"></i>' +
+        '<span class="seg-n">' + t.sections.length + " 段</span></span>" +
+      "</button>";
+  }).join("");
+}
+
+/* ---------- 编辑器 ---------- */
+function renderHead() {
+  var t = task(SEL);
+  document.getElementById("edGroup").textContent = t.group;
+  document.getElementById("edName").textContent = t.label;
+  document.getElementById("edDesc").textContent = t.desc;
+  document.getElementById("edKind").textContent = t.kind;
+  var b = document.getElementById("edBadge");
+  b.textContent = t.customized ? "已自定义" : "内置默认";
+  b.setAttribute("data-state", t.customized ? "custom" : "default");
+  document.getElementById("nRules").textContent = t.rules.length;
+  document.getElementById("wsTask").textContent = t.label + " · " + t.kind;
+  updateDirtyChip();
+}
+
+/* 未保存计数：DRAFTS 里与已存值不一致的段。切任务不会丢草稿，
+   所以页头要常驻一个计数，否则「改了没存」这件事没有任何落点。 */
+function dirtyCount() {
+  var n = 0;
+  TASKS.forEach(function (t) {
+    t.sections.forEach(function (s) {
+      var k = t.kind + "|" + s.key;
+      if ((k in DRAFTS) && DRAFTS[k] !== baseOf(t, s.key)) n++;
+    });
+  });
+  return n;
+}
+function updateDirtyChip() {
+  var chip = document.getElementById("dirtyChip");
+  if (!chip) return;
+  var n = dirtyCount();
+  chip.textContent = n ? n + " 项未保存" : "";
+  chip.hidden = !n;
+}
+
+function editView() {
+  var t = task(SEL);
+  var sec = t.sections.filter(function (s) { return s.key === SEC; })[0] || t.sections[0];
+  var val = draftOf(t, sec.key);
+  var pct = Math.min(100, Math.round(val.length / PROMPT_LIMIT * 100));
+  var over = val.length > PROMPT_LIMIT;
+  var dirty = val !== (sec.key === "task_prompt" ? t.draft : "");
+
+  var chips = t.sections.map(function (s) {
+    return '<button data-sec="' + esc(s.key) + '" class="' + (s.key === sec.key ? "is-active" : "") + '">' +
+      '<i data-state="' + (s.custom ? "custom" : "default") + '"></i>' + esc(s.label) + "</button>";
+  }).join("");
+
+  var body;
+  if (CMP === "side") {
+    body = '<div class="cmp">' +
+      '<div class="pane"><div class="ph"><span>当前草稿</span><em>保存后下一次生成生效</em></div>' +
+        '<textarea data-draft spellcheck="false" placeholder="留空后保存将恢复继承值。">' + esc(val) + "</textarea></div>" +
+      '<div class="pane ro"><div class="ph"><span>内置默认</span><em>v1 · 只读</em></div>' +
+        "<pre>" + esc(sec.key === "task_prompt" ? t.builtin : "（该段无内置默认，留空即不附加）") + "</pre></div>" +
+      "</div>";
+  } else {
+    var a = (sec.key === "task_prompt" ? t.builtin : "").split("\n");
+    var b = val.split("\n");
+    var rows = [];
+    for (var i = 0; i < Math.max(a.length, b.length); i++) {
+      var x = a[i], y = b[i];
+      if (x === y) rows.push('<div class="row keep"><s>·</s><span>' + esc(x == null ? "" : x) + "</span></div>");
+      else {
+        if (x != null && x !== "") rows.push('<div class="row del"><s>−</s><span>' + esc(x) + "</span></div>");
+        if (y != null && y !== "") rows.push('<div class="row add"><s>+</s><span>' + esc(y) + "</span></div>");
+      }
+    }
+    body = '<div class="diff">' + rows.join("") + "</div>";
+  }
+
+  return '<div class="sec-chips">' + chips + "</div>" +
+    '<div class="meta">' +
+      '<div class="meta-l">' +
+        '<p class="cond">' + esc(sec.cond) + "</p>" +
+        '<span class="hint">动态字段由 V2 运行端按当前任务合同注入，无需手写</span>' +
+      "</div>" +
+      '<div class="vars">' + t.vars.map(function (v) { return "<code>{{" + esc(v) + "}}</code>"; }).join("") + "</div>" +
+    "</div>" +
+    '<div class="cmp-head"><span class="t">与内置默认对照</span><div class="chips seg">' +
+      '<button data-cmp="side" class="' + (CMP === "side" ? "is-active" : "") + '">并排</button>' +
+      '<button data-cmp="diff" class="' + (CMP === "diff" ? "is-active" : "") + '">差异</button>' +
+      "</div></div>" +
+    body +
+    '<div class="count"><div class="bar"><i id="cBar" class="' + (over ? "over" : "") + '" style="width:' + pct + '%"></i></div>' +
+      '<div class="txt"><span id="cNum">' + num(val.length) + " / " + num(PROMPT_LIMIT) + " 字</span>" +
+      '<span id="cLeft">' + (over ? "超出上限，无法保存" : "剩余 " + num(PROMPT_LIMIT - val.length)) + "</span></div></div>" +
+    '<div class="ed-foot"><span class="status" id="edStatus" data-state="' + (dirty ? "dirty" : "ok") + '">' +
+      (dirty ? "有未保存更改" : t.customized ? "已自定义提示" : "使用内置默认值") + "</span>" +
+      '<div class="actions">' +
+        '<button data-act="reset" id="btnReset"' + (val === "" ? " disabled" : "") + ">恢复继承值</button>" +
+        '<button class="primary" data-act="save" id="btnSave"' + (dirty && !over ? "" : " disabled") + ">保存提示词</button>" +
+      "</div></div>";
+}
+
+function rulesView() {
+  var t = task(SEL);
+  var key = RULE || t.rules[0].key;
+  var r = t.rules.filter(function (x) { return x.key === key; })[0] || t.rules[0];
+  return '<div class="rules">' +
+    '<div class="rule-list">' + t.rules.map(function (x) {
+      return '<button data-rule="' + esc(x.key) + '" class="' + (x.key === r.key ? "is-active" : "") + '">' +
+        "<strong>" + esc(x.label) + "</strong><span>" + esc(x.cond) + "</span></button>";
+    }).join("") + "</div>" +
+    '<div class="pane ro"><div class="ph"><span>' + esc(r.label) + "</span><em>只读 · 运行端提供</em></div>" +
+      "<pre>" + esc(r.text) + "</pre></div></div>";
+}
+
+function compositionView() {
+  return '<div class="pipe">' + LAYERS.map(function (l, i) {
+    return '<div class="lay' + (l.editable ? " mine" : "") + '">' +
+      '<span class="idx">' + String(i + 1).padStart(2, "0") + "</span>" +
+      '<span class="nm"><strong>' + esc(l.label) + "</strong><em>" +
+        (l.editable ? "本页可编辑" : "运行端提供") + "</em></span>" +
+      '<span class="ds">' + esc(l.description) + "</span></div>";
+  }).join("") + "</div>" +
+  '<p class="cond">本页只编辑第 3 层；其余四层由运行端按任务与本轮场景装配，不读取任何单次请求正文。</p>';
+}
+
+function renderView() {
+  var box = document.getElementById("view");
+  box.innerHTML = VIEW === "rules" ? rulesView() : VIEW === "composition" ? compositionView() : editView();
+  var ta = box.querySelector("[data-draft]");
+  if (ta) {
+    var t = task(SEL), sec = currentSec(t);
+    /* 输入时只刷新计数与按钮，不重建 DOM：
+       原来整块重绘会把光标和滚动位置一起重置，中文输入时还会跳字。 */
+    ta.addEventListener("input", function () {
+      DRAFTS[t.kind + "|" + sec.key] = ta.value;
+      syncDraft(ta.value, t, sec);
+    });
+  }
+}
+
+function setText(id, s) { var el = document.getElementById(id); if (el) el.textContent = s; }
+function cssEsc(s) { return String(s).replace(/["\\]/g, "\\$&"); }
+
+function syncDraft(val, t, sec) {
+  var over = val.length > PROMPT_LIMIT;
+  var pct = Math.min(100, Math.round(val.length / PROMPT_LIMIT * 100));
+  var dirty = val !== baseOf(t, sec.key);
+  var bar = document.getElementById("cBar");
+  if (bar) { bar.style.width = pct + "%"; bar.className = over ? "over" : ""; }
+  setText("cNum", num(val.length) + " / " + num(PROMPT_LIMIT) + " 字");
+  setText("cLeft", over ? "超出上限，无法保存" : "剩余 " + num(PROMPT_LIMIT - val.length));
+  var st = document.getElementById("edStatus");
+  if (st) {
+    st.textContent = dirty ? "有未保存更改" : t.customized ? "已自定义提示" : "使用内置默认值";
+    st.setAttribute("data-state", dirty ? "dirty" : "ok");
+  }
+  var sv = document.getElementById("btnSave");
+  if (sv) sv.disabled = !(dirty && !over);
+  var rs = document.getElementById("btnReset");
+  if (rs) rs.disabled = !val;
+  updateDirtyChip();
+  var row = document.querySelector('.task-row[data-kind="' + cssEsc(t.kind) + '"]');
+  if (row) {
+    var side = row.querySelector(".side");
+    var mark = row.querySelector(".uns");
+    if (dirty && !mark) {
+      var s = document.createElement("span");
+      s.className = "uns"; s.textContent = "未保存";
+      side.insertBefore(s, side.firstChild);
+    } else if (!dirty && mark) {
+      mark.parentNode.removeChild(mark);
+    }
+  }
+}
+
+/* ---------- 保存 / 恢复继承值 ---------- */
+function toast(msg) {
+  var el = document.getElementById("toast");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(el._timer);
+  el._timer = setTimeout(function () { el.classList.remove("show"); }, 2400);
+}
+function saveDraft() {
+  var t = task(SEL), sec = currentSec(t);
+  var val = draftOf(t, sec.key);
+  if (val.length > PROMPT_LIMIT) { toast("超出 8000 字上限，未保存"); return; }
+  if (sec.key === "task_prompt") {
+    t.draft = val;
+    t.len = val.length;
+    t.customized = val !== "" && val !== t.builtin;
+    if (!t.customized) t.source = t.inherited;
+  }
+  toast(val ? "已保存 · 下一次生成生效" : "已清空 · 下一次生成恢复继承值");
+  render();
+}
+function resetDraft() {
+  var t = task(SEL), sec = currentSec(t);
+  DRAFTS[t.kind + "|" + sec.key] = "";
+  if (sec.key === "task_prompt") {
+    t.draft = ""; t.len = 0; t.customized = false; t.source = t.inherited;
+  }
+  toast("已恢复继承值 · 下一次生成生效");
+  render();
+}
+
+function render() {
+  renderChain(); renderHead(); renderCatalog(); renderView();
+}
+
+/* ---------- 事件 ---------- */
+function clearFilters() {
+  MODE = "all"; GRP = "all"; QUERY = "";
+  var q = document.getElementById("q");
+  if (q) q.value = "";
+  Array.prototype.forEach.call(document.querySelectorAll("#mode button"), function (x) {
+    x.classList.toggle("is-active", x.dataset.mode === "all");
+  });
+  renderCatalog();
+}
+document.getElementById("list").addEventListener("click", function (e) {
+  if (e.target.closest("[data-clear]")) { clearFilters(); return; }
+  var row = e.target.closest("[data-kind]");
+  if (!row) return;
+  selectTask(row.dataset.kind);
+});
+document.getElementById("groups").addEventListener("click", function (e) {
+  var b = e.target.closest("[data-grp]");
+  if (!b) return; GRP = b.dataset.grp; renderCatalog();
+});
+document.getElementById("mode").addEventListener("click", function (e) {
+  var b = e.target.closest("[data-mode]");
+  if (!b) return;
+  MODE = b.dataset.mode;
+  Array.prototype.forEach.call(document.querySelectorAll("#mode button"), function (x) { x.classList.toggle("is-active", x === b); });
+  renderCatalog();
+});
+document.getElementById("tabs").addEventListener("click", function (e) {
+  var b = e.target.closest("[data-view]");
+  if (!b) return;
+  VIEW = b.dataset.view;
+  Array.prototype.forEach.call(document.querySelectorAll("#tabs button"), function (x) {
+    x.setAttribute("aria-selected", String(x === b));
+  });
+  renderView();
+});
+document.getElementById("view").addEventListener("click", function (e) {
+  var sec = e.target.closest("[data-sec]");
+  if (sec) { SEC = sec.dataset.sec; renderView(); return; }
+  var cmp = e.target.closest("[data-cmp]");
+  if (cmp) { CMP = cmp.dataset.cmp; renderView(); return; }
+  var rl = e.target.closest("[data-rule]");
+  if (rl) { RULE = rl.dataset.rule; renderView(); return; }
+  var act = e.target.closest("[data-act]");
+  if (!act || act.disabled) return;
+  if (act.dataset.act === "save") saveDraft();
+  if (act.dataset.act === "reset") resetDraft();
+});
+document.getElementById("q").addEventListener("input", function (e) {
+  QUERY = e.target.value; renderCatalog();
+});
+/* ---------- 键盘 ---------- */
+function selectTask(kind) {
+  SEL = kind;
+  var t = task(SEL);
+  SEC = t.sections[0].key; RULE = ""; VIEW = "edit";
+  Array.prototype.forEach.call(document.querySelectorAll("#tabs button"), function (x) {
+    x.setAttribute("aria-selected", String(x.dataset.view === "edit"));
+  });
+  render();
+}
+function moveSel(dir) {
+  var vis = visible();
+  if (!vis.length) return false;
+  var i = 0;
+  vis.forEach(function (t, n) { if (t.kind === SEL) i = n; });
+  var next = vis[(i + dir + vis.length) % vis.length];
+  if (next.kind === SEL) return false;
+  selectTask(next.kind);
+  var el = document.querySelector('.task-row[data-kind="' + cssEsc(next.kind) + '"]');
+  if (el) {
+    el.focus();
+    if (el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+  }
+  return true;
+}
+/* 搜索框：Esc 清空，↑↓ 换任务 */
+document.getElementById("q").addEventListener("keydown", function (e) {
+  if (e.key === "Escape") { e.target.value = ""; QUERY = ""; renderCatalog(); return; }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  if (moveSel(e.key === "ArrowDown" ? 1 : -1)) e.preventDefault();
+});
+/* 目录内部：↑↓ 换任务（列表重绘后把焦点还回新行） */
+document.getElementById("list").addEventListener("keydown", function (e) {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  if (moveSel(e.key === "ArrowDown" ? 1 : -1)) e.preventDefault();
+});
+/* 全局：/ 定位搜索，Ctrl / Cmd + S 保存 */
+document.addEventListener("keydown", function (e) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    var btn = document.getElementById("btnSave");
+    if (btn && !btn.disabled) { saveDraft(); e.preventDefault(); }
+    return;
+  }
+  if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) {
+    var q = document.getElementById("q");
+    if (q) { q.focus(); q.select(); e.preventDefault(); }
+  }
+});
+
+render();
+</script>
+
+<script>
+/* 主题切换：把 data-theme 写到 <html>，整页令牌随之替换。
+   与真实页面一致——主题不是一组局部样式，而是根上的令牌集。 */
+(function () {
+  var bar = document.querySelector(".themebar");
+  if (!bar) return;
+  bar.addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-theme]");
+    if (!btn) return;
+    document.documentElement.setAttribute("data-theme", btn.dataset.theme);
+    Array.prototype.forEach.call(bar.querySelectorAll("button"), function (x) {
+      x.classList.toggle("is-active", x === btn);
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,181 @@
+"""Host-owned weather source settings, credentials and observation reuse."""
+
+import asyncio
+from copy import deepcopy
+import hmac
+from time import monotonic
+from urllib.parse import urlsplit
+
+from companion_v2.execution.models import TaskError, digest
+
+from .qweather_credentials import HOST_PATTERN, read_credentials
+from .qweather_weather import configured_qweather_weather_port
+from .qweather_alerts import configured_qweather_alert_port
+
+
+PROVIDERS = ("auto", "qweather", "open-meteo")
+
+
+def weather_settings(config):
+    values = config.get("weather", {}) if isinstance(config, dict) else {}
+    if type(values) is not dict:
+        raise ValueError("invalid weather settings")
+    provider, interval = values.get("provider", "auto"), values.get("refresh_minutes", 5)
+    if provider not in PROVIDERS or type(interval) is not int or not 1 <= interval <= 120:
+        raise ValueError("invalid weather source or refresh interval")
+    return {"provider": provider, "refresh_minutes": interval,
+            "api_host": values.get("api_host", ""), "credential": values.get("credential", "")}
+
+
+def normalize_host(value):
+    if type(value) is not str or len(value) > 253:
+        raise ValueError("invalid QWeather API Host")
+    value = value.strip().lower()
+    if value.startswith("https://"):
+        parsed = urlsplit(value)
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment or parsed.username or parsed.port:
+            raise ValueError("use the QWeather API Host without an endpoint")
+        value = parsed.hostname or ""
+    if value and not HOST_PATTERN.fullmatch(value):
+        raise ValueError("use the assigned QWeather API Host")
+    return value
+
+
+class CachedWeatherPort:
+    """Reuse a source observation across page, planning and contact reads."""
+
+    def __init__(self, port, refresh_minutes, *, clock=monotonic):
+        self.port, self.refresh_minutes, self.clock = port, refresh_minutes, clock
+        self.provider = getattr(port, "provider", "")
+        self.cache, self.pending = {}, {}
+
+    async def fetch(self, location):
+        saved = self.cache.get(location)
+        if saved is not None and 0 <= self.clock() - saved[0] < self.refresh_minutes * 60:
+            return saved[1]
+        pending = self.pending.get(location)
+        if pending is None:
+            pending = asyncio.create_task(self._fetch(location))
+            pending.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+            self.pending[location] = pending
+        return await asyncio.shield(pending)
+
+    async def refresh(self, location):
+        self.cache.pop(location, None)
+        return await self.fetch(location)
+
+    async def _fetch(self, location):
+        try:
+            snapshot = await self.port.fetch(location)
+            if len(self.cache) >= 64 and location not in self.cache:
+                self.cache.pop(next(iter(self.cache)))
+            self.cache[location] = (self.clock(), snapshot)
+            return snapshot
+        finally:
+            self.pending.pop(location, None)
+
+
+def configured_weather_ports(config):
+    settings = weather_settings(config)
+    return (CachedWeatherPort(configured_qweather_weather_port(config), settings["refresh_minutes"]),
+            configured_qweather_alert_port(config))
+
+
+class WeatherHostSettings:
+    def __init__(self, controller):
+        self.controller = controller
+
+    def view(self):
+        config = self.controller.config
+        try:
+            settings = weather_settings(config)
+            values = read_credentials(config)
+        except (ValueError, TypeError, KeyError):
+            raise TaskError("weather_source_invalid", "check the host weather settings") from None
+        plugin = bool(settings["api_host"] or settings["credential"])
+        source = "plugin" if plugin else "environment" if values else "none"
+        host = values["API_HOST"] if values else ""
+        credential_kind = ("api_key" if values and values["API_KEY"] else
+                           "jwt" if values and values.get("JWT_TOKEN") else
+                           "signed_jwt" if values else "none")
+        has_credential = bool(values and any(values[name] for name in values if name != "API_HOST"))
+        try:
+            weather, alerts = configured_weather_ports(config)
+        except (ValueError, TypeError, KeyError, OSError):
+            weather, alerts, state = None, None, "invalid"
+        else:
+            state = "configured"
+        return {"settings": {"provider": settings["provider"], "api_host": host,
+                             "refresh_minutes": settings["refresh_minutes"]},
+                "credential_source": source, "credential_kind": credential_kind,
+                "has_credential": has_credential, "source_state": state,
+                "actual_provider": getattr(weather, "provider", ""), "alerts_ready": alerts is not None,
+                "edit_token": digest([self.controller.runtime.installation_id, "weather", settings, values]),
+                "apply_mode": "immediate"}
+
+    def configure(self, data):
+        current = self.view()
+        if not hmac.compare_digest(data["edit_token"], current["edit_token"]):
+            raise TaskError("host_options_conflict", "weather settings changed; reload before saving")
+        changes = data["changes"]
+        if set(changes) - {"provider", "api_host", "credential", "refresh_minutes", "clear_credentials"}:
+            raise TaskError("host_options_request_invalid", "unknown weather setting")
+        candidate = deepcopy(dict(self.controller.config))
+        section = candidate.setdefault("weather", {})
+        clear = changes.get("clear_credentials", False)
+        if type(clear) is not bool:
+            raise TaskError("weather_source_invalid", "invalid clear option")
+        if clear:
+            if set(changes) != {"clear_credentials"}:
+                raise TaskError("host_options_request_invalid", "clear credentials separately")
+            section.update(api_host="", credential="")
+            if section.get("provider") == "qweather":
+                section["provider"] = "auto"
+        else:
+            for name in ("provider", "refresh_minutes"):
+                if name in changes:
+                    section[name] = changes[name]
+            credential = changes.get("credential", "")
+            if type(credential) is not str or len(credential) > 4096:
+                raise TaskError("weather_source_invalid", "check the QWeather credential")
+            credential = credential.strip()
+            if credential:
+                section["credential"] = credential
+            if "api_host" in changes:
+                try:
+                    section["api_host"] = normalize_host(changes["api_host"])
+                except ValueError:
+                    raise TaskError("weather_source_invalid", "check the assigned QWeather API Host") from None
+            # A provider-only save continues to use environment credentials. Editing
+            # their host deliberately creates a complete host-owned credential group.
+            if (current["credential_source"] == "environment" and (credential or "api_host" in changes)):
+                if not section.get("api_host"):
+                    section["api_host"] = current["settings"]["api_host"]
+                if not credential:
+                    raise TaskError("weather_source_credential_required", "enter a credential when replacing the environment host")
+        try:
+            weather, alerts = configured_weather_ports(candidate)
+        except (ValueError, TypeError, KeyError, OSError):
+            raise TaskError("weather_source_invalid", "check the weather source, API Host and JWT or API Key") from None
+        save = getattr(self.controller, "save_plugin_config", None)
+        if not callable(save):
+            raise TaskError("host_options_save_unavailable", "host configuration saving is unavailable")
+        save(candidate)
+        applications = []
+        for name in ("session", "last_session"):
+            app = getattr(getattr(self.controller, name, None), "application", None)
+            if app is not None and all(app is not prior for prior in applications):
+                applications.append(app)
+        for app in applications:
+            planning = getattr(app, "calendar_planning", None)
+            if planning is not None:
+                planning.weather_port = weather
+            schedule = getattr(app, "contact_schedule", None)
+            for name in ("weather_events", "weather_change_events", "official_alert_events"):
+                events = getattr(schedule, name, None)
+                if events is not None:
+                    events.port = alerts if name == "official_alert_events" else weather
+                    retry_at = getattr(events, "retry_at", None)
+                    if retry_at is not None:
+                        retry_at.clear()
+        return {"saved": True, **self.view()}

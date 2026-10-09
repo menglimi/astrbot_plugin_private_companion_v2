@@ -8,13 +8,12 @@ from pathlib import Path
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SETUP_STEPS = ("model", "knowledge", "relationships")
-MODES = {"accounts": ("single", "multiple"), "personas": ("single", "multiple")}
 
 
 def empty_state() -> dict:
-    return {"schema_version": SCHEMA_VERSION, "mode": None, "completed": [],
+    return {"schema_version": SCHEMA_VERSION, "completed": [],
             "skipped": [], "proactive_test": None, "ready": False}
 
 
@@ -45,12 +44,17 @@ class SetupStateStore:
                     raise ValueError("setup test receipt is invalid")
                 old_test = {"state": "delivered", "attempt_id": "previous-setup",
                             "started_at": tested_at, "finished_at": tested_at}
-            document = {**empty_state(), "mode": document["mode"],
-                        "completed": document["completed"],
-                        "proactive_test": old_test,
+            document = {**empty_state(), "completed": document["completed"],
+                        "proactive_test": old_test, "ready": document["ready"]}
+        elif document.get("schema_version") == 2:
+            old_fields = {"schema_version", "mode", "completed", "skipped", "proactive_test", "ready"}
+            if set(document) != old_fields:
+                raise ValueError("setup progress has an unsupported shape")
+            document = {"schema_version": SCHEMA_VERSION, "completed": document["completed"],
+                        "skipped": document["skipped"], "proactive_test": document["proactive_test"],
                         "ready": document["ready"]}
         if (document.get("schema_version") != SCHEMA_VERSION
-                or set(document) != {"schema_version", "mode", "completed", "skipped", "proactive_test", "ready"}
+                or set(document) != {"schema_version", "completed", "skipped", "proactive_test", "ready"}
                 or type(document.get("completed")) is not list
                 or type(document.get("skipped")) is not list
                 or any(item not in SETUP_STEPS for item in document["completed"] + document["skipped"])
@@ -59,19 +63,43 @@ class SetupStateStore:
                 or set(document["completed"]) & set(document["skipped"])
                 or type(document.get("ready")) is not bool):
             raise ValueError("setup progress has an unsupported shape")
-        mode = document["mode"]
-        if mode is not None and (type(mode) is not dict or set(mode) != set(MODES)
-                or any(mode[key] not in allowed for key, allowed in MODES.items())):
-            raise ValueError("setup mode is invalid")
         test = document["proactive_test"]
         if test is not None:
-            if (type(test) is not dict or test.get("state") not in ("started", "unknown", "delivered")
+            if (type(test) is not dict or test.get("state") not in ("started", "failed", "unknown", "delivered", "received")
                     or type(test.get("attempt_id")) is not str
                     or type(test.get("started_at")) is not str):
                 raise ValueError("setup test receipt is invalid")
-            if test["state"] in ("unknown", "delivered") and type(test.get("finished_at")) is not str:
+            if ("contact_enabled_before" in test
+                    and type(test["contact_enabled_before"]) is not bool):
+                raise ValueError("setup contact permission receipt is invalid")
+            if ("contact_permission_restored" in test
+                    and type(test["contact_permission_restored"]) is not bool):
+                raise ValueError("setup contact permission receipt is invalid")
+            if "route" in test and (type(test["route"]) is not dict
+                    or set(test["route"]) != {"id", "label", "variant"}
+                    or any(type(value) is not str for value in test["route"].values())):
+                raise ValueError("setup test route receipt is invalid")
+            if "stages" in test and (type(test["stages"]) is not list or len(test["stages"]) > 16
+                    or any(type(item) is not dict or not {"stage", "state"} <= set(item)
+                           or set(item) - {"stage", "state", "detail"}
+                           or type(item["stage"]) is not str or type(item["state"]) is not str
+                           or ("detail" in item and type(item["detail"]) is not str)
+                           for item in test["stages"])):
+                raise ValueError("setup test stages are invalid")
+            for key in ("task_id", "delivery_state", "receipt_ref"):
+                if key in test and (type(test[key]) is not str or len(test[key]) > 256):
+                    raise ValueError("setup test delivery receipt is invalid")
+            if test["state"] in ("failed", "unknown", "delivered") and type(test.get("finished_at")) is not str:
                 raise ValueError("setup test receipt is invalid")
-        if document["ready"] != bool(test and test.get("state") == "delivered"):
+            if ("error_code" in test and (type(test["error_code"]) is not str
+                    or len(test["error_code"]) > 64
+                    or any(not (char.islower() or char.isdigit() or char == "_") for char in test["error_code"]))):
+                raise ValueError("setup test receipt is invalid")
+            if test["state"] == "received" and (
+                    type(test.get("confirmed_at")) is not str
+                    or type(test.get("confirmed_by")) is not str or not test["confirmed_by"].strip()):
+                raise ValueError("setup test recipient confirmation is invalid")
+        if document["ready"] != bool(test and test.get("state") in ("delivered", "received")):
             raise ValueError("setup completion does not match the proactive test receipt")
         return document
 
@@ -92,22 +120,10 @@ class SetupStateStore:
             except OSError:
                 pass
 
-    def select_mode(self, *, accounts: str, personas: str) -> dict:
-        if accounts not in MODES["accounts"] or personas not in MODES["personas"]:
-            raise ValueError("setup mode is invalid")
-        state = self.read()
-        mode = {"accounts": accounts, "personas": personas}
-        if state["mode"] != mode:
-            state = {**empty_state(), "mode": mode}
-            self.write(state)
-        return state
-
     def complete(self, step: str, *, skipped: bool = False) -> dict:
         if step not in SETUP_STEPS:
             raise ValueError("unknown setup step")
         state = self.read()
-        if state["mode"] is None:
-            raise ValueError("select the setup mode first")
         destination = "skipped" if skipped else "completed"
         other = "completed" if skipped else "skipped"
         if step not in state[destination]:
@@ -121,23 +137,103 @@ class SetupStateStore:
         state = self.read()
         if state["ready"]:
             return state
-        if state["proactive_test"] is not None:
+        if state["proactive_test"] is not None and state["proactive_test"]["state"] != "failed":
             raise ValueError("the proactive test has already started and cannot be replayed")
-        if state["mode"] is None or any(step not in state["completed"] + state["skipped"]
-                                         for step in SETUP_STEPS):
+        if any(step not in state["completed"] + state["skipped"] for step in SETUP_STEPS):
             raise ValueError("complete the guided setup steps first")
         state["proactive_test"] = {"state": "started", "attempt_id": attempt_id,
-                                    "started_at": started_at}
+                                    "started_at": started_at,
+                                    "stages": [{"stage": "authorization", "state": "passed"},
+                                               {"stage": "binding", "state": "passed"},
+                                               {"stage": "runtime", "state": "passed"},
+                                               {"stage": "settings", "state": "running"}]}
         self.write(state)
         return state
 
-    def finish_proactive_test(self, *, delivered: bool, finished_at: str) -> dict:
+    def record_proactive_test_progress(self, *, attempt_id: str, stages: list[dict], route: dict | None = None,
+                                       task_id: str = "", delivery_state: str = "", receipt_ref: str = "") -> dict:
+        if (not isinstance(stages, list) or len(stages) > 16
+                or any(type(item) is not dict or not {"stage", "state"} <= set(item)
+                       or set(item) - {"stage", "state", "detail"}
+                       or type(item["stage"]) is not str or type(item["state"]) is not str
+                       or ("detail" in item and (type(item["detail"]) is not str or len(item["detail"]) > 256))
+                       for item in stages)):
+            raise ValueError("proactive test stages are invalid")
+        if route is not None and (type(route) is not dict or set(route) != {"id", "label", "variant"}
+                or any(type(value) is not str for value in route.values())):
+            raise ValueError("proactive test route is invalid")
+        if any(type(value) is not str or len(value) > 256 for value in (task_id, delivery_state, receipt_ref)):
+            raise ValueError("proactive test receipt details are invalid")
+        state = self.read()
+        receipt = state["proactive_test"]
+        if not receipt or receipt["attempt_id"] != attempt_id or receipt["state"] != "started":
+            raise ValueError("the proactive test attempt is no longer active")
+        receipt["stages"] = stages
+        if route is not None:
+            receipt["route"] = route
+        if task_id:
+            receipt["task_id"] = task_id
+        if delivery_state:
+            receipt["delivery_state"] = delivery_state
+        if receipt_ref:
+            receipt["receipt_ref"] = receipt_ref
+        self.write(state)
+        return state
+
+    def record_test_contact_permission(self, *, attempt_id: str, enabled_before: bool) -> dict:
+        if type(enabled_before) is not bool:
+            raise ValueError("the previous contact permission must be boolean")
+        state = self.read()
+        receipt = state["proactive_test"]
+        if not receipt or receipt["attempt_id"] != attempt_id or receipt["state"] != "started":
+            raise ValueError("the proactive test attempt is no longer active")
+        receipt["contact_enabled_before"] = enabled_before
+        receipt["contact_permission_restored"] = False
+        self.write(state)
+        return state
+
+    def mark_test_contact_permission_restored(self, *, attempt_id: str) -> dict:
+        state = self.read()
+        receipt = state["proactive_test"]
+        if not receipt or receipt["attempt_id"] != attempt_id:
+            raise ValueError("the proactive test attempt does not match")
+        receipt["contact_permission_restored"] = True
+        self.write(state)
+        return state
+
+    def finish_proactive_test(self, *, delivered: bool | None = None, outcome: str | None = None,
+                              finished_at: str, error_code: str = "", report: dict | None = None) -> dict:
         state = self.read()
         receipt = state["proactive_test"]
         if not receipt or receipt["state"] != "started":
             raise ValueError("there is no in-flight proactive test")
-        receipt["state"] = "delivered" if delivered else "unknown"
+        result = outcome or ("delivered" if delivered else "unknown")
+        if result not in ("failed", "unknown", "delivered"):
+            raise ValueError("proactive test outcome is invalid")
+        receipt["state"] = result
         receipt["finished_at"] = finished_at
-        state["ready"] = delivered
+        if error_code:
+            receipt["error_code"] = error_code
+        if report:
+            allowed = {"route", "stages", "task_id", "delivery_state", "receipt_ref"}
+            if set(report) - allowed:
+                raise ValueError("proactive test report contains unsupported fields")
+            receipt.update(report)
+        state["ready"] = result == "delivered"
+        self.write(state)
+        return state
+
+    def confirm_proactive_test(self, *, attempt_id: str, confirmed_by: str, confirmed_at: str) -> dict:
+        state = self.read()
+        receipt = state["proactive_test"]
+        if (not receipt or receipt["attempt_id"] != attempt_id
+                or not confirmed_by.strip()):
+            raise ValueError("confirm the existing proactive test attempt")
+        if state["ready"]:
+            return state
+        if receipt["state"] not in ("started", "unknown"):
+            raise ValueError("there is no unconfirmed proactive test")
+        receipt.update(state="received", confirmed_by=confirmed_by, confirmed_at=confirmed_at)
+        state["ready"] = True
         self.write(state)
         return state

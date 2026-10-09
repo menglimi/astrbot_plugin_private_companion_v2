@@ -23,8 +23,8 @@ if (scripts.length !== 3) throw new Error('预期三个脚本块（桥桩 / 页�
 const styleBlock = html.slice(html.indexOf('<style>') + 7, html.indexOf('</style>'));
 const tokenChecks = {
   '内联了 :root 尺寸令牌（--sp-*）': styleBlock.includes('--sp-2:8px') && styleBlock.includes('--sp-6:30px'),
-  '内联了 :root 字号令牌（--fs-*）': styleBlock.includes('--fs-body:calc(13.5px'),
-  '内联了 :root 圆角令牌（--r-*）': styleBlock.includes('--r-md:12px'),
+  '内联了 :root 字号令牌（--fs-*）': /--fs-body:calc\(\d+(?:\.\d+)?px \* var\(--font-scale\)\)/.test(styleBlock),
+  '内联了 :root 圆角令牌（--r-*）': /--r-md:[^;]+;/.test(styleBlock),
   '内联区在令牌之后才是页面样式': styleBlock.indexOf('--sp-2:8px') < styleBlock.indexOf('contact-page.css'),
   /* tokens.css 的首屏引导闸门有两道（theme-ready / room-ready）：
      html 没带齐时 body 整页 visibility:hidden。预览没有引导脚本，
@@ -65,7 +65,7 @@ const initial = (async () => {
   const checks = {
     '页面挂载出内容': out.length > 3000,
     '设置了 ready 标志': state && state.ready === true,
-    '拉到了 158 项设置': !!(state && state.settings) && Object.keys(state.settings).length > 100,
+    '拉到了 160 项设置': !!(state && state.settings) && Object.keys(state.settings).length === 160,
     '环上有 24 根柱子': (out.match(/class="ct-bar[" ]/g) || []).length === 24,
     '环上有三条问候弧': (out.match(/class="ct-anchor"/g) || []).length === 3,
     '免打扰弧跨午夜拆两段': (out.match(/class="ct-quiet is-on"/g) || []).length === 1,

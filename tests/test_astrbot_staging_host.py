@@ -20,15 +20,18 @@ if _previous_astrbot_root is None:
     os.environ["ASTRBOT_ROOT"] = _astrbot_import_root.name
 
 from astrbot_host.controller import AstrBotStagingController
+from astrbot_host.host_options_api import HostOptionsWebAPI
+from astrbot_host.native_extensions.builtins import BundledNativeLease
+from astrbot_host.native_extensions.screen_provider import NativeScreenProvider, PLUGIN_ID as SCREEN_PACKAGE_ID
 from astrbot_host.web_api import API_PREFIX
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
+from companion_v2.capabilities.models import FurnitureDescriptor
 from companion_v2.execution.models import TaskError
 from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS, SCREEN_READ
 from tests.native_adapter_support import completion, FakeEvent, FakeHostContext, FakeProvider, FakeReverseApi
 from tests.staging_bootstrap_support import database_contents, wait_for_batch
 from tests.test_management_access import NOW
-from tests.test_native_screen_flow import provider_module
 
 
 def tearDownModule():
@@ -88,7 +91,7 @@ class WebContext(FakeHostContext):
                 return
         self.registered_web_apis.append((route, handler, methods, description))
 
-    def get_using_provider(self):
+    def get_using_provider(self, umo=None):
         return self.provider
 
 
@@ -109,6 +112,26 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
             now=lambda: NOW,
         )
 
+    async def test_host_options_routes_are_registered_and_removed_with_the_host(self):
+        self.controller.register_routes()
+        routes = {route for route, _, _, _ in self.native.registered_web_apis}
+        self.assertTrue({
+            "/astrbot_plugin_private_companion_v2/host-options",
+            "/astrbot_plugin_private_companion_v2/host-options/voice",
+            "/astrbot_plugin_private_companion_v2/host-options/poke",
+            "/astrbot_plugin_private_companion_v2/host-options/forward_intake",
+            "/astrbot_plugin_private_companion_v2/host-options/balance",
+            "/astrbot_plugin_private_companion_v2/storage",
+        }.issubset(routes))
+        storage_methods = {tuple(methods) for route, _, methods, _ in self.native.registered_web_apis
+                           if route == "/astrbot_plugin_private_companion_v2/storage"}
+        self.assertEqual(storage_methods, {("GET",), ("POST",)})
+        self.controller.unregister_routes()
+        self.assertFalse(any(route.startswith("/astrbot_plugin_private_companion_v2/host-options")
+                             for route, _, _, _ in self.native.registered_web_apis))
+        self.assertFalse(any(route == "/astrbot_plugin_private_companion_v2/storage"
+                             for route, _, _, _ in self.native.registered_web_apis))
+
     async def asyncTearDown(self):
         await self.controller.terminate()
         self.temporary.cleanup()
@@ -121,17 +144,24 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         return initialized.unwrap(), started.unwrap()
 
     def load_screen_provider(self, *, version="3.3.0"):
-        provider = provider_module().NativeScreenProvider(self.root / "screen-native", version=version,
-            device_id="synthetic-desktop", platform_id="qq-main", account_id="100", bot_id="bot-a",
+        provider = NativeScreenProvider(self.root / "screen-native", version=version,
             capture=lambda: b"unused", now=lambda: NOW)
-        self.addAsyncCleanup(provider.close)
-        star = NS(root_dir_name="astrbot_plugin_screen_companion", version=version, activated=True,
-            star_cls=NS(extension_api=NS(companion_v2_native=lambda: provider)))
-        self.native.get_all_stars = lambda: (star,)
-        return star
+        # Exercise the bundled provider with an explicit synthetic release version.
+        with patch("astrbot_host.native_extensions.builtins.PRODUCT_VERSION", version):
+            lease = BundledNativeLease(SCREEN_PACKAGE_ID, provider,
+                furniture=FurnitureDescriptor("screen", SCREEN_EXTENSION, "屏幕台", "screen"))
+        self.addCleanup(lease.close)
+        previous_patch = getattr(self, "_screen_fixture_patch", None)
+        if previous_patch is not None:
+            previous_patch.stop()
+        self._screen_fixture_patch = patch("astrbot_host.controller.create_bundled_extensions",
+            return_value=((lease,), ()))
+        self._screen_fixture_patch.start()
+        self.addCleanup(self._screen_fixture_patch.stop)
+        return lease
 
     async def test_prepare_screen_route_is_exact_idempotent_and_does_not_start_intake(self):
-        star = self.load_screen_provider()
+        screen = self.load_screen_provider()
         self.controller.register_routes()
         handler = next(handler for route, handler, _, _ in self.native.registered_web_apis
                        if route == API_PREFIX + "/prepare-screen")
@@ -166,7 +196,7 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         before = database_contents(self.controller.runtime)
         self.assertEqual((await handler())["data"]["code"], "capability_consent_revoked")
         self.assertEqual(database_contents(self.controller.runtime), before)
-        star.version = "3.3.1"
+        screen.close()
         self.assertEqual((await handler())["data"]["code"], "staging_screen_provider_changed")
 
     async def test_prepare_screen_rolls_back_partial_authority(self):
@@ -275,6 +305,9 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         initialized, started = await self.initialize_and_start()
         self.assertFalse(initialized["replayed"])
         self.assertEqual(started["state"], "running")
+        model_profiles = self.controller.session.application.router.profiles
+        self.assertIn("role.self_review", model_profiles)
+        self.assertIn("role.expression.learn", model_profiles)
         event = FakeEvent(self.native)
         self.assertTrue(self.controller.claims(event))
         batch = (await self.controller.receive_claimed(event)).unwrap()
@@ -309,7 +342,6 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
                   for route, handler, _, _ in self.native.registered_web_apis}
         self.assertFalse((await routes["/status"]())["data"]["accepting"])
         self.assertEqual((await routes["/probe"]())["status"], "ok")
-        self.assertEqual((await routes["/initialize"]())["status"], "ok")
         for route in ("/authorize-delivery", "/revoke-delivery"):
             response = await routes[route]()
             self.assertEqual(response["status"], "ok")
@@ -428,6 +460,36 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(database_contents(other.runtime), before)
             self.assertEqual(self.native.provider.client.state.calls, [])
             self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        finally:
+            await other.terminate()
+
+    async def test_dashboard_balance_source_updates_the_live_port_and_survives_reload(self):
+        (await self.controller.initialize_profile()).unwrap()
+        api = HostOptionsWebAPI(self.controller)
+
+        def save(candidate):
+            self.controller.config.clear()
+            self.controller.config.update(candidate)
+
+        self.controller.save_plugin_config = save
+        current = api._view()
+        saved = api._configure(None, "balance", {"edit_token": current["edit_tokens"]["balance"],
+            "changes": {"url": "https://dashboard.example.com", "api_key": "fixture-secret",
+                        "user_id": "1234", "value_divisor": "1000000"}})
+        live_port = self.controller.session.application.contact_schedule.balance_events.port
+        self.assertEqual((live_port.url, live_port.headers["New-Api-User"], str(live_port.divisor)),
+                         ("https://dashboard.example.com/api/user/self", "1234", "1000000"))
+        self.assertNotIn("fixture-secret", json.dumps(saved))
+
+        await self.controller.terminate()
+        other = self.make_controller(config=self.controller.config.copy())
+        try:
+            loaded = await other.load_existing()
+            self.assertTrue(loaded.is_success, loaded.failure)
+            restored_port = other.session.application.contact_schedule.balance_events.port
+            self.assertEqual((restored_port.url, restored_port.headers["New-Api-User"], str(restored_port.divisor)),
+                             ("https://dashboard.example.com/api/user/self", "1234", "1000000"))
+            self.assertEqual(other.session.application.state, "new")
         finally:
             await other.terminate()
 

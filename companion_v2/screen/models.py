@@ -12,7 +12,7 @@ from companion_v2.foundation.refs import (
 from companion_v2.sources.models import AssetRecord, SourceRecord
 
 
-SCREEN_EXTENSION = "companion.screen"
+SCREEN_EXTENSION = "companion.screen.native"
 SCREEN_OWNER = "screen"
 SCREEN_READ = "screen.read"
 SCREEN_PROCESS = "screen.process"

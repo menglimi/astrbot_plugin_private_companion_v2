@@ -71,6 +71,8 @@ class RealitySnapshotAccess:
             active = bool(same and installed.desired_state is CapabilityDesiredState.ACTIVE)
             role_enabled = bool(selection and selection.enabled)
             consented = bool(consent and consent["state"] == CapabilityAuthorizationState.ACTIVE.value)
+            can_manage = self.policy.scope_access(operator, scope=self.context.scope,
+                action="capability.role.set", observed_at=at, core_only=True).is_success
             external = self.application.external
             invokable = bool(external and any(tool.action == self.capability
                              for tool in external.catalog_for(self.context)))
@@ -84,7 +86,7 @@ class RealitySnapshotAccess:
                       "reality_tool_unavailable" if not invokable else "")
             return {"action": self.capability, "package_version": self.package.package_version,
                     "installed": installed is not None, "role_enabled": role_enabled,
-                    "consented": consented, "invokable": invokable, "reason": reason,
+                    "consented": consented, "invokable": invokable, "can_manage": can_manage, "reason": reason,
                     "edit_token": self._token(state)}
 
     def configure(self, operator, command, at):

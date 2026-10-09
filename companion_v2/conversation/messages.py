@@ -15,6 +15,7 @@ from companion_v2.proactive.configuration import GROUP as CONTACT_CONFIGURATION_
 from companion_v2.proactive.configuration import target_for as contact_configuration_target_for
 from companion_v2.proactive.date_context import INSTRUCTION as IMPORTANT_DATES_INSTRUCTION
 from companion_v2.proactive.date_context import project_important_dates
+from companion_v2.proactive.inspirations import INSTRUCTION as INSPIRATION_INSTRUCTION, SNAPSHOT_KEY as INSPIRATION_KEY
 from companion_v2.delivery.history import INSTRUCTION as HISTORY_INSTRUCTION
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SourceRef, VersionRef
 from companion_v2.identity_policy.models import AuthenticatedHostPrincipal
@@ -27,6 +28,7 @@ from .foreground import (
 )
 from .date_context import ALMANAC_INSTRUCTION, CALENDAR_INSTRUCTION, project_local_date
 from .perception_settings import validate as validate_perception_settings, validate_snapshot as validate_perception_snapshot
+from .reply_settings import validate as validate_reply_settings
 from .models import InboundConversationEvent
 from .media.models import ImageConversationEvent, INSTRUCTION as IMAGE_INSTRUCTION
 from .media.codec import image_descriptor
@@ -39,7 +41,7 @@ from .media.audio.events import AudioConversationEvent
 from .media.audio.models import AudioDescriptor, fits_audio_budget, INSTRUCTION as AUDIO_INSTRUCTION
 from .media.audio.service import ConversationAudio
 from .media.video.events import VideoConversationEvent
-from .media.video.models import VideoDescriptor, fits_video_budget, INSTRUCTION as VIDEO_INSTRUCTION
+from .media.video.models import VideoDescriptor, fits_video_budget
 from .media.video.service import ConversationVideos
 from .quotes.models import (QuoteConversationEvent, QuoteDescriptor, event_forwards, event_images,
                             event_audios, event_videos, INSTRUCTION as QUOTE_INSTRUCTION)
@@ -49,6 +51,7 @@ from .forwards.models import ForwardConversationEvent, ForwardDescriptor, fits_f
 from .forwards.service import ConversationForwards
 from .relationship_context import RELATIONSHIP_INSTRUCTION, RelationshipContext
 from companion_v2.relationships.profile import ConversationRelationshipProfileContext
+from companion_v2.relationships.group_network import GroupRelationshipStore
 from .life_context import ConversationLifeContext, LIFE_INSTRUCTION
 from .growth_context import ConversationRoleGrowthContext, ROLE_GROWTH_INSTRUCTION
 from .self_review_context import ConversationSelfReviewContext, SELF_REVIEW_INSTRUCTION
@@ -119,7 +122,8 @@ def event_from_document(data, context):
 class ConversationMessages:
     def __init__(self, tasks: TaskSupervisor, *, relationships=None, memory=None, life=None, open_items=None,
                  role_growth=None, role_state=None, knowledge=None, role_self_review=None,
-                 expression_style=None, reference_materials=None, timezone_name="Asia/Shanghai", solar_term_port=None):
+                 expression_style=None, reference_materials=None, timezone_name="Asia/Shanghai", solar_term_port=None,
+                 calendar=None):
         if relationships is not None and relationships.runtime is not tasks.runtime:
             raise ValueError("relationship context must use the conversation's original runtime")
         if life is not None and life.tasks is not tasks:
@@ -148,6 +152,7 @@ class ConversationMessages:
         self.audio = ConversationAudio(self)
         self.videos = ConversationVideos(self)
         self.reply_images = ConversationReplyImages(self)
+        self.reply_pokes = False
         from .media.review import GroupImageReview
         self.image_review = GroupImageReview(self)
         self.image_fallback = None
@@ -159,6 +164,10 @@ class ConversationMessages:
         self.group_memory = GroupMemory(self)
         from companion_v2.memory.person.service import PersonAcquaintance
         self.acquaintance = PersonAcquaintance(self.runtime, self.tasks)
+        # One group graph is shared by the member card, imported clues and the
+        # short interaction rhythm.  It is deliberately independent of the
+        # private relationship-memory owner.
+        self.group_network = GroupRelationshipStore(self.runtime)
         # Habit evidence counting rides the same intake transaction as the
         # acquaintance card; without a memory service the feature stays absent.
         from companion_v2.memory.habits import HabitProfile
@@ -170,6 +179,7 @@ class ConversationMessages:
         self.reply_settings = None
         self.perception_settings = None
         self.background_history = None
+        self.proactive_inspirations = None
         self.relationship_context = RelationshipContext(relationships) if relationships is not None else None
         self.relationship_profile_context = ConversationRelationshipProfileContext(self.runtime)
         self.life_context = ConversationLifeContext(life) if life is not None else None
@@ -178,7 +188,7 @@ class ConversationMessages:
         self.role_self_review_context = role_self_review
         self.expression_style_context = expression_style
         self.reference_materials = reference_materials
-        self.role_state_context = ConversationStateContext(role_state) if role_state is not None else None
+        self.role_state_context = ConversationStateContext(role_state, calendar=calendar) if role_state is not None else None
         if memory is not None:
             memory.attach_messages(self)
             self.confirmed_reply_sources = memory.writer.access.sent_sources
@@ -240,6 +250,10 @@ class ConversationMessages:
                           if item is not None)
         with self.runtime.transaction() as connection:
             self.authorize(context)
+            from .reset import boundary
+            reset = boundary(self.runtime, context.scope)
+            if reset is not None and stamp(event.received_at) <= reset["reset_at"]:
+                raise TaskError("conversation_context_reset", "the captured input precedes this window's reset")
             self.recalls.check(event.scope, event.event_id, event.principal.native_account_id)
             if (event.scope != context.scope or event.principal != context.actor.principal or
                     (event.runtime_scope is not None and event.runtime_scope.persona != context.role_binding)):
@@ -255,6 +269,16 @@ class ConversationMessages:
             record = self._read_source(event.source, context, event.capability, self.tasks.now())
             if record.content_hash != event.input_hash:
                 raise TaskError("message_input_changed", "input hash must match its governed source")
+            if self.expression_style_context is not None:
+                connection.execute("SAVEPOINT expression_feedback_intake")
+                try:
+                    self.expression_style_context.consume_feedback(connection, context=context,
+                        text=record.payload, received_at=event.received_at)
+                    connection.execute("RELEASE SAVEPOINT expression_feedback_intake")
+                except Exception as error:
+                    connection.execute("ROLLBACK TO SAVEPOINT expression_feedback_intake")
+                    connection.execute("RELEASE SAVEPOINT expression_feedback_intake")
+                    logger.warning("V2 expression feedback intake failed: %s", type(error).__name__)
             if context.scope.kind is ScopeKind.GROUP:
                 try:
                     persist_hits(connection, evaluate_message(
@@ -291,12 +315,34 @@ class ConversationMessages:
                     except Exception as error:
                         # Optional derived counting never rejects an admitted input.
                         logger.warning("V2 conversation observer failed: %s", type(error).__name__)
+            if context.scope.kind is ScopeKind.GROUP:
+                try:
+                    self.group_network.observe(context, event, connection, text=record.payload)
+                except Exception as error:
+                    # The graph is a management projection; a damaged optional
+                    # record must never reject the authenticated group input.
+                    logger.warning("V2 group relationship graph update failed: %s", type(error).__name__)
             connection.execute("UPDATE conversation_batches SET revision = revision + 1 WHERE batch_id = ?", (batch_id,))
             return batch_id
 
     def _request(self, row, context, at, *, include_tools=True, historical=False):
+        if not historical:
+            from .reset import require_current_batch
+            require_current_batch(self.runtime, row["batch_id"], context.scope)
         inputs = self.runtime.read_all("SELECT * FROM conversation_inputs WHERE batch_id = ? ORDER BY position", (row["batch_id"],))
-        saved = json.loads(row["contributions_json"])
+        sealed_values = json.loads(row["contributions_json"])
+        saved = sealed_values if isinstance(sealed_values, dict) else {}
+        reply_snapshot = saved.get("reply_settings")
+        reply_values = reply_snapshot.get("settings") if isinstance(reply_snapshot, dict) else {}
+        if reply_values is None:
+            reply_values = {}
+        elif type(reply_values) is not dict:
+            raise TaskError("reply_configuration_invalid", "sealed reply settings are invalid")
+        if reply_values:
+            validate_reply_settings(reply_values)
+        forward_adaptation_enabled = reply_values.get("forward_message_adaptation_enabled", True)
+        if type(forward_adaptation_enabled) is not bool:
+            raise TaskError("reply_configuration_invalid", "forward reading setting must be boolean")
         if row["state"] == "open":
             selected = [item for item in inputs if not item["withdrawn"]]
         else:
@@ -307,6 +353,9 @@ class ConversationMessages:
         if not selected:
             raise TaskError("message_batch_empty", "no active inputs remain")
         events = [event_from_document(json.loads(item["event_json"]), context) for item in selected]
+        # Keep the turn's calendar stable across slow model/tool rounds. ``at``
+        # remains the current time for every source and permission recheck.
+        calendar_at = events[-1].received_at
         audio_descriptors = tuple(a for event in events for a in event_audios(event))
         video_descriptors = tuple(v for event in events for v in event_videos(event))
         if video_descriptors and not fits_video_budget(video_descriptors, tuple(i for event in events for i in event_images(event)), audio_descriptors):
@@ -336,12 +385,17 @@ class ConversationMessages:
         if context.scope.kind is ScopeKind.GROUP:
             contributions.append(self.group_context.speaker(context, events))
         if isinstance(saved, dict) and "group_context" in saved:
-            contributions.extend(self.group_context.contributions(saved["group_context"], context, row["batch_id"], at))
+            contributions.extend(self.group_context.contributions(saved["group_context"], context, row["batch_id"], at,
+                                                                   historical=historical))
         if isinstance(saved, dict) and "group_memory" in saved:
             contributions.extend(self.group_memory.context.contributions(saved["group_memory"], context, row["batch_id"]))
-        card = self.acquaintance.card_contribution(context, at)
+        card = self.acquaintance.card_contribution(context, at, snapshot=saved.get("person_card"))
         if card is not None:
             contributions.append(card)
+        if context.scope.kind is ScopeKind.GROUP:
+            network = self.group_network.contribution(context, events, at=at, snapshot=saved.get("group_network"))
+            if network is not None:
+                contributions.append(network)
         relationship_materials = ()
         if isinstance(saved, dict) and "relationship_context" in saved:
             relationship_snapshot = saved["relationship_context"]
@@ -385,18 +439,20 @@ class ConversationMessages:
                 contributions.extend(review_materials)
         if isinstance(saved, dict) and "expression_style" in saved:
             style_snapshot = saved["expression_style"]
-            ConversationExpressionStyleContext.validate_snapshot(style_snapshot, context)
-            if self.expression_style_context is None:
-                if style_snapshot["references"]:
-                    raise TaskError("expression_style_context_unavailable",
-                                    "original expression style owner is unavailable")
-            else:
-                contributions.extend(
-                    self.expression_style_context.contributions(style_snapshot, context, at))
+            if self.expression_style_context is not None:
+                try:
+                    ConversationExpressionStyleContext.validate_snapshot(style_snapshot, context)
+                    contributions.extend(
+                        self.expression_style_context.contributions(style_snapshot, context, at,
+                            policy=read_expression_settings(self.runtime, context),
+                            batch_id=None if historical else row["batch_id"]))
+                except Exception as error:
+                    logger.warning("V2 expression materials unavailable: %s", type(error).__name__)
         if isinstance(saved, dict) and saved.get("role_state") is not None:
             if self.role_state_context is None:
                 raise TaskError("state_owner_unavailable", "original role state owner is unavailable")
-            state_materials = self.role_state_context.contributions(saved["role_state"], context, at, historical=historical)
+            state_materials = self.role_state_context.contributions(saved["role_state"], context, at,
+                historical=historical, fallback_source=events[0].source)
             contributions.extend(state_materials)
         knowledge_materials = tuple(
             item for item in contributions
@@ -418,10 +474,14 @@ class ConversationMessages:
         if isinstance(saved, dict) and "background_history" in saved:
             if self.background_history is None:
                 raise TaskError("delivery_history_unavailable", "original background history owner is unavailable")
-            history = self.background_history.read(saved["background_history"], context, at)
+            history = self.background_history.read(saved["background_history"], context, at, historical=historical)
             contributions.extend(ContextContribution("sent:" + str(index), "delivery.history",
                 "confirmed_background_message", ContributionState.READY, json.dumps(item, ensure_ascii=False))
                 for index, item in enumerate(history))
+        if INSPIRATION_KEY in saved:
+            if self.proactive_inspirations is None:
+                raise TaskError("inspiration_owner_unavailable", "original inspiration list owner is unavailable")
+            contributions.append(self.proactive_inspirations.contribution(saved[INSPIRATION_KEY], context, at))
         if "memory_context" in saved:
             if self.memory_context is None and (saved["memory_context"].get("references")
                     or saved["memory_context"].get("experience_references")):
@@ -455,7 +515,7 @@ class ConversationMessages:
         calendar_enabled = perception_values is None or perception_values["calendar_enabled"]
         timezone_name = perception_values["calendar_timezone"] if perception_values else self.timezone_name
         if calendar_enabled:
-            calendar_payload = json.dumps(project_local_date(at, timezone_name, annual_calendars,
+            calendar_payload = json.dumps(project_local_date(calendar_at, timezone_name, annual_calendars,
                                           lunar_enabled=perception_values is None or perception_values["lunar_enabled"],
                                           holiday_enabled=perception_values is None or perception_values["holiday_enabled"],
                                           holiday_country=perception_values["holiday_country"] if perception_values else "CN",
@@ -467,7 +527,7 @@ class ConversationMessages:
                 "calendar:" + timezone_name, "conversation.calendar", "local_calendar_context",
                 ContributionState.READY, calendar_payload))
             if important_date_settings is not None:
-                date_context = project_important_dates(at, important_date_settings)
+                date_context = project_important_dates(calendar_at, important_date_settings)
                 if date_context["entries"]:
                     contributions.append(ContextContribution(
                         "important-dates:" + date_context["timezone"], "conversation.calendar",
@@ -493,7 +553,7 @@ class ConversationMessages:
                 contributions.extend(materials)
                 audios.extend(quoted_audios)
                 videos.extend(quoted_videos)
-            if getattr(event, "forwards", ()):
+            if forward_adaptation_enabled and getattr(event, "forwards", ()):
                 materials, forwarded, node_positions, forwarded_audios, forwarded_videos = self.forwards.read_all(context, event, at)
                 contributions.extend(materials)
                 audios.extend(forwarded_audios)
@@ -504,6 +564,15 @@ class ConversationMessages:
         sealed = self.assembler.seal(primary=primary, contributions=tuple(contributions))
         request = self.compiler.compile(event=events[0], role_instruction=row["role_instruction"],
                                         role_binding=context.role_binding, context=sealed)
+        file_payloads = (primary.payload, *(item.payload for item in contributions
+                          if item.state is ContributionState.READY and item.payload is not None))
+        if any("[文件阅读材料]" in payload for payload in file_payloads):
+            from .media.understanding import FILE_INSTRUCTION
+            file_prompt = reply_values.get("file_understanding_prompt", "").strip()
+            file_instruction = FILE_INSTRUCTION
+            if file_prompt:
+                file_instruction += "\n管理员补充文件描述偏好（只约束说明方式）：\n" + file_prompt
+            request = replace(request, instruction=request.instruction + "\n" + file_instruction)
         profile_snapshot = saved.get("role_profile") if isinstance(saved, dict) else None
         profile_instruction = self.role_profile_context.instruction(profile_snapshot, context)
         if profile_instruction:
@@ -527,7 +596,7 @@ class ConversationMessages:
                 request = replace(request, instruction=request.instruction + "\n管理员感知表达偏好："
                     + perception_values["guidance"].strip())
         if videos:
-            request = replace(request, videos=tuple(videos), instruction=request.instruction + "\n" + VIDEO_INSTRUCTION)
+            request = replace(request, videos=tuple(videos))
         if audios:
             request = replace(request, audios=tuple(audios), instruction=request.instruction + "\n" + AUDIO_INSTRUCTION)
         if images:
@@ -536,9 +605,9 @@ class ConversationMessages:
                 request = replace(request, reply_images=True)
         if any(getattr(event, "quotes", ()) for event in events):
             request = replace(request, instruction=request.instruction + "\n" + QUOTE_INSTRUCTION)
-        if any(event_forwards(event) for event in events):
+        if forward_adaptation_enabled and any(event_forwards(event) for event in events):
             request = replace(request, instruction=request.instruction + "\n" + FORWARD_INSTRUCTION)
-        if any(getattr(q, "forwards", ()) for event in events for q in getattr(event, "quotes", ())):
+        if forward_adaptation_enabled and any(getattr(q, "forwards", ()) for event in events for q in getattr(event, "quotes", ())):
             request = replace(request, instruction=request.instruction + "\n" + QUOTED_FORWARD_INSTRUCTION)
         if any(item.state is ContributionState.READY for item in relationship_materials):
             request = replace(request, instruction=request.instruction + "\n" + RELATIONSHIP_INSTRUCTION)
@@ -557,19 +626,21 @@ class ConversationMessages:
             request = replace(request, instruction=request.instruction + "\n" + MEMBER_CLUE_INSTRUCTION)
         if isinstance(saved, dict) and "background_history" in saved:
             request = replace(request, instruction=request.instruction + "\n" + HISTORY_INSTRUCTION)
+        if INSPIRATION_KEY in saved:
+            request = replace(request, instruction=request.instruction + "\n" + INSPIRATION_INSTRUCTION)
         if include_tools:
             if self.tools is not None:
                 request = self.tools.augment(row, context, request, at)
             elif self.runtime.read_one("SELECT 1 FROM conversation_tool_calls WHERE batch_id = ? LIMIT 1", (row["batch_id"],)):
                 raise TaskError("tool_owner_unavailable", "original tool results require their registered owners")
-            if (self.reference_materials is not None and context.scope.kind is ScopeKind.PRIVATE
+            if (self.reference_materials is not None and context.scope.kind in (ScopeKind.PRIVATE, ScopeKind.GROUP)
                     and self.tools is not None):
                 try:
                     actions = {tool.action for tool in self.tools.catalog_for(context, row["batch_id"])}
                     if "image.edit" in actions:
                         from zoneinfo import ZoneInfo
                         from companion_v2.references.prompts import image_reference_instruction
-                        local_date = at.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+                        local_date = calendar_at.astimezone(ZoneInfo(timezone_name)).date().isoformat()
                         material = self.reference_materials.prompt_material(context, local_date=local_date)
                         instruction = image_reference_instruction(material)
                         if instruction:
@@ -580,6 +651,7 @@ class ConversationMessages:
                     pass
         if context.scope.kind is ScopeKind.GROUP:
             request = replace(request, instruction=request.instruction + "\n" + GROUP_CONTEXT_INSTRUCTION)
+        generated_image_instruction = False
         if include_tools:
             generated = self.generated_images.read_batch(row, context, at)
             if generated:
@@ -587,8 +659,8 @@ class ConversationMessages:
                     for image in generated for item in self.generated_images.contributions(image))
                 request = replace(request, images=request.images + generated,
                     context=replace(request.context, materials=request.context.materials + materials),
-                    reply_images=self.reply_images.enabled and context.scope.kind in (ScopeKind.PRIVATE, ScopeKind.GROUP),
-                    instruction=request.instruction + "\n" + GENERATED_IMAGE_INSTRUCTION)
+                    reply_images=self.reply_images.enabled and context.scope.kind in (ScopeKind.PRIVATE, ScopeKind.GROUP))
+                generated_image_instruction = True
         semantic = getattr(self, "semantics", None)
         if include_tools and semantic is not None:
             request = semantic.augment(row, context, request)
@@ -600,6 +672,17 @@ class ConversationMessages:
                 request = replace(request, images=request.images + screens,
                     context=replace(request.context, materials=request.context.materials + materials),
                     instruction=request.instruction + "\n" + SCREEN_INSTRUCTION)
+        if generated_image_instruction:
+            request = replace(request, instruction=request.instruction + "\n" + GENERATED_IMAGE_INSTRUCTION)
+        actions = ["text", "silent"]
+        if request.reply_images:
+            actions.append("image")
+        if (reply_values.get("voice_enabled") is True
+                and context.scope.kind in (ScopeKind.PRIVATE, ScopeKind.GROUP)):
+            actions.append("voice_only")
+        if self.reply_pokes and context.scope.kind in (ScopeKind.PRIVATE, ScopeKind.GROUP):
+            actions.append("poke")
+        request = replace(request, reply_actions=tuple(actions))
         return request
 
     @outcome
@@ -632,6 +715,10 @@ class ConversationMessages:
         style_policy = None
         if self.expression_style_context is not None and context.scope.kind in (ScopeKind.PRIVATE, ScopeKind.GROUP):
             style_policy = read_expression_settings(self.runtime, context)
+        group_context_max_age_hours = None
+        if context.scope.kind is ScopeKind.GROUP:
+            from .participation import group_participation_settings
+            group_context_max_age_hours = group_participation_settings(self.runtime, context)["group_context_max_age_hours"]
         with self.runtime.transaction() as connection:
             if row["state"] != "open":
                 if row["generation_task_id"] is not None and row["state"] in ("sealed", "ready"):
@@ -643,6 +730,7 @@ class ConversationMessages:
                 raise TaskError("message_batch_closed", "original batch cannot generate another reply")
             task_id = "generate-" + batch_id
             saved = {"inputs": [item["event_key"] for item in inputs], "materials": material_refs}
+            saved["person_card"] = self.acquaintance.capture(context, self.tasks.now())
             profile_snapshot = self.role_profile_context.capture(context, self.tasks.now())
             if profile_snapshot is not None:
                 saved["role_profile"] = profile_snapshot
@@ -672,8 +760,11 @@ class ConversationMessages:
                         "configuration_token": contact_snapshot.unwrap().resolution_token,
                     }
             if context.scope.kind is ScopeKind.GROUP:
-                saved["group_context"] = self.group_context.capture(context, batch_id, self.tasks.now())
+                saved["group_context"] = self.group_context.capture(
+                    context, batch_id, self.tasks.now(), max_age_hours=group_context_max_age_hours
+                )
                 saved["group_memory"] = self.group_memory.context.capture(context, batch_id)
+                saved["group_network"] = self.group_network.capture(context, events, at=self.tasks.now())
             private = context.scope.kind is ScopeKind.PRIVATE
             if private and self.relationship_context is not None:
                 saved["relationship_context"] = self.relationship_context.capture(context, self.tasks.now())
@@ -695,11 +786,14 @@ class ConversationMessages:
                 saved["open_items"] = self.open_items_context.capture(context, self.tasks.now())
             if private and self.background_history is not None:
                 saved["background_history"] = self.background_history.capture(context, self.tasks.now())
+            not_before = self.tasks.now()
+            if deadline_at <= not_before:
+                raise TaskError("deadline_elapsed", "reply deadline elapsed while conversation context was being sealed")
+            task = TaskSpec(task_id, context, REPLY_KIND, batch_id, batch_id, not_before, deadline_at)
             connection.execute("""UPDATE conversation_batches SET state = 'sealed', revision = revision + 1,
                 generation_task_id = ?, contributions_json = ? WHERE batch_id = ?""",
                 (task_id, encode(saved), batch_id))
-            return require(self.tasks.submit(TaskSpec(task_id, context, REPLY_KIND, batch_id, batch_id,
-                                                     self.tasks.now(), deadline_at)))
+            return require(self.tasks.submit(task))
 
     @outcome
     def validate_generation(self, spec: TaskSpec, at: datetime):
@@ -721,6 +815,34 @@ class ConversationMessages:
             row = self.batch(run.task.spec.request_ref)
             require(self.validate_generation(run.task.spec, self.tasks.now()))
             return self._request(row, run.task.spec.context, at, include_tools=include_tools)
+
+    @staticmethod
+    def optional_guidance(material):
+        return (material.owner, material.purpose) in {
+            ("memory.person", "current_person_card"),
+            ("role.expression", "expression_style_context"),
+            ("role.expression", "expression_style_rule"),
+            ("role.self_review", "self_review_context"),
+            ("role.self_review", "self_review_guidance"),
+        }
+
+    def validate_optional_refresh(self, context, batch_id, original, request):
+        """Only the owners may remove lapsed optional guidance during a turn."""
+        old = tuple(m for m in original.context.materials if self.optional_guidance(m))
+        new = tuple(m for m in request.context.materials if self.optional_guidance(m))
+        if old == new:
+            return False
+        actual = self._request(self.owned(context, batch_id), context, self.tasks.now(), include_tools=False)
+        expected = tuple(m for m in actual.context.materials if self.optional_guidance(m))
+        if new != expected:
+            return False
+        # The style summary changes its injection count after a rule lapses.
+        # Other payloads may only disappear, never be replaced or newly injected.
+        old_payloads = iter(m for m in old if m.purpose != "expression_style_context")
+        for material in new:
+            if material.purpose != "expression_style_context" and not any(m == material for m in old_payloads):
+                return False
+        return True
 
     def _prepare_daily_outfit(self, run, at):
         if (self.reference_materials is None or self.tools is None
@@ -868,8 +990,10 @@ class ConversationMessages:
             raise ValueError("history requires a bounded cursor page")
         with self.runtime.read_snapshot():
             self.authorize(context)
-            rows = self.runtime.read_all("""SELECT h.*, p.sequence, p.text, p.platform_ref FROM conversation_sent_history h
+            rows = self.runtime.read_all("""SELECT h.*, p.sequence, p.text, p.platform_ref, b.presentation_action
+                FROM conversation_sent_history h
                 JOIN conversation_parts p ON p.part_id = h.part_id
+                JOIN conversation_batches b ON b.batch_id = h.batch_id
                 WHERE h.origin_key = ? AND h.history_sequence > ? ORDER BY h.history_sequence LIMIT ?""",
                 (context.key, after, limit))
             available = {}
@@ -895,6 +1019,8 @@ class ConversationMessages:
                               "batch_id": row["batch_id"], "sequence": row["sequence"],
                               "delivered_at": row["delivered_at"], "body_available": readable,
                               "text": row["text"] if readable else None})
+                if row["presentation_action"] != "text":
+                    items[-1]["action"] = row["presentation_action"]
                 if readable:
                     image_part_id, images = sent_images[row["batch_id"]]
                     if images and row["part_id"] == image_part_id:

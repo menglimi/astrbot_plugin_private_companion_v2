@@ -8,12 +8,12 @@
         而它拦不住任何回归。
      2. **它断言的东西已经不存在了**。它取 `#main .console-section-code` 里
         的 A1/B2/C3 编号当断言目标，但那些编号正是这一轮要去掉的脚手架；
-        它数 `#mainNav .rail-link` 与 `#navigationDialog .navigation-link`，
-        那两个 id 现在都不在页面里。
+   它数 `#mainNav .rail-link` 与 `#navigationDialog .navigation-link`，
+       那两个 id 现在都不在页面里。
      3. **它需要的是渲染结果，而不是浏览器**。真正值得守住的规矩是
-        「这两个扩展各自渲染到自己的挂载点」「设置按组保存、
-        敏感字段不回显」「没有原生配置的扩展给出就绪说明」——
-        这些在 vm 里桩掉宿主接口就能验，不必开浏览器。
+        「Screen 由 V2 原生工作区承载」「感知页只维护 Reality 提供方设置、
+        设置按组保存且敏感字段不回显」——这些在 vm 里桩掉宿主接口就能验，
+        不必开浏览器。
 
    导航结构的静态检查仍留着（它过去是这份脚本的一部分），但改成读源码：
    分组、条目数与 href 形状都是代码事实，读一次文件就能比对。
@@ -46,11 +46,27 @@ function settings(overrides = {}) {
   };
 }
 
+function realitySettings() {
+  return {
+    global: {enabled: true, vision_provider_id: "vision", timezone: "Asia/Shanghai"},
+    camera: {camera_enabled: false, camera_index: 0, min_interval_seconds: 10,
+      capture_timeout_seconds: 2, analysis_timeout_seconds: 5, proactive_curiosity_enabled: false,
+      proactive_min_tier: 1, proactive_max_daily: 0, proactive_cooldown_minutes: 60},
+    mobile: {enabled: false, host: "127.0.0.1", port: 8765, public_base_url: "", allowed_user_id: "",
+      session_ttl_hours: 24, location_ttl_seconds: 600, amap_reverse_geocode_enabled: false,
+      amap_api_key: "secret-amap-token", amap_cache_ttl_seconds: 3600, amap_request_timeout_seconds: 5,
+      telemetry_enabled: false, telemetry_ttl_seconds: 600, activity_enabled: false,
+      activity_ttl_seconds: 600, screen_upload_enabled: false, pairing_token: "secret-pairing-token"},
+    health: {enabled: false, ttl_seconds: 3600},
+    secrets: {amap_api_key_configured: true, pairing_token_configured: true},
+  };
+}
+
 function harness({providers} = {}) {
   const requests = [];
   const responses = providers || {
     screen: {available: true, settings: settings()},
-    reality: {available: false, reason: '尚未安装'},
+    reality: {available: true, settings: realitySettings()},
   };
   const window = {
     /* unwrap 要真的把信封拆开：后端给的是 {status, data}，页面拿到的必须是 data。
@@ -125,20 +141,19 @@ function rootStub(ids = ['screen', 'reality']) {
   };
 }
 
-test('every provider mounts into its own slot, installed or not', async () => {
+test('the V2 perception page mounts Reality only and does not render legacy Screen settings', async () => {
   const harnessed = harness();
   const root = rootStub();
   harnessed.page.mount(root);
   await drains();
 
-  /* 关键：不能因为一个扩展没装就整块不渲染——用户要知道「没装」，
-     而不是看到一片空白然后自己去猜哪里坏了。
-     两个节点都被写了内容：一个出表单，一个出原因句。 */
-  assert.match(root.html('screen'), /data-perception-form="screen"/);
-  assert.equal(root.html('reality'), '<p class="memory-notice" role="status">尚未安装</p>');
+  assert.equal(root.html('screen'), '');
+  assert.match(root.html('reality'), /data-perception-form="reality"/);
+  assert.doesNotMatch(root.html('reality'), /启用屏幕|remote_auth_token/);
+  assert.equal(harnessed.requests.length, 0);
 });
 
-test('a provider without native settings explains readiness instead of showing an empty form', async () => {
+test('legacy Screen-shaped data is ignored while the native Screen workspaces remain wired', async () => {
   const harnessed = harness({providers: {
     screen: {available: true, settings: {schema: 'companion.perception-settings.v1',
       mode: 'native_v2', read_only: true, runtime_ready: true, groups: [], fields: {}, values: {}}},
@@ -148,41 +163,40 @@ test('a provider without native settings explains readiness instead of showing a
   harnessed.page.mount(root);
   await drains();
 
-  assert.match(root.all(), /V2 原生截图已就绪/);
-  assert.equal(await harnessed.requests.length, 0);
-});
-
-test('an installed provider renders a form per settings group', async () => {
-  const harnessed = harness();
-  const root = rootStub();
-  harnessed.page.mount(root);
-  await drains();
-
-  const markup = root.html('screen');
-  /* 两个组各出一张表单。分组是后端的 schema 决定的，不是页面写死的——
-     页面按 settings.groups 逐组渲染，组里只画这一组声明的字段。 */
-  assert.match(markup, /data-perception-form="screen"/);
-  assert.match(markup, /data-perception-group="runtime"/);
-  assert.match(markup, /data-perception-group="vision"/);
-  assert.match(markup, /保存本组/);
-  /* 没装的扩展不该被塞进表单里的默认值骗到。 */
+  assert.equal(root.html('screen'), '');
   assert.equal(root.html('reality'), '<p class="memory-notice" role="status">尚未安装</p>');
+  assert.equal(harnessed.requests.length, 0);
+  const app = fs.readFileSync(path.join(PAGE_ROOT, 'app.js'), 'utf8');
+  assert.match(app, /configEditors\('screenConfigWorkspace'/);
+  assert.match(app, /data-screen-access/);
+  assert.doesNotMatch(source, /astrbot_plugin_screen_companion/);
 });
 
-test('a sensitive value is never written back into the markup', async () => {
+test('Reality settings render in their own configuration sections', async () => {
   const harnessed = harness();
   const root = rootStub();
   harnessed.page.mount(root);
   await drains();
 
-  /* 令牌已经设置过。页面用 configured 表达「已设置」，输入框留空表示「可替换」，
-     所以标记里不该出现任何真实值——把它回填等于密码明文躺在 DOM 里。 */
-  const markup = root.html('screen');
-  /* 密码框必须带着空 value 属性出现，并且旁边用一句「已设置，留空保持原值」
-     说明它其实有值——两件事同时成立才叫「能改又不泄露」。 */
+  const markup = root.html('reality');
+  for (const section of ['global', 'camera', 'mobile', 'health']) {
+    assert.match(markup, new RegExp(`data-perception-section="${section}"`));
+  }
+  assert.match(markup, /保存本组/);
+  assert.equal(root.html('screen'), '');
+});
+
+test('Reality secrets and legacy Screen values never enter the markup', async () => {
+  const harnessed = harness();
+  const root = rootStub();
+  harnessed.page.mount(root);
+  await drains();
+
+  const markup = root.html('reality');
   assert.match(markup, /type="password" value=""/);
   assert.match(markup, /已设置，留空保持原值。/);
-  assert.doesNotMatch(markup, /已设置"/, '标记里不该把可展示的值塞进属性');
+  assert.doesNotMatch(markup, /secret-amap-token|secret-pairing-token|remote_auth_token/);
+  assert.equal(root.html('screen'), '');
 });
 
 test('the current navigation keeps perception reachable and its secondary panels wired', () => {
@@ -199,10 +213,14 @@ test('the current navigation keeps perception reachable and its secondary panels
   assert.ok(hrefs.length > 0, '导航应当通过 navHref 生成链接');
   assert.doesNotMatch(app, /navHref\([^)]*"\/astrbot_plugin/,
     'navHref 的入参必须是插件相对路径');
-  assert.match(app, /role="tablist" aria-label="感知配置分区"/);
-  assert.match(app, /role="tabpanel" aria-labelledby="perception-tab-config-environment"/);
-  assert.match(app, /\['ArrowRight','ArrowLeft','Home','End'\]/,
-    '感知分区应支持方向键及 Home / End 键切换');
+  assert.match(app, /class="perception-config-nav" role="tablist" aria-label="感知设置"/,
+    '感知配置按设计提供四个正式子页签');
+  assert.equal((app.match(/role="tab" aria-selected="false" aria-controls="perception-page-/g)||[]).length,4,
+    '感知配置应提供四个可切换子页');
+  assert.match(app, /id="perception-page-environment" role="tabpanel"/);
+  assert.match(app, /id="perception-page-models" role="tabpanel"/);
+  assert.match(app, /id="perception-page-reality" role="tabpanel"/);
+  assert.match(app, /id="perception-page-external" role="tabpanel"/);
   assert.match(app, /String\(destination\)\.split\(':',2\)/,
     '看板来源应能同时定位配置分区与二级面板');
   for (const slot of ['modelWorkspace', 'contextImageWorkspace', 'perceptionOnlineQueryWorkspace',
@@ -212,10 +230,12 @@ test('the current navigation keeps perception reachable and its secondary panels
   assert.match(app, /sectionIds:\['news','web','selflink'\]/,
     'V1 网络探索、资讯和外部事件关联配置应在感知页可编辑');
   const overview = fs.readFileSync(path.join(PAGE_ROOT, 'perception-overview.js'), 'utf8');
-  assert.match(overview, /tab:"config-models:perception-detail-model-route"/);
-  assert.match(overview, /tab:"config-recall:perception-detail-recalls"/);
-  assert.match(overview, /tab:"config-environment:perception-detail-place"/);
-  assert.match(overview, /tab:"config-screen:perception-detail-device-access"/);
+  /* 每条通道的跳线目标必须还在源头存在。这些值已被抽成变量复用，
+     所以按目标值本身校验，而不是按它是字面量还是变量声明校验。 */
+  for (const target of ['config-models:perception-detail-model-route', 'config-recall:perception-detail-recalls',
+    'config-environment:perception-detail-place', 'config-screen:perception-detail-device-access']) {
+    assert.match(overview, new RegExp(target), `感知明细应仍能定位到 ${target}`);
+  }
 });
 
 test('related configuration stays in its intended relationship, learning and expression pages', () => {
@@ -227,6 +247,10 @@ test('related configuration stays in its intended relationship, learning and exp
   const expression = app.slice(app.indexOf('function renderExpressionOriginal'),
     app.indexOf('const SELF_PROFILE_SECTIONS'));
   assert.match(identity, /memberClueWorkspace/);
+  assert.match(identity, /identity-network-settings/);
+  assert.ok(identity.indexOf('personConfigWorkspace') < identity.indexOf('memberClueWorkspace'));
+  assert.ok(identity.indexOf('memberClueWorkspace') < identity.indexOf('renderIdentity()'));
+  assert.doesNotMatch(identity, /identity-person|identity-directory/);
   assert.doesNotMatch(app.slice(app.indexOf('function renderPerceptionOriginal'),
     app.indexOf('function renderDecisionOriginal')), /memberClueWorkspace|semanticLearningWorkspace|semanticExpressionWorkspace|reactionConfigWorkspace/);
   assert.match(learning, /semanticLearningWorkspace/);

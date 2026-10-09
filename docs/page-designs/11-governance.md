@@ -10,7 +10,7 @@
 
 | 分区 | 内容 | 性质 |
 | --- | --- | --- |
-| 关系与权限 | `renderIdentity()`：身份与范围卡 + identity 工作区（相识目录、三档权限说明） | 只读展示 + 跳转 → [05-identity-relationships.md](05-identity-relationships.md) |
+| 关系与权限 | `renderIdentity()`：identity 工作区（相识目录与逐人授权），内部身份标识不展示 | 只读展示 + 跳转 → [05-identity-relationships.md](05-identity-relationships.md) |
 | 模型分配 | 跳转卡「任务模型路由 → models 页」："和模型与连接页是同一份设置，改一处两边同步"（`app.js:1169`） | 跳转 |
 | 资源与预算 | 挂载头「每日软限额：只决定可选的后台工作是否开始；达到限额后当天不再开始新的可选任务，已经在跑的会走完；交互回复不受它影响」（`app.js:1170`） | **`model.budget` 2 项** |
 | 存储与部署 | 两张跳转卡：宿主运行状态 → host 页；资料与维护 → data 页（`app.js:1171`） | 跳转 |

@@ -17,6 +17,7 @@ from companion_v2.storage.runtime import StorageRuntime
 from .models import (MAX_ROLE_REFERENCE_BYTES, ContentDigest, ReferenceAsset,
                      ReferenceKind, ReferenceRole, ReferenceSource, ReferenceState,
                      WardrobeItem)
+from .usage import default_usage, validate_usage
 
 
 def _json(value):
@@ -61,7 +62,7 @@ class ReferenceAssetRepository:
         return _asset_from_row(row) if row else None
 
     def list(self, owner, *, kind=None, role=None, state=ReferenceState.ACTIVE, limit=None):
-        """Registrations for one role, oldest first so a planner sees a stable order.
+        """Registrations for one role, gallery order first and stable within ties.
 
         A role filter consults the declared-role rows, not just the primary column:
         a material that was granted a second role must be found by it.
@@ -81,8 +82,28 @@ class ReferenceAssetRepository:
             parameters.append(ReferenceRole(role).value)
         rows = self._runtime.read_all(
             f"SELECT a.* FROM reference_assets a WHERE {' AND '.join(clauses)} "
-            "ORDER BY a.created_at, a.asset_id LIMIT ?", (*parameters, ceiling))
+            "ORDER BY a.position, a.created_at, a.asset_id LIMIT ?", (*parameters, ceiling))
         return tuple(_asset_from_row(row) for row in rows)
+
+    def reorder_active(self, owner, *, expected_asset_ids, asset_ids):
+        with self._runtime.transaction() as connection:
+            rows = connection.execute(
+                "SELECT asset_id FROM reference_assets WHERE owner_key = ? AND state = ? "
+                "ORDER BY position, created_at, asset_id",
+                (owner, ReferenceState.ACTIVE.value),
+            ).fetchall()
+            current = [row["asset_id"] for row in rows]
+            if current != expected_asset_ids:
+                raise TaskError("reference_order_conflict", "the reference gallery changed; reload before saving its order")
+            if (len(asset_ids) != len(current) or len(set(asset_ids)) != len(asset_ids)
+                    or set(asset_ids) != set(current)):
+                raise TaskError("reference_order_invalid", "the saved order must contain every active reference exactly once")
+            connection.executemany(
+                "UPDATE reference_assets SET position = ? WHERE owner_key = ? AND asset_id = ? AND state = ?",
+                [(position, owner, asset_id, ReferenceState.ACTIVE.value)
+                 for position, asset_id in enumerate(asset_ids)],
+            )
+        return tuple(asset_ids)
 
     def count_active(self, owner):
         row = self._runtime.read_one(
@@ -101,15 +122,23 @@ class ReferenceAssetRepository:
                                 f"this role already holds {reference_limit()} active registrations")
         roles = {asset.role}
         with self._runtime.transaction() as connection:
+            existing = connection.execute(
+                "SELECT position FROM reference_assets WHERE owner_key = ? AND asset_id = ?",
+                (owner, asset.asset_id),
+            ).fetchone()
+            position = existing["position"] if existing else connection.execute(
+                "SELECT COALESCE(MAX(position) + 1, 0) AS next_position FROM reference_assets WHERE owner_key = ?",
+                (owner,),
+            ).fetchone()["next_position"]
             connection.execute(
                 """INSERT OR REPLACE INTO reference_assets
                    (owner_key, asset_id, kind, role, label, content_hash, size_bytes, mime_type,
-                    media_ref, source, state, revision, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    media_ref, source, state, revision, created_at, updated_at, position)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (owner, asset.asset_id, asset.kind.value, asset.role.value, asset.label,
                  asset.content_hash.sha256, asset.size_bytes, asset.mime_type, asset.media_ref,
                  asset.source.value, asset.state.value, asset.revision,
-                 (asset.created_at or created_at).isoformat(), created_at.isoformat()))
+                 (asset.created_at or created_at).isoformat(), created_at.isoformat(), position))
             # The declared role is also a row, so "which materials serve this slot"
             # is a query rather than a scan with an implicit assumption.
             connection.execute(
@@ -146,13 +175,82 @@ class ReferenceAssetRepository:
             raise TaskError("reference_payload_changed", "stored reference bytes differ from their immutable receipt")
         return payload
 
-    def withdraw(self, owner, asset_id, *, updated_at):
+    def usage_of(self, owner, asset_id):
+        row = self._runtime.read_one(
+            "SELECT usage_json FROM reference_asset_usage WHERE owner_key = ? AND asset_id = ?",
+            (owner, asset_id))
+        return validate_usage(json.loads(row["usage_json"])) if row else default_usage()
+
+    def update_registration(self, owner, asset_id, *, label, roles, expected_revision, updated_at, usage=None):
+        selected_roles = tuple(ReferenceRole(role) for role in roles)
+        if not selected_roles or len(set(selected_roles)) != len(selected_roles):
+            raise TaskError("reference_roles_invalid", "one or more distinct reference roles are required")
+        selected_usage = validate_usage(usage) if usage is not None else None
+        if (selected_usage and selected_usage["base_identity"]
+                and ReferenceRole.IDENTITY not in selected_roles):
+            raise TaskError("reference_usage_invalid", "a base identity reference requires the identity role")
         with self._runtime.transaction() as connection:
+            row = connection.execute(
+                "SELECT state, revision FROM reference_assets WHERE owner_key = ? AND asset_id = ?",
+                (owner, asset_id)).fetchone()
+            if row is None:
+                raise TaskError("reference_asset_missing", "the reference material is not registered")
+            if row["state"] != ReferenceState.ACTIVE.value:
+                raise TaskError("reference_asset_withdrawn", "the reference material was withdrawn")
+            if row["revision"] != expected_revision:
+                raise TaskError("reference_revision_conflict", "the reference material changed; reload before editing")
+            if selected_usage is None:
+                previous = connection.execute(
+                    "SELECT usage_json FROM reference_asset_usage WHERE owner_key = ? AND asset_id = ?",
+                    (owner, asset_id)).fetchone()
+                selected_usage = validate_usage(json.loads(previous["usage_json"])) if previous else default_usage()
+                if ReferenceRole.IDENTITY not in selected_roles:
+                    selected_usage["base_identity"] = False
+            changed = connection.execute(
+                "UPDATE reference_assets SET label = ?, role = ?, revision = revision + 1, updated_at = ? "
+                "WHERE owner_key = ? AND asset_id = ? AND revision = ? AND state = ?",
+                (label, selected_roles[0].value, updated_at.isoformat(), owner, asset_id,
+                 expected_revision, ReferenceState.ACTIVE.value))
+            if changed.rowcount != 1:
+                raise TaskError("reference_revision_conflict", "the reference material changed; reload before editing")
+            connection.execute("DELETE FROM reference_asset_roles WHERE owner_key = ? AND asset_id = ?",
+                               (owner, asset_id))
+            connection.executemany(
+                "INSERT INTO reference_asset_roles VALUES (?,?,?,?)",
+                [(owner, asset_id, role.value, updated_at.isoformat()) for role in selected_roles])
+            if selected_usage is not None:
+                if selected_usage["base_identity"]:
+                    others = connection.execute(
+                        "SELECT asset_id, usage_json FROM reference_asset_usage WHERE owner_key = ? AND asset_id != ?",
+                        (owner, asset_id)).fetchall()
+                    for other in others:
+                        previous = validate_usage(json.loads(other["usage_json"]))
+                        if not previous["base_identity"]:
+                            continue
+                        previous["base_identity"] = False
+                        connection.execute("UPDATE reference_asset_usage SET usage_json = ? WHERE owner_key = ? AND asset_id = ?",
+                                           (_json(previous), owner, other["asset_id"]))
+                        connection.execute("UPDATE reference_assets SET revision = revision + 1, updated_at = ? "
+                                           "WHERE owner_key = ? AND asset_id = ?",
+                                           (updated_at.isoformat(), owner, other["asset_id"]))
+                connection.execute("INSERT OR REPLACE INTO reference_asset_usage VALUES (?, ?, ?)",
+                                   (owner, asset_id, _json(selected_usage)))
+        return self.get(owner, asset_id)
+
+    def withdraw(self, owner, asset_id, *, updated_at, expected_revision=None):
+        with self._runtime.transaction() as connection:
+            row = connection.execute(
+                "SELECT state, revision FROM reference_assets WHERE owner_key = ? AND asset_id = ?",
+                (owner, asset_id)).fetchone()
+            if row is None or row["state"] == ReferenceState.WITHDRAWN.value:
+                return 0
+            if expected_revision is not None and row["revision"] != expected_revision:
+                raise TaskError("reference_revision_conflict", "the reference material changed; reload before removing it")
             changed = connection.execute(
                 "UPDATE reference_assets SET state = ?, revision = revision + 1, updated_at = ? "
-                "WHERE owner_key = ? AND asset_id = ? AND state != ?",
+                "WHERE owner_key = ? AND asset_id = ? AND revision = ? AND state = ?",
                 (ReferenceState.WITHDRAWN.value, updated_at.isoformat(), owner, asset_id,
-                 ReferenceState.WITHDRAWN.value))
+                 row["revision"], ReferenceState.ACTIVE.value))
             if changed.rowcount:
                 connection.execute("DELETE FROM reference_asset_payloads WHERE owner_key = ? AND asset_id = ?",
                                    (owner, asset_id))
@@ -172,15 +270,6 @@ class ReferenceAssetRepository:
             "SELECT role FROM reference_asset_roles WHERE owner_key = ? AND asset_id = ?",
             (owner, asset_id))))
 
-    def withdraw(self, owner, asset_id, *, updated_at):
-        with self._runtime.transaction() as connection:
-            changed = connection.execute(
-                "UPDATE reference_assets SET state = ?, revision = revision + 1, updated_at = ? "
-                "WHERE owner_key = ? AND asset_id = ? AND state != ?",
-                (ReferenceState.WITHDRAWN.value, updated_at.isoformat(), owner, asset_id,
-                 ReferenceState.WITHDRAWN.value))
-            return changed.rowcount
-
     def withdraw_source(self, owner, source, *, updated_at):
         """Withdraw one provider's material; keeps the catalog honest."""
         with self._runtime.transaction() as connection:
@@ -189,6 +278,10 @@ class ReferenceAssetRepository:
                 "WHERE owner_key = ? AND source = ? AND state != ?",
                 (ReferenceState.WITHDRAWN.value, updated_at.isoformat(), owner,
                  ReferenceSource(source).value, ReferenceState.WITHDRAWN.value))
+            connection.execute(
+                "DELETE FROM reference_asset_payloads WHERE owner_key = ? AND asset_id IN "
+                "(SELECT asset_id FROM reference_assets WHERE owner_key = ? AND source = ? AND state = ?)",
+                (owner, owner, ReferenceSource(source).value, ReferenceState.WITHDRAWN.value))
             return changed.rowcount
 
     # --- wardrobe items ----------------------------------------------------------

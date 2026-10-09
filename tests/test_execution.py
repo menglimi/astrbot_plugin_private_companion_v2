@@ -237,6 +237,70 @@ class ExecutionTests(ExecutionFixture):
         self.assertIsNone(self.tasks.claim(Lane.FOREGROUND).unwrap().claim)
         self.assertEqual(self.tasks.begin_effect(claim).failure.code, "task_attempt_fenced")
 
+    def test_restart_releases_only_superseded_read_only_slots_without_claiming_workers_stopped(self):
+        self.submit("stale-1")
+        first = self.claim()
+        self.tasks.begin(first).unwrap()
+        second_scope = replace(SCOPE, native_scope_id="native-b", conversation_id="conversation-b",
+                               session_id="session-b")
+        self.personas.register_route(ConversationRoute(second_scope, user=self.important.subject), observed_at=NOW)
+        self.grant(self.important, second_scope, "configuration.read")
+        second_context = self.context_for(self.important, scope=second_scope)
+        self.submit("stale-2", context=second_context)
+        second = self.claim()
+        self.tasks.begin(second).unwrap()
+        self.submit("queued")
+
+        other = self.supervisor(self.open_runtime())
+        other.start(expected_generation=1).unwrap()
+        self.assertEqual(set(other.recover().unwrap()), {"stale-1", "stale-2"})
+
+        for task_id, context in (("stale-1", self.context), ("stale-2", second_context)):
+            observed = other.observe(context, task_id).unwrap()
+            self.assertEqual(observed["state"], "uncertain")
+            self.assertFalse(observed["slot_held"])
+            self.assertFalse(observed["worker_stopped"])
+            self.assertEqual(observed["capacity_release"], "superseded_read_only_generation")
+            self.assertEqual(other.reconcile(context, task_id, expected_revision=observed["revision"],
+                result=TaskResult("succeeded", result_ref="late-read-only-result")).failure.code,
+                "task_worker_stop_unknown")
+
+        self.assertEqual(other.claim(Lane.FOREGROUND).unwrap().claim.task_id, "queued")
+
+    def test_process_exit_evidence_releases_unknown_effect_capacity_without_replay(self):
+        self.submit(kind="fixture.effect")
+        claim = self.claim()
+        self.tasks.begin(claim).unwrap()
+        self.tasks.begin_effect(claim).unwrap()
+        self.tasks.record_operation(claim, "owner-accepted-operation").unwrap()
+        self.submit("next-effect", kind="fixture.effect")
+
+        class StoppedLifecycle:
+            attempt = None
+
+            def capture(self):
+                raise AssertionError("recovery does not start workers")
+
+            def stopped_proof(self, attempt):
+                self.attempt = attempt
+                return "fixture_process_exited"
+
+        lifecycle = StoppedLifecycle()
+        other = self.supervisor(self.open_runtime())
+        other.bind_worker_lifecycle(lifecycle)
+        other.start(expected_generation=1).unwrap()
+        other.recover().unwrap()
+        recovered = other.recover_stopped_workers().unwrap()
+        self.assertEqual(recovered.released_tasks, ("task-1",))
+        unknown = other.read(self.context, "task-1").unwrap()
+        observed = other.observe(self.context, "task-1").unwrap()
+        self.assertEqual((unknown.state, unknown.effect, unknown.operation_id),
+                         ("uncertain", "unknown", "owner-accepted-operation"))
+        self.assertFalse(observed["slot_held"])
+        self.assertTrue(observed["worker_stopped"])
+        self.assertEqual(lifecycle.attempt.claim, claim)
+        self.assertEqual(other.claim(Lane.FOREGROUND).unwrap().claim.task_id, "next-effect")
+
     def test_cancel_before_start_is_final_running_cancel_requires_stop_and_commit_survives(self):
         queued = self.submit()
         cancelled = self.tasks.cancel(self.context, "task-1", expected_revision=queued.revision).unwrap()

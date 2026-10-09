@@ -11,6 +11,7 @@
 面板切换与状态卡片。这个页补的是外壳那一层。
 """
 import base64
+import json
 import pathlib
 import re
 import sys
@@ -18,6 +19,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PAGE = ROOT / "pages" / "陪伴小屋"
 OUT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else PAGE / "shell-preview.html"
+REPLY_EFFICIENCY_FIXTURE = ROOT / "fixtures" / "reply_efficiency_preview.json"
 
 
 def read(name):
@@ -54,6 +56,58 @@ def font_face():
     return "".join(blocks)
 
 
+def reply_efficiency_mock_script():
+    if not REPLY_EFFICIENCY_FIXTURE.exists():
+        raise SystemExit(f"缺少模拟数据：{REPLY_EFFICIENCY_FIXTURE}")
+    fixture = json.dumps(
+        json.loads(REPLY_EFFICIENCY_FIXTURE.read_text(encoding="utf-8")),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+    template = r'''<script>
+(() => {
+  if (new URLSearchParams(location.search).get("mock") !== "reply-efficiency") return;
+  const fixture = __FIXTURE__;
+  const host = "astrbot_plugin_private_companion_v2";
+  const responses = {
+    "integration/manifest": {providers: [], summary: {connected_count: 0}},
+    "page/targets": {
+      installation_id: "preview-installation",
+      operator_id: "preview-operator",
+      targets: [{
+        target_id: "preview-target", scope_kind: "private", platform_id: "onebot",
+        account_id: "preview-account", participant_id: "preview-user", display_name: "模拟私聊",
+        roles: [{role_id: "preview-role", role_name: "示例角色",
+          model_api: "/" + host + "/model"}]
+      }]
+    },
+    "model/maintenance": fixture.maintenance,
+    "model/voice": fixture.voice,
+    "model/image": fixture.image,
+    "model": fixture.model,
+    "model/balance": fixture.balance
+  };
+  window.AstrBotPluginPage = {
+    ready: async () => ({pluginName: host}),
+    onContext: () => () => {},
+    apiGet: async endpoint => {
+      const path = String(endpoint || "").replace(/^\/+/, "");
+      if (!Object.hasOwn(responses, path)) throw Object.assign(new Error("预览没有配置此读取路由"), {code: "preview_route_unavailable"});
+      return structuredClone(responses[path]);
+    },
+    apiPost: async () => { throw Object.assign(new Error("模拟预览为只读"), {code: "preview_read_only"}); }
+  };
+  const badge = document.createElement("div");
+  badge.setAttribute("role", "status");
+  badge.className = "preview-mock-badge";
+  badge.textContent = "模拟数据 · 只读预览";
+  badge.style.cssText = "position:fixed;top:10px;right:12px;z-index:10000;padding:6px 10px;border:1px solid var(--t-line);border-radius:var(--r-2xs);background:var(--t-surface);color:var(--t-text-soft);font:var(--fs-tiny) MiSans,sans-serif;box-shadow:var(--shadow-1);pointer-events:none";
+  document.body.append(badge);
+})();
+</script>'''
+    return template.replace("__FIXTURE__", fixture)
+
+
 def main():
     html = read("index.html")
 
@@ -72,6 +126,10 @@ def main():
 
     css = "\n".join(read(name) for name in styles)
     js = "\n;\n".join(read(name) for name in scripts)
+
+    # The dynamic output view copies this static template, including its asset URL.
+    image = base64.b64encode((PAGE / "assets" / "chengxi.jpg").read_bytes()).decode("ascii")
+    html = html.replace('src="assets/chengxi.jpg"', f'src="data:image/jpeg;base64,{image}"')
 
     # 去掉外链标签，换成内联。引导脚本保持内联位置（它必须在样式生效前跑）。
     body = html
@@ -107,6 +165,7 @@ document.documentElement.dataset.roomReady="";
 </head>
 <body>
 {body}
+{reply_efficiency_mock_script()}
 <script>
 {inline_safe(js)}
 </script>

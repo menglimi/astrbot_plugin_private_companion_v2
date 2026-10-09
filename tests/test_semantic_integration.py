@@ -1,13 +1,15 @@
+import asyncio
 import base64
 from contextlib import closing
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import io
 import json
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
 from PIL import Image
@@ -18,6 +20,7 @@ from companion_v2.conversation.media.models import CapturedImage, ImageDescripto
 from companion_v2.conversation.media.reply import ImageReplyDraft
 from companion_v2.execution.models import TaskError
 from companion_v2.model_gateway.embedding import EmbeddingGateway, unit
+from companion_v2.proactive.external_materials import NewsItem, ParseBatch
 from companion_v2.storage.semantic import SemanticStore
 from tests.test_host_application import HostFixture
 from tests.test_role_tool_loop import requested, answered, call
@@ -31,6 +34,8 @@ class SemanticPort:
         self.rerank_failing = False
         self.rerank_scores = None
         self.analysis_images = []
+        self.capture_suitable = True
+        self.metadata_result = None
 
     def binding(self, identifier, kind):
         return kind + self.version
@@ -47,8 +52,13 @@ class SemanticPort:
 
     async def analyze(self, identifier, prompt, images=()):
         self.analysis_images.append(tuple(images))
+        if "判断图片是否适合作为独立的聊天表情素材" in prompt:
+            if not self.capture_suitable:
+                return {"suitable": False}
+            return {"suitable": True, "name": "挥手", "description": "挥手回应", "visible_text": "你好",
+                    "tags": "挥手", "emotions": "友好", "intents": "问候、回应招呼"}
         if "为聊天表情建立元数据" in prompt:
-            return {"name": "挥手", "description": "两帧颜色交替的动画", "intents": "回应问候"}
+            return self.metadata_result or {"name": "挥手", "description": "两帧颜色交替的动画", "intents": "回应问候"}
         return {"fit": True, "reason": "与安慰意图贴合"} if images else []
 
     async def rerank(self, identifier, query, documents):
@@ -100,10 +110,27 @@ class EmbeddingTests(unittest.IsolatedAsyncioTestCase):
                 row = db.execute("SELECT * FROM reaction_inputs WHERE event_key='event'").fetchone()
                 self.assertEqual((row["actor"], row["received_at"], row["signal"]),
                                  ("speaker", None, None))
-                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
 
 
 class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_foreground_query_embeds_once_without_waiting_for_index_lock(self):
+        from unittest.mock import AsyncMock, patch
+        host = await self.semantic_host()
+        app = host.application
+        batch = host.receive(self.event("semantic-query-once", text="想要安慰和抱抱")).unwrap()
+        context = self.context(app, batch)
+        lock = self.semantic.locks.setdefault(self.semantic.owner(context), asyncio.Lock())
+        await lock.acquire()
+        self.addCleanup(lock.release)
+        with patch.object(self.semantic.memory, "prepare", AsyncMock(side_effect=AssertionError("foreground index fill"))), \
+                patch.object(self.semantic, "schedule_memory"), \
+                patch.object(app.memory.context, "enrich_semantic") as enrich:
+            self.advance(app)
+            self.assertEqual((await self.done(app, batch))["state"], "complete")
+            enrich.assert_called_once()
+        self.assertEqual(self.port.calls.count("想要安慰和抱抱"), 1)
+
     async def semantic_host(self, *, images=False, automatic_reactions=True):
         if images:
             self.sender = replace(self.sender, supports_images=True)
@@ -117,6 +144,110 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
                                            "reactions_cooldown_seconds": 0}, settings["revision"])
         await self.start(host)
         return host
+
+    async def test_reaction_collection_samples_direct_images_and_requires_visual_approval(self):
+        host = await self.semantic_host(images=True, automatic_reactions=False)
+        app = host.application
+        batch = host.receive(self.event("capture-context")).unwrap()
+        context = self.context(app, batch)
+        settings = self.semantic.store.settings()
+        self.assertFalse(settings["reactions_collection_private_enabled"])
+        self.assertFalse(settings["reactions_collection_group_enabled"])
+        settings = self.semantic.store.configure({
+            "reactions_collection_private_enabled": True,
+            "reactions_collection_private_probability": 0.0,
+        }, settings["revision"])
+
+        captured = picture()
+        direct_source = object()
+        prompt_image = SimpleNamespace(source=direct_source)
+        reads = []
+        app.messages.images.read = lambda current, events, at: (reads.append(events) or (prompt_image,))
+        self.semantic.schedule_reaction_collection("capture-not-sampled", context,
+            SimpleNamespace(event=SimpleNamespace(images=(captured.descriptor,)),
+                context=SimpleNamespace(materials=(SimpleNamespace(purpose="input_image:current",
+                    source=direct_source),))))
+        self.assertEqual(reads, [], "a probability miss must not read the original image")
+
+        settings = self.semantic.store.configure({"reactions_collection_private_probability": 1.0},
+                                                  settings["revision"])
+        self.assertEqual(settings["reactions_collection_private_probability"], 1.0)
+
+        app.messages.images.read = lambda current, events, at: (prompt_image,)
+        self.semantic.reactions.capture_prompt_image = lambda image: captured
+        owner = self.semantic.owner(context)
+
+        def request(purpose):
+            return SimpleNamespace(event=SimpleNamespace(images=(captured.descriptor,)),
+                context=SimpleNamespace(materials=(SimpleNamespace(purpose=purpose, source=direct_source),)))
+
+        self.port.capture_suitable = False
+        self.semantic.schedule_reaction_collection("capture-unsuitable", context,
+                                                    request("input_image:current"))
+        pending = [task for key, task in self.semantic.background.items() if key.startswith("reaction-capture:")]
+        await asyncio.gather(*pending)
+        self.assertEqual(self.semantic.store.list(owner, "reaction"), [])
+
+        reads = []
+        app.messages.images.read = lambda current, events, at: (reads.append(events) or (prompt_image,))
+        self.semantic.schedule_reaction_collection("capture-quoted", context, request("quoted_image:original"))
+        self.assertEqual(reads, [], "quoted images must never be fetched for collection")
+
+        self.port.capture_suitable = True
+        self.semantic.schedule_reaction_collection("capture-approved", context, request("input_image:current"))
+        pending = [task for key, task in self.semantic.background.items() if key.startswith("reaction-capture:")]
+        await asyncio.gather(*pending)
+        items = self.semantic.store.list(owner, "reaction")
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["payload"]["collection_source"], "private_capture")
+        self.assertEqual(item["payload"]["analysis"], "auto_reviewed")
+        self.assertEqual(item["payload"]["intents"], "问候、回应招呼")
+        self.assertEqual(self.semantic.reactions.captured(item).content, captured.content)
+
+        self.semantic.schedule_reaction_collection("capture-duplicate", context, request("input_image:current"))
+        pending = [task for key, task in self.semantic.background.items() if key.startswith("reaction-capture:")]
+        await asyncio.gather(*pending)
+        self.assertEqual(len(self.semantic.store.list(owner, "reaction")), 1)
+        totals = self.semantic.store.reaction_collection_summary(owner)["totals"]["private_capture"]
+        self.assertEqual((totals["added"], totals["duplicate"]), (1, 1))
+
+    async def test_visual_analysis_preserves_manual_fields_and_fills_the_rest(self):
+        host = await self.semantic_host(images=True)
+        owner = "manual-field-owner"
+        item = self.semantic.reactions.import_image(owner, picture(),
+            {"name": "人工名称", "description": "人工画面标注"})
+        self.port.metadata_result = {"name": "模型名称", "description": "模型画面", "visible_text": "你好",
+                                     "tags": "挥手", "emotions": "友好", "intents": "回应问候"}
+        analyzed = await self.semantic.reactions.analyze(owner, item["id"])
+        self.assertEqual(analyzed["payload"]["name"], "人工名称")
+        self.assertEqual(analyzed["payload"]["description"], "人工画面标注")
+        self.assertEqual(analyzed["payload"]["tags"], "挥手")
+        self.assertEqual(analyzed["payload"]["intents"], "回应问候")
+
+    async def test_visual_analysis_keeps_existing_metadata_when_model_omits_a_field(self):
+        host = await self.semantic_host(images=True)
+        owner = "sparse-analysis-owner"
+        item, created = self.semantic.reactions.import_image_with_status(owner, picture(), {
+            "name": "已识别名称", "description": "旧画面描述", "visible_text": "旧文字",
+            "tags": "旧标签", "emotions": "旧情绪", "intents": "旧用途",
+        }, collection_source="private_capture", auto_reviewed=True)
+        self.assertTrue(created)
+        self.port.metadata_result = {"description": "更新后的画面描述"}
+        analyzed = await self.semantic.reactions.analyze(owner, item["id"])
+        self.assertEqual(analyzed["payload"]["description"], "更新后的画面描述")
+        self.assertEqual(analyzed["payload"]["visible_text"], "旧文字")
+        self.assertEqual(analyzed["payload"]["intents"], "旧用途")
+
+    async def test_approved_collection_can_wait_for_manual_confirmation(self):
+        await self.semantic_host(images=True, automatic_reactions=False)
+        settings = self.semantic.store.settings()
+        self.semantic.store.configure({"reactions_collection_mode": "confirm"}, settings["revision"])
+        status, item = await self.semantic.reactions.collect_candidate(
+            "confirm-owner", picture(), "private_capture", lambda: None)
+        self.assertEqual(status, "pending_confirmation")
+        self.assertFalse(item["enabled"])
+        self.assertEqual(item["payload"]["collection_state"], "awaiting_confirmation")
 
     async def test_text_delivery_preserves_unresolved_reaction_usage_error(self):
         async def respond(_envelope):
@@ -185,6 +316,81 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         second = host.receive(self.event("semantic-followup", text="那种苦味饮料我平时喝吗？")).unwrap()
         self.advance(app)
         self.assertEqual((await self.done(app, second))["state"], "complete")
+
+    async def test_ai_news_feed_is_fetched_on_demand_with_governed_citations(self):
+        class NewsPort:
+            fingerprint = "conversation-news-test-v1"
+            source_label = "橘鸦AI早报"
+
+            def __init__(self, published_at):
+                self.published_at = published_at
+                self.calls = 0
+
+            async def fetch(self):
+                self.calls += 1
+                return ParseBatch((NewsItem("示例媒体", "news-1", "OpenAI 发布新模型",
+                    "https://news.example/openai-release", "发布了新的 AI 模型与工具。", self.published_at),), ())
+
+        host = await self.semantic_host()
+        app = host.application
+        port = NewsPort(self.clock.now() - timedelta(minutes=10))
+        app.contact_schedule.news_events.port = port
+
+        casual = host.receive(self.event("news-casual", text="我今天在整理桌面。" )).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, casual))["state"], "complete")
+        self.assertEqual(port.calls, 0)
+
+        batch = host.receive(self.event("news-query", text="AI 最近有什么新消息？能附上出处吗？")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertEqual(port.calls, 1)
+        material = next(item for item in self.called[-1].original.context.materials
+                        if item.owner == "conversation.news")
+        self.assertIsNotNone(material.source)
+        item = json.loads(material.payload)["items"][0]
+        self.assertEqual((item["source"], item["url"]),
+                         ("示例媒体", "https://news.example/openai-release"))
+        self.assertEqual(datetime.fromisoformat(item["published_at"]), port.published_at)
+        context = self.context(app, batch)
+        self.assertTrue(app.proactive.sources.validate_reference_for_audience(material.source,
+            recipient=context.actor.subject, observed_at=self.clock.now()).is_success)
+        preferences = app.proactive.preferences.read(context, observed_at=self.clock.now()).unwrap()
+        diagnostic = app.contact_schedule.news_events.diagnostic(context, preferences)
+        self.assertEqual(diagnostic["network_status"], "succeeded")
+        self.assertEqual(diagnostic["item_count"], 1)
+
+    async def test_ai_news_query_without_valid_recent_items_gets_no_memory_fallback(self):
+        class EmptyNewsPort:
+            fingerprint = "conversation-news-empty-v1"
+            source_label = "橘鸦AI早报"
+
+            def __init__(self):
+                self.calls = 0
+
+            async def fetch(self):
+                self.calls += 1
+                return ParseBatch((), ())
+
+        async def respond(envelope):
+            return answered("暂时没有可靠的近期资讯。")
+
+        self.model_behavior = respond
+        host = await self.semantic_host()
+        app = host.application
+        port = EmptyNewsPort()
+        app.contact_schedule.news_events.port = port
+
+        batch = host.receive(self.event("news-empty", text="AI 最近有什么新消息？")).unwrap()
+        self.advance(app)
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertEqual(port.calls, 1)
+        envelope = self.called[-1].original
+        self.assertNotIn("conversation.news", {item.owner for item in envelope.context.materials})
+        self.assertIn("没有取得可验证的近期来源材料", envelope.instruction)
+        context = self.context(app, batch)
+        preferences = app.proactive.preferences.read(context, observed_at=self.clock.now()).unwrap()
+        self.assertEqual(app.contact_schedule.news_events.diagnostic(context, preferences)["network_status"], "succeeded")
 
     async def test_private_turn_keeps_lexical_recall_when_embedding_fails(self):
         phase = {"seed": True}
@@ -271,6 +477,31 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
             usage = db.execute("SELECT id,batch FROM uses").fetchall()
         self.assertEqual([(row["id"], row["batch"]) for row in usage], [(picture().descriptor.content_hash, batch)])
         self.assertNotIn("reaction_usage", self.semantic.errors)
+
+    async def test_authorized_image_only_reply_delivers_no_text(self):
+        async def respond(envelope):
+            if not envelope.tool_history:
+                return requested(call("react", "reaction.search", intent="只想用表情安慰"))
+            image = envelope.original.images[0]
+            value = answered("占位正文")
+            return replace(value, draft=ImageReplyDraft("", (), action="image", images=(image.source,)))
+
+        self.model_behavior = respond
+        host = await self.semantic_host(images=True)
+        app = host.application
+        settings = self.semantic.store.settings()
+        self.semantic.store.configure({"reactions_delivery_mode": "same_message"}, settings["revision"])
+        batch = host.receive(self.event("image-only-reaction", text="有点难过")).unwrap()
+        context = self.context(app, batch)
+        self.semantic.reactions.import_image(self.semantic.owner(context), picture(),
+            {"name": "抱抱", "description": "伸手抱抱", "intents": "安慰"})
+
+        self.advance(app)
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertEqual([(part.text, len(getattr(part, "images", ()))) for part in self.sent], [("", 1)])
+        history = app.messages.history(context).unwrap()["items"]
+        self.assertEqual([(part["text"], len(part.get("images", ()))) for part in history], [("", 1)])
+        self.assertEqual(self.sent[0].images[0].descriptor.content_hash, picture().descriptor.content_hash)
 
     async def test_reaction_can_precede_text_or_share_its_message(self):
         async def respond(envelope):
@@ -504,6 +735,23 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.semantic.search.search = same_candidates
         self.assertEqual((await self.semantic.reactions.search(context, batch, "ranked", "安慰"))
                          ["items"][0]["id"], second["id"])
+
+    async def test_feedback_after_the_association_window_is_not_learned(self):
+        host = await self.semantic_host(images=True)
+        batch = host.receive(self.event("feedback-expired", text="有点难过")).unwrap()
+        context = self.context(host.application, batch)
+        owner = self.semantic.owner(context)
+        item = self.semantic.reactions.import_image(owner, picture(),
+            {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
+        actor = self.semantic.reaction_preferences.actor(context)
+        delivered_at = self.clock.now().timestamp()
+        with self.semantic.store.db() as db:
+            db.execute("INSERT INTO reaction_deliveries VALUES (?,?,?,?,?,NULL,NULL)",
+                       (owner, actor, "expired-delivery", item["id"], delivered_at))
+        from companion_v2.expression.reaction_preferences import REACTION_FEEDBACK_WINDOW_SECONDS
+        self.semantic.reaction_preferences._observe(owner, actor, "expired-feedback",
+            "刚才那张表情包不合适", delivered_at + REACTION_FEEDBACK_WINDOW_SECONDS + 1)
+        self.assertEqual(self.semantic.reaction_preferences.scores(context), {})
 
     async def test_confirmed_reaction_is_deprioritized_on_the_next_reply(self):
         async def respond(envelope):

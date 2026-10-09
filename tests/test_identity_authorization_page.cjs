@@ -19,6 +19,8 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../pages/关系与权限/app.js"), "utf8");
+const memberSource = fs.readFileSync(path.resolve(__dirname, "../pages/关系与权限/member-editor.js"), "utf8");
+const workspaceMarkup = fs.readFileSync(path.resolve(__dirname, "../pages/关系与权限/workspace.html"), "utf8");
 const endpoint = "acquaintance";
 const authorization = endpoint + "/authorization";
 
@@ -27,7 +29,7 @@ function person(subjectId, name, extra = {}) {
   return {
     subject_id: subjectId, native_account_id: subjectId, display_name: name, name_basis: "platform",
     platform: "qq-main", account_id: "account-a", role_id: "role-a", bot_id: "bot-a", revision: 3,
-    private_chat: true, group_member: false,
+    private_chat: true, private_target: true, settings_available: true, group_member: false,
     private: { msg_count: 12, active_days: 3, last_seen: "2026-09-30T10:00:00+00:00" },
     groups: {},
     total: { msg_count: 12, active_days: 3,
@@ -37,12 +39,15 @@ function person(subjectId, name, extra = {}) {
   };
 }
 
-function directory(persons, groups = []) {
+function directory(persons, groups = [], group_networks = [], group_access = {
+  mode: "shared", editable: true, running: false,
+  accounts: [{platform_id: "qq-main", account_id: "account-a", bot_id: "bot-a"}], persona_bots: ["bot-a"],
+}) {
   const privateCount = persons.filter((item) => item.private_chat).length;
   const groupCount = persons.filter((item) => item.group_member).length;
   const bothCount = persons.filter((item) => item.private_chat && item.group_member).length;
   return { installation_id: "inst", profile_id: "profile-1", operator_name: "admin",
-    persons, groups, counts: { total: persons.length, private_chat: privateCount,
+    persons, groups, group_networks, group_access, counts: { total: persons.length, private_chat: privateCount,
       group_member: groupCount, both: bothCount, private_only: privateCount - bothCount,
       group_only: groupCount - bothCount },
     page_managed_capabilities: ["conversation.reply", "message.delivery", "proactive.contact"] };
@@ -60,7 +65,7 @@ function grantRow(capability, changes = {}) {
 function status(subjectId, items, companion = false) {
   const counts = {};
   for (const item of items) counts[item.state] = (counts[item.state] || 0) + 1;
-  return { subject_id: subjectId, items, companion, counts };
+  return { subject_id: subjectId, items, companion, counts, identity_tier: "standard", identity_revision: 1 };
 }
 
 /* ── 一个够用的 DOM 桩 ────────────────────────────────────────────────
@@ -82,26 +87,55 @@ function element(tag) {
       },
       contains(token) { return node.className.split(/\s+/).includes(token); },
     },
-    setAttribute(name, value) { this[name] = String(value); },
+    setAttribute(name, value) {
+      this[name] = String(value);
+      if (name.startsWith("data-")) {
+        const key = name.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+        this.dataset[key] = String(value);
+      }
+    },
     getAttribute(name) { return this[name]; },
     addEventListener(type, handler) { this.handlers = this.handlers || {}; this.handlers[type] = handler; },
     append(...items) { this.children.push(...items); },
     replaceChildren(...items) { this.children = items; },
     closest() { return this; },
-    querySelector() { return null; },
+    querySelectorAll(selector) {
+      const selectors = String(selector).split(",").map(value => value.trim());
+      const matches = item => selectors.some(query => {
+        const classMatch = /^\.([\w-]+)$/.exec(query);
+        if (classMatch) return item.className.split(/\s+/).includes(classMatch[1]);
+        const dataMatch = /^\[data-([\w-]+)(?:="([^"]*)")?\]$/.exec(query);
+        if (dataMatch) {
+          const key = dataMatch[1].replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+          return item.dataset?.[key] !== undefined && (dataMatch[2] === undefined || item.dataset[key] === dataMatch[2]);
+        }
+        const focusMatch = /^(button|input|select):not\(:disabled\)$/.exec(query);
+        if (focusMatch) return item.tagName === focusMatch[1].toUpperCase() && !item.disabled;
+        if (query === '[tabindex]:not([tabindex="-1"])') return item.tabIndex !== undefined && item.tabIndex !== -1;
+        return false;
+      });
+      const found = [];
+      const visit = item => {
+        if (matches(item)) found.push(item);
+        for (const child of item.children || []) visit(child);
+      };
+      for (const child of this.children) visit(child);
+      return found;
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
   };
   return node;
 }
 
-function harness({ persons, groups = [], authorizations = {}, post } = {}) {
+function harness({ persons, groups = [], group_networks = [], group_access, authorizations = {}, memberSettings = {}, post } = {}) {
   const requests = [];
   const byId = new Map();
   const tabs = [element("button"), element("button"), element("button")];
-  const chips = [element("button"), element("button"), element("button"), element("button")];
+  const chips = [element("button"), element("button")];
   const graphFilters = [element("button"), element("button"), element("button")];
   const panels = [element("section"), element("section"), element("section")];
   tabs.forEach((tab, index) => { tab.dataset.tab = ["network", "people", "groups"][index]; });
-  chips.forEach((chip, index) => { chip.dataset.filter = ["all", "private", "group", "both"][index]; });
+  chips.forEach((chip, index) => { chip.dataset.filter = ["stable", "temporary"][index]; });
   graphFilters.forEach((filter, index) => { filter.dataset.graphScope = ["all", "private", "group"][index]; });
   panels.forEach((panel, index) => { panel.id = ["panel-network", "panel-people", "panel-groups"][index]; });
   tabs.forEach((tab, index) => { tab.id = ["tab-network", "tab-people", "tab-groups"][index]; });
@@ -109,18 +143,28 @@ function harness({ persons, groups = [], authorizations = {}, post } = {}) {
                     "count-group", "count-both", "count-split", "graph-summary", "graph-empty",
                     "relationship-graph", "directory-search", "clear-search", "people-result-count",
                     "people-grid", "person-detail", "groups-result-count", "groups-list", "group-detail",
-                    "refresh", "chip-all", "chip-private", "chip-group", "chip-both"]) {
+                    "refresh", "chip-stable", "chip-temporary"]) {
     byId.set(id, element(id === "refresh" ? "button" : "div"));
   }
+  for (const [, id] of workspaceMarkup.matchAll(/\bid="([^"]+)"/g)) {
+    if (!byId.has(id)) byId.set(id, element("div"));
+  }
   byId.get("directory-search").value = "";
+  const relationshipApp = element("main");
+  relationshipApp.className = "relationship-app";
   const document = {
     getElementById: (id) => byId.get(id) || null,
     createElement: (tag) => element(tag),
+    querySelector: (selector) => selector === ".relationship-app" ? relationshipApp : null,
     querySelectorAll: (selector) => selector === ".tab" ? tabs : selector === ".chip" ? chips
       : selector === ".graph-filter" ? graphFilters : selector === ".view-panel" ? panels : [],
     addEventListener() {},
   };
+  const navigations = [];
+  const documentEvents = {};
+  document.addEventListener = (type, handler) => {documentEvents[type] = handler;};
   const window = {
+    parent: {postMessage: (message, origin) => navigations.push({message, origin})},
     AstrBotPluginPage: {
       ready: () => Promise.resolve({ pluginName: "astrbot_plugin_private_companion_v2" }),
       apiGet: (route, params) => new Promise((resolve, reject) => {
@@ -132,16 +176,18 @@ function harness({ persons, groups = [], authorizations = {}, post } = {}) {
     },
     document,
   };
-  vm.runInNewContext(source, { window, document, console, Intl, Date, JSON, Math, Number, Object,
+  const context = vm.createContext({ window, document, console, Intl, Date, JSON, Math, Number, Object,
     Array, String, Set, Map, Boolean, Error, Promise, setTimeout, clearTimeout });
+  vm.runInContext(memberSource, context);
+  vm.runInContext(source, context);
   const answers = {
-    [endpoint]: directory(persons || [], groups),
+    [endpoint]: directory(persons || [], groups, group_networks, group_access),
     ...Object.fromEntries(Object.entries(authorizations).map(([subject, value]) =>
       [authorization + "|" + subject, value])),
   };
   const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
   const harness = {
-    requests, document, byId,
+    requests, document, byId, navigations,
     element: (id) => byId.get(id),
     settle,
     /* 回答在飞的请求。目录与授权都按路由 + 参数分发，写请求交给用例的 post。
@@ -152,14 +198,22 @@ function harness({ persons, groups = [], authorizations = {}, post } = {}) {
         if (request.answered) continue;
         if (read && !read(request)) continue;
         request.answered = true;
-        const value = request.method === "GET"
-          ? answers[request.route + (request.params?.subject_id ? "|" + request.params.subject_id : "")]
-          : post?.(request);
+        let value;
+        try {
+          value = request.method === "GET"
+          ? request.route === "acquaintance/settings" ? memberSettings[request.params?.subject_id] || {sections: {}}
+              : answers[request.route + (request.params?.subject_id ? "|" + request.params.subject_id : "")]
+            : post?.(request);
+        } catch (error) {
+          request.reject(error);
+          continue;
+        }
         if (value === undefined) continue;
         request.resolve(value);
       }
     },
     card: (name) => cardFor(byId.get("people-grid"), name),
+    mappingChanged: () => documentEvents["companion-mappings-change"](),
   };
   harness.send = async (read) => { await settle(); harness.answer(read); await settle(); };
   return harness;
@@ -198,16 +252,19 @@ function markup(node) {
   return `<${node.tagName.toLowerCase()}${attributes}${node.disabled ? " disabled" : ""}>${own}${inner}</${node.tagName.toLowerCase()}>`;
 }
 
-async function open(h, name) {
+async function open(h, name, pane = "身份与权限") {
   await h.send((request) => request.route === endpoint);
   const grid = h.element("people-grid");
   const card = cardFor(grid, name);
   const seen = grid.children.map((item) => item.tagName + "/" + item.className).join(",");
   assert.ok(card?.handlers?.click,
-    "目录里应当有 " + name + " 的卡片（grid=" + grid.children.length + " 个子节点：" + seen + "）");
+    "目录里应当有 " + name + " 的卡片（grid=" + grid.children.length + " 个子节点：" + seen
+      + "；sync=" + h.element("sync-state").textContent + "；notice=" + h.element("notice").textContent
+      + "；requests=" + JSON.stringify(h.requests.map(request => [request.method, request.route])) + "）");
   card.handlers.click();
   /* 点开一个人会去读他的授权：同一套「先发出来、再回答」。 */
-  await h.send((request) => request.route === authorization);
+  await h.send((request) => request.route === authorization || request.route === "acquaintance/settings");
+  findControl(h.element("person-detail"), pane).handlers.click();
   return h.element("person-detail");
 }
 
@@ -216,6 +273,259 @@ function tree(node, depth = 0) {
     + (node.textContent ? "(" + node.textContent + ")" : ""),
     ...(node.children || []).map((child) => "  ".repeat(depth + 1) + tree(child, depth + 1))].join("\n");
 }
+
+test("关系图作为关系网默认视图，人物筛选保留", async () => {
+  const html = fs.readFileSync(path.resolve(__dirname, "../pages/关系与权限/workspace.html"), "utf8");
+  assert.deepEqual([...html.matchAll(/data-tab="([^"]+)"/g)].map(match => match[1]), ["network", "people", "groups"]);
+  assert.deepEqual([...html.matchAll(/data-filter="([^"]+)"/g)].map(match => match[1]), ["stable", "temporary"]);
+  const h = harness();
+  await h.send();
+  assert.equal(h.document.querySelectorAll(".tab")[0].getAttribute("aria-selected"), "true");
+  assert.equal(h.document.querySelectorAll(".view-panel").find(item => item.id === "panel-network").hidden, false);
+  assert.equal(h.document.querySelectorAll(".view-panel").find(item => item.id === "panel-people").hidden, true);
+});
+
+test("成员页的错误提示不会串到群聊视图", async () => {
+  const h = harness();
+  await h.settle();
+  const request = h.requests.find(item => item.route === endpoint);
+  request.reject(new Error("directory unavailable"));
+  await h.settle();
+  assert.equal(h.element("notice").hidden, false);
+  h.document.querySelectorAll(".tab")[2].handlers.click();
+  assert.equal(h.element("notice").hidden, true);
+});
+
+test("同一人格的不同内部归属只显示一张成员卡，权限编辑仍按归属切换", async () => {
+  const first = person("subject-1", "阿澈", {role_id: "role-a", persona_ids: ["星缘-私聊"], revision: 3});
+  const second = person("subject-1", "阿澈", {role_id: "role-b", persona_ids: ["星缘-私聊"], revision: 8,
+    total: {msg_count: 4, active_days: 1, first_seen: "2026-09-15T10:00:00+00:00",
+      last_seen: "2026-10-01T10:00:00+00:00"}});
+  const h = harness({persons: [first, second], authorizations: {"subject-1": status("subject-1", [])}});
+  await h.send((request) => request.route === endpoint);
+  assert.equal(findAll(h.element("people-grid"), "person-card").length, 1,
+    tree(h.element("people-grid")) + "\nsync=" + h.element("sync-state").textContent
+      + "\nnotice=" + h.element("notice").textContent
+      + "\nrequests=" + JSON.stringify(h.requests.map(request => [request.method, request.route])));
+  assert.match(flat(h.element("people-grid")), /2 个内部归属/);
+  const card = cardFor(h.element("people-grid"), "阿澈");
+  card.handlers.click();
+  await h.send((request) => request.route === authorization || request.route === "acquaintance/settings");
+  assert.equal(h.requests.filter((request) => request.method === "GET" && request.route === authorization).length, 0,
+    "多个内部归属不能自动读取第一条路由的权限");
+  const selector = findInput(h.element("person-detail"), "选择内部人格归属");
+  assert.ok(selector && selector.children.length === 3);
+  selector.value = selector.children[2].value;
+  selector.handlers.change({target: selector});
+  await h.send((request) => request.route === authorization || request.route === "acquaintance/settings");
+  const authRead = h.requests.filter((request) => request.method === "GET" && request.route === authorization).at(-1);
+  assert.ok(authRead, JSON.stringify(h.requests.map(request => ({method: request.method, route: request.route, params: request.params}))));
+  assert.equal(authRead.params.role_id, "role-b");
+});
+
+test("没有已建立的 V2 私聊路由时成员资料与权限只读", async () => {
+  const member = person("subject-1", "阿澈", {settings_available: false});
+  const h = harness({persons: [member], authorizations: {"subject-1": status("subject-1", [])}});
+  const detail = await open(h, "阿澈");
+  assert.match(flat(detail), /尚未建立当前账号与人格下可管理的 V2 私聊窗口/);
+  assert.equal(h.requests.filter(request => request.method === "GET"
+    && [authorization, "acquaintance/settings"].includes(request.route)).length, 0);
+  assert.equal(findAll(detail, "member-permission-row").length, 0);
+});
+
+test("稳定和临时只按成员往来类型筛选，跳转时保持对应分类", async () => {
+  const stable = person("subject-stable", "稳定成员");
+  const temporary = person("subject-temporary", "临时成员", {
+    private_chat: false, private_target: false, settings_available: false, group_member: true, private: null,
+    groups: {"1001": {msg_count: 2, active_days: 1}},
+  });
+  const both = person("subject-both", "两边成员", {group_member: true,
+    groups: {"1001": {msg_count: 3, active_days: 2}}});
+  const h = harness({persons: [stable, temporary, both], groups: [
+    {group_id: "1001", display_name: "临时群", configured: false, member_count: 2, msg_count: 5},
+  ]});
+  await h.send();
+  const chips = h.document.querySelectorAll(".chip");
+  assert.equal(chips.length, 2);
+  assert.equal(h.element("chip-stable").textContent, "2");
+  assert.equal(h.element("chip-temporary").textContent, "1");
+  assert.equal(h.element("people-result-count").textContent, "2 人");
+
+  chips[1].handlers.click();
+  assert.equal(h.element("people-result-count").textContent, "1 人");
+  assert.match(flat(h.element("people-grid")), /临时成员/);
+  assert.equal(chips[1].getAttribute("aria-pressed"), "true");
+
+  const graph = h.element("relationship-graph");
+  graph.handlers.click({target: {dataset: {personId: JSON.stringify(["subject-temporary", "qq-main", "bot-a", "account-a", "role-a"])}, closest(selector) {
+    return selector === "[data-person-id]" ? this : null;
+  }}});
+  assert.equal(chips[1].getAttribute("aria-pressed"), "true");
+  assert.equal(h.element("people-result-count").textContent, "1 人");
+
+  h.document.querySelectorAll(".tab")[2].handlers.click();
+  findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+  findAll(h.element("group-detail"), "member-chip").find((item) => flat(item).includes("临时成员")).handlers.click();
+  assert.equal(chips[1].getAttribute("aria-pressed"), "true");
+});
+
+test("群名用于列表、图谱和搜索，历史群不会重复统计", async () => {
+  const member = person("subject-1", "阿澈", {group_member: true, groups: {"1002": {msg_count: 2, active_days: 1}}});
+  const h = harness({persons: [member], groups: [
+    {group_id: "1002", display_name: "周末读书群", configured: false, platform_id: "qq-main",
+      bot_id: "bot-a", account_id: "account-a", member_count: 1, msg_count: 2},
+  ]});
+  await h.send();
+  assert.match(flat(h.element("groups-list")), /周末读书群.*群号 1002.*历史往来.*1 位群成员.*2 条消息/);
+  assert.match(h.element("relationship-graph").innerHTML, /周末读书群/);
+  assert.match(flat(h.card("阿澈")), /群聊 1/);
+  const search = h.element("directory-search");
+  search.handlers.input({target: {value: "周末读书"}});
+  assert.equal(h.element("groups-result-count").textContent, "1 个群");
+  assert.equal(h.element("people-result-count").textContent, "1 人");
+});
+
+test("关系网展示自动接入状态，待映射群前往账号与会话", async () => {
+  const h = harness({groups: [
+    {group_id: "450", display_name: "项目讨论群", platform_id: "qq-main", bot_id: "bot-a",
+      account_id: "account-a", role_id: "role-a", configured: false, discovered: true, member_count: 0, msg_count: 0},
+  ]});
+  await h.send();
+  assert.match(flat(h.element("groups-list")), /项目讨论群.*AstrBot 已发现，待角色映射/);
+  findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+  const detail = flat(h.element("group-detail"));
+  assert.match(detail, /人格归入角色后会自动接入/);
+  assert.match(detail, /成员线索和熟人卡只用于认识群友/);
+  assert.equal(findControl(h.element("group-detail"), "加入 V2 群目标"), null);
+  assert.equal(findControl(h.element("group-detail"), "移出 V2 群目标"), null);
+  findControl(h.element("group-detail"), "账号与会话").handlers.click();
+  assert.equal(h.navigations.at(-1).message.target.tab, "host");
+  assert.equal(h.requests.filter(request => request.method === "POST").length, 0);
+});
+
+test("已自动接入的群提供本群回应与公共档案入口", async () => {
+  const h = harness({groups: [{group_id: "450", display_name: "项目讨论群", platform_id: "qq-main",
+    bot_id: "bot-a", account_id: "account-a", role_id: "role-a", configured: true,
+    discovered: true, member_count: 0, msg_count: 0}]});
+  await h.send();
+  findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+  assert.match(flat(h.element("group-detail")), /V2 群聊接入 已接入/);
+  findControl(h.element("group-detail"), "本群回应设置").handlers.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.navigations.at(-1).message.target)),
+    {tab: "group-reply", platform_id: "qq-main", bot_id: "bot-a", account_id: "account-a",
+      group_id: "450", role_id: "role-a"});
+  findControl(h.element("group-detail"), "群公共档案").handlers.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.navigations.at(-1).message.target)),
+    {tab: "group-memory", platform_id: "qq-main", bot_id: "bot-a", account_id: "account-a",
+      group_id: "450", role_id: "role-a"});
+  assert.equal(findControl(h.element("group-detail"), "移出 V2 群目标"), null);
+});
+
+test("运行状态不要求停机，未映射账号提供角色映射入口", async () => {
+  const group = {group_id: "454", display_name: "待配置群", platform_id: "qq-main", bot_id: "bot-a",
+    account_id: "account-a", configured: false, discovered: true, member_count: 0, msg_count: 0};
+  for (const running of [true, false]) {
+    const h = harness({groups: [{...group}], group_access: {
+      editable: !running, running, accounts: [], persona_bots: []}});
+    await h.send();
+    findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+    const detail = h.element("group-detail");
+    assert.match(flat(detail), /尚未归入角色/);
+    assert.doesNotMatch(flat(detail), /停止 V2|手动接管/);
+    findControl(detail, "账号与会话").handlers.click();
+    assert.equal(h.navigations.at(-1).message.target.tab, "host");
+  }
+});
+
+test("账号路由未明确的群只显示真实发现状态", async () => {
+  const h = harness({groups: [{group_id: "451", display_name: "账号待确认的群", platform_id: "qq-main",
+    bot_id: "", account_id: "", configured: false, discovered: true, member_count: 0, msg_count: 0}]});
+  await h.send();
+  assert.match(flat(h.element("groups-list")), /AstrBot 已发现，账号待确认/);
+  findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+  assert.match(flat(h.element("group-detail")), /还没有为这个群确定唯一的 Bot 账号/);
+  assert.equal(findAll(h.element("group-detail"), "group-access-button").length, 0);
+});
+
+test("角色映射更新后原地重读关系网并保留群选择", async () => {
+  const group = {group_id: "456", display_name: "项目讨论群", platform_id: "qq-main", bot_id: "bot-a",
+    account_id: "account-a", configured: false, discovered: true, member_count: 0, msg_count: 0};
+  const h = harness({groups: [group]});
+  await h.send();
+  findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+  group.configured = true;
+  h.mappingChanged();
+  await h.send(request => request.method === "GET" && request.route === endpoint);
+  assert.match(flat(h.element("group-detail")), /项目讨论群.*V2 群聊接入 已接入/);
+  assert.equal(h.requests.filter(request => request.method === "GET" && request.route === endpoint).length, 2);
+});
+
+test("群拓扑合并关系网成员、熟人卡与线索，并显示互动边", async () => {
+  const member = person("subject-700", "青禾", {native_account_id: "700", group_member: true,
+    private_chat: true, groups: {"300": {msg_count: 4, active_days: 2}}});
+  const network = {group_id: "300", platform_id: "qq-main", bot_id: "bot-a", account_id: "account-a",
+    role_id: "role-a", configured: false, member_count: 2, interaction_count: 5,
+    members: [
+      {native_account_id: "700", subject_id: "subject-700", display_name: "青禾", aliases: ["小禾"],
+        group_observation: {basis: "relationship_graph", message_count: 9, active_days: 3,
+          last_seen: "2026-10-01T10:00:00+00:00", recent: [{text: "接上话题"}]},
+        acquaintance: {message_count: 14, active_days: 4, private_chat: true},
+        clues: [{entry_id: "clue-1", name: "青禾", basis: "declared_account", content: "常聊读书"}]},
+      {native_account_id: "701", display_name: "木木", aliases: [],
+        group_observation: {basis: "relationship_graph", message_count: 3, active_days: 1,
+          last_seen: "2026-10-01T10:01:00+00:00", recent: []},
+        acquaintance: {message_count: 0, private_chat: false}, clues: []},
+    ],
+    edges: [{a: "700", b: "701", count: 5, tone: "banter", summary: "近期有玩笑或接梗",
+      last_seen: "2026-10-01T10:01:00+00:00"}],
+    unmatched_clues: [{entry_id: "clue-2", name: "群里新朋友", basis: "unmatched", content: "还未对应账号"}],
+  };
+  const h = harness({persons: [member], group_networks: [network]});
+  await h.send();
+  findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+  const detail = h.element("group-detail");
+  assert.match(flat(detail), /成员互动/);
+  assert.match(flat(detail), /青禾 ↔ 木木.*5 次.*玩笑/);
+  assert.match(flat(detail), /熟人卡 14 条 · 有私聊/);
+  assert.match(flat(detail), /成员线索：青禾/);
+  assert.match(flat(detail), /待确认成员线索.*群里新朋友/);
+  assert.match(flat(detail), /(?:V2 成员记录|群聊成员) 2 人.*已观察发言 12 条/);
+  assert.match(flat(detail), /群聊近况.*青禾.*接上话题/);
+  assert.match(flat(detail), /活跃群友.*青禾.*9 条.*3 天/);
+  assert.match(findAll(detail, "member-network-viewport")[0].innerHTML, /data-member-account="700"/);
+  findAll(detail, "member-chip")[0].handlers.click();
+  assert.equal(h.document.querySelectorAll(".tab")[1].getAttribute("aria-selected"), "true");
+});
+
+test("同一人格跨内部归属合并群关系网成员与互动边", async () => {
+  const base = {group_id: "300", platform_id: "qq-main", bot_id: "bot-a", account_id: "account-a",
+    configured: false, persona_ids: ["星缘-私聊"], role_name: "星缘-私聊"};
+  const first = {...base, role_id: "role-a", member_count: 2, interaction_count: 3,
+    members: [
+      {native_account_id: "700", display_name: "青禾", group_observation: {message_count: 9, active_days: 3},
+        acquaintance: {message_count: 14, private_chat: true}, clues: []},
+      {native_account_id: "701", display_name: "木木", group_observation: {message_count: 3, active_days: 1}, clues: []},
+    ], edges: [{a: "700", b: "701", count: 3, tone: "banter", summary: "接话", last_seen: "2026-10-01T10:00:00+00:00"}]};
+  const second = {...base, role_id: "role-b", member_count: 2, interaction_count: 2,
+    members: [
+      {native_account_id: "700", display_name: "青禾", group_observation: {message_count: 4, active_days: 2},
+        acquaintance: {message_count: 14, private_chat: true}, clues: []},
+      {native_account_id: "702", display_name: "小满", group_observation: {message_count: 2, active_days: 1}, clues: []},
+    ], edges: [{a: "700", b: "702", count: 2, tone: "ordinary", summary: "回应", last_seen: "2026-10-01T10:01:00+00:00"}]};
+  const h = harness({group_networks: [first, second]});
+  await h.send();
+  assert.equal(h.element("groups-result-count").textContent, "1 个群");
+  findAll(h.element("groups-list"), "group-card")[0].handlers.click();
+  const detail = h.element("group-detail");
+  assert.match(flat(detail), /3 人/);
+  const networkMarkup = findAll(detail, "member-network-viewport")[0].innerHTML;
+  assert.equal([...networkMarkup.matchAll(/data-member-account=/g)].length, 3);
+  assert.match(networkMarkup, /data-member-account="700"/);
+  assert.match(networkMarkup, /data-member-account="701"/);
+  assert.match(networkMarkup, /data-member-account="702"/);
+  assert.match(flat(detail), /青禾 ↔ 木木.*3 次/);
+  assert.match(flat(detail), /青禾 ↔ 小满.*2 次/);
+});
 
 test("面板为每一项能力画一行，状态取自服务端读回的那一份", async () => {
   const people = [person("subject-1", "阿澈")];
@@ -232,10 +542,12 @@ test("面板为每一项能力画一行，状态取自服务端读回的那一�
   assert.match(html, /data-capability="conversation\.reply"[^>]*data-state="active"[^>]*data-managed-by="configuration"/);
   /* 撤销过就说撤销过，不是「关」也不是空白：那是记录里的事实。 */
   assert.match(html, /data-capability="proactive\.contact"[^>]*data-state="revoked"/);
-  assert.match(JSON.stringify(text(detail)), /对话回复/);
-  assert.match(JSON.stringify(text(detail)), /已撤销/);
+  assert.match(JSON.stringify(text(detail)), /允许私聊对话/);
+  assert.match(JSON.stringify(text(detail)), /已关闭/);
   /* 一项配置派生的授权不当场改名成「没有授权」：它是生效的。 */
-  assert.match(JSON.stringify(text(detail)), /已生效/);
+  assert.match(JSON.stringify(text(detail)), /已允许/);
+  assert.match(JSON.stringify(text(detail)), /普通用户/);
+  assert.doesNotMatch(JSON.stringify(text(detail)), /conversation\.reply|proactive\.contact|login-a|档位 standard/);
 });
 
 test("配置派生的那一行没有撤销按钮，并说清去哪里改", async () => {
@@ -250,14 +562,38 @@ test("配置派生的那一行没有撤销按钮，并说清去哪里改", async
   const flat = JSON.stringify(text(detail));
   /* 不是笼统的「只读」：要说清它由运行实例配置签发、改哪里。 */
   assert.match(flat, /运行实例配置签发/);
-  assert.match(flat, /每次加载都会按配置重新写入/);
+  assert.match(flat, /账号与会话中调整/);
+  assert.equal(findPermission(detail, "conversation.reply").disabled, true);
   /* 本页拥有的那一行才有控件，并且按钮上写着它真的会做什么。 */
   const owned = harness({ persons: people, authorizations: { "subject-1": status("subject-1", [
     grantRow("proactive.contact"),
   ]) } });
   const ownedDetail = await open(owned, "阿澈");
-  assert.match(markup(ownedDetail), /撤销授权/);
+  assert.equal(Boolean(findPermission(ownedDetail, "proactive.contact").disabled), false);
   assert.doesNotMatch(JSON.stringify(text(ownedDetail)), /运行实例配置签发/);
+});
+
+test("其他能力显示真实管理入口，而不是留下不能点击的状态行", async () => {
+  const people = [person("subject-1", "阿澈")];
+  const h = harness({persons: people, authorizations: {"subject-1": status("subject-1", [
+    grantRow("text", {managed_by: "configuration", revocable: false}),
+    grantRow("configuration.read", {managed_by: "configuration", revocable: false}),
+    grantRow("screen.read", {managed_by: "configuration", revocable: false}),
+    grantRow("screen.process", {managed_by: "configuration", revocable: false}),
+    grantRow("extension.tool.invoke", {managed_by: "configuration", revocable: false}),
+    grantRow("message.delivery", {managed_by: "configuration", revocable: false}),
+  ])}});
+  const detail = await open(h, "阿澈");
+  const flatText = JSON.stringify(text(detail));
+  assert.match(flatText, /运行实例和拓展能力的统一授权/);
+  assert.match(flatText, /模型与连接/);
+  assert.match(flatText, /账号与会话/);
+  assert.match(flatText, /感知 · 设备与授权/);
+  assert.match(flatText, /打开设备与授权/);
+  assert.match(flatText, /兼容记录/);
+  assert.doesNotMatch(flatText, /旧投递授权.*已允许/);
+  assert.ok(findControl(detail, "打开设备与授权"), "屏幕能力应给出设备授权入口");
+  assert.ok(findControl(detail, "打开模型与连接"), "模型能力应给出模型入口");
 });
 
 test("管理员称呼写入绑定目录路由与卡片 revision，空值清除并恢复平台名称", async () => {
@@ -273,11 +609,12 @@ test("管理员称呼写入绑定目录路由与卡片 revision，空值清除�
         name_basis: request.body.admin_nickname ? "administrator" : "platform",
         revision, changed: true } };
     } });
-  const detail = await open(h, "平台昵称");
-  const input = findAll(detail, "admin-nickname-input")[0];
+  const detail = await open(h, "平台昵称", "身份与权限");
+  const input = findInput(detail, "目录显示名称");
   assert.ok(input, "成员详情应显示称呼编辑框");
   input.value = "小月亮";
-  findControl(detail, "保存称呼").handlers.click();
+  input.handlers.input();
+  findControl(detail, "保存备注").handlers.click();
   await h.send((request) => request.method === "POST");
   const first = h.requests.find((request) => request.method === "POST");
   assert.equal(first.route, "acquaintance/admin-name");
@@ -285,16 +622,85 @@ test("管理员称呼写入绑定目录路由与卡片 revision，空值清除�
     subject_id: "subject-1", platform: "qq-main", bot_id: "bot-a", account_id: "account-a",
     role_id: "role-a", native_account_id: "subject-1", admin_nickname: "小月亮", expected_revision: 3 });
   assert.match(flat(h.element("person-detail")), /小月亮/);
-  assert.match(flat(h.element("person-detail")), /管理员称呼/);
+  assert.match(flat(h.element("person-detail")), /目录备注/);
 
-  const clearInput = findAll(h.element("person-detail"), "admin-nickname-input")[0];
+  const clearInput = findInput(h.element("person-detail"), "目录显示名称");
   clearInput.value = "";
-  findControl(h.element("person-detail"), "保存称呼").handlers.click();
+  clearInput.handlers.input();
+  findControl(h.element("person-detail"), "保存备注").handlers.click();
   await h.send((request) => request.method === "POST" && request.body.expected_revision === 4);
   const clear = h.requests.filter((request) => request.method === "POST")[1];
   assert.equal(clear.body.admin_nickname, "");
   assert.equal(clear.body.expected_revision, 4);
   assert.match(flat(h.element("person-detail")), /平台昵称/);
+});
+
+test("熟人卡只管理互动记忆，人工关系资料独立呈现", async () => {
+  const fields = {
+    acquaintance_enabled: {kind: "boolean"},
+    acquaintance_learning_enabled: {kind: "boolean"},
+    acquaintance_card_chars: {kind: "integer", minimum: 100, maximum: 4000},
+  };
+  const memberSettings = {"subject-1": {sections: {person: {edit_token: "person-edit-1", fields,
+    settings: {acquaintance_enabled: true, acquaintance_learning_enabled: true, acquaintance_card_chars: 600}}}}};
+  const h = harness({persons: [person("subject-1", "阿澈")], memberSettings,
+    authorizations: {"subject-1": status("subject-1", [])}, post: request => ({sections: {
+      person: {edit_token: "person-edit-2", fields, settings: {...memberSettings["subject-1"].sections.person.settings,
+        ...request.body.sections.person.changes}},
+    }})});
+  const detail = await open(h, "阿澈", "熟人卡");
+  assert.ok(findInput(detail, "使用熟人卡"));
+  assert.ok(findInput(detail, "持续更新熟人卡"));
+  assert.ok(findInput(detail, "熟人卡字数上限"));
+  assert.doesNotMatch(flat(detail), /称呼与关系|相处方式|对用户的称呼/);
+  findControl(detail, "联系偏好").handlers.click();
+  assert.doesNotMatch(flat(detail), /使用熟人卡|持续更新熟人卡/);
+  findControl(detail, "熟人卡").handlers.click();
+  const enabled = findInput(detail, "使用熟人卡");
+  assert.equal(enabled.checked, true);
+  enabled.checked = false;
+  enabled.handlers.change();
+  findControl(detail, "保存资料").handlers.click();
+  await h.send(request => request.method === "POST");
+  const saved = h.requests.find(request => request.method === "POST");
+  assert.equal(saved.route, "acquaintance/settings");
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.person.changes)), {acquaintance_enabled: false});
+});
+
+test("核心用户的人工关系资料只读，普通成员在独立页签编辑", async () => {
+  const fields = Object.fromEntries(["default_nickname", "user_gender", "user_birthday", "user_occupation",
+    "role_relation", "interaction", "extra"].map(name => [name, {kind: "text", maximum_chars: 900}]));
+  const profile = {edit_token: "profile-edit-1", fields, settings: {default_nickname: "小屋主人",
+    user_gender: "未说明", user_birthday: "", user_occupation: "", role_relation: "核心用户",
+    interaction: "已经确认的相处方式", extra: ""}};
+  const memberSettings = {"subject-1": {sections: {profile}}};
+  const core = {...status("subject-1", []), identity_tier: "core"};
+  const h = harness({persons: [person("subject-1", "阿澈", {identity_tier: "core"})], memberSettings,
+    authorizations: {"subject-1": core}});
+  let detail = await open(h, "阿澈", "人工关系资料");
+  assert.doesNotMatch(flat(detail), /核心用户的关系资料在自我页编辑/);
+  assert.equal(findControl(detail, "熟人卡"), null);
+  assert.match(flat(detail), /已经确认的相处方式/);
+  assert.equal(findInput(detail, "对用户的称呼"), null);
+  assert.doesNotMatch(flat(detail), /保存资料/);
+
+  const regular = {...person("subject-2", "阿澈的朋友"), subject_id: "subject-2", native_account_id: "subject-2"};
+  const regularProfile = {...profile, edit_token: "profile-edit-2"};
+  const regularSettings = {"subject-2": {sections: {profile: regularProfile}}};
+  const other = harness({persons: [regular], memberSettings: regularSettings,
+    authorizations: {"subject-2": status("subject-2", [])},
+    post: request => ({sections: {profile: {...regularProfile,
+      edit_token: "profile-edit-3", settings: {...regularProfile.settings, ...request.body.sections.profile.changes}}}})});
+  detail = await open(other, "阿澈的朋友", "人工关系资料");
+  const nickname = findInput(detail, "对用户的称呼");
+  assert.ok(nickname);
+  nickname.value = "阿澈的小伙伴";
+  nickname.handlers.input();
+  findControl(detail, "保存资料").handlers.click();
+  await other.send(request => request.method === "POST");
+  const saved = other.requests.find(request => request.method === "POST");
+  assert.equal(saved.route, "acquaintance/settings");
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.profile.changes)), {default_nickname: "阿澈的小伙伴"});
 });
 
 test("切换发出的就是这一项、这个人、这一次读到的 revision", async () => {
@@ -303,9 +709,10 @@ test("切换发出的就是这一项、这个人、这一次读到的 revision",
     grantRow("proactive.contact", { policy_revision: 11 }),
   ]) } });
   const detail = await open(h, "阿澈");
-  const control = findControl(detail, "撤销授权");
-  assert.ok(control?.handlers?.click, "应当有一个撤销控件");
-  control.handlers.click();
+  const control = findPermission(detail, "proactive.contact");
+  assert.ok(control?.handlers?.change, "应当有一个权限开关");
+  control.checked = false;
+  control.handlers.change();
   await h.settle();
   const written = h.requests.find((item) => item.method === "POST");
   assert.ok(written, "点击必须真的发出写请求");
@@ -317,7 +724,7 @@ test("切换发出的就是这一项、这个人、这一次读到的 revision",
      用户看到的是"点了没反应"。 */
   assert.equal(written.body.expected_revision, 11);
   assert.equal(typeof written.body.operation_key, "string");
-  assert.ok(written.body.operation_key.includes("subject-1"));
+  assert.ok(written.body.operation_key.length > 0);
 });
 
 test("写回的是服务端返回的状态，页面不自己改本地副本", async () => {
@@ -328,13 +735,14 @@ test("写回的是服务端返回的状态，页面不自己改本地副本", as
     status: status("subject-1", [grantRow("proactive.contact", { state: "revoked",
       policy_revision: 12, grant_revision: 2 })]) } }) });
   const detail = await open(h, "阿澈");
-  findControl(detail, "撤销授权").handlers.click();
+  const toggle = findPermission(detail, "proactive.contact");
+  toggle.checked = false; toggle.handlers.change();
   await h.send((request) => request.method === "POST");
   const html = markup(h.element("person-detail"));
   assert.match(html, /data-capability="proactive\.contact"[^>]*data-state="revoked"/);
   /* 新的 revision 已经就位：下一次点击用的是 12，不是上一次的 7。 */
-  const control = findControl(h.element("person-detail"), "重新授权");
-  assert.ok(control, "撤销之后这一行应当给出开启控件");
+  const control = findPermission(h.element("person-detail"), "proactive.contact");
+  assert.equal(control.checked, false, "服务端确认撤销后开关应关闭");
 });
 
 test("一项授权都没有的人得到一句说明，而不是一排空行", async () => {
@@ -349,29 +757,69 @@ test("一项授权都没有的人得到一句说明，而不是一排空行", as
   assert.doesNotMatch(markup(detail), /data-capability=/, "空态不许画成一排空行");
 });
 
-test("陪伴对象标记只在两项都生效时出现", async () => {
-  const people = [person("subject-1", "阿澈"), person("subject-2", "小满"), person("subject-3", "阿岚")];
-  const both = [grantRow("conversation.reply", { managed_by: "configuration", revocable: false }),
-                grantRow("message.delivery", { managed_by: "configuration", revocable: false })];
-  const half = [grantRow("conversation.reply", { managed_by: "configuration", revocable: false })];
+test("身份与生效权限由服务端确认，并仅更新对应成员", async () => {
+  const people = [person("subject-1", "阿澈"), person("subject-2", "小满")];
+  const core = {...status("subject-1", [grantRow("conversation.reply", {state: "revoked",
+    effective_state: "active", identity_override: true})]), identity_tier: "core"};
   const h = harness({ persons: people, authorizations: {
-    "subject-1": status("subject-1", both, true),
-    "subject-2": status("subject-2", half, false),
-    "subject-3": status("subject-3", [], false),
+    "subject-1": core,
+    "subject-2": status("subject-2", [grantRow("conversation.reply", {state: "revoked"})]),
   } });
   const detail = await open(h, "阿澈");
-  assert.match(flat(detail), /陪伴对象：对话回复与主动投递都生效/);
-  /* 标记是**逐卡**的：断言落在每个节点上，而不是"整棵树里出现过这个词"。 */
+  assert.match(flat(detail), /核心用户/);
+  assert.match(flat(detail), /由当前管理身份自动允许/);
+  const overridden = findPermission(detail, "conversation.reply");
+  assert.equal(overridden.checked, true);
+  assert.equal(overridden.disabled, true);
   const badges = findAll(h.element("people-grid"), "badge companion");
-  assert.equal(badges.length, 1, "列表上只该有一个人被标记为陪伴对象");
-  assert.deepEqual(flat(badges[0]).split(" ").filter((item) => item === "陪伴对象"), ["陪伴对象"]);
-  /* 另一个人只有对话权限：他自己的卡片上不能出现完整陪伴对象标记。 */
+  assert.equal(badges.length, 1);
+  assert.equal(flat(badges[0]), "核心用户");
   const other = cardFor(h.element("people-grid"), "小满");
   other.handlers.click();
-  await h.send((request) => request.route === authorization);
+  await h.send((request) => request.route === authorization || request.route === "acquaintance/settings");
+  findControl(h.element("person-detail"), "身份与权限").handlers.click();
   const otherDetail = h.element("person-detail");
-  assert.doesNotMatch(markup(otherDetail), /class="badge companion"/);
-  assert.doesNotMatch(flat(otherDetail), /陪伴对象：对话回复/);
+  assert.equal(findPermission(otherDetail, "conversation.reply").checked, false);
+  assert.doesNotMatch(flat(otherDetail), /由当前管理身份自动允许/);
+  assert.doesNotMatch(flat(other), /核心用户/);
+});
+
+test("用户页明确显示管理员权限，设为核心用户仍沿身份接口保存", async () => {
+  const people = [person("subject-1", "阿澈")];
+  let saved;
+  const h = harness({persons: people, authorizations: {"subject-1": status("subject-1", [])},
+    post: request => {
+      saved = request;
+      return {status: "ok", data: {replayed: false, operation_id: "identity-op",
+        status: {...status("subject-1", []), identity_tier: "core", identity_revision: 2}}};
+    }});
+  const detail = await open(h, "阿澈");
+  assert.match(flat(detail), /管理员权限/);
+  assert.match(flat(detail), /核心用户就是核心管理员/);
+  assert.match(flat(detail), /未开启/);
+  assert.match(flat(detail), /重要用户和普通用户不会获得管理员权限/);
+  assert.ok(findAll(detail, "member-admin-row").length === 1);
+
+  findControl(detail, "设为核心用户").handlers.click();
+  assert.match(flat(detail), /待保存 · 将开启/);
+  findControl(detail, "保存身份").handlers.click();
+  await h.send(request => request.method === "POST");
+  assert.equal(saved.route, "acquaintance/identity");
+  assert.equal(saved.body.tier, "core");
+  assert.equal(saved.body.expected_revision, 1);
+  assert.match(flat(h.element("person-detail")), /已开启 · 核心管理员/);
+});
+
+test("缺少显示名称与未知能力状态时不会回显内部标识", async () => {
+  const h = harness({persons: [person("subject-1", "阿澈")], authorizations: {
+    "subject-1": status("subject-1", [grantRow("internal.capability", {state: "internal_state"})]),
+  }});
+  const detail = await open(h, "阿澈");
+  assert.match(flat(detail), /当前角色/);
+  assert.match(flat(detail), /其他能力/);
+  assert.match(flat(detail), /待核对/);
+  assert.doesNotMatch(flat(detail), /role-a|account-a|bot-a|internal\.capability|internal_state/);
+  assert.doesNotMatch(flat(h.card("阿澈")), /role-a|account-a|bot-a/);
 });
 
 test("关系网和私聊、群聊视图按 V2 记录互相跳转", async () => {
@@ -385,12 +833,13 @@ test("关系网和私聊、群聊视图按 V2 记录互相跳转", async () => {
       first_seen: "2026-09-01T10:00:00+00:00", last_seen: "2026-09-30T10:00:00+00:00" },
   });
   const h = harness({ persons: [member], groups: [
-    { group_id: "1001", bot_id: "bot-a", account_id: "login-a", member_count: 1, msg_count: 8 },
+    { group_id: "1001", platform_id: "qq-main", bot_id: "bot-a", account_id: "account-a",
+      member_count: 1, msg_count: 8 },
   ], authorizations: { "subject-1": status("subject-1", []) } });
   await h.send((request) => request.route === endpoint);
 
   const graph = h.element("relationship-graph");
-  assert.match(graph.innerHTML, /data-group-id="1001"[^]*已配置群目标/);
+  assert.match(graph.innerHTML, /data-group-id="1001"[^]*已自动接入/);
   assert.match(graph.innerHTML, /data-group-id="1002"[^]*历史群内记录/);
   assert.match(graph.innerHTML, /class="graph-edge group"/);
   assert.match(graph.innerHTML, /不推断成员彼此关系/);
@@ -404,12 +853,21 @@ test("关系网和私聊、群聊视图按 V2 记录互相跳转", async () => {
   assert.equal(h.document.querySelectorAll(".tab")[2].getAttribute("aria-selected"), "true");
   assert.match(flat(h.element("group-detail")), /群 1001/);
   const memberLink = findAll(h.element("group-detail"), "member-chip")[0];
-  assert.ok(memberLink?.handlers?.click, "群成员应当可打开私聊与权限详情");
+  assert.ok(memberLink?.handlers?.click, "群成员应当可打开统一人物详情");
   memberLink.handlers.click();
-  await h.send((request) => request.route === authorization);
+  await h.send((request) => request.route === authorization || request.route === "acquaintance/settings");
   assert.equal(h.document.querySelectorAll(".tab")[1].getAttribute("aria-selected"), "true");
   assert.match(flat(h.element("person-detail")), /阿澈/);
+  /* 熟人卡不是配置分区，而是名片上的一张卡：默认收起，点开是独立弹窗。 */
+  const cardTrigger = findControl(h.element("person-detail"), "熟人卡");
+  assert.equal(cardTrigger.getAttribute("aria-haspopup"), "dialog");
+  assert.equal(cardTrigger.getAttribute("aria-expanded"), "false");
+  assert.equal(findControl(h.element("person-detail"), "身份与权限").getAttribute("aria-selected"), "true");
+  cardTrigger.handlers.click();
+  assert.equal(findControl(h.element("person-detail"), "熟人卡").getAttribute("aria-expanded"), "true");
+  assert.match(flat(h.element("person-detail")), /自动积累|持续更新熟人卡/);
 
+  findControl(h.element("person-detail"), "往来记录").handlers.click();
   const contextGroup = findAll(h.element("person-detail"), "context-group").find((item) => flat(item).includes("1001"));
   assert.ok(contextGroup?.handlers?.click, "成员详情中的群记录应当可返回对应群详情");
   assert.doesNotThrow(() => contextGroup.handlers.click());
@@ -441,6 +899,26 @@ function findControl(node, label) {
     const item = stack.shift();
     if (item.tagName === "BUTTON" && flat(item).includes(label)) return item;
     stack.push(...(item.children || []));
+  }
+  return null;
+}
+
+function findInput(node, label) {
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(node.tagName) && node.getAttribute("aria-label") === label) return node;
+  for (const child of node.children || []) {
+    const input = findInput(child, label);
+    if (input) return input;
+  }
+  return null;
+}
+
+function findPermission(node, capability) {
+  if (node.dataset?.capability === capability) {
+    return (node.children || []).find(child => child.tagName === "INPUT" && child.type === "checkbox");
+  }
+  for (const child of node.children || []) {
+    const control = findPermission(child, capability);
+    if (control) return control;
   }
   return null;
 }

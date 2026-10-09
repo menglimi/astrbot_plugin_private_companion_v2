@@ -15,7 +15,7 @@
  * 环心是**此刻**：现在处于哪一段、此刻能不能开口、不能的话是哪一条。
  *
  * 读出口是角色目录的 perception_native_api，其中 contact 来自 ContactManagement.status。
- * 它给 158 个 settings、15 个 purposes（各带 allowed + 唯一阻断原因）、
+ * 它给 160 个 settings、15 个 purposes（各带 allowed + 唯一阻断原因）、
  * 以及 effective 上的四层判定。写出口是另一个：POST /config/configure 的
  * proactive.contact 段（native 那条只放行 6 个 news 字段，写不动其余 152 项）。
  *
@@ -35,6 +35,15 @@ window.CompanionContactPage = (() => {
   const HOST = "astrbot_plugin_private_companion_v2";
   const PREFIX = "/" + HOST + "/";
   const STORE = "companion-contact-page-v1:";
+  const HISTORY_PENDING = "__companion_contact_pending_v1";
+  const HISTORY_PREVIOUS = "__companion_contact_previous_state_v1";
+  const pendingWrites = new Map();
+  const AUTO_RECOVERY_INITIAL_DELAY = 400;
+  const AUTO_RECOVERY_MAX_DELAY = 30000;
+  const AUTO_RECOVERY_MAX_EXPONENT = 8;
+  let autoRecoveryKey = "";
+  let autoRecoveryTimer = null;
+  let autoRecoveryAttempts = 0;
   const GROUP = "proactive.contact";
   /* 15 类契机，归属三个语义桶——这个分法来自它们「凭什么开口」：
      关系本身、日程时刻、还是外部分享。矩阵按桶分行，不按字母序。 */
@@ -50,6 +59,87 @@ window.CompanionContactPage = (() => {
       ["environment","环境与状态变化"],["screen","已授权屏幕观察"]]},
   ];
   const ALL_PURPOSES = PURPOSE_BUCKETS.flatMap(b => b.purposes);
+  const PURPOSE_META = Object.fromEntries(PURPOSE_BUCKETS.flatMap(bucket =>
+    bucket.purposes.map(([name, label]) => [name, {label, bucket}])));
+  const TEST_INSTRUCTIONS = [
+    {id:"affection", label:"想念与亲近", bucket:"关系", coverage:"ready",
+      source:"近期双方有来有回、明确表达亲近的私聊",
+      setup:"合成双方近期互相回应并明确表达亲近的对话；另备一组只有单向旧消息的负例。",
+      instruction:"只根据双方真实表达的亲近感，判断是否适合留一句自然、不索取回应的话；不能凭沉默声称想念。",
+      expect:"正文锚定原对话；没有明确亲近证据时选择 skip。"},
+    {id:"care", label:"情绪关怀", bucket:"关系", coverage:"ready",
+      source:"对方明确说出的感受",
+      setup:"合成对方明确表达疲惫或难过的对话；另备普通沉默和情绪不明的负例。",
+      instruction:"回应对方实际说出的感受，不诊断原因，不提供未经请求的方案，也不把沉默解释成低落。",
+      expect:"不夸大情绪、不连续追问；缺少明确感受时选择 skip。"},
+    {id:"play", label:"轻松互动", bucket:"关系", coverage:"ready",
+      source:"双方都参与过的玩笑或共同话题",
+      setup:"合成双方都接受的玩笑或共同梗；另备单方玩笑及严肃语境的负例。",
+      instruction:"只有原语境确实轻松且双方都参与时，才延续一个低压力的小互动；不编造共同梗。",
+      expect:"互动可自然结束；紧张、严肃或单方玩笑素材必须选择 skip。"},
+    {id:"repair", label:"关系修复", bucket:"关系", coverage:"ready",
+      source:"角色可核验的失误及对方指出的不适",
+      setup:"合成角色具体失误和对方明确指出不适的对话；另备没有具体失误的负例。",
+      instruction:"准确承认自己做错的具体部分，简短表达理解；不辩解、不要求原谅、不把修复责任推给对方。",
+      expect:"只回应证据支持的失误；对方要求停止联系时必须选择 skip。"},
+    {id:"chat", label:"日常话题", bucket:"关系", coverage:"ready",
+      source:"已完成的最近一轮私聊与原始消息来源",
+      setup:"构造已完成的真实私聊批次，推进到配置的空闲窗口；另备刚有新输入和重复话题的负例。",
+      instruction:"从最近实际谈过的话题承接一点内容；避免“在吗”、空泛问候和复述刚发过的话。",
+      expect:"授权、空闲、额度、活动曲线和去重按真实配置生效；不合适时选择 skip。"},
+    {id:"greeting", label:"问候与纪念", bucket:"日程", coverage:"ready",
+      source:"本地问候窗口、夜间窗口或管理员配置的纪念日期",
+      setup:"分别构造早/午/晚窗口、夜间窗口和重要日期样例，并验证窗口边界。",
+      instruction:"把日期或时段只当作开口机会；优先承接当前语境，不假设对方刚醒、吃饭、休息或正在等待。",
+      expect:"只在有效窗口、静默和冷却规则允许时进入链路；不得机械套用固定问候。"},
+    {id:"followup", label:"接回旧话题", bucket:"日程", coverage:"ready",
+      source:"已确认投递记录、等待时间及之后是否有新输入",
+      setup:"构造已确认投递、等待期已过且无新输入的记录；另测新输入、屏幕观察和冷却中的对照组。",
+      instruction:"只承接原记录中仍有意义且未被新输入取代的话题，不暗示已读或催回复。",
+      expect:"只在原话仍有效、等待期已过且无新输入时起草；跟进生产器会再次校验原始投递与冷却。"},
+    {id:"invitation", label:"共同活动邀请", bucket:"日程", coverage:"ready",
+      source:"对方明确提出的共同活动邀请与活动素材",
+      setup:"合成包含明确共同活动邀请的私聊；另测只有共同兴趣、空闲未知及已拒绝的样例。",
+      instruction:"把活动说成可商量的邀请，不伪造双方空闲、预约或承诺，不要求接受。",
+      expect:"不把提议说成已预约；明确邀请才产生候选，只有共同兴趣或对方已拒绝时不发送。"},
+    {id:"reminder", label:"约定与提醒", bucket:"日程", coverage:"ready",
+      source:"当前有效、已接受且即将开始的日历约定",
+      setup:"构造已接受且即将开始的约定；对照待确认、取消、过期和修订过的记录。",
+      instruction:"只根据当前有效的已接受约定简短提醒，不说成已经发生，也不声称对方已收到或记得。",
+      expect:"来源回执、版本、发生时间和配置窗口全部匹配才进入模型。"},
+    {id:"meal", label:"饭点问候", bucket:"日程", coverage:"ready",
+      source:"关系时区中的午餐或晚餐时间窗口",
+      setup:"按关系时区构造午餐、晚餐窗口；另测窗口边界、暂停和重复候选。",
+      instruction:"当地饭点只提供时间语境，不推断对方没吃饭、正在吃饭或需要提醒；没有自然话头就选择 skip。",
+      expect:"使用配置时区和原始窗口；不默认盘问饮食或要求报平安。"},
+    {id:"life", label:"分享自己的生活", bucket:"分享", coverage:"ready",
+      source:"仍有效且允许分享的角色活动回执或日记记录",
+      setup:"构造真实活动完成回执或角色日记；另测素材撤回和修订版本变化。",
+      instruction:"只分享已完成且当前仍有效的具体片段；日记和梦境保持主观语境，不扩写成客观事实或对方经历。",
+      expect:"原操作、修订、来源授权和受众复核通过才生成；旧候选在来源变化后失效。"},
+    {id:"creation", label:"作品与阅读", bucket:"分享", coverage:"ready",
+      source:"带有阅读范围的完成回执",
+      setup:"构造完成阅读回执和可引用范围；对照只打开、未完成和范围已变更的记录。",
+      instruction:"只说回执覆盖的阅读片段；个人感想明确是角色感受，不声称读完整本或把书中内容说成现实。",
+      expect:"只有完成且回执有效时触发；不补写未提供的书名、章节或情节。"},
+    {id:"news", label:"外部资讯", bucket:"分享", coverage:"ready",
+      source:"带标题、原链接和发布时间的当前资讯条目",
+      setup:"使用隔离资讯源返回当前条目；另测过期、重复、抓取失败及来源配置变化。",
+      instruction:"只根据给定条目判断是否与关系语境相关；保留原发布时间，不声称亲历、看完全文或独立核实。",
+      expect:"来源不完整或失效时不触发；准确归因由程序追加一次。"},
+    {id:"environment", label:"环境与状态变化", bucket:"分享", coverage:"ready",
+      source:"当前天气、天气变化、官方预警或 Bot 服务余额来源",
+      setup:"分测当前观测、两次观测的变化、官方预警覆盖范围和服务余额；再测过期或范围不明素材。",
+      instruction:"天气观测不等于预报，变化不等于灾害；预警只按官方原文与覆盖范围，余额不是用户欠款，不催充值。",
+      expect:"严格使用来源地点、时效、覆盖范围和金额；依据不足时选择 skip。"},
+    {id:"screen", label:"已授权屏幕观察", bucket:"分享", coverage:"ready",
+      source:"同一私聊中仍有效的授权屏幕分析回执",
+      setup:"构造同一私聊且授权有效的屏幕分析回执；另测撤权、来源撤回和冷却。",
+      instruction:"只提及分析明确支持且适合分享的一点观察；不暴露无关屏幕内容，不推断用户意图或身份。",
+      expect:"授权、来源、窗口和每日上限复核通过才进入模型；撤权或来源变化后立即失效。"},
+  ];
+  const TEST_COVERAGE = {ready:"生产器已接通", partial:"只有资格检查", missing:"尚无独立生产器"};
+  const TEST_BUCKET_IDS = {关系:"bond", 日程:"daily", 分享:"share"};
   /* 强度档位。effects 只是**给界面看的**说明，真值在 configuration.py 的
      INTENSITY_PRESETS 里；这里写死的是「这个档位会怎么变」的文案，
      不参与任何计算。 */
@@ -72,8 +162,8 @@ window.CompanionContactPage = (() => {
                    ["evening","evening_greeting","20:10","21:20"]];
   const errors = {
     dashboard_identity_required:"请从已登录的 AstrBot 管理界面打开陪伴小屋。",
-    staging_not_initialized:"V2 数据尚未加载。请先在账号与会话中加载已初始化的配置，再刷新。",
-    staging_host_terminated:"V2 宿主已停止，请重新打开拓展页。",
+    staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
+    staging_host_terminated:"插件已停止，请重新打开拓展页。",
     core_access_required:"当前账号没有联系设置权限。",
     authorization_denied:"当前对象尚未授予联系权限。",
     binding_revoked:"管理账号的授权已撤销。", binding_rebound:"管理账号的绑定已变化，请重新进入。",
@@ -89,6 +179,9 @@ window.CompanionContactPage = (() => {
     proactive_contact_dates_invalid:"重要日期需要一个 JSON 数组，最多 32 条。",
     proactive_contact_source_invalid:"资讯来源填写有误，请核对类型、标识或地址。",
     proactive_contact_revision_conflict:"设置已有其他更新，已读取最新值。",
+    configuration_revision_conflict:"设置已有其他更新，请重新读取后再保存。",
+    contact_configuration_invalid:"请核对联系设置：提交的字段或操作不完整。",
+    invalid_contact_preference:"请核对联系设置的格式或范围。",
     proactive_budget_scope:"这两个额度限制整段关系，只能在安装 / 角色 / 关系层设置。",
     contact_relationship_budget_scope:"这两个额度限制整段关系，只能在安装 / 角色 / 关系层设置。",
     configuration_relationship_required:"这个对象还没有建立可写入的关系。",
@@ -98,16 +191,36 @@ window.CompanionContactPage = (() => {
     bridge_unavailable:"页面还没有接上 AstrBot。若这是从管理界面打开的插件页，刷新一次通常就好；若反复出现，请确认插件已启用。",
     bridge_timeout:"未收到服务确认，请刷新核对。",
     invalid_response:"服务返回的数据不完整，请刷新核对。",
+    proactive_quiet_hours:"当前处于免打扰时段。", proactive_paused:"当前已暂停主动联系。",
+    proactive_disabled:"主动联系总开关已关闭。", contact_automatic_disabled:"后台自动联系未开启。",
+    model_task_unregistered:"请先登记主动联系模型。", host_not_running:"当前运行实例尚未启动。",
   };
-  /* 后端把阻断原因与机器码混在同一个字段上：reason 可能是
-     `proactive_quiet_hours` 这样的码，也可能是一句可直接展示的话。
-     用形状判，不猜词表。 */
   const CODE = /^[a-z][a-z0-9_]{2,60}$/;
   const denied = new Set(["dashboard_identity_required","core_access_required","binding_revoked",
     "binding_rebound","staging_host_terminated","proactive_contact_scope_invalid"]);
   const e = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  const reason = code => errors[code] || (code ? "需要核对：" + code : "暂无具体原因");
+  const reason = code => errors[code] || "联系条件暂时无法核对，请重新读取状态。";
   const problem = code => Object.assign(new Error(reason(code)), {code});
+  function recoveryFailure(code) {
+    if (code === "bridge_timeout" || code === "bridge_unavailable") {
+      return "自动核对暂时没有收到服务确认；原请求已保留，系统会继续核对。";
+    }
+    if (errors[code]) return "核对未完成：" + errors[code];
+    const detail = CODE.test(code || "") ? `（错误码：${code}）` : "";
+    return `核对请求未收到确认${detail}；原保存请求已保留。`;
+  }
+  function automaticNotice(effective) {
+    if (!effective || effective.automatic_allowed !== false) return null;
+    const code = typeof effective.automatic_reason === "string" ? effective.automatic_reason : "";
+    /* 授权、宿主、暂停等原因已经由环心的主原因说明；只有自动联系
+       自己还有一条额外阻断时才另列一行，避免「开关已开」却显示成
+       「后台自动联系未开启」的假象。 */
+    if (!code || code === effective.reason) return null;
+    const text = reason(code);
+    return {code, text: code === "contact_automatic_disabled"
+      ? "后台自动联系未开启" : (text === "联系条件暂时无法核对，请重新读取状态。"
+        ? "后台自动联系当前受限。" : "后台自动联系：" + text)};
+  }
   /* 时刻 HH:MM → 一天中的分钟数。跨午夜的区间靠 from > to 判定，不做取模，
      因为后端明确要求「窗口必须当天内结束」，只有免打扰允许跨午夜。 */
   const minutes = value => {
@@ -151,11 +264,14 @@ window.CompanionContactPage = (() => {
     seed:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v7"/><path d="M8.5 6.5 12 10l3.5-3.5"/><path d="M5 14h14v6H5z"/></svg>',
     quota:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 19V9M10 19V5M15 19v-6M20 19v-9"/></svg>',
     source:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18.5" cy="18" r="2"/></svg>',
+    test:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.5h6M8.5 10h7M8.5 14h7M8.5 18h4"/><path d="m8.5 8.5 1 1 1.7-2"/></svg>',
+    copy:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h2"/></svg>',
     mute:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9v6h3l4 3V6L9 9z"/><path d="m16 9 4 6M20 9l-4 6"/></svg>',
     refresh:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 4v4h-4"/></svg>',
     alert:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5M12 16h.01"/></svg>',
     check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7"/></svg>',
     save:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11l3 3v13H5z"/><path d="M9 4v5h6"/></svg>',
+    arrow:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m13 6 6 6-6 6"/></svg>',
     undo:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h11a4 4 0 0 1 0 8H8"/><path d="m8 6-4 4 4 4"/></svg>',
     /* 外部触发源那一屏的分组图标。几何都用圆、矩形、直线拼，
        不用一条长贝塞尔画云或碗：16px 下曲线走形比抽象更难看。 */
@@ -181,15 +297,137 @@ window.CompanionContactPage = (() => {
     proactive_intensity_preset:"tier",
   };
   let root = null, bridge = null, version = 0, data = null;
+  /* 联系设置有不少页面内筛选与未保存草稿。路由切换会卸载本页，按当前
+     角色/会话在内存保留这些普通字段；令牌不进入缓存，回来后由真实接口
+     重新读取。 */
+  const contactCache = new Map();
+  let contactScope = "";
+  function currentContactScope() {
+    try { return window.CompanionProduct?.scopeKey?.() || "default"; } catch (_) { return "default"; }
+  }
+  function cacheContact() {
+    if (!data || !contactScope) return;
+    contactCache.set(contactScope, {
+      ...data, editToken:"", configToken:"", busy:false, loading:false, contractLoading:false,
+      contractError:"", contractErrorCode:"", materialsLoading:false, touched:[...data.touched],
+      draft:{...data.draft}, pulse:new Set(), pulseNow:[], flip:null, flipNow:null, viewShift:null, viewShiftNow:null,
+    });
+  }
+  function pendingWriteKey() {
+    const identity = window.CompanionProduct?.identity?.() || {};
+    return STORE + "pending:" + JSON.stringify([
+      identity.installation_id || "", identity.operator_id || "", contactScope, data?.configPath || "",
+    ]);
+  }
+  function writeHistoryPending(key, value) {
+    try {
+      const current = window.history.state;
+      const state = current && typeof current === "object" && !Array.isArray(current)
+        ? {...current} : current == null ? {} : {[HISTORY_PREVIOUS]: current};
+      const pending = state[HISTORY_PENDING] && typeof state[HISTORY_PENDING] === "object"
+        ? {...state[HISTORY_PENDING]} : {};
+      if (value) pending[key] = JSON.stringify(value);
+      else delete pending[key];
+      if (Object.keys(pending).length) state[HISTORY_PENDING] = pending;
+      else delete state[HISTORY_PENDING];
+      const next = !Object.keys(state).length ? null
+        : Object.keys(state).length === 1 && HISTORY_PREVIOUS in state ? state[HISTORY_PREVIOUS] : state;
+      window.history.replaceState(next, "");
+      return true;
+    } catch { return false; }
+  }
+  function readHistoryPending(key) {
+    try {
+      const stored = window.history.state?.[HISTORY_PENDING]?.[key];
+      return typeof stored === "string" ? JSON.parse(stored) : null;
+    } catch { return null; }
+  }
+  function storePendingWrite() {
+    const key = pendingWriteKey();
+    // Sandboxed Dashboard pages may block both storage and history. Keep the
+    // same operation in this page session while its original response is unknown.
+    if (data?.pendingWrite) pendingWrites.set(key, JSON.stringify(data.pendingWrite));
+    else pendingWrites.delete(key);
+    try {
+      if (data?.pendingWrite) {
+        sessionStorage.setItem(key, JSON.stringify(data.pendingWrite));
+        return true;
+      }
+    } catch {}
+    if (data?.pendingWrite) {
+      try {
+        localStorage.setItem(key, JSON.stringify(data.pendingWrite));
+        return true;
+      } catch { return writeHistoryPending(key, data.pendingWrite) || pendingWrites.has(key); }
+    }
+    let removed = false;
+    for (const storage of [() => sessionStorage, () => localStorage]) {
+      try { storage().removeItem(key); removed = true; } catch {}
+    }
+    return writeHistoryPending(key, null) || removed;
+  }
+  function restorePendingWrite() {
+    if (data?.pendingWrite) return data.pendingWrite;
+    const key = pendingWriteKey();
+    for (const read of [
+      () => pendingWrites.get(key),
+      () => sessionStorage.getItem(key),
+      () => localStorage.getItem(key),
+      () => readHistoryPending(key),
+    ]) try {
+      const stored = read();
+      const value = typeof stored === "string" ? JSON.parse(stored) : stored;
+      const body = value?.body;
+      if (value?.route === data.configPath + "/configure" && body?.section === GROUP
+          && typeof body.operation_key === "string" && body.operation_key.length > 0 && body.operation_key.length <= 128
+          && typeof body.edit_token === "string" && body.edit_token.length === 64
+          && body.changes && typeof body.changes === "object" && !Array.isArray(body.changes)
+          && Object.keys(body.changes).length) return value;
+    } catch {}
+    return null;
+  }
+
+  function schedulePendingRecovery(ticket = version) {
+    const operationKey = data?.pendingWrite?.body?.operation_key;
+    if (!operationKey) return;
+    if (autoRecoveryKey !== operationKey) {
+      if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
+      autoRecoveryKey = operationKey;
+      autoRecoveryAttempts = 0;
+    }
+    if (autoRecoveryTimer !== null) return;
+    const delay = Math.min(AUTO_RECOVERY_INITIAL_DELAY * (2 ** Math.min(autoRecoveryAttempts,
+      AUTO_RECOVERY_MAX_EXPONENT)), AUTO_RECOVERY_MAX_DELAY);
+    autoRecoveryTimer = setTimeout(() => {
+      autoRecoveryTimer = null;
+      if (!live(ticket) || data.pendingWrite?.body?.operation_key !== operationKey) return;
+      if (!data.ready || data.busy || data.loading) {
+        schedulePendingRecovery(ticket);
+        return;
+      }
+      autoRecoveryAttempts = Math.min(autoRecoveryAttempts + 1, AUTO_RECOVERY_MAX_EXPONENT);
+      void save();
+    }, delay);
+  }
+
+  function clearPendingRecovery(operationKey) {
+    if (autoRecoveryKey !== operationKey) return;
+    if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
+    autoRecoveryTimer = null;
+    autoRecoveryKey = "";
+    autoRecoveryAttempts = 0;
+  }
 
   function blank() {
-    return {view:"dial",
+    return {view:"dial", purposeQuery:"", purposeBucket:"all", purposeFilter:"all",
+      testQuery:"", testBucket:"all", testCoverage:"all", materialQuery:"", materialCategory:"all",
       nativePath:"", configPath:"",
       settings:null, effective:null, purposes:{}, hostState:"",
-      editToken:"", configToken:"",
+      materialItems:[], materialsLoaded:false, materialsLoading:false, materialsError:"",
+       editToken:"", configToken:"", contractLoading:false, contractError:"", contractErrorCode:"",
       /* 草稿：只放用户真的改过的字段。提交时只发这些，未动的字段一个都不发——
          避免把「没看过的字段」当成「要保持的值」写回去。 */
-      draft:{}, touched:new Set(), tierDraft:null,
+      draft:{}, touched:new Set(), tierDraft:null, pendingWrite:null,
       /* pulse 是「下一次渲染要闪哪几片盘面」，pulseNow 是这一帧真正在闪的。
          两者分开是因为 render() 每次都会重写 DOM，类必须由渲染时的状态决定，
          当场往节点上加类会被紧接着的重写丢掉（切档位那次动画就是这么消失的）。 */
@@ -225,10 +463,10 @@ window.CompanionContactPage = (() => {
   }
   async function api(method, path, body) {
     const response = await bounded(method === "GET" ? bridge.apiGet(path, body) : bridge.apiPost(path, body));
-    const wrapped = ["ok","error"].includes(response?.status) ? response
-      : ["ok","error"].includes(response?.data?.status) ? response.data : null;
-    if (wrapped?.status === "error") throw problem(CODE.test(wrapped.data?.code || wrapped.message || "")
-      ? (wrapped.data?.code || wrapped.message) : "invalid_response");
+    const wrapped = ["ok","error"].includes(response?.status) && response?.data !== undefined ? response
+      : ["ok","error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
+    if (wrapped?.status === "error") throw Object.assign(problem(CODE.test(wrapped.data?.code || wrapped.message || "")
+      ? (wrapped.data?.code || wrapped.message) : "invalid_response"), {confirmed:true});
     const value = wrapped ? wrapped.data : response;
     if (!value || typeof value !== "object") throw problem("invalid_response");
     return value;
@@ -246,34 +484,79 @@ window.CompanionContactPage = (() => {
       const status = payload.contact;
       if (!live(ticket)) return;
       if (!status?.settings || typeof status.settings !== "object") throw problem("invalid_response");
+      const effective = status.effective;
+      if (!effective || typeof effective !== "object"
+          || typeof effective.allowed !== "boolean"
+          || typeof effective.automatic_allowed !== "boolean") throw problem("invalid_response");
       data.settings = status.settings;
-      data.effective = status.effective && typeof status.effective === "object" ? status.effective : null;
+      data.effective = effective;
       data.purposes = status.purposes && typeof status.purposes === "object" ? status.purposes : {};
       data.hostState = typeof status.host_state === "string" ? status.host_state : "";
       data.editToken = typeof status.edit_token === "string" ? status.edit_token : "";
       data.ready = true; data.scanning = true;
+      /* 成功读到一份新的联系快照后，旧的网络/保存错误已经没有继续
+         挂在页面上的意义；保存成功提示（error=false）仍然保留。 */
+      if (data.error) { data.notice = ""; data.error = false; }
     } catch (error) {
       if (!live(ticket)) return;
       data.settings = null; data.effective = null; data.purposes = {}; data.editToken = "";
       data.ready = false;
       notice(error.code ? reason(error.code) : "连接中断，已清空旧内容。请刷新核对。", true);
     } finally {
-      if (live(ticket)) { data.loading = false; data.busy = false; render(); }
+      if (live(ticket)) {
+        data.loading = false; data.busy = false; render();
+        if (data.ready && data.pendingWrite) schedulePendingRecovery(ticket);
+      }
     }
   }
   /* 配置侧只要 edit_token 与字段契约——值仍旧从 native 那份读，
      两处读出的值必须一致，不一致就说明两端读的不是同一层。 */
   async function loadContract() {
-    if (!data.configPath) return;
+    if (!data.configPath || data.contractLoading) return;
     const ticket = version;
+    data.configToken = "";
+    data.contractLoading = true;
+    render();
     try {
       const payload = await api("GET", data.configPath, {sections: GROUP});
       if (!live(ticket)) return;
       const section = payload?.sections?.[GROUP];
-      if (!section) return;
-      data.configToken = typeof section.edit_token === "string" ? section.edit_token : "";
+      if (!section || typeof section !== "object"
+          || typeof section.edit_token !== "string" || !section.edit_token) throw problem("invalid_response");
+      data.configToken = section.edit_token;
+      data.contractError = "";
+      data.contractErrorCode = "";
     } catch (error) {
-      if (live(ticket)) notice(error.code ? reason(error.code) : "配置字段契约未读到，保存仍可用。", true);
+      if (live(ticket)) {
+        data.contractErrorCode = typeof error.code === "string" ? error.code : "";
+        data.contractError = data.ready
+          ? "联系状态已读取；配置编辑信息未读到，保存暂不可用。"
+          : "配置编辑信息未能读取，请稍后重试。";
+      }
+    } finally {
+      if (live(ticket)) { data.contractLoading = false; render(); }
+    }
+  }
+  async function loadMaterials() {
+    if (!data.nativePath || data.materialsLoading) return;
+    const ticket = version;
+    data.materialsLoading = true;
+    data.materialsError = "";
+    render();
+    try {
+      const payload = await api("GET", data.nativePath + "/materials");
+      if (!live(ticket)) return;
+      if (!Array.isArray(payload?.items)) throw problem("invalid_response");
+      data.materialItems = payload.items.filter(item => item && typeof item === "object"
+        && typeof item.id === "string" && typeof item.title === "string");
+      data.materialsLoaded = true;
+    } catch (error) {
+      if (!live(ticket)) return;
+      data.materialItems = [];
+      data.materialsLoaded = false;
+      data.materialsError = error.code ? reason(error.code) : "素材暂时无法读取，请重试。";
+    } finally {
+      if (live(ticket)) { data.materialsLoading = false; render(); }
     }
   }
   /* ---- 写 -------------------------------------------------------------
@@ -281,35 +564,79 @@ window.CompanionContactPage = (() => {
      配置页的令牌与 native 的令牌是两个生效范围，不能互相顶替
      （native 那条路由只写 news 六个字段，其余交给 config 段）。 */
   async function save() {
-    if (!data.configPath || data.busy || !data.touched.size) return;
+    if (!data.configPath || data.busy || (!data.pendingWrite && !data.touched.size)) return;
     if (!data.ready) { notice("还没有读到当前设置，不能保存。", true); render(); return; }
-    if (!data.configToken) { notice("缺少配置令牌，请重新读取后再保存。", true); render(); return; }
+    if (!data.configToken && !data.pendingWrite) { notice("缺少配置令牌，请重新读取后再保存。", true); render(); return; }
     const ticket = version;
     data.busy = true;
-    const changes = {};
-    for (const name of data.touched) if (name in data.draft) changes[name] = data.draft[name];
+    let pending = data.pendingWrite;
+    let changes = pending?.body?.changes || {};
+    if (!pending) {
+      changes = {};
+      for (const name of data.touched) if (name in data.draft) changes[name] = data.draft[name];
+      pending = {route:data.configPath + "/configure", body:{
+        section:GROUP, operation_key:operationKey(), edit_token:data.configToken, changes,
+      }};
+      data.pendingWrite = pending;
+      if (!storePendingWrite()) {
+        data.pendingWrite = null;
+        data.busy = false;
+        notice("当前浏览器无法安全记录这次保存请求，尚未提交。请检查页面存储后重试。", true);
+        render();
+        return;
+      }
+    }
     try {
-      const payload = await api("POST", data.configPath + "/configure", {
-        section:GROUP, operation_key:operationKey(), edit_token:data.configToken, changes});
+      const payload = await api("POST", pending.route, pending.body);
       if (!live(ticket)) return;
+      const receipt = payload?.result ?? payload;
+      if (typeof receipt?.operation_id !== "string" || typeof receipt?.replayed !== "boolean") {
+        throw problem("invalid_response");
+      }
       const status = payload?.status?.sections?.[GROUP];
-      if (status) {
-        data.editToken = typeof status.edit_token === "string" ? status.edit_token : data.editToken;
+      const hasFreshConfigToken = typeof status?.edit_token === "string" && status.edit_token.length === 64;
+      if (hasFreshConfigToken) {
+        data.editToken = status.edit_token;
         data.configToken = data.editToken;
       }
+      data.pendingWrite = null; storePendingWrite();
+      clearPendingRecovery(pending.body.operation_key);
       data.touched.clear(); data.draft = {}; data.tierDraft = null;
       data.savedAt = Date.now(); data.busy = false;
-      notice("已保存 " + Object.keys(changes).length + " 项。改动从下一轮主动评估开始生效。");
+      const savedNotice = "已保存 " + Object.keys(changes).length + " 项。改动从下一轮主动评估开始生效。";
+      notice(savedNotice);
       await load();
+      if (live(ticket) && !hasFreshConfigToken) await loadContract();
+      if (live(ticket)) {
+        const refreshed = data.ready;
+        notice(refreshed ? savedNotice : "已保存 " + Object.keys(changes).length + " 项，但当前状态未能刷新；请稍后重新读取。", !refreshed);
+        render();
+      }
     } catch (error) {
       if (!live(ticket)) return;
       data.busy = false;
       const code = error.code || "";
-      notice(reason(code), true);
-      if (code === "proactive_contact_revision_conflict" || code === "proactive_contact_target_changed") {
+      if (error.confirmed) {
+        data.pendingWrite = null; storePendingWrite();
+        clearPendingRecovery(pending?.body?.operation_key);
+      }
+      const unresolved = !!data.pendingWrite && !error.confirmed;
+      notice(unresolved ? recoveryFailure(code) : reason(code), true);
+      if (["configuration_revision_conflict", "proactive_contact_revision_conflict",
+        "proactive_contact_target_changed"].includes(code)) {
         data.touched.clear(); data.draft = {}; data.tierDraft = null;
         await load();
-      } else if (!code) render();
+        await loadContract();
+        if (live(ticket) && !data.error) {
+          notice("设置已有其他更新，已读取最新值。", false);
+          render();
+        }
+      } else {
+        /* notice() 只改状态；失败路径必须主动重画，否则用户点保存后
+           看不到任何反馈，直到下一次切页或别的控件触发 render。 */
+        render();
+        if (data.pendingWrite) schedulePendingRecovery(ticket);
+      }
     }
   }
   /* 幂等键：同一份草稿重复提交沿用同一个键，后端按 operation_key 去重，
@@ -320,12 +647,13 @@ window.CompanionContactPage = (() => {
     return STORE + data.nativePath + ":" + (data.savedAt || 0) + ":" + opCounter++;
   }
   function set(name, value) {
+    if (data.pendingWrite) return;
     data.draft[name] = value; data.touched.add(name);
     if (name === "proactive_intensity_preset") data.tierDraft = tierOf(value);
     const part = PULSE_PART[name];
     if (part) data.pulse.add(part);
   }
-  function resetDraft() { data.touched.clear(); data.draft = {}; data.tierDraft = null; render(); }
+  function resetDraft() { if (data.pendingWrite) return; data.touched.clear(); data.draft = {}; data.tierDraft = null; render(); }
   /* 这一帧要不要给这个开关播翻转动画、播哪个方向。
      方向由 flipNow 记述，这里只翻译成类，不改动词义。 */
   function flipClass(name) {
@@ -372,25 +700,26 @@ window.CompanionContactPage = (() => {
     if (!data.ready || !data.settings || !data.effective) {
       return {tone:"blocked", title:"联系状态尚未读取", detail:"读取设置后再判断当前联系条件。", code:"", automatic:false};
     }
+    const automatic = automaticNotice(data.effective);
     const minute = currentMinute();
     const blocked = data.effective && data.effective.allowed === false;
     if (blocked) {
       const code = data.effective.reason;
       return {tone:"blocked", title:"当前不会开口", detail:reason(code),
-        code:code || "", automatic:data.effective.automatic_allowed === false};
+        code:code || "", automatic};
     }
     if (inQuiet(minute)) {
       return {tone:"quiet", title:"免打扰中", detail:quietSpanText(),
-        code:"proactive_quiet_hours", automatic:data.effective?.automatic_allowed === false};
+        code:"proactive_quiet_hours", automatic};
     }
     const weight = currentWeight(minute);
     if (weight !== null && weight < 0.3) {
       return {tone:"low", title:"节律低谷", detail:"这一小时的活动权重 " + weight.toFixed(2)
-        + "，低于 0.30；这条曲线只删格子，不放宽额度。", code:"", automatic:data.effective?.automatic_allowed === false};
+        + "，低于 0.30；这条曲线只删格子，不放宽额度。", code:"", automatic};
     }
     return {tone:"open", title:"此刻可以开口", detail:minute === null
       ? "未设时区，只能按服务端的判定。" : "本地时间 " + hm(minute) + "，不在免打扰内。",
-      code:"", automatic:data.effective?.automatic_allowed === false};
+      code:"", automatic};
   }
   function quietSpanText() {
     const span = quietSpan();
@@ -482,9 +811,10 @@ window.CompanionContactPage = (() => {
   }
 
   /* ---- 渲染 ------------------------------------------------------------ */
-  const VIEWS = [["dial","节律盘",ICON.dial],["purposes","契机矩阵",ICON.seed],
+  const VIEWS = [["dial","节律盘",ICON.dial],["tests","消息测试",ICON.test],
+                 ["purposes","契机矩阵",ICON.seed],
                  ["gates","开口闸门",ICON.gate],["budgets","额度与去重",ICON.quota],
-                 ["sources","外部触发源",ICON.source]];
+                 ["sources","外部触发源",ICON.source],["materials","素材池",ICON.seed]];
   function headMarkup() {
     const v = verdict();
     const label = VIEWS.find(([id]) => id === data.view)?.[1] || "节律盘";
@@ -495,9 +825,12 @@ window.CompanionContactPage = (() => {
         <span class="ct-verdict is-${v.tone}"><i class="ct-dot"></i>${e(v.title)}</span>
       </div>
       <div class="ct-head-actions">
-        ${dirtyCount ? `<button type="button" class="ct-btn" data-action="reset">${ICON.undo}<span>放弃 ${dirtyCount} 项改动</span></button>
-          <button type="button" class="ct-btn is-primary" data-action="save"${data.busy ? " disabled" : ""}>${ICON.save}<span>保存</span></button>`
-        : `<button type="button" class="ct-btn" data-action="refresh"${data.loading || data.busy ? " disabled" : ""}>${ICON.refresh}<span>重新读取</span></button>`}
+        <button type="button" class="ct-btn ct-head-test" data-view="tests" aria-pressed="${data.view === "tests"}"
+          title="打开消息测试">${ICON.test}<span>消息测试</span></button>
+        ${dirtyCount && !data.pendingWrite ? `<button type="button" class="ct-btn" data-action="reset">${ICON.undo}<span>放弃 ${dirtyCount} 项改动</span></button>` : ""}
+        ${data.pendingWrite ? "" : dirtyCount
+          ? `<button type="button" class="ct-btn is-primary" data-action="save"${data.busy || data.contractLoading || !data.configToken ? " disabled" : ""}>${ICON.save}<span>保存</span></button>`
+          : `<button type="button" class="ct-btn" data-action="refresh"${data.loading || data.busy || data.contractLoading ? " disabled" : ""}>${ICON.refresh}<span>重新读取</span></button>`}
       </div>
     </header>`;
   }
@@ -508,9 +841,27 @@ window.CompanionContactPage = (() => {
         <span class="ct-rail-icon">${icon}</span><span class="ct-rail-label">${e(text)}</span></button>`).join("")}</nav>`;
   }
   function noticeMarkup() {
-    if (!data.notice) return "";
-    return `<p class="ct-notice${data.error ? " is-error" : ""}" role="status">${data.error ? ICON.alert : ICON.check}`
-      + `<span>${e(data.notice)}</span><button type="button" data-action="dismiss" aria-label="关闭">×</button></p>`;
+    const notices = [];
+    if (data.pendingWrite) {
+      const pendingText = data.busy
+        ? "保存请求处理中；系统会核对原操作结果。"
+        : "保存结果尚未确认；系统会持续沿用同一操作标识核对，不会重复写入。";
+      notices.push(`<div class="ct-notice is-error" role="status">${ICON.alert}`
+      + `<span>${pendingText}`
+      + `${data.error && data.notice ? `<small>${e(data.notice)}</small>` : ""}</span>`
+      + `<button type="button" class="ct-notice-retry" data-action="retry-pending"`
+      + `${data.busy || data.loading || !data.ready ? " disabled" : ""}>${ICON.refresh}`
+      + `<span>${data.busy ? "处理中" : "立即核对"}</span></button></div>`);
+    } else if (data.notice) notices.push(`<p class="ct-notice${data.error ? " is-error" : ""}" role="status">${data.error ? ICON.alert : ICON.check}`
+      + `<span>${e(data.notice)}</span><button type="button" data-action="dismiss" aria-label="关闭">×</button></p>`);
+    if (data.contractError) {
+      const message = data.contractLoading
+        ? "正在重新读取配置编辑信息；当前输入会保留。" : data.contractError;
+      const detail = data.contractErrorCode ? ` title="接口错误码：${e(data.contractErrorCode)}"` : "";
+      notices.push(`<p class="ct-notice is-error" role="status">${ICON.alert}`
+        + `<span${detail}>${e(message)}</span><button type="button" class="ct-notice-retry" data-action="retry-contract"${data.contractLoading ? " disabled" : ""}>${ICON.refresh}<span>${data.contractLoading ? "读取中" : "重试"}</span></button></p>`);
+    }
+    return notices.join("");
   }
   function emptyMarkup() {
     if (data.loading) return `<div class="ct-empty"><span class="ct-spinner"></span>正在读取联系设置…</div>`;
@@ -534,6 +885,10 @@ window.CompanionContactPage = (() => {
     const v = verdict();
     const interval = Number(value("interval_seconds"));
     const idle = Number(value("idle_seconds"));
+    const effectiveInterval = Number.isFinite(interval) && interval > 0
+      ? Math.max(1, Math.round(interval * tier.interval)) : null;
+    const effectiveIdle = Number.isFinite(idle)
+      ? Math.max(0, Math.round(idle * tier.idle)) : null;
     /* 这一帧要闪哪几片盘面。取出来就清空：动效只放一次，
        下一次渲染（哪怕什么都没改）不该重放。 */
     const pulse = data.pulseNow;
@@ -544,7 +899,7 @@ window.CompanionContactPage = (() => {
           <span class="ct-center-detail">${e(v.detail)}</span>
           ${["authorization_denied", "configuration_relationship_required"].includes(v.code)
             ? `<button type="button" class="ct-center-action" data-go="manage" data-manage="identity" aria-label="前往关系与权限，核对主动联系授权">前往关系与权限</button>` : ""}
-          ${v.automatic ? `<span class="ct-center-flag">${ICON.alert}后台自动联系未开启</span>` : ""}
+          ${v.automatic ? `<span class="ct-center-flag">${ICON.alert}${e(v.automatic.text)}</span>` : ""}
         </div>
         ${data.scanning ? `<div class="ct-scan-hint">时间游标按 ${e(value("quiet_timezone") || "未设时区")} 走</div>` : ""}
       </div>
@@ -566,11 +921,17 @@ window.CompanionContactPage = (() => {
       ], "is-wide is-ring-curve")}
       ${fieldBlock("强度档位 · 三圈", [
         tierPicker(tier),
-        ``,
-        numberRow("interval_seconds", "两次联系至少间隔", "秒", 60, 604800,
-          interval ? "档位换算后约 " + fmtDuration(Math.max(1, Math.round(interval * tier.interval))) : ""),
-        numberRow("idle_seconds", "对话结束后至少等候", "秒", 0, 86400,
-          idle !== undefined && Number.isFinite(idle) ? "档位换算后约 " + fmtDuration(Math.max(0, Math.round(idle * tier.idle))) : ""),
+        `<div class="ct-tier-effective" role="status" aria-live="polite">
+          <span>当前生效</span>
+          <strong>${effectiveInterval === null ? "—" : e(fmtDuration(effectiveInterval))}</strong>
+          <small>两次联系至少间隔</small>
+          <strong>${effectiveIdle === null ? "—" : e(fmtDuration(effectiveIdle))}</strong>
+          <small>对话结束后至少等候</small>
+        </div>`,
+        numberRow("interval_seconds", "两次联系至少间隔（基础值）", "秒", 60, 604800,
+          interval ? "当前档位实际约 " + fmtDuration(effectiveInterval) : ""),
+        numberRow("idle_seconds", "对话结束后至少等候（基础值）", "秒", 0, 86400,
+          idle !== undefined && Number.isFinite(idle) ? "当前档位实际约 " + fmtDuration(effectiveIdle) : ""),
       ], "is-ring-tier")}
       ${fieldBlock("问候窗口 · 内圈", [
         toggle("enable_daily_greetings", "启用每日问候", "三个窗口必须当天内结束，不能跨午夜。"),
@@ -626,15 +987,22 @@ window.CompanionContactPage = (() => {
   /* 强度档位是一个**控件**，不是下拉：五档的差别是「更快 / 更多」，而这句话
      只有并排画出来才成立。选中的档位给一条随档位变长的底条。 */
   function tierPicker(tier) {
+    const interval = Number(value("interval_seconds"));
+    const idle = Number(value("idle_seconds"));
     return `<div class="ct-tiers" role="radiogroup" aria-label="强度档位">
       ${TIERS.map(t => {
         const on = t.key === tier.key;
+        const effectiveInterval = Number.isFinite(interval) && interval > 0
+          ? fmtDuration(Math.max(1, Math.round(interval * t.interval))) : "—";
+        const effectiveIdle = Number.isFinite(idle)
+          ? fmtDuration(Math.max(0, Math.round(idle * t.idle))) : "—";
         return `<button type="button" role="radio" aria-checked="${on}" data-tier="${t.key}"
           class="ct-tier${on ? " is-on" : ""}${dirty("proactive_intensity_preset") ? " is-dirty" : ""}"
           title="间隔 ×${t.interval}　等候 ×${t.idle}">
           <span class="ct-tier-bar" style="--fill:${(1 - t.interval) * 100}%"></span>
           <span class="ct-tier-label">${e(t.label)}</span>
           <span class="ct-tier-meta">间隔 ×${t.interval}</span>
+          <span class="ct-tier-effective">约 ${e(effectiveInterval)} · 等候 ${e(effectiveIdle)}</span>
         </button>`;
       }).join("")}
     </div>`;
@@ -672,22 +1040,152 @@ window.CompanionContactPage = (() => {
   function purposesView() {
     const rows = PURPOSE_BUCKETS.map(bucket => {
       const items = bucket.purposes.map(([name, label]) => purposeRow(name, label));
-      return `<section class="ct-bucket"><header>
+      return `<section class="ct-bucket${bucket.id === "share" ? " is-wide" : ""}" data-purpose-bucket="${bucket.id}"><header>
           <h3>${e(bucket.label)}</h3><span>${e(bucket.hint)}</span>
-          <em>${bucket.purposes.length} 类</em></header>
+          <em data-purpose-bucket-count="${bucket.id}">${bucket.purposes.length}/${bucket.purposes.length} 类</em></header>
         <div class="ct-purpose-list">${items.join("")}</div></section>`;
     }).join("");
-    const allowed = ALL_PURPOSES.filter(([name]) => data.purposes[name]?.allowed).length;
+    const enabled = ALL_PURPOSES.filter(([name]) => value(name + ".enabled") !== false).length;
+    const allowed = ALL_PURPOSES.filter(([name]) => purposeStatus(name) === "available").length;
+    const paused = ALL_PURPOSES.filter(([name]) => purposeStatus(name) === "paused").length;
     return `<div class="ct-purposes">
-      <div class="ct-purposes-sum">${ALL_PURPOSES.length} 类契机中 <strong>${allowed}</strong> 类此刻可开口</div>
-      ${rows}</div>`;
+      <div class="ct-purposes-summary" aria-label="契机概况">
+        <div class="ct-purpose-stat"><strong>${ALL_PURPOSES.length}</strong><span>类契机</span></div>
+        <div class="ct-purpose-stat"><strong>${enabled}</strong><span>单项已开启</span></div>
+        <div class="ct-purpose-stat"><strong>${allowed}</strong><span>当前可开口</span></div>
+        <div class="ct-purpose-stat"><strong>${paused}</strong><span>暂缓中</span></div>
+      </div>
+      <div class="ct-purpose-tools">
+        <label class="ct-purpose-search"><span>查找</span>
+          <input type="search" data-purpose-search aria-label="搜索契机名称或限制原因"
+            value="${e(data.purposeQuery)}" placeholder="名称、类别或限制原因">
+        </label>
+        <label class="ct-purpose-filter"><span>类别</span>
+          <select data-purpose-bucket-filter aria-label="按契机类别筛选">
+            <option value="all"${data.purposeBucket === "all" ? " selected" : ""}>全部类别</option>
+            ${PURPOSE_BUCKETS.map(bucket => `<option value="${bucket.id}"${data.purposeBucket === bucket.id ? " selected" : ""}>${e(bucket.label)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="ct-purpose-filter"><span>当前状态</span>
+          <select data-purpose-filter aria-label="按当前状态筛选">
+            ${[["all","全部状态"],["enabled","单项已开启"],["disabled","单项已关闭"],
+              ["available","当前可开口"],["paused","暂缓中"],["unavailable","当前不可开口"]]
+              .map(([key, label]) => `<option value="${key}"${data.purposeFilter === key ? " selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+        <span class="ct-purpose-results" data-purpose-result-count>${ALL_PURPOSES.length} / ${ALL_PURPOSES.length} 类</span>
+      </div>
+      <div class="ct-purpose-groups">${rows}</div>
+      <p class="ct-purpose-empty" hidden>没有匹配的契机</p>
+    </div>`;
+  }
+  function testInstructionText(item) {
+    return [
+      `这是一条「${item.label}」主动联系候选。`,
+      `素材来源：${item.source}`,
+      `样例准备：${item.setup}`,
+      "只使用本次提供的已核验素材，不把候选摘要当事实，不推断对方情绪、行程或需要。没有自然且值得发送的内容时返回 skip。",
+      `类型要求：${item.instruction}`,
+      "若发送，保持当前角色口吻，正文简短、不索取回复、不提测试或内部流程；严格遵守通用 JSON 合同，并给出 decision_confidence。",
+      `通过条件：${item.expect}`,
+    ].join("\n");
+  }
+  function testsView() {
+    const counts = Object.fromEntries(["ready", "partial", "missing"].map(coverage => [
+      coverage, TEST_INSTRUCTIONS.filter(item => item.coverage === coverage).length,
+    ]));
+    const cards = TEST_INSTRUCTIONS.map(item => `<article class="ct-test-card"
+      data-test-card data-test-id="${e(item.id)}" data-test-bucket="${TEST_BUCKET_IDS[item.bucket]}"
+      data-test-coverage="${e(item.coverage)}">
+      <header class="ct-test-card-head">
+        <div class="ct-test-title"><code>${e(item.id)}</code><h3>${e(item.label)}</h3></div>
+        <span class="ct-test-coverage is-${e(item.coverage)}">${e(TEST_COVERAGE[item.coverage])}</span>
+      </header>
+      <dl class="ct-test-details">
+        <div><dt>测试素材</dt><dd>${e(item.source)}</dd></div>
+        <div><dt>样例准备</dt><dd>${e(item.setup)}</dd></div>
+      </dl>
+      <section class="ct-test-prompt"><h4>类型指令</h4><p>${e(item.instruction)}</p></section>
+      <p class="ct-test-expect"><strong>通过条件</strong>${e(item.expect)}</p>
+      <footer class="ct-test-actions"><button type="button" class="ct-btn ct-test-copy"
+        data-test-copy="${e(item.id)}">${ICON.copy}<span>复制测试指令</span></button></footer>
+    </article>`).join("");
+    return `<div class="ct-tests">
+      <div class="ct-test-overview">
+        <p>15 类主动消息各有独立的素材准备、类型指令和验收条件。</p>
+        <div class="ct-test-coverage-summary" aria-label="生产器覆盖情况">
+          <span><i class="is-ready"></i>生产器已接通 <strong>${counts.ready}</strong></span>
+          <span><i class="is-partial"></i>只有资格检查 <strong>${counts.partial}</strong></span>
+          <span><i class="is-missing"></i>尚无独立生产器 <strong>${counts.missing}</strong></span>
+        </div>
+        <p class="ct-test-boundary">复制只生成测试文本，不调用模型，也不向真实会话投递。</p>
+      </div>
+      <div class="ct-test-tools">
+        <label class="ct-test-search"><span>查找类型</span>
+          <input type="search" data-test-search aria-label="搜索主动消息类型和测试指令"
+            value="${e(data.testQuery)}" placeholder="名称、素材、指令或验收条件">
+        </label>
+        <label><span>消息类别</span><select data-test-bucket-filter aria-label="按消息类别筛选">
+          <option value="all"${data.testBucket === "all" ? " selected" : ""}>全部类别</option>
+          <option value="bond"${data.testBucket === "bond" ? " selected" : ""}>关系</option>
+          <option value="daily"${data.testBucket === "daily" ? " selected" : ""}>日程</option>
+          <option value="share"${data.testBucket === "share" ? " selected" : ""}>分享</option>
+        </select></label>
+        <label><span>生产器状态</span><select data-test-coverage-filter aria-label="按生产器状态筛选">
+          <option value="all"${data.testCoverage === "all" ? " selected" : ""}>全部状态</option>
+          <option value="ready"${data.testCoverage === "ready" ? " selected" : ""}>生产器已接通</option>
+          <option value="partial"${data.testCoverage === "partial" ? " selected" : ""}>只有资格检查</option>
+          <option value="missing"${data.testCoverage === "missing" ? " selected" : ""}>尚无独立生产器</option>
+        </select></label>
+        <span class="ct-test-result-count" data-test-result-count>${TEST_INSTRUCTIONS.length} / ${TEST_INSTRUCTIONS.length} 类</span>
+      </div>
+      <div class="ct-tests-grid">${cards}</div>
+      <p class="ct-test-empty" hidden>没有匹配的消息类型</p>
+    </div>`;
+  }
+  function testMatches(id) {
+    const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === id);
+    if (!item) return false;
+    if (data.testBucket !== "all" && TEST_BUCKET_IDS[item.bucket] !== data.testBucket) return false;
+    if (data.testCoverage !== "all" && item.coverage !== data.testCoverage) return false;
+    const query = data.testQuery.trim().toLocaleLowerCase();
+    if (!query) return true;
+    return [item.id, item.label, item.bucket, item.source, item.setup, item.instruction,
+      item.expect, TEST_COVERAGE[item.coverage]].join(" ").toLocaleLowerCase().includes(query);
+  }
+  function updateTestFilters() {
+    if (!root?.querySelectorAll) return;
+    const cards = Array.from(root.querySelectorAll("[data-test-card]"));
+    if (!cards.length) return;
+    let visible = 0;
+    for (const card of cards) {
+      const show = testMatches(card.dataset.testId);
+      card.hidden = !show;
+      if (show) visible++;
+    }
+    const result = root.querySelector("[data-test-result-count]");
+    if (result) result.textContent = visible + " / " + TEST_INSTRUCTIONS.length + " 类";
+    const empty = root.querySelector(".ct-test-empty");
+    if (empty) empty.hidden = visible > 0;
+  }
+  function purposeStatus(name) {
+    const info = data.purposes[name] || {};
+    if (value(name + ".enabled") === false) return "disabled";
+    if (value("enabled") === false) return "unavailable";
+    if (info.reason === "proactive_paused") return "paused";
+    if (info.allowed === true) return "available";
+    if (info.allowed === false) return "unavailable";
+    return "unknown";
   }
   function purposeRow(name, label) {
     const info = data.purposes[name] || {};
     const enabled = value(name + ".enabled") !== false;
     const weight = Number(value(name + ".weight"));
-    const paused = typeof value(name + ".pause_until") === "string" && value(name + ".pause_until");
-    const blocked = info.allowed === false;
+    const status = purposeStatus(name);
+    const pauseUntil = [value(name + ".pause_until"), value("pause_until")]
+      .filter(until => typeof until === "string" && Date.parse(until) > Date.now())
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+    const blocked = info.allowed === false && status === "unavailable" && info.reason !== "proactive_disabled";
     const scale = Math.max(0, Math.min(5, Number.isFinite(weight) ? weight : 1));
     return `<article class="ct-purpose${blocked ? " is-blocked" : ""}${enabled ? " is-on" : ""}"
       data-purpose="${e(name)}">
@@ -702,13 +1200,58 @@ window.CompanionContactPage = (() => {
         <em>${Number.isFinite(weight) ? weight.toFixed(1) : "—"}</em>
       </div>
       <div class="ct-purpose-state">
-        ${blocked
+        ${status === "disabled" ? `<span class="ct-chip">已关闭</span>`
+          : status === "paused" ? `<span class="ct-chip is-paused">${pauseUntil ? "暂缓至 " + e(pauseUntil.slice(0, 16).replace("T", " ")) : "暂缓中"}</span>`
+          : status === "unavailable" ? value("enabled") === false
+            ? `<span class="ct-chip is-risk">总开关关闭</span>`
+            : `<span class="ct-chip is-risk" title="${e(reason(info.reason))}">${e(shortReason(info.reason))}</span>`
+          : status === "available" ? `<span class="ct-chip is-ok">可开口</span>`
+          : blocked
           ? `<span class="ct-chip is-risk" title="${e(reason(info.reason))}">${e(shortReason(info.reason))}</span>`
-          : paused ? `<span class="ct-chip is-paused">暂缓至 ${e(paused.slice(0, 16).replace("T", " "))}</span>`
-          : enabled ? `<span class="ct-chip is-ok">可开口</span>`
-          : `<span class="ct-chip">已关闭</span>`}
+          : `<span class="ct-chip">待核对</span>`}
       </div>
     </article>`;
+  }
+  function purposeMatches(name) {
+    const meta = PURPOSE_META[name], info = data.purposes[name] || {};
+    const query = data.purposeQuery.trim().toLocaleLowerCase();
+    if (data.purposeBucket !== "all" && meta.bucket.id !== data.purposeBucket) return false;
+    if (query) {
+      const searchable = [name, meta.label, meta.bucket.label, info.label, info.reason,
+        info.reason ? reason(info.reason) : ""]
+        .filter(Boolean).join(" ").toLocaleLowerCase();
+      if (!searchable.includes(query)) return false;
+    }
+    switch (data.purposeFilter) {
+      case "enabled": return value(name + ".enabled") !== false;
+      case "disabled": return value(name + ".enabled") === false;
+      case "available": return purposeStatus(name) === "available";
+      case "paused": return purposeStatus(name) === "paused";
+      case "unavailable": return purposeStatus(name) === "unavailable";
+      default: return true;
+    }
+  }
+  function updatePurposeFilters() {
+    if (!root?.querySelectorAll) return;
+    const rows = Array.from(root.querySelectorAll(".ct-purpose"));
+    if (!rows.length) return;
+    const visibleByBucket = Object.fromEntries(PURPOSE_BUCKETS.map(bucket => [bucket.id, 0]));
+    let visible = 0;
+    for (const row of rows) {
+      const show = purposeMatches(row.dataset.purpose);
+      row.hidden = !show;
+      if (show) { visible++; visibleByBucket[PURPOSE_META[row.dataset.purpose].bucket.id]++; }
+    }
+    for (const bucket of PURPOSE_BUCKETS) {
+      const section = root.querySelector('[data-purpose-bucket="' + bucket.id + '"]');
+      if (section) section.hidden = visibleByBucket[bucket.id] === 0;
+      const count = root.querySelector('[data-purpose-bucket-count="' + bucket.id + '"]');
+      if (count) count.textContent = visibleByBucket[bucket.id] + "/" + bucket.purposes.length + " 类";
+    }
+    const result = root.querySelector("[data-purpose-result-count]");
+    if (result) result.textContent = visible + " / " + ALL_PURPOSES.length + " 类";
+    const empty = root.querySelector(".ct-purpose-empty");
+    if (empty) empty.hidden = visible > 0;
   }
   function shortReason(code) {
     if (!code) return "受阻";
@@ -727,8 +1270,8 @@ window.CompanionContactPage = (() => {
        code:data.effective?.automatic_reason, note:"只影响后台自行决定的开口，不影响你主动触发的。"},
       {id:"model", title:"主动联系模型", ok:data.effective?.model_registered !== false, code:"model_task_unregistered",
        note:"未登记模型时，即使前两闸都开也不会生成内容。"},
-      {id:"host", title:"宿主运行", ok:data.hostState === "running", code:"host_not_running",
-       note:"宿主未运行时所有后台判定暂停。"},
+      {id:"host", title:"角色运行", ok:data.hostState === "running", code:"host_not_running",
+       note:"角色未运行时所有后台判定暂停。"},
       {id:"quiet", title:"免打扰时段", ok:!inQuiet(currentMinute()), code:"proactive_quiet_hours",
        note:quietSpanText()},
       {id:"curve", title:"小时活动曲线", ok:(() => { const w = currentWeight(currentMinute()); return w === null || w >= 0.3; })(),
@@ -738,13 +1281,23 @@ window.CompanionContactPage = (() => {
     ];
     const blocked = gates.filter(g => !g.ok).length;
     return `<div class="ct-gates">
-      <p class="ct-gates-sum">${blocked ? `有 <strong>${blocked}</strong> 道闸门此刻是关的` : "全部闸门此刻都是开的"}</p>
+      <p class="ct-gates-sum${blocked ? " is-shut" : " is-open"}">${blocked ? `有 <strong>${blocked}</strong> 道闸门此刻是关的` : "全部闸门此刻都是开的"}</p>
       ${gates.map((g, i) => `<article class="ct-gate${g.ok ? " is-ok" : " is-shut"}" style="--i:${i}">
         <span class="ct-gate-mark">${g.ok ? ICON.check : ICON.alert}</span>
         <div class="ct-gate-body"><strong>${e(g.title)}</strong>
-          ${g.ok ? "" : `<code>${e(g.code || "—")}</code>`}</div>
+          ${g.ok ? "" : `<small>${e(g.code ? reason(g.code) : g.note)}</small>`}</div>
         <span class="ct-gate-state">${g.ok ? "开" : "关"}</span></article>`).join("")}
-      <section class="ct-block"><h3>临时暂停</h3>
+      <section class="ct-gate-settings-brief" aria-label="回复与补看设置">
+        <div class="ct-gate-settings-copy">
+          <span class="ct-gate-settings-eyebrow">回复与补看</span>
+          <h3>忙碌延迟、休息判定与醒后补看</h3>
+          <p>这里查看当前判定，下面统一调整对应规则。</p>
+        </div>
+        <button type="button" class="ct-btn is-primary ct-gate-settings-button" data-action="open-gate-settings">
+          ${ICON.gate}<span>调整开口闸门</span>
+        </button>
+      </section>
+      <section class="ct-block ct-gate-pause"><h3>临时暂停</h3>
         <label class="ct-field${dirty("pause_until") ? " is-dirty" : ""}">
           <span class="ct-field-label">暂缓全部联系至<small>留空表示不暂停</small></span>
           <input type="datetime-local" data-field="pause_until"
@@ -791,7 +1344,7 @@ window.CompanionContactPage = (() => {
     return `<div class="ct-budgets">
       <section class="ct-block"><h3>每日额度</h3>
         <p class="ct-note">这几个数只有上限，没有实时读出口——所以画成刻度，不画成进度条。</p>
-        
+
         ${quota.map(([name, label, unit, max]) => {
           const current = num(name);
           return `<div class="ct-quota${dirty(name) ? " is-dirty" : ""}">
@@ -854,9 +1407,9 @@ window.CompanionContactPage = (() => {
            ["severe","橙色 · 严重"],["extreme","红色 · 特别严重"]]),
       ]},
       {id:"news", icon:ICON.source, title:"资讯", hint:"资讯来源、每日热点与去重时长。", body:[
-        srcToggle("news_share_enabled", "分享资讯", ""),
+        srcToggle("news_share_enabled", "分享资讯", "自然分享亮点和感想；追问时再给来源与原文。分段沿用表达设置。"),
         srcNumber("news_check_interval_minutes", "检查间隔", "分钟", 15, 1440, ""),
-        srcSelect("news_source_kind", "来源类型", [["host","宿主提供"],["url","自定地址"],["uid","平台标识"]]),
+        srcSelect("news_source_kind", "来源类型", [["host","默认数据源"],["url","自定地址"],["uid","平台标识"]]),
         srcText("news_source_uid", "来源标识", "", "与类型匹配填写。"),
         srcText("news_source_url", "来源地址", "", "与类型匹配填写。"),
         srcToggle("news_daily_hot_read_enabled", "每日热点", ""),
@@ -918,21 +1471,21 @@ window.CompanionContactPage = (() => {
       ]},
     ];
     const groups = known.map(sourceGroup).join("");
-    /* 导语里的两个数是**数出来的**，不是写死的：条目数或开关数变了它自己会跟上，
-       写死的话改完字段就会开始撒谎。 */
     const fields = (groups.match(/data-field="/g) || []).length;
     const toggles = (groups.match(/data-kind="toggle"/g) || []).length;
     const on = (groups.match(/data-on="1"/g) || []).length;
+    const entries = [
+      ["天气与官方预警", "地点、时效、突变采样和官方预警状态", "config-environment:perception-detail-place", ICON.weather],
+      ["日期、饭点与约定", "重要日子、日历上下文和提醒素材", "config-environment:perception-detail-important-days", ICON.meal],
+      ["资讯与网络探索", "来源、兴趣和外部检索状态", "config-news:perception-detail-external", ICON.source],
+      ["设备观察与动作", "授权屏幕、手机、摄像头和动作回执", "config-screen:perception-detail-device-access", ICON.screen],
+      ["余额感知", "服务余额状态与数据源配置", "config-balance:perception-detail-balance", ICON.purse],
+    ];
     return `<div class="ct-sources">
-      
+      <section class="ct-source-guide"><div><strong>触发条件可在本页直接调整</strong><p>下面每张卡片的开关、时间、来源和阈值会直接写入主动联系设置。感知页提供按职责查看的状态汇总与更细的授权配置，可以从这里跳过去核对，两边不是单一入口。</p></div><div class="ct-source-guide-links">${entries.map(([title, detail, target, icon]) => `<button type="button" class="ct-source-guide-link" data-go="manage" data-manage="perception" data-perception-tab-target="${e(target)}"><span class="ct-src-icon">${icon}</span><span><b>${e(title)}</b><small>${e(detail)}</small></span><span class="ct-source-guide-arrow">查看感知状态 ${ICON.arrow}</span></button>`).join("")}</div></section>
+      <div class="ct-source-summary" role="status">${fields} 项触发配置 · ${on}/${toggles} 个开关当前开启</div>
       ${groups}</div>`;
   }
-  /* 一张触发源卡片。头部那两个数是给用户看的「这一组开了几项」，
-     也写成 data-* 供自检比对——否则加一个开关忘了改头部，卡片会开始撒谎。
-     条目多的组（wide）在卡片内部分两栏：14 行单栏会把同一行的短卡片拉出
-     一大块空白。分栏在这里**显式切成两个列容器**，不交给 CSS 自动分栏——
-     自动分栏时「每列第一行不要上边线」这条没法用选择器表达，
-     第二栏的第一行会平白多一条横线，两栏顶边对不齐。 */
   function sourceGroup(group) {
     const body = group.body;
     const html = body.join("");
@@ -943,18 +1496,10 @@ window.CompanionContactPage = (() => {
     const on = (html.match(/data-on="1"/g) || []).length;
     return `<section class="ct-src-group${group.wide ? " is-wide" : ""}" data-source="${e(group.id)}"
       data-toggles="${toggles}" data-enabled="${on}">
-      <header class="ct-src-head">
-        <span class="ct-src-icon">${group.icon}</span>
-        <h3>${e(group.title)}</h3>
-        <em class="ct-src-badge${on ? " is-on" : ""}">${on}/${toggles} 开启</em>
-      </header>
-      
-      <div class="ct-src-rows">${rows}</div></section>`;
+      <header class="ct-src-head"><span class="ct-src-icon">${group.icon}</span><h3>${e(group.title)}</h3>
+        <em class="ct-src-badge${on ? " is-on" : ""}">${on}/${toggles} 开启</em></header>
+      <p class="ct-src-hint">${e(group.hint)}</p><div class="ct-src-rows">${rows}</div></section>`;
   }
-  /* 触发源的紧凑行：标签在左、控件在右，一行一件事。
-     这是与主配置区并列的第二套字段版式，所以是另一组函数，而不是给
-     toggle/textRow/numberRow 加一个「紧凑」开关——一个函数两套版式，
-     迟早会有一行悄悄退回竖排，而两套版式长得都「没错」，没人看得出来。 */
   function srcRow(name, label, help, kind, control) {
     return `<label class="ct-src-row${dirty(name) ? " is-dirty" : ""}" data-kind="${kind}">
       <span class="ct-src-label">${e(label)}${help ? `<small>${e(help)}</small>` : ""}</span>
@@ -962,39 +1507,100 @@ window.CompanionContactPage = (() => {
   }
   function srcToggle(name, label, help) {
     const on = value(name) === true;
-    /* data-on 只标在开着的行上：头部那两个数就是数它数出来的。 */
     return `<label class="ct-src-row is-toggle${on ? " is-on" : ""}${dirty(name) ? " is-dirty" : ""}${flipClass(name)}"
       data-kind="toggle"${on ? ' data-on="1"' : ""}>
       <span class="ct-src-label">${e(label)}${help ? `<small>${e(help)}</small>` : ""}</span>
-      <span class="ct-src-control"><span class="ct-switch">
-        <input type="checkbox" data-field="${e(name)}"${on ? " checked" : ""}>
+      <span class="ct-src-control"><span class="ct-switch"><input type="checkbox" data-field="${e(name)}"${on ? " checked" : ""}>
         <span class="ct-switch-track"><i></i></span></span></span></label>`;
   }
   function srcText(name, label, placeholder, help) {
     const current = value(name);
-    return srcRow(name, label, help, "text",
-      `<input type="text" data-field="${e(name)}" value="${e(typeof current === "string" ? current : "")}"
-        placeholder="${e(placeholder)}" autocomplete="off" spellcheck="false" aria-label="${e(label)}">`);
+    return srcRow(name, label, help, "text", `<input type="text" data-field="${e(name)}" value="${e(typeof current === "string" ? current : "")}"
+      placeholder="${e(placeholder)}" autocomplete="off" spellcheck="false" aria-label="${e(label)}">`);
   }
   function srcNumber(name, label, unit, min, max, help) {
     const current = value(name);
-    /* 取值范围不再拼进说明行：这一屏有近 60 项，每行都挂一段「0–1440」，
-       扫过去全是数字噪声，行高还被撑得参差不齐。范围由输入框的
-       min/max 兜底，越界会被夹回去；想核对时悬停输入框看 title。
-       说明行只留真正有信息量的那句话。 */
     const range = "可填 " + min + "–" + max + (unit ? "，单位 " + unit : "");
-    return srcRow(name, label, help, "number",
-      `<input type="number" data-field="${e(name)}" value="${e(current ?? "")}" min="${min}" max="${max}"
-        step="1" inputmode="numeric" aria-label="${e(label)}" title="${e(range)}"><i>${e(unit)}</i>`);
+    return srcRow(name, label, help, "number", `<input type="number" data-field="${e(name)}" value="${e(current ?? "")}" min="${min}" max="${max}"
+      step="1" inputmode="numeric" aria-label="${e(label)}" title="${e(range)}"><i>${e(unit)}</i>`);
   }
   function srcSelect(name, label, options) {
     const current = value(name);
-    return srcRow(name, label, "", "select",
-      `<select data-field="${e(name)}" aria-label="${e(label)}">${options.map(([v, text]) =>
-        `<option value="${e(v)}"${String(current ?? "") === v ? " selected" : ""}>${e(text)}</option>`).join("")}</select>`);
+    return srcRow(name, label, "", "select", `<select data-field="${e(name)}" aria-label="${e(label)}">${options.map(([v, text]) =>
+      `<option value="${e(v)}"${String(current ?? "") === v ? " selected" : ""}>${e(text)}</option>`).join("")}</select>`);
   }
-
+  function materialTime(value) {
+    if (typeof value !== "string") return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", {
+      month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit",
+    });
+  }
+  function materialCard(item) {
+    const search = [item.category, item.purpose, item.title, item.detail, item.note, item.source]
+      .filter(Boolean).join(" ").toLocaleLowerCase();
+    const source = item.source || "已核验来源";
+    return `<article class="ct-material-card" data-material-card data-category="${e(item.category || "")}" data-search="${e(search)}">
+      <header class="ct-material-card-head"><span class="ct-material-category">${e(item.category || "素材")}</span>
+        <span class="ct-material-purpose">${e(item.purpose || "")}</span></header>
+      <h3>${e(item.title || "主动素材")}</h3>
+      ${item.detail ? `<p class="ct-material-detail">${e(item.detail)}</p>` : ""}
+      ${item.note ? `<p class="ct-material-note">${e(item.note)}</p>` : ""}
+      <footer><span>${e(source)}</span><time datetime="${e(item.captured_at || "")}">${e(materialTime(item.captured_at))}</time>
+        <span>${item.expires_at ? "有效至 " + e(materialTime(item.expires_at)) : "有效期未设"}</span></footer>
+    </article>`;
+  }
+  function materialsView() {
+    const items = Array.isArray(data.materialItems) ? data.materialItems : [];
+    const count = items.length;
+    const categories = [["all","全部类别"],["对话","对话"],["生活记录","生活记录"],
+      ["约定","约定"],["环境与状态","环境与状态"],["资讯","资讯"],["屏幕观察","屏幕观察"]];
+    let content = "";
+    if (data.materialsLoading && !data.materialsLoaded) {
+      content = `<div class="ct-material-empty"><span class="ct-spinner"></span><strong>正在读取素材</strong></div>`;
+    } else if (data.materialsError) {
+      content = `<div class="ct-material-empty is-error">${ICON.alert}<strong>素材读取失败</strong><p>${e(data.materialsError)}</p>
+        <button type="button" class="ct-btn" data-action="refresh-materials"${data.materialsLoading ? " disabled" : ""}>${ICON.refresh}<span>重试</span></button></div>`;
+    } else if (!count) {
+      content = `<div class="ct-material-empty">${ICON.source}<strong>当前没有通过核验的主动素材</strong></div>`;
+    } else {
+      content = `<div class="ct-material-grid">${items.map(materialCard).join("")}</div>
+        <p class="ct-material-filter-empty" hidden>没有匹配的素材</p>`;
+    }
+    return `<div class="ct-materials">
+      <div class="ct-material-tools">
+        <label class="ct-material-search"><span>查找素材</span>
+          <input type="search" data-material-search aria-label="搜索主动素材" value="${e(data.materialQuery)}" placeholder="名称、内容或来源">
+        </label>
+        <label><span>来源类别</span><select data-material-category aria-label="按来源类别筛选">
+          ${categories.map(([value, label]) => `<option value="${e(value)}"${data.materialCategory === value ? " selected" : ""}>${e(label)}</option>`).join("")}
+        </select></label>
+        <span class="ct-material-count" data-material-result-count>${count} 项素材</span>
+      </div>
+      ${data.materialsLoading && data.materialsLoaded ? `<p class="ct-material-updating" role="status">正在更新</p>` : ""}
+      ${content}
+    </div>`;
+  }
+  function updateMaterialFilters() {
+    if (!root) return;
+    const query = data.materialQuery.trim().toLocaleLowerCase();
+    const category = data.materialCategory;
+    const cards = [...root.querySelectorAll("[data-material-card]")];
+    let visible = 0;
+    for (const card of cards) {
+      const matches = (category === "all" || card.dataset.category === category)
+        && (!query || String(card.dataset.search || "").includes(query));
+      card.hidden = !matches;
+      if (matches) visible++;
+    }
+    const count = root.querySelector("[data-material-result-count]");
+    if (count) count.textContent = visible + " / " + cards.length + " 项素材";
+    const empty = root.querySelector(".ct-material-filter-empty");
+    if (empty) empty.hidden = visible > 0 || cards.length === 0;
+  }
   function body() {
+    if (data.view === "tests") return testsView();
+    if (data.view === "materials") return materialsView();
     if (!data.ready) return emptyMarkup();
     return {"dial":dialView, "purposes":purposesView, "gates":gatesView,
       "budgets":budgetsView, "sources":sourcesView}[data.view]();
@@ -1009,6 +1615,7 @@ window.CompanionContactPage = (() => {
     data.viewShift = to > from ? 1 : to < from ? -1 : null;
     data.view = next;
     data.notice = "";
+    if (next === "materials") void loadMaterials();
   }
   function render() {
     if (!root) return;
@@ -1024,6 +1631,12 @@ window.CompanionContactPage = (() => {
     const enter = shift ? (shift > 0 ? " is-from-next" : " is-from-prev") : "";
     root.innerHTML = `<div class="ct-app">${railMarkup()}<div class="ct-main">`
       + `<div class="ct-view${enter}">${headMarkup()}${noticeMarkup()}${body()}</div></div></div>`;
+    if (data.pendingWrite) for (const field of root.querySelectorAll("[data-field]")) field.disabled = true;
+    const gateSettingsArea = document.getElementById("contact-gate-settings-area");
+    if (gateSettingsArea) gateSettingsArea.hidden = data.view !== "gates";
+    if (data.view === "purposes") updatePurposeFilters();
+    if (data.view === "tests") updateTestFilters();
+    if (data.view === "materials") updateMaterialFilters();
     if (data.scanning && data.ready) {
       data.scanning = false;
       const dial = root.querySelector(".ct-dial");
@@ -1033,12 +1646,37 @@ window.CompanionContactPage = (() => {
 
   /* ---- 交互 ------------------------------------------------------------ */
   let painting = null;
+  function focusGateSettings() {
+    const target = document.getElementById("contact-gate-settings");
+    if (!target) return false;
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
+      || ["low", "off"].includes(document.documentElement.dataset.motion);
+    target.scrollIntoView({behavior: reduced ? "instant" : "smooth", block: "start"});
+    if (!target.hasAttribute("tabindex")) target.tabIndex = -1;
+    target.focus({preventScroll: true});
+    return true;
+  }
+  function openGateSettingsView() {
+    if (!root || !data) return false;
+    if (data.view !== "gates") { switchView("gates"); render(); }
+    return focusGateSettings();
+  }
   function clicked(event) {
     const view = event.target.closest("[data-view]");
     if (view) { switchView(view.dataset.view); render(); return; }
+    const testCopy = event.target.closest("[data-test-copy]")?.dataset.testCopy;
+    if (testCopy) { copyTestInstruction(testCopy); return; }
     const action = event.target.closest("[data-action]")?.dataset.action;
-    if (action === "refresh") { data.notice = ""; load(); loadContract(); return; }
+    if (action === "refresh") {
+      data.notice = ""; data.error = false; load(); loadContract();
+      if (data.view === "materials") void loadMaterials();
+      return;
+    }
+    if (action === "retry-contract") { void loadContract(); return; }
+    if (action === "refresh-materials") { void loadMaterials(); return; }
+    if (action === "open-gate-settings") { focusGateSettings(); return; }
     if (action === "save") { save(); return; }
+    if (action === "retry-pending") { save(); return; }
     if (action === "reset") { resetDraft(); notice("已放弃未保存的改动。"); render(); return; }
     if (action === "dismiss") { data.notice = ""; render(); return; }
     if (action === "curve-default") {
@@ -1064,6 +1702,28 @@ window.CompanionContactPage = (() => {
     }
   }
   function changed(event) {
+    const materialCategory = event.target.closest("[data-material-category]");
+    if (materialCategory) {
+      data.materialCategory = materialCategory.value;
+      updateMaterialFilters();
+      return;
+    }
+    const testBucket = event.target.closest("[data-test-bucket-filter]");
+    if (testBucket) { data.testBucket = testBucket.value; updateTestFilters(); return; }
+    const testCoverage = event.target.closest("[data-test-coverage-filter]");
+    if (testCoverage) { data.testCoverage = testCoverage.value; updateTestFilters(); return; }
+    const bucketFilter = event.target.closest("[data-purpose-bucket-filter]");
+    if (bucketFilter) {
+      data.purposeBucket = bucketFilter.value;
+      updatePurposeFilters();
+      return;
+    }
+    const purposeFilter = event.target.closest("[data-purpose-filter]");
+    if (purposeFilter) {
+      data.purposeFilter = purposeFilter.value;
+      updatePurposeFilters();
+      return;
+    }
     const field = event.target.closest("[data-field]");
     if (!field) return;
     const name = field.dataset.field;
@@ -1099,13 +1759,41 @@ window.CompanionContactPage = (() => {
   }
   function readField(name, value_) { set(name, value_); }
   function input(event) {
+    const materialSearch = event.target.closest("[data-material-search]");
+    if (materialSearch) {
+      data.materialQuery = materialSearch.value;
+      updateMaterialFilters();
+      return;
+    }
+    const testSearch = event.target.closest("[data-test-search]");
+    if (testSearch) { data.testQuery = testSearch.value; updateTestFilters(); return; }
+    const search = event.target.closest("[data-purpose-search]");
+    if (search) {
+      data.purposeQuery = search.value;
+      updatePurposeFilters();
+      return;
+    }
     const field = event.target.closest("[data-field]");
     if (field && field.type === "range") changed(event);
+  }
+  async function copyTestInstruction(id) {
+    const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === id);
+    if (!item) return;
+    try {
+      const clipboard = window.navigator?.clipboard;
+      if (typeof clipboard?.writeText !== "function") throw new Error("clipboard unavailable");
+      await clipboard.writeText(testInstructionText(item));
+      notice(item.id + " 测试指令已复制；当前只复制文本，没有调用模型或真实投递。");
+    } catch {
+      notice("剪贴板权限不可用，请选中当前类型卡片中的指令手动复制。", true);
+    }
+    render();
   }
   /* 曲线拖涂。按下开始，横向移动换算成小时，纵向换算成权重——
      这是这一页唯一一个「直接画数据」的地方，因为 24 个数字确实没人愿意输。 */
   function plotRect() { return root?.querySelector('[data-role="curvePlot"]')?.getBoundingClientRect() || null; }
   function paintHour(clientX, clientY, rect) {
+    if (data.pendingWrite) return;
     const x = Math.max(0, Math.min(rect.width - 0.01, clientX - rect.left));
     const hour = Math.min(23, Math.floor((x / rect.width) * 24));
     const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
@@ -1149,7 +1837,7 @@ window.CompanionContactPage = (() => {
       event.preventDefault();
       const index = VIEWS.findIndex(([id]) => id === data.view);
       const next = (index + (event.key === "ArrowDown" ? 1 : VIEWS.length - 1)) % VIEWS.length;
-      data.view = VIEWS[next][0]; render();
+      switchView(VIEWS[next][0]); render();
       root.querySelector('[data-view="' + data.view + '"]')?.focus();
     }
   }
@@ -1194,7 +1882,11 @@ window.CompanionContactPage = (() => {
        页面看着挂上了但其实一个请求都没发；
        在建 data 之前 render() 会读到 null —— 那是一条只在首次挂载时出现的崩溃。 */
     unmount();
-    root = host; data = blank();
+    root = host; contactScope = currentContactScope();
+    const cached = contactCache.get(contactScope);
+    data = cached ? {...blank(), ...cached, touched:new Set(cached.touched || []), draft:{...(cached.draft || {})}, pulse:new Set(), pulseNow:[], flip:null, flipNow:null, viewShift:null, viewShiftNow:null} : blank();
+    /* 页面切换只缓存草稿和筛选，不把旧的网络错误带回新的读取周期。 */
+    if (data.error) { data.notice = ""; data.error = false; }
     const ticket = ++version;
     root.addEventListener("click", clicked);
     root.addEventListener("change", changed);
@@ -1212,17 +1904,24 @@ window.CompanionContactPage = (() => {
       if (!live(ticket)) return;
       if (context?.pluginName !== HOST) throw problem("bridge_unavailable");
       addresses();
+      data.pendingWrite = restorePendingWrite();
       await load(); await loadContract();
+      if (data.view === "materials") await loadMaterials();
       if (live(ticket)) render();
     } catch (error) {
       if (!live(ticket)) return;
-      notice(error.code ? reason(error.code) : String(error?.message || "未完成"), true);
+      notice(reason(error.code), true);
       render();
     }
   }
   function unmount() {
     ++version;
-    if (!root) { data = null; bridge = null; return; }
+    if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
+    autoRecoveryTimer = null;
+    autoRecoveryKey = "";
+    autoRecoveryAttempts = 0;
+    cacheContact();
+    if (!root) { data = null; bridge = null; contactScope = ""; return; }
     root.removeEventListener("click", clicked);
     root.removeEventListener("change", changed);
     root.removeEventListener("input", input);
@@ -1231,11 +1930,11 @@ window.CompanionContactPage = (() => {
     root.removeEventListener("pointermove", pointerMove);
     root.removeEventListener("pointerup", pointerUp);
     root.removeEventListener("pointercancel", pointerUp);
-    root = null; bridge = null; data = null; painting = null;
+    root = null; bridge = null; data = null; contactScope = ""; painting = null;
   }
   /* `state` 只为测试驱动而暴露：这一页的 data 是模块私有的，
      测试要断言环的几何与阈值时没有别的入口。 */
-  return {mount, unmount,
+  return {mount, unmount, openGateSettingsView,
     get state() { return {data}; },
     _internals:{minutes, hm, angle, point, curveOf, curveText, tierOf, arc, quietSpan}};
 })();

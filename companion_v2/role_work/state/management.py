@@ -1,7 +1,8 @@
 """Explicit core operations for state, schedules and presentation of one private role."""
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 import json
+from zoneinfo import ZoneInfo
 
 from companion_v2.execution.models import TaskError, digest, require, stamp
 from companion_v2.execution.service import outcome
@@ -10,6 +11,7 @@ from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 from companion_v2.delivery.presence_diagnostics import describe_presentation
 from companion_v2.role_work.life.management import RoleLifeManagement
+from .ownership import role_schedule_key
 from .configuration import DEFAULTS, GROUP, OWNER, PERMISSIONS, target_for
 
 
@@ -38,9 +40,10 @@ class StateManagement:
     @outcome
     def status(self, operator, *, after_id="", limit=30):
         with self.app.runtime.read_snapshot():
+            now = self.app.now()
             access = self.life.authorize(operator)
             snapshot = require(self.app.configuration.read(operator, target=target_for(self.context),
-                               group_id=GROUP, observed_at=self.app.now()))
+                               group_id=GROUP, observed_at=now))
             effective = {}
             for option, actions in PERMISSIONS.items():
                 try:
@@ -55,14 +58,18 @@ class StateManagement:
                 original = self.app.role_state.records.get(self.context, "current")
                 state = {"state": "unavailable", "revision": original["revision"] if original else 0, "code": error.code}
             state["view_token"] = self.token(operator, access, "current", state["revision"])
-            calendar = self.app.calendar.inventory(self.context, after_id=after_id, limit=limit, operator=operator)
+            calendar = self.app.calendar.inventory(self.context, after_id=after_id, limit=limit,
+                                                   operator=operator)
             for item in calendar["items"]:
                 item["view_token"] = self.token(operator, access, item["id"], item["revision"])
             schedule = self.app.runtime.read_one("SELECT next_at, enabled, result_json FROM role_state_schedules WHERE context_key = ?",
-                                                 (self.context.key,))
+                                                 (role_schedule_key(self.context),))
             sleep = self.life.sleep_status(operator, access=access)
             settings = {name: snapshot.values[GROUP + "." + name] for name in DEFAULTS}
             settings["mood_cross_window"] = True
+            local_day = now.astimezone(ZoneInfo(settings["planning_timezone"]))
+            day_start = local_day.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
             return {"settings": settings,
                 "body_scope": {"installation_id": self.context.scope.installation_id,
                     "bot_id": self.context.scope.bot_id, "role_id": self.context.role_binding.role.subject_id,
@@ -71,8 +78,9 @@ class StateManagement:
                 "effective": effective, "state": state, "calendar": calendar,
                 "planning": self.app.calendar_planning.status(self.context),
                 "create_token": self.token(operator, access, "calendar:new", 0),
-                "occurrences": self.app.calendar.occurrences(self.context, start=self.app.now(),
-                    end=self.app.now() + timedelta(days=7), operator=operator),
+                "occurrences": self.app.calendar.occurrences(self.context,
+                    start=day_start.astimezone(timezone.utc), end=day_end.astimezone(timezone.utc),
+                    operator=operator),
                 **sleep,
                 "maintenance": {"next_at": schedule["next_at"], "enabled": bool(schedule["enabled"]),
                     "result": json.loads(schedule["result_json"]) if schedule["result_json"] else None} if schedule else None,
@@ -96,6 +104,7 @@ class StateManagement:
             if role_owner(bound[0]) == role_owner(self.context):
                 try:
                     self.app.state_maintenance.bind(*bound[:2], guard=bound[2])
+                    self.app.calendar_planning.next_checks.pop(bound[0].key, None)
                 except TaskError:
                     continue  # A retired window cannot invalidate the current configuration.
         if self.app.presence is not None:
@@ -120,7 +129,7 @@ class StateManagement:
                 raise TaskError("record_revision_conflict", "read the current state first")
             with self.app.runtime.transaction() as connection:
                 connection.execute("UPDATE role_state_schedules SET next_at = ?, revision = revision + 1 WHERE context_key = ?",
-                                   (stamp(self.app.now()), self.context.key))
+                                   (stamp(self.app.now()), role_schedule_key(self.context)))
             require(operations.transition(op_id, expected_state=OperationState.ACCEPTED,
                 next_state=OperationState.COMPLETED, observed_at=self.app.now()))
         return {"operation_id": op_id, "replayed": reserved.replayed, "state": "scheduled"}

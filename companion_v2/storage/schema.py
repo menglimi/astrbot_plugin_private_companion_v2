@@ -1695,6 +1695,140 @@ MIGRATION_V46_TO_V47_FINGERPRINT = hashlib.sha256(
     "\n".join(V47_MIGRATION_STATEMENTS).encode("utf-8")
 ).hexdigest()
 
+V48_MIGRATION_STATEMENTS = (
+    """CREATE TABLE model_call_cache_signatures (
+        call_id TEXT PRIMARY KEY NOT NULL,
+        signature_json TEXT NOT NULL CHECK(json_valid(signature_json) AND length(signature_json) <= 32768),
+        FOREIGN KEY(call_id) REFERENCES model_calls(call_id)
+    )""",
+)
+V48_REQUIRED_TABLES = V47_REQUIRED_TABLES.union({"model_call_cache_signatures"})
+V48_SCHEMA_STATEMENTS = V47_SCHEMA_STATEMENTS + V48_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V48_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V48_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V48 = "companion-v2.storage.v48"
+SCHEMA_VERSION = SCHEMA_VERSION_V48
+MIGRATION_V47_TO_V48_ID = "companion-v2.storage.v47-to-v48"
+MIGRATION_V47_TO_V48_FINGERPRINT = hashlib.sha256(
+    "\n".join(V48_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V49_MIGRATION_STATEMENTS = (
+    """CREATE TABLE inbound_no_replies (
+        event_ref TEXT PRIMARY KEY NOT NULL CHECK(length(event_ref) = 32),
+        origin_key TEXT,
+        channel TEXT NOT NULL CHECK(channel IN ('private', 'group', 'unknown')),
+        reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 96),
+        observed_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX inbound_no_replies_role_recent_idx ON inbound_no_replies(origin_key, observed_at DESC)",
+)
+V49_REQUIRED_TABLES = V48_REQUIRED_TABLES.union({"inbound_no_replies"})
+V49_SCHEMA_STATEMENTS = V48_SCHEMA_STATEMENTS + V49_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V49_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V49_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V49 = "companion-v2.storage.v49"
+SCHEMA_VERSION = SCHEMA_VERSION_V49
+MIGRATION_V48_TO_V49_ID = "companion-v2.storage.v48-to-v49"
+MIGRATION_V48_TO_V49_FINGERPRINT = hashlib.sha256(
+    "\n".join(V49_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V50_MIGRATION_STATEMENTS = (
+    "ALTER TABLE inbound_no_replies ADD COLUMN code TEXT CHECK(code IS NULL OR length(code) BETWEEN 1 AND 96)",
+)
+V50_REQUIRED_TABLES = V49_REQUIRED_TABLES
+V50_SCHEMA_STATEMENTS = V49_SCHEMA_STATEMENTS + V50_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V50_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V50_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V50 = "companion-v2.storage.v50"
+SCHEMA_VERSION = SCHEMA_VERSION_V50
+MIGRATION_V49_TO_V50_ID = "companion-v2.storage.v49-to-v50"
+MIGRATION_V49_TO_V50_FINGERPRINT = hashlib.sha256(
+    "\n".join(V50_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V51_MIGRATION_STATEMENTS = (
+    "ALTER TABLE reference_assets ADD COLUMN position INTEGER NOT NULL DEFAULT 0 CHECK(position >= 0)",
+    """UPDATE reference_assets AS asset SET position = (
+        SELECT COUNT(*) FROM reference_assets AS earlier
+        WHERE earlier.owner_key = asset.owner_key
+          AND (earlier.created_at < asset.created_at
+               OR (earlier.created_at = asset.created_at AND earlier.asset_id < asset.asset_id))
+    )""",
+    "CREATE INDEX reference_assets_gallery_order_idx ON reference_assets(owner_key, state, position, asset_id)",
+    """CREATE TABLE reference_asset_usage (
+        owner_key TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        usage_json TEXT NOT NULL CHECK(json_valid(usage_json) AND length(usage_json) <= 8192),
+        PRIMARY KEY(owner_key, asset_id),
+        FOREIGN KEY(owner_key, asset_id) REFERENCES reference_assets(owner_key, asset_id)
+    )""",
+)
+V51_REQUIRED_TABLES = V50_REQUIRED_TABLES.union({"reference_asset_usage"})
+V51_SCHEMA_STATEMENTS = V50_SCHEMA_STATEMENTS + V51_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V51_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V51_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V51 = "companion-v2.storage.v51"
+SCHEMA_VERSION = SCHEMA_VERSION_V51
+MIGRATION_V50_TO_V51_ID = "companion-v2.storage.v50-to-v51"
+MIGRATION_V50_TO_V51_FINGERPRINT = hashlib.sha256(
+    "\n".join(V51_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V52_MIGRATION_STATEMENTS = (
+    "ALTER TABLE conversation_batches ADD COLUMN presentation_action TEXT NOT NULL DEFAULT 'text' "
+    "CHECK(presentation_action IN ('text', 'image', 'voice_only', 'poke', 'silent'))",
+)
+V52_REQUIRED_TABLES = V51_REQUIRED_TABLES
+V52_SCHEMA_STATEMENTS = V51_SCHEMA_STATEMENTS + V52_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V52_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V52_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V52 = "companion-v2.storage.v52"
+SCHEMA_VERSION = SCHEMA_VERSION_V52
+MIGRATION_V51_TO_V52_ID = "companion-v2.storage.v51-to-v52"
+MIGRATION_V51_TO_V52_FINGERPRINT = hashlib.sha256(
+    "\n".join(V52_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V53_MIGRATION_STATEMENTS = (
+    """CREATE TABLE model_call_diagnostics (
+        call_id TEXT PRIMARY KEY NOT NULL REFERENCES model_calls(call_id),
+        summary_json TEXT NOT NULL CHECK(json_valid(summary_json) AND length(summary_json) <= 8192),
+        observed_at TEXT NOT NULL
+    )""",
+)
+V53_REQUIRED_TABLES = V52_REQUIRED_TABLES.union({"model_call_diagnostics"})
+V53_SCHEMA_STATEMENTS = V52_SCHEMA_STATEMENTS + V53_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V53_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V53_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V53 = "companion-v2.storage.v53"
+SCHEMA_VERSION = SCHEMA_VERSION_V53
+MIGRATION_V52_TO_V53_ID = "companion-v2.storage.v52-to-v53"
+MIGRATION_V52_TO_V53_FINGERPRINT = hashlib.sha256(
+    "\n".join(V53_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+
+V54_MIGRATION_STATEMENTS = (
+    """CREATE TABLE conversation_reply_streams (
+        batch_id TEXT PRIMARY KEY NOT NULL REFERENCES conversation_batches(batch_id),
+        call_id TEXT NOT NULL REFERENCES model_calls(call_id),
+        state TEXT NOT NULL CHECK(state IN ('open', 'complete', 'interrupted')),
+        observed_at TEXT NOT NULL
+    )""",
+)
+V54_REQUIRED_TABLES = V53_REQUIRED_TABLES.union({"conversation_reply_streams"})
+V54_SCHEMA_STATEMENTS = V53_SCHEMA_STATEMENTS + V54_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V54_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V54_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V54 = "companion-v2.storage.v54"
+SCHEMA_VERSION = SCHEMA_VERSION_V54
+MIGRATION_V53_TO_V54_ID = "companion-v2.storage.v53-to-v54"
+MIGRATION_V53_TO_V54_FINGERPRINT = hashlib.sha256(
+    "\n".join(V54_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
 
 def migration_count() -> int:
     """How many ordered migrations a fully upgraded data root records.

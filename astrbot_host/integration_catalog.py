@@ -18,10 +18,12 @@ OPTIONAL_PROVIDERS: tuple[dict[str, Any], ...] = (
         "furniture": {"id": "content", "name": "创作书架", "panel_id": "content"},
     },
     {
-        "plugin_id": "astrbot_plugin_image_companion",
+        "plugin_id": "astrbot_plugin_private_companion_v2.image",
         "capability_id": "image",
+        "extension_id": "image",
+        "owner": "companion_v2",
         "label": "生图与相册",
-        "description": "生成、编辑、参考图和原件保留。",
+        "description": "V2 内置的生成、编辑、参考图与原件保留拓展，可独立装配。",
         "furniture": {"id": "image", "name": "画面工作室", "panel_id": "image"},
     },
     {
@@ -32,10 +34,12 @@ OPTIONAL_PROVIDERS: tuple[dict[str, Any], ...] = (
         "furniture": {"id": "reality", "name": "现实设备台", "panel_id": "reality"},
     },
     {
-        "plugin_id": "astrbot_plugin_screen_companion",
+        "plugin_id": "astrbot_plugin_private_companion_v2.screen",
         "capability_id": "screen",
+        "extension_id": "companion.screen.native",
+        "owner": "companion_v2",
         "label": "屏幕陪伴",
-        "description": "授权范围内的屏幕采集、识别和观察记录。",
+        "description": "V2 内置的按需屏幕采集、识别和观察记录拓展，可独立装配。",
         "furniture": {"id": "screen", "name": "屏幕台", "panel_id": "screen"},
     },
     {
@@ -60,4 +64,3 @@ OPTIONAL_PROVIDERS: tuple[dict[str, Any], ...] = (
         "furniture": {"id": "live", "name": "直播与表演", "panel_id": "live"},
     },
 )
-

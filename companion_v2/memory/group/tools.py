@@ -4,7 +4,7 @@ from dataclasses import replace
 import json
 
 from companion_v2.conversation.foreground import PromptMaterial
-from companion_v2.execution.models import TaskError, encode
+from companion_v2.execution.models import TaskError, encode, require
 from companion_v2.model_gateway.models import ToolSpec
 from .context import INSTRUCTION
 from .service import OWNER
@@ -12,6 +12,7 @@ from .service import OWNER
 
 FIELDS = {
     "group.memory.query": ((), ("query", "cursor", "limit")),
+    "group.memory.legacy.query": (("query",), ("material_kind", "cursor", "limit", "time_start", "time_end")),
     "group.memory.remember": (("input_handle", "statement"), ("memory_id", "expected_revision")),
     "group.memory.retract": (("input_handle", "memory_id", "expected_revision"), ()),
     "group.memory.operation": (("operation_id",), ()),
@@ -22,10 +23,12 @@ class GroupMemoryTools:
     actions = frozenset(FIELDS)
     mutations = frozenset({"group.memory.remember", "group.memory.retract"})
 
-    def __init__(self, memory):
+    def __init__(self, memory, legacy_memory=None):
         self.memory, self.messages = memory, memory.messages
+        self.legacy_memory = legacy_memory
         descriptions = (
             "在本群当前角色记忆中按原话线索查询；返回原发言者及版本，可沿 next_cursor 续查。",
+            "只读查询已映射到本群的 V1 历史资料；结果是历史记录，不是当前事实，也不能作为群记忆写入证据。",
             "保存本轮成员有来源的公开陈述；修订须提供本人原记录 ID 和当前版本。",
             "按本人当前明确请求撤回其原群记忆；不代其他成员撤回，不删除平台原话。",
             "查询本人原群记忆操作的持久回执，查不到或未知不等于未执行。",
@@ -44,8 +47,11 @@ class GroupMemoryTools:
         try:
             self.memory.access.check(context, "group.memory.write")
         except TaskError:
-            return tuple(t for t in self.catalog if t.action not in self.mutations)
-        return self.catalog
+            catalog = tuple(t for t in self.catalog if t.action not in self.mutations)
+        else:
+            catalog = self.catalog
+        return tuple(t for t in catalog
+                     if t.action != "group.memory.legacy.query" or self.legacy_memory is not None)
 
     def execute(self, context, batch_id, call_id, action, arguments):
         if action not in {t.action for t in self.catalog_for(context)}:
@@ -55,6 +61,13 @@ class GroupMemoryTools:
             raise ValueError("group memory tool fields do not match its contract")
         if action == "group.memory.query":
             result = self.memory.query(context, **arguments)
+        elif action == "group.memory.legacy.query":
+            query = self.legacy_memory.query.legacy
+            result = require(query.query(context, query_intent=arguments["query"],
+                material_kind=arguments.get("material_kind", "all"),
+                cursor=arguments.get("cursor"), limit=arguments.get("limit"),
+                time_start=arguments.get("time_start"), time_end=arguments.get("time_end"),
+                group_read_authorized=True))
         elif action == "group.memory.operation":
             result = self.memory.operation(context, arguments["operation_id"])
         else:
@@ -77,6 +90,12 @@ class GroupMemoryTools:
         payload, materials = result["payload"], []
         if row["action"] == "group.memory.query":
             items = payload["items"]
+        elif row["action"] == "group.memory.legacy.query":
+            if self.legacy_memory is None:
+                raise TaskError("group_memory_tool_unavailable", "historical memory reader is unavailable")
+            self.memory.access.check(context, "group.memory.read")
+            self.legacy_memory.query.legacy.verify(context, payload["items"])
+            return result, None
         else:
             identifier = (json.loads(row["arguments_json"])["operation_id"] if row["action"] == "group.memory.operation"
                           else row["operation_id"])

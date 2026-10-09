@@ -1,15 +1,16 @@
 """Group-audience safety review of provider-generated originals.
 
-A generated image reaches a group only when a review that actually ran said the
-visible content is safe for that collective audience. Every other outcome -- an
-unsafe label, an unusable answer, a timed-out or unavailable model, or a disabled
-review -- withholds the image from the group and keeps it available through the
-requesting member's own separately authorized private route instead.
+When enabled, review lets a generated image reach a group only after a safe
+verdict. Unsafe images are withheld from the group and may use the requester's
+separately authorized private route. An inconclusive or unavailable review uses
+the configured private fallback or keeps only the text in the group. Disabling
+review preserves the original group delivery flow.
 
 A verdict never rewrites a sealed batch. It governs one delivery: the group part
-is sent without its image entry, and the image leaves through an independent
-delivery. Pixels are never copied into the ledger, so a withdrawn or revoked
-provider original cannot be resurrected by a stored verdict.
+is sent without a withheld image entry. Unsafe images, and inconclusive images
+when configured, may leave through an independent authorized private delivery.
+Pixels are never copied into the ledger, so a withdrawn or revoked provider
+original cannot be resurrected by a stored verdict.
 """
 
 from __future__ import annotations

@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import timedelta
 import json
 import unittest
+from types import SimpleNamespace
 
 from companion_v2.capabilities.models import CapabilityAuthorizationState, CapabilityPackageDescriptor
 from companion_v2.capabilities.repositories import CapabilityRepository
@@ -15,7 +16,7 @@ from companion_v2.conversation.foreground import ClaimKind, DraftClaim
 from companion_v2.conversation.tool_loop import LocalRoleTools
 from companion_v2.execution.models import Lane, ProviderBinding, SideEffect, TaskError, digest, encode
 from companion_v2.execution.runner import TaskRun
-from companion_v2.foundation.refs import SourceRef, VersionRef
+from companion_v2.foundation.refs import ScopeKind, SourceRef, VersionRef
 from companion_v2.model_gateway.models import ToolCall, ToolSpec
 from companion_v2.model_gateway.routing import ModelRouter
 from companion_v2.model_gateway.service import LocalModelGateway
@@ -135,6 +136,17 @@ class ExternalFixture(MessageFixture):
 
 
 class ExternalToolTests(ExternalFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_group_catalog_filter_audit_is_bounded_and_uses_codes_only(self):
+        group_context = SimpleNamespace(scope=SimpleNamespace(kind=ScopeKind.GROUP))
+
+        offered, filtered = self.extension.catalog_with_diagnostics(group_context)
+
+        self.assertEqual(offered, ())
+        self.assertEqual([item["action"] for item in filtered], ["device.read", "device.play"])
+        self.assertEqual({item["reason"] for item in filtered}, {"not_supported_for_group"})
+        self.assertTrue(all(set(item) == {"action", "reason"} for item in filtered))
+        self.assertLessEqual(len(filtered), 128)
+
     async def test_read_governed_source_continues_original_role_ignoring_proactive_weight(self):
         async def respond(envelope):
             self.assertIn("device.read", {tool.action for tool in envelope.tools})

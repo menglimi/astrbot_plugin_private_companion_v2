@@ -168,10 +168,17 @@ class GroupReplyHistory:
         saved = json.loads(batch["contributions_json"])
         if (type(saved) is not dict
                 or set(saved) - {"inputs", "materials", "group_context", "group_memory", "reply_settings",
-                                 "expression_style"}
+                                 "expression_style", "person_card", "group_network"}
                 or type(saved.get("inputs")) is not list or not 1 <= len(saved["inputs"]) <= 32
                 or type(saved.get("materials")) is not list or len(saved["materials"]) > 32):
             raise TaskError("group_reply_profile", "group history has no reader for another profile's material")
+        try:
+            if "person_card" in saved:
+                groups.messages.acquaintance.validate_snapshot(saved["person_card"], original)
+            if "group_network" in saved:
+                groups.messages.group_network.validate_snapshot(saved["group_network"], original)
+        except TaskError as error:
+            raise TaskError("group_reply_profile", "group reply metadata belongs to another conversation") from error
         if "expression_style" in saved:
             # Adopted expression rules change a reply's wording, not its facts,
             # so the snapshot only has to be well formed here. Re-resolving its

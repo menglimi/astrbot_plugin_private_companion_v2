@@ -44,7 +44,8 @@ class NativeExtensionRegistry(AstrBotToolPort):
     """Discovery never mutates storage; execution borrows the original task fence."""
 
     def __init__(self, context, *, result_handlers: Mapping[str, Callable] | None = None, now=None,
-                 together_execution=None, image_settings_path=None):
+                 together_execution=None, image_settings_path=None, bundled_extensions=(),
+                 bundled_issues=(), managed_extensions=()):
         self.context = context
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.together_execution = dict(together_execution or {})
@@ -64,7 +65,11 @@ class NativeExtensionRegistry(AstrBotToolPort):
         self.content = None
         self.screen = None
         self.camera = None
-        self._entries, self.issues = discover(context)
+        self._entries, discovered_issues = discover(context, excluded_extensions=managed_extensions)
+        self._bundled_extensions = tuple(bundled_extensions)
+        for lease in self._bundled_extensions:
+            self._entries.update({item.host_tool_id: (item, lease) for item in lease.declarations()})
+        self.issues = tuple((*discovered_issues, *bundled_issues))
         self._blocked_extension_ids = frozenset()
         self.image_settings_path = image_settings_path
         self.image_enabled = read_image_settings(image_settings_path)
@@ -84,10 +89,16 @@ class NativeExtensionRegistry(AstrBotToolPort):
         if (self._enforcing_image_settings and entry[0].descriptor.tool.action in IMAGE_ACTIONS
                 and not self.image_enabled[entry[0].descriptor.tool.action]):
             return None
+        if self._enforcing_image_settings and entry[0].descriptor.tool.action in IMAGE_ACTIONS:
+            action = entry[0].descriptor.tool.action
+            backend = getattr(getattr(entry[1].port, "owner", None), "backend", None)
+            operations = getattr(backend, "operations", None)
+            if operations is not None and action.split(".", 1)[1] not in operations:
+                return None
         return entry[0]
 
     def image_extension_api(self):
-        "The current image extension's management API, or None when absent or stale."
+        "The management API pinned to a current V2-native Image declaration."
         if self._closed:
             return None
         for declaration, lease in self._entries.values():
@@ -137,18 +148,21 @@ class NativeExtensionRegistry(AstrBotToolPort):
                     if self.current_declaration(declaration.host_tool_id) != declaration:
                         raise TaskError("native_provider_changed", "native declaration is no longer current")
                     registered = repository.register_descriptor(package, registered_at=observed_at)
-                    if registered.failure is not None and registered.failure.code == "capability_descriptor_conflict":
-                        # An optional provider cannot replace an immutable descriptor
-                        # under the same version, or take the whole core offline.
+                    if registered.failure is not None and registered.failure.code in {
+                            "capability_descriptor_conflict", "capability_identity_conflict"}:
+                        # An optional provider cannot replace an immutable package
+                        # identity or take the whole core offline.
                         # Retain its records and refuse every tool from this extension.
-                        blocked[package.extension_id] = self._entries[declaration.host_tool_id][1].manifest.plugin_id
+                        blocked[package.extension_id] = (
+                            self._entries[declaration.host_tool_id][1].manifest.plugin_id,
+                            registered.failure.code,
+                        )
                         continue
                     packages[package.extension_id] = require(registered)
                 if self.content is not None and "content" not in blocked and "content" not in self._blocked_extension_ids:
                     self.content.sources.synchronize()
             self._blocked_extension_ids = self._blocked_extension_ids | frozenset(blocked)
-            self.issues = tuple(dict.fromkeys((*self.issues,
-                *((plugin_id, "capability_descriptor_conflict") for plugin_id in blocked.values()))))
+            self.issues = tuple(dict.fromkeys((*self.issues, *blocked.values())))
             self._enforcing_image_settings = True
             return Outcome.success(tuple(packages.values()))
         except TaskError as error:
@@ -197,6 +211,11 @@ class NativeExtensionRegistry(AstrBotToolPort):
                         if self.camera is not None and invocation.descriptor.tool.action == REALITY_CAMERA_ACTION
                         else None)
         request = invocation_request(invocation)
+        if action in IMAGE_ACTIONS and self.runtime is not None:
+            from companion_v2.conversation.media.output_settings import effective_settings, apply_prompts
+            preferences = effective_settings(self.runtime, invocation.context)
+            prompts = apply_prompts(request["arguments"], action, preferences)
+            request["image_prompt"] = {"positive":prompts["prompt"], "negative":prompts["negative_prompt"]}
         if invocation.descriptor.tool.action == TOGETHER_CREATE_ACTION:
             if self.persona_guard is None:
                 raise TaskError("native_persona_guard_missing", "room creation requires a verified host persona")
@@ -342,6 +361,11 @@ class NativeExtensionRegistry(AstrBotToolPort):
     def close(self):
         if self.content is not None:
             self.content.close()
+        for lease in self._bundled_extensions:
+            try:
+                lease.close()
+            except Exception:
+                pass
         self._closed = True
         self.application = self.runtime = self.role_guard = self.persona_guard = self.screen = None
 

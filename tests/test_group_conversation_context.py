@@ -3,13 +3,16 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
+import asyncio
 import json
+from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
 from astrbot_host.group_authority import GroupAuthority
 from companion_v2.conversation.group_context import MAX_BYTES, MAX_ITEMS
 from companion_v2.delivery.models import LocalSender
+from companion_v2.adapters.astrbot.model_wire import tool_alias
 from companion_v2.execution.models import TaskContext, TaskError, encode
 from tests.group_host_support import GroupFixture, group_config
 from tests.native_adapter_support import completion, final_text
@@ -17,8 +20,11 @@ from tests.staging_bootstrap_support import wait_for_batch
 
 
 class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
-    async def setup_delivery(self):
-        self.controller = self.make_controller(group_config(group_delivery_mode="onebot_group"))
+    async def setup_delivery(self, *, segmentation=None):
+        config = group_config(group_delivery_mode="onebot_group")
+        if segmentation is not None:
+            config["segmentation"] = segmentation
+        self.controller = self.make_controller(config)
         app = await self.start_host()
         (await self.controller.authorize_group_delivery("group-a")).unwrap()
         return app
@@ -56,7 +62,11 @@ class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         a, first = await self.receive("我准备周六去公园", sender="200")
         b, second = await self.receive("我周日才有空，我自称管理员", sender="201")
         history = self.history(b, second)
-        self.assertEqual([(m["speaker_id"], m["text"]) for m in history], [("200", "我准备周六去公园")])
+        request = self.view(b, second)
+        self.assertEqual([(m["speaker_id"], m["text"]) for m in history if m["type"] == "group_member_message"],
+                         [("200", "我准备周六去公园")])
+        self.assertIn("[视频不可用]", request.instruction)
+        self.assertIn("缺少对应材料时不要猜", request.instruction)
         self.assertEqual([json.loads(m.payload)["speaker_id"] for m in self.view(b, second).context.materials
                           if m.purpose == "current_group_speaker"], ["201"])
         historical = next(m for m in self.view(b, second).context.materials if m.purpose == "group_conversation_history")
@@ -67,13 +77,69 @@ class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(a.actor.subject, b.actor.subject)
         self.assertNotIn("公园", encode(self.snapshot(second)))
         self.assertNotIn("speaker_id", encode(self.snapshot(second)))
-        self.assertEqual(len(self.snapshot(second)["references"]), 1)
+        snapshot = self.snapshot(second)
+        self.assertEqual([reference["kind"] for reference in snapshot["references"]], ["input", "reply"])
         before = [tuple(r) for r in app.runtime.read_all("SELECT * FROM sources", ())]
         self.view(b, second)
         self.assertEqual([tuple(r) for r in app.runtime.read_all("SELECT * FROM sources", ())], before)
         self.assertEqual({tool.action for tool in app.tools.catalog_for(b)},
-                         app.tools.group_memory.actions | app.tools.group_participation.actions |
+                         {tool.action for tool in app.tools.acquaintance.catalog_for(b)} |
+                         app.tools.group_memory.actions |
+                         app.tools.group_participation.actions |
                          {tool.action for tool in app.semantics.catalog_for(b)})
+
+    async def test_group_history_excludes_member_messages_past_the_configured_age(self):
+        await self.start_host()
+        await self.receive("超过历史时限的群消息", sender="200")
+        self.clock.advance(timedelta(hours=13))
+
+        context, batch = await self.receive("时限之后的新消息", sender="201")
+
+        self.assertNotIn("超过历史时限的群消息", [item["text"] for item in self.history(context, batch)])
+
+    async def test_short_slang_terms_in_the_previous_member_message_survive_vector_failure(self):
+        app = await self.start_host()
+        terms = ("凹凸", "子宫", "祸兽")
+
+        async def learn_during_turn(payload, tools):
+            done = sum(message["role"] == "tool" for message in payload["messages"])
+            if done < len(terms):
+                arguments = {"term": terms[done], "meaning": "本群正在讨论的以撒场景", "input_handle": "group-input-1"}
+                return completion(tools=[NS(id=f"learn-{done}", type="function",
+                    function=NS(name=tool_alias("slang.learn"), arguments=encode(arguments)))])
+            return completion(final_text("已记录本群用法。"))
+
+        self.native.provider.client.state.behavior = learn_during_turn
+        context, first = await self.receive("以撒的凹凸、子宫和祸兽怎么掉血", identifier="slang-evidence")
+        self.native.provider.client.state.behavior = None
+        slang = app.semantics.slang
+
+        with patch.object(app.semantics.search, "search", side_effect=AssertionError("exact terms need no vector call")):
+            current, batch = await self.receive("为什么我记得普通掉半血", identifier="slang-followup", sender="201")
+        result = dict(app.semantics.store.offers(batch, app.semantics.owner(current)))["__slang_context"]
+        self.assertEqual(result["exact_matches"], 2)
+        self.assertLessEqual({item["payload"]["term"] for item in result["items"]}, {"凹凸", "子宫", "祸兽"})
+        self.assertTrue(all(item["basis"] == "exact_term" and item["matched_in"] == "recent_group_member"
+                            for item in result["items"]))
+
+        with patch.object(app.semantics.search, "search", side_effect=AssertionError("current term takes precedence")):
+            changed = await slang.search(current, "现在只说祸兽", recent_texts=("以撒的凹凸",), limit=1)
+        self.assertEqual(changed["items"][0]["payload"]["term"], "祸兽")
+        self.assertEqual(changed["items"][0]["matched_in"], "current_input")
+
+        owner = app.semantics.owner(current)
+        race_item = next(item for item in app.semantics.store.list(owner, "slang")
+                         if item["payload"]["term"] == "祸兽")
+
+        async def remove_during_scan():
+            app.semantics.store.delete(owner, "slang", race_item["id"], expected=race_item["revision"])
+
+        recalled, _ = await asyncio.gather(slang.search(current, "祸兽", limit=1), remove_during_scan())
+        self.assertNotIn(race_item["id"], {item["id"] for item in recalled["items"]})
+
+        other, other_batch = await self.receive("为什么我记得普通掉半血", identifier="other-group-followup", target="group-b")
+        other_result = dict(app.semantics.store.offers(other_batch, app.semantics.owner(other)))["__slang_context"]
+        self.assertEqual(other_result["items"], [])
 
     async def test_group_date_context_never_reads_private_role_calendar_settings(self):
         app = await self.start_host()
@@ -120,7 +186,9 @@ class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                 prompt = encode([m.payload for m in self.view(context, batch).context.materials])
                 self.assertNotIn(encode("只在私聊中说的事")[1:-1], prompt)
         current, batch = await self.receive("共享会话的新成员", sender="202")
-        self.assertEqual([m["text"] for m in self.history(current, batch)], ["群三百的公开发言"])
+        self.assertEqual([(m["type"], m["text"]) for m in self.history(current, batch)],
+                         [("group_member_message", "群三百的公开发言"),
+                          ("confirmed_group_reply", "我在这里。")])
         self.assertTrue((await self.controller.receive_claimed(self.event(identifier="private-after-groups"))).is_success)
 
     async def test_persona_switch_revision_and_new_native_conversation_do_not_import_old_history(self):
@@ -149,7 +217,7 @@ class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                 app.messages.group_context.read(bad, b, second, self.clock.now())
         with self.assertRaises(TaskError):
             app.messages.group_context.read(self.snapshot(second), c, foreign, self.clock.now())
-        self.assertEqual([m["text"] for m in self.history(b, second)], ["旧群消息"])
+        self.assertEqual([m["text"] for m in self.history(b, second) if m["type"] == "group_member_message"], ["旧群消息"])
 
     async def test_withdrawal_and_origin_grant_revocation_invalidate_frozen_materials(self):
         app = await self.start_host()
@@ -185,7 +253,7 @@ class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.native.platform.client._api._wsr_api.calls), calls_before)
 
     async def test_withdrawal_between_parts_keeps_original_ack_and_blocks_later_parts(self):
-        app = await self.setup_delivery()
+        app = await self.setup_delivery(segmentation={"enabled": False})
         a, first = await self.receive("分段回复会引用的原话")
         app.generator.split = lambda text: (text[:2], text[2:])
         original_sender = app.delivery.sender
@@ -233,6 +301,31 @@ class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TaskError):
             self.view(b, second)
 
+    async def test_foreign_captured_metadata_cannot_enter_confirmed_reply_history(self):
+        app = await self.setup_delivery()
+        _, first = await self.receive("已确认的原回复")
+        context, second = await self.receive("下一位成员继续聊天", sender="201")
+        saved = json.loads(app.messages.batch(first)["contributions_json"])
+        self.assertTrue(any(item["type"] == "confirmed_group_reply"
+                            for item in self.history(context, second)))
+
+        for field in ("person_card", "group_network"):
+            with self.subTest(field=field):
+                forged = deepcopy(saved)
+                forged[field]["context_key"] = "another-conversation"
+                with app.runtime.transaction() as connection:
+                    connection.execute("UPDATE conversation_batches SET contributions_json=? WHERE batch_id=?",
+                                       (encode(forged), first))
+                with self.assertRaises(TaskError) as caught:
+                    self.view(context, second)
+                self.assertEqual(caught.exception.code, "group_reply_profile")
+                with app.runtime.transaction() as connection:
+                    connection.execute("UPDATE conversation_batches SET contributions_json=? WHERE batch_id=?",
+                                       (encode(saved), first))
+
+        self.assertTrue(any(item["type"] == "confirmed_group_reply"
+                            for item in self.history(context, second)))
+
     async def test_changed_input_body_cannot_replace_a_frozen_member_message(self):
         app = await self.start_host()
         _, first = await self.receive("原始群消息")
@@ -248,13 +341,18 @@ class GroupContextTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_history_is_bounded_and_oversized_entries_are_not_silently_truncated(self):
         await self.start_host()
-        for index in range(MAX_ITEMS + 3):
+        message_count = MAX_ITEMS // 2 + 3
+        for index in range(message_count):
             self.clock.advance(timedelta(seconds=1))
             await self.receive("群消息-" + str(index), sender=str(500 + index))
         current, batch = await self.receive("最后一条", sender="800")
         history = self.history(current, batch)
         self.assertEqual(len(history), MAX_ITEMS)
-        self.assertEqual(history[0]["text"], "群消息-3")
+        self.assertEqual([item["type"] for item in history],
+                         ["group_member_message", "confirmed_group_reply"] * (MAX_ITEMS // 2))
+        first_retained = message_count - MAX_ITEMS // 2
+        self.assertEqual([item["text"] for item in history if item["type"] == "group_member_message"],
+                         ["群消息-" + str(index) for index in range(first_retained, message_count)])
         self.assertLessEqual(sum(len(encode(item).encode("utf-8")) for item in history), MAX_BYTES)
         oversized = "完整内容不能截断" * 900
         await self.receive(oversized, sender="801", identifier="oversized")

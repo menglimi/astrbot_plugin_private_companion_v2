@@ -1,0 +1,49 @@
+{
+  "legacy_compat_config": {
+    "enable_segmented_proactive_reply": true,
+    "enable_llm_controlled_segmenting": false,
+    "llm_controlled_segmenting_prompt": "",
+    "enable_segmented_plugin_rules": true,
+    "segmented_proactive_scope": "all_llm",
+    "segmented_proactive_chat_scope": "all",
+    "enable_segmented_proactive_chat_profiles": false,
+    "segmented_proactive_threshold": 500,
+    "segmented_proactive_min_segment_chars": 5,
+    "segmented_proactive_max_segments": 5,
+    "segmented_proactive_split_mode": "words",
+    "segmented_proactive_match_width_variants": true,
+    "segmented_proactive_regex": "(?<=[。！？!?…~～])\\s*|\\n+",
+    "segmented_proactive_split_words": [
+      "。",
+      "？",
+      "！",
+      "~",
+      "～",
+      "?",
+      ".",
+      "!",
+      ";",
+      "；",
+      "~",
+      "……",
+      "）",
+      "“",
+      "，",
+      "…",
+      "，"
+    ],
+    "enable_segmented_proactive_content_cleanup": true,
+    "segmented_proactive_content_cleanup_rule": "[\\n。？！]",
+    "segmented_proactive_content_cleanup_scope": "all",
+    "segmented_proactive_content_cleanup_words": [
+      "。",
+      "，"
+    ],
+    "enable_segmented_proactive_content_replacement": false,
+    "segmented_proactive_content_replacements": [],
+    "segmented_proactive_interval_method": "log",
+    "segmented_proactive_interval_min": 1.5,
+    "segmented_proactive_interval_max": 3.5,
+    "segmented_proactive_log_base": 2.1
+  }
+}

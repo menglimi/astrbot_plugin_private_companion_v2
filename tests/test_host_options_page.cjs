@@ -1,0 +1,82 @@
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const source = fs.readFileSync(path.join(__dirname, "../pages/陪伴小屋/host-options-page.js"), "utf8");
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const drain = async (count = 8) => {for (let index = 0; index < count; index += 1) await flush();};
+
+function harness() {
+  const calls = [], handlers = {};
+  let snapshot = {
+    voice_reply: {enabled: false, probability: 1, private_probability: -1, group_probability: -1},
+    poke: {enabled: false, trigger_probability: 0.25, back_probability: 0, replies: ["我在"]},
+    forward_intake: {max_forwards: 4, max_nodes: 32, max_depth: 4},
+    forward_bounds: {max_forwards: 4, max_nodes: 32, max_depth: 4},
+    edit_tokens: {voice: "v".repeat(64), poke: "p".repeat(64), forward_intake: "f".repeat(64)},
+    apply_modes: {voice: "restart_host", poke: "immediate", forward_intake: "immediate_next_input"},
+  };
+  const bridge = {
+    async apiGet(route) {calls.push({method: "GET", route});return {status: "ok", data: snapshot};},
+    async apiPost(route, body) {
+      calls.push({method: "POST", route, body});
+      snapshot = {...snapshot, forward_intake: {...snapshot.forward_intake, ...body.changes}};
+      return {status: "ok", data: {...snapshot, saved: true, apply_mode: "immediate_next_input"}};
+    },
+  };
+  const window = {CompanionProduct: {bridgeNow: () => bridge}};
+  const context = vm.createContext({window, setTimeout, clearTimeout});
+  vm.runInContext(source, context);
+  const root = {id: "forwardIntakeWorkspace", dataset: {}, innerHTML: "",
+    addEventListener(type, handler) {handlers[type] = handler;},
+    removeEventListener(type) {delete handlers[type];}};
+  return {page: window.CompanionHostOptionsPage, root, handlers, calls};
+}
+
+test("forward intake page renders bounded controls, saves all values and exposes the search owner", async () => {
+  const h = harness();
+  h.page.mount({forwardRoot: h.root});
+  await drain();
+  assert.match(h.root.innerHTML, /name="max_forwards" min="1" max="4"/);
+  assert.match(h.root.innerHTML, /name="max_nodes" min="1" max="32"/);
+  assert.match(h.root.innerHTML, /name="max_depth" min="1" max="4"/);
+  assert.match(h.root.innerHTML, /单条消息最大转发数/);
+  assert.equal(h.page.searchEntries().filter(item => item.group === "forward_intake").length, 3);
+
+  const values = {max_forwards: "2", max_nodes: "8", max_depth: "2"};
+  const message = {textContent: "", hidden: true};
+  const button = {disabled: false, textContent: "保存合并转发上限"};
+  const controls = Object.fromEntries(Object.entries(values).map(([name, value]) => [name, {value}]));
+  const form = {dataset: {hostForm: "forward_intake"},
+    querySelector(selector) {
+      const field = selector.match(/^\[name="(.+)"\]$/)?.[1];
+      return field ? controls[field] : selector.includes("button") ? button : message;
+    }};
+  let prevented = false;
+  h.handlers.submit({target: {closest: () => form}, preventDefault() {prevented = true;}});
+  await drain();
+  const saved = h.calls.find(call => call.method === "POST");
+  assert.equal(prevented, true);
+  assert.equal(saved.route, "host-options/forward_intake");
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.changes)), {max_forwards: 2, max_nodes: 8, max_depth: 2});
+  assert.match(h.root.innerHTML, /已保存/);
+});
+
+test("forward intake page rejects a value beyond the host-provided structural bound", async () => {
+  const h = harness();
+  h.page.mount({forwardRoot: h.root});
+  await drain();
+  const message = {textContent: "", hidden: true};
+  const controls = {max_forwards: {value: "4"}, max_nodes: {value: "33"}, max_depth: {value: "4"}};
+  const form = {dataset: {hostForm: "forward_intake"}, querySelector(selector) {
+    const field = selector.match(/^\[name="(.+)"\]$/)?.[1];
+    return field ? controls[field] : message;
+  }};
+  h.handlers.submit({target: {closest: () => form}, preventDefault() {}});
+  await drain();
+  assert.equal(h.calls.some(call => call.method === "POST"), false);
+  assert.match(message.textContent, /每条转发的节点数请输入 1 到 32/);
+});

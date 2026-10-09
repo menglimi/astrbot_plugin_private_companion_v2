@@ -41,7 +41,7 @@ window.CompanionAppearancePage = (() => {
         <div class="apv-brand"><span class="apv-brand-mark">屋</span><strong>陪伴小屋</strong></div>
         <span class="apv-nav active">今日空间</span>
         <span class="apv-nav">状态记录</span>
-        <span class="apv-nav">记忆与经历</span>
+        <span class="apv-nav">事实与经历</span>
         <span class="apv-nav-rule"></span>
         <span class="apv-nav">外观设置</span>
       </aside>
@@ -67,6 +67,26 @@ window.CompanionAppearancePage = (() => {
               <button type="button" class="button small" tabindex="-1">查看详情</button>
               <button type="button" class="button small primary" tabindex="-1">记下一刻</button>
             </div>
+          </div>
+          <div class="apv-card apv-task-card">
+            <div class="apv-head">
+              <span class="apv-dot"></span>
+              <strong>今天的三件事</strong>
+              <span class="apv-status">1 / 3 已完成</span>
+            </div>
+            <div class="apv-row"><span class="apv-chip">散步 30 分钟</span><span class="apv-chip quiet">已完成</span></div>
+            <div class="apv-row"><span class="apv-chip">采购周末食材</span><span class="apv-chip quiet">待确认</span></div>
+          </div>
+          <div class="apv-card apv-record-card">
+            <div class="apv-head">
+              <span class="apv-dot"></span>
+              <strong>最近的记录</strong>
+              <span class="apv-status">今天 · 2 条</span>
+            </div>
+            <ul class="apv-record-list">
+              <li><time>09:20</time><span>在阳台给薄荷浇了水，晒了会儿太阳</span></li>
+              <li><time>13:05</time><span>午饭后散步 30 分钟，路过花店</span></li>
+            </ul>
           </div>
           <div class="apv-field">
             <label>留一句给小屋</label>
@@ -99,6 +119,7 @@ window.CompanionAppearancePage = (() => {
       radius: current.radius || next.radius, typeScale: current.typeScale || next.typeScale,
       motion: current.motion || next.motion });
     if (api && typeof api.followLight === "function") next.followLight = !!api.followLight();
+    next.largeText = !!window.CompanionDisplayPreferences?.largeText?.();
     next.systemReduced = !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     next.ready = !!current;
     return next;
@@ -121,27 +142,26 @@ window.CompanionAppearancePage = (() => {
         <i class="ap-sw-dot"></i>
       </span>
       <span class="ap-theme-copy"><strong>${esc(item.label)}</strong><small>${esc(item.note)}</small></span>
-      <span class="ap-theme-meta">
-        <span class="ap-theme-light">${esc(item.mode === "dark" ? "夜间" : "日间")}</span>
-        <span class="ap-theme-current">当前</span>
-      </span>
+      <span class="ap-theme-meta"><span class="ap-theme-current">当前</span></span>
     </button>`;
   }
 
   function themeSection() {
     const themes = catalog()?.THEMES || [];
-    const group = (label, ids) => {
+    const group = (label, note, ids) => {
       const items = ids.map(id => themes.find(item => item.id === id)).filter(Boolean);
       if (!items.length) return "";
-      return `<div class="ap-theme-group"><span class="ap-group-label">${label}</span>
+      return `<div class="ap-theme-group"><div class="ap-group-label"><strong>${label} · ${items.length} 套</strong><small>${note}</small></div>
         <div class="ap-theme-grid">${items.map(themeCard).join("")}</div></div>`;
     };
-    return `<section class="ap-block" aria-label="主题">
-      <header class="ap-block-head"><h2>主题</h2>
-        </header>
-      ${group("日间", LIGHT_ORDER)}${group("夜间", DARK_ORDER)}
+    const lightCount = themes.filter(item => item.mode !== "dark").length;
+    const darkCount = themes.filter(item => item.mode === "dark").length;
+    return `<section class="ap-surface ap-theme-panel" aria-label="主题">
+      <header class="ap-panel-head"><div class="ap-panel-title"><h2>主题</h2><p>色卡里的颜色就是主题令牌原色。</p></div>
+        <span class="ap-count-badge">日间 ${lightCount} · 夜间 ${darkCount}</span></header>
+      ${group("日间", "按一天的光线顺序", LIGHT_ORDER)}${group("夜间", "按陈设风格", DARK_ORDER)}
       <label class="ap-switch-row">
-        <span><b>跟随小屋光照</b><small>随小屋昼夜切换主题。</small></span>
+        <span><b>跟随小屋光照</b><small>小屋昼夜变化时自动切换主题。</small></span>
         <span class="ap-switch${state.followLight ? " on" : ""}" role="switch" tabindex="0"
           aria-checked="${state.followLight}" data-ap-follow aria-label="跟随小屋光照"></span>
       </label>
@@ -149,9 +169,10 @@ window.CompanionAppearancePage = (() => {
   }
 
   function dimensionSection() {
-    return `<section class="ap-block" aria-label="显示维度">
-      <header class="ap-block-head"><h2>显示维度</h2>
-        </header>
+    return `<section class="ap-surface ap-dimension-panel" aria-label="显示维度">
+      <header class="ap-panel-head"><div class="ap-panel-title"><h2>显示维度</h2>
+        <p>改动后当前页面与上方预览同步更新。</p></div></header>
+      <div class="ap-dimension-grid">
       ${DIMENSIONS.map(([name, label, options, hint]) => `
         <div class="ap-dim">
           <div class="ap-dim-copy"><b>${label}</b><small>${hint}</small></div>
@@ -161,21 +182,24 @@ window.CompanionAppearancePage = (() => {
               class="${state[name] === value ? "active" : ""}">${text}</button>`).join("")}
           </div>
         </div>`).join("")}
+      </div>
     </section>`;
   }
 
   function assistSection() {
-    return `<section class="ap-block" aria-label="文字辅助">
-      <header class="ap-block-head"><h2>可读性</h2>
-        </header>
+    return `<section class="ap-surface ap-assist-panel" aria-label="可读性">
+      <header class="ap-panel-head"><div class="ap-panel-title"><h2>可读性</h2>
+        <p>辅助说明文字；系统状态只读取，不在这里修改。</p></div></header>
+      <div class="ap-assist-grid">
       <label class="ap-switch-row">
         <span><b>放大辅助文字</b><small>放大说明与详情文字。</small></span>
         <span class="ap-switch${state.largeText ? " on" : ""}" role="switch" tabindex="0"
           aria-checked="${state.largeText}" data-ap-large aria-label="放大辅助文字"></span>
       </label>
       <div class="ap-switch-row static">
-        <span><b>尊重系统减少动态效果</b><small></small></span>
+        <span><b>尊重系统减少动态效果</b><small>与动效设置取更严格的一项。</small></span>
         <span class="ap-pill${state.systemReduced ? " on" : ""}">${state.systemReduced ? "系统已开启" : "系统未开启"}</span>
+      </div>
       </div>
     </section>`;
   }
@@ -184,9 +208,10 @@ window.CompanionAppearancePage = (() => {
     /* 预览窗是这一页的核心：四个维度都作用在它身上。
        它按当前设置渲染内外两套属性，所以「改了会怎样」当场可见，
        不必切出去看整页变没变。 */
-    return `<section class="ap-block ap-preview-block" aria-label="预览">
-      <header class="ap-block-head"><h2>预览</h2>
-        </header>
+    return `<section class="ap-surface ap-preview-panel" aria-label="预览">
+      <header class="ap-panel-head"><div class="ap-panel-title"><h2>预览</h2>
+        <p>五个维度作用在这块样板上，结构为示意，不是真实数据。</p></div>
+        <span class="ap-preview-badge">按当前设置渲染</span></header>
       <div class="ap-preview" data-theme="${esc(state.theme)}"
         data-density="${esc(state.density)}" data-radius="${esc(state.radius)}"
         data-type-scale="${esc(state.typeScale)}" data-motion="${esc(state.motion)}">
@@ -211,16 +236,31 @@ window.CompanionAppearancePage = (() => {
     const ticket = version;
     if (!state) state = blank();
     root.innerHTML = `<div class="ap-page">
-      <section class="ap-block ap-reset-block">
+      <p class="ap-intro">这些偏好只作用于当前浏览器，点击后立即生效，不会写入插件数据。主题、密度、圆角、字号与动效都会同步反映在下方预览中。</p>
+      <section class="ap-section" aria-labelledby="ap-section-preview-title">
+        <header class="ap-section-head">
+          <span class="ap-section-number">01</span>
+          <span class="ap-section-copy"><h2 id="ap-section-preview-title">预览与主题</h2>
+            <small>左窗按当前设置实时渲染工作区结构，右侧选主题后也会立即反映在左窗。</small></span>
+          <span class="ap-section-badge">选一套 · 左窗即刻变</span>
+        </header>
         <div class="ap-reset-row">
-          <span><b>显示偏好</b><small>保存到当前浏览器</small></span>
+          <span><b>显示偏好</b><small>保存到当前浏览器 · 换设备或清理缓存后回到默认</small></span>
           <button type="button" class="button small" data-ap-reset>恢复默认外观</button>
         </div>
+        <div class="ap-top-grid">${previewSection()}${themeSection()}</div>
       </section>
-      ${previewSection()}
-      ${themeSection()}
-      ${dimensionSection()}
-      ${assistSection()}
+      <section class="ap-section" aria-labelledby="ap-section-dimensions-title">
+        <header class="ap-section-head">
+          <span class="ap-section-number amber">02</span>
+          <span class="ap-section-copy"><h2 id="ap-section-dimensions-title">显示维度与可读性</h2>
+            <small>四个显示维度共同决定排版；可读性辅助项让说明文字更易阅读。</small></span>
+          <span class="ap-section-badge amber">全部即时生效</span>
+        </header>
+        ${dimensionSection()}
+        ${assistSection()}
+      </section>
+      <p class="ap-footer-note">主题、密度、圆角、字号与动效保存在当前浏览器，不会写入插件数据，也不会同步到其他设备。</p>
     </div>${state.notice ? `<div class="ap-notice" role="status">${esc(state.notice)}</div>` : ""}`;
     if (!ticket || ticket !== version) return;
   }
@@ -231,7 +271,7 @@ window.CompanionAppearancePage = (() => {
   function apply(name, value) {
     const api = product();
     if (!api || typeof api.setAppearance !== "function") {
-      state.notice = "外观设置需要宿主的注入连接；读到之后再试一次。";
+      state.notice = "页面连接尚未就绪，请稍后重新读取外观设置。";
       render();
       return;
     }
@@ -276,12 +316,16 @@ window.CompanionAppearancePage = (() => {
   /* 大字模式。它在外壳里实现为 body 上的一個类（见 app.js 的 state.largeText
      与 updateAppearance 的 classList.toggle('large-text')），不在 product 的
      外观维度里——那个维度只管主题与四个显示维度。
-     所以这里不自己写 body：直接派发外壳已经在听的那个控件事件，
-     让它走原本那条路（并落盘）。两边各写一次 body 类会打架。 */
+     设置通过外壳 API 落盘并同步全局样式。 */
   function toggleLargeText() {
+    const preferences = window.CompanionDisplayPreferences;
+    if (preferences && typeof preferences.setLargeText === "function") {
+      state.largeText = !!preferences.setLargeText(!state.largeText);
+      return true;
+    }
     const node = document.querySelector("[data-display='largeText']");
     if (node) { node.click(); return true; }
-    return false;
+    return true;
   }
 
   /* 由 app.js 在小屋光照换了主题之后调用（跟随光照那一跳）。
@@ -317,12 +361,9 @@ window.CompanionAppearancePage = (() => {
       return;
     }
     if (target.closest("[data-ap-large]")) {
-      /* 转交给外壳那条既有链路。外壳的委托监听读的是 [data-display='largeText']
-         那个开关，而它没有 DOM 节点可达（它原来在旧内联面板里），
-         所以调 toggleLargeText() 找那个开关并触发它，走原本的落盘与类切换。
-         找不到时（宿主注入还没到）仍切本地态，至少这一页的预览会跟着变。 */
+      /* 外壳持有该偏好，页面只同步它的值与开关状态。 */
       toggleLargeText();
-      state.largeText = !state.largeText;
+      if (!window.CompanionDisplayPreferences?.setLargeText) state.largeText = !state.largeText;
       setSwitch(target.closest("[data-ap-large]"), state.largeText);
       refreshSummary();
       return;

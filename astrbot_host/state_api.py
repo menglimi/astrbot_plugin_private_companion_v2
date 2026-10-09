@@ -3,9 +3,12 @@
 import json
 
 from astrbot.api.web import request
-from companion_v2.execution.models import TaskError
+from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.role_work.state.management import StateManagement
+from companion_v2.agenda.planning_config import configured_weather_location, configured_weather_max_age
+from companion_v2.agenda.weather_reading import WeatherReading
+from companion_v2.role_work.state.configuration import GROUP, target_for
 from .growth_api import _source
 from .management_identity import dashboard_operator
 
@@ -15,9 +18,12 @@ PREFIX = "/astrbot_plugin_private_companion_v2/state"
 class StateWebAPI:
     def __init__(self, controller):
         self.controller = controller
+        self._weather_application = None
+        self._weather_reading = None
 
     def routes(self):
         return [(PREFIX, self.status, ["GET"], "Read role state and calendar"),
+                (PREFIX + "/weather", self.weather, ["GET"], "Read configured role weather"),
                 (PREFIX + "/command", self.command, ["POST"], "Manage role state and calendar")]
 
     async def _run(self, data=None, **query):
@@ -53,6 +59,70 @@ class StateWebAPI:
         except (TypeError, ValueError):
             return outcome_response(Outcome.failed("state_query_invalid", "invalid state query"))
         return await self._run(after_id=query.get("after_id", ""), limit=limit)
+
+    def _weather_context(self):
+        controller = self.controller
+        if controller._terminated:
+            raise TaskError("staging_host_terminated", "the plugin has stopped")
+        username = request.username
+        if type(username) is not str or not username.strip():
+            raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+        session = controller.session or controller.last_session
+        if session is None or controller.runtime is None:
+            raise TaskError("staging_not_initialized", "load an initialized V2 profile first")
+        app, context = session.application, session.profile.target
+        operator = dashboard_operator(controller.runtime, username, at=controller.now())
+        with app.runtime.read_snapshot():
+            StateManagement(app, context).life.authorize(operator)
+            snapshot = require(app.configuration.read(operator, target=target_for(context),
+                group_id=GROUP, observed_at=app.now()))
+            settings = {name: snapshot.values[GROUP + "." + name] for name in (
+                "planning_weather_enabled", "planning_weather_location", "planning_weather_max_age_minutes",
+                "planning_timezone")}
+        return app, context, settings
+
+    async def weather(self):
+        from .web_api import outcome_response
+        controller = self.controller
+        try:
+            query = request.query
+            if (set(query.keys()) - {"refresh"}
+                    or any(len(query.getlist(key)) != 1 for key in query.keys())
+                    or query.get("refresh", "0") not in ("0", "1")):
+                raise ValueError("weather route has invalid query fields")
+            force = query.get("refresh", "0") == "1"
+            async with controller._control_lock:
+                app, context, settings = self._weather_context()
+                location = configured_weather_location(settings["planning_weather_location"])
+                timezone = settings["planning_timezone"]
+                if settings["planning_weather_enabled"] is not True:
+                    return outcome_response(Outcome.success({"state":"disabled", "location":location.name if location else None,
+                        "timezone":timezone, "server_time":app.now().isoformat()}))
+                if location is None:
+                    raise TaskError("planning_weather_location_required", "set the role location before reading current weather")
+                port = app.calendar_planning.weather_port
+                if self._weather_application is not app:
+                    self._weather_application, self._weather_reading = app, WeatherReading()
+                reading = self._weather_reading
+
+            result = await reading.read(port, location, max_age=configured_weather_max_age(settings),
+                now=app.now, force=force)
+
+            async with controller._control_lock:
+                current_app, current_context, current_settings = self._weather_context()
+                if current_app is not app or current_context != context:
+                    raise TaskError("staging_context_changed", "the active role changed during the weather read")
+                current_location = configured_weather_location(current_settings["planning_weather_location"])
+                if (current_settings["planning_weather_enabled"] is not True or current_location != location
+                        or configured_weather_max_age(current_settings) != configured_weather_max_age(settings)
+                        or app.calendar_planning.weather_port is not port):
+                    raise TaskError("weather_settings_changed", "weather settings changed during the read")
+                return outcome_response(Outcome.success({**result, "timezone":current_settings["planning_timezone"],
+                    "server_time":app.now().isoformat()}))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return outcome_response(Outcome.failed("state_query_invalid", "invalid weather request"))
 
     async def command(self):
         from .web_api import outcome_response

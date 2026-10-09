@@ -8,7 +8,7 @@ from companion_v2.foundation.refs import RoleOwnerRef, SourceRef, VersionRef
 from companion_v2.identity_policy.private_domain import PrivateDomainAccess, source_ref
 from companion_v2.sources.models import SourceRecord
 from companion_v2.sources.dependencies import link
-from .configuration import GROUP, target_for
+from .configuration import FEATURE_SWITCHES, GROUP, target_for
 from . import cycle
 from . import cycle_feelings
 from . import mood
@@ -106,6 +106,17 @@ class RoleStateService:
             # Kept for old configuration records; role simulation is always persona-wide.
             values["mood_cross_window"] = True
             return values, token
+
+    def planning_settings_token(self, context):
+        """Version the planning preferences independently of home display edits."""
+        with self.runtime.read_snapshot():
+            self.tasks._context(context, self.tasks.now())
+            definitions = tuple(field for field in self.configuration.registry.group(GROUP)
+                if field.field_id.rsplit(".", 1)[-1] in ("calendar_enabled", "schedule_simulation_mode")
+                or field.field_id.rsplit(".", 1)[-1].startswith("planning_"))
+            owner = self.configuration._owners[definitions[0].owner_id]
+            snapshot = owner.read(target_for(context), definitions)
+            return digest([(key, field.value, field.source_revision) for key, field in snapshot.fields.items()])
 
     @staticmethod
     def cycle_settings_token(values):
@@ -299,7 +310,7 @@ class RoleStateService:
         result.pop("mood_dynamics", None)
         if values["mood_enabled"] and type(record["values"]["mood"]) is dict and (local or role_shared):
             result["mood_dynamics"] = mood.project(record["values"]["mood"], record.get("mood_dynamics"),
-                at=authority_at or at, half_life_minutes=values["mood_decay_half_life_minutes"],
+                at=cycle_at or at, half_life_minutes=values["mood_decay_half_life_minutes"],
                 band=values["mood_neutral_band"], cross_window=not local and role_shared)
         clock = result.pop("cycle_clock", None)
         result.pop("cycle_sources", None)
@@ -316,8 +327,8 @@ class RoleStateService:
                     if (local and visible) or role_shared]
         live_conditions = [c for c in eligible if c["expires_at"] is None or datetime.fromisoformat(c["expires_at"]) > at]
         result["expired_conditions"] = len(eligible) - len(live_conditions)
-        for name in ("hunger", "health", "cycle"):
-            if not values[name + "_enabled"]:
+        for name, option in FEATURE_SWITCHES.items():
+            if not values[option]:
                 result["values"][name] = None
                 live_conditions = [c for c in live_conditions if c["kind"] != name]
         if clock and (clock["applicability"] != "applicable" or not values["cycle_discomfort_enabled"]

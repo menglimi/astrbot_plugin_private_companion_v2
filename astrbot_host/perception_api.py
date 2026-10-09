@@ -16,8 +16,7 @@ from .management_identity import dashboard_operator
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/perception"
-PROVIDERS = {"screen": "astrbot_plugin_screen_companion",
-             "reality": "astrbot_plugin_reality_companion"}
+PROVIDERS = {"reality": "astrbot_plugin_reality_companion"}
 
 
 class PerceptionWebAPI:

@@ -138,6 +138,26 @@ class RoleGrowthManagement:
                 "items": [self._project(record, operator, context, policy_revision, at) for record in page],
                 "next_cursor": page[-1].growth_id if len(records) > limit else None}
 
+    @outcome
+    def evidence(self, *, operator, context, growth_id):
+        """Read only the current, audience-authorized source text for one record."""
+        at = self.ledger.now()
+        with self.runtime.read_snapshot():
+            owner, _ = self._authorize(operator, context, at)
+            record = self._record(growth_id, owner, context)
+            unavailable = self._unavailable(record, context, at)
+            if unavailable:
+                raise TaskError(unavailable, "one or more original sources are no longer readable")
+            resolved = require(self.identities.resolve_authenticated(
+                context.actor.principal, observed_at=at))
+            items = []
+            for reference in record.sources:
+                source = require(self.sources.read(reference, resolved=resolved,
+                    capability="role.growth.read", observed_at=at, authorizer=self.identities))
+                items.append({"text": source.payload[:2000], "issued_at": reference.issued_at.isoformat()})
+            return {"growth_id": record.growth_id, "revision": record.revision,
+                "items": items, "read_at": at.isoformat()}
+
     def _validate_sources(self, sources, context, at):
         if (type(sources) is not tuple or not 1 <= len(sources) <= 8
                 or any(not isinstance(source, SourceRef) for source in sources)

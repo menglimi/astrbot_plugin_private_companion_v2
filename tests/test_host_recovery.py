@@ -134,7 +134,11 @@ class HostRecoveryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.done(new.application, batch))["reason"], "conversation_task_uncertain")
         self.assertEqual(self.called, [])
         self.assertEqual(self.sent, [])
-        self.assertEqual(self.runtime.read_one("SELECT slot_held FROM execution_attempts WHERE attempt_id = ?", (claim.attempt_id,))["slot_held"], 1)
+        observed = new.application.tasks.observe(self.context(new.application, batch),
+            app.messages.batch(batch)["generation_task_id"]).unwrap()
+        self.assertFalse(observed["slot_held"])
+        self.assertFalse(observed["worker_stopped"])
+        self.assertEqual(observed["capacity_release"], "superseded_read_only_generation")
 
     async def test_restart_fences_dispatched_send_and_keeps_physical_slot(self):
         host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 5)))
@@ -167,6 +171,29 @@ class HostRecoveryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         new = await self.start(self.host(runtime=self.open_runtime()), 1, 1)
         self.assertEqual((await self.done(new.application, batch))["reason"], "deadline_elapsed")
         self.assertEqual(self.called, [])
+
+    async def test_deadline_expiring_during_seal_is_local_and_keeps_host_running(self):
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 1, 0)))
+        app = host.application
+        knowledge = app.messages._knowledge_contributions
+
+        def cross_deadline(*args, **kwargs):
+            self.clock.advance(timedelta(seconds=2))
+            return knowledge(*args, **kwargs)
+
+        with patch.object(app.messages, "_knowledge_contributions", side_effect=cross_deadline):
+            batch = host.receive(self.event()).unwrap()
+            await self.until(lambda: app.flow.row(batch)["state"] in ("closed", "blocked") or app.state == "faulted")
+
+        self.assertEqual(app.state, "running", app.failure_code)
+        self.assertEqual((app.flow.row(batch)["state"], app.flow.row(batch)["reason"]),
+                         ("closed", "deadline_elapsed"))
+        self.assertEqual(app.messages.batch(batch)["state"], "cancelled")
+        self.assertEqual(self.called, [])
+
+        next_batch = host.receive(self.event("after-deadline")).unwrap()
+        self.assertEqual((await self.done(app, next_batch))["state"], "complete")
+        self.assertEqual(len(self.called), 1)
 
     async def test_capacity_failure_keeps_unsealed_input_then_retries_without_duplication(self):
         host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))

@@ -1,4 +1,4 @@
-/* 记忆策略配置：记忆与经历页面的独立视图。
+/* 记忆策略配置：事实与经历页面的独立视图。
 
    档案操作与策略编辑分开呈现，但共用同一领域入口，避免把策略散落在决策页。
 
@@ -106,7 +106,12 @@ window.CompanionMemorySettingsSection = (() => {
     instance = window.CompanionWorkbench.create({
       group: "memory",
       title: "统一记忆策略",
-      note: "",
+      /* 「别把两件事弄混」的落点：用户看到「记忆」两个字，最容易以为这里调的是
+         外部记忆插件（LivingMemory /《我会牢牢记住你》）。实际调的是 V2 自己
+         记什么、记多少、多久整理一次；外部插件是否提供长期记忆、用了多少，
+         由它自己在治理与维护页的账本行负责。 */
+      note: "这里调的是 V2 自己记什么、记多少、多久整理一次，与外部记忆插件的库无关——"
+        + "外部记忆插件是否提供长期记忆、用了多少，由它自己的账本负责。",
       labels, helps,
       /* 注册表里这两个是 TEXT，但整理时刻与 IANA 时区名各有更合适的控件。 */
       inputs: {reflection_time: "time", reflection_timezone: "line"},

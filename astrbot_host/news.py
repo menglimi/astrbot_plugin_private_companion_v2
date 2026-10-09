@@ -16,8 +16,10 @@ from companion_v2.proactive.news_sources import NewsFetchError, NewsSource, news
 from .news_parsing import parse_bilibili_news, parse_rss_news
 
 
-MAX_RESPONSE_BYTES = 524288
+MAX_RESPONSE_BYTES = 1048576
 HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}\Z")
+DEFAULT_AI_NEWS_FEED_URL = "https://daily.juya.uk/rss.xml"
+DEFAULT_AI_NEWS_FEED_LABEL = "橘鸦AI早报"
 
 
 class NewsJsonPort:
@@ -38,16 +40,25 @@ class NewsJsonPort:
     async def _read(self, url=None):
         timeout = aiohttp.ClientTimeout(total=8)
         try:
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+            # Some public RSS hosts reject the aiohttp default client header (or
+            # return a bot-check page without one). Keep the request identity
+            # explicit and stable so the default AI daily feed is read the same
+            # way in background maintenance and in the verified contact path.
+            async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=False,
+                    headers={"Accept-Encoding": "gzip, deflate",
+                             "User-Agent": "AstrBotCompanionV2/2.0"}) as session:
                 async with session.get(url or self.url, headers=self.headers, allow_redirects=False) as response:
                     if response.status != 200:
                         raise NewsFetchError("news_http_error", http_status=response.status)
                     if response.content_length is not None and response.content_length > MAX_RESPONSE_BYTES:
                         raise NewsFetchError("news_too_large")
-                    raw = await response.content.read(MAX_RESPONSE_BYTES + 1)
-                    if len(raw) > MAX_RESPONSE_BYTES:
-                        raise NewsFetchError("news_too_large")
-                    return raw
+                    chunks = bytearray()
+                    async for chunk in response.content.iter_chunked(65536):
+                        if len(chunks) + len(chunk) > MAX_RESPONSE_BYTES:
+                            raise NewsFetchError("news_too_large")
+                        chunks.extend(chunk)
+                    return bytes(chunks)
         except TimeoutError as error:
             raise NewsFetchError("news_timeout") from error
         except aiohttp.ClientError as error:
@@ -63,6 +74,11 @@ class NewsJsonPort:
 
 class NewsRssPort(NewsJsonPort):
     kind = "rss"
+
+    def __init__(self, *, url, source_label="", api_key="", auth_header="Authorization", auth_scheme="Bearer"):
+        super().__init__(url=url, api_key=api_key, auth_header=auth_header, auth_scheme=auth_scheme)
+        if source_label:
+            self.source_label = source_label
 
     async def fetch(self):
         raw = await self._read()
@@ -180,8 +196,10 @@ class HotTrendNewsPort:
 class NewsSourceRouter:
     """Resolve each window's public selection without storing host credentials in V2."""
 
-    def __init__(self, default_source, *, auth, bilibili_cookie="", search_url="", hot_sources=("weibo", "hackernews"), hot_result_count=10):
+    def __init__(self, default_source, *, auth, default_source_auth=True, bilibili_cookie="", search_url="",
+                 hot_sources=("weibo", "hackernews"), hot_result_count=10):
         self.default_source, self.auth, self.bilibili_cookie = default_source, auth, bilibili_cookie
+        self.default_source_auth = default_source_auth
         self.search_url, self.hot_sources = search_url, tuple(hot_sources)
         self.hot_result_count = max(3, min(30, int(hot_result_count)))
 
@@ -203,8 +221,12 @@ class NewsSourceRouter:
             configured = values.get("news_hot_sources", "")
             selected = tuple(item.strip().lower() for item in configured.split(",") if item.strip()) or self.hot_sources
             return HotTrendNewsPort(selected, values.get("news_hot_result_count", self.hot_result_count))
-        auth = self.auth if source == self.default_source else {}
-        return (NewsRssPort if source.kind == "rss" else NewsJsonPort)(url=source.url, **auth)
+        auth = self.auth if source == self.default_source and self.default_source_auth else {}
+        if source.kind == "rss":
+            label = (DEFAULT_AI_NEWS_FEED_LABEL if source == self.default_source
+                     and source.url == DEFAULT_AI_NEWS_FEED_URL else "")
+            return NewsRssPort(url=source.url, source_label=label, **auth)
+        return NewsJsonPort(url=source.url, **auth)
 
 
 def configured_news_port(config=None):
@@ -221,15 +243,23 @@ def configured_news_port(config=None):
     settings = config.get("news", {}) or {}
     if type(settings) is not dict:
         raise ValueError("news host settings must be an object")
-    source = NewsSource.read({"news_source_kind": settings.get("source_kind", "host"),
-                             "news_source_uid": settings.get("bilibili_uid", ""),
-                             "news_source_url": settings.get("feed_url", "")})
+    configured_kind = settings.get("source_kind")
+    if configured_kind is None and settings.get("feed_url"):
+        source = NewsSource.read({"news_source_kind": "rss", "news_source_url": settings["feed_url"]})
+    else:
+        source = NewsSource.read({"news_source_kind": configured_kind or "host",
+                                  "news_source_uid": settings.get("bilibili_uid", ""),
+                                  "news_source_url": settings.get("feed_url", "")})
     if source.kind == "host" and values["URL"]:
         source = NewsSource("json", url=news_url(values["URL"]))
+    elif source.kind == "host":
+        source = NewsSource("rss", url=DEFAULT_AI_NEWS_FEED_URL)
     hot_sources = settings.get("hot_sources", "weibo,hackernews")
     if type(hot_sources) is not str:
         raise ValueError("news hot sources must be comma-separated text")
-    router = NewsSourceRouter(source, auth=auth, bilibili_cookie=values["BILIBILI_COOKIE"],
+    default_source_auth = not (source.kind == "rss" and source.url == DEFAULT_AI_NEWS_FEED_URL)
+    router = NewsSourceRouter(source, auth=auth, default_source_auth=default_source_auth,
+                              bilibili_cookie=values["BILIBILI_COOKIE"],
                               search_url=settings.get("search_url") or values["SEARCH_URL"],
                               hot_sources=tuple(item.strip().lower() for item in hot_sources.split(",")),
                               hot_result_count=settings.get("hot_result_count", 10))

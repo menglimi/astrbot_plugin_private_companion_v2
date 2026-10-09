@@ -4,12 +4,11 @@ The catalog describes supported sources. It intentionally does not locate, open,
 transform any source: locating a V1 installation is a separate concern, and the actual
 transformations live beside the domain they convert.
 
-**Handler status (2026-10-01).** ``private.host_configuration`` has the only automatic
-converter: :mod:`companion_v2.legacy.weather_migration` converts the V1 weather group.
-It is a converter for one group, not the whole host configuration, and it takes an
-already-read mapping rather than opening anything itself. The core profile, work/delivery,
-and world/assets sources are catalogued explicitly as ``NO_HANDLER`` until their
-converters exist.
+**Handler status (2026-10-09).** Configuration conversion remains separate from data
+import. Role journals, group interaction aggregates, worldbook entries and both
+reaction-asset catalogs have data importers. Work/delivery and world assets have
+documented skip dispositions because their source scopes, external receipts, or asset
+ownership cannot be transferred faithfully.
 """
 
 from __future__ import annotations
@@ -19,18 +18,21 @@ from enum import Enum
 
 
 V1_PLUGIN_ID = "astrbot_plugin_private_companion"
-V1_SUPPORTED_VERSION = "6.6.2"
+V1_SUPPORTED_VERSION = "6.7.0"
+V1_SUPPORTED_VERSIONS = ("6.6.2", V1_SUPPORTED_VERSION)
 
 
 class CatalogAction(str, Enum):
     """The allowed post-migration disposition for one declared legacy source."""
 
     CONVERTED = "converted"
+    DATA_CONVERTED = "data_converted"
     NO_HANDLER = "no_handler"
     COMPAT_READABLE = "compat_readable"
     RETAINED_EXTERNAL = "retained_external"
     HELD = "held"
     UNSUPPORTED = "unsupported"
+    DOCUMENTED_SKIP = "documented_skip"
 
 
 @dataclass(frozen=True)
@@ -46,17 +48,15 @@ class LegacyCatalogEntry:
     action: CatalogAction
     handler_id: str
     acceptance_scope: tuple[str, ...]
+    disposition_reason: str = ""
 
 
 @dataclass(frozen=True)
 class CapabilityDispositionEntry:
     """一条能力级处置：**不是**数据归属，而是「这项能力谁对外表达」。
 
-    为什么必须有它：记忆伴侣的 ``memory_companion.db`` 是 ``COMPAT_READABLE``
-    （保持原位可读、V2 不复制），但**能力**上 V2 已经让位——注入与工具都归它。
-    两件事的结论相反，用同一条记录表达就一定会写错其中一个：把数据改成
-    ``RETAINED_EXTERNAL`` 等于说「V2 不读这个库了」，而 V2 其实照旧读；把能力
-    留在 ``COMPAT_READABLE`` 等于说「两边都可以对外表达」，那正是要消掉的重复。
+    记忆库会以一致性快照归档，但对话中的活跃记忆仍归原提供方。
+    这两件事必须分开表达：快照保留历史与治理数据，不会生成第二份活跃记忆。
 
     所以数据级事实留在 :data:`LEGACY_COMPATIBILITY_CATALOG`（并留在迁移发现里，
     用户可以逐条看见），能力级事实放在 :data:`CAPABILITY_DISPOSITIONS`。迁移的
@@ -142,13 +142,15 @@ class LegacyCompatibilityCatalog:
                 errors.append(f"handler_missing:{item.source_id}")
             if not item.acceptance_scope:
                 errors.append(f"acceptance_scope_missing:{item.source_id}")
+            if item.action is CatalogAction.DOCUMENTED_SKIP and not item.disposition_reason:
+                errors.append(f"documented_skip_reason_missing:{item.source_id}")
         return tuple(errors)
 
 
 LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
     schema_version="companion-v2.legacy-compatibility-catalog.v0",
     target_plugin_id=V1_PLUGIN_ID,
-    supported_v1_versions=(V1_SUPPORTED_VERSION,),
+    supported_v1_versions=V1_SUPPORTED_VERSIONS,
     entries=(
         LegacyCatalogEntry(
             source_id="private.host_configuration",
@@ -165,28 +167,63 @@ LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
             source_id="private.core_profiles",
             source_plugin_id=V1_PLUGIN_ID,
             source_version=V1_SUPPORTED_VERSION,
-            owner="private_companion.role_and_relationship",
+            owner="private_companion.role_journal_and_person_profiles",
             source_paths=("companions.json", "persona_profiles"),
             format_signature="private-core.json-or-configured-sqlite.v1",
-            action=CatalogAction.NO_HANDLER,
-            handler_id="v2.private-core-converter",
+            action=CatalogAction.DATA_CONVERTED,
+            handler_id="v2.role-journal-and-worldbook-importer",
             acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-09"),
+        ),
+        LegacyCatalogEntry(
+            source_id="private.group_relationship_graph",
+            source_plugin_id=V1_PLUGIN_ID,
+            source_version=V1_SUPPORTED_VERSION,
+            owner="private_companion.group_observation.relationship_graph",
+            source_paths=("companions.json",),
+            format_signature="private-core-groups-relationship-edges.json.v1",
+            action=CatalogAction.DATA_CONVERTED,
+            handler_id="v2.group-relationship-importer",
+            acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-09"),
+        ),
+        LegacyCatalogEntry(
+            source_id="private.reaction_assets",
+            source_plugin_id=V1_PLUGIN_ID,
+            source_version=V1_SUPPORTED_VERSION,
+            owner="private_companion.reaction_expression_library",
+            source_paths=("reaction_expression_library/catalog.json",
+                          "reaction_expression_library/images"),
+            format_signature="reaction-expression-library.catalog.v2",
+            action=CatalogAction.DATA_CONVERTED,
+            handler_id="v2.reaction-asset-importer",
+            acceptance_scope=("RG-03", "RG-05", "RG-08"),
+        ),
+        LegacyCatalogEntry(
+            source_id="private.owned_reaction_assets",
+            source_plugin_id=V1_PLUGIN_ID,
+            source_version=V1_SUPPORTED_VERSION,
+            owner="private_companion.owned_reaction_expression_assets",
+            source_paths=("owned_reaction_assets", "photo_action_config.owned_reaction_assets"),
+            format_signature="owned-reaction-assets.hash-locked-list.v1",
+            action=CatalogAction.DATA_CONVERTED,
+            handler_id="v2.reaction-asset-importer",
+            acceptance_scope=("RG-03", "RG-05", "RG-08"),
         ),
         LegacyCatalogEntry(
             source_id="memory.timeline_and_governance",
             source_plugin_id="astrbot_plugin_memory_companion",
             source_version=V1_SUPPORTED_VERSION,
             owner="memory_companion.conversation_and_governance",
-            source_paths=("memory_companion.db",),
+            source_paths=("plugin-data:astrbot_plugin_memory_companion/memory_companion.db",),
             format_signature="memory-companion.sqlite.v1",
-            action=CatalogAction.COMPAT_READABLE,
-            handler_id="v2.memory-snapshot-adapter",
+            action=CatalogAction.DATA_CONVERTED,
+            handler_id="v2.memory-snapshot-archive",
             acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-09"),
+            disposition_reason=(
+                "完整记忆库按 SQLite backup API 保存到 V2 隔离归档，包含 WAL 中已提交事务；"
+                "时间线与治理表保留原结构，不混入 V2 活跃记忆。"
+            ),
         ),
-        # 注意：这一条**保持** COMPAT_READABLE，一个字都不改。它说的是数据事实
-        # （库留在原处、V2 只读不复制），而记忆能力现在由 CAPABILITY_DISPOSITIONS
-        # 里的那条记录声明为 RETAINED_EXTERNAL。两件事结论相反但都对，混在一条
-        # 记录里必然写错其中一个。
+        # 快照归档保留历史与治理记录；活跃记忆提供方由能力处置单独声明。
         LegacyCatalogEntry(
             source_id="private.work_and_delivery",
             source_plugin_id=V1_PLUGIN_ID,
@@ -194,9 +231,13 @@ LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
             owner="private_companion.work_and_delivery",
             source_paths=("framework_work/work.db", "framework_work/delivery.db"),
             format_signature="private-work-delivery.sqlite.v1",
-            action=CatalogAction.NO_HANDLER,
+            action=CatalogAction.DOCUMENTED_SKIP,
             handler_id="v2.work-delivery-converter",
             acceptance_scope=("RG-05", "RG-07", "RG-08", "RG-09"),
+            disposition_reason=(
+                "旧任务可能处于待执行或结果未知状态，投递库还包含旧正文和外部发送回执；"
+                "无法复核 V2 当前身份、授权与真实发送结果，因此只统计状态，不复制或重放。"
+            ),
         ),
         LegacyCatalogEntry(
             source_id="private.world_assets",
@@ -205,9 +246,13 @@ LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
             owner="private_companion.world_and_assets",
             source_paths=("framework_world/album.db", "framework_world/resources"),
             format_signature="private-world-album-and-files.v1",
-            action=CatalogAction.NO_HANDLER,
+            action=CatalogAction.DOCUMENTED_SKIP,
             handler_id="v2.world-asset-converter",
             acceptance_scope=("RG-04", "RG-05", "RG-08"),
+            disposition_reason=(
+                "旧相册由 Image Companion 持有，且外部图片引用没有 V2 的来源、所有权与受众凭据；"
+                "仅统计本地目录，不复制资源或重建外部引用。"
+            ),
         ),
         LegacyCatalogEntry(
             source_id="content.creative_projects",

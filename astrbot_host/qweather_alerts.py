@@ -39,7 +39,7 @@ class QWeatherAlertPort:
         return normalize_qweather_alerts(json.loads(raw), location, self._now())
 
 
-def configured_qweather_alert_port():
+def configured_qweather_alert_port(config=None):
     """Read optional host-only credentials; never persist them in role configuration."""
-    credentials = credentials_from_environment(label="alert")
+    credentials = credentials_from_environment(label="alert", config=config)
     return QWeatherAlertPort(credentials) if credentials is not None else None

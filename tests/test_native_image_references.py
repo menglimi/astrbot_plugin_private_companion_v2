@@ -63,6 +63,27 @@ class NativeImageReferenceTests(unittest.TestCase):
         self.assertEqual(lease.fetch("source-handle", "a" * 64, role="identity"), b"source-bytes")
         self.assertEqual(lease.fetch("mask-handle", "b" * 64, role="outfit"), b"mask-bytes")
 
+    def test_explicit_input_index_selects_only_the_named_image_and_rebinds_its_role(self):
+        tickets = self.tickets()
+        lease = lease_for("image.edit", {"reference_indices": [1], "reference_roles": ["identity"]}, tickets,
+                          lambda ticket, at: None)
+        with self.assertRaises(TaskError) as unselected:
+            lease.fetch("source-handle", "a" * 64, role="identity")
+        self.assertEqual(unselected.exception.code, "reference_not_selected")
+        self.assertEqual(lease.fetch("mask-handle", "b" * 64, role="identity"), b"mask-bytes")
+
+    def test_explicit_input_index_rejects_missing_or_duplicate_positions(self):
+        from astrbot_host.native_extensions.image_native.references import (
+            ReferenceSelectionError, select_edit_tickets,
+        )
+        tickets = self.tickets()
+        with self.assertRaises(ReferenceSelectionError) as missing:
+            select_edit_tickets({"reference_indices": [2]}, tickets, {})
+        self.assertEqual(missing.exception.code, "native_reference_index_unavailable")
+        with self.assertRaises(ReferenceSelectionError) as duplicate:
+            select_edit_tickets({"reference_indices": [1, 1]}, tickets, {})
+        self.assertEqual(duplicate.exception.code, "invalid_reference_indices")
+
     def test_group_admission_rejects_mask_edit_even_if_a_model_submits_it(self):
         executor = ExternalToolExecutor.__new__(ExternalToolExecutor)
         descriptor = NS(tool=NS(action="image.mask_edit"))

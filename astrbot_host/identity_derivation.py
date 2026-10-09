@@ -122,3 +122,30 @@ def derived_identity(*, platform_id: str, account_id: str, participant_id: str,
 def persona_label(persona_id: str) -> str:
     """How a derived role is described to the operator."""
     return persona_id or "随会话当前人格"
+
+
+def role_display_name(role_id: object, persona_ids: object = ()) -> str:
+    """Return the human role name without exposing generated storage keys.
+
+    Older mappings often used persona names such as ``星缘-私聊`` and
+    ``星缘-群聊`` as the role key.  The role is the shared character, so those
+    transport suffixes must not leak into the cottage title.  Explicit human
+    role names still win; generated ``role-*`` keys fall back to the loaded
+    persona labels.
+    """
+    role = str(role_id or "").strip()
+    if role and not role.startswith(("role-", "staging-", "dashboard:", "onebot-user:")):
+        for suffix in ("-私聊", "-群聊", "_私聊", "_群聊"):
+            if role.endswith(suffix) and len(role) > len(suffix):
+                role = role[:-len(suffix)].strip()
+                break
+        return role or "当前角色"
+    values = persona_ids if isinstance(persona_ids, (list, tuple, set)) else ()
+    labels = []
+    for value in values:
+        text = "默认人格" if value in (None, "", "[%None]") else str(value).strip()
+        if text.endswith(("-私聊", "-群聊", "_私聊", "_群聊")):
+            text = text[:-3]
+        if text and text not in labels:
+            labels.append(text)
+    return "、".join(labels) or (role if role else "当前角色")

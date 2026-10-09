@@ -5,7 +5,7 @@ import re
 
 LLM_SEGMENT_MARKER = "<<PRIVATE_COMPANION_SPLIT>>"
 _TOKENS = re.compile(
-    r"(?:&lt;|&#0*60;){2}\s*PRIVATE_COMPANION_SPLIT\s*(?:&gt;|&#0*62;){2}"
+    r"(?:&lt;|&#0*60;|&#x0*3c;){2}\s*PRIVATE_COMPANION_SPLIT\s*(?:&gt;|&#0*62;|&#x0*3e;){2}"
     r"|\\<\\<\s*PRIVATE\s*_\s*COMPANION\s*_\s*SPLIT\s*\\>\\>"
     r"|\{\{\s*split_marker\s*\}\}|<<\s*PRIVATE\s*_\s*COMPANION\s*_\s*SPLIT\s*>>",
     re.IGNORECASE,

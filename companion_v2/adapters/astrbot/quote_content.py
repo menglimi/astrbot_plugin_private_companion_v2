@@ -16,8 +16,10 @@ from .quotes import image_locator, audio_locator, video_locator
 async def capture_quote_content(locator, sender, sent_at, parts, *, current, image_loader,
                                 audio_loader=None, video_loader=None, mention=None,
                                 intake=ForwardIntakePolicy()):
-    if not isinstance(parts, list) or not 0 < len(parts) <= 128:
-        raise TaskError("host_quote_unsupported", "quote requires a bounded native component array")
+    if not isinstance(parts, list) or not parts:
+        raise TaskError("host_quote_unsupported", "quote requires a native component array")
+    if len(parts) > 128:
+        raise TaskError("host_quote_limit", "quote exceeds its component budget")
     text, locators, audio_locators, video_locators, forward_locators, cards = [], [], [], [], [], []
     for position, part in enumerate(parts):
         if not isinstance(part, dict) or not isinstance(part.get("data"), dict):
@@ -47,9 +49,11 @@ async def capture_quote_content(locator, sender, sent_at, parts, *, current, ima
         else:
             raise TaskError("host_quote_unsupported", "nested replies and unsupported components need their own adapter")
     body = "".join(text)
-    if (not body.strip() or len(body) > 65536 or len(locators) > MAX_INPUT_IMAGES
+    if not body.strip():
+        raise TaskError("host_quote_unsupported", "quoted content is unavailable")
+    if (len(body) > 65536 or len(locators) > MAX_INPUT_IMAGES
             or len(audio_locators) > MAX_INPUT_AUDIOS or len(video_locators) > MAX_VIDEOS):
-        raise TaskError("host_quote_unsupported", "quoted content exceeds its intake budget")
+        raise TaskError("host_quote_limit", "quoted content exceeds its intake budget")
     # Freeze the entire returned message before the first image await.
     plans = (freeze_forward_cards(tuple(forward_locators), cards,
                 audio_enabled=audio_loader is not None, video_enabled=video_loader is not None, intake=intake)
@@ -58,7 +62,7 @@ async def capture_quote_content(locator, sender, sent_at, parts, *, current, ima
     if (len(locators) + sum(len(n.images) for n in planned) > MAX_INPUT_IMAGES
             or len(audio_locators) + sum(len(n.audios) for n in planned) > MAX_INPUT_AUDIOS
             or len(video_locators) + sum(len(n.videos) for n in planned) > MAX_VIDEOS):
-        raise TaskError("host_quote_unsupported", "quoted originals exceed their shared media budget")
+        raise TaskError("host_quote_limit", "quoted originals exceed their shared media budget")
     images = []
     for item in locators:
         current()

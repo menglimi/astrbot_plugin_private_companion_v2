@@ -123,7 +123,11 @@ class SemanticWebAPI:
 
     @staticmethod
     def public(item):
-        return {k:item[k] for k in ("id","kind","revision","enabled","payload")}
+        fields = ("id", "kind", "revision", "enabled", "payload")
+        result = {key: item[key] for key in fields}
+        if "vector_ready" in item:
+            result["vector_ready"] = item["vector_ready"]
+        return result
 
     def status(self, service, context):
         result = service.status()
@@ -136,7 +140,10 @@ class SemanticWebAPI:
                     counts = {str(r[0]):r[1] for r in db.execute("SELECT enabled,COUNT(*) FROM items WHERE owner=? AND kind=? GROUP BY enabled",(owner,kind))}
                     embedded = db.execute("""SELECT COUNT(*) FROM vectors v JOIN items i ON i.owner=v.owner AND i.kind=v.kind AND i.id=v.id
                         WHERE v.owner=? AND v.kind=? AND v.model=? AND v.revision=i.revision AND i.enabled=1""",(owner,kind,result["model_binding"])).fetchone()[0]
-                    result["catalog"][kind] = {"enabled":counts.get("1",0),"disabled":counts.get("0",0),"embedded":embedded}
+                    result["catalog"][kind] = {"enabled":counts.get("1",0),"disabled":counts.get("0",0),
+                                               "total":sum(counts.values()),"embedded":embedded}
+            result["reaction_collection"] = (service.store.reaction_collection_summary(service.owner(context))
+                                             if context else {"totals": {}, "recent": []})
         return result
 
     async def get(self):
@@ -165,7 +172,16 @@ class SemanticWebAPI:
                         result["image_url"] = "data:"+image.descriptor.mime_type+";base64,"+base64.b64encode(image.content).decode("ascii")
                 else:
                     page = service.store.list(owner,kind,after=query.get("after",""),limit=25)
-                    result["items"] = [{**self.public(i),"source_valid":service.slang.validate(i,context) if kind=="slang" else True} for i in page[:24]]
+                    with service.store.db() as db:
+                        items = []
+                        for item in page[:24]:
+                            vector = db.execute("""SELECT 1 FROM vectors WHERE owner=? AND kind=? AND id=?
+                                AND model=? AND revision=?""",
+                                (owner, kind, item["id"], result["model_binding"], item["revision"])
+                                if result["model_binding"] else (owner, kind, item["id"], "", item["revision"])).fetchone()
+                            items.append({**self.public({**item, "vector_ready": vector is not None}),
+                                "source_valid": service.slang.validate(item,context) if kind=="slang" else True})
+                    result["items"] = items
                     result["next_after"] = page[23]["id"] if len(page)>24 else None
             return self.response(result)
         except (TaskError,ValueError,TypeError,KeyError) as error:
@@ -188,7 +204,8 @@ class SemanticWebAPI:
                 raise ValueError("JSON object required")
             action = data.get("action")
             fields = {"configure":("changes","revision"),"import":("content","metadata"),"analyze":("id",),
-                      "edit":("id","kind","revision","values","enabled"),"search":("kind","query"),"reindex":()}
+                      "edit":("id","kind","revision","values","enabled"),"delete":("id","kind","revision"),
+                      "search":("kind","query"),"reindex":()}
             if action not in fields or set(data)-{"target_id","role_id","session_id","action",*fields[action]}:
                 raise ValueError("unsupported action or fields")
             selection = {k:data[k] for k in ("target_id","role_id","session_id") if k in data}
@@ -205,7 +222,8 @@ class SemanticWebAPI:
                 if type(data["content"]) is not str or type(data.get("metadata",{})) is not dict:
                     raise ValueError("image and metadata required")
                 image = inspect_image(base64.b64decode(data["content"],validate=True),0)
-                result = {"item":self.public(service.reactions.import_image(owner,image,data.get("metadata",{})))}
+                item, created = service.reactions.import_image_with_status(owner, image, data.get("metadata",{}))
+                result = {"item":self.public(item), "created": created}
             elif action=="analyze":
                 result = {"item":self.public(await service.reactions.analyze(owner,data["id"],validate))}
             elif action=="edit":
@@ -224,6 +242,9 @@ class SemanticWebAPI:
                     payload["source"]="manual"
                 else:
                     payload["analysis"]="manual"
+                    payload["manual_fields"] = sorted(set(payload.get("manual_fields", ())) | set(values))
+                    if data["enabled"] and payload.get("collection_state") == "awaiting_confirmation":
+                        payload["collection_state"] = "confirmed"
                 payload["text"]="；".join(payload.get(k,"") for k in allowed)
                 result = {"item":self.public(service.store.put(owner,kind,item["id"],payload,expected=data["revision"],enabled=data["enabled"]))}
             elif action=="search":
@@ -234,6 +255,12 @@ class SemanticWebAPI:
                     raise ValueError("group vocabulary requires a group")
                 result = await service.search.search(owner,kind,text,context=context)
                 validate()
+            elif action=="delete":
+                if (data["kind"]!="reaction" or type(data["id"]) is not str or not data["id"]
+                        or type(data["revision"]) is not int):
+                    raise ValueError("reaction ID and revision required")
+                validate()
+                result = service.store.delete(owner,"reaction",data["id"],expected=data["revision"])
             else:
                 with service.store.db() as db:
                     db.execute("DELETE FROM vectors WHERE owner=?",(owner,))

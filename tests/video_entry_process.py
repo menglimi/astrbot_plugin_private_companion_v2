@@ -68,7 +68,7 @@ def run():
                 event.stopped = False
                 event.stop_event = lambda: setattr(event, "stopped", True)
                 await plugin.receive_companion_message(event)
-                assert event.stopped
+                assert not event.stopped and event.call_llm
                 batch = plugin.staging.latest_batch_id
                 await wait_for_batch(plugin.staging.session, batch)
                 preview = (await plugin.staging.preview(batch)).unwrap()

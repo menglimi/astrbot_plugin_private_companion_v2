@@ -59,6 +59,8 @@ class AddressingPromptTests(unittest.TestCase):
                 context=context,
             )
             self.assertIn(ADDRESSING_INSTRUCTION, request.instruction)
+            self.assertIn("pc_reaction_expression", request.instruction)
+            self.assertIn("Express the emotion naturally.", request.instruction)
             runtime.close()
 
 

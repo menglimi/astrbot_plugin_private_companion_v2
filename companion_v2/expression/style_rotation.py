@@ -151,19 +151,24 @@ def sample(candidates, *, usage_map, at, count, seed):
     return tuple(picked)
 
 
-def record(runtime, *, owner_key, scope_key, signal_ids, at):
-    """Count one injection attempt per rule, inside the caller's transaction."""
+def record(runtime, *, owner_key, scope_key, signal_ids, at, connection=None):
+    """Count one confirmed injection per rule, optionally inside its receipt transaction."""
     if not signal_ids:
         return
     moment = stamp(at)
-    with runtime.transaction() as connection:
+    def write(active_connection):
         for signal_id in sorted(set(signal_ids)):
             key = metadata_key(owner_key, scope_key, signal_id)
-            row = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (key,)).fetchone()
+            row = active_connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (key,)).fetchone()
             entry = _entry(row["value"]) if row is not None else None
             injections = entry[1] if entry is not None and entry[0] == scope_key else 0
-            connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
+            active_connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (key, json.dumps({"signal_id": signal_id, "scope_key": scope_key,
                                   "injections": injections + 1, "last_injected_at": moment},
                                  ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+    if connection is not None:
+        write(connection)
+    else:
+        with runtime.transaction() as active_connection:
+            write(active_connection)

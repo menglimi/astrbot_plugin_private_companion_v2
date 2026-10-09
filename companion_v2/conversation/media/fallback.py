@@ -1,10 +1,11 @@
-"""Private delivery of one reviewed image the group audience may not receive.
+"""Private delivery of one image withheld from a group audience.
 
 The channel is independent of the group turn: a different audience, a different
 grant and a different receipt. It exists only when the host resolves an explicit,
 separately authorized private target for the member who actually asked for the
-image. Without that resolution the original group delivery stays blocked; nothing
-falls back to broadcasting, and no group audience is reused for a private send.
+image. A definite unsafe verdict always qualifies; an inconclusive verdict only
+qualifies when its failure policy selects private delivery. Without an authorized
+route the original group delivery remains image-free; no group audience is reused.
 
 The destination and the exact withheld manifest are frozen into the review
 delivery row when the fallback is queued, and rechecked on every read. A withdraw,
@@ -19,19 +20,19 @@ import base64
 import json
 
 from companion_v2.foundation.refs import ScopeKind
-from companion_v2.delivery.media import ImageDeliveryContent, payload_hash
+from companion_v2.delivery.media import ImageDeliveryContent, manifest_hash
 from companion_v2.delivery.service import DeliveryRequest
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require
+from companion_v2.execution.service import outcome
 from companion_v2.identity_policy.group_audience import group_audience
 
 from .models import CapturedImage, ImageDescriptor, PromptImage
-from .review import WITHHOLD, check_verdict
+from .review import INCONCLUSIVE_LABELS, UNSAFE_LABELS, WITHHOLD, check_verdict
 
 
 OWNER = "conversation.image_review_fallback"
 VERSION = "conversation.group_image_fallback.v1"
 MAX_LIFETIME_SECONDS = 300
-UNSAFE_LABELS = ("adult_nsfw", "disallowed")
 
 
 class ImageReviewFallback:
@@ -66,8 +67,8 @@ class ImageReviewFallback:
         manifest = target["images"][0]
         document = {"version": VERSION, "review_key": plan.review_key, "part_id": part["part_id"],
                     "batch_id": row["batch_id"], "image_position": target["image_position"],
-                    "manifest": manifest, "destination": destination.document()}
-        content = payload_hash("", (manifest,), image_position=target["image_position"])
+                    "manifest": manifest, "destination": json.loads(encode(destination))}
+        content = manifest_hash("", (manifest,), image_position=target["image_position"])
         now = self.messages.tasks.now()
         end = min(deadline_at, now + timedelta(seconds=MAX_LIFETIME_SECONDS))
         if end <= now:
@@ -102,11 +103,17 @@ class ImageReviewFallback:
         if row is None or row["state"] == "pending":
             raise TaskError("image_review_unavailable", "the original review is unavailable")
         verdict = check_verdict(json.loads(row["review_json"]))
-        if verdict["state"] != "reviewed" or verdict["label"] not in UNSAFE_LABELS:
-            # Only a decided review that actually found the image unsuitable for
-            # the group may leave through a private route.
+        if not self._private_fallback_allowed(row, verdict):
             raise TaskError("image_review_decision", "this review did not withhold the image from the group")
         return row, verdict
+
+    def _private_fallback_allowed(self, row, verdict):
+        if verdict["state"] == "reviewed" and verdict["label"] in UNSAFE_LABELS:
+            return True
+        if verdict["state"] not in ("reviewed", "unavailable") or verdict["label"] not in INCONCLUSIVE_LABELS:
+            return False
+        settings = self.messages.image_review.settings_for(self._group_context(row))
+        return settings["group_nsfw_image_review_failure_action"] == "private"
 
     def _group_context(self, row):
         group = TaskContext.restore(json.loads(self.messages.batch(row["batch_id"])["context_json"]))
@@ -149,13 +156,14 @@ class ImageReviewFallback:
                 or document["review_key"] != request.source_ref
                 or request.logical_key != self.logical_key(request.source_ref)):
             raise TaskError("image_review_fallback_unavailable", "this delivery is not the original fallback")
-        if request.payload_hash != payload_hash("", (document["manifest"],),
-                                                image_position=document["image_position"]):
+        if request.payload_hash != manifest_hash("", (document["manifest"],),
+                                                 image_position=document["image_position"]):
             raise TaskError("image_review_fallback_changed", "the original fallback payload changed")
         return document
 
     # -- delivery owner -------------------------------------------------
 
+    @outcome
     def read(self, request, at):
         """Recheck the whole decision before the private image may leave."""
         document = self._stored(request)
@@ -163,14 +171,14 @@ class ImageReviewFallback:
         if review is None or review["state"] == "pending":
             raise TaskError("image_review_unavailable", "the original review is unavailable")
         verdict = check_verdict(json.loads(review["review_json"]))
-        if verdict["state"] != "reviewed" or verdict["label"] not in UNSAFE_LABELS:
+        if not self._private_fallback_allowed(review, verdict):
             raise TaskError("image_review_decision", "this review no longer withholds the image")
         group = self._group_context(review)
         destination = self._destination(group)
-        if destination != request.context or destination.document() != document["destination"]:
+        if destination != request.context or json.loads(encode(destination)) != document["destination"]:
             raise TaskError("image_review_fallback_route", "the authorized private route changed")
         manifest = document["manifest"]
-        return ImageDeliveryContent("", (self._image(manifest, at),))
+        return ImageDeliveryContent("", (self._image(manifest, at),), allow_cross_scope_images=True)
 
     def _image(self, manifest, at):
         """Rebuild one reviewed original from its governed blob, never from a URL."""

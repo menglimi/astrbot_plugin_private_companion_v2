@@ -2,16 +2,24 @@
 
 V2 规划可读取角色所在地的当前天气。此能力默认关闭，仅在 `planning_enabled`、`calendar_enabled`、`planning_weather_enabled` 同时启用，角色日历写入有授权，且 `calendar.plan` 后台模型可用时取样。设置保存在角色生活配置中，使用独立 V2 数据；不读取 V1 的天气城市、凭据或缓存。
 
-## 数据源：和风天气优先，Open-Meteo 兜底
+## 数据源：全局选择，自动模式按凭据回退
 
-**当前天气默认使用和风天气。** 选择不是配置项，而是由凭据是否存在推断：
+天气源在插件级全局配置 `weather.provider` 中选择：`auto`、`qweather` 或 `open-meteo`。
+默认 `auto` 会在存在和风凭据时使用和风，否则使用 Open-Meteo；显式选 `qweather` 时
+必须配置和风凭据，显式选 `open-meteo` 时始终使用 Open-Meteo。
 
 | 情况 | 实况来源 | 说明 |
 |---|---|---|
-| 已配置和风凭据 | **和风天气** `/v7/weather/now` | 默认路径；同一份凭据同时服务官方预警 |
-| 未配置任何和风凭据 | Open-Meteo | 零配置可用，无凭据、无预警 |
+| `weather.provider=auto` 且已配置和风凭据 | **和风天气** `/v7/weather/now` | 自动模式优先和风 |
+| `weather.provider=auto` 且没有和风凭据 | Open-Meteo | 零配置可用 |
+| `weather.provider=qweather` | **和风天气** `/v7/weather/now` | 必须有和风凭据，否则配置无效 |
+| `weather.provider=open-meteo` | Open-Meteo | 不使用和风凭据 |
 
-和风优先的理由不是偏好，而是只有它能同时提供实况与官方预警——一套凭据覆盖两件事。因此 V2 **没有** V1 那样的 `weather_source` 显式选择项：一旦同时提供多个源，「实况用 A、预警用 B」这种半配置状态就会出现，而两份数据对同一时刻的描述可能不一致。凭据的填法见[官方天气预警来源](OFFICIAL_WEATHER_ALERT_SOURCE_20260926.md)的环境变量章节。
+和风优先的理由不是偏好，而是只有它能同时提供实况与官方预警——一套凭据覆盖两件事。
+官方预警仍由独立的和风预警端口读取；实况源选择不会替代预警凭据。迁移时，V1 的
+`qweather` 会写入全局 `weather.provider=qweather`，Open-Meteo 的旧拼写会归一到
+`open-meteo`；V2 不支持的 OpenWeatherMap 或高德来源不会伪装成等价源。天气凭据仍从
+环境变量读取，见[官方天气预警来源](OFFICIAL_WEATHER_ALERT_SOURCE_20260926.md)的环境变量章节。
 
 两个源都归一化到同一份 `WeatherSnapshot`，下游（规划、主动联系、预警）不感知来源差异。和风的天气图标码会映射到 Open-Meteo 使用的 WMO 码，因此 `weather_code` 语义一致；映射表见 `astrbot_host/qweather_weather.py`。未知图标码按族（1xx 晴、3xx 雨、4xx 雪、5xx 雾）降级而不是整条丢弃。实况文本缺失时按图标回填中文描述，不因少一个标签就作废整次观测。
 

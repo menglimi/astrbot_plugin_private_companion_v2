@@ -495,7 +495,7 @@ button.summary-record:hover strong,.summary-memory:hover>strong,.summary-note:ho
 .summary-relations{display:flex;align-items:center;flex-wrap:wrap;gap:5px 7px;text-align:left;padding:12px 0 0;font-size:11px;line-height:1.8;color:#536783}
 .summary-relations svg{width:13px;height:13px;flex:none}.summary-relations strong{font-size:10px;font-weight:400;margin-left:auto;color:#65748b}
 .summary-no-record{font-size:12px;color:#65748b;padding:15px 0}
-.large-text .overview-heading h2{font-size:18px}                                                                        .large-text .overview-card :is(.snapshot-activity small,.timeline-copy small,.summary-metrics dt,.summary-metrics dd small,.summary-description,.summary-relations,.summary-relations strong,.summary-source,.summary-footnote{font-size:12px}.large-text .summary-copy strong,.large-text .summary-note>strong,.large-text .summary-memory>strong{font-size:14px}
+.large-text .overview-heading h2{font-size:18px}                                                                        .large-text .overview-card :is(.snapshot-activity small,.timeline-copy small,.summary-metrics dt,.summary-metrics dd small,.summary-description,.summary-relations,.summary-relations strong,.summary-source,.summary-footnote){font-size:12px}.large-text .summary-copy strong,.large-text .summary-note>strong,.large-text .summary-memory>strong{font-size:14px}
 .timeline-status{font-size:10px;color:#65748b}
 .compact-timeline li:before{top:14px}.compact-timeline li:not(:last-child):after{top:19px;bottom:-14px}
 @media(min-width:991px){.home-overview{align-items:stretch}.home-overview .room-column{display:flex;flex-direction:column}.home-overview .room-stage{height:auto;min-height:360px;flex:1}.large-text .snapshot-facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -511,7 +511,7 @@ button.summary-record:hover strong,.summary-memory:hover>strong,.summary-note:ho
 
 /* V2 home combines the overview, room, observation and furniture directory. */
 .home-jumpbar{display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid #cdd5e267;border-bottom:1px solid #cdd5e267;margin:-4px 0 20px;padding:8px 0;color:#62728a}.home-overview .room-stage{min-height:340px}.home-section-heading>.text-button{font-size:11px;white-space:nowrap}.observation-filters button.active{border-color:#819f92;color:#4a7967}.observation-timeline .pill{font-size:9px;padding:1px 6px}.observation-empty .text-button{font-size:11px;padding:4px 6px}.furniture-filters button.active{background:#e4eaf4;color:#4e688a;box-shadow:none}.furniture-card .pill{font-size:10px;padding:3px 7px;white-space:nowrap}
-                                                                                                                                                                                                    .large-text :is(.home-jumpbar button{font-size:12px}
+                                                                                                                                                                                                    .large-text .home-jumpbar button{font-size:12px}
 @media(min-width:1440px){.home-overview{grid-template-columns:minmax(0,1fr) 352px}}
 @media(max-width:1190px) and (min-width:991px){.furniture-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.home-section .home-summary-grid{grid-template-columns:minmax(0,1.25fr) repeat(2,minmax(0,1fr))}.home-section .home-summary-grid>.overview-card{padding:15px 13px}.observation-filters button{font-size:10px;padding:9px 4px}.room-quick-access button{font-size:10px;gap:5px}.room-quick-access svg:last-child{display:none}}
 @media(max-width:990px){.home-jumpbar>span{display:none}.home-jumpbar{margin-top:0}.home-overview .room-stage{height:430px}.home-section .home-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.home-section .home-life-records{grid-column:1/-1}.observation-body{min-height:180px}.home-life-records .summary-records{display:grid;grid-template-columns:1.4fr 1fr;gap:24px}.home-life-records .summary-record+.summary-record{border-top:0}.home-life-records .summary-dream{align-items:center}.observation-filters button{padding:11px 14px;font-size:12px}.furniture-toolbar{flex-wrap:wrap;gap:11px}.furniture-toolbar .inline-search{flex:1;min-width:180px}.furniture-toolbar input{width:100%}.furniture-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
@@ -11924,7 +11924,7 @@ window.CompanionReplyPage = (() => {
     note: "保存后从下一轮生成开始生效；已经开始生成的回复保留原配置。",
     labels: {
       enabled: "启用分段", streaming: "流式接收模型回复", llm_controlled: "由模型决定边界",
-      rules_enabled: "补充分段规则", rule_mode: "规则方式", threshold: "规则起始字数",
+      rule_mode: "规则方式", threshold: "规则起始字数",
       min_segment_chars: "最短分段字数", max_segments: "最多消息条数", part_gap_ms: "段间间隔（秒）",
       image_position: "同条图片位置", prompt: "自定义提示词",
       enable_humanized_expression: "启用拟人回复 Prompt",
@@ -11943,7 +11943,7 @@ window.CompanionReplyPage = (() => {
       enabled: "让一轮回复自然地分成多条消息。",
       streaming: "完整接收并校验后，再依次发送分段。",
       llm_controlled: "使用独立一行的分段标记，普通换行不会自动拆分。",
-      rules_enabled: "对较长正文按句子或段落拆分，保护代码和 Markdown。",
+      rule_mode: "规则补充分段始终开启；可选择按句子或段落拆分，并保护代码和 Markdown。",
       part_gap_ms: "每条分段之间的等待时间；0 表示不等待。",
       prompt: "最多 4000 字；可用 {{split_marker}} 插入标记。控制语气和分段倾向，正文和证据仍遵循原有回复约定。",
       enable_humanized_expression: "开启后向本轮系统提示注入一份日常说话方式要求：更口语、更短、少服务腔。只影响措辞，不改事实与授权。",
@@ -11957,7 +11957,7 @@ window.CompanionReplyPage = (() => {
     /* 段落只影响阅读顺序：整张卡共用一个编辑令牌、一次保存。 */
     sections: [
       {id: "segment", title: "分段", help: "怎么把一轮回复切成多条消息",
-       fields: ["enabled", "streaming", "llm_controlled", "rules_enabled", "rule_mode", "threshold",
+       fields: ["enabled", "streaming", "llm_controlled", "rule_mode", "threshold",
                 "min_segment_chars", "max_segments", "part_gap_ms", "image_position", "prompt"]},
       {id: "humanized", title: "拟人回复", help: "只影响措辞，不改事实与授权",
        fields: ["enable_humanized_expression", "humanized_expression_prompt"]},

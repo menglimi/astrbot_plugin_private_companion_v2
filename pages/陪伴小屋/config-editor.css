@@ -14,7 +14,7 @@
 .config-editor-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-4);margin:var(--sp-3) 0 0}
 .config-editor-fields>label{display:flex;flex-direction:column;gap:var(--sp-2);min-width:0;font-size:var(--fs-body);color:var(--t-text)}
 .config-editor-fields>label>small{color:var(--t-text-faint);line-height:1.7;font-size:var(--fs-tiny);max-width:62ch}
-.config-editor-fields input,.config-editor-fields select,.config-editor-fields textarea{width:100%;min-width:0;border:1px solid #c8ccda;border-radius:var(--r-sm);background:#ffffffb3;color:var(--ink);padding:var(--sp-2) var(--sp-3)}
+.config-editor-fields input,.config-editor-fields select,.config-editor-fields textarea{width:100%;min-width:0;border:1px solid var(--t-line-firm);border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text);padding:var(--sp-2) var(--sp-3)}
 .config-editor-fields textarea{resize:vertical;line-height:1.8}
 .config-editor-fields>.reply-toggle{grid-column:1/-1}
 .config-editor-scope{margin:var(--sp-1) 0 0;color:var(--secondary);font-size:var(--fs-body);line-height:1.8}

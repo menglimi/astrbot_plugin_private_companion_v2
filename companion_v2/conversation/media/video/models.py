@@ -123,7 +123,7 @@ def check_video_manifest(videos):
 @dataclass(frozen=True)
 class CapturedVideo:
     descriptor: VideoDescriptor
-    content: bytes = field(repr=False)
+    content: bytes = field(repr=False, metadata={"encode": False})
     frames: tuple[CapturedImage, ...] = field(repr=False)
 
     def __post_init__(self):
@@ -141,11 +141,14 @@ class PromptVideo:
     parent: SourceRef
     descriptor: VideoDescriptor
     frames: tuple[PromptImage, ...] = field(repr=False)
+    content: bytes = field(repr=False, metadata={"encode": False})
 
     def __post_init__(self):
         if (not isinstance(self.source, SourceRef) or not isinstance(self.parent, SourceRef)
                 or self.source.owner != OWNER or self.source.scope != self.parent.scope
                 or type(self.descriptor) is not VideoDescriptor or not isinstance(self.frames, tuple)
                 or any(type(f) is not PromptImage or f.parent != self.source for f in self.frames)
-                or tuple(f.descriptor for f in self.frames) != tuple(f.image for f in self.descriptor.frames)):
-            raise TaskError("video_prompt_invalid", "video frames must retain the captured originals and governed parent")
+                or tuple(f.descriptor for f in self.frames) != tuple(f.image for f in self.descriptor.frames)
+                or type(self.content) is not bytes or len(self.content) != self.descriptor.byte_count
+                or hashlib.sha256(self.content).hexdigest() != self.descriptor.content_hash):
+            raise TaskError("video_prompt_invalid", "video prompt must retain the governed original and frame manifest")

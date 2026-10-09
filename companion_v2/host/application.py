@@ -11,6 +11,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from logging import getLogger
+from pathlib import Path
+import json
+import traceback
 
 from companion_v2.agenda.background import AgendaBackground, AgendaDispatchPolicy, OWNER as AGENDA_OWNER
 from companion_v2.agenda.service import AgendaService
@@ -43,9 +47,13 @@ from companion_v2.conversation.perception_settings import (PerceptionConfigurati
     configuration_fields as perception_configuration_fields)
 from companion_v2.conversation.media.quota import (ImageQuotaConfigurationOwner,
     configuration_fields as image_quota_configuration_fields)
+from companion_v2.conversation.media.output_settings import (ImageOutputConfigurationOwner,
+    configuration_fields as image_output_configuration_fields)
 from companion_v2.conversation.media.review import (ImageReviewConfigurationOwner, GroupImageReview,
     configuration_fields as image_review_configuration_fields)
 from companion_v2.conversation.media.review_service import GroupImageReviewService, image_review_profile
+from companion_v2.conversation.media.image_narration import PrivateImageNarrationService
+from companion_v2.conversation.media.video.narration import NativeVideoNarrationService
 from companion_v2.conversation.media.context_caption import ContextImageCaptionService
 from companion_v2.conversation.content.authoring_workflow import ContentAuthoringWorkflow
 from companion_v2.conversation.media.fallback import ImageReviewFallback, OWNER as FALLBACK_OWNER
@@ -117,6 +125,7 @@ from companion_v2.role_work.journal.scheduling import JournalScheduleDriver
 from companion_v2.memory.activity_receipts import RoleReceiptReader
 from companion_v2.expression.style_evidence import ExpressionSampleCatalog
 from companion_v2.expression.style_service import ExpressionStyleService
+from companion_v2.expression.review import ExpressionDraftReview
 from companion_v2.expression.style_management import ExpressionStyleManagement
 from companion_v2.expression.configuration import (ExpressionConfigurationOwner,
     configuration_fields as expression_configuration_fields)
@@ -150,12 +159,16 @@ from companion_v2.proactive.service import ProactiveContacts
 from companion_v2.proactive.scheduling import ContactSchedule
 
 
+logger = getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class StartupReport:
     task_generation: int
     model_generation: int
     recovered_tasks: int
     unresolved_deliveries: int
+    released_worker_slots: int = 0
 
 
 @dataclass(frozen=True)
@@ -172,7 +185,7 @@ class CompanionApplication:
                  runtime_identity=None, presence_port=None, segmentation=SegmentationPolicy(), voice_policy=None,
                  weather_port=None, weather_alert_port=None, balance_port=None, news_port=None,
                  solar_term_port=None, budget_soft=None, capability_owners=(),
-                 qzone_transport=None,
+                 qzone_transport=None, default_provider_resolver=None,
                  knowledge=None, memory_owner=DEFAULT_MEMORY_OWNER, memory_push=DEFAULT_MEMORY_PUSH):
         if type(owns_runtime) is not bool or not any(p.kind == REPLY_KIND and p.lane is Lane.FOREGROUND for p in profiles):
             raise ValueError("assembly requires a foreground reply profile and explicit runtime ownership")
@@ -185,6 +198,10 @@ class CompanionApplication:
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.external = external
         self.semantics = None
+        # Optional Laya resolver is attached by the host after assembly.  It is
+        # resolved per conversation context so one shared application can serve
+        # multiple targets and roles without sharing credentials.
+        self.laya_decision_resolver = None
         self.image_review = None
         # Reserve a child slot for each concurrently running parent when tools are installed.
         self.worker_limit = limits.foreground_slots // 2 if external is not None else limits.foreground_slots
@@ -198,6 +215,7 @@ class CompanionApplication:
             *reply_configuration_fields(segmentation, streaming, policy.part_gap_seconds, voice_policy),
             *perception_configuration_fields(), *person_configuration_fields(),
             *image_quota_configuration_fields(), *image_review_configuration_fields(),
+            *image_output_configuration_fields(),
             *expression_configuration_fields(), *reaction_configuration_fields(),
             *busy_gate_configuration_fields(), *group_participation_configuration_fields(),
             *knowledge_configuration_fields(), *budget_configuration_fields(),
@@ -211,6 +229,7 @@ class CompanionApplication:
             *content_authoring_configuration_fields(), *content_cover_configuration_fields()) if f.field_id not in registry.fields)
         if extra:
             registry = FieldRegistry(version=registry.version, fields=tuple(registry.fields.values()) + extra)
+        reference_configuration_owner = ReferenceConfigurationOwner(runtime)
         self.configuration = ConfigurationService(runtime, with_contact_fields(registry),
             owners=(ContactConfigurationOwner(runtime), GrowthConfigurationOwner(runtime),
                 SkillConfigurationOwner(runtime), RoleProfileConfigurationOwner(runtime),
@@ -218,12 +237,13 @@ class CompanionApplication:
                 StateConfigurationOwner(runtime),
                     LifeConfigurationOwner(runtime), ReplyConfigurationOwner(runtime, voice_policy),
                     PerceptionConfigurationOwner(runtime), ImageQuotaConfigurationOwner(runtime),
+                    ImageOutputConfigurationOwner(runtime),
                     ImageReviewConfigurationOwner(runtime), ExpressionConfigurationOwner(runtime),
                     ReactionConfigurationOwner(runtime), BusyGateConfigurationOwner(runtime),
                     GroupParticipationConfigurationOwner(runtime), KnowledgeConfigurationOwner(runtime),
                     ScreenConfigurationOwner(runtime), RecallConfigurationOwner(runtime),
                     LibraryConfigurationOwner(runtime),
-                    ReferenceConfigurationOwner(runtime),
+                    reference_configuration_owner,
                     WardrobeConfigurationOwner(runtime),
                     QzoneConfigurationOwner(runtime),
                     *capability_owners))
@@ -232,7 +252,7 @@ class CompanionApplication:
         self.screen_settings = ScreenSettings(self.configuration)
         self.recall_settings = RecallSettings(self.configuration)
         self.library_settings = LibrarySettings(self.configuration)
-        self.reference_settings = ReferenceSettings(self.configuration)
+        self.reference_settings = ReferenceSettings(reference_configuration_owner)
         self.wardrobe_settings = WardrobeSettings(self.configuration)
         self.qzone_settings = QzoneSettings(self.configuration)
         # Without a host transport the extension is simply absent: no credentials,
@@ -252,18 +272,21 @@ class CompanionApplication:
         self.growth_progress = GrowthProgressService(runtime)
         self.self_review = SelfReviewService(runtime)
         self.expression_style = ExpressionStyleService(runtime)
+        self.expression_draft_review = ExpressionDraftReview(runtime)
         self.agenda = AgendaService(runtime)
         self.outbound = OutboundDelivery(runtime, sender, (
             DeliveryOwner(AGENDA_OWNER, "reminder.deliver", lambda request, at: self.agenda_background.delivery_text(request, at),
                 lambda request, at: self.agenda_background.history_text(request, at)),
             DeliveryOwner(CONTACT_GROUP, CONTACT_GROUP, self.proactive.delivery_text, self.proactive.history_text),
-            DeliveryOwner(FALLBACK_OWNER, FALLBACK_OWNER, lambda request, at: self.image_fallback.read(request, at)),
+            DeliveryOwner(FALLBACK_OWNER, "conversation.reply", lambda request, at: self.image_fallback.read(request, at)),
         ), concurrency=limits.background_slots)
         self.outbound.on_delivered = self._mark_contact_sent
         # The review executor only needs the runtime until its app is attached; the
         # conversation owner binds the real review instance once messages exist.
         self.image_review_service = GroupImageReviewService(runtime, notify=self.notify)
         self.context_image_caption = ContextImageCaptionService(runtime, notify=self.notify)
+        self.image_narration = PrivateImageNarrationService(runtime, notify=self.notify)
+        self.video_narration = NativeVideoNarrationService(runtime, notify=self.notify)
         self.screen_interpretation = ScreenInterpretationService(runtime, notify=self.notify)
         self.screen_peek = ScreenPeekService(runtime, notify=self.notify)
         self.authoring = ContentAuthoringWorkflow(runtime)
@@ -274,15 +297,16 @@ class CompanionApplication:
             TaskRegistration(TaskDefinition(DELIVERY_KIND, "conversation.delivery", REPLY_ACTION, Lane.FOREGROUND,
                 side_effect=SideEffect.MESSAGE_DELIVERY, binding=sender.binding, timeout_seconds=30,
                 max_attempts=1, concurrency=self.worker_limit), lambda spec, at: self.delivery.validate(spec, at)),
-        ) + self.journal_writer.registrations + self.memory_reflection.registrations + self.role_reader.registrations + self.state_maintenance.registrations + self.calendar_planning.registrations + self.growth_progress.registrations + self.self_review.registrations + self.expression_style.registrations + self.proactive.registrations + self.outbound.registrations + self.image_review_service.registrations + self.context_image_caption.registrations + self.screen_interpretation.registrations + self.screen_peek.registrations + self.authoring.registrations + (external.registrations if external is not None else ())
+        ) + self.journal_writer.registrations + self.memory_reflection.registrations + self.role_reader.registrations + self.state_maintenance.registrations + self.calendar_planning.registrations + self.growth_progress.registrations + self.self_review.registrations + self.expression_style.registrations + self.proactive.registrations + self.outbound.registrations + self.image_review_service.registrations + self.context_image_caption.registrations + self.image_narration.registrations + self.video_narration.registrations + self.screen_interpretation.registrations + self.screen_peek.registrations + self.authoring.registrations + (external.registrations if external is not None else ())
+        registrations += self.expression_draft_review.registrations
         self.tasks = TaskSupervisor(runtime, registrations, limits=limits, now=self.now)
         # Reference material shares this runtime and the supervisor that owns it, so
         # it is constructed here rather than with the other settings readers above.
         self.references = ReferenceAssetService(runtime, self.tasks, settings=self.reference_settings,
                                                 wardrobe=self.wardrobe_settings,
                                                 require_running=self.require_running)
-        self.calendar = CalendarService(self.tasks, self.agenda)
         self.role_state = RoleStateService(self.tasks, self.configuration, self.role_life)
+        self.calendar = CalendarService(self.tasks, self.agenda, self.role_state)
         self.outbound.attach(self.tasks)
         # 私聊用户权限：默认值来自配置；权限本身仍只看 grant。
         # 拒绝的判定在核心，**发送在宿主层**（那里才有平台客户端，也才覆盖得了陌生号）。
@@ -344,6 +368,7 @@ class CompanionApplication:
                                              role_growth=self.role_growth_context, role_state=self.role_state,
                                              role_self_review=self.role_self_review_context,
                                              expression_style=self.expression_style_context,
+                                             calendar=self.calendar,
                                              reference_materials=self.references,
                                              knowledge=knowledge_context(runtime) if knowledge is None else knowledge,
                                              solar_term_port=solar_term_port)
@@ -367,7 +392,9 @@ class CompanionApplication:
             require_running=self.require_running)
         self.delivery = LocalConversationDelivery(self.messages, sender)
         self.messages.reply_images.enabled = sender.supports_images
-        self.router = ModelRouter(self.configuration, profiles, providers)
+        self.messages.reply_pokes = sender.supports_poke
+        self.router = ModelRouter(self.configuration, profiles, providers,
+                                  default_provider_resolver=default_provider_resolver)
         self.gateway = LocalModelGateway(self.router, BudgetLedger(runtime, budget, budget_soft), self.tasks)
         self.authoring.attach(self.gateway, require_running=self.require_running)
         self.background_waiting = BackgroundTaskQueue(self.tasks)
@@ -376,10 +403,15 @@ class CompanionApplication:
         self.image_fallback = ImageReviewFallback(self.messages, self.delivery)
         self.messages.image_review = self.image_review
         self.messages.context_image_caption = self.context_image_caption
+        self.messages.image_narration = self.image_narration
+        self.messages.expression_draft_review = self.expression_draft_review
+        self.messages.video_narration = self.video_narration
         self.messages.image_fallback = self.image_fallback
         self.messages.outbound_delivery = self.outbound
         self.image_review_service.attach(self)
         self.context_image_caption.attach(self)
+        self.image_narration.attach(self)
+        self.video_narration.attach(self)
         self.screen_interpretation.attach(self)
         self.screen_peek.attach(self)
         self.background = BackgroundCoordinator(self.tasks, self.outbound,
@@ -390,14 +422,18 @@ class CompanionApplication:
         self.growth_progress.attach(self)
         self.self_review.attach(self)
         self.expression_style.attach(self)
+        self.expression_draft_review.attach(self)
         self.journal_writer.attach(self.gateway, require_running=self.require_running, waiting=self.background_waiting)
         self.memory_reflection.attach(self.memory, self.gateway, require_running=self.require_running)
         self.proactive.attach(self.gateway, self.outbound, require_running=self.require_running, notify=self.notify)
         self.proactive.history = self.background_history
+        self.messages.proactive_inspirations = self.proactive.inspirations
         # The contact worker reads the same memory the reply path reads, so a
         # proactive body cannot contradict a stored fact. Memory stays optional:
         # an unwired host keeps generating contacts without it.
         self.proactive.attach_memory(self.memory)
+        self.proactive.expression_context = self.expression_style_context
+        self.proactive.expression_review = self.expression_draft_review
         self.contact_schedule = ContactSchedule(self.proactive, self.messages, role_life=self.role_life,
                                                 role_journal=self.role_journal, calendar=self.calendar,
                                                 role_state=self.role_state, weather_port=weather_port,
@@ -434,8 +470,16 @@ class CompanionApplication:
                                              voice_policy=voice_policy)
         self.flow = ConversationFlow(self.messages, self.delivery, policy=policy)
         self.runner = ExactTaskRunner(self.tasks, frozenset({REPLY_KIND, DELIVERY_KIND}), self._execute)
+        from companion_v2.conversation.streaming_reply import send_stream_part
+
+        async def stream_sender(run, part_id, settings):
+            await send_stream_part(self.delivery, self.runner, run, part_id, settings)
+
+        if limits.foreground_slots >= 2:
+            self.generator.send_stream_part = stream_sender
         self.state = "new"
         self.failure_code = None
+        self.failure_detail = None
         self._wake = asyncio.Event()
         self._driver = None
         self._workers = {}
@@ -449,6 +493,14 @@ class CompanionApplication:
             raise TaskError("host_not_running", "host intake is not active")
         require(self.tasks.check_generation())
 
+    def _record_failure(self, error, fallback):
+        self.failure_code = error.code if isinstance(error, TaskError) else fallback
+        frames = traceback.extract_tb(error.__traceback__)[-10:]
+        location = " > ".join(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames)
+        self.failure_detail = {"code": self.failure_code, "error_type": type(error).__name__, "location": location}
+        logger.error("[CompanionV2] 宿主运行失败 code=%s error_type=%s location=%s",
+                     self.failure_code, type(error).__name__, location)
+
     def attach_semantics(self, port):
         from companion_v2.expression.semantic_service import SemanticService
         if self.semantics is not None:
@@ -461,6 +513,13 @@ class CompanionApplication:
         if self.state == "running":
             self._reconcile_contact_reactions()
         return self.semantics
+
+    def attach_laya_decision(self, resolver):
+        """Attach the optional semantic decision resolver supplied by the host."""
+        if resolver is not None and not callable(resolver):
+            raise ValueError("Laya decision resolver must be callable or None")
+        self.laya_decision_resolver = resolver
+        self.messages.laya_decision_resolver = resolver
 
     async def start(self, *, expected_task_generation, expected_model_generation):
         async with self._closing:
@@ -489,12 +548,20 @@ class CompanionApplication:
             self.state = "new"
             return Outcome.failed("host_startup_failed", "startup transaction failed; intake remains closed")
         try:
-            recovered = unresolved = 0
+            recovered = unresolved = released_slots = 0
             while True:
                 page = require(self.tasks.recover(limit=32))
                 recovered += len(page)
                 if len(page) < 32:
                     break
+                await asyncio.sleep(0)
+            after_attempt_id = None
+            while True:
+                page = require(self.tasks.recover_stopped_workers(limit=32, after_attempt_id=after_attempt_id))
+                released_slots += len(page.released_tasks)
+                if page.scanned < 32:
+                    break
+                after_attempt_id = page.last_attempt_id
                 await asyncio.sleep(0)
             while True:
                 page = self.background_waiting.recover(limit=32)
@@ -520,7 +587,7 @@ class CompanionApplication:
             self.memory_schedule.start_recovery()
             self._driver = asyncio.create_task(self._drive(), name="companion:conversation-host")
             self.notify()
-            return Outcome.success(StartupReport(generation, model_generation, recovered, unresolved))
+            return Outcome.success(StartupReport(generation, model_generation, recovered, unresolved, released_slots))
         except asyncio.CancelledError:
             self.state = "faulted"
             self.provider_registry.close()
@@ -529,7 +596,7 @@ class CompanionApplication:
         except Exception as error:
             self.state = "faulted"
             self.provider_registry.close()
-            self.failure_code = error.code if isinstance(error, TaskError) else "host_recovery_failed"
+            self._record_failure(error, "host_recovery_failed")
             return Outcome.failed(self.failure_code, "host recovery did not complete; intake remains closed")
 
     @outcome
@@ -615,6 +682,29 @@ class CompanionApplication:
         self.notify()
         return result
 
+    @outcome
+    def reset_conversation_window(self, window, *, reset_id):
+        from companion_v2.conversation.reset import reset_window
+
+        result = reset_window(self.runtime, window, reset_id=reset_id, at=self.now())
+        batches = set(result["batches"])
+        for work, worker in tuple(self._workers.values()):
+            if work.batch_id in batches:
+                worker.cancel()
+        participation = getattr(self.tools, "group_participation", None)
+        if participation is not None:
+            if not result["replayed"]:
+                participation.admission.reset_window(window)
+            for batch_id in batches:
+                participation._frozen_turns.pop(batch_id, None)
+        if self.state == "running":
+            for batch_id in batches:
+                for task_id in self.flow._batch_tasks(batch_id):
+                    require(self.tasks.discard_queued(task_id, reason="owner_closed"))
+                self.flow._resolve(batch_id, "context_reset", expected=False)
+        self.notify()
+        return result
+
     def record_receipt(self, receipt):
         # This trusted accounting hook remains usable during draining, while storage is held.
         if self._storage_closed:
@@ -649,24 +739,25 @@ class CompanionApplication:
             self.semantics.errors["reaction_usage"] = getattr(exc, "code", type(exc).__name__)
 
     def _mark_contact_sent(self, delivery_id):
-        if self.semantics is None:
-            return
-        try:
-            if self.semantics.reactions.mark_contact_sent(delivery_id):
-                self.semantics.errors.pop("reaction_usage", None)
-        except Exception as exc:
-            self.semantics.errors["reaction_usage"] = getattr(exc, "code", type(exc).__name__)
+        self.proactive.delivery_confirmed(delivery_id)
+        if self.semantics is not None:
+            try:
+                if self.semantics.reactions.mark_contact_sent(delivery_id):
+                    self.semantics.errors.pop("reaction_usage", None)
+            except Exception as exc:
+                self.semantics.errors["reaction_usage"] = getattr(exc, "code", type(exc).__name__)
+        self.notify()
 
     def _reconcile_contact_reactions(self):
-        if self.semantics is None:
-            return
         last = ""
         while True:
             rows = self.runtime.read_all("""SELECT delivery_id FROM background_deliveries
                 WHERE owner = ? AND state = 'delivered' AND delivery_id > ?
                 ORDER BY delivery_id LIMIT 32""", (CONTACT_GROUP, last))
             for row in rows:
-                self._mark_contact_sent(row["delivery_id"])
+                self.proactive.delivery_confirmed(row["delivery_id"])
+                if self.semantics is not None:
+                    self._mark_contact_sent(row["delivery_id"])
             if len(rows) < 32:
                 break
             last = rows[-1]["delivery_id"]
@@ -676,18 +767,26 @@ class CompanionApplication:
         self._wake.set()
 
     async def _execute(self, run):
-        if run.task.spec.kind == REPLY_KIND:
-            result = await self.generator.generate(run)
-            if self.semantics is not None:
-                self.semantics.schedule_memory(run.task.spec.context)
-            return result
-        result = await self.delivery.deliver(run)
+        # The supervisor remembers only that a worker stopped; the turn's own
+        # reply diagnosis needs the code the owner actually raised.
+        try:
+            if run.task.spec.kind == REPLY_KIND:
+                result = await self.generator.generate(run)
+                if self.semantics is not None:
+                    self.semantics.schedule_memory(run.task.spec.context)
+                return result
+            result = await self.delivery.deliver(run)
+        except TaskError as error:
+            self.flow.note_failure(run.task.task_id, error.code)
+            raise
         if result.result_ref:
             self._mark_reaction_sent(result.result_ref)
         return result
 
     async def _drive(self):
         try:
+            loop = asyncio.get_running_loop()
+            next_contact_delivery_check = 0.0
             while self.state == "running":
                 self._wake.clear()
                 require(self.tasks.check_generation())
@@ -698,12 +797,32 @@ class CompanionApplication:
                             self.flow.completed(work.batch_id, worker.result())
                 excluded = tuple(work.batch_id for work, _ in self._workers.values())
                 available = self.worker_limit - len(self._workers)
+                started_foreground = False
                 if available > 0:
+                    def slots_for(work):
+                        batch = self.messages.batch(work.batch_id)
+                        saved = json.loads(batch["contributions_json"]).get("reply_settings", {})
+                        values = saved.get("settings", {})
+                        return 2 if (batch["generation_task_id"] == work.task_id and values.get("enabled", False)
+                            and values.get("streaming_mode", "buffered") == "incremental"
+                            and values.get("streaming", False) and self.tasks.limits.foreground_slots >= 2) else 1
+
+                    used = sum(slots_for(work) for work, _ in self._workers.values())
                     for work in require(self.flow.advance(limit=available, excluded=excluded)):
+                        slots = slots_for(work)
+                        if used + slots > self.tasks.limits.foreground_slots:
+                            self.flow.defer(work.batch_id)
+                            continue
+                        used += slots
                         worker = asyncio.create_task(self.runner.run(work.context, work.task_id),
                                                      name="companion:flow:" + work.batch_id)
                         self._workers[work.task_id] = (work, worker)
                         worker.add_done_callback(lambda done: self.notify())
+                        started_foreground = True
+                if started_foreground:
+                    # Start admitted model/send work before synchronous periodic
+                    # maintenance occupies the loop. All original fences remain.
+                    await asyncio.sleep(0)
                 excluded = tuple(work.batch_id for work, _ in self._workers.values())
                 deadline = self.flow.next_wake(excluded=excluded) if len(self._workers) < self.worker_limit else None
                 self.memory_schedule.advance()
@@ -718,9 +837,16 @@ class CompanionApplication:
                 self.calendar_planning.advance()
                 self.growth_progress.advance()
                 self.self_review.advance()
+                tools = self.messages.tools
+                participation = getattr(tools, "group_participation", None) if tools is not None else None
+                if participation is not None:
+                    participation.advance_reflection()
                 self.expression_style.advance()
                 if self.presence is not None:
                     self.presence.advance()
+                if loop.time() >= next_contact_delivery_check:
+                    self.proactive.advance_deliveries()
+                    next_contact_delivery_check = loop.time() + 1.0
                 self.journal_schedule.advance()
                 journal_deadline = self.journal_schedule.next_wake()
                 if journal_deadline is not None:
@@ -740,7 +866,7 @@ class CompanionApplication:
             raise
         except Exception as error:
             self.state = "faulted"
-            self.failure_code = error.code if isinstance(error, TaskError) else "host_dispatch_failed"
+            self._record_failure(error, "host_dispatch_failed")
             # A failed coordinator closes intake and fences its live wrappers. It never retries effects.
             for _, worker in self._workers.values():
                 worker.cancel()
@@ -774,11 +900,14 @@ class CompanionApplication:
                 + self.growth_progress.active_handles
                 + self.self_review.active_handles
                 + self.expression_style.active_handles
+                + self.expression_draft_review.active_handles
                 + (self.presence.active_handles if self.presence else ())
                 + self.background.active_handles + self.memory_schedule.active_handles
                 + self.proactive.active_handles + self.contact_schedule.active_handles
                 + self.journal_triggers.active_handles + self.journal_schedule.active_handles
                 + self.image_review_service.active_handles
+                + self.image_narration.active_handles
+                + self.video_narration.active_handles
                 + self.screen_interpretation.active_handles
                 + self.screen_peek.active_handles
                 + (self.authoring.runner.active_handles if self.authoring.runner else ())
@@ -813,8 +942,11 @@ class CompanionApplication:
             await self.growth_progress.close()
             await self.self_review.close()
             await self.expression_style.close()
+            await self.expression_draft_review.close()
             await self.image_review_service.close()
             await self.context_image_caption.close()
+            await self.image_narration.close()
+            await self.video_narration.close()
             await self.screen_interpretation.close()
             await self.screen_peek.close()
             self.memory.activity.close()

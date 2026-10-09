@@ -6,7 +6,7 @@
 
 ## 一、页面功能
 
-日记、梦境、阅读、睡眠与执行记录的工作台：看四类私人记录的原文与来源，做显式的书写/作息操作与已知失败的_retry_；同时承载生活例程（role.life）的快捷设置表单。
+日记、梦境、阅读、睡眠与执行记录的工作台：看四类私人记录的原文与来源，做显式的书写/作息操作与已知失败的_retry_；同时承载生活例程、睡眠与写作偏好。休息时回复判定与醒后补看移到主动联系页的开口闸门，和消息开口时机放在一起。
 
 ## 二、展示部分（life 工作区，iframe 内）
 
@@ -29,9 +29,9 @@
 
 后端定义 `companion_v2/role_work/life/configuration.py:27`；消费 `role_work/life/rest_gate.py`、journal。
 
-- **目标结构**：统一配置编辑器 `lifeConfigWorkspace`（spec 组 `life`，23 项全量）挂在本视图面板顶部——`renderViewPanel('diary')` 内、life 工作区 iframe 之上，走 `POST /config/configure`（section=`life` → `DiaryAndRestManagement`，`configuration_api.py:35-48`）。写作偏好、作息与休息时段回复判定紧挨着它们作用的工作区，改完向下就能看到效果。
+- **目标结构**：统一配置编辑器 `lifeConfigWorkspace`（spec 组 `life`，按 section 过滤）挂在本视图面板顶部——`renderViewPanel('diary')` 内、life 工作区 iframe 之上，走 `POST /config/configure`（section=`life` → `DiaryAndRestManagement`，`configuration_api.py:35-48`）。这里展示 `routine`、`sleep`、`writing`；`rest` 与 `backlog` 由主动联系页的开口闸门工作区挂载。
 - **移除项**：工作区内嵌 `config-form`（`pages/日记与生活/workspace.html:31-47`：启用/时区/日记时间/入睡/阅读/摘要约 7 项，经 `send("configure")` 即 `POST {life_api}/command`，`pages/日记与生活/app.js:183`）——它是 23 项的子集，保留即双入口、两份草稿。移除后需重建 `workspace-bundle.js`（`tools/sync_framework_page.py`）。
-- **现状（未实施）**：编辑器仍挂在决策 B3（`app.js:1143`），工作区表单仍在（`workspace.html:31`）。
+- **现状**：编辑器已按页面职责过滤挂载；生活工作区表单仍由 iframe 提供记录与执行操作，配置保存统一走宿主配置接口。
 
 ### 23 项按功能划分（spec 标签实查）
 

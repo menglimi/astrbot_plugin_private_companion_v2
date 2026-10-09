@@ -12,7 +12,7 @@ authorization gate.
 
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tests import test_astrbot_staging_host as support
 from tests.multi_host_support import MultiFixture, multi_config
@@ -54,6 +54,39 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                     and "/targets/" + target_id + "/" in route][0]
         return handlers, editor("first"), editor("second")
 
+    async def test_official_catalogue_and_saved_missing_sources_are_visible(self):
+        handlers, first, _ = await self.routes()
+        official = NS(list_sources=AsyncMock(return_value=[{
+            "id": "kb:kb-1", "type": "knowledge_base", "kb_id": "kb-1", "name": "星河设定",
+            "documents": [{"id": "doc:kb-1:doc-1", "name": "角色资料.md"}],
+        }]))
+        self.native.kb_manager = NS()
+        try:
+            with patch("astrbot_host.configuration_api.AstrBotKnowledgeSources", return_value=official):
+                status = (await call(handlers[first], query={"sections": "knowledge"}))["data"]["sections"]["knowledge"]
+                saved = await call(handlers[first + "/configure"], {
+                    "section": "knowledge", "operation_key": "official-kb-selection",
+                    "edit_token": status["edit_token"],
+                    "changes": {"source_ids": "doc:kb-1:doc-1\nkb:missing"},
+                }, query={"sections": "knowledge"})
+                reread = (await call(handlers[first], query={"sections": "knowledge"}))[
+                    "data"]["sections"]["knowledge"]
+            self.assertEqual(saved["status"], "ok", saved)
+            self.assertNotIn("status", saved["data"])
+            status = reread
+            self.assertTrue(status["knowledge_sources_available"])
+            self.assertEqual(status["knowledge_sources"][0]["documents"][0]["id"], "doc:kb-1:doc-1")
+            self.assertEqual(status["knowledge_sources"][-1]["type"], "missing")
+            self.assertEqual(status["knowledge_sources"][-1]["id"], "kb:missing")
+            official.list_sources.side_effect = RuntimeError("catalogue unavailable")
+            with patch("astrbot_host.configuration_api.AstrBotKnowledgeSources", return_value=official):
+                unavailable = (await call(handlers[first], query={"sections": "knowledge"}))["data"]["sections"]["knowledge"]
+            self.assertFalse(unavailable["knowledge_sources_available"])
+            self.assertEqual([item["id"] for item in unavailable["knowledge_sources"]],
+                             ["doc:kb-1:doc-1", "kb:missing"])
+        finally:
+            self.controller.unregister_routes()
+
     async def test_every_section_reads_with_its_own_scope_and_token(self):
         handlers, first, _ = await self.routes()
         try:
@@ -69,6 +102,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                                  "qzone",
                                  "relationship_profile", "role.growth.skills", "role_growth",
                                  "role_profile", "screen", "wardrobe"}
+            expected_sections.add("image.output")
             self.assertTrue(expected_sections.issubset(status))
             self.assertEqual(set(status), expected_sections)
             self.assertEqual(status["quota"]["scope"], "role")
@@ -117,6 +151,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             # 参考图与衣柜的两个总闸默认关闭；轮换天数沿用 14 天。
             self.assertFalse(status["wardrobe"]["settings"]["enabled"])
             self.assertFalse(status["photo.reference"]["settings"]["enabled"])
+            self.assertFalse(status["photo.reference"]["settings"]["group_enabled"])
             self.assertFalse(status["photo.reference"]["settings"]["daily_outfit_enabled"])
             self.assertEqual(status["photo.reference"]["settings"]["daily_outfit_rotation_days"], 14)
             for name, section in status.items():
@@ -165,27 +200,30 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             saved = await call(handlers[first + "/configure"], quota)
             self.assertEqual(saved["status"], "ok", saved)
             self.assertTrue((await call(handlers[first + "/configure"], quota))["data"]["result"]["replayed"])
-            after = saved["data"]["status"]["sections"]["quota"]["settings"]
+            after = (await call(handlers[first], query={"sections": "quota"}))["data"]["sections"]["quota"]["settings"]
             self.assertEqual((after["group_max_daily"], after["proactive_max_daily"]), (5, 0))
             # Another target keeps its own ceiling.
             other = (await call(handlers[second]))["data"]["sections"]["quota"]["settings"]
             self.assertEqual(other["group_max_daily"], -1)
             # A window section saves with its own token and leaves the role
             # ceiling untouched.
+            review_status = (await call(handlers[first], query={"sections": "image_review"}))
             review = {"section": "image_review", "operation_key": "review-1",
-                      "edit_token": saved["data"]["status"]["sections"]["image_review"]["edit_token"],
+                      "edit_token": review_status["data"]["sections"]["image_review"]["edit_token"],
                       "changes": {"enable_group_nsfw_private_fallback": True,
                                   "group_nsfw_image_review_mode": "dual"}}
             reviewed = await call(handlers[first + "/configure"], review)
             self.assertEqual(reviewed["status"], "ok", reviewed)
-            sections = reviewed["data"]["status"]["sections"]
+            sections = (await call(handlers[first], query={"sections": "image_review"}))["data"]["sections"]
             self.assertTrue(sections["image_review"]["settings"]["enable_group_nsfw_private_fallback"])
             self.assertEqual(sections["image_review"]["settings"]["group_nsfw_image_review_mode"], "dual")
-            self.assertEqual(sections["quota"]["settings"]["group_max_daily"], 5)
+            quota_after = (await call(handlers[first], query={"sections": "quota"}))
+            self.assertEqual(quota_after["data"]["sections"]["quota"]["settings"]["group_max_daily"], 5)
             # Using one section's token for another section's target is rejected.
+            quota_token = quota_after["data"]["sections"]["quota"]["edit_token"]
             crossed = await call(handlers[first + "/configure"],
                                     {"section": "reaction", "operation_key": "cross",
-                                     "edit_token": sections["quota"]["edit_token"], "changes": {"candidate_limit": 3}})
+                                     "edit_token": quota_token, "changes": {"candidate_limit": 3}})
             self.assertIn(crossed["data"]["code"], ("configuration_revision_conflict", "invalid_configuration_value"))
         finally:
             self.controller.unregister_routes()
@@ -200,7 +238,8 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                 "changes": {"identity": "住在旧城边的电台编辑", "world": "信件总会晚一个雨季才抵达。"},
             })
             self.assertEqual(response["status"], "ok", response)
-            first_saved = response["data"]["status"]["sections"]["role_profile"]["settings"]
+            first_saved = (await call(handlers[first], query={"sections": "role_profile"}))[
+                "data"]["sections"]["role_profile"]["settings"]
             self.assertEqual(first_saved["identity"], "住在旧城边的电台编辑")
             self.assertEqual(first_saved["world"], "信件总会晚一个雨季才抵达。")
             other = (await call(handlers[second]))["data"]["sections"]["role_profile"]["settings"]
@@ -232,7 +271,8 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                 "changes": {"default_nickname": "小舟", "role_relation": "经确认的搭档"},
             })
             self.assertEqual(response["status"], "ok", response)
-            first_saved = response["data"]["status"]["sections"]["relationship_profile"]["settings"]
+            first_saved = (await call(handlers[first], query={"sections": "relationship_profile"}))[
+                "data"]["sections"]["relationship_profile"]["settings"]
             self.assertEqual(first_saved["default_nickname"], "小舟")
             self.assertEqual(first_saved["role_relation"], "经确认的搭档")
             other = (await call(handlers[third]))["data"]["sections"]["relationship_profile"]["settings"]
@@ -242,7 +282,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.controller.unregister_routes()
 
     async def test_the_contact_section_publishes_four_layers_and_locks_the_relationship_budget(self):
-        """主动联系偏好是唯一一个四层组，也是最长的一个分区（158 项）。
+        """主动联系偏好是唯一一个四层组，也是最长的一个分区（160 项）。
 
         两个「同一关系」的额度按窗口写入会被所有者拒绝，所以字段契约里不能出现
         窗口层——否则页面会渲染一个存不下去的控件。其余字段仍然四层可写。
@@ -254,8 +294,8 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(contact["group_id"], "proactive.contact")
             self.assertEqual(contact["scope"], "window")
             self.assertEqual(contact["layers"], ["installation", "role", "relationship", "window"])
-            self.assertEqual(len(contact["settings"]), 158)
-            self.assertEqual(len(contact["provenance"]), 158)
+            self.assertEqual(len(contact["settings"]), 164)
+            self.assertEqual(len(contact["provenance"]), 164)
             self.assertFalse(contact["settings"]["enabled"])
             self.assertEqual(contact["settings"]["interval_seconds"], 3600)
             self.assertEqual(contact["settings"]["quiet_timezone"], "Asia/Shanghai")
@@ -275,11 +315,41 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                  "edit_token": contact["edit_token"],
                  "changes": {"interval_seconds": 900, "quiet_enabled": True}})
             self.assertEqual(saved["status"], "ok", saved)
-            after = saved["data"]["status"]["sections"]["proactive.contact"]
+            after = (await call(handlers[first], query={"sections": "proactive.contact"}))[
+                "data"]["sections"]["proactive.contact"]
             self.assertEqual(after["settings"]["interval_seconds"], 900)
             self.assertTrue(after["settings"]["quiet_enabled"])
             # 保存后编辑令牌必然更新，否则两次保存会互相覆盖。
             self.assertNotEqual(after["edit_token"], contact["edit_token"])
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_contact_save_returns_receipt_without_reading_status(self):
+        from astrbot_host.configuration_api import ConfigurationWebAPI
+
+        handlers, first, _ = await self.routes()
+        try:
+            initial = (await call(handlers[first], query={"sections": "proactive.contact"}))
+            contact = initial["data"]["sections"]["proactive.contact"]
+            body = {"section": "proactive.contact", "operation_key": "contact-save-isolated",
+                    "edit_token": contact["edit_token"], "changes": {"interval_seconds": 1200}}
+            with patch.object(ConfigurationWebAPI, "_status", new_callable=AsyncMock) as api_status, \
+                    patch("companion_v2.configuration.management.GroupEditor.status",
+                          side_effect=AssertionError("a write must not read its post-save status")) as editor_status:
+                saved = await call(handlers[first + "/configure"], body)
+                replayed = await call(handlers[first + "/configure"], body)
+
+            api_status.assert_not_awaited()
+            editor_status.assert_not_called()
+            self.assertEqual(saved["status"], "ok", saved)
+            self.assertEqual(set(saved["data"]), {"result"})
+            self.assertFalse(saved["data"]["result"]["replayed"])
+            self.assertTrue(replayed["data"]["result"]["replayed"])
+            self.assertEqual(saved["data"]["result"]["operation_id"],
+                             replayed["data"]["result"]["operation_id"])
+            refreshed = (await call(handlers[first], query={"sections": "proactive.contact"}))[
+                "data"]["sections"]["proactive.contact"]
+            self.assertEqual(refreshed["settings"]["interval_seconds"], 1200)
         finally:
             self.controller.unregister_routes()
 
@@ -294,7 +364,8 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                  "changes": {"busy_reply_gate_enabled": True, "busy_reply_min_delay_seconds": 45,
                              "busy_activity_keywords": "开会, 赶稿、写代码"}})
             self.assertEqual(answer["status"], "ok", answer)
-            settings = answer["data"]["status"]["sections"]["busy_gate"]["settings"]
+            after = (await call(handlers[first], query={"sections": "busy_gate"}))["data"]["sections"]["busy_gate"]
+            settings = after["settings"]
             self.assertTrue(settings["busy_reply_gate_enabled"])
             self.assertEqual(settings["busy_reply_min_delay_seconds"], 45)
             # The stored form keeps the separators the operator typed; the parsed
@@ -303,7 +374,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             # A keyword list the gate would reject never reaches storage.
             refused = await call(handlers[first + "/configure"],
                 {"section": "busy_gate", "operation_key": "gate-2",
-                 "edit_token": answer["data"]["status"]["sections"]["busy_gate"]["edit_token"],
+                 "edit_token": after["edit_token"],
                  "changes": {"busy_activity_keywords": "x" * 25}})
             self.assertEqual(refused["data"]["code"], "busy_gate_settings_invalid")
         finally:
@@ -320,7 +391,8 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                  "edit_token": initial["edit_token"],
                  "changes": {"enabled": True, "direction_prompt": "保持清晰、克制的叙事风格。"}})
             self.assertEqual(answer["status"], "ok", answer)
-            settings = answer["data"]["status"]["sections"]["content.authoring"]["settings"]
+            settings = (await call(handlers[first], query={"sections": "content.authoring"}))[
+                "data"]["sections"]["content.authoring"]["settings"]
             self.assertTrue(settings["enabled"])
             self.assertEqual(settings["direction_prompt"], "保持清晰、克制的叙事风格。")
         finally:

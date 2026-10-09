@@ -53,8 +53,12 @@ class SelfReviewManagement:
         except (TypeError, ValueError):
             raise TaskError("self_review_evidence_changed", "stored self-review evidence is invalid") from None
         if (type(window) is not dict or set(window) != {"opened_at", "closed_at", "handles", "kinds"}
+                or type(window["handles"]) is not list
+                or any(type(value) is not str for value in window["handles"])
+                or len(set(window["handles"])) != len(window["handles"])
                 or type(handles) is not list or not handles
-                or any(type(value) is not str or value not in window["handles"] for value in handles)):
+                or any(type(value) is not str or value not in window["handles"] for value in handles)
+                or len(set(handles)) != len(handles)):
             raise TaskError("self_review_evidence_changed", "stored self-review evidence is invalid")
         return run, window, handles
 
@@ -72,41 +76,67 @@ class SelfReviewManagement:
         if opened_at > closed_at or closed_at > at:
             raise TaskError("self_review_evidence_changed", "self-review window is not yet complete")
         try:
-            self.evidence.resolve_handles(handles, opened_at, closed_at, context, at)
+            descriptions = self.evidence.describe_handles(handles, opened_at, closed_at, context, at)
         except TaskError as error:
             raise TaskError("self_review_evidence_changed", error.reason) from None
-        return run, handles
+        return run, handles, descriptions
 
     @outcome
-    def list(self, *, operator, context, limit=20, after_id=None):
-        if type(limit) is not int or not 1 <= limit <= 50 or (after_id is not None and
+    def list(self, *, operator, context, state="pending", limit=20, after_id=None):
+        if state not in ("pending", "active", "decided") or type(limit) is not int or not 1 <= limit <= 50 or (after_id is not None and
                 (type(after_id) is not str or not after_id.strip() or len(after_id) > 512)):
             raise TaskError("self_review_query_invalid", "invalid self-review page")
         at = self.management.ledger.now()
+        if state == "pending":
+            state_clause, state_values = "(state = 'pending')", ()
+        elif state == "active":
+            # Keep accepted rows visible even after their evidence expires or is
+            # withdrawn.  The dashboard needs to explain why injection stopped;
+            # filtering them out here made the stopped section impossible to
+            # render and made the effective count lie.
+            state_clause, state_values = "(state = 'accepted')", ()
+        else:
+            state_clause, state_values = "(state = 'rejected' OR (state = 'accepted' AND expires_at <= ?))", (stamp(at),)
         with self.runtime.read_snapshot():
             owner, policy_revision = self.management._authorize(operator, context, at)
-            rows = self.runtime.read_all("""SELECT * FROM role_self_review_items
-                WHERE owner_key = ? AND scope_key = ? AND state = 'pending'
+            rows = self.runtime.read_all(f"""SELECT * FROM role_self_review_items
+                WHERE owner_key = ? AND scope_key = ? AND {state_clause}
                   AND (? IS NULL OR item_id > ?) ORDER BY item_id LIMIT ?""",
-                (digest(owner), digest(context.scope), after_id, after_id, limit + 1))
+                (digest(owner), digest(context.scope), *state_values, after_id, after_id, limit + 1))
             items, expired = [], 0
             for row in rows[:limit]:
-                unavailable, expires_at = None, None
+                unavailable, expires_at, run_summary, evidence = None, row["expires_at"], None, []
                 try:
-                    self._basis(row, owner, context, at)
-                    expires_at = row["expires_at"]
+                    run, _, evidence = self._basis(row, owner, context, at)
+                    run_summary = run["summary"]
                 except TaskError as error:
                     unavailable = error.code
                 if expires_at is not None and expires_at <= stamp(at):
                     expired += 1
+                if row["state"] != "pending":
+                    actions = []
+                elif (unavailable is not None or expires_at is None or expires_at <= stamp(at)
+                      or row["kind"] != "ask_user"):
+                    actions = ["reject"]
+                else:
+                    actions = ["accept", "reject"]
                 items.append({"item_id": row["item_id"], "run_id": row["run_id"],
                     "kind": row["kind"], "observation": row["observation"] if unavailable is None else None,
                     "next_action": row["next_action"] if unavailable is None else None,
                     "confidence": row["confidence"], "expires_at": expires_at,
-                    "created_at": row["created_at"], "unavailable_reason": unavailable,
-                    "actions": ["accept", "reject"] if unavailable is None else ["reject"],
+                    "created_at": row["created_at"], "state": row["state"],
+                    "summary": run_summary, "evidence": evidence if unavailable is None else [],
+                    "automatic": row["decided_by"] == "system:self-review",
+                    "unavailable_reason": unavailable, "actions": actions,
                     "view_token": self._token(operator, context, row, policy_revision)})
-            return {"items": items, "expired_in_page": expired,
+            reviewer = getattr(self.app, "role_self_review", None)
+            policy = {
+                "window_hours": getattr(reviewer, "window_hours", 24),
+                "scan_seconds": getattr(reviewer, "scan_seconds", 86400),
+                "empty_retry_seconds": getattr(reviewer, "empty_retry_seconds", 3600),
+                "minimum_evidence": getattr(reviewer, "minimum_evidence", 1),
+            }
+            return {"items": items, "expired_in_page": expired, "policy": policy,
                 "next_cursor": rows[limit - 1]["item_id"] if len(rows) > limit else None,
                 "context_key": context.key, "role_id": owner.persona_id}
 
@@ -130,9 +160,9 @@ class SelfReviewManagement:
                 self._basis(row, owner, context, at)
                 if row["expires_at"] <= stamp(at):
                     raise TaskError("self_review_expired", "this guidance has already expired")
-                if row["kind"] == "no_change":
+                if row["kind"] != "ask_user":
                     raise TaskError("self_review_command_invalid",
-                                    "no_change is informational and cannot be accepted as guidance")
+                                    "only guidance that asks the user can be accepted manually")
             changed = connection.execute("""UPDATE role_self_review_items
                 SET state = ?, decided_at = ?, decided_by = ?, decision_key = ?
                 WHERE item_id = ? AND owner_key = ? AND scope_key = ? AND state = 'pending'""",
@@ -141,6 +171,10 @@ class SelfReviewManagement:
                  item_id, digest(owner), digest(context.scope)))
             if changed.rowcount != 1:
                 raise TaskError("self_review_decided", "self-review item changed during decision")
+            connection.execute("""UPDATE role_self_review_runs SET state = 'decided', decided_at = ?
+                WHERE run_id = ? AND state = 'pending' AND NOT EXISTS (
+                    SELECT 1 FROM role_self_review_items WHERE run_id = ? AND state = 'pending')""",
+                (stamp(at), row["run_id"], row["run_id"]))
             self.app.notify()
             return {"item_id": item_id, "state": "accepted" if action == "accept" else "rejected",
                 "replayed": False}

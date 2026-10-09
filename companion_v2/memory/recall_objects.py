@@ -5,6 +5,7 @@ import json
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind, SourceRef, VersionRef
 from companion_v2.sources.privacy import redact_text
+from companion_v2.conversation.reset import batch_current
 
 from . import codec
 from .models import AtomRef, Evidence, owner_key, timestamp
@@ -40,7 +41,7 @@ class RecallObjects:
 
     def source(self, context, kind, identifier, *, authoritative=False):
         if kind == "human":
-            row = self.runtime.read_one("""SELECT i.event_json, b.context_json FROM conversation_inputs i
+            row = self.runtime.read_one("""SELECT i.batch_id, i.event_json, b.context_json FROM conversation_inputs i
                 JOIN conversation_batches b ON b.batch_id = i.batch_id
                 WHERE i.event_key = ? AND i.withdrawn = 0""", (identifier,))
             if row is None:
@@ -63,7 +64,8 @@ class RecallObjects:
             speaker, source_kind = context.role_binding.role.subject_id, "bot_message"
         original_context = TaskContext.restore(json.loads(row["context_json"]))
         if (original_context.scope.kind is not ScopeKind.PRIVATE or owner_key(original_context) != owner_key(context)
-                or self._forgotten(context, reference)):
+                or self._forgotten(context, reference)
+                or not batch_current(self.runtime, row["batch_id"], original_context.scope)):
             return None
         if authoritative:
             if kind == "reply":

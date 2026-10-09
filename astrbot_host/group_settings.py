@@ -30,7 +30,8 @@ def parse_group_targets(values):
         target = GroupTarget(**{field: _text(value[field], required=True) for field in fields})
         try:
             HostAccount(target.platform_id, target.account_id, target.bot_id)
-            account_number(target.group_id)
+            if target.group_id != "*":
+                account_number(target.group_id)
             if not PROFILE_PATTERN.fullmatch(target.target_id) or target.route_key in routes:
                 raise ValueError()
         except ValueError:

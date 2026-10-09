@@ -13,8 +13,12 @@ from .annual_calendar import parse_annual_calendar
 # module, not the other way around. An operator setting may only narrow inside it.
 WEATHER_MAX_AGE_MINUTES = 120
 WEATHER_MAX_AGE_MINIMUM = 5
+SCHEDULE_MODE_CONTINUOUS = "continuous"
+SCHEDULE_MODE_ORCHESTRATED = "orchestrated"
+SCHEDULE_MODES = (SCHEDULE_MODE_CONTINUOUS, SCHEDULE_MODE_ORCHESTRATED)
 
 DEFAULTS = {
+    "schedule_simulation_mode": SCHEDULE_MODE_ORCHESTRATED,
     "planning_enabled": False,
     "planning_timezone": "Asia/Shanghai",
     "planning_horizon_days": 90,
@@ -95,6 +99,9 @@ def configured_annual_calendars(value):
 
 
 def validate_settings(values):
+    mode = values.get("schedule_simulation_mode", SCHEDULE_MODE_ORCHESTRATED)
+    if mode not in SCHEDULE_MODES:
+        raise ConfigurationError("schedule_simulation_mode_invalid", "choose a supported schedule simulation mode")
     try:
         ZoneInfo(values["planning_timezone"])
     except (ZoneInfoNotFoundError, ValueError, TypeError) as error:

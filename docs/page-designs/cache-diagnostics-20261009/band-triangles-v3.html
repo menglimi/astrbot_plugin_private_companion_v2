@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拉链旗带 · v3 紧凑圆滑</title>
+<style>
+  :root {
+    --bg: #05080F;
+    --card: #0F1725;
+    --line: rgba(148, 163, 184, .14);
+    --text: #E9EFFA;
+    --text-2: #93A4C0;
+    --text-3: #5C6C88;
+    --teal: #3EE0D0;
+    --green: #3FE0A6;
+    --purple: #A17BFF;
+    --amber: #FFC258;
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(1100px 460px at 70% -10%, rgba(62,224,208,.05), transparent 60%),
+      var(--bg);
+    font-family: var(--sans); color: var(--text);
+    padding: 36px 24px 72px;
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .variant {
+    width: 100%; max-width: 880px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 16px 20px 16px;
+  }
+  .v-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .v-badge {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    color: var(--teal); background: rgba(62,224,208,.1);
+    border: 1px solid rgba(62,224,208,.28); border-radius: 999px; padding: 2px 9px;
+  }
+  .v-head h2 { font-size: 13px; font-weight: 700; }
+  .v-head .tail { margin-left: auto; font-size: 10px; color: var(--text-3); }
+  .v-note { font-size: 10.5px; color: var(--text-2); line-height: 1.7; margin-bottom: 14px; }
+  .v-note b { color: var(--text); }
+
+  /* ===== v3 紧凑圆滑 ===== */
+  .zip { position: relative; height: 24px; }
+  .zip svg { display: block; width: 100%; height: 100%; overflow: visible; }
+  .zip svg .seg { transition: opacity 150ms ease; }
+  .zip svg:has(.seg:hover) .seg:not(:hover) { opacity: .38; }
+  .zip svg .seg:hover polygon { filter: brightness(1.18); }
+  .zip svg polygon { transition: filter 150ms ease; }
+
+  /* 入场：从各自底边弹出（峰从下、谷从上） */
+  .zip svg polygon {
+    transform-box: fill-box;
+    animation: pop 360ms cubic-bezier(.2,.8,.3,1.25) backwards;
+  }
+  .zip svg polygon.up   { transform-origin: 50% 100%; }
+  .zip svg polygon.down { transform-origin: 50% 0%; }
+  @keyframes pop { from { transform: scaleY(0); } }
+  @media (prefers-reduced-motion: reduce) { .zip svg polygon { animation: none; } }
+
+  /* 紧凑标签：单行名+百分比，数值第二行 */
+  .zip-labels { display: flex; gap: 5px; margin-top: 9px; }
+  .zip-labels > span { min-width: 0; text-align: center; white-space: nowrap; overflow: hidden; }
+  .zip-labels .nm { display: block; font-size: 10px; font-weight: 700; }
+  .zip-labels .nm b { font-family: var(--mono); font-weight: 600; margin-left: 4px; }
+  .zip-labels .vl { display: block; font-family: var(--mono); font-size: 8.5px; color: var(--text-3); margin-top: 1px; }
+  .l-hit { color: var(--green); } .l-write { color: var(--teal); }
+  .l-plain { color: var(--purple); } .l-out { color: var(--amber); }
+
+  .zip-caps {
+    display: flex; justify-content: space-between;
+    margin-top: 10px; padding-top: 7px; border-top: 1px dashed var(--line);
+    font-family: var(--mono); font-size: 9px; color: var(--text-3);
+  }
+  .zip-caps b { color: var(--text-2); font-weight: 500; }
+
+  .changelog { margin-top: 13px; display: grid; gap: 5px; font-size: 10.5px; color: var(--text-2); line-height: 1.55; }
+  .changelog li { list-style: none; padding-left: 16px; position: relative; }
+  .changelog li::before { content: "▸"; position: absolute; left: 0; color: var(--teal); }
+  .changelog b { color: var(--text); }
+</style>
+</head>
+<body>
+
+  <section class="variant">
+    <div class="v-head"><span class="v-badge">拉链 v3</span><h2>小三角咬合 · 紧凑圆滑</h2><span class="tail">SVG 圆角峰 · 高度 30→24px · 标签两行并一</span></div>
+    <p class="v-note">在 v2 基础上收两件事：<b>圆滑</b>——三角改由 SVG 绘制，用圆角连接（stroke-linejoin: round）把每个尖角磨成小圆峰，咬合处互相搭接不留缝；<b>紧凑</b>——带高 30→24px，段间缝 7→4px、枚间缝 2→1px，标签两行并一（名+% 同行），去掉独立刻度行（边界刻度直接融进标签行上方）。</p>
+
+    <div class="zip" id="zipBand" role="img" aria-label="Token 构成拉链旗带 v3：28 枚圆角三角形，数据边界落在段缝上；缓存命中 12 枚、缓存写入 5 枚、普通输入 8 枚、输出 3 枚"></div>
+
+    <div class="zip-labels">
+      <span class="l-hit" style="flex:42.7">
+        <span class="nm">缓存命中<b>42.7%</b></span>
+        <span class="vl">2,091,245,663</span>
+      </span>
+      <span class="l-write" style="flex:18.3">
+        <span class="nm">缓存写入<b>18.3%</b></span>
+        <span class="vl">894,552,317</span>
+      </span>
+      <span class="l-plain" style="flex:28.6">
+        <span class="nm">普通输入<b>28.6%</b></span>
+        <span class="vl">1,401,337,660</span>
+      </span>
+      <span class="l-out" style="flex:10.4">
+        <span class="nm">输出<b>10.4%</b></span>
+        <span class="vl">511,942,672</span>
+      </span>
+    </div>
+
+    <div class="zip-caps">
+      <span>▸ 28 facets · 1 ≈ 3.6%</span>
+      <b>输入侧 25 枚 = 89.3% · 输出侧 3 枚 = 10.7%</b>
+      <span>cache://zip-composition ▸</span>
+    </div>
+
+    <ul class="changelog">
+      <li><b>圆角峰</b>：三角从 CSS clip-path 改为 SVG polygon，同色描边 + stroke-linejoin: round，尖角全部磨圆；相邻三角沿中轴搭接 2px，圆化后依然咬合不漏底。</li>
+      <li><b>峰谷同色系</b>：谷只比峰暗约 8% 明度（v2 曾拉满明暗对比），上下三角形仍可分辨但整带读作一条连续色带，段与段之间靠色相区分。</li>
+      <li><b>更紧凑</b>：带高 30→24px，缝 7→4px / 2→1px，标签行高收紧（两行并一），整卡比 v2 矮约 26px。</li>
+      <li><b>响应式重绘</b>：SVG 坐标按容器实际宽度计算，窗口缩放即时重排，圆角粗细不随拉伸变形（clip-path 百分比方案做不到这点）。</li>
+      <li><b>保留 v2 全部语义</b>：12/5/8/3 枚、边界落在缝上、分组悬停（本段亮、其余 38% 透明）、逐枚入场、reduced-motion 降级。</li>
+    </ul>
+  </section>
+
+<script>
+  (function () {
+    var palette = {
+      hit:   ["#3FE0A6", "#33C795"],
+      write: ["#3EE0D0", "#31C4B6"],
+      plain: ["#A17BFF", "#8F6BF0"],
+      out:   ["#FFC258", "#EDAF45"]
+    };
+    var plan = [
+      { key: "hit",   flex: 42.7, count: 12 },
+      { key: "write", flex: 18.3, count: 5 },
+      { key: "plain", flex: 28.6, count: 8 },
+      { key: "out",   flex: 10.4, count: 3 }
+    ];
+    var H = 24, SW = 4, OVERLAP = 2, GAP_SEG = 4;
+    var wrap = document.getElementById("zipBand");
+    var NS = "http://www.w3.org/2000/svg";
+
+    function render() {
+      var W = wrap.clientWidth;
+      if (!W) return;
+      wrap.innerHTML = "";
+      var svg = document.createElementNS(NS, "svg");
+      svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+      svg.setAttribute("preserveAspectRatio", "none");
+
+      // 中轴缝线
+      var axis = document.createElementNS(NS, "line");
+      axis.setAttribute("x1", 0); axis.setAttribute("x2", W);
+      axis.setAttribute("y1", H / 2); axis.setAttribute("y2", H / 2);
+      axis.setAttribute("stroke", "rgba(233,239,250,.18)");
+      axis.setAttribute("stroke-dasharray", "4 5");
+      svg.appendChild(axis);
+
+      var totalFlex = plan.reduce(function (s, p) { return s + p.flex; }, 0);
+      var usable = W - GAP_SEG * (plan.length - 1);
+      var x = 0, gi = 0, delay = 0;
+
+      plan.forEach(function (seg) {
+        var segW = usable * seg.flex / totalFlex;
+        var cell = segW / seg.count;
+        var g = document.createElementNS(NS, "g");
+        g.setAttribute("class", "seg");
+        var c = palette[seg.key];
+        for (var i = 0; i < seg.count; i++) {
+          var up = gi % 2 === 0;
+          var cx = x + cell * (i + 0.5);
+          var half = cell / 2 + OVERLAP;
+          var baseY = up ? H - SW / 2 : SW / 2;
+          var apexY = up ? SW / 2 : H - SW / 2;
+          var pts = cx + "," + apexY + " " + (cx + half) + "," + baseY + " " + (cx - half) + "," + baseY;
+          var poly = document.createElementNS(NS, "polygon");
+          poly.setAttribute("points", pts);
+          poly.setAttribute("fill", up ? c[0] : c[0]);
+          poly.setAttribute("stroke", c[0]);
+          poly.setAttribute("stroke-width", SW);
+          poly.setAttribute("stroke-linejoin", "round");
+          poly.setAttribute("class", up ? "up" : "down");
+          poly.style.animationDelay = (delay += 24) + "ms";
+          // 谷（倒三角）只比峰暗一档（≈8% 明度差），整带读作同色系
+          if (!up) poly.setAttribute("fill", c[1]), poly.setAttribute("stroke", c[1]);
+          g.appendChild(poly);
+          gi++;
+        }
+        svg.appendChild(g);
+        x += segW + GAP_SEG;
+      });
+      wrap.appendChild(svg);
+    }
+    render();
+    window.addEventListener("resize", render);
+  })();
+</script>
+</body>
+</html>

@@ -158,11 +158,30 @@ class DifferenceReportingTests(unittest.TestCase):
     def test_every_skipped_key_is_also_explained(self):
         """A skip the operator cannot see is indistinguishable from a bug."""
         migration = convert(weather_source="qweather", weather_amap_api_key="amap-key",
-                            enable_yesterday_screen_diary_context=True)
+                            enable_yesterday_screen_diary_context=True,
+                            weather_alert_api_key="alert-key",
+                            mobile_location_weather_sensitivity="sensitive")
         explained = {item.field_id for item in migration.differences}
         for key in migration.skipped:
             with self.subTest(key=key):
                 self.assertIn(key, explained)
+
+    def test_the_alert_api_key_is_reported_without_reproducing_its_value(self):
+        """V1 允许用它代替 weather_alert_token 存预警凭据；漏报等于悄悄丢一份凭据。"""
+        migration = convert(weather_alert_api_key="alert-secret")
+        self.assertIn("weather_alert_api_key", migration.skipped)
+        explained = next(item for item in migration.differences
+                         if item.field_id == "weather_alert_api_key")
+        self.assertEqual(explained.kind, "not_migrated")
+        self.assertEqual(explained.v1_value, "（已填写，值不在此显示）")
+        self.assertNotIn("alert-secret", json.dumps(migration.document(), ensure_ascii=False))
+
+    def test_mobile_location_sensitivity_is_reported_as_not_migrated(self):
+        migration = convert(mobile_location_weather_sensitivity="sensitive")
+        self.assertIn("mobile_location_weather_sensitivity", migration.skipped)
+        explained = next(item for item in migration.differences
+                         if item.field_id == "mobile_location_weather_sensitivity")
+        self.assertEqual(explained.kind, "not_migrated")
 
     def test_the_cooldown_is_reported_as_resemanticised(self):
         migration = convert(environment_change_cooldown_minutes=90)
@@ -170,12 +189,10 @@ class DifferenceReportingTests(unittest.TestCase):
         self.assertEqual(migration.changes[CONTACT + ".dedup_weather_window_minutes"], 90)
         self.assertIn("event_revision", item.summary)
 
-    def test_the_source_selector_is_reported_as_not_migrated(self):
-        migration = convert(weather_source="openweathermap")
-        item = next(item for item in migration.differences
-                    if item.field_id == "weather_source" and item.kind == "not_migrated")
-        self.assertEqual(item.v1_value, "openweathermap")
-        self.assertIn("凭据推断", item.summary)
+    def test_global_source_selector_is_left_for_plugin_configuration_migration(self):
+        migration = convert_weather_config({"weather_source": "qweather"}).unwrap()
+        self.assertNotIn("weather_source", migration.skipped)
+        self.assertNotIn("weather_source", {item.field_id for item in migration.differences})
 
     def test_a_renamed_severity_is_reported_even_though_it_succeeded(self):
         migration = convert(weather_alert_min_severity="red")
@@ -200,6 +217,11 @@ class SwitchTests(unittest.TestCase):
         self.assertFalse(migration.changes[STATE + ".planning_weather_enabled"])
         downgraded = [item for item in migration.differences if item.kind == "downgraded"]
         self.assertEqual(len(downgraded), 1)
+
+    def test_weather_context_with_a_location_keeps_its_role_weather_meaning(self):
+        migration = convert_weather_config({"enable_weather_context": True, **LOCATION}).unwrap()
+        self.assertTrue(migration.changes[STATE + ".planning_weather_enabled"])
+        self.assertNotIn(CONTACT + ".weather_checkin_enabled", migration.changes)
 
     def test_the_two_environment_settings_split_into_v2_shapes(self):
         migration = convert(enable_environment_change_proactive=True,

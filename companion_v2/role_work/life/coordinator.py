@@ -9,7 +9,7 @@ from companion_v2.foundation.refs import ScopeKind
 from .configuration import GROUP
 from .runtime import RoleLifeRuntime
 from .configuration import values
-from companion_v2.role_work.journal.scheduling import next_daily
+from .scheduling import next_bedtime, sleep_rhythm
 
 
 class RoleLifeCoordinator:
@@ -87,18 +87,22 @@ class RoleLifeCoordinator:
         if settings["sleep_enabled"]:
             next_at = executor._next_sleep if executor is not None else None
             if next_at is None:
-                next_at = next_daily(now, settings["sleep_timezone"], time.fromisoformat(settings["sleep_time"]))
+                next_at = next_bedtime(now, routine.owner, settings["sleep_timezone"],
+                    time.fromisoformat(settings["sleep_time"]), settings["sleep_variation_minutes"])
         next_wake = next_at + timedelta(minutes=settings["sleep_minutes"]) if next_at else None
         active_sleep = self.app.role_state.body_clock.read(routine.context)
+        rhythm = sleep_rhythm(now, next_at if settings["sleep_enabled"] else None, active_sleep)
         return {"shared": True, "owner": {"installation_id": routine.context.scope.installation_id,
                     "bot_id": routine.context.scope.bot_id, "role_id": routine.context.role_binding.role.subject_id},
             "enabled": settings["sleep_enabled"], "time": settings["sleep_time"],
             "timezone": settings["sleep_timezone"], "duration_minutes": settings["sleep_minutes"],
+            "variation_minutes": settings["sleep_variation_minutes"],
             "executor_is_current": executor is routine,
             "executor_state": "available" if executor is not None else "no_authorized_window" if settings["sleep_enabled"] else "disabled",
             "executor_window": self._window_descriptor(executor),
             "next_sleep_at": next_at.isoformat() if next_at else None,
             "next_wake_at": next_wake.isoformat() if next_wake else None,
+            "rhythm": rhythm,
             "active_wake_at": active_sleep["planned_wake_at"] if active_sleep and active_sleep["state"] == "sleeping" else None}
 
     @staticmethod

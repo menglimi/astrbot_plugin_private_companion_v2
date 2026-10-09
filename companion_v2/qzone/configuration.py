@@ -12,7 +12,7 @@ from companion_v2.configuration.role_settings import RoleSharedSettingsOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
 from companion_v2.execution.models import require
 
-from .topics import QzoneTopic, TOPIC_SPECS
+from .topics import QzoneTopic, TOPIC_SPECS, allowed_scenes
 
 
 GROUP = "qzone"
@@ -91,7 +91,7 @@ def validate(values):
     for item in TOPIC_SPECS:
         name = f"{item.topic.value}_scenes"
         try:
-            configured = {scene.value for scene in __import__("companion_v2.qzone.topics", fromlist=["allowed_scenes"]).allowed_scenes(values[name])}
+            configured = {scene.value for scene in allowed_scenes(values[name])}
         except (TypeError, ValueError):
             raise ConfigurationError("qzone_configuration_invalid", f"{name} contains an unsupported scene") from None
         allowed = {scene.value for scene in item.scenes}

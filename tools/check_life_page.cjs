@@ -9,8 +9,8 @@ async function run({browser, outputDir}) {
   const root = path.resolve(__dirname, '../pages/日记与生活');
   const bridge = `(() => {
     const state = {role_id:'小伴', participant:'测试私聊', host_state:'running', view_token:'v1', edit_token:'c1',
-      config:{enabled:true,diary_enabled:true,diary_time:'23:50',timezone:'Asia/Shanghai',sleep_enabled:false,sleep_time:'00:30',sleep_timezone:'Asia/Shanghai',sleep_minutes:480,reading_enabled:false,derive_enabled:true},
-      sleep_schedule:{shared:true,owner:{installation_id:'test',bot_id:'bot-test',role_id:'小伴'},enabled:true,time:'22:30',timezone:'Asia/Shanghai',duration_minutes:480,executor_is_current:true,executor_state:'available',executor_window:{platform:'qq',account_id:'10001',native_scope_id:'20002',session_id:'20002',label:'qq · 账号 10001 · 会话 20002'},next_sleep_at:'2026-09-23T14:30:00Z',next_wake_at:'2026-09-23T22:30:00Z',active_wake_at:'2026-09-23T12:00:00Z'},
+      config:{enabled:true,diary_enabled:true,diary_time:'23:50',timezone:'Asia/Shanghai',sleep_enabled:false,sleep_time:'00:30',sleep_timezone:'Asia/Shanghai',sleep_variation_minutes:20,sleep_minutes:480,reading_enabled:false,derive_enabled:true},
+      sleep_schedule:{shared:true,owner:{installation_id:'test',bot_id:'bot-test',role_id:'小伴'},enabled:true,time:'22:30',timezone:'Asia/Shanghai',variation_minutes:20,duration_minutes:480,executor_is_current:true,executor_state:'available',executor_window:{platform:'qq',account_id:'10001',native_scope_id:'20002',session_id:'20002',label:'qq · 账号 10001 · 会话 20002'},next_sleep_at:'2026-09-23T14:30:00Z',next_wake_at:'2026-09-23T22:30:00Z',active_wake_at:'2026-09-23T12:00:00Z'},
       journals:[{kind:'diary',local_date:'2026-09-23',revision:1,state:'active',body:'读到一段谈论城市和树木的文章。\\n我又想起窗边那点慢慢移动的光。<img src=x onerror="window.injected=true">',afterglow:'',summary:'读到城市与树木，想到窗边的光。',dream_fragments:[],view_token:'j1'},
         {kind:'dream',local_date:'2026-09-22',revision:1,state:'active',body:'我只记得树叶的影子。',afterglow:'有一点安静。',summary:null,dream_fragments:[],view_token:'j2'}],
       activities:[{activity_id:'book1',revision:1,kind:'reading',state:'planned',title:'城市与树木 · 1–120 字符',started_at:'2026-09-23T04:00:00Z',view_token:'a1',task:null},
@@ -58,8 +58,9 @@ async function run({browser, outputDir}) {
   try{
     await page.goto('http://127.0.0.1:'+server.address().port);
     await page.waitForFunction(()=>document.getElementById('role').textContent==='小伴');
-    assert.match(await page.locator('#sleep-scope').textContent(),/bot-test/);
-    assert.match(await page.locator('#sleep-executor').textContent(),/qq · 账号 10001 · 会话 20002（本页）/);
+    assert.match(await page.locator('#sleep-scope').textContent(),/当前角色 · 各会话共享/);
+    assert.match(await page.locator('#sleep-executor').textContent(),/当前私聊窗口（本页）/);
+    assert.doesNotMatch(await page.locator('body').innerText(),/bot-test|10001|20002/);
     assert.match(await page.locator('#sleep-active-wake').textContent(),/2026/);
     await layout();assert.equal(await page.evaluate(()=>window.injected),undefined);
     await capture('life-desktop');

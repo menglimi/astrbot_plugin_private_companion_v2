@@ -13,8 +13,8 @@
  *      下方面板跟着换成那件家具的用途说明；点左侧导航才换配置编辑器。
  *      两套选择各自记住，互相不覆盖。
  *
- *   3. 未开多 bot / 多人格时顶栏整条不渲染（topbar 是外壳里唯一
- *      依赖会话对象的东西）。搜索与显示偏好移入左栏底部。
+ *   3. 共享目录加载后，顶栏显示当前对象与全局工具；目录加载前先收起。
+ *      搜索与显示偏好移入左栏底部。
  */
 "use strict";
 
@@ -94,13 +94,6 @@ window.CompanionShell = (() => {
 
   function snapshot() { return {...state}; }
 
-  /* 未开多 bot / 多人格：顶栏整条不渲染。
-     判据来自 product.targetsMode()，它读的是宿主返回的 catalog.mode；
-     静态预览下没有 catalog，返回 null，同样按「未开」处理。 */
-  function multi() {
-    return window.CompanionProduct?.targetsMode?.() === "multi";
-  }
-
   /* 把外壳上的数据属性同步到 DOM。视觉全部由 CSS 依据这些属性决定，
      不在 JS 里写行内样式——属性是状态，样式是表现。 */
   function paint(root = document) {
@@ -108,31 +101,25 @@ window.CompanionShell = (() => {
     if (!shell) return;
     shell.dataset.selected = state.furniture || "";
     shell.dataset.section = state.section || "";
-    shell.dataset.mode = multi() ? "multi" : "single";
     /* 小屋只留在首页。选了一项配置分区就是离开首页去看那一项设置，
        小屋与右栏状态卡都不该跟着——它们是首页的东西。
        家具说明与家具目录/生活观察仍属于首页，所以只有 section 会触发离开。 */
     shell.dataset.away = String(Boolean(state.section));
-    /* 顶栏只在多目标时存在。这里用 hidden 而不是从 DOM 里删掉：
-       product-page.renderScope() 会往顶栏里写生效范围控件，删掉节点会让它找不到容器。 */
-    const bar = $(".topbar", root);
-    if (bar) bar.hidden = !multi();
-    const scope = $("#productScope", root);
-    if (scope) scope.hidden = !multi();
   }
 
   /* 左栏导航。状态由首页右侧看板进入，避免与人格总览重复占位。 */
   const RAIL_GROUPS = [
     ["专题配置", [
-      ["identity", "shield-check", "关系与权限"],
+      ["identity", "network", "关系网"],
       ["contact", "heart-handshake", "主动与联系"],
-      ["memory", "orbit", "记忆与经历"],
+      ["memory", "orbit", "事实与经历"],
       ["learning", "graduation-cap", "学习与反思"],
       ["models", "sliders-horizontal", "模型与连接"],
       ["maintenance", "settings-2", "治理与维护"],
     ], { untitled: true }],
     ["能力配置", [
       ["perception", "scan-eye", "感知"],
+      ["understanding", "brain-circuit", "理解"],
       ["decision", "brain", "决策"],
       ["action", "play", "行动"],
       ["output", "shapes", "产出"],
@@ -151,11 +138,16 @@ window.CompanionShell = (() => {
     return RAIL_GROUPS.map(([group, items, options]) => `
       <div class="shell-nav-group">
         ${options?.untitled ? "" : `<span class="shell-nav-title">${group}</span>`}
-        ${items.map(([id, icon, label, kind]) => `
-          <button class="shell-nav-link" ${kind === "view" ? `data-shell-view="${id}"` : `data-shell-section="${id}"`}
-                  aria-pressed="${kind === "view" ? state.view === id : state.section === id}" title="${label}">
+        ${items.map(([id, icon, label, kind]) => {
+          const isView = kind === "view";
+          const active = isView ? state.view === id : state.section === id;
+          const action = isView ? `data-shell-view="${id}"` : `data-shell-section="${id}"`;
+          return `
+          <button class="shell-nav-link" ${action}
+                  aria-pressed="${active}" title="${label}">
             ${I(icon)}<span>${label}</span>
-          </button>`).join("")}
+          </button>`;
+        }).join("")}
       </div>`).join("");
   }
 
@@ -163,7 +155,7 @@ window.CompanionShell = (() => {
     $, $$, I,
     STAGE_STATIONS, VIEWS,
     onChange, emit, paint, railHTML,
-    selectFurniture, selectSection, selectView, snapshot, multi,
+    selectFurniture, selectSection, selectView, snapshot,
     get furniture() { return state.furniture; },
     get section() { return state.section; },
     get view() { return state.view; },

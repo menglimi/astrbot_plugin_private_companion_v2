@@ -81,6 +81,14 @@ class ToolLoopFixture(MessageFixture):
     def rows(self):
         return self.runtime.read_all("SELECT * FROM conversation_tool_calls ORDER BY sequence", ())
 
+    def assert_reply_usage(self, *, held=0, spent=0):
+        calls = self.call_rows()
+        self.assertEqual(sum(row["reserved_tokens"] for row in calls if row["actual_tokens"] is None), held)
+        self.assertEqual(sum(row["actual_tokens"] or 0 for row in calls), spent)
+        # Main-chain calls retain receipts and ownership links but do not
+        # consume the plugin's auxiliary model budget.
+        self.assertTrue(all((row["held_tokens"], row["spent_tokens"]) == (0, 0) for row in self.accounts()))
+
     async def manual_run(self, *, batch=None):
         batch = batch or self.accept()
         task = self.messages.seal(self.context, batch, deadline_at=self.deadline).unwrap()
@@ -90,6 +98,53 @@ class ToolLoopFixture(MessageFixture):
 
 
 class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_laya_wait_keeps_tool_suggestion_advisory_and_creates_no_visible_parts(self):
+        seen_facts = []
+
+        class DecisionService:
+            async def decide(self, facts):
+                seen_facts.append(facts)
+                return {"status": "ok", "decision": {
+                    "turn_state": "unfinished", "action": "wait", "reply_intent": "acknowledge",
+                    "reply_style": "brief", "reply_form": "text", "segment_mode": "single",
+                    "tool_need": "memory", "reason_codes": [],
+                }}
+
+        self.messages.laya_decision_resolver = lambda _context: DecisionService()
+
+        async def suggest_tool(_envelope):
+            return requested(call())
+
+        self.responses["primary"] = suggest_tool
+        batch = await self.generate()
+
+        self.assertEqual(seen_facts[0]["user_text"], "private input input-1")
+        self.assertEqual(len(self.called), 1)
+        self.assertEqual(self.rows(), ())
+        self.assertEqual(self.parts(batch), ())
+
+    async def test_refreshed_owner_guidance_keeps_the_original_tool_turn_instructions(self):
+        augment = self.tools.augment
+
+        def owner_guidance(*args, **kwargs):
+            request = augment(*args, **kwargs)
+            guidance = "新增的工具结果表达指引。" if self.called else "本轮初始表达指引。"
+            return replace(request, instruction=request.instruction + "\n" + guidance)
+
+        async def respond(envelope):
+            return requested(call()) if not envelope.tool_history else answered()
+
+        self.responses["primary"] = respond
+        with patch.object(self.tools, "augment", side_effect=owner_guidance):
+            await self.generate()
+
+        self.assertEqual(len(self.called), 2)
+        original, continued = (envelope.original for _, envelope in self.called)
+        self.assertTrue(continued.instruction.startswith(original.instruction))
+        self.assertIn("新增的工具结果表达指引。", continued.instruction)
+        self.assertEqual(continued.event, original.event)
+        self.assertEqual(continued.role_binding, original.role_binding)
+
     async def test_current_weather_is_a_private_on_demand_read_of_the_configured_role_location(self):
         self.weather_settings.enabled = True
         self.weather_settings.location = json.dumps({"name": "苏州", "latitude": 31.3, "longitude": 120.6},
@@ -147,7 +202,7 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(envelope.original.role_binding, self.context.role_binding)
             self.assertEqual(envelope.task_prompt, "Reply supplement")
             self.assertEqual(envelope.configuration_token, self.called[0][1].configuration_token)
-        self.assertTrue(all(account["spent_tokens"] == 45 for account in self.accounts()))
+        self.assert_reply_usage(spent=45)
         await self.deliver_next(batch)
         self.assertEqual(self.history()[0]["text"], "Saved locally.")
 
@@ -270,7 +325,7 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure.exception.code, "source_revoked")
         self.assertEqual(self.parts(batch), ())
         self.assertEqual(self.call_rows()[-1]["state"], "discarded")
-        self.assertTrue(all(account["spent_tokens"] == 30 for account in self.accounts()))
+        self.assert_reply_usage(spent=30)
 
     async def test_cancel_after_save_retains_actual_operation_and_unknown_second_usage(self):
         continued = asyncio.Event()
@@ -290,7 +345,7 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.runtime.read_all("SELECT * FROM agenda_memos", ())), 1)
         self.assertEqual(self.call_rows()[-1]["state"], "unknown")
         self.assertEqual(self.parts(batch), ())
-        self.assertTrue(all(account["held_tokens"] == 30 for account in self.accounts()))
+        self.assert_reply_usage(held=30, spent=15)
 
     async def test_unknown_local_barrier_never_redispatches_and_rolls_back_domain_write(self):
         batch, run = await self.manual_run()
@@ -328,7 +383,7 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
             return requested(call(), known=False) if not envelope.tool_history else answered()
         self.responses["primary"] = respond
         await self.generate()
-        self.assertTrue(all((account["held_tokens"], account["spent_tokens"]) == (30, 15) for account in self.accounts()))
+        self.assert_reply_usage(held=30, spent=15)
 
     async def test_each_tool_round_uses_confirmed_not_started_fallback_and_separate_accounting(self):
         self.patch_model(kind="conversation.reply", fallback="fallback")
@@ -341,23 +396,24 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([name for name, _ in self.called], ["primary", "fallback", "primary", "fallback"])
         self.assertEqual([row["position"] for row in self.call_rows()], [0, 1, 2, 3])
         self.assertEqual(self.parts(batch)[0]["text"], "Fallback continued the original role.")
-        self.assertTrue(all(account["spent_tokens"] == 30 for account in self.accounts()))
+        self.assert_reply_usage(spent=30)
 
-    async def test_multi_round_reservations_stop_at_the_original_scope_budget(self):
+    async def test_multi_round_main_chain_usage_does_not_consume_plugin_scope_budget(self):
         policy = BudgetPolicy(*(Amount(45, 1000) for _ in range(5)))
         self.ledger = BudgetLedger(self.runtime, policy)
         self.gateway = LocalModelGateway(self.router, self.ledger, self.tasks)
         self.generator.gateway = self.gateway
         async def respond(envelope):
+            if len(envelope.tool_history) == 3:
+                return answered("All three tool results were received.")
             return requested(call("explain-" + str(len(envelope.tool_history)),
                                   "diagnostics.explain", topic="configuration"))
         self.responses["primary"] = respond
         batch, run = await self.manual_run()
-        with self.assertRaises(TaskError) as failure:
-            await self.generator.generate(run)
-        self.assertEqual(failure.exception.code, "model_budget_exhausted")
-        self.assertEqual(len(self.rows()), 2)
-        self.assertEqual(self.parts(batch), ())
+        await self.generator.generate(run)
+        self.assertEqual(len(self.rows()), 3)
+        self.assert_reply_usage(spent=60)
+        self.assertEqual(self.parts(batch)[0]["text"], "All three tool results were received.")
 
     async def test_tool_catalog_rejects_a_selected_provider_without_tool_capability(self):
         providers = tuple(replace(provider, capabilities=("text",)) for provider in self.providers)

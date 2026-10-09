@@ -39,7 +39,7 @@ PAGE_GROUPS = {
     "表达": ("conversation.presentation", "expression.learning", "expression.reaction"),
     "自我": ("knowledge",),
     "主动与联系": ("proactive.contact",),
-    "记忆与经历": ("memory",),
+    "事实与经历": ("memory",),
     "学习与反思": ("expression.learning", "role.growth"),
     "模型与连接": tuple(),  # model.* is matched by prefix, not by exact group name
 }
@@ -62,7 +62,7 @@ PAGE_NOTES = {
     "自我": "角色自己的设定与世界知识",
     "关系与权限": "角色、人物、群与授权；由独立拓展页承载",
     "主动与联系": "候选、联系节奏与编排",
-    "记忆与经历": "事实、原话与群词义",
+    "事实与经历": "事实、原话与群词义",
     "学习与反思": "从经历里学到什么",
     "模型与连接": "公共模型与任务路由",
     "治理与维护": "运行状态、预算、迁移与资料",

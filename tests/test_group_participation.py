@@ -170,6 +170,19 @@ class GroupParticipationTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.choices.decision(context, batch)["mode"], "reply")
         self.assertEqual(self.parts(batch)[0]["state"], "delivered")
 
+    async def test_slow_participation_tool_round_continues_after_the_calendar_minute_changes(self):
+        await self.setup_delivery()
+        async def slow_choice(payload, tools):
+            if not any(m["role"] == "tool" for m in payload["messages"]):
+                self.clock.advance(timedelta(seconds=65))
+                return completion(tools=[command(ACTION, {"mode": "reply", "reason": "回应当前群话题"})])
+            return completion(final_text("我也说一句。"))
+        context, batch, _ = await self.receive(behavior=slow_choice)
+        self.assertEqual(self.app.flow.row(batch)["state"], "complete")
+        self.assertEqual(self.choices.decision(context, batch)["mode"], "reply")
+        self.assertEqual(len(self.native.provider.client.state.calls), 2)
+        self.assertEqual(self.parts(batch)[0]["state"], "delivered")
+
     async def test_business_receipt_fixes_reply_before_later_skip_request(self):
         await self.setup_delivery()
         context, batch, _ = await self.receive("我想周六去河边", commands=(
@@ -276,8 +289,8 @@ class GroupParticipationTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.parts(batch), ())
         self.assertEqual(self.sent, [])
 
-    async def test_original_preview_decision_cannot_upgrade_on_mode_switch(self):
-        config = group_config()
+    async def test_legacy_preview_normalizes_to_group_mode_and_replay_preserves_admission(self):
+        config = group_config(group_delivery_mode="preview")
         config["runtime"].update(quiet_seconds=2, maximum_wait_seconds=5)
         self.controller = self.make_controller(config)
         await self.start_host()
@@ -293,8 +306,13 @@ class GroupParticipationTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         await self.settle(batch)
         context = TaskContext.restore(json.loads(self.app.messages.batch(batch)["context_json"]))
         self.assertEqual(self.choices.decision(context, batch)["mode"], "reply")
-        self.assertEqual(self.controller.authority.group_delivery.mode(batch), "preview")
-        self.assertEqual(self.sent, [])
+        self.assertEqual(self.controller.authority.group_delivery.mode(batch), "onebot_group")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.parts(batch)[0]["state"], "delivered")
+        self.assertEqual((await self.controller.receive_claimed(event)).unwrap(), batch)
+        await self.settle(batch)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.native.provider.client.state.calls), 1)
 
     async def test_unknown_model_call_is_not_retried_as_a_new_participation_decision(self):
         await self.setup_delivery()

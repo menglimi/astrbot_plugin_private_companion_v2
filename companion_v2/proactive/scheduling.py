@@ -14,9 +14,10 @@ from companion_v2.conversation.busy_gate import (SettingsReader, busy_context, b
 from companion_v2.conversation.messages import event_from_document
 from companion_v2.execution.models import QUEUED, TaskContext, TaskError, digest, require, stamp
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.delivery.history import VERSION as HISTORY_VERSION
 
 from .contact_models import ContactIntent
-from .configuration import GROUP
+from .configuration import GROUP, PURPOSES
 from .calendar_events import CalendarContactEvents
 from .date_events import DateContactEvents
 from .events import ActivityContactEvents
@@ -30,9 +31,20 @@ from .official_alert_events import OfficialAlertContactEvents
 from .balance_events import BalanceContactEvents
 from .news_events import NewsContactEvents
 from .screen_events import ScreenContactEvents
+from .relationship_events import RelationshipContactEvents
 from .models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
 from .persona_judge import KIND as JUDGE_KIND
+from .preferences import ContactPreferences
 from .service import CONTACT_KIND
+
+
+DIAGNOSTIC_ENVIRONMENT_VARIANTS = {
+    "weather": ("weather_events", "weather_event", "天气观测生产器"),
+    "weather_change": ("weather_change_events", "weather_change_event", "天气变化生产器"),
+    "official_alert": ("official_alert_events", "official_alert_event", "官方预警生产器"),
+    "service_balance": ("balance_events", "balance_event", "服务余额生产器"),
+    "external_news": ("news_events", "news_event", "外部资讯生产器"),
+}
 
 
 class ContactSchedule:
@@ -42,6 +54,7 @@ class ContactSchedule:
         self.contacts, self.messages, self.notify = contacts, messages, notify
         self.tasks, self.runtime = contacts.tasks, contacts.runtime
         self.screen_peek = screen_peek
+        self._maintenance_contexts = {}
         self._workers, self._cursor, self._closed = {}, 0, False
         self._judges = {}
         self.rhythm = ContactRhythm(contacts.runtime)
@@ -59,6 +72,17 @@ class ContactSchedule:
         self.balance_events = BalanceContactEvents(contacts, balance_port)
         self.news_events = NewsContactEvents(contacts, news_port)
         self.screen_events = ScreenContactEvents(contacts)
+        self.relationship_events = RelationshipContactEvents(contacts, messages)
+
+    def bind_context(self, context):
+        """Bind the active staging target for source maintenance.
+
+        Source maintenance is intentionally tied to the current role target,
+        while contact opportunities still derive their identity from the latest
+        conversation.  This lets a paused contact window keep its news cache
+        current without inventing a message or a send permission.
+        """
+        self._maintenance_contexts[context.key] = context
 
     def _origin(self, context, batch_id, at):
         row = self.runtime.read_one("""SELECT f.state AS flow_state, b.* FROM conversation_flows f
@@ -87,7 +111,8 @@ class ContactSchedule:
         current, row, event = self._origin(context, origin["batch_id"], at)
         event_markers = {"activity_event", "journal_event", "calendar_event", "date_event",
                          "meal_event", "weather_event", "weather_change_event", "official_alert_event",
-                         "balance_event", "news_event", "screen_event", "greeting_event", "burst_event"}
+                         "balance_event", "news_event", "screen_event", "greeting_event", "burst_event",
+                         "relationship_event", "followup_event"}
         if current != {key: value for key, value in origin.items() if key not in event_markers}:
             raise TaskError("contact_conversation_changed", "automatic opportunity lost its original conversation")
         preferences = require(self.contacts.preferences.read(context, observed_at=at))
@@ -97,7 +122,8 @@ class ContactSchedule:
         if at < max(event.received_at, datetime.fromisoformat(row["created_at"])) + timedelta(seconds=idle):
             raise TaskError("contact_conversation_active", "original conversation has not reached its configured idle time")
         interaction = None
-        if "greeting_event" in origin or "burst_event" in origin or not event_markers.intersection(origin):
+        if ("greeting_event" in origin or "burst_event" in origin or "followup_event" in origin
+                or not event_markers.intersection(origin)):
             if self.contacts.history is None:
                 raise TaskError("delivery_history_unavailable", "automatic contact requires confirmed communication history")
             interaction = self.contacts.history.interaction(context, at, action=GROUP)
@@ -144,6 +170,10 @@ class ContactSchedule:
             self.news_events.validate(context, origin["news_event"], at)
         if "screen_event" in origin:
             self.screen_events.validate(context, origin["screen_event"], at)
+        if "relationship_event" in origin:
+            self.relationship_events.validate(context, event, origin["relationship_event"], at)
+        if "followup_event" in origin:
+            self._validate_followup(context, event, origin["followup_event"], preferences, at, interaction)
 
     def _plan(self, row, at):
         context = TaskContext.restore(json.loads(row["context_json"]))
@@ -174,10 +204,7 @@ class ContactSchedule:
         # with the unanswered slowdown reserved for the ordinary slot pacing.
         burst = self.rhythm.burst_slot(context, preferences, at, interaction=interaction,
                                        last_contact=last_contact)
-        interval = timedelta(seconds=self.rhythm.base_interval_seconds(preferences))
-        if burst is None and self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
-                AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - interval))):
-            return None
+        base_interval = timedelta(seconds=self.rhythm.base_interval_seconds(preferences))
         if self.calendar_events is not None:
             candidate, more = self.calendar_events.select(context, preferences, at)
             if candidate is not None:
@@ -221,6 +248,10 @@ class ContactSchedule:
             intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
                 context.scope, at, (event.source, *intent.thought.evidence.sources)))) for intent in intents)
             return context, opportunity, intents, batch["role_instruction"], {**origin, "screen_event": marker}
+        candidate = self.relationship_events.select(context, preferences, event, at)
+        if candidate is not None:
+            opportunity, intents, marker = candidate
+            return context, opportunity, intents, batch["role_instruction"], {**origin, "relationship_event": marker}
         candidate = self.date_events.select(context, preferences, at)
         if candidate is not None:
             opportunity, intents, marker = candidate
@@ -256,6 +287,13 @@ class ContactSchedule:
             if candidate is not None:
                 opportunity, marker = candidate
                 return context, opportunity, (), batch["role_instruction"], {**origin, "weather_change_pending": marker}
+        candidate = self._followup_candidate(context, event, interaction, preferences, at)
+        if candidate is not None:
+            opportunity, intents, marker = candidate
+            return context, opportunity, intents, batch["role_instruction"], {**origin, "followup_event": marker}
+        if burst is None and self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
+                AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - base_interval))):
+            return None
         if preferences.unanswered_paused(unanswered) or preferences.reason("chat"):
             return None
         if self.rhythm.closing_hold(preferences, at, interaction=interaction, last_contact=last_contact) is not None:
@@ -303,6 +341,296 @@ class ContactSchedule:
         if self.rhythm.share_allowed(context, preferences, opportunity.opportunity_id, purpose=purpose):
             return candidate
         return None
+
+    @staticmethod
+    def _diagnostic_preferences(preferences):
+        """Allow an explicitly confirmed test past time gates, preserving sources.
+
+        A dashboard test may be started during quiet hours or while a purpose is
+        paused.  The producer still has to find its real event, window and
+        source; only those two policy gates are lifted for this one in-memory
+        selection.  The normal contact worker remains responsible for all
+        authorization and delivery checks.
+        """
+        values = dict(preferences.values)
+        values["quiet_enabled"] = False
+        values["pause_until"] = ""
+        for purpose in PURPOSES:
+            values[purpose + ".pause_until"] = ""
+        return ContactPreferences(preferences.snapshot, values, preferences.observed_at)
+
+    @staticmethod
+    def _diagnostic_route(route_id, label, variant=None):
+        return {"id": route_id, "label": label, "variant": variant or route_id}
+
+    async def diagnostic_candidate(self, context, purpose, *, at=None, variant=None):
+        """Select one current candidate through its real producer.
+
+        This is the source-backed counterpart of the onboarding connection
+        test.  It deliberately returns no synthetic empty-evidence intent: a
+        purpose without a current producer event is reported to the dashboard
+        instead of being dressed up as a generic affectionate message.
+        """
+        if purpose not in PURPOSES:
+            raise TaskError("unknown_contact_purpose", "contact purpose must be registered")
+        if variant is not None and (purpose != "environment" or variant not in DIAGNOSTIC_ENVIRONMENT_VARIANTS):
+            raise TaskError("contact_diagnostic_variant_invalid", "diagnostic variant is not valid for this purpose")
+        if context.scope.kind.value != "private":
+            raise TaskError("setup_private_window_required", "the proactive diagnostic requires the confirmed private window")
+        at = at or self.tasks.now()
+        row = self.runtime.read_one("""SELECT f.state AS flow_state, b.* FROM conversation_flows f
+            JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
+            ORDER BY f.sequence DESC LIMIT 1""", (context.scope.key,))
+        if row is None:
+            raise TaskError("contact_diagnostic_source_required", "the selected purpose has no completed conversation source")
+        origin, batch, event = self._origin(context, row["batch_id"], at)
+        preferences = require(self.contacts.preferences.read(context, observed_at=at))
+        preferences = self._diagnostic_preferences(preferences)
+
+        def finish(candidate, route):
+            if candidate is None:
+                return None
+            opportunity, intents, marker = candidate
+            # The environment panel can explicitly probe the external-news
+            # source alongside weather and balance.  NewsContactEvents keeps
+            # its normal ``news`` purpose for ordinary proactive scheduling;
+            # only this confirmed environment diagnostic presents the same
+            # source through the selected environment purpose.  Keep the
+            # producer receipt as ``news_event`` so source validation and the
+            # programmed attribution suffix remain unchanged.
+            environment_news = purpose == "environment" and route.get("id") == "news_event"
+            if not intents or any(intent.purpose != purpose and
+                                  not (environment_news and intent.purpose == "news")
+                                  for intent in intents):
+                return None
+            enriched = []
+            for intent in intents:
+                if environment_news and intent.purpose == "news":
+                    intent = replace(intent, purpose=purpose)
+                sources = list(intent.thought.evidence.sources)
+                if event.source not in sources:
+                    sources.insert(0, event.source)
+                enriched.append(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
+                    context.scope, at, tuple(sources)))))
+            diagnostic_origin = {"_diagnostic": {
+                "route_id": route["id"], "purpose": purpose, "batch_id": row["batch_id"],
+                "event_key": event.scoped_key, "event_hash": event.input_hash,
+                "role_hash": digest(batch["role_instruction"])}}
+            if route["id"] != "conversation_scheduler":
+                diagnostic_origin[route["id"]] = marker
+            return {"opportunity": opportunity, "intents": tuple(enriched),
+                    "role_instruction": batch["role_instruction"], "route": route,
+                    "diagnostic_origin": diagnostic_origin}
+
+        def direct(candidate, route_id, label, variant=None):
+            return finish(candidate, self._diagnostic_route(route_id, label, variant))
+
+        async def pending(producer, selected, route_id, label, variant=None):
+            if selected is None:
+                return None
+            opportunity, marker = selected
+            prepared = await producer.prepare(context, marker)
+            return direct(prepared, route_id, label, variant)
+
+        if purpose == "chat":
+            opportunity = Opportunity("diagnostic-chat-" + digest([context.key, stamp(at)]),
+                context.scope, at, at + timedelta(minutes=4))
+            thought = Thought("diagnostic-chat-thought-" + digest([context.key, stamp(at)]), opportunity,
+                ThoughtKind.CONVERSATION,
+                "这是当前已完成私聊的主动话题测试机会；只从当前真实对话来源自然承接一点内容，没有合适内容就跳过。",
+                EvidenceSnapshot(context.scope, at, (event.source,)), 1.0)
+            return finish((opportunity, (ContactIntent("chat", thought),), None),
+                          self._diagnostic_route("conversation_scheduler", "日常会话调度"))
+
+        if purpose == "greeting":
+            candidate = self.greeting_events.select(context, preferences, at, interaction=None)
+            result = direct(candidate, "greeting_event", "问候窗口生产器")
+            if result is None:
+                result = direct(self.date_events.select(context, preferences, at),
+                                "date_event", "纪念日期生产器")
+            if result is not None:
+                return result
+
+        if purpose in ("life", "creation") and self.events is not None:
+            candidate, _ = self.events.select(context, preferences, at, purpose=purpose)
+            result = direct(candidate, "activity_event", "角色活动完成回执", "reading" if purpose == "creation" else "activity")
+            if result is not None:
+                return result
+        if purpose == "life" and self.journal_events is not None:
+            candidate, _ = self.journal_events.select(context, preferences, at)
+            result = direct(candidate, "journal_event", "角色日记/梦境回执", "journal")
+            if result is not None:
+                return result
+
+        if purpose == "screen":
+            result = direct(self.screen_events.select(context, preferences, at),
+                            "screen_event", "已授权屏幕分析回执", "glance")
+            if result is not None:
+                return result
+
+        if purpose in ("affection", "care", "play", "repair", "invitation"):
+            result = direct(self.relationship_events.select(context, preferences, event, at, purpose=purpose),
+                            "relationship_event", "明确关系表达生产器", purpose)
+            if result is not None:
+                return result
+
+        if purpose == "reminder" and self.calendar_events is not None:
+            candidate, _ = self.calendar_events.select(context, preferences, at)
+            result = direct(candidate, "calendar_event", "已接受日历约定生产器")
+            if result is not None:
+                return result
+
+        if purpose == "meal":
+            result = direct(self.meal_events.select(context, preferences, at),
+                            "meal_event", "本地饭点生产器")
+            if result is not None:
+                return result
+
+        if purpose == "followup":
+            interaction = (self.contacts.history.interaction(context, at, action=GROUP)
+                           if self.contacts.history is not None else None)
+            result = direct(self._followup_candidate(context, event, interaction, preferences, at),
+                            "followup_event", "已确认投递跟进生产器")
+            if result is not None:
+                return result
+
+        if purpose == "environment":
+            for variant_id, (producer_name, route_id, label) in DIAGNOSTIC_ENVIRONMENT_VARIANTS.items():
+                if variant is not None and variant != variant_id:
+                    continue
+                producer = getattr(self, producer_name, None)
+                if producer is None:
+                    continue
+                selected = producer.select(context, preferences, at)
+                result = await pending(producer, selected, route_id, label, variant_id)
+                if result is not None:
+                    return result
+
+        if purpose == "news":
+            result = await pending(self.news_events, self.news_events.select(context, preferences, at),
+                                   "news_event", "外部资讯生产器", "external_news")
+            if result is not None:
+                return result
+
+        raise TaskError("contact_diagnostic_source_required",
+                         f"当前没有可核验的「{PURPOSES[purpose]}」真实生产器契机；本次不会使用空证据或通用文案")
+
+    def validate_diagnostic_origin(self, context, origin, at, *, purpose=None):
+        if type(origin) is not dict or type(origin.get("_diagnostic")) is not dict:
+            raise TaskError("contact_diagnostic_source_changed", "diagnostic contact lost its producer receipt")
+        receipt = origin["_diagnostic"]
+        if set(receipt) != {"route_id", "purpose", "batch_id", "event_key", "event_hash", "role_hash"}:
+            raise TaskError("contact_diagnostic_source_changed", "diagnostic producer receipt is invalid")
+        route_purposes = {
+            "conversation_scheduler": {"chat"}, "greeting_event": {"greeting"}, "date_event": {"greeting"},
+            "activity_event": {"life", "creation"}, "journal_event": {"life"}, "screen_event": {"screen"},
+            "relationship_event": {"affection", "care", "play", "repair", "invitation"},
+            "calendar_event": {"reminder"}, "meal_event": {"meal"}, "followup_event": {"followup"},
+            "official_alert_event": {"environment"}, "balance_event": {"environment"},
+            "news_event": {"news", "environment"}, "weather_event": {"environment"},
+            "weather_change_event": {"environment"},
+        }
+        route_id = receipt["route_id"]
+        if (route_id not in route_purposes or receipt["purpose"] not in route_purposes[route_id]
+                or (purpose is not None and receipt["purpose"] != purpose)):
+            raise TaskError("contact_diagnostic_source_changed", "diagnostic producer does not match its selected purpose")
+        expected_keys = {"_diagnostic"} if route_id == "conversation_scheduler" else {"_diagnostic", route_id}
+        if set(origin) != expected_keys:
+            raise TaskError("contact_diagnostic_source_changed", "diagnostic producer marker does not match its route")
+        _, batch, event = self._origin(context, receipt["batch_id"], at)
+        if (event.scoped_key != receipt["event_key"] or event.input_hash != receipt["event_hash"]
+                or digest(batch["role_instruction"]) != receipt["role_hash"]):
+            raise TaskError("contact_conversation_changed", "diagnostic contact lost its original conversation or persona")
+
+    def _followup_candidate(self, context, event, interaction, preferences, at):
+        if (context.scope.kind.value != "private" or preferences.reason("followup")
+                or interaction is None or self.contacts.history is None):
+            return None
+        row = self.runtime.read_one("""SELECT d.*, c.contact_id, c.record_json
+            FROM background_deliveries d JOIN proactive_contacts c
+              ON json_extract(d.request_json, '$.source_ref') = c.contact_id
+            WHERE d.origin_key = ? AND d.owner = 'proactive.contact' AND d.state = 'delivered'
+              AND d.delivered_at IS NOT NULL
+              AND COALESCE(json_extract(d.request_json, '$.sequence'), 0)
+                    = COALESCE(json_extract(d.request_json, '$.part_count'), 1) - 1
+              AND NOT EXISTS (SELECT 1 FROM background_deliveries p
+                  WHERE json_extract(p.request_json, '$.source_ref') = c.contact_id
+                    AND p.owner = 'proactive.contact' AND p.state != 'delivered')
+            ORDER BY d.delivered_at DESC, d.delivery_id DESC LIMIT 1""", (context.key,))
+        if row is None:
+            return None
+        saved = json.loads(row["record_json"])
+        purpose = saved.get("purpose")
+        if purpose in (None, "screen", "followup"):
+            return None
+        delivered = datetime.fromisoformat(row["delivered_at"])
+        if (not interaction or interaction.get("last_input_at") is None
+                or datetime.fromisoformat(interaction["last_input_at"]) > delivered):
+            return None
+        opened = delivered + timedelta(minutes=preferences.values["contact_followup_after_minutes"])
+        if at < opened:
+            return None
+        latest_followup = self.runtime.read_one("""SELECT MAX(created_at) FROM proactive_contacts
+            WHERE origin_key = ? AND json_extract(record_json, '$.purpose') = 'followup'""", (context.key,))[0]
+        if latest_followup and at < datetime.fromisoformat(latest_followup) + timedelta(
+                minutes=preferences.values["contact_followup_cooldown_minutes"]):
+            return None
+        reference = self.contacts.history.reference(row)
+        snapshot = {"version": HISTORY_VERSION, "context_key": context.key, "references": [reference]}
+        try:
+            history = self.contacts.history.read(snapshot, context, at, action=GROUP)
+        except TaskError:
+            return None
+        if not history or history[0]["owner"] != "proactive.contact":
+            return None
+        expires = opened + timedelta(seconds=preferences.values["event_max_age_seconds"])
+        if at >= expires:
+            return None
+        opportunity = Opportunity("followup-" + digest([context.key, row["contact_id"]]),
+                                  context.scope, opened, expires)
+        task_id = self.contacts.task_id(context, opportunity)
+        if (self.runtime.read_one("SELECT 1 FROM execution_tasks WHERE task_id = ?", (task_id,))
+                or self.runtime.read_one("SELECT 1 FROM proactive_contacts WHERE task_id = ?", (task_id,))):
+            return None
+        marker = {"contact_id": row["contact_id"], "delivery_id": row["delivery_id"],
+                  "delivered_at": row["delivered_at"], "purpose": purpose, "expires_at": stamp(expires)}
+        thought = Thought("followup-thought-" + digest(marker), opportunity, ThoughtKind.CONVERSATION,
+            "上一条主动消息已有一段时间。只在原话仍有自然承接价值时轻轻接一句；不知道对方是否看过，也不催促回应。",
+            EvidenceSnapshot(context.scope, at, (event.source,)), 1.0)
+        return opportunity, (ContactIntent("followup", thought),), marker
+
+    def _validate_followup(self, context, event, marker, preferences, at, interaction):
+        if type(marker) is not dict or set(marker) != {
+                "contact_id", "delivery_id", "delivered_at", "purpose", "expires_at"}:
+            raise TaskError("contact_followup_invalid", "follow-up candidate marker is invalid")
+        row = self.runtime.read_one("""SELECT d.*, c.contact_id, c.record_json
+            FROM background_deliveries d JOIN proactive_contacts c
+              ON json_extract(d.request_json, '$.source_ref') = c.contact_id
+            WHERE d.origin_key = ? AND d.owner = 'proactive.contact' AND d.state = 'delivered'
+              AND d.delivered_at IS NOT NULL
+              AND COALESCE(json_extract(d.request_json, '$.sequence'), 0)
+                    = COALESCE(json_extract(d.request_json, '$.part_count'), 1) - 1
+              AND NOT EXISTS (SELECT 1 FROM background_deliveries p
+                  WHERE json_extract(p.request_json, '$.source_ref') = c.contact_id
+                    AND p.owner = 'proactive.contact' AND p.state != 'delivered')
+            ORDER BY d.delivered_at DESC, d.delivery_id DESC LIMIT 1""", (context.key,))
+        if row is None:
+            raise TaskError("contact_followup_changed", "the original delivered contact is unavailable")
+        saved = json.loads(row["record_json"])
+        delivered = datetime.fromisoformat(row["delivered_at"])
+        if (not interaction or interaction.get("last_input_at") is None
+                or datetime.fromisoformat(interaction["last_input_at"]) > delivered):
+            raise TaskError("contact_followup_superseded", "a new user input superseded the original follow-up")
+        opened = delivered + timedelta(minutes=preferences.values["contact_followup_after_minutes"])
+        expires = opened + timedelta(seconds=preferences.values["event_max_age_seconds"])
+        if (marker != {"contact_id": row["contact_id"], "delivery_id": row["delivery_id"],
+                "delivered_at": row["delivered_at"], "purpose": saved.get("purpose"), "expires_at": stamp(expires)}
+                or saved.get("purpose") in (None, "screen", "followup") or at < opened or at >= expires):
+            raise TaskError("contact_followup_changed", "the original follow-up window changed")
+        reference = self.contacts.history.reference(row)
+        self.contacts.history.read({"version": HISTORY_VERSION, "context_key": context.key,
+                                    "references": [reference]}, context, at, action=GROUP)
+        preferences.require_contact("followup")
 
     def _appointment_silence(self, context, preferences, at):
         """True while a voluntary contact is too close to an accepted appointment.
@@ -453,6 +781,14 @@ class ContactSchedule:
     def advance(self):
         if self._closed:
             return
+        for context in tuple(self._maintenance_contexts.values()):
+            try:
+                preferences = self.contacts.preferences.read(context, observed_at=self.tasks.now())
+                if preferences.is_success:
+                    self.news_events.maintain(context, preferences.unwrap())
+            except (TaskError, ValueError, TypeError, AttributeError):
+                # A source status must never take down the contact coordinator.
+                pass
         for key, worker in tuple(self._workers.items()):
             if worker.done():
                 if not worker.cancelled():

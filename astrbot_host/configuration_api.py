@@ -18,6 +18,7 @@ from companion_v2.configuration.management import (AcquaintanceManagement, BusyG
                                                    ContentAuthoringManagement,
                                                    DiaryAndRestManagement, GroupParticipationManagement,
                                                    ImageQuotaManagement,
+                                                   ImageOutputManagement,
                                                    ImageReviewManagement, KnowledgeManagement,
                                                    LibraryManagement,
                                                    ModelBudgetManagement, ProactiveContactManagement,
@@ -32,12 +33,16 @@ from companion_v2.configuration.management import (AcquaintanceManagement, BusyG
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.knowledge.configuration import KnowledgeSettings
+
+from .knowledge_sources import AstrBotKnowledgeSources
 
 from .management_identity import dashboard_operator
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/config"
 SECTIONS = {"quota": ImageQuotaManagement, "image_review": ImageReviewManagement,
+            "image.output": ImageOutputManagement,
             "busy_gate": BusyGateManagement,
             "content.authoring": ContentAuthoringManagement,
             "reaction": ReactionRetrievalManagement, "budget": ModelBudgetManagement,
@@ -118,14 +123,17 @@ class ConfigurationWebAPI:
                 operator = dashboard_operator(controller.runtime, username, at=controller.now())
                 context = session.profile.target
                 if action == "status":
-                    result = Outcome.success(self._status(session.application, context, operator, query))
+                    result = Outcome.success(await self._status(session.application, context, operator, query,
+                                                                 host_context=controller.context))
                 else:
                     editor = SECTIONS[data["section"]](session.application, context)
                     result = editor.configure(operator, {key: data[key]
                                                          for key in ("operation_key", "edit_token", "changes")})
                     if result.is_success:
-                        result = Outcome.success({"result": result.unwrap(),
-                            "status": self._status(session.application, context, operator, query)})
+                        # The operation receipt confirms the write. Pages refresh status
+                        # separately so a slow projection cannot turn a committed write
+                        # into an unconfirmed POST.
+                        result = Outcome.success({"result": result.unwrap()})
                 return outcome_response(result)
         except (TaskError, ConfigurationError) as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
@@ -141,10 +149,31 @@ class ConfigurationWebAPI:
             raise TaskError("configuration_request_invalid", "unknown configuration section")
         return wanted
 
-    def _status(self, app, context, operator, query):
+    async def _status(self, app, context, operator, query, *, host_context=None, section_names=None):
         sections = {}
-        for name in self._requested(query):
+        for name in section_names if section_names is not None else self._requested(query):
             sections[name] = {**SECTIONS[name](app, context).status(operator).unwrap(), "section": name}
+            if name == "knowledge":
+                section = sections[name]
+                try:
+                    selected = KnowledgeSettings.from_values(section["settings"]).knowledge_source_ids()
+                except Exception:
+                    selected = ()
+                try:
+                    sources = await AstrBotKnowledgeSources(host_context).list_sources()
+                    sources_available = bool(getattr(host_context, "kb_manager", None))
+                except Exception:
+                    sources = []
+                    sources_available = False
+                available = {item["id"] for item in sources}
+                available.update(doc["id"] for item in sources for doc in item.get("documents", ()))
+                for identifier in selected:
+                    if identifier not in available:
+                        sources.append({"id": identifier, "type": "missing", "kb_id": "",
+                                        "name": "不可用来源 · " + identifier,
+                                        "documents": []})
+                section["knowledge_sources"] = sources
+                section["knowledge_sources_available"] = sources_available
         return {"sections": sections}
 
     async def status(self):

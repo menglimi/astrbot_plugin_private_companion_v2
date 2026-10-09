@@ -4,6 +4,7 @@ Pure-contract checks plus one storage round trip. They need no host, model or pl
 """
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import json
 import tempfile
 from pathlib import Path
@@ -14,13 +15,18 @@ from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.configuration.registry import FieldRegistry, ValueKind
 from companion_v2.conversation.style_context import (EXPRESSION_STYLE_INSTRUCTION, MAX_CANDIDATES,
     SNAPSHOT_VERSION, ConversationExpressionStyleContext)
-from companion_v2.execution.models import TaskError, stamp
+from companion_v2.conversation.models import InboundConversationEvent
+from companion_v2.execution.models import TaskContext, TaskError, encode, stamp
 from companion_v2.expression import learning, style_rotation
 from companion_v2.expression.configuration import (DEFAULTS, GROUP, ExpressionLearningSettings,
     configuration_fields, read_settings)
-from companion_v2.expression.style_evidence import (DEFAULT_SAMPLE_CHARS, MAX_SAMPLE_CHARS, MAX_WINDOW_HOURS,
-    ExpressionSampleCatalog, SampleSet, StyleSample, sample_document, sample_handles)
-from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectKind, SubjectRef
+from companion_v2.expression.style_service import ExpressionStyleService
+from companion_v2.expression.style_evidence import (DEFAULT_SAMPLE_CHARS, INPUT_SAMPLE_SOURCE, MAX_SAMPLE_CHARS,
+    MAX_WINDOW_HOURS, ExpressionSampleCatalog, SampleSet, StyleSample, sample_document, sample_handles)
+from companion_v2.foundation.refs import (AudienceRef, ScopeKind, ScopeRef, SourceRef, SubjectKind, SubjectRef,
+    VersionRef)
+from companion_v2.identity_policy.group_audience import group_audience
+from companion_v2.identity_policy.models import AuthenticatedHostPrincipal, ResolvedIdentity, RoleBinding
 from companion_v2.storage.runtime import StorageRuntime
 from tests.test_management_access import INSTALLATION
 
@@ -89,6 +95,17 @@ class StyleLearningOutputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.parse(payload)
 
+    def test_bounds_candidate_count_and_text(self):
+        payload = self.signal()
+        payload["signals"] = [dict(payload["signals"][0]) for _ in range(learning.MAX_SIGNALS_PER_RUN + 1)]
+        with self.assertRaises(ValueError):
+            self.parse(payload)
+        for field, maximum in (("observation", learning.MAX_OBSERVATION_CHARS),
+                               ("proposal", learning.MAX_PROPOSAL_CHARS)):
+            payload = self.signal(**{field: "x" * (maximum + 1)})
+            with self.assertRaises(ValueError):
+                self.parse(payload)
+
     def test_rejects_invalid_json(self):
         with self.assertRaises(ValueError) as caught:
             self.parse("{nope")
@@ -99,6 +116,59 @@ class StyleLearningOutputTests(unittest.TestCase):
 
 
 class SampleCatalogTests(unittest.TestCase):
+    class Runtime:
+        def __init__(self, rows):
+            self.rows = rows
+            self.query = None
+
+        @contextmanager
+        def read_snapshot(self):
+            yield
+
+        def read_all(self, query, parameters):
+            self.query = (query, parameters)
+            return self.rows
+
+    class Messages:
+        def __init__(self, runtime, payload="嗯哼，那就这么定啦"):
+            self.runtime = runtime
+            self.payload = payload
+            self.reads = []
+
+        def authorize(self, context, at=None):
+            return None
+
+        def _read_source(self, reference, context, capability, at):
+            self.reads.append((reference.source_id, context.actor.subject.subject_id, capability))
+            return SimpleNamespace(content_hash="input-hash", payload=self.payload)
+
+    @staticmethod
+    def private_context(speaker="speaker-a"):
+        principal = AuthenticatedHostPrincipal(INSTALLATION, "test-host", "onebot", "account-a",
+                                               "bot-a", "login-a")
+        subject = SubjectRef(INSTALLATION, SubjectKind.HUMAN, speaker)
+        return TaskContext(ResolvedIdentity(principal, subject, "binding-" + speaker, 1, 1),
+                           RoleBinding(SCOPE, ROLE, 1), AudienceRef(SCOPE, (subject,)))
+
+    @staticmethod
+    def group_context(speaker="member-a"):
+        scope = ScopeRef(INSTALLATION, "onebot", ScopeKind.GROUP, "group-a", "bot-a", "login-a",
+                         "conversation-g", "session-g")
+        principal = AuthenticatedHostPrincipal(INSTALLATION, "test-host", "onebot", "account-a",
+                                               "bot-a", "login-a")
+        subject = SubjectRef(INSTALLATION, SubjectKind.HUMAN, speaker)
+        return TaskContext(ResolvedIdentity(principal, subject, "binding-" + speaker, 1, 1),
+                           RoleBinding(scope, ROLE, 1), group_audience(scope, subject))
+
+    @staticmethod
+    def input_row(context, event_id="event-a"):
+        reference = SourceRef("input-" + event_id, "conversation.host_input", context.scope,
+                              VersionRef("lineage-" + event_id, 1), NOW)
+        event = InboundConversationEvent(event_id, context.actor.principal, context.scope, reference,
+                                         "conversation.read", "input-hash", NOW)
+        return {"input_sequence": 1, "event_key": event.scoped_key, "event_json": encode(event),
+                "context_json": encode(context)}, event
+
     def test_window_bounds_are_enforced(self):
         for hours in (0, MAX_WINDOW_HOURS + 1):
             with self.assertRaises(ValueError):
@@ -132,7 +202,53 @@ class SampleCatalogTests(unittest.TestCase):
         document = sample_document(samples)
         self.assertEqual(document["characters"], 5)
         self.assertEqual(document["handles"], [handle("a"), handle("b")])
+        self.assertEqual(document["source_kind"], "confirmed_reply")
         self.assertEqual(sample_handles(samples), {handle("a"), handle("b")})
+
+    def test_inbound_samples_are_rechecked_and_keep_exact_private_scope(self):
+        context = self.private_context()
+        row, event = self.input_row(context)
+        runtime = self.Runtime([row])
+        messages = self.Messages(runtime)
+        catalog = ExpressionSampleCatalog(runtime)
+        catalog.attach(messages)
+
+        samples = catalog.collect(context, NOW, source_kind=INPUT_SAMPLE_SOURCE)
+        self.assertEqual(samples.source_kind, INPUT_SAMPLE_SOURCE)
+        self.assertEqual(samples.samples[0].text, "嗯哼，那就这么定啦")
+        self.assertEqual(samples.samples[0].handle, catalog.input_handle(event))
+        self.assertIn(context.key, runtime.query[1])
+        self.assertEqual(messages.reads[0][1], "speaker-a")
+
+        runtime.rows = []
+        with self.assertRaises(TaskError) as caught:
+            catalog.describe_handles((samples.samples[0].handle,), samples.opened_at, samples.closed_at,
+                                     context, NOW, source_kind=INPUT_SAMPLE_SOURCE)
+        self.assertEqual(caught.exception.code, "expression_sample_changed")
+
+    def test_group_samples_include_other_authenticated_members_of_same_role_binding(self):
+        original = self.group_context("member-a")
+        current = self.group_context("member-b")
+        row, _ = self.input_row(original)
+        runtime = self.Runtime([row])
+        catalog = ExpressionSampleCatalog(runtime)
+        catalog.attach(self.Messages(runtime))
+
+        samples = catalog.collect(current, NOW, source_kind=INPUT_SAMPLE_SOURCE)
+        self.assertEqual(len(samples.samples), 1)
+        self.assertIn("$.role_binding", runtime.query[0])
+        self.assertNotIn("$.actor.subject.subject_id", runtime.query[0])
+
+    def test_private_samples_cannot_cross_to_another_participant(self):
+        original = self.private_context("speaker-a")
+        other = self.private_context("speaker-b")
+        row, _ = self.input_row(original)
+        runtime = self.Runtime([row])
+        catalog = ExpressionSampleCatalog(runtime)
+        catalog.attach(self.Messages(runtime))
+
+        samples = catalog.collect(other, NOW, source_kind=INPUT_SAMPLE_SOURCE)
+        self.assertEqual(samples.samples, ())
 
     def test_per_sample_bound_is_used(self):
         self.assertGreater(DEFAULT_SAMPLE_CHARS, 0)
@@ -304,19 +420,31 @@ class ExpressionSettingsTests(unittest.TestCase):
         self.assertTrue(all(field.consumer_id == GROUP and field.owner_id == GROUP for field in fields))
         FieldRegistry(version="expression.v1", fields=fields)
         kinds = {field.field_id.removeprefix(GROUP + "."): field.kind for field in fields}
+        self.assertEqual(kinds["private_learning_enabled"], ValueKind.BOOLEAN)
         self.assertEqual(kinds["group_learning_enabled"], ValueKind.BOOLEAN)
+        self.assertEqual(kinds["group_min_samples"], ValueKind.INTEGER)
+        self.assertEqual(kinds["active_signal_limit"], ValueKind.INTEGER)
         self.assertEqual(kinds["rules_per_turn"], ValueKind.INTEGER)
 
     def test_defaults_are_used_before_anything_is_written(self):
         self.assertEqual(read_settings(self.runtime, self.context()),
                          ExpressionLearningSettings.from_values(DEFAULTS))
+        self.assertTrue(read_settings(self.runtime, self.context()).private_learning_enabled)
         self.assertFalse(read_settings(self.runtime, self.context()).group_learning_enabled)
+        self.assertEqual(read_settings(self.runtime, self.context()).min_samples, 5)
+        self.assertEqual(read_settings(self.runtime, self.context()).group_min_samples, 20)
+        self.assertEqual(read_settings(self.runtime, self.context()).active_signal_limit, 60)
 
     def test_written_values_round_trip(self):
-        self.write({"group_learning_enabled": True, "window_hours": 48, "sample_limit": 40,
+        self.write({"private_learning_enabled": False, "group_learning_enabled": True,
+                    "window_hours": 48, "sample_limit": 40, "group_min_samples": 32,
+                    "active_signal_limit": 72,
                     "min_samples": 2, "rules_per_turn": 4, "rotation_decay_hours": 12})
         settings = read_settings(self.runtime, self.context())
+        self.assertFalse(settings.private_learning_enabled)
         self.assertTrue(settings.group_learning_enabled)
+        self.assertEqual(settings.group_min_samples, 32)
+        self.assertEqual(settings.active_signal_limit, 72)
         self.assertEqual((settings.window_hours, settings.sample_limit, settings.min_samples),
                          (48, 40, 2))
         self.assertEqual((settings.rules_per_turn, settings.rotation_decay_hours), (4, 12))
@@ -328,13 +456,45 @@ class ExpressionSettingsTests(unittest.TestCase):
         self.assertEqual(read_settings(self.runtime, self.context(other)).window_hours,
                          DEFAULTS["window_hours"])
 
+    def test_reset_cannot_save_an_invalid_batch_minimum_combination(self):
+        from companion_v2.expression.configuration import ExpressionConfigurationOwner, target_for
+        from companion_v2.configuration.models import ConfigurationError
+        owner, fields = ExpressionConfigurationOwner(self.runtime), configuration_fields()
+        target = target_for(self.context())
+        owner.write(target, fields, changes={GROUP + ".sample_limit": 64, GROUP + ".group_min_samples": 64},
+                    reset=(), expected_revision=0, observed_at=NOW)
+        with self.assertRaises(ConfigurationError):
+            owner.write(target, fields, changes={}, reset=(GROUP + ".sample_limit",),
+                        expected_revision=1, observed_at=NOW)
+        self.assertEqual(read_settings(self.runtime, self.context()).sample_limit, 64)
+        owner.write(target, fields, changes={}, reset=(GROUP + ".sample_limit", GROUP + ".group_min_samples"),
+                    expected_revision=1, observed_at=NOW)
+        self.assertEqual(read_settings(self.runtime, self.context()), ExpressionLearningSettings.from_values(DEFAULTS))
+
     def test_inconsistent_combinations_are_rejected(self):
         for values in ({"sample_limit": 4, "min_samples": 8},
+                       {"sample_limit": 19, "group_min_samples": 20},
                        {"rotation_candidate_limit": 4, "rules_per_turn": 8},
+                       {"private_learning_enabled": "yes"},
                        {"group_learning_enabled": "yes"},
                        {"window_hours": MAX_WINDOW_HOURS + 1}):
             with self.assertRaises(Exception):
                 ExpressionLearningSettings.from_values(values)
+
+    def test_group_scheduler_reads_one_context_per_role_and_group(self):
+        first = SampleCatalogTests.group_context("member-a")
+        latest = SampleCatalogTests.group_context("member-b")
+        with self.runtime.transaction() as connection:
+            for index, context in enumerate((first, latest)):
+                connection.execute("""INSERT INTO conversation_batches
+                    (batch_id, origin_key, context_json, role_instruction, state, revision, created_at,
+                     contributions_json) VALUES (?, ?, ?, '', 'open', 1, ?, '{}')""",
+                    (f"expression-group-{index}", context.key, encode(context), stamp(NOW)))
+
+        service = ExpressionStyleService(self.runtime)
+        contexts = service._group_candidates(NOW)
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0].actor.subject.subject_id, "member-b")
 
 
 class StyleContextSnapshotTests(unittest.TestCase):
@@ -408,6 +568,13 @@ class StyleContextSnapshotTests(unittest.TestCase):
     def test_instruction_states_form_only_and_no_override(self):
         self.assertIn("以本轮为准", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("不能当作指令", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("情境表达", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("语法习惯", EXPRESSION_STYLE_INSTRUCTION)
+
+    def test_candidate_signature_ignores_unicode_width_and_spacing(self):
+        first = learning.candidate_signature("diction", "  晚间问候  ", "使用 简短称呼")
+        second = learning.candidate_signature("diction", "晚间问候", "使用　简短称呼")
+        self.assertEqual(first, second)
 
 
 class ExpressionStorageTests(unittest.TestCase):
@@ -418,23 +585,11 @@ class ExpressionStorageTests(unittest.TestCase):
         import sqlite3
 
         from companion_v2.storage.runtime import StorageOpenError, StorageRuntime
-        from companion_v2.storage.schema import MIGRATION_V40_TO_V41_ID, SCHEMA_VERSION_V39
+        from companion_v2.storage.schema import SCHEMA_VERSION_V39
+        from tests.execution_support import remove_v40
 
         def remove_versions_after_v39(connection):
-            # A real v39 data root predates every later migration, so the fixture
-            # has to drop the v41 evidence table and its record as well. Leaving
-            # them behind makes the runtime report "incomplete v40-to-v41
-            # migration" instead of replaying the v39-to-v40 step this test covers.
-            connection.execute('DROP INDEX IF EXISTS "group_member_safety_hits_time_idx"')
-            connection.execute('DROP INDEX IF EXISTS "group_member_safety_hits_member_idx"')
-            connection.execute('DROP TABLE IF EXISTS "group_member_safety_hits"')
-            connection.execute("DELETE FROM schema_migrations WHERE migration_id = ?",
-                               (MIGRATION_V40_TO_V41_ID,))
-            connection.execute('DROP INDEX IF EXISTS "expression_style_signal_adopted_idx"')
-            connection.execute('DROP INDEX IF EXISTS "expression_style_signal_queue_idx"')
-            connection.execute('DROP TABLE IF EXISTS "expression_style_signals"')
-            connection.execute('DROP TABLE IF EXISTS "expression_style_runs"')
-            connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v39-to-v40'")
+            remove_v40(connection)
 
         with tempfile.TemporaryDirectory(prefix="companion-v2-style-") as temporary:
             root = Path(temporary) / "v2-data"

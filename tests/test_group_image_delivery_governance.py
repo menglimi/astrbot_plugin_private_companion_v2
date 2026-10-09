@@ -10,8 +10,13 @@ from unittest.mock import patch
 
 from astrbot_host.group_authority import GroupAuthority
 from companion_v2.conversation.media.reply import OWNER
+from companion_v2.delivery.media import manifest_hash
 from companion_v2.delivery.models import DeliveryReceipt, LocalSender
-from companion_v2.execution.models import TaskContext, TaskError, digest
+from companion_v2.delivery.service import DeliveryRequest
+from companion_v2.conversation.media.fallback import OWNER as IMAGE_FALLBACK_OWNER
+from companion_v2.conversation.media.review import DEFAULTS, verdict_document
+from companion_v2.execution.models import TaskContext, TaskError, digest, stamp
+from companion_v2.foundation.refs import ScopeKind
 from tests.animation_support import animation_bytes
 from tests.group_host_support import group_config
 from tests.group_image_delivery_support import GroupImageDeliveryFixture
@@ -208,3 +213,189 @@ class GroupImageGovernanceTests(GroupImageDeliveryFixture, unittest.IsolatedAsyn
         await self.settle(batch)
         self.assertFalse(self.sends())
         self.assertFalse(self.app.messages.history(self.context(batch)).unwrap()["items"])
+
+    async def test_reviewed_group_image_is_sent_only_to_requester_private_route(self):
+        self.config = group_config(group_delivery_mode="onebot_group")
+        self.config["multi_host"]["targets"].append(dict(
+            target_id="member-201", platform_id="qq-main", account_id="100",
+            bot_id="bot-a", participant_id="201"))
+        self.controller = self.make_controller(self.config)
+        app = await self.start_host()
+        (await self.controller.authorize_group_delivery("group-a")).unwrap()
+        app.image_review._settings_reader = lambda: {
+            **DEFAULTS, "enable_group_nsfw_private_fallback": True,
+        }
+        app.image_review_service.closed = True
+
+        result = await self.controller.receive_claimed(self.media_event([sdk_image()], sender="201"))
+        batch = result.unwrap()
+
+        async def pending_review_part():
+            while True:
+                parts = self.parts(batch)
+                if parts:
+                    row = app.image_review.row_for_part(parts[0]["part_id"])
+                    if row is not None and row["state"] == "pending":
+                        return parts[0], row
+                await asyncio.sleep(0.005)
+
+        part, review_row = await asyncio.wait_for(pending_review_part(), self.batch_timeout_seconds)
+        original = json.loads(review_row["review_json"])
+        verdict = verdict_document("reviewed", "single", "balanced", label="adult_nsfw",
+                                   confidence=0.95, provider_ids=("synthetic-review",), revision=1)
+        verdict.update({name: original[name] for name in ("origin_key", "role_key", "group_key", "created_at")})
+        verdict["target"] = original["target"]
+        verdict["updated_at"] = stamp(self.clock.now())
+        app.image_review.store(review_row["review_key"], verdict)
+        self.assertIsNotNone(app.delivery.withheld_image(part))
+        app.notify()
+
+        await self.settle(batch)
+        self.assertEqual(app.flow.row(batch)["state"], "complete")
+        substitution = app.image_review.substitution(part["part_id"])
+        self.assertEqual(substitution and substitution["mode"], "withhold_image")
+        installed_fallback = app.image_review.fallback_document(part["part_id"])
+        self.assertIsNotNone(installed_fallback)
+
+        async def private_fallback_sent():
+            while True:
+                private = [params for action, params in self.api.calls if action == "send_private_msg"]
+                if private:
+                    return private
+                await asyncio.sleep(0.005)
+
+        private = await asyncio.wait_for(private_fallback_sent(), self.batch_timeout_seconds)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual([item["type"] for item in self.sends()[0]["message"]], ["text"])
+        self.assertEqual(len(private), 1)
+        self.assertEqual([item["type"] for item in private[0]["message"]], ["image"])
+        fallback = app.runtime.read_one(
+            "SELECT state FROM background_deliveries WHERE owner = ?", (IMAGE_FALLBACK_OWNER,))
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback["state"], "delivered")
+
+    async def test_inconclusive_review_private_policy_sends_image_to_requester_route(self):
+        self.config = group_config(group_delivery_mode="onebot_group")
+        self.config["multi_host"]["targets"].append(dict(
+            target_id="member-201", platform_id="qq-main", account_id="100",
+            bot_id="bot-a", participant_id="201"))
+        self.controller = self.make_controller(self.config)
+        app = await self.start_host()
+        (await self.controller.authorize_group_delivery("group-a")).unwrap()
+        app.image_review._settings_reader = lambda: {
+            **DEFAULTS, "enable_group_nsfw_private_fallback": True,
+            "group_nsfw_image_review_failure_action": "private",
+        }
+        app.image_review_service.closed = True
+        batch = (await self.controller.receive_claimed(self.media_event([sdk_image()], sender="201"))).unwrap()
+
+        async def pending_review_part():
+            while True:
+                parts = self.parts(batch)
+                if parts:
+                    row = app.image_review.row_for_part(parts[0]["part_id"])
+                    if row is not None and row["state"] == "pending":
+                        return parts[0], row
+                await asyncio.sleep(0.005)
+
+        part, review_row = await asyncio.wait_for(pending_review_part(), self.batch_timeout_seconds)
+        original = json.loads(review_row["review_json"])
+        verdict = verdict_document("unavailable", "single", "balanced", reason="没有可用审核模型")
+        verdict.update({name: original[name] for name in ("origin_key", "role_key", "group_key", "created_at")})
+        verdict["target"] = original["target"]
+        verdict["updated_at"] = stamp(self.clock.now())
+        app.image_review.store(review_row["review_key"], verdict)
+        app.notify()
+        await self.settle(batch)
+
+        substitution = app.image_review.substitution(part["part_id"])
+        self.assertEqual(substitution and substitution["mode"], "withhold_image")
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual([item["type"] for item in self.sends()[0]["message"]], ["text"])
+
+        async def private_fallback_sent():
+            while True:
+                private = [params for action, params in self.api.calls if action == "send_private_msg"]
+                if private:
+                    return private
+                await asyncio.sleep(0.005)
+
+        private = await asyncio.wait_for(private_fallback_sent(), self.batch_timeout_seconds)
+        queue = [dict(row) for row in app.runtime.read_all(
+            "SELECT state, reason FROM background_deliveries WHERE owner = ?", (IMAGE_FALLBACK_OWNER,))]
+        self.assertEqual(len(private), 1, f"private fallback queue state: {queue!r}")
+        self.assertEqual([item["type"] for item in private[0]["message"]], ["image"])
+        fallback = app.runtime.read_one(
+            "SELECT state FROM background_deliveries WHERE owner = ?", (IMAGE_FALLBACK_OWNER,))
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback["state"], "delivered")
+
+    async def test_withheld_image_fallback_is_queued_through_the_review_owner_helper(self):
+        """The private downgrade is one method that queues a deliverable private image.
+
+        ``LocalConversationDelivery`` inherits from ``object`` alone and defines no
+        ``manifest`` helper, so a fallback body naming one would raise AttributeError
+        and strand the reviewed original. The single definition must hand the
+        withheld manifest to the review fallback owner, on the requester's own
+        private route, without queueing that image twice.
+        """
+        self.config = group_config(group_delivery_mode="onebot_group")
+        self.config["multi_host"]["targets"].append(dict(
+            target_id="member-201", platform_id="qq-main", account_id="100",
+            bot_id="bot-a", participant_id="201"))
+        self.controller = self.make_controller(self.config)
+        app = await self.start_host()
+        (await self.controller.authorize_group_delivery("group-a")).unwrap()
+        app.image_review._settings_reader = lambda: {
+            **DEFAULTS, "enable_group_nsfw_private_fallback": True,
+        }
+        app.image_review_service.closed = True
+        batch = (await self.controller.receive_claimed(self.media_event([sdk_image()], sender="201"))).unwrap()
+
+        async def pending_review_part():
+            while True:
+                parts = self.parts(batch)
+                if parts:
+                    row = app.image_review.row_for_part(parts[0]["part_id"])
+                    if row is not None and row["state"] == "pending":
+                        return parts[0], row
+                await asyncio.sleep(0.005)
+
+        part, review_row = await asyncio.wait_for(pending_review_part(), self.batch_timeout_seconds)
+        original = json.loads(review_row["review_json"])
+        verdict = verdict_document("reviewed", "single", "balanced", label="adult_nsfw",
+                                   confidence=0.95, provider_ids=("synthetic-review",), revision=1)
+        verdict.update({name: original[name] for name in ("origin_key", "role_key", "group_key", "created_at")})
+        verdict["target"] = original["target"]
+        verdict["updated_at"] = stamp(self.clock.now())
+        app.image_review.store(review_row["review_key"], verdict)
+        app.notify()
+        await self.settle(batch)
+
+        plan = app.delivery.withheld_image(part)
+        self.assertIsNotNone(plan)
+        # The reviewed original may leave only through the fallback owner's own
+        # queueing entry point; this class never had a ``manifest`` helper.
+        self.assertFalse(hasattr(app.delivery, "manifest"))
+        delivery_id = app.delivery.enqueue_fallback(part, deadline_at=self.clock.now() + timedelta(seconds=60))
+        self.assertIsInstance(delivery_id, str)
+        document = app.image_review.fallback_document(part["part_id"])
+        self.assertEqual(document["delivery_id"], delivery_id)
+        self.assertEqual(document["manifest"], plan.manifest)
+        self.assertEqual(document["image_position"], plan.image_position)
+        destination = TaskContext.restore(document["destination"])
+        self.assertIs(destination.scope.kind, ScopeKind.PRIVATE)
+        self.assertEqual(destination.audience.recipients, (destination.actor.subject,))
+        self.assertNotEqual(destination.key, self.context(batch).key)
+        queued = app.runtime.read_all("SELECT * FROM background_deliveries WHERE owner = ?",
+                                      (IMAGE_FALLBACK_OWNER,))
+        self.assertEqual([row["delivery_id"] for row in queued], [delivery_id])
+        request = DeliveryRequest.restore(queued[0]["request_json"])
+        self.assertEqual((request.owner, request.context), (IMAGE_FALLBACK_OWNER, destination))
+        self.assertEqual(request.payload_hash,
+                         manifest_hash("", (document["manifest"],), image_position=document["image_position"]))
+        # A second pass re-reads the installed decision instead of queueing again.
+        self.assertEqual(app.delivery.enqueue_fallback(part, deadline_at=self.clock.now() + timedelta(seconds=60)),
+                         delivery_id)
+        self.assertEqual(len(app.runtime.read_all("SELECT delivery_id FROM background_deliveries WHERE owner = ?",
+                                                  (IMAGE_FALLBACK_OWNER,))), 1)

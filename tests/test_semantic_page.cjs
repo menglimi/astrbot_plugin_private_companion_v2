@@ -5,6 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/semantic-page.js'), 'utf8');
+const styles = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/semantic-page.css'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function catalog(kind, name) {
@@ -37,6 +38,7 @@ function harness(group = false) {
       apiPost: (route, values) => new Promise((resolve, reject) => requests.push({method: 'POST', route, values, resolve, reject})),
     },
     lucide: {createIcons() {}},
+    confirm: () => true,
   };
   /* FormData 的替身：page 用 new FormData(form) 读表单，而这里的 form 是
      提交时构造的桩，所以直接用它的 values 映射。 */
@@ -45,7 +47,10 @@ function harness(group = false) {
     has(name) { return Boolean(this.map[name]); }
     get(name) { return name in this.map ? this.map[name] : null; }
   }
-  vm.runInNewContext(source, {window, AbortController, FormData: FormDataStub});
+  class FileReaderStub {
+    readAsDataURL(file) { this.result = file.dataUrl; this.onload?.(); }
+  }
+  vm.runInNewContext(source, {window, AbortController, FormData: FormDataStub, FileReader: FileReaderStub});
   function root() {
     const handlers = {};
     return {
@@ -56,6 +61,7 @@ function harness(group = false) {
       click(selector, dataset) {
         handlers.click({target: {closest: candidate => candidate === selector ? {dataset} : null}});
       },
+      change(id, files) { handlers.change({target: {id, files}}); },
       /* 设置表单的提交：values 是 FormData 的替身内容。
          数值保持原类型，否则 Number() 读到字符串会得到 NaN。 */
       submit(id, values) {
@@ -124,7 +130,8 @@ test('initial read failure offers a retry that loads the catalog', async () => {
   page.mount(node);
   requests[0].reject(new Error('read failed'));
   await flush();
-  assert.match(node.innerHTML, /read failed/);
+  assert.match(node.innerHTML, /读取失败，请重试/);
+  assert.doesNotMatch(node.innerHTML, /read failed/);
   assert.match(node.innerHTML, /data-semantic="retry"/);
   node.click('[data-semantic]', {semantic: 'retry'});
   requests[1].resolve(catalog('reaction', 'recovered reaction'));
@@ -133,11 +140,17 @@ test('initial read failure offers a retry that loads the catalog', async () => {
   assert.doesNotMatch(node.innerHTML, /data-semantic="retry"/);
 });
 
-/* 设置表单的桩：settings 版本号 + 可编辑的 15 项。 */
+/* 设置表单的桩：全部可编辑字段都参与版本冲突与草稿往返。 */
 function settingsCatalog(revision = 3, overrides = {}) {
   return {
     state: 'ready', selection_ready: true, providers: {embedding: [], rerank: [], analysis: []},
     settings: {revision, enabled: true, memory_enabled: true, reactions_enabled: true,
+      reactions_private_enabled: true, reactions_group_enabled: false,
+      reactions_collection_private_enabled: false, reactions_collection_group_enabled: false,
+      reactions_collection_private_probability: 0.1, reactions_collection_group_probability: 0.1,
+      reactions_collection_mode: 'automatic',
+      reactions_trigger_probability: 0.2, reactions_cooldown_seconds: 180,
+      reactions_delivery_mode: 'separate_after', reactions_image_format: 'image',
       slang_enabled: true, slang_learning: true, slang_web_search_enabled: false,
       vision_review: true,
       embedding_provider: '', rerank_provider: '', analysis_provider: '',
@@ -149,6 +162,12 @@ function settingsCatalog(revision = 3, overrides = {}) {
 }
 
 const FORM = {enabled: true, memory_enabled: true, reactions_enabled: true,
+  reactions_private_enabled: true, reactions_group_enabled: false,
+  reactions_collection_private_enabled: true, reactions_collection_group_enabled: false,
+  reactions_collection_private_probability: 15, reactions_collection_group_probability: 20,
+  reactions_collection_mode: 'confirm',
+  reactions_trigger_probability: 60, reactions_cooldown_seconds: 120,
+  reactions_delivery_mode: 'same_message', reactions_image_format: 'qq_emoji',
   slang_enabled: true, slang_learning: true, slang_web_search_enabled: false,
   vision_review: true,
   embedding_provider: '', rerank_provider: '', analysis_provider: '',
@@ -172,6 +191,11 @@ test('a revision conflict re-reads and keeps the values the user just entered', 
     'the search switch must be a boolean, never a missing key');
   assert.equal(requests[1].values.changes.slang_web_search_candidates, 6);
   assert.equal(requests[1].values.changes.slang_web_search_results, 3);
+  assert.equal(requests[1].values.changes.reactions_collection_private_probability, 0.15);
+  assert.equal(requests[1].values.changes.reactions_collection_group_probability, 0.2);
+  assert.equal(requests[1].values.changes.reactions_collection_mode, 'confirm');
+  assert.equal(requests[1].values.changes.reactions_trigger_probability, 0.6);
+  assert.equal(requests[1].values.changes.reactions_delivery_mode, 'same_message');
   /* 别处先改过：服务端拒绝这次 CAS。 */
   requests[1].reject(new Error('settings changed; refresh before saving'));
   await flush();
@@ -182,7 +206,7 @@ test('a revision conflict re-reads and keeps the values the user just entered', 
   await flush();
   assert.match(node.innerHTML, /已被别处修改/);
   assert.match(node.innerHTML, /value="12"/, 'the user input must survive the reload');
-  assert.match(node.innerHTML, /草稿待核对/);
+  assert.match(node.innerHTML, /semantic-conflict/);
   /* 再次提交按新版本号写入，且带的仍是用户的草稿。 */
   node.submit('semanticSettings', FORM);
   assert.equal(requests[3].values.revision, 4);
@@ -233,7 +257,8 @@ test('a non-conflict failure does not fabricate a draft or a reload', async () =
   requests[1].reject(new Error('unsupported reaction delivery setting'));
   await flush();
   assert.equal(requests.length, 2, 'a plain failure must not trigger a re-read');
-  assert.match(node.innerHTML, /unsupported reaction delivery setting/);
+  assert.match(node.innerHTML, /操作失败，请刷新核对/);
+  assert.doesNotMatch(node.innerHTML, /unsupported reaction delivery setting/);
   assert.doesNotMatch(node.innerHTML, /草稿待核对/);
 });
 
@@ -246,18 +271,17 @@ test('a machine code is translated instead of shown raw', async () => {
   requests[0].reject(new Error('staging_not_initialized'));
   await flush();
   assert.doesNotMatch(node.innerHTML, /staging_not_initialized/);
-  assert.match(node.innerHTML, /账号与会话/);
+  assert.match(node.innerHTML, /角色数据尚未加载，请重新读取/);
 });
 
-test('an uninitialized host points at host management instead of offering a pointless retry', async () => {
-  /* 运行实例没加载时重试仍是同样结果，所以只给去宿主管家的入口。 */
+test('unloaded role data offers an inline reload', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
   requests[0].reject(new Error('staging_not_initialized'));
   await flush();
-  assert.match(node.innerHTML, /data-go="manage" data-manage="host"/);
-  assert.doesNotMatch(node.innerHTML, /data-semantic="retry"/);
+  assert.match(node.innerHTML, /data-semantic="retry"/);
+  assert.doesNotMatch(node.innerHTML, /data-manage="host"/);
 
   requests[1] = null;
   const other = root();
@@ -268,13 +292,156 @@ test('an uninitialized host points at host management instead of offering a poin
   assert.doesNotMatch(other.innerHTML, /data-manage="host"/);
 });
 
-test('a loaded but unstarted host explains the state and links to host management', async () => {
+test('an unavailable semantic service offers an inline reload', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
   requests[0].reject(Object.assign(new Error('unavailable'), {code: 'supervisor_fenced'}));
   await flush();
-  assert.match(node.innerHTML, /后台尚未运行或已被替换/);
-  assert.match(node.innerHTML, /data-go="manage" data-manage="host"/);
-  assert.doesNotMatch(node.innerHTML, /读取失败|data-semantic="retry"/);
+  assert.match(node.innerHTML, /语义服务暂不可用/);
+  assert.match(node.innerHTML, /data-semantic="retry"/);
+  assert.doesNotMatch(node.innerHTML, /读取失败|data-manage="host"/);
+});
+
+test('unnamed semantic search results keep internal IDs only in action attributes', async () => {
+  const {page, requests, root} = harness();
+  const node = root();page.mount(node);
+  requests[0].resolve(settingsCatalog());await flush();
+  node.submit('semanticSearch', {query:'表情'});
+  requests[1].resolve({mode:'keyword',embedded:0,eligible:1,
+    items:[{id:'internal-material-opaque',payload:{},score:.5}]});await flush();
+  assert.match(node.innerHTML, /data-semantic-open="internal-material-opaque">未命名素材 1 · 0.50<\/button>/);
+  assert.doesNotMatch(node.innerHTML, />internal-material-opaque/);
+});
+
+test('expression settings expose per-scope collection controls and preserve stored probabilities', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node, {view: 'expression'});
+  requests[0].resolve(settingsCatalog());
+  await flush();
+  assert.match(node.innerHTML, /从私聊自动收录/);
+  assert.match(node.innerHTML, /从群聊自动收录/);
+  assert.match(node.innerHTML, /私聊收录概率 \/ %/);
+  assert.match(node.innerHTML, /value="10"/);
+  assert.match(node.innerHTML, /semantic-catalog-stats/);
+  assert.match(node.innerHTML, /自动识别/);
+  assert.match(node.innerHTML, /可用 1 \/ 1 项/);
+  assert.match(node.innerHTML, /待人工确认/);
+  node.submit('semanticSettings', FORM);
+  assert.equal(requests[1].values.changes.reactions_collection_private_probability, 0.15);
+  assert.equal(requests[1].values.changes.reactions_collection_group_probability, 0.2);
+  assert.equal(requests[1].values.changes.reactions_delivery_mode, 'same_message');
+  assert.equal(requests[1].values.changes.reactions_private_enabled, true);
+});
+
+test('reaction editor can delete the current revision and then reload the catalog', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node, {view: 'expression'});
+  requests[0].resolve(catalog('reaction', 'auto-collected sticker'));
+  await flush();
+  node.click('[data-semantic-open]', {semanticOpen: 'reaction-1'});
+  requests[1].resolve({item: {id: 'reaction-1', revision: 4, enabled: true,
+    payload: {name: 'auto-collected sticker', description: 'a wave'}}});
+  await flush();
+  assert.match(node.innerHTML, /data-semantic="delete"/);
+  node.click('[data-semantic]', {semantic: 'delete'});
+  assert.equal(requests[2].values.action, 'delete');
+  assert.equal(requests[2].values.id, 'reaction-1');
+  assert.equal(requests[2].values.revision, 4);
+  requests[2].resolve({deleted: true});
+  await flush();
+  assert.equal(requests[3].method, 'GET');
+  requests[3].resolve({...catalog('reaction', ''), items: [], catalog: {reaction: {enabled: 0}}});
+  await flush();
+  assert.match(node.innerHTML, /表情素材已删除/);
+  assert.match(node.innerHTML, /当前没有素材/);
+});
+
+test('batch import reports new, duplicate, failed, and out-of-limit files without stopping', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node, {view: 'expression'});
+  requests[0].resolve({...settingsCatalog(), reaction_collection: {totals: {}, recent: []}});
+  await flush();
+  node.change('semanticFile', [
+    {name: 'new.png', size: 10, dataUrl: 'data:image/png;base64,AA=='},
+    {name: 'duplicate.png', size: 10, dataUrl: 'data:image/png;base64,AA=='},
+    {name: 'large.png', size: 5 * 1024 * 1024 + 1, dataUrl: ''},
+  ]);
+  await flush();
+  assert.equal(requests[1].values.action, 'import');
+  requests[1].resolve({created: true});
+  await flush();
+  assert.equal(requests[2].values.action, 'import');
+  requests[2].resolve({created: false});
+  await flush();
+  assert.equal(requests[3].method, 'GET');
+  requests[3].resolve({...settingsCatalog(), reaction_collection: {totals: {}, recent: []}});
+  await flush();
+  assert.match(node.innerHTML, /新增 1 张，重复跳过 1 张，失败 1 张/);
+});
+
+test('automatic collection status is visible without exposing event or asset identifiers', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node, {view: 'expression'});
+  requests[0].resolve({...settingsCatalog(),
+    catalog: {reaction: {enabled: 2, disabled: 1, total: 3}},
+    reaction_collection: {totals: {private_capture: {added: 4, duplicate: 2}}, recent: [
+      {scope: 'private_capture', status: 'duplicate', code: null, updated_at: 1790900000,
+        item_id: 'private-material-id'},
+    ]},
+  });
+  await flush();
+  assert.match(node.innerHTML, /已自动启用 4 · 重复跳过 2/);
+  assert.match(node.innerHTML, /重复跳过/);
+  assert.match(node.innerHTML, /可用 2 \/ 3 项/);
+  assert.doesNotMatch(node.innerHTML, /private-material-id/);
+});
+
+test('learning semantic catalog loads group slang and reaction entries and saves its settings', async () => {
+  const {page, requests, root} = harness(true);
+  const node = root();
+  page.mount(node, {view: 'learning'});
+  assert.deepEqual(requests.map(request => request.values.kind), ['slang', 'reaction']);
+  const slang = {...settingsCatalog(), items: [{id: 'slang-1', kind: 'slang', revision: 2,
+    enabled: true, vector_ready: true, source_valid: true,
+    payload: {term: '小灯', meaning: '提醒喝水', usage: '群内昵称', collection_source: 'group_capture'}}]};
+  const reactions = {...settingsCatalog(), items: [{id: 'reaction-1', kind: 'reaction', revision: 3,
+    enabled: false, vector_ready: false, payload: {name: '挥手', description: '挥手告别'}}]};
+  requests[0].resolve(slang);
+  requests[1].resolve(reactions);
+  await flush();
+  assert.match(node.innerHTML, /小灯/);
+  assert.match(node.innerHTML, /挥手/);
+  assert.match(node.innerHTML, /语义目录与提供方/);
+  assert.match(node.innerHTML, /语义记忆与群聊黑话/);
+  assert.match(node.innerHTML, /语义反应素材/);
+  assert.match(node.innerHTML, /向量就绪/);
+  assert.match(node.innerHTML, /semantic-learning-links/);
+
+  node.submit('semanticSettings', {enabled: true, vision_review: false, memory_enabled: false,
+    slang_enabled: true, slang_learning: false, slang_web_search_enabled: true,
+    embedding_provider: 'embed-a', rerank_provider: '', analysis_provider: '',
+    timeout_seconds: 12, batch_size: 32, learning_interval_seconds: 1800,
+    slang_web_search_candidates: 6, slang_web_search_results: 3});
+  assert.equal(requests[2].method, 'POST');
+  assert.equal(requests[2].values.action, 'configure');
+  assert.equal(requests[2].values.changes.memory_enabled, false);
+  assert.equal(requests[2].values.changes.slang_learning, false);
+  assert.equal(requests[2].values.changes.embedding_provider, 'embed-a');
+  assert.equal(requests[2].values.changes.timeout_seconds, 12);
+  assert.equal(requests[2].values.changes.reactions_trigger_probability, 0.2,
+    'settings hidden in this view remain preserved in the full configuration patch');
+});
+
+test('learning semantic layout uses theme tokens and collapses cleanly on narrow screens', () => {
+  const block = styles.slice(styles.indexOf('/* 学习页语义目录'));
+  assert.match(block, /\.semantic-learning-settings\{display:grid;grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
+  assert.match(block, /@media\(max-width:900px\)\{\.semantic-learning-settings\{grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(block, /var\(--t-surface-raised\)/);
+  assert.match(block, /var\(--t-focus\)/);
+  assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b/i);
 });

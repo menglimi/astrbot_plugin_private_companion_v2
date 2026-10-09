@@ -83,8 +83,9 @@ class NativeLease:
         return tuple(result)
 
 
-def discover(context):
+def discover(context, *, excluded_extensions=()):
     candidates, issues = [], []
+    excluded_extensions = frozenset(excluded_extensions)
     for identifier, matches in sorted(stars_by_id(context).items()):
         if len(matches) != 1:
             issues.append((identifier, "native_instance_conflict"))
@@ -98,6 +99,8 @@ def discover(context):
         try:
             lease = NativeLease.capture(identifier, star)
             if lease is None:
+                continue
+            if lease.manifest.package.extension_id in excluded_extensions:
                 continue
             candidates.append((lease, lease.declarations()))
         except Exception:
@@ -114,3 +117,18 @@ def discover(context):
         issues.append(("native", "native_catalog_capacity"))
         entries = {}
     return entries, tuple(issues)
+
+
+def declarations_for_manifest(manifest):
+    result = []
+    for tool in manifest.tools:
+        descriptor = ExtensionToolDescriptor(
+            ToolSpec(tool["action"], tool["description"], encode(tool["parameters"])),
+            manifest.package,
+            ProviderBinding(tool["capability"], manifest.provider_id,
+                            manifest.package.package_version, manifest.generation),
+            tool["source_owner"], SideEffect(tool["side_effect"]), tool["timeout_seconds"],
+        )
+        result.append(AstrBotToolDeclaration(
+            f"native:{manifest.plugin_id}:{tool['action']}", descriptor))
+    return tuple(result)

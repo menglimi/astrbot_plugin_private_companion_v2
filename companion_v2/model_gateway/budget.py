@@ -19,8 +19,9 @@ from companion_v2.execution.runner import TaskRun
 from companion_v2.execution.service import TaskSupervisor
 from companion_v2.storage.runtime import StorageRuntime
 
-from .models import Amount, BudgetPolicy, ProviderResponse
+from .models import Amount, BudgetPolicy, CacheSignature, ProviderResponse
 from .failures import ModelFailure
+from .usage import MAIN_CHAIN_KIND
 
 
 # Optional background work that may be deferred once the day's soft ceiling is reached.
@@ -114,6 +115,23 @@ class BudgetLedger:
             layers.append(("background", installation))
         return tuple((digest([layer, address, period]), getattr(self.policy, layer)) for layer, address in layers)
 
+    @staticmethod
+    def _is_main_chain(run: TaskRun) -> bool:
+        """Identify the exact foreground reply task, rather than its action."""
+        return run.task.spec.kind == MAIN_CHAIN_KIND
+
+    def plugin_account_usage(self, account_key: str):
+        """Read charged work directly, including accounts from before reply exemption."""
+        return self.runtime.read_one("""SELECT
+                COALESCE(SUM(CASE WHEN c.actual_tokens IS NOT NULL THEN c.actual_tokens ELSE 0 END), 0) AS spent_tokens,
+                COALESCE(SUM(CASE WHEN c.actual_cost IS NOT NULL THEN c.actual_cost ELSE 0 END), 0) AS spent_cost,
+                COALESCE(SUM(CASE WHEN c.actual_tokens IS NULL THEN c.reserved_tokens ELSE 0 END), 0) AS held_tokens,
+                COALESCE(SUM(CASE WHEN c.actual_tokens IS NULL THEN c.reserved_cost ELSE 0 END), 0) AS held_cost
+            FROM model_calls c
+            JOIN model_call_accounts ca ON ca.call_id = c.call_id
+            JOIN execution_tasks t ON t.task_id = c.task_id
+            WHERE ca.account_key = ? AND t.kind != ?""", (account_key, MAIN_CHAIN_KIND))
+
     def _soft_refusal(self, run: TaskRun, period: str, amount: Amount):
         """The configured account that defers this call, or None.
 
@@ -139,10 +157,8 @@ class BudgetLedger:
                 digest(["role", [scope.installation_id, scope.bot_id, asdict(context.role_binding.role)], period]))
         used = 0
         for key in keys:
-            row = self.runtime.read_one(
-                "SELECT spent_tokens, held_tokens FROM model_budget_accounts WHERE account_key = ?", (key,))
-            if row:
-                used += row["spent_tokens"] + row["held_tokens"]
+            usage = self.plugin_account_usage(key)
+            used += usage["spent_tokens"] + usage["held_tokens"]
         if used >= settings.tokens or settings.tokens < amount.tokens:
             return keys[0]
         return None
@@ -160,19 +176,28 @@ class BudgetLedger:
                                   (run.task.task_id, position)).fetchone():
                 raise TaskError("model_call_already_reserved", "an original call cannot be repeated")
             period = datetime.fromisoformat(plan["created_at"]).date().isoformat()
+            main_chain = self._is_main_chain(run)
+            # Keep role account links as a reporting/ownership index. Main-chain
+            # calls use those links for maintenance views, but never charge them.
             accounts = self._accounts(run, period)
-            # Hard ceilings are checked first: software deferral decides whether optional
-            # work should run, never whether the body may answer at all.
+            # Every call gets a scope index so maintenance can enforce role
+            # visibility. Only plugin calls enter the budget checks below.
             for key, ceiling in accounts:
                 connection.execute("INSERT OR IGNORE INTO model_budget_accounts VALUES (?, ?, ?, ?, 0, 0, 0, 0)",
                                    (key, self.policy_hash, ceiling.tokens, ceiling.cost_microusd))
-                account = connection.execute("SELECT * FROM model_budget_accounts WHERE account_key = ?", (key,)).fetchone()
-                if account["policy_hash"] != self.policy_hash:
-                    raise TaskError("model_budget_policy_changed", "active daily budget policy requires an explicit migration")
-                if (account["spent_tokens"] + account["held_tokens"] + amount.tokens > account["token_limit"]
-                        or account["spent_cost"] + account["held_cost"] + amount.cost_microusd > account["cost_limit"]):
-                    raise TaskError("model_budget_exhausted", "model reservation exceeds an original scope budget")
-            if self._soft_refusal(run, period, amount) is not None:
+                if not main_chain:
+                    # Hard ceilings are checked first: software deferral decides
+                    # whether optional work should run, never whether the body may answer.
+                    account = connection.execute("SELECT * FROM model_budget_accounts WHERE account_key = ?", (key,)).fetchone()
+                    if account["policy_hash"] != self.policy_hash:
+                        raise TaskError("model_budget_policy_changed", "active daily budget policy requires an explicit migration")
+                    usage = self.plugin_account_usage(key)
+                    spent_tokens, held_tokens = usage["spent_tokens"], usage["held_tokens"]
+                    spent_cost, held_cost = usage["spent_cost"], usage["held_cost"]
+                    if (spent_tokens + held_tokens + amount.tokens > account["token_limit"]
+                            or spent_cost + held_cost + amount.cost_microusd > account["cost_limit"]):
+                        raise TaskError("model_budget_exhausted", "model reservation exceeds an original scope budget")
+            if not main_chain and self._soft_refusal(run, period, amount) is not None:
                 raise TaskError("model_budget_soft_deferred",
                                 "the daily soft ceiling defers this optional background call")
             connection.execute("""INSERT INTO model_calls
@@ -180,8 +205,9 @@ class BudgetLedger:
                 VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?)""",
                 (call_id, run.task.task_id, run.claim.attempt_id, position, encode(provider), amount.tokens, amount.cost_microusd))
             for key, _ in accounts:
-                connection.execute("UPDATE model_budget_accounts SET held_tokens = held_tokens + ?, held_cost = held_cost + ? WHERE account_key = ?",
-                                   (amount.tokens, amount.cost_microusd, key))
+                if not main_chain:
+                    connection.execute("UPDATE model_budget_accounts SET held_tokens = held_tokens + ?, held_cost = held_cost + ? WHERE account_key = ?",
+                                       (amount.tokens, amount.cost_microusd, key))
                 connection.execute("INSERT INTO model_call_accounts VALUES (?, ?)", (call_id, key))
 
     def dispatch(self, run: TaskRun, call_id: str):
@@ -192,6 +218,27 @@ class BudgetLedger:
                 (stamp(run.supervisor.now()), call_id, run.claim.attempt_id))
             if changed.rowcount != 1:
                 raise TaskError("model_dispatch_conflict", "only an unstarted original reservation may dispatch")
+
+    def record_cache_signature(self, run: TaskRun, call_id: str, provider: ProviderBinding,
+                               signature: CacheSignature):
+        if (self.runtime is not run.supervisor.runtime or not isinstance(signature, CacheSignature)):
+            raise ValueError("cache signature must belong to the current model task")
+        signature_json = encode(signature.to_record())
+        with self.runtime.transaction() as connection:
+            run.validate()
+            row = connection.execute("""SELECT state, provider_json FROM model_calls
+                WHERE call_id = ? AND task_id = ? AND attempt_id = ?""",
+                (call_id, run.task.task_id, run.claim.attempt_id)).fetchone()
+            if row is None or row["state"] != "dispatched" or row["provider_json"] != encode(provider):
+                raise TaskError("model_cache_signature_mismatch", "cache signature belongs to no active provider call")
+            existing = connection.execute("SELECT signature_json FROM model_call_cache_signatures WHERE call_id = ?",
+                                          (call_id,)).fetchone()
+            if existing is not None:
+                if existing["signature_json"] != signature_json:
+                    raise TaskError("model_cache_signature_conflict", "cache signature is immutable for an original call")
+                return
+            connection.execute("INSERT INTO model_call_cache_signatures(call_id, signature_json) VALUES (?, ?)",
+                               (call_id, signature_json))
 
     def settle(self, call_id: str, provider: ProviderBinding, response: ProviderResponse, *,
                observed_at: datetime, latency_ms: float | None = None):
@@ -218,11 +265,13 @@ class BudgetLedger:
                         for name in ("input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens")):
                     raise TaskError("model_usage_conflict", "settled usage details are immutable")
             elif usage is not None:
+                task = connection.execute("SELECT kind FROM execution_tasks WHERE task_id = ?", (row["task_id"],)).fetchone()
                 accounts = connection.execute("SELECT account_key FROM model_call_accounts WHERE call_id = ?", (call_id,)).fetchall()
-                for account in accounts:
-                    connection.execute("""UPDATE model_budget_accounts SET held_tokens = held_tokens - ?,
-                        held_cost = held_cost - ?, spent_tokens = spent_tokens + ?, spent_cost = spent_cost + ? WHERE account_key = ?""",
-                        (row["reserved_tokens"], row["reserved_cost"], usage.tokens, usage.cost_microusd, account["account_key"]))
+                if task is None or task["kind"] != MAIN_CHAIN_KIND:
+                    for account in accounts:
+                        connection.execute("""UPDATE model_budget_accounts SET held_tokens = held_tokens - ?,
+                            held_cost = held_cost - ?, spent_tokens = spent_tokens + ?, spent_cost = spent_cost + ? WHERE account_key = ?""",
+                            (row["reserved_tokens"], row["reserved_cost"], usage.tokens, usage.cost_microusd, account["account_key"]))
             # A late accounting receipt cannot resurrect a discarded draft or replay a call.
             state = row["state"] if row["state"] in ("generated", "discarded", "not_started") else response.status
             connection.execute("""UPDATE model_calls SET state = ?, actual_tokens = ?, actual_cost = ?,
@@ -237,6 +286,12 @@ class BudgetLedger:
                 stamp(observed_at), latency_ms, call_id))
             if response.failure is not None:
                 self._record_failure(connection, call_id, response.failure, observed_at)
+            if response.diagnostics is not None:
+                # Preserve the first adapter observation; accounting reconciliation
+                # must not replace it or make an unknown response replayable.
+                connection.execute("""INSERT INTO model_call_diagnostics(call_id, summary_json, observed_at)
+                    VALUES (?, ?, ?) ON CONFLICT(call_id) DO NOTHING""",
+                    (call_id, encode(response.diagnostics.to_record()), stamp(observed_at)))
             return row["actual_tokens"] is not None or usage is not None
 
     @staticmethod

@@ -66,6 +66,14 @@ async def available_personas(context: Any) -> list[str]:
     manager = getattr(context, "persona_manager", None)
     if manager is None:
         return []
+    # AstrBot 4.27 keeps the active dashboard personas in ``personas_v3``.
+    # ``get_personas`` below is a legacy database API and can omit those choices.
+    current = getattr(manager, "personas_v3", None)
+    if isinstance(current, (list, tuple)):
+        names = [name for name in (_name_of(entry) for entry in current) if name]
+        names = sorted({name for name in names if name != "[%None]"})
+        if names:
+            return names
     names: list[str] = []
     for attribute in ENUMERATORS:
         method = getattr(manager, attribute, None)

@@ -1,26 +1,28 @@
 # 12 · 主动与联系（`manage/contact`）
 
-代码位置：`renderContactPage`（`pages/陪伴小屋/app.js:1188-1195`）；挂载 `contactPreferencesWorkspace`（`app.js:1261`）与 `busyGateWorkspace`（`app.js:1265`）；「联系节奏」块 = `renderRoleState('contact')`（`app.js:1190`）→ `CompanionStatePage` 的 contact 段 + `state-contact.js` 字段库。
+代码位置：`renderContactPage`（`pages/陪伴小屋/app.js`）；主动联系工作台挂载 `contactPreferencesWorkspace`，开口闸门状态挂载 `contactWorkspace`，下方统一挂载 `replyGateConfigWorkspace`（`busy_gate` 的 reply/contact 分段与 `role.life` 的 rest/backlog 分段）；联系节奏仍由 `CompanionStatePage` 的 contact 段提供。
 
 ## 一、页面功能
 
-"她什么时候来找我"——陪伴的核心配置页，也是最大的配置类（`proactive.contact` 158 项 + `busy_gate` 7 项）。三个分区各管一层：当前现状（联系节奏）、完整设置面（主动联系偏好）、忙碌顺延（繁忙闸门）。
+"她什么时候来找我"——陪伴的核心配置页，也是最大的配置类（`proactive.contact` 160 项 + `busy_gate` 7 项）。页面先给出节律和当前闸门判定，再提供主动联系偏好与开口闸门设置；忙碌回复延迟、主动联系恢复、休息时回复判定和醒后补看集中在开口闸门。
 
-> 代码注释（`app.js:1177-1187`）记录了历史：本页正文曾调用从未定义的 `renderPreferences()` 导致整页渲染中断；158 项大组曾四层全缺（后端 GroupEditor/SECTIONS/spec/挂载点），现已补齐，按 22 段渲染。
+> 代码注释记录了历史：本页正文曾调用从未定义的 `renderPreferences()` 导致整页渲染中断；160 项大组曾四层全缺（后端 GroupEditor/SECTIONS/spec/挂载点），现已补齐，按 23 段渲染。
 
 ## 二、展示部分
 
 | 分区 | 内容 | 证据 |
 | --- | --- | --- |
 | 联系节奏（现状与快速修改） | `state-contact.js` 渲染「主动联系偏好」只读摘要：联系开关、当前条件、间隔与额度、沉默门槛、免打扰、暂停截止、宿主/模型状态、关系共享上限（只读提示）、各联系目的当前条件 details | `state-contact.js:121-135` |
-| 主动联系偏好（完整设置面） | 挂载头「四层继承：默认写入窗口层，安装/角色/关系层的值会被继承；两个关系级配额只能在安装/角色/关系层设置」（`app.js:1192`）+ 22 段编辑器 | `/config` |
-| 繁忙时顺延 | 挂载头无说明，直接 7 项编辑器（`app.js:1193-1194`） | `/config` |
+| 主动联系偏好（完整设置面） | 挂载头「四层继承：默认写入窗口层，安装/角色/关系层的值会被继承；两个关系级配额只能在安装/角色/关系层设置」+ 23 段编辑器；外部触发源按天气、预警、资讯、饭点/纪念日、网络探索、设备动作、生成上下文和余额分组，均可在本页直接编辑 | `/config` |
+| 开口闸门 | 先显示当前授权、模型、宿主、免打扰、曲线与暂停判定；设置区再编辑忙碌回复延迟、主动联系恢复、休息回复判定与醒后补看，并提供直达入口 | `/config` |
 
 生效口径：联系节奏改动**从下一轮主动评估开始生效**；开启总开关时会一并签发这个对象的主动联系授权（`app.js:1190` 挂载头文案）。
 
+触发源的直接编辑与「感知」页是互补关系：主动联系页负责该角色何时采用天气、资讯、设备、余额等材料作为开口契机；感知页负责按来源查看实况、授权和更细的上下文配置。主动联系页的来源卡片同时提供到感知二级分区的状态跳转，但跳转不会替代本页控件。
+
 ## 三、配置部分
 
-### ① `proactive.contact`（158 项）— installation+role+relationship+window，立即生效，通道 `/config`
+### ① `proactive.contact`（160 项）— installation+role+relationship+window，立即生效，通道 `/config`
 
 挂载 `configEditors('contactPreferencesWorkspace',['proactive.contact'])`（`app.js:1192`）；`SECTIONS` 为 `ProactiveContactManagement`（`configuration_api.py:35-48`）。按功能划分（字段前缀实查，`proactive/configuration.py:220`）：
 
@@ -42,7 +44,7 @@
 
 ### ② `conversation.busy_gate`（繁忙回复闸门）— 7 项，window，立即生效，通道 `/config`
 
-挂载 `configEditors('busyGateWorkspace',['busy_gate'])`（`app.js:1194`，挂载点 `:1265`；`SECTIONS` 的 `BusyGateManagement`）。字段（spec 标签实查）：
+挂载 `configEditors('replyGateConfigWorkspace',['busy_gate'])` 的 `reply` 与 `contact` 分段（`SECTIONS` 的 `BusyGateManagement`）。字段（spec 标签实查）：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -53,9 +55,13 @@
 | `busy_exclude_keywords` | 排除关键词（优先级更高） |
 | `busy_urgent_keywords` | 紧急关键词（立即回复） |
 
-### ③ 联系节奏的快速修改（`role.state` 组的 contact 段）
+### ③ `role.life` 的开口闸门分段
 
-`renderRoleState('contact')` 挂的是状态工作台 contact 段：`state-contact.js` 定义节奏/沉默/免打扰/联系目的/天气（CAP 五级预警）字段的表单与校验（6 位小数、datetime→ISO，`:44-79`），提交 `POST {state_api}/command` action=`contact.configure`（`state-editor.js:38`）。**注意与 ① 的分工**：contact 段是"此刻为什么没来找你"的现状与快捷修改（也是唯一会随总开关签发主动联系授权的地方），完整 158 项只在 ①。
+`rest` 分段负责休息时回复判定，`backlog` 分段负责醒后补看材料。它们与 `busy_gate` 一起挂在 `replyGateConfigWorkspace`，日记页只展示 `routine`、`sleep`、`writing` 三个分段。
+
+### ④ 联系节奏的快速修改（`role.state` 组的 contact 段）
+
+`renderRoleState('contact')` 挂的是状态工作台 contact 段：`state-contact.js` 定义节奏/沉默/免打扰/联系目的/天气（CAP 五级预警）字段的表单与校验（6 位小数、datetime→ISO），提交 `POST {state_api}/command` action=`contact.configure`。**注意与 ① 的分工**：contact 段是"此刻为什么没来找你"的现状与快捷修改；主动联系页的来源卡片仍提供完整触发条件的直接编辑，感知页只按来源筛选同一合同的相关分段。总开关签发主动联系授权仍由 contact 状态命令负责。
 
 ## 四、边界与空态
 
@@ -71,5 +77,5 @@
 
 ## 六、相关设计稿与复核
 
-- 联系节奏现状面板与状态工作台共用 → [02-state.md](02-state.md)、[07-decision.md](07-decision.md)；天气/新闻的环境注入侧 → [06-perception.md](06-perception.md)。
+- 联系节奏现状面板与状态工作台共用 → [02-state.md](02-state.md)、[07-decision.md](07-decision.md)；天气/新闻的环境注入侧与触发条件互相跳转 → [06-perception.md](06-perception.md)。
 - 复核功能簇：`grep -oE "^\s{4}[a-z_]+" companion_v2/proactive/configuration.py | sort | uniq -c | head -40`；三方对账（SECTIONS↔spec↔挂载）命令见 `docs/PAGE_DISPLAY_AND_CONFIG_DESIGN_20260929.md` §七。

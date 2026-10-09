@@ -40,9 +40,9 @@
 
 后端 `conversation/media/review.py:100` → media/review_service.py 消费。
 
-### `photo.reference`（参考图）— 3 项，role，下一轮生效
+### `photo.reference`（参考图）— 4 项，role，下一轮生效
 
-`enabled` 启用参考图、`daily_outfit_enabled` 启用每日穿搭、`daily_outfit_rotation_days` 同一套穿搭的轮换间隔（天）。后端 `references/configuration.py:20`。
+`enabled` 启用参考图、`group_enabled` 单独允许群聊使用角色参考图（默认关闭，不影响私聊）、`daily_outfit_enabled` 启用每日穿搭、`daily_outfit_rotation_days` 同一套穿搭的轮换间隔（天）。后端 `references/configuration.py:20`。
 
 ### `wardrobe`（衣柜）— 6 项，role，下一轮生效
 

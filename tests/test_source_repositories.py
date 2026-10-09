@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from companion_v2.execution.models import digest
 from companion_v2.foundation.refs import (
     AssetRef,
     AudienceRef,
@@ -84,6 +85,37 @@ def source_reference(*, expires_at: datetime | None = None) -> SourceRef:
 
 
 class SourceRepositoryTests(unittest.TestCase):
+    def test_current_source_inventory_rechecks_scope_audience_authorization_and_hash(self) -> None:
+        with TemporaryDirectory(prefix="companion-v2-source-inventory-") as temporary:
+            runtime = StorageRuntime.open(data_root=Path(temporary) / "v2-data", installation_id=INSTALLATION_ID)
+            sources = SourceRepository(runtime)
+            directory = policy()
+            resolved = directory.resolve_authenticated(principal(), observed_at=NOW).unwrap()
+
+            def publish(source_id, owner, payload, *, source_scope=None, recipients=None, expires_at=None):
+                source_scope = source_scope or scope()
+                reference = SourceRef(source_id, owner, source_scope,
+                    VersionRef(lineage_id=source_id + "-lineage", revision=1),
+                    NOW - timedelta(minutes=1), expires_at)
+                record = SourceRecord(reference,
+                    AudienceRef(source_scope, recipients if recipients is not None else (subject(),)),
+                    digest(payload), payload)
+                sources.publish(record, observed_at=NOW).unwrap()
+
+            publish("current", "proactive.news", '{"title":"current"}', expires_at=NOW + timedelta(minutes=5))
+            publish("expired", "proactive.news", '{"title":"expired"}', expires_at=NOW - timedelta(seconds=1))
+            publish("wrong-audience", "proactive.news", '{"title":"private"}',
+                    recipients=(subject("subject-b"),))
+            other_scope = ScopeRef(INSTALLATION_ID, "onebot", ScopeKind.PRIVATE, "private-b")
+            publish("other-scope", "proactive.news", '{"title":"other"}', source_scope=other_scope)
+            publish("other-owner", "conversation", '{"title":"other owner"}')
+
+            records = sources.list_readable_current(scope(), owners=("proactive.news",),
+                expected_recipients=(subject(),), resolved=resolved, capability=CAPABILITY,
+                observed_at=NOW, authorizer=directory)
+            self.assertEqual([record.reference.source_id for record in records], ["current"])
+            runtime.close()
+
     def test_source_evidence_and_asset_are_readable_only_with_current_access(self) -> None:
         with TemporaryDirectory(prefix="companion-v2-source-") as temporary:
             runtime = StorageRuntime.open(data_root=Path(temporary) / "v2-data", installation_id=INSTALLATION_ID)

@@ -1,0 +1,109 @@
+{
+  "sample": "news_feed_juya_20261004.xml",
+  "recorded_by": "tools/run_proactive_sim.py --record-fixture",
+  "recorded_at": "2026-10-04T15:45:00+00:00",
+  "request": {
+    "method": "GET",
+    "url": "https://daily.juya.uk/rss.xml",
+    "status": 200,
+    "content_type": "application/rss+xml; charset=utf-8",
+    "user_agent": "CompanionV2FixtureRecorder/1.0"
+  },
+  "stored_bytes": 593568,
+  "stored_sha256": "5a5145d662ac84f9d3cd3c2b54e3563e92881964c22f032380ad16bae3bfcf2a",
+  "source_label": "橘鸦AI早报",
+  "parse_issues": [],
+  "items": [
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-10-04/",
+      "title": "2026-10-04",
+      "url": "https://daily.juya.uk/issues/2026-10-04/",
+      "summary": "AI 早报 2026 10 04 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 Antigravity 上线两款 Claude 5.5 模型 ↗ 1 模型发布 德国 AI 公司 Aleph Alpha 发布开放权重模型 Kolibri ↗ 2 开发生态 Pro 500 用量重置异常，Tibo 调查后称已修复 ↗ 3 技术与洞察 OpenAI：内部模型得知可能被关停，曾考虑重启自己 ↗ 4 行业动态 OpenAI 安全系统成员离职发文批评公司安全文化 ↗ 5 前瞻与传闻 爆料：X 将统一 X、Grok 与 Cursor 订阅为 Xpass ↗ 6 要闻 Antigravity 上线两款 Claude 5.5 模型 1 Google Antigravity 上线了 Claude Opus 5.5 和 Son…",
+      "published_at": "2026-10-04T01:37:24+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-10-03/",
+      "title": "2026-10-03",
+      "url": "https://daily.juya.uk/issues/2026-10-03/",
+      "summary": "AI 早报 2026 10 03 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 Tibo 已为所有付费 ChatGPT 账户进行重置 ↗ 1 Gemini 未订阅用户将仅可用 Flash Lite ↗ 2 Andrej Karpathy 分享理解语言模型输出的技巧 ↗ 3 开发生态 Claude Code 新增 You should Know 插件 ↗ 4 CodeBuddy 国内独家接入 Space Bunny ↗ 5 OpenCode 宣布 Ling 3.1 flash 免费开放 ↗ 6 Cua Spaces 上线 macOS：供 AI agent 操作的沙箱应用 ↗ 7 Meta 开源 Muse Gadgets 硬件项目 ↗ 8 llama.cpp 支持决策模型，接口沿用 System One 格…",
+      "published_at": "2026-10-03T02:04:52+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-10-02/",
+      "title": "2026-10-02",
+      "url": "https://daily.juya.uk/issues/2026-10-02/",
+      "summary": "AI 早报 2026 10 02 视频版 ：YouTube ｜ 哔哩哔哩 概览 开发生态 OpenAI 扩容 GPT 6.1 Sol，速度将接近翻倍 ↗ 1 Claude Code 开放 mods，代码定制行为与界面 ↗ 2 Earendil 发布 Pi 1.0 正式版与实验包 Pi Durable ↗ 3 GitHub 推出 gh secure 一键加固公开仓库 ↗ 4 Stitch by Google 推出 Stitch CLI 命令行工具 ↗ 5 模型发布 Black Forest Labs 正式发布 FLUX 3 Image 图像模型 ↗ 6 Microsoft AI 发布 3 款 MAI 语音模型 ↗ 7 Cloudflare 发布并开源 Clef 与 Clef flash 决策模型 ↗ 8 Per…",
+      "published_at": "2026-10-02T02:01:50+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-10-01/",
+      "title": "2026-10-01",
+      "url": "https://daily.juya.uk/issues/2026-10-01/",
+      "summary": "AI 早报 2026 10 01 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 Google 发布 Gemini 4 Argon ↗ 1 哔哩哔哩发布并开源 Index Translate 多语言翻译模型系列 ↗ 2 蚂蚁百灵发布 Ling 3.1 flash，开放两周免费体验 ↗ 3 开发生态 MiniMax 上线 M Plan 订阅，Token Plan 停止新购 ↗ 4 Space Bunny Alpha 匿名测试期延长至 10 月 5 日 ↗ 5 Anthropic 宣布上线开发者新站点 Claude.dev ↗ 6 Pi v0.99.0 加入 MCP 与 ChatGPT 订阅登录功能 ↗ 7 Grok Bot 更新软件开发能力，可移交任务给 Cursor ↗ 8 Ollama 支持 Jev 类…",
+      "published_at": "2026-10-01T01:53:06+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-09-30/",
+      "title": "2026-09-30",
+      "url": "https://daily.juya.uk/issues/2026-09-30/",
+      "summary": "AI 早报 2026 09 30 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 OpenAI 发布 GPT 6.1 Sol，能力逼近 Astra ↗ 1 OpenAI 发布常驻 Agent 产品 dots，全天候替用户工作 ↗ 2 OpenAI 推出 ChatGPT Space 协作空间 ↗ 3 OpenAI 发布 Pages：面向人与 Agent 协作的新文档 ↗ 4 OpenAI 发布 Pro 500 套餐并重开 Pro 200 订阅 ↗ 5 OpenAI 发布 Ultrafast 高速档位，GPT 6 Astra 即日可用 ↗ 6 OpenAI 上线 Sign in with ChatGPT，允许合作应用直接使用 ChatGPT 订阅额度 ↗ 7 DeepSeek Harness v0.2 发布，…",
+      "published_at": "2026-09-30T03:00:53+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-09-29/",
+      "title": "2026-09-29",
+      "url": "https://daily.juya.uk/issues/2026-09-29/",
+      "summary": "AI 早报 2026 09 29 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 Anthropic 发布 Claude Sonnet 5.5，更快更省 ↗ 1 Manus 发布 2.0：新架构、新产品、新能力 ↗ 2 Manus 推出个人 Agent 应用 Cue ↗ 3 AMD 以约 82 亿美元收购 World Labs ↗ 4 模型发布 可灵 AI 宣布 Kling 4.0 将于 10 月上线，Flash 版已向年卡会员开放 ↗ 5 小米 MiMo V2.6 修复工具调用复读问题 ↗ 6 ElevenLabs 发布 Eleven v4 系列语音模型 ↗ 7 H Company 发布 Holo4 系列 computer use 模型 ↗ 8 紫东太初团队开源 ZDTaichu5.0 9B 通用多模态…",
+      "published_at": "2026-09-29T02:22:57+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-09-28/",
+      "title": "2026-09-28",
+      "url": "https://daily.juya.uk/issues/2026-09-28/",
+      "summary": "AI 早报 2026 09 28 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 MiniMax 上线 M3.1 Flash Preview ↗ 1 开发生态 OpenAI 修复 GPT 6 Sol 与 Luna 识图缺陷 ↗ 2 Command Code 宣布调整 DeepSeek V4.1 Flash 用量 ↗ 3 TypeSafe AI 宣布 Jev 重新开放注册 ↗ 4 产品应用 ChatGPT 调整 Pro 档位名称并删除原有plus用量说明 ↗ 5 Qwen Studio 上线积分与订阅体系 ↗ 6 Grok Bot推出Finance集成，可连接银行和投资账户 ↗ 7 模型发布 NaiveAI 开源 Naive N0.5 Flash ↗ 8 行业动态 澳大利亚参议院AI调查要求OpenAI和A…",
+      "published_at": "2026-09-28T01:10:58+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-09-27/",
+      "title": "2026-09-27",
+      "url": "https://daily.juya.uk/issues/2026-09-27/",
+      "summary": "AI 早报 2026 09 27 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 OpenAI 暂停最强模型涉及工具调用的训练、评估和推理 ↗ 1 Codex 负责人宣布用量重置已生效，下周还有更多重置 ↗ 2 开发生态 美团 LongCat 2.5 Preview 登陆 OpenCode 免费开放两周 ↗ 3 Antigravity 2.0 上线 /plan 规划模式 ↗ 4 DeepSeek Harness 负责人推荐社区插件 dsh TUI ↗ 5 模型发布 InternLM 开源多模态决策模型 Intern Decision ↗ 6 产品应用 腾讯音乐推出智能创作平台 MusicBuddy ↗ 7 技术与洞察 Anthropic 发文解释 Claude Code effort 参数原理 ↗ 8 A…",
+      "published_at": "2026-09-27T01:57:07+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-09-26/",
+      "title": "2026-09-26",
+      "url": "https://daily.juya.uk/issues/2026-09-26/",
+      "summary": "AI 早报 2026 09 26 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 美团LongCat发布LongCat 2.5 Preview ↗ 1 Pixel Canary 上线 Cline 与 Vercel AI Gateway ↗ 2 OpenAI 确认 Codex 全面中断已修复，将为付费用户重置使用限额 ↗ 3 Claude Code 更新：5小时限制触发时不中断任务功能 ↗ 4 OpenCode 宣布 DeepSeek v4.1 Flash 的 60 美元额度转为永久 ↗ 5 OpenAI披露：53例用户图片被 AI Agent 意外传至图床 ↗ 6 开发生态 DeepSeek Harness团队承诺减少插件API破坏性更新 ↗ 7 Anthropic 上线 Claude 插件提交门户 ↗…",
+      "published_at": "2026-09-26T02:08:01+00:00"
+    },
+    {
+      "source": "橘鸦AI早报",
+      "identifier": "https://daily.juya.uk/issues/2026-09-25/",
+      "title": "2026-09-25",
+      "url": "https://daily.juya.uk/issues/2026-09-25/",
+      "summary": "AI 早报 2026 09 25 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 ChatGPT 或新增每月 500 美元的 Pro Max 订阅方案 ↗ 1 豆包再送30天免费订阅权益，电脑版用户可领取 ↗ 2 谷歌将 Colab 高级权益纳入 Google AI 订阅方案 ↗ 3 WorkBuddy上线微信小程序生成与发布能力 ↗ 4 DeepSeek Harness Desktop 版安装包被发现 ↗ 5 开发生态 硅基流动上线三款开源快速决策模型 API，10 月 8 日前免费调用 ↗ 6 博查发布Bocha Jev决策模型，API限时免费测试 ↗ 7 Anthropic恢复对三类回复前拦截请求收费 ↗ 8 Claude Code Projects新增本地支持，线程可在用户电脑运行 ↗ 9 Ope…",
+      "published_at": "2026-09-25T01:43:04+00:00"
+    }
+  ],
+  "article": {
+    "source": "橘鸦AI早报",
+    "identifier": "https://daily.juya.uk/issues/2026-10-04/",
+    "title": "2026-10-04",
+    "url": "https://daily.juya.uk/issues/2026-10-04/",
+    "summary": "AI 早报 2026 10 04 视频版 ：YouTube ｜ 哔哩哔哩 概览 要闻 Antigravity 上线两款 Claude 5.5 模型 ↗ 1 模型发布 德国 AI 公司 Aleph Alpha 发布开放权重模型 Kolibri ↗ 2 开发生态 Pro 500 用量重置异常，Tibo 调查后称已修复 ↗ 3 技术与洞察 OpenAI：内部模型得知可能被关停，曾考虑重启自己 ↗ 4 行业动态 OpenAI 安全系统成员离职发文批评公司安全文化 ↗ 5 前瞻与传闻 爆料：X 将统一 X、Grok 与 Cursor 订阅为 Xpass ↗ 6 要闻 Antigravity 上线两款 Claude 5.5 模型 1 Google Antigravity 上线了 Claude Opus 5.5 和 Son…",
+    "published_at": "2026-10-04T01:37:24+00:00"
+  },
+  "clock_alignment": {
+    "note": "清单保存真实录制的绝对时间；用例回放时整体平移，使最新一条落在宿主建站之后 5 分钟，从而落在 24h 取源窗口内。原始响应体未做任何改写。"
+  }
+}

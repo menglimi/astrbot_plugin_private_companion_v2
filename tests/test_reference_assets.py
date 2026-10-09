@@ -6,17 +6,24 @@ production wiring into the task supervisor is covered where assembly is tested.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
+from io import BytesIO
 import tempfile
 from pathlib import Path
 import unittest
 
+from PIL import Image
+
 from companion_v2.configuration.models import ConfigLayer, ConfigurationError
 from companion_v2.execution.models import TaskError
-from companion_v2.foundation.refs import ReferenceValidationError
+from companion_v2.foundation.refs import AudienceRef, ReferenceValidationError, ScopeKind
 from companion_v2.references.models import (ContentDigest, ReferenceKind, ReferenceRole,
                                             ReferenceSource, ReferenceState, WardrobeItem)
+from companion_v2.references.management import ReferenceMaterialManagement
 from companion_v2.references.repositories import ReferenceAssetRepository
-from companion_v2.references.service import ReferenceAssetService
+from companion_v2.references.service import OWNED_REFERENCE_PREFIX, ReferenceAssetService
+from companion_v2.references.usage import default_usage
+from companion_v2.references.prompts import image_reference_instruction
 from companion_v2.storage.reference_asset_schema import reference_limit
 from companion_v2.storage.runtime import StorageRuntime
 from tests.test_conversation_messages import MessageFixture
@@ -108,6 +115,31 @@ class ReferenceAssetServiceTests(MessageFixture):
     def test_a_size_that_does_not_match_the_payload_is_refused(self):
         message = self.refusal(lambda: self.register(size_bytes=len(self.bytes_) + 1))
         self.assertIn("reference_size_mismatch", message)
+
+    def test_reference_gallery_edit_replaces_roles_and_checks_revision(self):
+        asset = self.register(media_ref=OWNED_REFERENCE_PREFIX + "test:asset-1")
+        updated = self.service.assets.update_registration(
+            self.owner, asset.asset_id, label="侧身穿搭", roles=(ReferenceRole.OUTFIT, ReferenceRole.POSE),
+            expected_revision=asset.revision, updated_at=self.tasks.now())
+
+        self.assertEqual(updated.label, "侧身穿搭")
+        self.assertEqual(updated.revision, asset.revision + 1)
+        self.assertEqual(self.service.assets.roles_of(self.owner, asset.asset_id), ("outfit", "pose"))
+        self.assertEqual(self.service.assets.get_payload(self.owner, asset.asset_id), self.bytes_)
+        with self.assertRaises(TaskError) as caught:
+            self.service.assets.update_registration(
+                self.owner, asset.asset_id, label="旧页面", roles=(ReferenceRole.IDENTITY,),
+                expected_revision=asset.revision, updated_at=self.tasks.now())
+        self.assertEqual(caught.exception.code, "reference_revision_conflict")
+
+    def test_withdrawal_removes_role_owned_image_bytes(self):
+        self.register(media_ref=OWNED_REFERENCE_PREFIX + "test:asset-1")
+        self.assertEqual(self.service.assets.get_payload(self.owner, "asset-1"), self.bytes_)
+
+        self.service.assets.withdraw(self.owner, "asset-1", updated_at=self.tasks.now(), expected_revision=1)
+
+        self.assertIsNone(self.service.assets.get_payload(self.owner, "asset-1"))
+
 
     def test_an_asserted_digest_must_be_a_real_sha256(self):
         for bad in ("abc", "", "A" * 64, "g" * 64, 5):
@@ -240,6 +272,82 @@ class ReferenceAssetServiceTests(MessageFixture):
         self.assertIsNotNone(repository.get(self.owner, "asset-1"))
         self.assertIsNotNone(repository.get_item(self.owner, "item-1"))
 
+    def test_reference_gallery_order_is_persisted_and_rejects_a_stale_snapshot(self):
+        self.register("asset-a")
+        self.register("asset-b")
+        self.register("asset-c")
+        repository = ReferenceAssetRepository(self.runtime)
+        original = [asset.asset_id for asset in repository.list(self.owner)]
+        reordered = [original[1], original[0], original[2]]
+
+        self.assertEqual(repository.reorder_active(
+            self.owner, expected_asset_ids=original, asset_ids=reordered), tuple(reordered))
+        self.assertEqual([asset.asset_id for asset in repository.list(self.owner)], reordered)
+        with self.assertRaises(TaskError) as caught:
+            repository.reorder_active(self.owner, expected_asset_ids=original, asset_ids=original)
+        self.assertEqual(caught.exception.code, "reference_order_conflict")
+        reopened = StorageRuntime.open(data_root=self.root, installation_id=self.context.scope.installation_id)
+        self.addCleanup(reopened.close)
+        self.assertEqual([asset.asset_id for asset in ReferenceAssetRepository(reopened).list(self.owner)], reordered)
+        for invalid in ([original[0]], [original[0], original[0], original[1]], [*original[:2], "unknown"]):
+            with self.assertRaises(TaskError) as caught:
+                repository.reorder_active(self.owner, expected_asset_ids=reordered, asset_ids=invalid)
+            self.assertEqual(caught.exception.code, "reference_order_invalid")
+        self.assertEqual([asset.asset_id for asset in repository.list(self.owner)], reordered)
+
+
+class ReferenceUsageTests(ReferenceAssetServiceTests):
+    def test_usage_survives_reopen_and_enters_the_authorized_image_prompt(self):
+        asset = self.register(media_ref=OWNED_REFERENCE_PREFIX + "test:asset-1")
+        selected = {**default_usage(), "base_identity": True, "outfit_category": "home",
+                    "outfit_lock": "reference", "preferred_scene": "home-night",
+                    "scenes": ["居家", "卧室"], "times": ["睡前"],
+                    "excluded_scenes": ["泳池"], "excluded_times": ["白天"]}
+        self.service.assets.update_registration(
+            self.owner, asset.asset_id, label="基础参考", roles=(ReferenceRole.IDENTITY, ReferenceRole.OUTFIT),
+            expected_revision=asset.revision, updated_at=self.tasks.now(), usage=selected)
+        reopened = StorageRuntime.open(data_root=self.root, installation_id=self.context.scope.installation_id)
+        self.addCleanup(reopened.close)
+        self.assertEqual(ReferenceAssetRepository(reopened).usage_of(self.owner, asset.asset_id), selected)
+        material = self.service.prompt_material(self.context, local_date="2026-10-07")
+        self.assertEqual(material["references"][0]["usage"], selected)
+        prompt = image_reference_instruction(material)
+        self.assertIn('"preferred_scene":"home-night"', prompt)
+        self.assertIn("用户明确换装要求优先", prompt)
+        self.assertIn("[场景预设:对应名称]", prompt)
+
+    def test_replacing_base_identity_invalidates_other_editors_for_that_role(self):
+        first = self.register("asset-a")
+        second = self.register("asset-b")
+        repository = self.service.assets
+        selected = {**default_usage(), "base_identity": True}
+        for asset in (first, second):
+            repository.update_registration(self.owner, asset.asset_id, label="身份", roles=(ReferenceRole.IDENTITY,),
+                expected_revision=asset.revision, updated_at=self.tasks.now(), usage=selected)
+        self.assertFalse(repository.usage_of(self.owner, first.asset_id)["base_identity"])
+        self.assertTrue(repository.usage_of(self.owner, second.asset_id)["base_identity"])
+        self.assertEqual(repository.get(self.owner, first.asset_id).revision, 3)
+        with self.assertRaises(TaskError) as caught:
+            repository.update_registration(self.owner, first.asset_id, label="旧页面", roles=(ReferenceRole.IDENTITY,),
+                expected_revision=2, updated_at=self.tasks.now(), usage=selected)
+        self.assertEqual(caught.exception.code, "reference_revision_conflict")
+        repository.update_registration(self.owner, second.asset_id, label="仅穿搭", roles=(ReferenceRole.OUTFIT,),
+            expected_revision=2, updated_at=self.tasks.now())
+        self.assertFalse(repository.usage_of(self.owner, second.asset_id)["base_identity"])
+
+    def test_invalid_usage_does_not_modify_asset_or_roles(self):
+        asset = self.register()
+        repository = self.service.assets
+        for selected in ({**default_usage(), "scenes": ["居家", "居家"]},
+                         {**default_usage(), "outfit_lock": "unsupported"},
+                         {**default_usage(), "base_identity": True}):
+            with self.assertRaises(TaskError) as caught:
+                repository.update_registration(self.owner, asset.asset_id, label="无效", roles=(ReferenceRole.OUTFIT,),
+                    expected_revision=1, updated_at=self.tasks.now(), usage=selected)
+            self.assertEqual(caught.exception.code, "reference_usage_invalid")
+        self.assertEqual(repository.get(self.owner, asset.asset_id).revision, 1)
+        self.assertEqual(repository.roles_of(self.owner, asset.asset_id), ("identity",))
+
 
 class ReferenceGateTests(ReferenceAssetServiceTests):
     """The C2-1 switches must change behaviour, not merely exist."""
@@ -262,6 +370,41 @@ class ReferenceGateTests(ReferenceAssetServiceTests):
         with self.assertRaises(TaskError) as caught:
             self.gated.list_assets(self.context)
         self.assertEqual(caught.exception.code, "photo_reference_disabled")
+
+    def group_context(self):
+        scope = replace(self.context.scope, kind=ScopeKind.GROUP, native_scope_id="reference-group",
+                        conversation_id="reference-group", session_id="reference-group")
+        return replace(self.context, role_binding=replace(self.context.role_binding, scope=scope),
+                       audience=AudienceRef(scope, self.context.audience.recipients))
+
+    def test_group_use_of_role_references_has_an_independent_default_off_switch(self):
+        asset = self.register(media_ref=OWNED_REFERENCE_PREFIX + "test:asset-1")
+        group = self.group_context()
+        self.options.options["enabled"] = True
+        current, payload, roles = self.gated.read_asset(self.context, asset.asset_id)
+        self.assertEqual(current.asset_id, asset.asset_id)
+        self.assertEqual(payload, self.bytes_)
+        self.assertIn("identity", roles)
+
+        with self.assertRaises(TaskError) as disabled:
+            self.gated.read_asset(group, asset.asset_id)
+        self.assertEqual(disabled.exception.code, "photo_reference_group_disabled")
+
+        self.options.options["group_enabled"] = True
+        current, payload, roles = self.gated.read_asset(group, asset.asset_id)
+        self.assertEqual(current.asset_id, asset.asset_id)
+        self.assertEqual(payload, self.bytes_)
+        self.assertIn("identity", roles)
+
+    def test_group_prompt_material_contains_only_the_role_reference_catalog(self):
+        asset = self.register(media_ref=OWNED_REFERENCE_PREFIX + "test:asset-1")
+        self.options.options.update(enabled=True, group_enabled=True)
+
+        material = self.gated.prompt_material(self.group_context(), local_date="2026-10-07")
+
+        self.assertEqual([item["id"] for item in material["references"]], [asset.asset_id])
+        self.assertIsNone(material["wardrobe"])
+        self.assertIsNone(material["daily_outfit"])
 
     def test_the_switch_does_not_stop_an_operator_withdrawing_material(self):
         # Reading and registering are gated; shutting the switch off must not trap
@@ -309,6 +452,7 @@ class ReferenceConfigurationTests(unittest.TestCase):
     def test_the_defaults_keep_the_old_behaviour(self):
         from companion_v2.references import configuration as group
         self.assertEqual(group.DEFAULTS["enabled"], False)
+        self.assertEqual(group.DEFAULTS["group_enabled"], False)
         self.assertEqual(group.DEFAULTS["daily_outfit_enabled"], False)
         # With the group off, nothing about an installation's behaviour changes.
         self.assertFalse(group.validate(dict(group.DEFAULTS))["enabled"])
@@ -328,7 +472,7 @@ class ReferenceConfigurationTests(unittest.TestCase):
         from companion_v2.references import configuration as group
         for name, value in (("daily_outfit_rotation_days", 0), ("daily_outfit_rotation_days", 366),
                             ("daily_outfit_rotation_days", True), ("enabled", 1),
-                            ("daily_outfit_enabled", "yes")):
+                            ("daily_outfit_enabled", "yes"), ("group_enabled", "yes")):
             with self.assertRaises(ConfigurationError, msg=name):
                 group.validate({**group.DEFAULTS, name: value})
 
@@ -456,6 +600,28 @@ class WardrobeConfigurationTests(unittest.TestCase):
         from companion_v2.references import wardrobe as group
         with self.assertRaises(ConfigurationError):
             group.validate({"enabled": True})
+
+
+class ReferenceUploadValidationTests(unittest.TestCase):
+    def image_bytes(self, image_format):
+        buffer = BytesIO()
+        Image.new("RGB", (12, 12), (24, 80, 140)).save(buffer, format=image_format)
+        return buffer.getvalue()
+
+    def test_png_jpeg_and_webp_uploads_are_decoded_and_matched_to_their_mime(self):
+        for image_format, mime in (("PNG", "image/png"), ("JPEG", "image/jpeg"), ("WEBP", "image/webp")):
+            with self.subTest(image_format=image_format):
+                payload = self.image_bytes(image_format)
+                self.assertEqual(ReferenceMaterialManagement._validate_upload(payload, mime), mime)
+
+    def test_upload_rejects_mime_mismatch_and_corrupt_bytes(self):
+        with self.assertRaises(TaskError) as mismatch:
+            ReferenceMaterialManagement._validate_upload(self.image_bytes("PNG"), "image/jpeg")
+        self.assertEqual(mismatch.exception.code, "reference_image_type_mismatch")
+
+        with self.assertRaises(TaskError) as corrupt:
+            ReferenceMaterialManagement._validate_upload(b"not an image", "image/png")
+        self.assertEqual(corrupt.exception.code, "reference_image_invalid")
 
 
 if __name__ == "__main__":

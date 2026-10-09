@@ -190,7 +190,7 @@ test("没有宿主目录时不渲染空 iframe，而是给出说明与两个出�
   /* 关键断言：不能是 iframe。iframe 的内容由 mountWorkspace() 用 srcdoc 填，
      桥不在时它不会执行，于是留下一块永不加载的空白。 */
   assert.doesNotMatch(markup, /<iframe/, "宿主目录没读到却渲染了 iframe，会得到一块空框");
-  assert.match(markup, /还没有读到宿主目录/, "应当说清发生了什么");
+  assert.match(markup, /角色与会话目录暂未读到/, "应当说清发生了什么");
   assert.match(markup, /data-workspace-retry/, "应当给一个重试出口");
   assert.match(markup, /data-manage="host"/, "应当给一个去宿主管理的出口");
 });
@@ -199,7 +199,7 @@ test("正在读取时也不先摆空框", () => {
   /* 「正在读取…」配一块 900px 空框，就是截图里那个观感的来源。 */
   const markup = productWith().workspace("host");
   assert.doesNotMatch(markup, /<iframe/);
-  assert.match(markup, /正在读取宿主目录|还没有读到宿主目录/);
+  assert.match(markup, /正在读取角色与会话|角色与会话目录暂未读到/);
 });
 
 test("没有宿主目录时四个工作区都是说明块，没有空框", () => {

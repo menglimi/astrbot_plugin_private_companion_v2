@@ -52,8 +52,12 @@ class GroupObservationSettingsTests(GroupRhythmFixture):
             self.assertEqual(by_name[name].default, default, name)
             self.assertIs(by_name[name].kind, ValueKind.BOOLEAN, name)
         self.assertIs(by_name["group_repeat_interrupt_text"].kind, ValueKind.TEXT)
-        for name in ("group_interject_max_daily", "group_repeat_trigger_threshold", "group_repeat_window_seconds"):
+        for name in ("group_interject_max_daily", "group_repeat_trigger_threshold", "group_repeat_window_seconds",
+                     "group_context_max_age_hours"):
             self.assertIs(by_name[name].kind, ValueKind.INTEGER, name)
+        self.assertEqual((by_name["group_context_max_age_hours"].default,
+                          by_name["group_context_max_age_hours"].minimum,
+                          by_name["group_context_max_age_hours"].maximum), (12, 1, 168))
         for name, (low, high) in CONFIG_LIMITS.items():
             self.assertEqual((by_name[name].minimum, by_name[name].maximum), (low, high))
         for field in fields:
@@ -76,6 +80,15 @@ class GroupObservationSettingsTests(GroupRhythmFixture):
 
 
 class GroupObservationMaterialTests(GroupRhythmFixture):
+    def test_early_observation_is_persisted_without_building_a_reply(self):
+        self.configure(**ALL_ON)
+        self.assertTrue(self.participation.observe_early(
+            self.context, text="笑死 这波名场面", speaker_id="211", received_at=TURN))
+        records = self.metadata()
+        self.assertTrue(any(":mood:" in key for key in records))
+        self.assertTrue(any(":moments:" in key for key in records))
+        self.assertFalse(self.runtime.read_all("SELECT * FROM conversation_batches", ()))
+
     def facts(self, texts, recent):
         self.configure(**ALL_ON)
         turn = self.turn(texts, recent=recent, batch="batch-observe")

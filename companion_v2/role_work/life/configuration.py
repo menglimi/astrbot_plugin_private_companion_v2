@@ -13,14 +13,15 @@ from .rest_gate import validate_changes as validate_rest_changes, validate_value
 
 GROUP = "role.life"
 DEFAULTS = {"enabled": False, "diary_enabled": True, "diary_time": "23:50", "timezone": "Asia/Shanghai",
-            "sleep_enabled": False, "sleep_time": "00:30", "sleep_timezone": "Asia/Shanghai", "sleep_minutes": 480,
+            "sleep_enabled": False, "sleep_time": "00:30", "sleep_timezone": "Asia/Shanghai",
+            "sleep_variation_minutes": 20, "sleep_minutes": 480,
             "reading_enabled": False, "derive_enabled": True,
             "diary_style_prompt": "",
             "dream_theme_candidates": "", "dream_mixed_themes_enabled": False,
             "dream_intimate_theme_enabled": False, "dream_afterglow_mode": "auto",
             **REST_GATE_DEFAULTS}
 OWNER = "role.life.settings"
-SLEEP_FIELDS = frozenset(("sleep_enabled", "sleep_time", "sleep_timezone", "sleep_minutes"))
+SLEEP_FIELDS = frozenset(("sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes"))
 AFTERGLOW_MODES = ("auto", "轻", "标准", "明显")
 
 
@@ -28,8 +29,9 @@ def configuration_fields():
     fields = []
     for name, value in DEFAULTS.items():
         kind = ValueKind.BOOLEAN if type(value) is bool else ValueKind.INTEGER if type(value) is int else ValueKind.TEXT
-        bounds = {"minimum": REST_GATE_LIMITS[name][0], "maximum": REST_GATE_LIMITS[name][1]} if name in REST_GATE_LIMITS \
-            else {"minimum": 1, "maximum": 1440}
+        bounds = ({"minimum": 0, "maximum": 120} if name == "sleep_variation_minutes" else
+                  {"minimum": REST_GATE_LIMITS[name][0], "maximum": REST_GATE_LIMITS[name][1]}
+                  if name in REST_GATE_LIMITS else {"minimum": 1, "maximum": 1440})
         fields.append(FieldDefinition(GROUP + "." + name, GROUP, GROUP, kind, value,
             layers=(ConfigLayer.WINDOW, ConfigLayer.ROLE), apply_mode=ApplyMode.IMMEDIATE, owner_id=OWNER,
             **(bounds if kind is ValueKind.INTEGER else {})))
@@ -53,6 +55,8 @@ def values(snapshot):
         parsed = time.fromisoformat(result[name])
         if parsed.tzinfo is not None or parsed.second or parsed.microsecond or len(result[name]) != 5:
             raise ValueError("use HH:MM local time")
+    if type(result["sleep_variation_minutes"]) is not int or not 0 <= result["sleep_variation_minutes"] <= 120:
+        raise ValueError("sleep variation must be 0..120 minutes")
     if result["dream_afterglow_mode"] not in AFTERGLOW_MODES:
         raise ValueError("unsupported dream afterglow mode")
     # The eight rest-gate fields are closed here too, so a malformed stored value

@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Token 构成条带 · 样式对比</title>
+<style>
+  :root {
+    --bg: #05080F;
+    --panel: #0A0F1C;
+    --card: #0F1725;
+    --card-2: #141E30;
+    --line: rgba(148, 163, 184, .14);
+    --line-soft: rgba(148, 163, 184, .08);
+    --text: #E9EFFA;
+    --text-2: #93A4C0;
+    --text-3: #5C6C88;
+    --teal: #3EE0D0;
+    --green: #3FE0A6;
+    --blue: #6FA2FF;
+    --purple: #A17BFF;
+    --amber: #FFC258;
+    --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+    --sans: 'Sarasa Gothic SC', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    font-family: var(--sans);
+    color: var(--text);
+    padding: 36px 24px 72px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page-head { width: 100%; max-width: 880px; margin-bottom: 6px; }
+  .page-head h1 { font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+  .page-head p { margin-top: 5px; font-size: 11.5px; color: var(--text-2); line-height: 1.7; }
+  .page-head p b { color: var(--text); }
+
+  .variant {
+    width: 100%; max-width: 880px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 18px 20px 16px;
+  }
+  .v-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 3px; }
+  .v-badge {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    color: var(--blue); background: rgba(111,162,255,.12);
+    border: 1px solid rgba(111,162,255,.25); border-radius: 999px; padding: 2px 9px;
+  }
+  .v-head h2 { font-size: 13.5px; font-weight: 700; }
+  .v-head .tail { margin-left: auto; font-size: 10px; color: var(--text-3); }
+  .v-note { font-size: 10.5px; color: var(--text-2); line-height: 1.65; margin-bottom: 13px; }
+  .v-note b { color: var(--text); }
+
+  .v-foot {
+    margin-top: 12px; padding-top: 9px; border-top: 1px dashed var(--line-soft);
+    display: flex; gap: 18px; font-size: 10px; line-height: 1.6;
+  }
+  .v-foot .pro { color: var(--green); }
+  .v-foot .con { color: var(--amber); }
+  .v-foot span::before { content: "▸ "; opacity: .7; }
+
+  /* ===== 通用分段 ===== */
+  .band { display: flex; gap: 3px; border-radius: 9px; }
+  .band > span {
+    display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden;
+    white-space: nowrap; font-weight: 650;
+  }
+  .band > span > b { font-size: 11.5px; }
+  .band > span > em { font-style: normal; font-family: var(--mono); font-size: 10px; opacity: .78; }
+  .ink-dark { color: rgba(6, 12, 22, .9); text-shadow: 0 1px 0 rgba(255,255,255,.25); }
+  .ink-light { color: rgba(255,255,255,.95); text-shadow: 0 1px 2px rgba(0,0,0,.35); }
+  .band > span { transition: filter 140ms ease, flex 450ms cubic-bezier(.2,.7,.2,1); }
+  .band > span:hover { filter: brightness(1.12); }
+  .s-hit    { background-image: linear-gradient(180deg, #3FE0A6, #16A36C); }
+  .s-write  { background-image: linear-gradient(180deg, #3EE0D0, #129C93); }
+  .s-plain  { background-image: linear-gradient(180deg, #A17BFF, #6340D6); }
+  .s-out    { background-image: linear-gradient(180deg, #FFC258, #D98A0C); }
+  .s-blue   { background-image: linear-gradient(180deg, #6FA2FF, #2D5FC6); }
+  .s-amber  { background-image: linear-gradient(180deg, #FFC258, #D98A0C); }
+
+  /* ===== 方案 A：单条全量带 ===== */
+  .vA .band { height: 46px; }
+  .vA .band > span { padding: 0 12px; }
+  .vA .band > span > b { font-size: 12px; }
+  .vA-bracket { position: relative; margin: 7px 2px 0; height: 16px; }
+  .vA-bracket .rail {
+    position: absolute; left: 0; top: 0; width: 89.6%; height: 100%;
+    border: 1px solid rgba(111,162,255,.35); border-top: 0;
+    border-radius: 0 0 7px 7px; border-top-width: 0;
+  }
+  .vA-bracket .cap {
+    position: absolute; left: 0; top: 2px; width: 89.6%;
+    display: flex; justify-content: center;
+  }
+  .vA-bracket .cap span {
+    font-size: 9.5px; color: var(--blue); background: var(--card);
+    padding: 0 8px; line-height: 14px;
+  }
+
+  /* ===== 方案 B：下钻放大镜 ===== */
+  .vB .l1 { height: 30px; }
+  .vB .l1 > span { padding: 0 11px; }
+  .vB .l2 { height: 34px; margin-top: 0; }
+  .vB .l2 > span { padding: 0 11px; }
+  .vB-funnel { position: relative; height: 18px; }
+  .vB-funnel .trap {
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(111,162,255,.02), rgba(111,162,255,.12));
+    clip-path: polygon(0 0, 89.6% 0, 100% 100%, 0 100%);
+  }
+  .vB-funnel .edge {
+    position: absolute; inset: 0;
+    clip-path: polygon(89.55% 0, 89.75% 0, 100.2% 100%, 100% 100%);
+    background: rgba(111,162,255,.5);
+  }
+  .vB-funnel > span {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    font-size: 9.5px; color: var(--text-3); letter-spacing: .04em;
+  }
+  .vB-funnel .tag {
+    position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+    font-size: 9.5px; color: var(--text-3);
+  }
+  .vB .rest-note { margin-top: 7px; text-align: right; font-size: 9.5px; color: var(--text-3); }
+
+  /* ===== 方案 C：层积纵带 ===== */
+  .vC-stack {
+    display: flex; flex-direction: column; gap: 2px;
+    border-radius: 10px; overflow: hidden;
+  }
+  .vC-stack .st {
+    height: calc(var(--h) * 1px);
+    display: flex; align-items: center; gap: 10px; padding: 0 14px;
+    min-height: 18px; overflow: hidden; white-space: nowrap;
+    transition: filter 140ms ease;
+  }
+  .vC-stack .st:hover { filter: brightness(1.1); }
+  .vC-stack .nm { font-size: 11.5px; font-weight: 700; }
+  .vC-stack .vl { font-family: var(--mono); font-size: 10px; opacity: .82; }
+  .vC-stack b { margin-left: auto; font-family: var(--mono); font-size: 11.5px; }
+  .vC-stack .st-hit   { background: linear-gradient(90deg, rgba(63,224,166,.92), rgba(22,163,108,.9)); }
+  .vC-stack .st-plain { background: linear-gradient(90deg, rgba(161,123,255,.9), rgba(99,64,214,.9)); }
+  .vC-stack .st-write { background: linear-gradient(90deg, rgba(62,224,208,.92), rgba(18,156,147,.9)); }
+  .vC-stack .st-out   { background: linear-gradient(90deg, rgba(255,194,88,.92), rgba(217,138,12,.9)); }
+  .vC-rank { display: flex; gap: 12px; margin-top: 7px; font-size: 9.5px; color: var(--text-3); }
+  .vC-rank i { font-style: normal; color: var(--text-2); }
+
+  /* ===== 方案 D：光谱细带 ===== */
+  .vD-top { display: flex; margin-bottom: 5px; }
+  .vD-top > span {
+    display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden;
+    font-size: 9.5px; font-weight: 650; white-space: nowrap;
+  }
+  .vD-top > span::before { content: ""; width: 1px; height: 9px; background: currentColor; opacity: .9; }
+  .vD-top .c-hit { color: var(--green); }
+  .vD-top .c-write { color: var(--teal); }
+  .vD-top .c-plain { color: var(--purple); }
+  .vD-top .c-out { color: var(--amber); }
+  .vD-band { height: 16px; gap: 0; border-radius: 6px; overflow: hidden; outline: 1px solid var(--line); }
+  .vD-band > span { border-right: 1px solid rgba(5, 8, 15, .55); }
+  .vD-band > span:last-child { border-right: 0; }
+  .vD-scope { display: flex; gap: 4px; margin-top: 6px; align-items: center; }
+  .vD-scope .rib { height: 5px; border-radius: 999px; }
+  .vD-scope .in {
+    flex: 89.6; background: linear-gradient(90deg, rgba(111,162,255,.15), rgba(111,162,255,.55));
+    position: relative;
+  }
+  .vD-scope .out { flex: 10.4; background: rgba(255,194,88,.4); }
+  .vD-scope-lb { display: flex; gap: 4px; margin-top: 4px; }
+  .vD-scope-lb span { font-size: 9px; color: var(--text-3); }
+  .vD-scope-lb .lbin { flex: 89.6; }
+  .vD-scope-lb .lbout { flex: 10.4; text-align: right; }
+</style>
+</head>
+<body>
+
+  <div class="page-head">
+    <h1>Token 构成条带 · 四种样式对比</h1>
+    <p>同一套数据（本期合计 <b>4,899,078,312</b> Token）的四种条带编码。现状 v1 的问题：上下两层各说各话、L2 末尾有一段斜纹「输出不计入」空占位、绿/青两色偏近。以下方案全部消除空占位；<b>落码时配色换成主题 token</b>（绿=命中、青=写入、紫=普通输入、琥珀=输出、蓝=输入总量，映射不变）。</p>
+  </div>
+
+  <!-- ============ 方案 A ============ -->
+  <section class="variant vA">
+    <div class="v-head">
+      <span class="v-badge">方案 A</span>
+      <h2>单条全量带 · 一屏一真相</h2>
+      <span class="tail">一层编码，括注补语义</span>
+    </div>
+    <p class="v-note">放弃「输入/输出 + 下钻」两层结构，<b>一根带子按占总量比例分四段</b>，所见即所得。输入范围用底部括注表达；「命中占输入 47.7%」这类口径换算交给括注与派生行。</p>
+
+    <div class="band">
+      <span class="s-hit ink-dark" style="flex:42.7"><b>缓存命中</b><em>42.7%</em></span>
+      <span class="s-write ink-dark" style="flex:18.3"><b>缓存写入</b><em>18.3%</em></span>
+      <span class="s-plain ink-light" style="flex:28.6"><b>普通输入</b><em>28.6%</em></span>
+      <span class="s-out ink-dark" style="flex:10.4"><b>输出</b><em>10.4%</em></span>
+    </div>
+    <div class="vA-bracket">
+      <div class="rail"></div>
+      <div class="cap"><span>输入 89.6% · 其中缓存覆盖 68.1% · 命中 : 写入 2.34 : 1</span></div>
+    </div>
+
+    <div class="v-foot">
+      <span class="pro">结构最诚实：四段同口径（占总量），无嵌套歧义</span>
+      <span class="pro">少一层，省 30px 高度</span>
+      <span class="con">「47.7% 命中率」不能直接从带上看，要读括注</span>
+    </div>
+  </section>
+
+  <!-- ============ 方案 B ============ -->
+  <section class="variant vB">
+    <div class="v-head">
+      <span class="v-badge">方案 B</span>
+      <h2>下钻放大镜 · 漏斗连接</h2>
+      <span class="tail">保留两层，修掉空占位</span>
+    </div>
+    <p class="v-note">保留 v1 的两层语义，但把「缩窄的 L2 + 斜纹空位」改成<b>全宽放大镜</b>：L2 是输入段的等比放大，两条斜边交代「这里被放大了」，L2 各段宽度 = 占输入比例，语义严格。</p>
+
+    <div class="band l1">
+      <span class="s-blue ink-light" style="flex:89.6"><b>输入</b><em>89.6% · 4,387,135,640</em></span>
+      <span class="s-amber ink-dark" style="flex:10.4"><b>输出</b><em>10.4%</em></span>
+    </div>
+    <div class="vB-funnel">
+      <div class="trap"></div>
+      <div class="edge"></div>
+      <span>↓ 下钻 · 输入内部构成</span>
+      <span class="tag">宽度口径：占输入 100%</span>
+    </div>
+    <div class="band l2">
+      <span class="s-hit ink-dark" style="flex:47.7"><b>缓存命中</b><em>47.7%</em></span>
+      <span class="s-write ink-dark" style="flex:20.4"><b>缓存写入</b><em>20.4%</em></span>
+      <span class="s-plain ink-light" style="flex:31.9"><b>普通输入</b><em>31.9%</em></span>
+    </div>
+    <div class="rest-note">输出 10.4% 不参与缓存口径，仅在上层出现</div>
+
+    <div class="v-foot">
+      <span class="pro">命中率口径（占输入）直接可读，保留下钻叙事</span>
+      <span class="pro">L2 全宽，窄段有更多空间放标签</span>
+      <span class="con">两条带口径不同（上=占总量 / 下=占输入），依赖漏斗提示</span>
+    </div>
+  </section>
+
+  <!-- ============ 方案 C ============ -->
+  <section class="variant vC">
+    <div class="v-head">
+      <span class="v-badge">方案 C</span>
+      <h2>层积纵带 · 核心样本</h2>
+      <span class="tail">纵向层积，标签内嵌</span>
+    </div>
+    <p class="v-note">换一个编码方向：四段<b>纵向堆叠</b>，层高 = 占总量比例，按体量降序，像一管岩芯样本。每层内嵌名称 + 数值 + 百分比，<b>可以完全去掉下方图例卡</b>，卡片反而更矮。</p>
+
+    <div class="vC-stack">
+      <div class="st st-hit ink-dark" style="--h:77"><span class="nm">缓存命中</span><span class="vl">2,091,245,663</span><b>42.7%</b></div>
+      <div class="st st-plain ink-light" style="--h:52"><span class="nm">普通输入</span><span class="vl">1,401,337,660</span><b>28.6%</b></div>
+      <div class="st st-write ink-dark" style="--h:33"><span class="nm">缓存写入</span><span class="vl">894,552,317</span><b>18.3%</b></div>
+      <div class="st st-out ink-dark" style="--h:21"><span class="nm">输出</span><span class="vl">511,942,672</span><b>10.4%</b></div>
+    </div>
+    <div class="vC-rank">
+      <span>层序按体量降序 · 层高严格等比（1% ≈ 1.8px）</span>
+      <span><i>输入 89.6% = 上三层之和</i></span>
+    </div>
+
+    <div class="v-foot">
+      <span class="pro">标签永远放得下，天然响应式（窄屏也不挤）</span>
+      <span class="pro">免图例，卡片总高最低</span>
+      <span class="con">纵向占地高（约 190px）；与页内其他横向条形语言不一致</span>
+    </div>
+  </section>
+
+  <!-- ============ 方案 D ============ -->
+  <section class="variant vD">
+    <div class="v-head">
+      <span class="v-badge">方案 D</span>
+      <h2>光谱细带 · 省墨模式</h2>
+      <span class="tail">细带 + 外浮标签 + 范围缎带</span>
+    </div>
+    <p class="v-note">最克制的一版：<b>16px 细带零缝隙</b>，段间只用发丝分隔；名称与百分比浮在带上方用刻度线对位，数值全部交给图例卡；输入/输出范围用底部两条缎带收束。</p>
+
+    <div class="vD-top">
+      <span class="c-hit" style="flex:42.7">缓存命中 42.7%</span>
+      <span class="c-write" style="flex:18.3">写入 18.3%</span>
+      <span class="c-plain" style="flex:28.6">普通输入 28.6%</span>
+      <span class="c-out" style="flex:10.4">输出 10.4%</span>
+    </div>
+    <div class="band vD-band">
+      <span class="s-hit" style="flex:42.7"></span>
+      <span class="s-write" style="flex:18.3"></span>
+      <span class="s-plain" style="flex:28.6"></span>
+      <span class="s-out" style="flex:10.4"></span>
+    </div>
+    <div class="vD-scope">
+      <div class="rib in"></div>
+      <div class="rib out"></div>
+    </div>
+    <div class="vD-scope-lb">
+      <span class="lbin">输入 89.6% · 缓存覆盖 68.1%</span>
+      <span class="lbout">输出 10.4%</span>
+    </div>
+
+    <div class="v-foot">
+      <span class="pro">最轻量，与页内 KPI 卡、Provider 表的气质最搭</span>
+      <span class="pro">外浮标签不挤占段内空间，段再窄也不糊</span>
+      <span class="con">带内无数值，读数必须落一行图例；信息密度最低</span>
+    </div>
+  </section>
+
+</body>
+</html>

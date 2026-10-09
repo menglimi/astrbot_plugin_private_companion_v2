@@ -20,7 +20,8 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
         return await self.start(self.host(runtime=runtime, event_port=self.bridge.ports, identity_port=self.bridge.ports,
             role_port=self.bridge.ports, providers=(self.native_model.local_provider(),),
             sender=self.native_sender.local_sender(), budget=BudgetPolicy(*(Amount(10**8, 10**9) for _ in range(5))),
-            policy=ConversationPolicy(0, 0, 180, gap), segmentation=segmentation or SegmentationPolicy(enabled=True),
+            policy=ConversationPolicy(0, 0, 180, gap), segmentation=segmentation or SegmentationPolicy(
+                enabled=True, llm_controlled=True, rules_enabled=False),
             voice_policy=voice_policy), generation, generation)
 
     def parts(self, app, batch):
@@ -47,7 +48,8 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
                     function=dict(name=tool_alias("memo.list"), arguments="{"))]),
                     chunk(tools=[dict(index=0, function=dict(arguments="}"))]),
                     chunk(finish="tool_calls"), chunk(usage=USAGE)]
-            self.assertIn("succeeded", payload["messages"][-1]["content"])
+            tool_result = next(message for message in payload["messages"] if message["role"] == "tool")
+            self.assertIn("succeeded", tool_result["content"])
             pieces = text_chunks(final_text(text))
             return pieces[:-2] + [pause] + pieces[-2:]
         self.client_state.behavior = respond
@@ -60,7 +62,7 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(self.texts(), [])
         release.set()
         self.assertEqual((await self.done(app, batch))["state"], "complete")
-        expected = ["我在这里。\n", "慢慢说。\n", "不用着急。"]
+        expected = ["我在这里。", "慢慢说。", "不用着急。"]
         self.assertEqual(self.texts(), expected)
         self.assertTrue(all(p["state"] == "delivered" for p in self.parts(app, batch)))
         self.assertEqual(self.diagnostics(app, batch),
@@ -90,7 +92,7 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
         api.call_action = action
         batch = host.receive(snapshot).unwrap()
         await self.until(lambda: len(self.parts(app, batch)) == 3 and self.parts(app, batch)[0]["state"] == "delivered")
-        self.assertEqual(self.texts(), ["第一段\n"])
+        self.assertEqual(self.texts(), ["第一段"])
         self.advance(app, 1)
         await asyncio.sleep(0.02)
         self.assertEqual(len(api.calls), 1)
@@ -101,11 +103,11 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
             ("delivered", "voice_disabled", "not_applicable", ["text"], 0),
             ("unknown", "voice_disabled", "not_applicable", ["text"], 0),
             ("pending", "voice_disabled", "not_applicable", [], 0)])
-        self.assertEqual([h["text"] for h in app.messages.history(self.context(app, batch)).unwrap()["items"]], ["第一段\n"])
+        self.assertEqual([h["text"] for h in app.messages.history(self.context(app, batch)).unwrap()["items"]], ["第一段"])
         host.receive(snapshot).unwrap()
         self.advance(app, 10)
         await asyncio.sleep(0.02)
-        self.assertEqual(self.texts(), ["第一段\n", "第二段\n"])
+        self.assertEqual(self.texts(), ["第一段", "第二段"])
         await app.close()
         restored = await self.start_stream_host(runtime=self.open_runtime(), generation=1)
         await asyncio.sleep(0.02)
@@ -115,7 +117,7 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
             ("unknown", "voice_disabled", "not_applicable", ["text"], 0),
             ("pending", "voice_disabled", "not_applicable", [], 0)])
         self.assertEqual(len(self.client_state.calls), 1)
-        self.assertEqual(self.texts(), ["第一段\n", "第二段\n"])
+        self.assertEqual(self.texts(), ["第一段", "第二段"])
 
     async def test_withdrawal_while_streaming_cancels_and_discards_all_parts(self):
         entered = asyncio.Event()
@@ -195,7 +197,7 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
             return pieces[:-2] + [pause] + pieces[-2:]
         self.client_state.behavior = respond
         host = await self.start_stream_host(segmentation=SegmentationPolicy(
-            enabled=True, rules_enabled=True, threshold=1, min_segment_chars=1, max_segments=2))
+            enabled=True, rules_enabled=True, threshold=500, min_segment_chars=1, max_segments=2))
         app = host.application
         batch = host.receive(snapshot).unwrap()
         await asyncio.wait_for(waiting.wait(), 3)
@@ -258,7 +260,7 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
         self.assertEqual([[part["type"] for part in params["message"]] for _, params in sends],
                          [["text", "record"], ["text", "image", "record"]])
         self.assertEqual([part["text"] for part in self.parts(app, batch)],
-                         ["第一段。第一段正文。\n", "第二段。第二段正文。"])
+                         ["第一段。第一段正文。", "第二段。第二段正文。"])
         self.assertEqual(spoken, [("第一段。", "", 30), ("第二段。", "", 30)])
         self.assertEqual(len(self.client_state.calls), 2)
         self.assertTrue(all(call["stream"] for call in self.client_state.calls))
@@ -378,6 +380,82 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
             "JOIN conversation_parts p ON p.part_id = v.part_id WHERE p.batch_id = ?", (next_batch,)))
         self.assertEqual(self.diagnostics(app, next_batch),
                          [("delivered", "voice_disabled", "not_applicable", ["text"], 0)])
+
+    async def test_silent_action_finishes_without_creating_a_delivery_part(self):
+        self.client_state.text = json.dumps({"action": "silent", "text": "", "claims": []})
+        host = await self.start_stream_host()
+        app = host.application
+        batch = host.receive(await self.capture()).unwrap()
+
+        result = await self.done(app, batch)
+
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(result["reason"], "model_silent")
+        self.assertEqual(app.messages.batch(batch)["presentation_action"], "silent")
+        self.assertEqual(self.parts(app, batch), ())
+        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_poke_only_action_uses_native_poke_without_sending_an_empty_message(self):
+        self.client_state.text = json.dumps({"action": "poke", "text": "", "claims": []})
+        host = await self.start_stream_host()
+        app = host.application
+        batch = host.receive(await self.capture()).unwrap()
+
+        result = await self.done(app, batch)
+
+        calls = self.native.platform.client._api._wsr_api.calls
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(app.messages.batch(batch)["presentation_action"], "poke")
+        self.assertEqual([part["state"] for part in self.parts(app, batch)], ["delivered"])
+        self.assertEqual([action for action, _ in calls], ["friend_poke"])
+        self.assertEqual(calls[0][1]["user_id"], int(self.context(app, batch).scope.native_scope_id))
+
+    async def test_unknown_poke_only_action_is_not_replayed(self):
+        self.client_state.text = json.dumps({"action": "poke", "text": "", "claims": []})
+        host = await self.start_stream_host()
+        app = host.application
+        api = self.native.platform.client._api._wsr_api
+        original = api.call_action
+
+        async def timed_out(action, **params):
+            api.calls.append((action, params))
+            raise TimeoutError("poke acknowledgement was lost")
+
+        api.call_action = timed_out
+        batch = host.receive(await self.capture()).unwrap()
+
+        result = await self.done(app, batch)
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual([part["state"] for part in self.parts(app, batch)], ["unknown"])
+        self.assertEqual([action for action, _ in api.calls], ["friend_poke"])
+
+        api.call_action = original
+        app.notify()
+        await asyncio.sleep(0.05)
+        self.assertEqual([action for action, _ in api.calls], ["friend_poke"])
+
+    async def test_voice_only_action_sends_only_voice_and_never_falls_back_to_text(self):
+        response = {"action": "voice_only", "text": "我在这里。", "claims": [
+            {"id": "c1", "kind": "subjective", "statement": "我在这里。", "evidence": None}]}
+        self.client_state.text = json.dumps(response, ensure_ascii=False)
+        async def render(_, speech, *, provider_id="", timeout_seconds=30):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+        self.native_sender.voice = render
+        host = await self.start_stream_host(voice_policy=VoiceReplyPolicy())
+        app = host.application
+        first = host.receive(await self.capture()).unwrap()
+        self.assertEqual((await self.done(app, first))["state"], "complete")
+        api = self.native.platform.client._api._wsr_api
+        self.assertEqual([part["type"] for part in api.calls[-1][1]["message"]], ["record"])
+        self.assertEqual(app.messages.batch(first)["presentation_action"], "voice_only")
+
+        async def unavailable(_, speech, *, provider_id="", timeout_seconds=30):
+            return None
+        self.native_sender.voice = unavailable
+        second = host.receive(await self.capture(FakeEvent(self.native, event_id="voice-only-failed"))).unwrap()
+        self.assertEqual((await self.done(app, second))["state"], "blocked")
+        self.assertEqual([part["state"] for part in self.parts(app, second)], ["failed"])
+        self.assertEqual(len(api.calls), 1)
 
     async def test_original_turn_deadline_interrupts_stream_without_publishing(self):
         entered = asyncio.Event()

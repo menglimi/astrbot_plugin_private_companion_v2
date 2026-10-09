@@ -16,6 +16,7 @@ from companion_v2.capabilities.models import (
     CapabilityAuthorizationState, CapabilityDesiredState, CapabilityPackageDescriptor,
 )
 from companion_v2.capabilities.repositories import CapabilityRepository
+from companion_v2.capabilities.screen_access import PACKAGE_ID as SCREEN_PACKAGE_ID
 from companion_v2.execution.models import ProviderBinding, TaskContext, TaskError, encode, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import AudienceRef, OperationRef, VersionRef, normalize_utc
@@ -275,6 +276,8 @@ class AstrBotStagingBootstrap:
                 # 收回后仍然要能重开这一次会话：收信闸会把它变成"按配置回一句"。
                 continue
             current = require(access)
+            if capability in REVOCABLE_CAPABILITIES:
+                continue
             if current.grant_id != self.grant_id(capability) or current.grant_revision != 1:
                 raise TaskError("staging_grant_changed", "the configured original capability grant changed")
         return TaskContext(actor, persona.binding, AudienceRef(config.scope, (actor.subject,)))
@@ -304,7 +307,7 @@ class AstrBotStagingBootstrap:
     def _screen_package(package: CapabilityPackageDescriptor) -> None:
         if (not isinstance(package, CapabilityPackageDescriptor)
                 or package.extension_id != SCREEN_EXTENSION
-                or package.package_id != "astrbot_plugin_screen_companion"
+                or package.package_id != SCREEN_PACKAGE_ID
                 or set(package.capabilities) != {SCREEN_READ, SCREEN_PROCESS}
                 or set(package.dataset_owners) != {"screen"}):
             raise TaskError("staging_screen_package_invalid", "loaded Screen package has an unexpected identity")
@@ -500,14 +503,14 @@ class AstrBotStagingBootstrap:
              voice_policy=None, weather_port=None, weather_alert_port=None, balance_port=None, news_port=None, solar_term_port=None,
              qzone_transport=None,
              additional_providers=(), fallback_provider_id="", replacement_rules="[]",
-             fallback_on_refusal=False, review_only=False) -> Outcome[AstrBotStagingSession]:
+             fallback_on_refusal=False, review_only=False, default_provider_resolver=None) -> Outcome[AstrBotStagingSession]:
         """Read current authority and assemble; never initialize, grant or start work."""
         try:
             with self.runtime.read_snapshot():
                 return Outcome.success(self._load(runtime_instance_id, native_tool_port, voice, voice_policy,
                                                   weather_port, weather_alert_port, balance_port, news_port, solar_term_port, additional_providers,
                                                   fallback_provider_id, replacement_rules, fallback_on_refusal, review_only,
-                                                  qzone_transport))
+                                                  qzone_transport, default_provider_resolver))
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
         except Exception:
@@ -516,7 +519,8 @@ class AstrBotStagingBootstrap:
     def _load(self, runtime_instance_id: str, native_tool_port=None, voice=None,
               voice_policy=None, weather_port=None, weather_alert_port=None, balance_port=None, news_port=None, solar_term_port=None,
               additional_providers=(), fallback_provider_id="", replacement_rules="[]",
-              fallback_on_refusal=False, review_only=False, qzone_transport=None) -> AstrBotStagingSession:
+              fallback_on_refusal=False, review_only=False, qzone_transport=None,
+              default_provider_resolver=None) -> AstrBotStagingSession:
         if self._marker() is None:
             raise TaskError("staging_not_initialized", "use explicit initialization on a fresh staging store first")
         target = self._target(self._time())
@@ -538,6 +542,7 @@ class AstrBotStagingBootstrap:
             weather_alert_port=weather_alert_port, balance_port=balance_port, news_port=news_port,
             solar_term_port=solar_term_port,
             qzone_transport=qzone_transport,
+            default_provider_resolver=default_provider_resolver,
             additional_providers=additional_providers,
             fallback_provider_id=fallback_provider_id, replacement_rules=replacement_rules,
             fallback_on_refusal=fallback_on_refusal, review_only=review_only,

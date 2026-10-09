@@ -112,8 +112,8 @@ test("真实 SDK 夹具断言 endpoint 是插件相对路径", () => {
      plugin_page_bridge.js，它的断言就是口径的定义。哪天有人把这个断言删了，
      说明依据没了，得重新找证据，而不是继续照抄注释。 */
   const tool = TOOL("check_host_management_page.cjs");
-  assert.match(tool, /assert\.equal\(\s*endpoint\.startsWith\("\/"\)\s*,\s*false/,
-    "真实 SDK 夹具不再断言 endpoint 为插件相对路径——口径的证据丢了");
-  assert.match(tool, /bridge endpoints remain plugin-relative/,
-    "断言消息被改掉了：它记录着这条口径的出处");
+  assert.ok(tool.includes('assert(!endpoint.startsWith("/")'),
+    "宿主 SDK 夹具不再拒绝绝对 endpoint——插件相对路径的口径证据丢了");
+  assert.ok(tool.includes('endpoint.startsWith("/")'),
+    "宿主 SDK 夹具没有检查 endpoint 是否以斜杠开头");
 });

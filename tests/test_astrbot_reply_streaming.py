@@ -11,6 +11,9 @@ from tests.native_adapter_support import final_text
 from tests.segmentation_stream_support import StreamingFixture, chunk, text_chunks, USAGE
 
 
+EXPECTED_USAGE = Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_tokens=10)
+
+
 class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestCase):
     async def test_real_http_sse_decoder_handles_split_utf8_and_json_bytes(self):
         import httpx
@@ -49,8 +52,8 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
                 result = await model.generate(envelope)
                 self.assertEqual(result.status, "generated", result.failure)
                 self.assertEqual(result.draft.text, text)
-                self.assertEqual(result.usage, Amount(40, 90))
-                self.assertEqual(SegmentationPolicy(enabled=True).parts(result.draft.text), ("中文 👩‍💻。\n", "第二段。"))
+                self.assertEqual(result.usage, EXPECTED_USAGE)
+                self.assertEqual(SegmentationPolicy(enabled=True, llm_controlled=True).parts(result.draft.text), ("中文 👩‍💻。\n", "第二段。"))
         self.assertEqual(len(seen), 3)
         self.assertTrue(all(p["stream"] and p["stream_options"]["include_usage"] for p in seen))
         self.assertTrue(all(s.closed for s in streams))
@@ -69,8 +72,8 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
                 streamed = await self.native_model.generate(envelope)
                 self.assertEqual(streamed.status, "generated", streamed.failure)
                 self.assertEqual(streamed.draft, whole.draft)
-                self.assertEqual(streamed.usage, Amount(40, 90))
-                parts = SegmentationPolicy(enabled=True).parts(streamed.draft.text)
+                self.assertEqual(streamed.usage, EXPECTED_USAGE)
+                parts = SegmentationPolicy(enabled=True, llm_controlled=True).parts(streamed.draft.text)
                 self.assertEqual(tuple(p.strip() for p in parts), ("我在这里 👩‍💻。", "慢慢说。\n\n```python\nprint('hello。')\n```"))
         self.assertEqual(len(self.client_state.calls), 6)
         self.assertTrue(all(s.closed for s in self.client_state.streams))
@@ -90,7 +93,7 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
         self.assertIsNone(result.draft)
         self.assertEqual(json.loads(result.tool_calls[0].arguments_json), {"limit": 2})
         self.assertEqual(result.tool_calls[0].action, "memo.list")
-        self.assertEqual(result.usage, Amount(40, 90))
+        self.assertEqual(result.usage, EXPECTED_USAGE)
 
     async def test_partial_empty_truncated_refused_malformed_and_mixed_streams_never_publish(self):
         valid = final_text(f"甲\n{MARKER}\n乙")
@@ -136,7 +139,7 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
         self.client_state.behavior = truncated
         result = await self.native_model.generate(await self.envelope())
         self.assertEqual(result.status, "unknown")
-        self.assertEqual(result.usage, Amount(40, 90))
+        self.assertEqual(result.usage, EXPECTED_USAGE)
 
     async def test_cancellation_closes_socket_and_never_falls_back(self):
         entered = asyncio.Event()
@@ -167,7 +170,7 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
             with self.subTest(field=field):
                 result = await self.native_model.generate(await self.envelope())
                 self.assertEqual(result.status, "unknown")
-                self.assertEqual(result.usage, Amount(40, 90))
+                self.assertEqual(result.usage, EXPECTED_USAGE)
                 self.assertIsNone(result.draft)
             self.native.selected = "original"
             self.native.provider.model_name = "fixture"
@@ -191,7 +194,7 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
             result = await self.native_model.generate(await self.envelope())
         self.assertEqual(result.status, "unknown")
         self.assertIsNone(result.draft)
-        self.assertEqual(result.usage, Amount(40, 90))
+        self.assertEqual(result.usage, EXPECTED_USAGE)
         self.assertEqual(len(self.client_state.calls), 1)
 
     async def test_malformed_streamed_tool_arguments_are_not_repaired_into_commands(self):
@@ -204,7 +207,7 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
         result = await self.native_model.generate(await self.envelope(tools=(ToolSpec("memo.list", "list", '{"type":"object"}'),)))
         self.assertEqual(result.status, "unknown")
         self.assertEqual(result.tool_calls, ())
-        self.assertEqual(result.usage, Amount(40, 90))
+        self.assertEqual(result.usage, EXPECTED_USAGE)
 
     async def test_choice_usage_and_inconsistent_usage_do_not_turn_into_zero(self):
         async def respond(_):
@@ -214,7 +217,7 @@ class AstrBotReplyStreamingTests(StreamingFixture, unittest.IsolatedAsyncioTestC
         self.client_state.behavior = respond
         result = await self.native_model.generate(await self.envelope())
         self.assertEqual(result.status, "generated", result.failure)
-        self.assertEqual(result.usage, Amount(40, 90))
+        self.assertEqual(result.usage, EXPECTED_USAGE)
         async def bad_usage(_):
             pieces = text_chunks(final_text(), usage=False)
             pieces.append(chunk(usage={**USAGE, "total_tokens": 0}))

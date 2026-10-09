@@ -38,7 +38,8 @@ class SegmentSpacingTests(unittest.TestCase):
 
         fields = {field.field_id.removeprefix("conversation.presentation."): field
                   for field in configuration_fields(SegmentationPolicy(), False, 0)}
-        self.assertEqual(fields["part_gap_mode"].default, "fixed")
+        self.assertEqual(fields["part_gap_mode"].default, "log")
+        self.assertEqual(fields["part_gap_log_base"].default, 2.1)
         self.assertEqual(fields["part_gap_log_base"].kind, ValueKind.WEIGHT)
         self.assertEqual(fields["part_gap_log_base"].minimum, 1.1)
         self.assertEqual(fields["part_gap_log_base"].maximum, 5.0)

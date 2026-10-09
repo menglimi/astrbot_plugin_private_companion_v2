@@ -19,9 +19,11 @@ from companion_v2.foundation.refs import (
     VersionRef,
     normalize_utc,
 )
+from companion_v2.execution.models import digest
 from companion_v2.identity_policy.models import ResolvedIdentity
 from companion_v2.identity_policy.ports import IdentityAuthorizationPort
-from companion_v2.storage.codec import decode_timestamp, encode_timestamp, scope_from_row, scope_values
+from companion_v2.storage.codec import (SCOPE_COLUMNS, decode_timestamp, encode_timestamp,
+                                        scope_from_row, scope_values)
 from companion_v2.storage.repositories import NamespaceRepository
 from companion_v2.storage.runtime import StorageRuntime
 
@@ -99,6 +101,44 @@ class SourceRepository:
             if expected_content_hash is not None and row["content_hash"] != expected_content_hash:
                 return Outcome.failed("source_content_changed", "source no longer matches the recorded content hash")
             return current
+
+    def validate_archived_provenance(
+        self, reference: SourceRef, *, recipient: SubjectRef, observed_at: datetime,
+        expected_content_hash: str,
+    ) -> Outcome[SourceRef]:
+        """Check immutable attribution metadata for a receipt-backed archive.
+
+        This returns no source payload and grants no current evidence lease.
+        Producers must independently verify the sealed archive and its trusted
+        delivery receipt. A past source's TTL and live producer settings do not
+        rewrite its attribution; current revocation, scope, audience and hash do.
+        Normal source reads and sends still require current owner governance.
+        """
+        if not isinstance(reference, SourceRef) or not isinstance(recipient, SubjectRef):
+            return Outcome.failed("source_reference_invalid", "archived provenance needs explicit identities")
+        _ensure_runtime_scope(self._runtime, reference.scope)
+        normalize_utc(observed_at, field="observed_at")
+        with self._runtime.read_snapshot():
+            columns = ", ".join((*SCOPE_COLUMNS, "source_id", "owner", "lineage_id", "source_revision",
+                                 "issued_at", "expires_at", "state", "recipients_json", "content_hash"))
+            row = self._runtime.read_one(f"""SELECT {columns} FROM sources
+                WHERE source_id = ? AND lineage_id = ? AND source_revision = ?""", _source_key(reference))
+            if row is None:
+                return Outcome.failed("source_not_found", "original attribution source is unavailable")
+            stored = SourceRef(row["source_id"], row["owner"], scope_from_row(row),
+                VersionRef(row["lineage_id"], row["source_revision"]), decode_timestamp(row["issued_at"]),
+                decode_timestamp(row["expires_at"]) if row["expires_at"] else None)
+            if stored != reference:
+                return Outcome.failed("source_reference_mismatch", "archived attribution identity changed")
+            if row["state"] != GovernanceState.ACTIVE.value:
+                return Outcome.failed("source_revoked", "original attribution was revoked")
+            if observed_at < stored.issued_at:
+                return Outcome.failed("source_not_active", "original attribution is not yet available")
+            if recipient not in _decode_audience(reference.scope, row["recipients_json"]).recipients:
+                return Outcome.failed("source_audience_denied", "original attribution belongs to another audience")
+            if row["content_hash"] != expected_content_hash:
+                return Outcome.failed("source_content_changed", "original attribution content changed")
+            return Outcome.success(stored)
 
     def prepare_message(self, record: SourceRecord) -> SourceRecord:
         """Prepare visible message text before any durable publication."""
@@ -256,6 +296,69 @@ class SourceRepository:
         if record.reference.is_expired_at(observed_at):
             return Outcome.failed("source_expired", "source is no longer current")
         return Outcome.success(record)
+
+    def list_readable_current(
+        self,
+        scope: ScopeRef,
+        *,
+        owners: tuple[str, ...],
+        expected_recipients: tuple[SubjectRef, ...],
+        resolved: ResolvedIdentity,
+        capability: str,
+        observed_at: datetime,
+        authorizer: IdentityAuthorizationPort,
+        limit: int = 128,
+    ) -> tuple[SourceRecord, ...]:
+        """List bounded current sources after rechecking read governance.
+
+        The inventory query returns identifiers only. Payloads are read through
+        ``read`` so source-owner attestations, identity grants, and audience
+        checks remain in force for every returned record.
+        """
+        observed_at = normalize_utc(observed_at, field="observed_at")
+        _ensure_runtime_scope(self._runtime, scope)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 256:
+            raise ValueError("source inventory limit must be between 1 and 256")
+        selected_owners = tuple(dict.fromkeys(owner for owner in owners
+                                              if isinstance(owner, str) and owner.strip()))
+        if not selected_owners:
+            return ()
+        recipient_set = set(expected_recipients)
+        if not recipient_set or resolved.subject not in recipient_set:
+            return ()
+        columns = ", ".join(SCOPE_COLUMNS)
+        owner_slots = ", ".join("?" for _ in selected_owners)
+        rows = self._runtime.read_all(
+            f"""SELECT source_id, lineage_id, source_revision, owner, {columns}, issued_at, expires_at
+                FROM sources
+                WHERE installation_id = ? AND platform = ? AND scope_kind = ? AND native_scope_id = ?
+                  AND bot_id = ? AND account_id = ? AND conversation_id = ? AND session_id = ?
+                  AND owner IN ({owner_slots}) AND state = 'active' AND issued_at <= ?
+                  AND (expires_at IS NULL OR expires_at > ?)
+                ORDER BY issued_at DESC, source_id DESC LIMIT ?""",
+            (*scope_values(scope), *selected_owners, encode_timestamp(observed_at),
+             encode_timestamp(observed_at), limit),
+        )
+        readable = []
+        for row in rows:
+            try:
+                reference = SourceRef(row["source_id"], row["owner"], scope_from_row(row),
+                    VersionRef(row["lineage_id"], int(row["source_revision"])),
+                    decode_timestamp(row["issued_at"]),
+                    decode_timestamp(row["expires_at"]) if row["expires_at"] else None)
+                result = self.read(reference, resolved=resolved, capability=capability,
+                                   observed_at=observed_at, authorizer=authorizer)
+                if not result.is_success:
+                    continue
+                record = result.unwrap()
+                if (record.reference.scope != scope
+                        or not recipient_set.issubset(set(record.audience.recipients))
+                        or digest(record.payload) != record.content_hash):
+                    continue
+                readable.append(record)
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                continue
+        return tuple(readable)
 
 
 class EvidenceRepository:

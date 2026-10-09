@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 import json
 import math
+from logging import getLogger
 from types import MappingProxyType
 from typing import Callable
 from uuid import uuid4
@@ -26,8 +27,12 @@ from companion_v2.storage.runtime import StorageRuntime
 
 from .models import (
     ClaimResult, Lane, QUEUED, SideEffect, SupervisorLimits, TERMINAL, TaskClaim, TaskContext,
-    TaskError, TaskRecord, TaskRegistration, TaskResult, TaskSpec, digest, encode, require, stamp,
+    TaskError, TaskRecord, TaskRegistration, TaskResult, TaskSpec, WorkerAttempt, WorkerOwnership,
+    WorkerStopRecovery, digest, encode, require, stamp,
 )
+
+
+logger = getLogger(__name__)
 
 
 def outcome(method):
@@ -58,6 +63,7 @@ class TaskSupervisor:
         self.limits = limits
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.generation: int | None = None
+        self.worker_lifecycle = None
         # A dashboard preview may rebuild an already persisted prompt after a
         # process restart. It may recheck scope/source authority, but it must
         # never acquire or renew an execution lease. Context-local state keeps
@@ -83,6 +89,14 @@ class TaskSupervisor:
     def _reading_only(self):
         access = self._read_only_access.get()
         return access is not None and access.active
+
+    def bind_worker_lifecycle(self, lifecycle):
+        """Install trusted host evidence before this supervisor starts accepting work."""
+        if self.generation is not None or self.worker_lifecycle is not None:
+            raise ValueError("worker lifecycle must be bound once before startup")
+        if not all(callable(getattr(lifecycle, method, None)) for method in ("capture", "stopped_proof")):
+            raise ValueError("worker lifecycle requires ownership and termination evidence")
+        self.worker_lifecycle = lifecycle
 
     def _now(self):
         return normalize_utc(self.now(), field="supervisor clock")
@@ -169,8 +183,9 @@ class TaskSupervisor:
     @staticmethod
     def _scope_action(context, action):
         if context.scope.kind is ScopeKind.GROUP and action not in (
-                "conversation.reply", "configuration.read", "text", "extension.tool.invoke"):
-            raise TaskError("group_action_unavailable", "this group profile supports foreground conversation and authorized image tools")
+                "conversation.reply", "configuration.read", "text", "extension.tool.invoke",
+                "role.expression.read"):
+            raise TaskError("group_action_unavailable", "this action is unavailable in the group profile")
 
     def _registration(self, row):
         data = json.loads(row["record_json"])
@@ -418,10 +433,13 @@ class TaskSupervisor:
             raise TaskError("task_attempt_expired", "attempt lease or logical deadline expired")
         return row, attempt
 
-    def _save_attempt(self, attempt, data, *, stopped=False):
+    def _save_attempt(self, attempt, data, *, stopped=False, release_capacity=False):
+        if stopped and release_capacity:
+            raise ValueError("stopped evidence already releases execution capacity")
         with self.runtime.transaction() as connection:
+            held = 0 if stopped or release_capacity else attempt["slot_held"]
             connection.execute("UPDATE execution_attempts SET record_json = ?, slot_held = ? WHERE attempt_id = ?",
-                               (encode(data), 0 if stopped else attempt["slot_held"], attempt["attempt_id"]))
+                               (encode(data), held, attempt["attempt_id"]))
 
     @outcome
     def begin(self, claim: TaskClaim) -> TaskRecord:
@@ -433,6 +451,11 @@ class TaskSupervisor:
             self._authorize(row, now)
             data = json.loads(attempt["record_json"])
             data["started_at"] = stamp(now)
+            if self.worker_lifecycle is not None:
+                ownership = self.worker_lifecycle.capture()
+                if not isinstance(ownership, WorkerOwnership):
+                    raise TypeError("host worker ownership must be a validated record")
+                data["worker_owner"] = asdict(ownership)
             self._save_attempt(attempt, data)
             return self._record(self._change(row, "running", "started", now))
 
@@ -629,6 +652,10 @@ class TaskSupervisor:
                 data = json.loads(attempt["record_json"])
                 if data["started_at"] is not None:
                     self._change(row, "uncertain", "worker_lost", now)
+                    task_data = json.loads(row["record_json"])
+                    if task_data["definition"]["side_effect"] == SideEffect.NONE.value:
+                        data["capacity_release"] = "superseded_read_only_generation"
+                        self._save_attempt(attempt, data, release_capacity=True)
                 else:
                     data.update(finished_at=stamp(now), stopped_proof="not_started")
                     self._save_attempt(attempt, data, stopped=True)
@@ -643,6 +670,40 @@ class TaskSupervisor:
                     self._change(row, state, reason, now, generation=self.generation, next_run_at=stamp(now))
                 changed.append(row["task_id"])
             return tuple(changed)
+
+    @outcome
+    def recover_stopped_workers(self, *, limit: int = 32, after_attempt_id: str | None = None) -> WorkerStopRecovery:
+        """Release physical slots with host stop evidence, preserving every original result."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("worker recovery requires a bounded page")
+        with self.runtime.transaction() as connection:
+            self._active()
+            if self.worker_lifecycle is None:
+                return WorkerStopRecovery(0, None, ())
+            rows = connection.execute("""SELECT a.*, t.record_json AS task_json FROM execution_attempts a
+                JOIN execution_tasks t ON t.task_id = a.task_id
+                WHERE a.slot_held = 1 AND a.generation != ? AND a.attempt_id > ?
+                ORDER BY a.attempt_id LIMIT ?""", (self.generation, after_attempt_id or "", limit)).fetchall()
+            released = []
+            for row in rows:
+                data = json.loads(row["record_json"])
+                if data.get("started_at") is None:
+                    continue
+                claim = TaskClaim(row["task_id"], row["attempt_id"], row["generation"])
+                try:
+                    ownership = WorkerOwnership.restore(data["worker_owner"]) if data.get("worker_owner") else None
+                    attempt = WorkerAttempt(claim, row["kind"], row["attempt_no"],
+                        datetime.fromisoformat(data["started_at"]), ownership,
+                        SideEffect(json.loads(row["task_json"])["definition"]["side_effect"]))
+                except (ValueError, KeyError, TypeError):
+                    continue
+                proof = self.worker_lifecycle.stopped_proof(attempt)
+                if proof is not None:
+                    require(self.acknowledge_stopped(claim, proof_ref=proof))
+                    released.append(claim.task_id)
+                    logger.info("[CompanionV2] 已回收退出工作者的执行名额 task=%s kind=%s generation=%s proof=%s",
+                                claim.task_id, attempt.kind, claim.generation, proof)
+            return WorkerStopRecovery(len(rows), rows[-1]["attempt_id"] if rows else None, tuple(released))
 
     @outcome
     def reconcile(self, context: TaskContext, task_id: str, *, expected_revision: int,
@@ -660,8 +721,11 @@ class TaskSupervisor:
             if row["revision"] != expected_revision or row["state"] != "uncertain":
                 raise TaskError("task_revision_conflict", "only the current uncertain revision can be reconciled")
             attempt = self._attempt(TaskClaim(task_id, row["attempt_id"], row["generation"]))
+            attempt_data = json.loads(attempt["record_json"])
             if attempt["slot_held"]:
                 raise TaskError("task_worker_not_stopped", "a local fence does not prove the old worker stopped")
+            if attempt_data.get("stopped_proof") is None:
+                raise TaskError("task_worker_stop_unknown", "this read-only slot was released without proving worker termination")
             return self._record(self._result(row, attempt, result, now, inputs=False))
 
     @outcome
@@ -681,5 +745,7 @@ class TaskSupervisor:
                     "finished_at": attempt_data.get("finished_at"), "queue_ms": attempt_data.get("queue_ms"),
                     "execution_ms": attempt_data.get("execution_ms"), "effect": data["effect"],
                     "slot_held": bool(attempt["slot_held"]) if attempt else False,
+                    "worker_stopped": attempt_data.get("stopped_proof") is not None,
+                    "capacity_release": attempt_data.get("capacity_release"),
                     "reason": data["reason"], "result_body": "redacted", "provider_latency_ms": None,
                     "delivery_latency_ms": None, "recipient_received": "unknown"}

@@ -15,9 +15,10 @@ from companion_v2.conversation.foreground import ClaimKind, ContextContribution,
 from companion_v2.conversation.generation import LocalReplyGenerator
 from companion_v2.conversation.messages import ConversationMessages, DELIVERY_KIND, REPLY_ACTION, REPLY_KIND
 from companion_v2.conversation.models import InboundConversationEvent
+from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.diagnostics.models import CheckStatus, DiagnosticContext, DiagnosticQuery
 from companion_v2.diagnostics.service import DiagnosticService
-from companion_v2.execution.models import Lane, ProviderBinding, SideEffect, TaskDefinition, TaskRegistration, digest
+from companion_v2.execution.models import Lane, ProviderBinding, SideEffect, TaskDefinition, TaskRegistration, TaskError, digest
 from companion_v2.execution.runner import LocalTaskRunner, TaskRun
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import SourceRef, SubjectKind, SubjectRef, VersionRef
@@ -47,7 +48,8 @@ class MessageFixture(ModelFixture):
         self.ledger = BudgetLedger(self.runtime, BudgetPolicy(*(Amount(1000, 10000) for _ in range(5))))
         self.gateway = LocalModelGateway(self.router, self.ledger, self.tasks)
         self.responses["primary"] = ProviderResponse("generated", ModelDraft("First part.\nSecond part.", ()), Amount(15, 40), "model-receipt")
-        self.generator = LocalReplyGenerator(self.messages, self.gateway, split=lambda text: tuple(text.splitlines(keepends=True)))
+        self.generator = LocalReplyGenerator(self.messages, self.gateway,
+            segmentation=SegmentationPolicy(enabled=False), split=lambda text: tuple(text.splitlines(keepends=True)))
         self.deadline = NOW + timedelta(minutes=2)
         self.grant(self.important, SCOPE, "text")
 
@@ -119,6 +121,46 @@ class MessageFixture(ModelFixture):
 
 
 class ConversationMessageTests(MessageFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_reply_usage_cannot_discount_the_plugin_budget(self):
+        self.ledger = BudgetLedger(self.runtime, BudgetPolicy(*(Amount(30, 1000) for _ in range(5))))
+        self.gateway.ledger = self.ledger
+        await self.generate()
+        self.assertTrue(self.accounts())
+        self.assertTrue(all(self.ledger.plugin_account_usage(row["account_key"])["spent_tokens"] == 0
+                            for row in self.accounts()))
+        run = self.model_run("plugin-call")
+        await self.gateway.generate(run, self.request())
+
+        with self.assertRaises(TaskError) as caught:
+            self.ledger.reserve(run, call_id="plugin-over-budget", position=1,
+                provider=self.providers[0].binding, amount=self.estimate)
+        self.assertEqual(caught.exception.code, "model_budget_exhausted")
+        self.assertEqual(len(self.call_rows()), 2)
+
+    async def test_main_chain_reply_still_generates_when_plugin_budget_is_exhausted(self):
+        self.ledger = BudgetLedger(self.runtime, BudgetPolicy(*(Amount(30, 1000) for _ in range(5))))
+        self.gateway.ledger = self.ledger
+        reply_response = self.responses["primary"]
+        self.responses["primary"] = ProviderResponse("generated", ModelDraft("plugin work", ()),
+                                                       Amount(30, 1000), "plugin-budget-receipt")
+        await self.gateway.generate(self.model_run("plugin-budget-full"), self.request())
+        account_keys = [row["account_key"] for row in self.accounts()]
+        self.assertTrue(account_keys)
+        self.assertTrue(all(self.ledger.plugin_account_usage(key)["spent_tokens"] == 30
+                            for key in account_keys))
+
+        self.responses["primary"] = reply_response
+        await self.generate(self.event("after-plugin-budget"))
+
+        self.assertEqual(len(self.called), 2)
+        latest = self.runtime.read_one("""SELECT c.* FROM model_calls c
+            JOIN execution_tasks t ON t.task_id = c.task_id
+            WHERE t.kind = ? ORDER BY c.finished_at DESC LIMIT 1""", (REPLY_KIND,))
+        self.assertEqual((latest["state"], latest["actual_tokens"]), ("generated", 15))
+        self.assertTrue(all((row["held_tokens"], row["held_cost"]) == (0, 0) for row in self.accounts()))
+        self.assertTrue(all(self.ledger.plugin_account_usage(key)["spent_tokens"] == 30
+                            for key in account_keys))
+
     async def test_async_merge_preserves_role_and_governed_materials_without_waiting_for_maintenance(self):
         batch = self.accept()
         self.accept(self.event("input-2"), batch_id=batch)
@@ -145,6 +187,16 @@ class ConversationMessageTests(MessageFixture, unittest.IsolatedAsyncioTestCase)
         self.assertNotIn("2026-09-21", stored["contributions_json"])
         self.assertEqual(self.runtime.read_one("SELECT COUNT(*) n FROM operations", ())["n"], 0)
 
+    async def test_generated_reply_log_preserves_the_final_segment_boundaries(self):
+        with self.assertLogs("companion_v2.conversation.generation", level="INFO") as captured:
+            batch = await self.generate()
+
+        lines = [line for line in captured.output if "回复正文已通过校验" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("batch=" + batch, lines[0])
+        self.assertIn("parts=2", lines[0])
+        self.assertIn("分段正文=('First part.', 'Second part.')", lines[0])
+
     async def test_event_replay_and_withdrawal_tombstone_survive_reopen(self):
         event = self.event()
         batch = self.accept(event)
@@ -169,11 +221,11 @@ class ConversationMessageTests(MessageFixture, unittest.IsolatedAsyncioTestCase)
     async def test_only_confirmed_parts_enter_paginated_history_and_delay_keeps_sequence(self):
         batch = await self.generate()
         self.assertEqual((await self.deliver_next(batch)).state, "succeeded")
-        self.assertEqual([item["text"] for item in self.history()], ["First part.\n"])
+        self.assertEqual([item["text"] for item in self.history()], ["First part."])
         self.assertIsNone(await self.deliver_next(batch, not_before=NOW + timedelta(seconds=3)))
         self.clock.advance(timedelta(seconds=3))
         self.assertEqual((await self.runner().run_once(Lane.FOREGROUND)).unwrap().task.state, "succeeded")
-        self.assertEqual([item["text"] for item in self.history()], ["First part.\n", "Second part."])
+        self.assertEqual([item["text"] for item in self.history()], ["First part.", "Second part."])
         first = self.messages.history(self.context, limit=1).unwrap()
         second = self.messages.history(self.context, after=first["next_cursor"], limit=1).unwrap()
         self.assertEqual(second["items"][0]["sequence"], 2)
@@ -233,7 +285,7 @@ class ConversationMessageTests(MessageFixture, unittest.IsolatedAsyncioTestCase)
         self.assertIsNone(self.history()[0]["text"])
         self.assertFalse(self.delivery.queue_next(self.context, batch, deadline_at=self.deadline).is_success)
         await self.deliver_next(other)
-        self.assertEqual(self.history()[-1]["text"], "First part.\n")
+        self.assertEqual(self.history()[-1]["text"], "First part.")
 
     async def test_late_receipt_after_cancel_and_source_revocation_only_accounts_original_part(self):
         event = self.event()

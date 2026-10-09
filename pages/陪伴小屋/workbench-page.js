@@ -9,7 +9,7 @@
    - 层轨：后端下发 `layers`（继承链，外→内）与 `provenance`（每字段实际来源）。
      本文件把它画成可交互的层轨，并让悬停某层时其余层退后。
    - 幂等：保存沿用 operation_key + edit_token，结果未确认时锁编辑并只重试原请求。
-   - 草稿：sessionStorage 按 installation + operator + group 隔离，切页不丢。 */
+   - 草稿：sessionStorage 按 installation + operator + 当前对象/角色 + group 隔离，切页不丢。 */
 "use strict";
 window.CompanionWorkbench = (() => {
   const PREFIX = "/astrbot_plugin_private_companion_v2/";
@@ -44,8 +44,8 @@ window.CompanionWorkbench = (() => {
     invalid_precision: "数值精度超出允许范围。",
     dashboard_identity_required: "请从已登录的 AstrBot 管理界面打开陪伴小屋。",
     core_access_required: "当前账号没有管理权限。",
-    staging_not_initialized: "请先在账号与会话中加载 V2 运行实例。",
-    staging_host_terminated: "宿主已停止，请重新进入插件。",
+    staging_not_initialized: "角色数据尚未加载，请重新读取。",
+    staging_host_terminated: "插件已停止，请重新进入插件。",
     bridge_timeout: "连接超时，请核对连接后重试。",
     invalid_response: "返回数据不完整，请刷新核对。",
     /* 表达学习分区（expression-page.js）走这个内核渲染，它的域内码放在这里，
@@ -90,7 +90,8 @@ window.CompanionWorkbench = (() => {
     reference_scope_invalid: "参考图按角色生效，请选择一个已初始化的私聊对象。",
     reference_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     reference_configuration_invalid: "请提供明确的配置变更。",
-    photo_reference_configuration_invalid: "请核对两个开关与轮换天数（1 到 365）的取值范围。",
+    photo_reference_configuration_invalid: "请核对三个开关与轮换天数（1 到 365）的取值范围。",
+    photo_reference_group_disabled: "这个角色尚未允许在群聊使用已登记参考图。",
     wardrobe_scope_invalid: "衣柜按角色生效，请选择一个已初始化的私聊对象。",
     wardrobe_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     wardrobe_configuration_invalid: "请核对开关、两处文字（各不超过 800 字）与两项数量上限的取值范围。",
@@ -131,6 +132,13 @@ window.CompanionWorkbench = (() => {
   const isCode = value => typeof value === "string" && /^[a-z][a-z0-9_]{2,60}$/.test(value);
   const codeOf = wrapped => wrapped?.data?.code
     || (isCode(wrapped?.message) ? wrapped.message : "") || "";
+  const ENVELOPE_KEYS = new Set(["status", "message", "reason", "data", "error", "code"]);
+  const hasOwn = (value, name) => !!value && typeof value === "object"
+    && Object.prototype.hasOwnProperty.call(value, name);
+  const isEnvelope = value => !!value && typeof value === "object" && !Array.isArray(value)
+    && ["ok", "error"].includes(value.status)
+    && Object.keys(value).every(name => ENVELOPE_KEYS.has(name))
+    && (value.status === "error" || hasOwn(value, "data"));
   const localized = (problem, fallback) => errors[problem?.code]
     || (isCode(problem?.message) ? errors[problem.message] : problem?.message)
     || fallback;
@@ -164,6 +172,16 @@ window.CompanionWorkbench = (() => {
       return Array.isArray(parsed) && parsed.every(item => typeof item === "string") ? parsed : null;
     } catch { return null; }
   };
+  const parseLineList = value => String(value ?? "").split(/\r\n|\n|\r/)
+    .map(line => line.trim()).filter(Boolean).map(line => {
+      const token = line.toLocaleLowerCase();
+      if (["<newline>", "{newline}", "[newline]", "\\n"].includes(token)) return "\n";
+      if (["<space>", "{space}", "[space]"].includes(token)) return " ";
+      if (["<tab>", "{tab}", "[tab]"].includes(token)) return "\t";
+      return line;
+    });
+  const lineListText = words => words.map(word => word === "\n" ? "<newline>"
+    : word === "\t" ? "<tab>" : word === " " ? "<space>" : word).join("\n");
   const parseReplacementList = value => {
     try {
       const parsed = JSON.parse(String(value ?? ""));
@@ -191,7 +209,31 @@ window.CompanionWorkbench = (() => {
     if (value === " " || folded === "<space>") return "空格";
     return value;
   };
-  const displayValue = (item, value) => item.input === "word-list"
+  /* 自我页的三种「轻结构」文本：生日（年份可省、可标农历）、口吻示例（一句一行）
+     与词条（顿号分隔的自由文本）。它们在注册表里仍是 TEXT，值按原样保存；
+     控件只负责把结构化编辑翻译回字符串，真源始终是 data-wb-field 那一个控件。 */
+  const TAG_SPLIT = /[、,，;；\n]+/;
+  const parseTagList = value => String(value ?? "").split(TAG_SPLIT)
+    .map(part => part.trim()).filter(Boolean);
+  const parseQuoteLines = value => String(value ?? "").split(/\r\n|\n|\r/);
+  const BIRTHDAY_RE = /^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日(?:\s*·\s*农历)?$/;
+  function parseBirthday(value) {
+    const text = String(value ?? "").trim();
+    const chinese = BIRTHDAY_RE.exec(text);
+    if (chinese) {
+      return {year: chinese[1] || "", month: chinese[2], day: chinese[3],
+        lunar: /农历\s*$/.test(text)};
+    }
+    const iso = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(text);
+    if (iso) return {year: iso[1], month: iso[2], day: iso[3], lunar: false};
+    return null;
+  }
+  const birthdayText = (parts, lunar, noYear) =>
+    `${!noYear && parts.year ? `${parts.year}年` : ""}${Number(parts.month)}月${Number(parts.day)}日${lunar ? " · 农历" : ""}`;
+  const fireInput = el => el.dispatchEvent(new Event("input", {bubbles: true}));
+  const displayValue = (item, value) => item.input === "line-list"
+    ? (parseStringList(value) || []).map(word => word === "\n" ? "<newline>" : word).join(" · ") || "（空）"
+    : item.input === "word-list"
     ? (parseStringList(value) || []).map(wordLabel).join("、") || "（空）"
     : item.input === "replacement-list"
       ? (parseReplacementList(value) || []).map(pair => `${visibleToken(pair.from)} → ${visibleToken(pair.to) || "删除"}`).join("、") || "（空）"
@@ -210,10 +252,10 @@ window.CompanionWorkbench = (() => {
        它们既不会被改动，也不会进入 changes。 */
     if (!item) return true;
     if (item.kind === "bool") return typeof value === "boolean";
-    if (item.input === "word-list") {
+    if (item.input === "word-list" || item.input === "line-list") {
       const words = parseStringList(value);
       const policy = item.listPolicy || {};
-      if (!words || words.length > (policy.maxItems || 80)
+      if (!words || words.length < (policy.minItems || 0) || words.length > (policy.maxItems || 80)
           || words.some(word => !word.length || word.length > (policy.maxLength || 200))) return false;
       if (policy.unique === "exact" && new Set(words).size !== words.length) return false;
       if (policy.unique === "casefold"
@@ -275,7 +317,7 @@ window.CompanionWorkbench = (() => {
       + ` aria-hidden="true">${nodes}</div>`;
   }
 
-  function controlMarkup(item, value, locked) {
+  function controlMarkup(item, value, locked, state) {
     const dis = locked ? " disabled" : "";
     if (item.kind === "bool") {
       return `<label class="wb-switch"><input type="checkbox" data-wb-field="${e(item.name)}" ${value ? "checked" : ""}${dis}>`
@@ -300,16 +342,57 @@ window.CompanionWorkbench = (() => {
         `<option value="${e(key)}" ${selected === key ? "selected" : ""}>${e(text)}</option>`).join("");
       return `<select data-wb-field="${e(item.name)}"${dis}>${options}</select>`;
     }
+    if (item.kind === "text" && item.input === "source-checklist") {
+      const selected = new Set(String(value ?? "").split(/[\r\n,;，；]+/)
+        .map(identifier => identifier.trim()).filter(Boolean));
+      const sources = item.catalog?.(state.status) || [];
+      const selectedLimit = Number(state.draft?.source_limit || 16);
+      const option = (id, label, detail, attributes = "") =>
+        `<label class="wb-source-option"><input type="checkbox" data-wb-field="${e(item.name)}"`
+        + ` data-wb-source-id="${e(id)}"${attributes} ${selected.has(id) ? "checked" : ""}${dis}>`
+        + `<span><b>${e(label)}</b>${detail ? `<small>${e(detail)}</small>` : ""}</span></label>`;
+      const rows = sources.map(source => {
+        if (source.type === "missing") {
+          return `<div class="wb-source-missing">${option(source.id, source.name || source.id,
+            "AstrBot 中已不可用", " data-wb-source-missing")}</div>`;
+        }
+        const kbId = String(source.kb_id || "");
+        const docs = Array.isArray(source.documents) ? source.documents : [];
+        const base = option(source.id, `${source.emoji ? source.emoji + " " : ""}${source.name || kbId}`,
+          `${Number(source.doc_count || docs.length)} 篇文档 · ${Number(source.chunk_count || 0)} 段`,
+          ` data-wb-source-base="${e(kbId)}"`);
+        const docRows = docs.map(doc => option(doc.id, doc.name || doc.doc_id,
+          `${doc.file_type || "文档"} · ${Number(doc.chunk_count || 0)} 段`,
+          ` data-wb-source-document="${e(kbId)}"`)).join("");
+        return `<section class="wb-source-group">${base}${source.description
+          ? `<p>${e(source.description)}</p>` : ""}${docRows ? `<div class="wb-source-documents">${docRows}</div>` : ""}</section>`;
+      }).join("");
+      const empty = state.status?.knowledge_sources_available === false
+        ? "AstrBot 知识库暂不可用" : "暂无 AstrBot 知识库";
+      const count = selected.size;
+      return `<div class="wb-source-picker" data-wb-source-limit="${e(selectedLimit)}">`
+        + (rows || `<div class="wb-empty-list">${e(empty)}</div>`)
+        + `<span class="wb-source-count">已选 ${count} / ${selectedLimit} 项</span></div>`;
+    }
     if (item.catalog) {
       /* 选项在读取之后才知道（如 TTS 扩展目录），所以由分区声明一个
          取选项的函数；当前值不在目录里时补一条标注，避免选择被静默改写。 */
-      const entries = item.catalog() || {};
+      const entries = item.catalog(state.status) || {};
       if (value !== undefined && value !== null && !Object.hasOwn(entries, value)) {
         entries[value] = `${value}（暂不可用）`;
       }
       const options = Object.entries(entries).map(([key, text]) =>
         `<option value="${e(key)}" ${value === key ? "selected" : ""}>${e(text)}</option>`).join("");
       return `<select data-wb-field="${e(item.name)}"${dis}>${options}</select>`;
+    }
+    if (item.kind === "text" && item.input === "line-list") {
+      const words = parseStringList(value) || [];
+      const policy = item.listPolicy || {};
+      const limit = policy.maxItems || 80;
+      const rows = Math.max(4, Math.min(8, words.length + 1));
+      return `<div class="wb-line-list-editor"><textarea class="wb-line-list" data-wb-field="${e(item.name)}"`
+        + ` data-wb-line-list="${e(item.name)}" rows="${rows}" aria-label="${e(item.label || item.name)}"${dis}>`
+        + `${e(lineListText(words))}</textarea><div class="wb-word-tools"><span class="wb-line-list-count">${words.length} / ${limit} 项 · 每行一个，<newline> 表示换行</span></div></div>`;
     }
     if (item.kind === "text" && item.input === "word-list") {
       const words = parseStringList(value) || [];
@@ -319,7 +402,9 @@ window.CompanionWorkbench = (() => {
         "<span class=\"wb-keyword\"><span>" + e(wordLabel(word)) + "</span>"
         + "<button type=\"button\" data-wb-word-remove=\"" + e(item.name) + "\""
         + " data-wb-word-index=\"" + index + "\" aria-label=\"删除 "
-        + e(wordLabel(word)) + "\" title=\"删除\">" + icon("x") + "</button></span>").join("");
+        + e(wordLabel(word)) + "\" title=\"删除\""
+        + (words.length <= (policy.minItems || 0) ? " disabled" : "")
+        + ">" + icon("x") + "</button></span>").join("");
       const specialLabels = {newline: "换行", space: "空格", tab: "制表符"};
       const specialWords = {newline: "\n", space: " ", tab: "\t"};
       const specials = (policy.specials || []).map(special => {
@@ -330,6 +415,13 @@ window.CompanionWorkbench = (() => {
           + (locked || present || words.length >= limit ? " disabled" : "") + ">"
           + glyph + "<span>" + e(specialLabels[special] || special) + "</span></button>";
       }).join("");
+      const quickWords = (policy.quickAdd || []).map(word => {
+        const present = words.includes(word);
+        return "<button type=\"button\" class=\"wb-word-special\" data-wb-word-value=\""
+          + e(word) + "\" data-wb-word-field=\"" + e(item.name) + "\""
+          + (locked || present || words.length >= limit ? " disabled" : "") + ">"
+          + "<span>" + e(word) + "</span></button>";
+      }).join("");
       return "<div class=\"wb-word-editor\" data-wb-word-list=\"" + e(item.name) + "\">"
         + "<div class=\"wb-keywords\" role=\"group\" aria-label=\"" + e(item.label || item.name) + "\">"
         + chips + "<input class=\"wb-keyword-input\" type=\"text\" data-wb-word-input=\""
@@ -339,7 +431,10 @@ window.CompanionWorkbench = (() => {
         + "<button type=\"button\" class=\"wb-keyword-add\" data-wb-word-add=\"" + e(item.name) + "\""
         + (locked || words.length >= limit ? " disabled" : "") + ">"
         + icon("plus") + "<span>添加</span></button></div>"
-        + "<div class=\"wb-word-tools\">" + specials + "<span>" + words.length + " / " + limit
+        + "<div class=\"wb-word-tools\">" + specials
+        + (quickWords ? "<span class=\"wb-word-tools-label\">" + e(policy.quickAddLabel || "常用分段词")
+          + "</span>" + quickWords : "")
+        + "<span>" + words.length + " / " + limit
         + "</span></div></div>";
     }
     if (item.kind === "text" && item.input === "replacement-list") {
@@ -395,6 +490,81 @@ window.CompanionWorkbench = (() => {
         + ">" + icon("plus") + "<span>添加</span></button><button type=\"button\" class=\"wb-word-special\""
         + " data-wb-order-natural=\"" + e(item.name) + "\"" + dis + ">" + icon("rotate-ccw") + "<span>恢复自然顺序</span></button></div></div>";
     }
+    /* 生日：日期选择 + 农历 + 「不确定年份」。选择器里用一个占位年份承载
+       「不确定」的月日；保存值始终是组成后的中文字符串。 */
+    if (item.kind === "text" && item.input === "date") {
+      const parts = parseBirthday(value);
+      const lunar = parts?.lunar || false;
+      const noYear = parts ? !parts.year : false;
+      const picker = parts
+        ? `${noYear ? "2000" : parts.year.padStart(4, "0")}-${parts.month.padStart(2, "0")}-${parts.day.padStart(2, "0")}`
+        : "";
+      return `<div class="wb-date" data-wb-date-group="${e(item.name)}">`
+        + `<input type="hidden" data-wb-field="${e(item.name)}" value="${e(value)}">`
+        + `<input type="date" data-wb-date="${e(item.name)}" data-wb-date-role="picker" value="${e(picker)}"`
+        + ` aria-label="${e(item.label || item.name)}日期"${dis}>`
+        + `<label class="wb-date-flag"><input type="checkbox" data-wb-date="${e(item.name)}"`
+        + ` data-wb-date-role="lunar"${lunar ? " checked" : ""}${dis}><span>农历</span></label>`
+        + `<label class="wb-date-flag"><input type="checkbox" data-wb-date="${e(item.name)}"`
+        + ` data-wb-date-role="noyear"${noYear ? " checked" : ""}${dis}><span>不确定年份</span></label></div>`;
+    }
+    /* 词条快选：固定候选 + 自定义输入。可见的文本框就是 data-wb-field，
+       候选只是往里填写；单击选中、再击清空（multi 模式为顿号清单的加入与移除）。 */
+    if (item.kind === "text" && item.input === "chips") {
+      const options = item.chipOptions?.options || [];
+      const multi = item.chipOptions?.mode === "multi";
+      const current = String(value ?? "").trim();
+      const parts = parseTagList(current);
+      const chips = options.map(option => {
+        const on = multi ? parts.includes(option) : current === option;
+        return `<button type="button" class="wb-chip-opt${on ? " is-on" : ""}"`
+          + ` data-wb-chip="${e(item.name)}" data-wb-chip-value="${e(option)}"${dis}>${e(option)}</button>`;
+      }).join("");
+      return `<div class="wb-chipset" data-wb-chipset="${e(item.name)}">`
+        + (chips ? `<div class="wb-chip-opts">${chips}</div>` : "")
+        + `<input type="text" data-wb-field="${e(item.name)}" value="${e(value)}"`
+        + ` aria-label="${e(item.label || item.name)}" placeholder="${e(item.chipOptions?.placeholder || "自定义…")}"${dis}></div>`;
+    }
+    /* 词条小片：从顿号清单里逐项增删（爱好、标志性表达这类自由清单）。 */
+    if (item.kind === "text" && item.input === "tags") {
+      const tags = parseTagList(value);
+      const max = item.chipOptions?.maxTags || 24;
+      const slips = tags.map((tag, index) =>
+        `<span class="wb-tag"><span>${e(tag)}</span>`
+        + `<button type="button" data-wb-tag-remove="${e(item.name)}" data-wb-tag-index="${index}"`
+        + ` aria-label="删除 ${e(tag)}" title="删除"${dis}>${icon("x")}</button></span>`).join("");
+      const count = Array.from(String(value ?? "")).length;
+      return `<div class="wb-tagset" data-wb-tagset="${e(item.name)}">`
+        + `<input type="hidden" data-wb-field="${e(item.name)}" value="${e(value)}">`
+        + `<div class="wb-tag-slips" role="list" aria-label="${e(item.label || item.name)}">`
+        + (slips || `<span class="wb-empty-list">尚未添加</span>`) + `</div>`
+        + `<div class="wb-tag-form"><input type="text" data-wb-tag-input="${e(item.name)}"`
+        + ` maxlength="${e(Math.min(item.maximumChars || 40, 40))}" aria-label="添加${e(item.label || "词条")}"`
+        + ` placeholder="输入后按 Enter"${dis || tags.length >= max ? " disabled" : ""}>`
+        + `<button type="button" class="wb-keyword-add" data-wb-tag-add="${e(item.name)}"`
+        + (dis || tags.length >= max ? " disabled" : "") + ">" + icon("plus") + "<span>添加</span></button></div>"
+        + (item.maximumChars != null
+          ? `<span class="wb-text-length${count > item.maximumChars ? " is-over-limit" : ""}" data-wb-counter="${e(item.name)}">${count} / ${e(item.maximumChars)} 字</span>` : "")
+        + `</div>`;
+    }
+    /* 台词气泡：口吻示例一句一行；每一句都是发给模型的样本。 */
+    if (item.kind === "text" && item.input === "quotes") {
+      const lines = parseQuoteLines(value).map(line => line.trim()).filter(Boolean);
+      const count = Array.from(String(value ?? "")).length;
+      const bubbles = lines.map((line, index) =>
+        `<div class="wb-quote"><span class="wb-quote-no" aria-hidden="true">${index + 1}</span>`
+        + `<textarea data-wb-quote-line="${e(item.name)}" rows="1" aria-label="${e(item.label || item.name)} 第 ${index + 1} 句"${dis}>${e(line)}</textarea>`
+        + `<button type="button" class="wb-quote-remove" data-wb-quote-remove="${e(item.name)}"`
+        + ` data-wb-quote-index="${index}" aria-label="删除第 ${index + 1} 句" title="删除这句"${dis}>${icon("x")}</button></div>`).join("");
+      return `<div class="wb-quotes" data-wb-quotes="${e(item.name)}">`
+        + `<input type="hidden" data-wb-field="${e(item.name)}" value="${e(value)}">`
+        + `<div class="wb-quote-list">${bubbles || `<span class="wb-empty-list">还没有示例；新增一句试试。</span>`}</div>`
+        + `<div class="wb-quote-tools"><button type="button" class="wb-keyword-add" data-wb-quote-add="${e(item.name)}"${dis}>`
+        + icon("plus") + "<span>新增一句</span></button>"
+        + (item.maximumChars != null
+          ? `<span class="wb-text-length${count > item.maximumChars ? " is-over-limit" : ""}" data-wb-counter="${e(item.name)}">${count} / ${e(item.maximumChars)} 字</span>` : "")
+        + `</div></div>`;
+    }
     if (item.kind === "text") {
       /* 记忆分区的整理时刻与时区是两个「文本」字段，但 textarea 既难读也难填：
          它们其实是 time 输入与 IANA 时区名。`inputs` 声明控件类型，
@@ -434,7 +604,7 @@ window.CompanionWorkbench = (() => {
     const locked = state.locked();
     /* 继承态：标签上显示被覆盖的幽灵值与实际生效值。 */
     let label = item.label || name;
-    if (inherited) {
+    if (inherited && container.presentation !== "journal") {
       const ghost = state.base?.[name];
       const shown = displayValue(item, ghost);
       const live = displayValue(item, value);
@@ -452,10 +622,10 @@ window.CompanionWorkbench = (() => {
     const visible = !item.visibleWhen || Object.entries(item.visibleWhen)
       .every(([field, expected]) => state.draft?.[field] === expected);
     return `<div class="wb-field${dirty}${inheritClass}" data-wb-row="${e(name)}"${visible ? "" : " hidden"}>`
-      + railMarkup(state, name, item, state.status?.provenance, container)
+      + (container.presentation === "journal" ? "" : railMarkup(state, name, item, state.status?.provenance, container))
       + `<div class="wb-field-main"><span class="wb-label">${label}</span>`
-      + (item.help ? `<p class="wb-help">${e(item.help)}</p>` : "")
-      + `<div class="wb-control">${controlMarkup(item, value, locked)}</div></div>`
+      + (item.help && container.presentation !== "journal" ? `<p class="wb-help">${e(item.help)}</p>` : "")
+      + `<div class="wb-control">${controlMarkup(item, value, locked, state)}</div></div>`
       + `<div class="wb-field-side">${chip}${reset}</div></div>`;
   }
 
@@ -463,11 +633,23 @@ window.CompanionWorkbench = (() => {
     const s = state;
     /* 分区可以把自己的字段分成若干逻辑段落（如「分段」「拟人」「语音」）。
        分组只是阅读顺序，不改变作用范围：整张卡仍然共用一个编辑令牌与一次保存。 */
-    const grouped = container.groups.length > 1;
+    const groups = state.visibleGroupIds
+      ? container.groups.filter(group => state.visibleGroupIds.has(group.id))
+      : container.groups;
+    const grouped = groups.length > 1;
+    const journal = container.presentation === "journal";
     const groupMarkup = (group, index) => {
       const names = group.fields.filter(name => container.fields[name]);
       if (!names.length) return "";
-      const rows = names.map(name => fieldMarkup(s, container, name)).join("");
+      let rows = names.map(name => fieldMarkup(s, container, name)).join("");
+      if (journal && container.group === "role_profile" && group.id === "identity") {
+        const identityFields = ["name", "gender", "birthday", "age", "species", "occupation"];
+        const emblem = Array.from(String(s.draft?.name || "").trim())[0] || "设";
+        rows = `<div class="wb-identity-card"><div class="wb-identity-photo" aria-hidden="true">${e(emblem)}</div>`
+          + `<div class="wb-identity-rows">${identityFields.filter(name => names.includes(name))
+            .map(name => fieldMarkup(s, container, name)).join("")}</div></div>`
+          + names.filter(name => !identityFields.includes(name)).map(name => fieldMarkup(s, container, name)).join("");
+      }
       /* 只有一段时不必重复标题。 */
       const heading = grouped && group.title
         ? `<h4 class="wb-group-head">${e(group.title)}</h4>` : "";
@@ -475,21 +657,29 @@ window.CompanionWorkbench = (() => {
          不显示的话，用户看到一排不起作用的开关却找不到原因。数据一直传到了这里
          （spec.sections 的 help 经 group.help 进来），只是渲染时被漏掉了。
          用与字段说明同一个 .wb-help 类，保持同一套排版。 */
-      const groupHelp = grouped && group.help
+      const groupHelp = !journal && grouped && group.help
         ? `<p class="wb-help">${e(group.help)}</p>` : "";
       return `<section class="wb-group" data-wb-group="${e(group.id || index)}">${heading}`
         + `${groupHelp}<div class="wb-fields">${rows}</div></section>`;
     };
-    const useSectionNavigation = grouped && container.groups.length <= container.navigationLimit;
-    const activeGroup = container.groups.find(group => group.id === state.activeGroupId)
-      || container.groups[0];
+    const useSectionNavigation = grouped && groups.length <= container.navigationLimit;
+    const activeGroup = groups.find(group => group.id === state.activeGroupId)
+      || groups[0];
     const blocks = useSectionNavigation
-      ? `<div class="wb-section-layout">
+      ? journal
+        ? `<div class="wb-section-panels">${groups.map((group, index) => {
+            const id = group.id || String(index);
+            return `<div class="wb-section-panel" id="${e(container.sectionTabPrefix)}panel-${e(id)}"
+                role="tabpanel" aria-labelledby="${e(container.sectionTabPrefix)}tab-${e(id)}"
+                data-wb-section-panel="${e(id)}"${id === activeGroup?.id ? "" : " hidden"}>
+              ${groupMarkup(group, index)}</div>`;
+          }).join("")}</div>`
+        : `<div class="wb-section-layout">
           <aside class="wb-section-sidebar">
             <div class="wb-section-nav-head"><span class="wb-section-nav-title">配置模块</span>
               <p class="wb-section-nav-note">保存会提交全部模块的改动</p></div>
             <nav class="wb-section-nav" role="tablist" aria-orientation="vertical" aria-label="${e(container.title)} 配置模块">
-            ${container.groups.map((group, index) => {
+            ${groups.map((group, index) => {
               const id = group.id || String(index);
               const active = id === activeGroup?.id;
               const changed = group.fields.filter(name => s.draft?.[name] !== s.base?.[name]
@@ -507,7 +697,7 @@ window.CompanionWorkbench = (() => {
             </nav>
           </aside>
           <div class="wb-section-panels">
-            ${container.groups.map((group, index) => {
+            ${groups.map((group, index) => {
               const id = group.id || String(index);
               const active = id === activeGroup?.id;
               return `<div class="wb-section-panel" id="${state.instanceId}-panel-${e(id)}"
@@ -518,15 +708,20 @@ window.CompanionWorkbench = (() => {
             }).join("")}
           </div>
         </div>`
-      : container.groups.map(groupMarkup).join("");
+      : groups.map(groupMarkup).join("");
     const body = s.status ? blocks
       : `<div class="wb-skeleton" role="status" aria-label="正在读取设置">`
         + `<div class="wb-skeleton-row"></div><div class="wb-skeleton-row"></div><div class="wb-skeleton-row"></div></div>`;
-    const legend = s.status && container.layers.length > 1
+    const legend = !journal && s.status && container.layers.length > 1
       ? `<div class="wb-rail-legend">${container.layers.map(layer =>
           `<b>${e(LAYER_SHORT_LABELS[layer] || layer)}</b>`).join("<span>·</span>")}`
         + `</div>` : "";
-    const scopeLabel = s.status
+     const pendingText = s.pending
+       ? (s.pendingReason
+         ? `保存结果尚未确认（${s.pendingReason}）。可能已经写入；核对会沿用同一个操作标识，不会重复保存。`
+         : "保存结果尚未确认。可能已经写入；核对会沿用同一个操作标识，不会重复保存。")
+       : "";
+     const scopeLabel = s.status
       ? (container.scopeNote || (s.status.scope === "role" ? "安装与角色"
         /* 默认写窗口、但角色层同样可写的组（技能领域、日记与作息）：值是角色共享的，
            只有本会话覆盖才落在窗口层，所以不能只标「当前会话」。
@@ -535,13 +730,14 @@ window.CompanionWorkbench = (() => {
         : (s.status.layers || []).includes("role") ? "角色共享 · 本会话可覆盖" : "当前会话"))
       : "";
     const apply = s.status?.apply_mode === "next_task" ? "下一个任务生效" : "立即生效";
-    return `<section class="wb-card" data-wb-card="${e(container.group)}">`
-      + `<header class="wb-card-head"><div class="wb-card-copy">`
+    const heading = journal ? "" : `<header class="wb-card-head"><div class="wb-card-copy">`
       + `${titleAbove === container.title ? "" : `<h3>${e(container.title)}</h3>`}${container.note ? `<p>${e(container.note)}</p>` : ""}</div>`
       + (scopeLabel ? `<span class="wb-scope">${e(scopeLabel)} · ${e(apply)}</span>` : "")
-      + `</header><div class="wb-card-body">`
-      + (s.pending ? `<div class="wb-pending"><p>上次保存结果未确认，请核对。</p>`
-          + `<button type="button" class="button small" data-wb-action="retry"${s.busy ? " disabled" : ""}>核对原保存结果</button></div>` : "")
+      + `</header>`;
+    return `<section class="wb-card${journal ? " wb-journal" : ""}" data-wb-card="${e(container.group)}">`
+      + heading + `<div class="wb-card-body">`
+       + (s.pending ? `<div class="wb-pending"><p>${e(pendingText)}</p>`
+           + `<button type="button" class="button small" data-wb-action="retry"${s.busy ? " disabled" : ""}>核对原保存结果</button></div>` : "")
       + legend + body
       + `<div class="wb-actions">`
       + `<button type="button" class="wb-save${s.busy ? " is-busy" : ""}${s.savedState || ""}"`
@@ -555,11 +751,14 @@ window.CompanionWorkbench = (() => {
         ? `<button type="button" class="button" data-wb-action="inherit"${s.locked() ? " disabled" : ""}>全部恢复继承</button>`
         : "")
       + `<span class="wb-actions-note">${e(s.dirty() ? "有未保存的改动" : "与已保存一致")}</span>`
+      + (journal && scopeLabel ? `<span class="wb-scope">${e(scopeLabel)}</span>` : "")
       + `</div></div></section>`;
   }
 
-  function noticeMarkup(state) {
-    if (!state.notice) return "";
+   function noticeMarkup(state) {
+     /* 未确认保存已经有一个带操作按钮的待核对块；顶部再画同一句失败提示，
+        用户会误以为发生了两次保存问题。真正的原因放进待核对块，保留一个入口。 */
+     if (!state.notice || state.pending) return "";
     const tone = state.bad ? " is-error" : state.ok ? " is-ok" : "";
     return `<div class="wb-notice${tone}" role="status" aria-live="polite">`
       + `${icon(state.bad ? "alert-circle" : state.ok ? "check-circle-2" : "info")}`
@@ -571,9 +770,10 @@ window.CompanionWorkbench = (() => {
     const {
       group, title, note = "", labels = {}, helps = {}, choices = {}, sections = null,
       catalogs = {}, rows = {}, inputs = {}, suggestions = {}, segmentedChoices = [],
-      visibility = {}, listFields = {}, navigationLimit = 8,
+      visibility = {}, listFields = {}, chipOptions = {}, navigationLimit = 8,
+      presentation = "", sectionTabPrefix = "", initialSection = null,
       mount: mountPoint, endpoint, order = null, pollMs = 0, query = null,
-      audit = null, onStatus = null,
+      audit = null, onStatus = null, scopeKey: scopeKeyOverride = null,
       /* 分组用一层继承链，但「值是谁共享的」不一定等于链上有没有角色层：
          主动联系偏好还有关系层，卡片右上角要说清这一点，所以允许分区声明自己的
          生效范围文案；不声明时仍按链自动判断。 */
@@ -582,7 +782,7 @@ window.CompanionWorkbench = (() => {
          令牌字段与重置字段也各有叫法。这些在 spec 里声明，不一处分叉一份内核。
          `resetKey` 默认不发送：只有真的支持恢复继承的分区才声明它，
          否则多带一个字段会被严格校验的分区直接拒掉。 */
-      valuesKey = "settings", savePath = "/configure",
+      valuesKey = "settings", savePath = "/configure", requestSection = null,
       tokenKey = "edit_token", sendTokenKey = null, resetKey = null,
       /* 字段名在读取侧与写入侧可以不同：记忆分区读短名 `enabled`、
          写长名 `memory.enabled`（后端 `_normalize_patch` 按 field_id 查表，
@@ -595,15 +795,18 @@ window.CompanionWorkbench = (() => {
        总有一侧拼错——读取静默落空（invalid_response），或保存被后端拒掉。 */
     const writeTokenKey = sendTokenKey || tokenKey;
     const state = {
-      status: null, draft: null, base: null, pending: null,
+       status: null, draft: null, base: null, pending: null, pendingReason: "",
       busy: false, loading: false, denied: false, stale: false,
       notice: "", bad: false, ok: false, savedState: "", ticket: 0,
       drawRails: true, container: null, timer: null,
-      instanceId: `wb-${++instanceSequence}`, activeGroupId: null, resetFields: [],
+      instanceId: `wb-${++instanceSequence}`, activeGroupId: initialSection, resetFields: [],
+      visibleGroupIds: null,
     };
     /* 被显式「恢复继承」的字段：保存时要作为 reset_to_inherit 发出去，
        而不是留一份与继承值相同的显式副本。 */
     let resets_ = [];
+    let autoRecoveryKey = "";
+    let autoRecoveryTimer = null;
 
     const locked = () => state.busy || state.loading || !!state.pending || !state.status || state.denied;
     const dirty = () => !!state.draft && !!state.base
@@ -611,10 +814,16 @@ window.CompanionWorkbench = (() => {
     state.locked = locked;
     state.dirty = dirty;
 
-    const storageKey = () => {
-      const identity = window.CompanionProduct?.identity?.() || {};
-      return STORE + JSON.stringify([identity.installation_id, identity.operator_id, group]);
-    };
+     const storageKey = () => {
+       const identity = window.CompanionProduct?.identity?.() || {};
+       let scope = "";
+       try {
+         scope = typeof scopeKeyOverride === "string" && scopeKeyOverride
+           ? scopeKeyOverride : typeof window.CompanionProduct?.scopeKey === "function"
+             ? String(window.CompanionProduct.scopeKey() || "") : "";
+       } catch (_) {}
+       return STORE + JSON.stringify([identity.installation_id, identity.operator_id, scope, group]);
+     };
     const savePending = () => {
       try {
         if (state.pending) sessionStorage.setItem(storageKey(), JSON.stringify(state.pending));
@@ -626,10 +835,37 @@ window.CompanionWorkbench = (() => {
         const value = JSON.parse(sessionStorage.getItem(storageKey()));
         if (value && typeof value.operation_key === "string" && value.operation_key
             && typeof value.edit_token === "string" && value.edit_token.length === 64
-            && value.changes && Object.keys(value.changes).length) return value;
+            && value.changes && Object.keys(value.changes).length) {
+          const restored = requestSection ? {...value, section: group} : {...value};
+          if (typeof restored.pending_reason === "string") {
+            restored.pending_reason = restored.pending_reason.slice(0, 512);
+          } else {
+            delete restored.pending_reason;
+          }
+          return restored;
+        }
       } catch {}
       return null;
     };
+
+    function scheduleAutoRecovery(operationKey, ticket = state.ticket) {
+      if (!operationKey || state.pending?.operation_key !== operationKey || autoRecoveryKey === operationKey) return;
+      if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
+      autoRecoveryKey = operationKey;
+      autoRecoveryTimer = setTimeout(() => {
+        autoRecoveryTimer = null;
+        if (ticket !== state.ticket || state.pending?.operation_key !== operationKey
+            || state.busy || state.loading || state.denied) return;
+        void save(true);
+      }, 400);
+    }
+
+    function clearAutoRecovery(operationKey) {
+      if (autoRecoveryKey !== operationKey) return;
+      if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
+      autoRecoveryTimer = null;
+      autoRecoveryKey = "";
+    }
 
     /* 容器形状：字段顺序、契约、继承链、本次写入层 */
     function buildContainer(status) {
@@ -651,6 +887,8 @@ window.CompanionWorkbench = (() => {
         if (segmentedChoices.includes(name)) fields[name].segmented = true;
         if (visibility[name]) fields[name].visibleWhen = {...visibility[name]};
         if (listFields[name]) fields[name].listPolicy = {...listFields[name]};
+        /* 词条快选的候选与模式（single/multi）：候选只是往 data-wb-field 里填值。 */
+        if (chipOptions[name]) fields[name].chipOptions = {...chipOptions[name]};
       }
       /* 段落：spec.sections 声明 [{id, title, help, fields}]。
          没声明时退化成一段，标题留空——单段不强加小标题。
@@ -675,12 +913,19 @@ window.CompanionWorkbench = (() => {
         ? status.layers : ["installation", "role", "window"];
       return {
         group, title, note, order: names, fields, layers, groups, scopeNote, navigationLimit,
+        presentation, sectionTabPrefix,
         writeLayer: layers[layers.length - 1],
         /* 只有声明了 resetKey 的分区才提供「全部恢复继承」：
            没有这条协议的分区点了会写出错误请求。 */
         resettable: Boolean(resetKey),
         drawRails: state.drawRails,
       };
+    }
+
+    function refreshCatalogs() {
+      if (!state.status || !state.container) return;
+      state.container = buildContainer(state.status);
+      paint();
     }
 
     async function api(method, path, body, query) {
@@ -705,10 +950,15 @@ window.CompanionWorkbench = (() => {
           method === "GET" ? bridge.apiGet(route, query || body) : bridge.apiPost(route, body),
           new Promise((_, reject) => {timer = setTimeout(() => reject(error("bridge_timeout")), 15000);}),
         ]);
-        const wrapped = ["ok", "error"].includes(response?.status) ? response
-          : ["ok", "error"].includes(response?.data?.status) ? response.data : null;
+        const wrapped = isEnvelope(response) ? response : isEnvelope(response?.data) ? response.data : null;
         if (wrapped?.status === "error") throw error(codeOf(wrapped) || "invalid_response", true);
-        const value = wrapped ? wrapped.data : response;
+        let value = wrapped ? wrapped.data : response;
+        /* Some Dashboard bridge versions leave one anonymous {data: ...} wrapper. */
+        if (!wrapped && response && typeof response === "object" && !Array.isArray(response)
+            && !hasOwn(response, "status") && hasOwn(response, "data")
+            && response.data && typeof response.data === "object" && !Array.isArray(response.data)) {
+          value = response.data;
+        }
         if (!value || typeof value !== "object" || Array.isArray(value)) throw error("invalid_response");
         return value;
       } finally { clearTimeout(timer); }
@@ -740,6 +990,8 @@ window.CompanionWorkbench = (() => {
         setTimeout(() => rails.forEach(node => node.classList.remove("is-drawing")), 900);
       }
       window.lucide?.createIcons({nodes: root.querySelectorAll("[data-lucide]")});
+      /* 台词气泡的 textarea 按内容自动长高；重绘后统一量一次。 */
+      growQuotes(root);
     }
 
     function focusSection(id) {
@@ -749,10 +1001,39 @@ window.CompanionWorkbench = (() => {
 
     function selectSection(id, focus = false) {
       const groups = state.container?.groups || [];
-      if (!groups.some(group => group.id === id) || state.activeGroupId === id) return;
+      if (presentation === "journal" && !state.container) {
+        state.activeGroupId = id;
+        return;
+      }
+      if (!groups.some(group => group.id === id)
+          || (state.visibleGroupIds && !state.visibleGroupIds.has(id))
+          || state.activeGroupId === id) return;
       state.activeGroupId = id;
+      if (presentation === "journal") {
+        const panels = mountPoint()?.querySelectorAll?.("[data-wb-section-panel]") || [];
+        for (const panel of panels) panel.hidden = panel.dataset.wbSectionPanel !== id;
+        return;
+      }
       paint();
       if (focus) focusSection(id);
+    }
+
+    function setVisibleGroups(ids, preferredId = "") {
+      const requested = Array.isArray(ids) ? new Set(ids.map(String)) : null;
+      state.visibleGroupIds = requested?.size ? requested : null;
+      const groups = state.container?.groups || [];
+      const visible = state.visibleGroupIds
+        ? groups.filter(group => state.visibleGroupIds.has(group.id)) : groups;
+      if (visible.length) {
+        if (!visible.some(group => group.id === state.activeGroupId)) {
+          state.activeGroupId = visible.some(group => group.id === preferredId)
+            ? preferredId : visible[0].id;
+        }
+      } else if (!groups.length && preferredId) {
+        state.activeGroupId = preferredId;
+      }
+      if (state.container) paint();
+      return true;
     }
 
     function onSectionKeydown(event) {
@@ -760,6 +1041,12 @@ window.CompanionWorkbench = (() => {
       if (wordInput && event.key === "Enter" && !event.isComposing) {
         event.preventDefault();
         addWord(wordInput.dataset.wbWordInput, wordInput.value);
+        return;
+      }
+      const tagInput = event.target.closest?.("[data-wb-tag-input]");
+      if (tagInput && event.key === "Enter" && !event.isComposing) {
+        event.preventDefault();
+        addTag(tagInput.dataset.wbTagInput, tagInput.value);
         return;
       }
       const replacementFrom = event.target.closest?.("[data-wb-replacement-from]");
@@ -856,22 +1143,84 @@ window.CompanionWorkbench = (() => {
 
     function onInput(event) {
       const el = event.target;
+      /* Native choice controls emit `input` before `change`. Repainting here
+         removes the active radio before its change event reaches this owner. */
+      if (event.type === "input" && (el?.type === "radio" || el?.type === "checkbox")) return;
+      /* 生日与台词气泡的辅助控件：先把它们的改动翻译回 data-wb-field 的字符串，
+         再走下面同一条通用路径（草稿、脏标记、计数全部复用）。 */
+      if (el.dataset?.wbDate) { composeDateField(el.dataset.wbDate); return; }
+      if (el.dataset?.wbQuoteLine !== undefined) {
+        el.style.height = "auto";
+        el.style.height = `${el.scrollHeight}px`;
+        composeQuotes(el.dataset.wbQuoteLine);
+        return;
+      }
       const name = el.dataset?.wbField;
       if (!name || !state.draft || !state.container?.fields[name]) return;
       const item = state.container.fields[name];
+      if (item.input === "source-checklist" && el.type === "checkbox") {
+        const control = el.closest(".wb-source-picker");
+        const baseId = el.dataset.wbSourceBase;
+        const docKbId = el.dataset.wbSourceDocument;
+        if (el.checked && baseId) {
+          [...(control?.querySelectorAll("[data-wb-source-document]") || [])]
+            .filter(input => input.dataset.wbSourceDocument === baseId)
+            .forEach(input => { input.checked = false; });
+        } else if (el.checked && docKbId) {
+          const base = [...(control?.querySelectorAll("[data-wb-source-base]") || [])]
+            .find(input => input.dataset.wbSourceBase === docKbId);
+          if (base) base.checked = false;
+        }
+        const options = [...(control?.querySelectorAll("[data-wb-source-id]:checked") || [])];
+        const maximum = Number(state.draft.source_limit || 16);
+        if (options.length > maximum) {
+          el.checked = false;
+          state.notice = `最多读取 ${maximum} 个来源。`;
+          state.bad = true; state.ok = false;
+          paint();
+          return;
+        }
+        const raw = options.map(input => input.dataset.wbSourceId).join("\n");
+        state.draft[name] = raw;
+        state.savedState = ""; state.ok = false;
+        const row = el.closest(".wb-field");
+        if (row) row.classList.toggle("is-dirty", state.base && raw !== state.base[name]);
+        const count = control?.querySelector(".wb-source-count");
+        if (count) count.textContent = `已选 ${options.length} / ${maximum} 项`;
+        return;
+      }
       const raw = item.kind === "bool" ? el.checked
         : el.tagName === "SELECT" ? coerceChoice(item, el.value)
-          : item.kind === "text" ? el.value
+          : item.kind === "text" && item.input === "line-list" ? JSON.stringify(parseLineList(el.value))
+            : item.kind === "text" ? el.value
             : fromDisplay(item, el.valueAsNumber);
       state.draft[name] = raw;
       state.savedState = "";
       state.ok = false;
       const affectsVisibility = Object.values(state.container.fields)
         .some(field => field.visibleWhen && Object.hasOwn(field.visibleWhen, name));
-      if (affectsVisibility) { paint(); return; }
+      if (affectsVisibility) {
+        const restoreChoiceFocus = el.type === "radio" || el.type === "checkbox";
+        paint();
+        if (restoreChoiceFocus) {
+          const next = [...(mountPoint()?.querySelectorAll?.("[data-wb-field]") || [])]
+            .find(control => control.dataset.wbField === name
+              && (el.type !== "radio" || String(control.value) === String(raw)));
+          next?.focus?.({preventScroll: true});
+        }
+        return;
+      }
       /* 局部更新：不重绘整卡，避免输入框失去焦点。 */
       const row = el.closest(".wb-field");
       if (row) row.classList.toggle("is-dirty", state.base && raw !== state.base[name]);
+      if (item.input === "chips") refreshChipset(name);
+      if (row && item.input === "line-list") {
+        const words = parseStringList(raw) || [];
+        const policy = item.listPolicy || {};
+        const count = row.querySelector(".wb-line-list-count");
+        if (count) count.textContent = `${words.length} / ${policy.maxItems || 80} 项 · 每行一个，<newline> 表示换行`;
+        el.setAttribute("aria-invalid", String(!valid(item, raw)));
+      }
       if (row && item.maximumChars != null) {
         const count = Array.from(String(raw ?? "")).length;
         const counter = row.querySelector("[data-wb-counter]");
@@ -913,12 +1262,37 @@ window.CompanionWorkbench = (() => {
         if (value !== undefined) addWord(specialWord.dataset.wbWordField, value);
         return;
       }
+      const quickWord = event.target.closest("[data-wb-word-value]");
+      if (quickWord) {
+        addWord(quickWord.dataset.wbWordField, quickWord.dataset.wbWordValue);
+        return;
+      }
       const addReplacementButton = event.target.closest("[data-wb-replacement-add]");
       if (addReplacementButton) { addReplacement(addReplacementButton.dataset.wbReplacementAdd); return; }
       const removeReplacementButton = event.target.closest("[data-wb-replacement-remove]");
       if (removeReplacementButton) {
         removeReplacementAt(removeReplacementButton.dataset.wbReplacementRemove,
           Number(removeReplacementButton.dataset.wbReplacementIndex));
+        return;
+      }
+      const chipOption = event.target.closest("[data-wb-chip]");
+      if (chipOption) { applyChipOption(chipOption.dataset.wbChip, chipOption.dataset.wbChipValue); return; }
+      const tagAdd = event.target.closest("[data-wb-tag-add]");
+      if (tagAdd) {
+        const input = tagAdd.closest(".wb-tag-form")?.querySelector("[data-wb-tag-input]");
+        if (input) addTag(tagAdd.dataset.wbTagAdd, input.value);
+        return;
+      }
+      const tagRemove = event.target.closest("[data-wb-tag-remove]");
+      if (tagRemove) {
+        removeTagAt(tagRemove.dataset.wbTagRemove, Number(tagRemove.dataset.wbTagIndex));
+        return;
+      }
+      const quoteAdd = event.target.closest("[data-wb-quote-add]");
+      if (quoteAdd) { addQuote(quoteAdd.dataset.wbQuoteAdd); return; }
+      const quoteRemove = event.target.closest("[data-wb-quote-remove]");
+      if (quoteRemove) {
+        removeQuote(quoteRemove.dataset.wbQuoteRemove, Number(quoteRemove.dataset.wbQuoteIndex));
         return;
       }
       const orderStart = event.target.closest("[data-wb-order-start]");
@@ -976,6 +1350,11 @@ window.CompanionWorkbench = (() => {
       const policy = item.listPolicy || {};
       const word = policy.trim ? String(rawWord ?? "").trim() : String(rawWord ?? "");
       if (!word.length) return;
+      if (word.length > (policy.maxLength || 200)) {
+        state.notice = `每个词条最多 ${policy.maxLength || 200} 个字符。`;
+        state.bad = true; state.ok = false; paint();
+        return;
+      }
       const words = parseStringList(state.draft[name]) || [];
       const duplicate = policy.unique === "casefold"
         ? words.some(value => value.toLocaleLowerCase() === word.toLocaleLowerCase())
@@ -1000,6 +1379,7 @@ window.CompanionWorkbench = (() => {
       if (!item || item.input !== "word-list") return;
       const words = parseStringList(state.draft[name]) || [];
       if (!Number.isInteger(index) || index < 0 || index >= words.length) return;
+      if (words.length <= ((item.listPolicy || {}).minItems || 0)) return;
       const [removed] = words.splice(index, 1);
       updateWordList(name, words, `已移除“${wordLabel(removed)}”。`, false);
     }
@@ -1096,6 +1476,168 @@ window.CompanionWorkbench = (() => {
       if (focusSelector) mountPoint()?.querySelector(focusSelector)?.focus?.();
     }
 
+    /* === 轻结构文本的编辑翻译 === */
+    /* 生日：辅助控件（日期/农历/不确定年份）→ 组成字符串写回隐藏的 data-wb-field。
+       原值是无法解析的自由文本且尚未选日期时不碰它，避免一句“春天出生”被清掉。 */
+    function composeDateField(name) {
+      if (!state.draft || locked()) return;
+      const group = mountPoint()?.querySelector(`[data-wb-date-group="${name}"]`);
+      if (!group) return;
+      const field = group.querySelector("[data-wb-field]");
+      if (!field) return;
+      const item = state.container?.fields[name];
+      if (!item || item.input !== "date") return;
+      const picker = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(
+        group.querySelector('[data-wb-date-role="picker"]')?.value || "");
+      const lunar = Boolean(group.querySelector('[data-wb-date-role="lunar"]')?.checked);
+      const noYear = Boolean(group.querySelector('[data-wb-date-role="noyear"]')?.checked);
+      const parts = picker || parseBirthday(field.value);
+      if (!parts) return;
+      field.value = birthdayText(parts, lunar, noYear || !parts.year);
+      fireInput(field);
+    }
+    /* 词条快选：single 模式单击选中、再击清空；multi 模式维护顿号清单。 */
+    function applyChipOption(name, option) {
+      if (!state.draft || locked()) return;
+      const item = state.container?.fields[name];
+      if (!item || item.input !== "chips") return;
+      const line = mountPoint()?.querySelector(`[data-wb-chipset="${name}"] [data-wb-field]`);
+      if (!line) return;
+      const current = String(line.value ?? "").trim();
+      let next;
+      if (item.chipOptions?.mode === "multi") {
+        const parts = parseTagList(current);
+        const index = parts.indexOf(option);
+        if (index >= 0) parts.splice(index, 1); else parts.push(option);
+        next = parts.join("、");
+      } else {
+        next = current === option ? "" : option;
+      }
+      line.value = next;
+      refreshChipset(name);
+      fireInput(line);
+    }
+    function refreshChipset(name) {
+      const set = mountPoint()?.querySelector(`[data-wb-chipset="${name}"]`);
+      if (!set) return;
+      const item = state.container?.fields[name];
+      const value = String(set.querySelector("[data-wb-field]")?.value ?? "").trim();
+      const parts = parseTagList(value);
+      set.querySelectorAll("[data-wb-chip]").forEach(button => {
+        const on = item?.chipOptions?.mode === "multi"
+          ? parts.includes(button.dataset.wbChipValue)
+          : value === button.dataset.wbChipValue;
+        button.classList.toggle("is-on", on);
+      });
+    }
+    function setTagList(name, tags, notice, focusInput) {
+      if (!state.draft || locked()) return;
+      const field = mountPoint()?.querySelector(`[data-wb-tagset="${name}"] [data-wb-field]`);
+      const raw = tags.join("、");
+      if (field) field.value = raw;
+      state.draft[name] = raw;
+      resets_ = resets_.filter(item => item !== name);
+      state.notice = notice;
+      state.bad = false; state.ok = false; state.savedState = "";
+      paint();
+      if (focusInput) mountPoint()?.querySelector(`[data-wb-tag-input="${name}"]`)?.focus?.();
+    }
+    function addTag(name, rawTag) {
+      if (!state.draft || locked()) return;
+      const item = state.container?.fields[name];
+      if (!item || item.input !== "tags") return;
+      const tag = String(rawTag ?? "").trim();
+      if (!tag.length) return;
+      const tags = parseTagList(state.draft[name]);
+      const max = item.chipOptions?.maxTags || 24;
+      if (tags.includes(tag)) {
+        state.notice = "这一条已经在列表里。";
+        state.bad = false; state.ok = false; paint();
+        return;
+      }
+      if (tags.length >= max) {
+        state.notice = `最多添加 ${max} 项。`;
+        state.bad = true; state.ok = false; paint();
+        return;
+      }
+      tags.push(tag);
+      setTagList(name, tags, `已添加“${tag}”。`, true);
+    }
+    function removeTagAt(name, index) {
+      if (!state.draft || locked()) return;
+      const item = state.container?.fields[name];
+      if (!item || item.input !== "tags") return;
+      const tags = parseTagList(state.draft[name]);
+      if (!Number.isInteger(index) || index < 0 || index >= tags.length) return;
+      const [removed] = tags.splice(index, 1);
+      setTagList(name, tags, `已移除“${removed}”。`, false);
+    }
+    /* 台词气泡：直接在原位增删节点并重新编号，不整卡重绘；删除与改写都会
+       重新组成“一句一行”写回隐藏的 data-wb-field。 */
+    function renumberQuotes(set, label) {
+      set.querySelectorAll("[data-wb-quote]").forEach((node, index) => {
+        const no = node.querySelector(".wb-quote-no");
+        if (no) no.textContent = String(index + 1);
+        const remove = node.querySelector("[data-wb-quote-remove]");
+        if (remove) {
+          remove.dataset.wbQuoteIndex = String(index);
+          remove.setAttribute("aria-label", `删除第 ${index + 1} 句`);
+        }
+        const line = node.querySelector("[data-wb-quote-line]");
+        if (line) line.setAttribute("aria-label", `${label} 第 ${index + 1} 句`);
+      });
+    }
+    function growQuotes(scope) {
+      scope?.querySelectorAll?.("[data-wb-quote-line]")?.forEach(node => {
+        node.style.height = "auto";
+        node.style.height = `${node.scrollHeight}px`;
+      });
+    }
+    function composeQuotes(name) {
+      if (!state.draft || locked()) return;
+      const set = mountPoint()?.querySelector(`[data-wb-quotes="${name}"]`);
+      if (!set) return;
+      const field = set.querySelector("[data-wb-field]");
+      if (!field) return;
+      const lines = [...set.querySelectorAll("[data-wb-quote-line]")]
+        .map(node => node.value.replace(/\s*\n+\s*/g, " ").trim()).filter(Boolean);
+      field.value = lines.join("\n");
+      fireInput(field);
+    }
+    function addQuote(name) {
+      if (!state.draft || locked()) return;
+      const set = mountPoint()?.querySelector(`[data-wb-quotes="${name}"]`);
+      if (!set) return;
+      const item = state.container?.fields[name];
+      if (!item || item.input !== "quotes") return;
+      set.querySelector(".wb-empty-list")?.remove();
+      const list = set.querySelector(".wb-quote-list");
+      const node = document.createElement("div");
+      node.className = "wb-quote";
+      const index = list.querySelectorAll("[data-wb-quote-line]").length;
+      node.innerHTML = `<span class="wb-quote-no" aria-hidden="true">${index + 1}</span>`
+        + `<textarea data-wb-quote-line="${e(name)}" rows="1" aria-label="${e(item.label || item.name)} 第 ${index + 1} 句"></textarea>`
+        + `<button type="button" class="wb-quote-remove" data-wb-quote-remove="${e(name)}"`
+        + ` data-wb-quote-index="${index}" aria-label="删除第 ${index + 1} 句" title="删除这句">${icon("x")}</button>`;
+      list.appendChild(node);
+      window.lucide?.createIcons({nodes: node.querySelectorAll("[data-lucide]")});
+      const line = node.querySelector("textarea");
+      line.focus();
+    }
+    function removeQuote(name, index) {
+      if (!state.draft || locked()) return;
+      const set = mountPoint()?.querySelector(`[data-wb-quotes="${name}"]`);
+      if (!set) return;
+      const nodes = [...set.querySelectorAll("[data-wb-quote]")];
+      if (!Number.isInteger(index) || index < 0 || index >= nodes.length) return;
+      nodes[index].remove();
+      if (!set.querySelector("[data-wb-quote-line]")) {
+        set.querySelector(".wb-quote-list").innerHTML = `<span class="wb-empty-list">还没有示例；新增一句试试。</span>`;
+      }
+      renumberQuotes(set, state.container?.fields[name]?.label || name);
+      composeQuotes(name);
+    }
+
     /* 恢复继承：清掉本层的显式值，让低层重新生效。
        记进 resets_ 以便保存时发 reset_to_inherit，而不是写一份重复值。 */
     function revertField(name) {
@@ -1140,29 +1682,43 @@ window.CompanionWorkbench = (() => {
           /* 后端版本变了，之前标记的「恢复继承」所依赖的基线已不成立。 */
           if (changed) resets_ = resets_.filter(name => name in state.draft);
         }
-        state.stale = changed && !!state.draft;
-        if (!state.pending) state.pending = restorePending();
+        state.stale = false;
+        if (!state.pending) {
+          state.pending = restorePending();
+          state.pendingReason = state.pending?.pending_reason || "";
+        }
         state.denied = false; state.bad = false;
-        state.notice = state.stale
-          ? "当前配置已更新，草稿仍保留；核对后可继续编辑。"
-          : state.notice || "已读取当前设置。";
+        if (changed) state.notice = "已读取最新配置。";
         state.loading = false;
         paint();
         if (onStatus) onStatus(value);
+        if (state.pending) scheduleAutoRecovery(state.pending.operation_key, ticket);
         schedule();
       } catch (problem) {
         if (ticket !== state.ticket) return;
+        /* 读取失败后不能继续把上一份配置当成当前真实状态展示。保留用户尚未
+           提交的草稿，但把它标成需要核对；没有未保存改动时连草稿基线一起丢掉，
+           下一次成功读取会从服务端重新建立完整合同。 */
+        const preserveDraft = dirty();
+        state.status = null;
+        state.container = null;
+        if (!preserveDraft) {
+          state.draft = null;
+          state.base = null;
+          resets_ = [];
+        }
+        state.stale = preserveDraft;
         state.loading = false;
         state.denied = true; state.bad = true;
-        state.notice = localized(problem, "暂时无法读取。请检查宿主连接后重试。");
+        state.notice = localized(problem, "暂时无法读取。请重新读取角色状态后重试。");
         paint();
       }
     }
 
     async function save(retry) {
       if (state.busy || state.loading || state.denied) return;
-      if (!retry) {
-        if (state.pending) { state.notice = "先核对上次未确认的保存结果。"; paint(); return; }
+       if (!retry) {
+         if (state.pending) { state.notice = ""; state.bad = false; paint(); return; }
         if (state.stale) { state.notice = "配置已更新，请先核对当前版本。"; paint(); return; }
         const bad = Object.entries(state.draft).find(([name, value]) =>
           !valid(state.container.fields[name], value));
@@ -1198,6 +1754,7 @@ window.CompanionWorkbench = (() => {
         /* 存进 pending 的是**网线名**：重试要逐字节复用原请求，
            而草稿名与网线名可能不同（见 outbound）。 */
         state.pending = {
+          ...(requestSection ? {section: group} : {}),
           operation_key: crypto.randomUUID(),
           edit_token: state.status.edit_token,
           changes,
@@ -1206,21 +1763,29 @@ window.CompanionWorkbench = (() => {
         savePending();
       }
       if (!state.pending) return;
-      state.busy = true; state.bad = false; state.ok = false; state.notice = retry ? "正在核对原保存结果…" : "正在保存…";
+       state.busy = true; state.bad = false; state.ok = false;
+       if (!retry) state.pendingReason = "";
+       state.notice = retry ? "正在核对原保存结果…" : "正在保存…";
       paint();
       const request = {...state.pending};
       try {
-        const result = await api("POST", endpoint + savePath, {
+        const body = {
           operation_key: request.operation_key,
           [writeTokenKey]: request.edit_token,
           changes: request.changes,
           ...(resetKey ? {[resetKey]: request.reset_to_inherit || []} : {}),
-        });
+        };
+        /* /config/configure multiplexes groups and requires `section`; the
+           reply/expression/memory routes identify their group in the path and
+           reject unknown body keys. Keep the discriminator opt-in. */
+        if (requestSection) body.section = request.section || requestSection;
+        const result = await api("POST", endpoint + savePath, body);
         const receipt = result.result ?? result;
         if (typeof receipt?.operation_id !== "string" || typeof receipt?.replayed !== "boolean") {
           throw error("invalid_response");
         }
-        state.pending = null; savePending();
+         state.pending = null; state.pendingReason = ""; savePending();
+        clearAutoRecovery(request.operation_key);
         /* 保存确认同样按分区包裹，取本分区那一片；缺失时保留原状态。
            读取侧与发送侧的值字段名可以不同（见 valuesKey），这里也要按同一个名字回填，
            否则记忆分区保存成功后快照永远不刷新，下一次保存又会撞版本冲突。 */
@@ -1254,19 +1819,47 @@ window.CompanionWorkbench = (() => {
         if (!freshValues) void refresh();
         setTimeout(() => {
           if (state.savedState) { state.savedState = ""; paint(); }
-        }, result.result.replayed ? 1800 : 1300);
+        }, receipt.replayed ? 1800 : 1300);
       } catch (problem) {
         state.busy = false;
         state.bad = true;
         if (problem.confirmed) {
-          state.pending = null; savePending();
-          state.stale = true;
-          state.notice = localized(problem, "保存未通过。请读取当前设置后核对。");
+           state.pending = null; state.pendingReason = ""; savePending();
+           clearAutoRecovery(request.operation_key);
+           state.stale = true;
+           state.notice = localized(problem, "保存未通过。请读取当前设置后核对。");
         } else {
-          state.notice = "保存结果尚未确认。核对时会沿用原操作标识。";
-        }
+           state.pendingReason = localized(problem, "连接没有返回保存确认。");
+           state.pending.pending_reason = state.pendingReason.slice(0, 512);
+           savePending();
+           scheduleAutoRecovery(request.operation_key, state.ticket);
+           /* 待核对块会展示原因和唯一操作入口；顶部不要再重复一条红色提示。 */
+           state.notice = "";
+           state.bad = false;
+         }
         paint();
       }
+    }
+
+    async function saveField(name, value) {
+      if (state.pending) return {state: "unknown", message: state.pendingReason || state.pending.pending_reason || ""};
+      if (state.busy || state.loading || state.denied || !state.status) return {state: "unavailable"};
+      if (!state.draft || !state.container?.fields[name]) return {state: "unavailable"};
+      if (state.stale) return {state: "conflict", message: state.notice || "配置已更新，请先核对当前版本。"};
+      const otherChanges = Object.keys(state.draft).some(field => field !== name && state.draft[field] !== state.base?.[field]);
+      if (otherChanges || resets_.length) return {state: "dirty"};
+      state.draft[name] = value;
+      state.savedState = "";
+      state.ok = false;
+      state.notice = "";
+      state.bad = false;
+      if (state.base[name] === value) { paint(); return {state: "unchanged"}; }
+      await save();
+      if (state.ok) return {state: "saved"};
+      if (state.pending) return {state: "unknown", message: state.pendingReason || state.pending.pending_reason || ""};
+      if (state.stale) return {state: "conflict", message: state.notice || "配置已更新，请先核对当前版本。"};
+      if (state.bad) return {state: "rejected", message: state.notice || "设置未通过校验。"};
+      return {state: "unchanged", message: state.notice || "设置没有变化。"};
     }
 
     function schedule() {
@@ -1281,6 +1874,7 @@ window.CompanionWorkbench = (() => {
 
     function mount() {
       bind();
+      window.addEventListener("companion:catalogs-updated", refreshCatalogs);
       if (!window.CompanionProduct?.hosted?.()) {
         const root = mountPoint();
         if (root) root.innerHTML = `<p class="wb-notice">${icon("info")}`
@@ -1309,14 +1903,21 @@ window.CompanionWorkbench = (() => {
     function unmount() {
       state.ticket++;
       stop();
+      if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
+      autoRecoveryTimer = null;
+      autoRecoveryKey = "";
       unbind();
-      state.status = null; state.container = null; state.draft = null; state.base = null;
+      window.removeEventListener("companion:catalogs-updated", refreshCatalogs);
+       state.status = null; state.container = null; state.draft = null; state.base = null;
+       state.pendingReason = "";
       state.busy = false; state.loading = false; state.notice = ""; state.bad = false;
       state.ok = false; state.savedState = ""; state.drawRails = true;
+      state.visibleGroupIds = null;
       resets_ = [];
     }
 
-    return {mount, attach, unmount, refresh, state, save, stop, start: schedule};
+    return {group, mount, attach, unmount, refresh, state, save, saveField, stop, start: schedule,
+      selectSection, setVisibleGroups};
   }
 
   return {create, errors, LAYER_LABELS, contract, valid, toDisplay, fromDisplay, choiceText};

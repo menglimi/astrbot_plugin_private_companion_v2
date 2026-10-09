@@ -3,6 +3,7 @@
 import asyncio
 import base64
 from dataclasses import replace
+from datetime import timedelta
 from functools import partial
 import json
 import unittest
@@ -100,7 +101,7 @@ class AstrBotGroupForwardTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCa
         self.assertTrue(all(node["forwarded_by"] == "201" for node in nodes))
         self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_image_payloads", ())[0], 1)
 
-    async def test_group_forward_node_audio_video_reach_model_with_bounded_video_frames(self):
+    async def test_group_forward_audio_reaches_model_with_explicit_unread_video_fallback(self):
         views = []
         async def respond(payload, _):
             content = next(m["content"] for m in payload["messages"] if m["role"] == "user")
@@ -141,7 +142,11 @@ class AstrBotGroupForwardTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCa
                                if m["evidence"] and m["owner"].startswith("conversation.")] for view in views]
         self.assertEqual(evidence_materials[0], evidence_materials[1])
         self.assertEqual([part["type"] for part in views[0]].count("input_audio"), 1)
-        self.assertEqual([part["type"] for part in views[0]].count("image_url"), 4)
+        self.assertEqual([part["type"] for part in views[0]].count("image_url"), 0)
+        video_status = [m for m in json.loads(views[0][0]["text"])["materials"]
+                        if m["purpose"] == "current_video_narration"]
+        self.assertEqual(len(video_status), 1)
+        self.assertIn("尚未读取视频", video_status[0]["text"])
         video_material = next(json.loads(item.payload) for item in request.context.materials
                               if item.purpose.startswith("forwarded_video:"))
         self.assertEqual(video_material["audio_status"], "not_inspected")
@@ -193,6 +198,16 @@ class AstrBotGroupForwardTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCa
         self.assertIn("historical_metadata_only", user_text)
         self.assertNotIn("image_url", json.dumps(user_content, ensure_ascii=False))
         self.assertNotIn("input_audio", json.dumps(user_content, ensure_ascii=False))
+
+    async def test_group_context_drops_member_messages_older_than_configured_window(self):
+        await self.start_host()
+        await self.receive_parts([Plain("十三小时前的祸兽专名")], sender="201")
+        self.clock.advance(timedelta(hours=13))
+        context, batch = await self.receive_parts([Plain("普通掉半血吗？")], sender="202")
+        history = [json.loads(item.payload) for item in self.request(context, batch).context.materials
+                   if item.purpose == "group_conversation_history"]
+        self.assertNotIn("十三小时前的祸兽专名", json.dumps(history, ensure_ascii=False))
+        self.assertNotIn("普通掉半血吗？", json.dumps(history, ensure_ascii=False))
 
     async def test_withdrawal_revokes_group_forward_and_removes_it_from_later_history(self):
         await self.start_host()
@@ -343,13 +358,25 @@ class AstrBotGroupForwardTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCa
 
     async def test_forward_media_loaders_are_optional_and_account_change_during_capture_is_rejected(self):
         await self.start_host()
-        self.store_group_forward("1201", nodes=[node_raw(audios=(audio_bytes(),), videos=(video_bytes(),))])
         bridge = self.controller.session.bridge.groups
-        for options in ({"video_loader": load_native_video}, {"audio_loader": load_native_audio}):
+        for index, options in enumerate(({"video_loader": load_native_video}, {"audio_loader": load_native_audio})):
+            identifier = str(1201 + index)
+            self.store_group_forward(identifier, nodes=[node_raw(audios=(audio_bytes(),), videos=(video_bytes(),))])
             bridge.forward_loader = partial(read_group_forwards, reverse_api_type=type(self.api),
                 image_loader=load_native_image, **options)
-            result = await self.controller.receive_claimed(self.forward_event())
-            self.assertEqual(result.failure.code, "host_forward_unsupported")
+            result = await self.controller.receive_claimed(self.forward_event(identifier))
+            self.assertTrue(result.is_success, result.failure)
+            batch = result.unwrap()
+            await wait_for_batch(self.controller.session, batch)
+            context = TaskContext.restore(json.loads(self.app.messages.batch(batch)["context_json"]))
+            captured = self.input(context, batch)
+            self.assertEqual(type(captured).__name__, "InboundConversationEvent")
+            payload = json.dumps(self.native.provider.client.state.calls[-1][0], ensure_ascii=False)
+            self.assertIn("[合并转发不可用]", payload)
+        self.store_group_forward("1203", nodes=[node_raw(audios=(audio_bytes(),), videos=(video_bytes(),))])
+        baseline_sources = self.app.runtime.read_one("SELECT COUNT(*) FROM sources", ())[0]
+        baseline_inputs = self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0]
+        baseline_calls = len(self.native.provider.client.state.calls)
         connection = self.native.platform.client._wsr_api_clients["100"]
         async def changed(locator):
             captured = await load_native_audio(locator)
@@ -358,12 +385,13 @@ class AstrBotGroupForwardTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCa
         bridge.forward_loader = partial(read_group_forwards, reverse_api_type=type(self.api),
             image_loader=load_native_image, audio_loader=changed, video_loader=load_native_video)
         try:
-            result = await self.controller.receive_claimed(self.forward_event())
+            result = await self.controller.receive_claimed(self.forward_event("1203"))
         finally:
             self.native.platform.client._wsr_api_clients["100"] = connection
         self.assertEqual(result.failure.code, "host_forward_account_changed")
-        self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM sources", ())[0], 0)
-        self.assertEqual(self.native.provider.client.state.calls, [])
+        self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM sources", ())[0], baseline_sources)
+        self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0], baseline_inputs)
+        self.assertEqual(len(self.native.provider.client.state.calls), baseline_calls)
 
     async def test_group_forward_node_budget_rejects_before_loading_images_or_publishing(self):
         await self.start_host()
@@ -404,32 +432,39 @@ class AstrBotGroupForwardTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCa
             self.assertEqual(self.app.runtime.read_one(f"SELECT COUNT(*) FROM {table}", ())[0], 0)
         self.assertEqual(self.native.provider.client.state.calls, [])
 
-    async def test_group_forward_read_errors_are_sanitized_and_host_recovers(self):
+    async def test_group_forward_read_errors_keep_only_the_original_text_and_host_recovers(self):
         await self.start_host()
         original_action = self.api.call_action
-        cases = ((asyncio.TimeoutError("sensitive timeout detail"), "host_forward_timeout"),
-                 (RuntimeError("sensitive transport detail"), "host_forward_unavailable"))
+        cases = (asyncio.TimeoutError("sensitive timeout detail"), RuntimeError("sensitive transport detail"))
 
-        for index, (error, expected_code) in enumerate(cases):
+        for index, error in enumerate(cases):
             failed_id = str(1201 + index * 2)
             recovered_id = str(1202 + index * 2)
             self.store_group_forward(failed_id, nodes=[node_raw("暂时不可用", sender="999")])
             self.store_group_forward(recovered_id, nodes=[node_raw("恢复后的记录", sender="999")])
-            baseline_sources = self.app.runtime.read_one("SELECT COUNT(*) FROM sources", ())[0]
             baseline_inputs = self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0]
-            baseline_model_calls = len(self.native.provider.client.state.calls)
 
             async def fail_read(*_, _error=error, **__):
                 raise _error
 
             self.api.call_action = fail_read
             failed = await self.controller.receive_claimed(self.forward_event(failed_id))
-            self.assertFalse(failed.is_success)
-            self.assertEqual(failed.failure.code, expected_code)
-            self.assertNotIn(str(error), failed.failure.reason)
-            self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM sources", ())[0], baseline_sources)
-            self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0], baseline_inputs)
-            self.assertEqual(len(self.native.provider.client.state.calls), baseline_model_calls)
+            self.assertTrue(failed.is_success, failed.failure)
+            batch = failed.unwrap()
+            await wait_for_batch(self.controller.session, batch)
+            context = TaskContext.restore(json.loads(self.app.messages.batch(batch)["context_json"]))
+            captured = self.input(context, batch)
+            self.assertEqual(type(captured).__name__, "InboundConversationEvent")
+            self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0],
+                             baseline_inputs + 1)
+            request = self.request(context, batch)
+            material_text = "".join(item.payload for item in request.context.materials)
+            wire_text = json.dumps(self.native.provider.client.state.calls[-1][0], ensure_ascii=False)
+            self.assertNotIn(str(error), material_text)
+            self.assertNotIn("暂时不可用", material_text)
+            self.assertNotIn(str(error), wire_text)
+            self.assertNotIn("暂时不可用", wire_text)
+            self.assertIn("[合并转发不可用]", wire_text)
 
             self.api.call_action = original_action
             recovered = await self.controller.receive_claimed(self.forward_event(recovered_id))
@@ -437,6 +472,31 @@ class AstrBotGroupForwardTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCa
             await wait_for_batch(self.controller.session, recovered.unwrap())
 
         self.api.call_action = original_action
+
+    async def test_optional_read_failure_cannot_adopt_a_replaced_account_connection(self):
+        await self.start_host()
+        original_action = self.api.call_action
+        clients = self.native.platform.client._wsr_api_clients
+        connection = clients["100"]
+        for index, error in enumerate((asyncio.TimeoutError(), RuntimeError("lost transport"))):
+            identifier = str(1601 + index)
+            self.store_group_forward(identifier)
+
+            async def changed_then_failed(*_, _error=error, **__):
+                clients["100"] = object()
+                raise _error
+
+            self.api.call_action = changed_then_failed
+            try:
+                result = await self.controller.receive_claimed(self.forward_event(identifier))
+            finally:
+                clients["100"] = connection
+                self.api.call_action = original_action
+            self.assertFalse(result.is_success)
+            self.assertEqual(result.failure.code, "host_client_mismatch")
+            for table in ("conversation_inputs", "conversation_image_payloads", "sources", "assets"):
+                self.assertEqual(self.app.runtime.read_one(f"SELECT COUNT(*) FROM {table}", ())[0], 0)
+        self.assertEqual(self.native.provider.client.state.calls, [])
 
 
 if __name__ == "__main__":

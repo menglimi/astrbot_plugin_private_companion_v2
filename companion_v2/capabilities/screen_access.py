@@ -12,8 +12,8 @@ from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
 
-EXTENSION = "companion.screen"
-PACKAGE_ID = "astrbot_plugin_screen_companion"
+EXTENSION = "companion.screen.native"
+PACKAGE_ID = "astrbot_plugin_private_companion_v2.screen"
 PROVIDER = "screen.native"
 ACTION = "screen.capture"
 CAPABILITIES = ("screen.read", "screen.process")
@@ -86,6 +86,8 @@ class ScreenAccess:
             role_enabled = bool(selection and selection.enabled)
             read_consented = consents.get("screen.read", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
             process_consented = consents.get("screen.process", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
+            can_manage = self.policy.scope_access(operator, scope=self.context.scope,
+                action="capability.role.set", observed_at=at, core_only=True).is_success
             catalog = getattr(self.application, "external", None)
             invokable = bool(catalog and any(tool.action == ACTION for tool in catalog.catalog_for(self.context)))
             reason = ("capability_not_installed" if installed is None else
@@ -99,7 +101,8 @@ class ScreenAccess:
                 "installed": installed is not None, "active": active, "role_enabled": role_enabled,
                 "read_consented": read_consented, "process_consented": process_consented,
                 "consented": read_consented and process_consented,
-                "invokable": invokable, "reason": reason, "edit_token": self._token(state)}
+                "invokable": invokable, "can_manage": can_manage,
+                "reason": reason, "edit_token": self._token(state)}
 
     def configure(self, operator, command, at):
         self._access(operator, at, action="capability.consent.set")

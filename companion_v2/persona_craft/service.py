@@ -59,10 +59,13 @@ class PersonaWorkshop:
             "has_history": latest is not None,
         }
 
-    def save(self, snapshot: PersonaSnapshot, *, text, note, expected_current) -> dict:
+    def save(self, snapshot: PersonaSnapshot, *, text, note, expected_current, original_text=None) -> dict:
         """Append the proposed persona as a new version."""
+        source = snapshot.text if original_text is None else original_text
+        if type(source) is not str or len(source) > 30000:
+            raise TaskError("persona_draft_invalid", "the source snapshot must be text under 30000 characters")
         return self._append(snapshot, text=text, note=note, expected_current=expected_current,
-                            kind=DRAFT_KIND, restored_from=None)
+                            kind=DRAFT_KIND, restored_from=None, original_text=source)
 
     def restore(self, snapshot: PersonaSnapshot, *, version_id, note, expected_current) -> dict:
         """Revive an older version by appending a copy of its text.
@@ -74,9 +77,10 @@ class PersonaWorkshop:
             raise TaskError("persona_workshop_request_invalid", "the host persona must be read before the workshop")
         target = self.versions.version(self.owner(snapshot.persona_id), version_id)
         return self._append(snapshot, text=target.draft_text, note=note, expected_current=expected_current,
-                            kind=RESTORE_KIND, restored_from=target.version_id)
+                            kind=RESTORE_KIND, restored_from=target.version_id, original_text=snapshot.text)
 
-    def _append(self, snapshot: PersonaSnapshot, *, text, note, expected_current, kind, restored_from) -> dict:
+    def _append(self, snapshot: PersonaSnapshot, *, text, note, expected_current, kind, restored_from,
+                original_text) -> dict:
         if not isinstance(snapshot, PersonaSnapshot):
             raise TaskError("persona_workshop_request_invalid", "the host persona must be read before the workshop")
         expected = clean_expected_current(expected_current)
@@ -90,8 +94,8 @@ class PersonaWorkshop:
                 raise TaskError("persona_draft_conflict", "the draft moved on; read the newest version and retry")
             version = self.versions.append(
                 owner, draft_text=text, note=note,
-                # 原文与显示名都在保存这一刻从宿主读取，因此每版都留着当时的底稿。
-                original_text=snapshot.text, persona_name=snapshot.name, at=self.now(),
+                # 原文可为用户粘贴的工作来源；显示名和归属仍来自宿主所选人格。
+                original_text=original_text, persona_name=snapshot.name, at=self.now(),
                 kind=kind, restored_from=restored_from)
         return {"version": version, "current": version}
 

@@ -97,6 +97,10 @@ class MemoryWriter:
 
     def _validate_proposal(self, context, item, action):
         self.access.check(context, action)
+        if item.retention in ("session", "short"):
+            from companion_v2.conversation.reset import source_current
+            if any(not source_current(self.runtime, evidence.source) for evidence in item.evidence):
+                raise TaskError("conversation_context_reset", "temporary memory evidence precedes its window's reset")
         if item.retention == "protected":
             self.access.check(context, "memory.protect")
         for evidence in item.evidence:

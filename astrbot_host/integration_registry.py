@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from companion_v2.product import CORE_COMPONENTS, PRODUCT_DISPLAY_NAME, PRODUCT_ID, PRODUCT_VERSION
+from companion_v2.capabilities.models import CapabilityDesiredState
+from companion_v2.capabilities.repositories import CapabilityRepository
 from .integration_catalog import OPTIONAL_PROVIDERS
 
 
@@ -21,7 +23,8 @@ class IntegrationRegistry:
     def __init__(self, context: Any):
         self.context = context
 
-    def snapshot(self, *, host_status=None, application=None, terminated=False, native_issues=()):
+    def snapshot(self, *, host_status=None, application=None, native_extensions=None,
+                 terminated=False, native_issues=()):
         discovery = "available"
         try:
             stars = self.context.get_all_stars()
@@ -32,8 +35,12 @@ class IntegrationRegistry:
             # Match exact directory metadata, never a display-name substring.
             identifier = getattr(star, "root_dir_name", None) or getattr(star, "name", None)
             installed.setdefault(identifier, []).append(star)
-        providers = [self._provider(spec, installed.get(spec["plugin_id"], []), discovery, terminated)
-                     for spec in OPTIONAL_PROVIDERS]
+        providers = [
+            self._bundled_provider(spec, application, native_extensions, terminated)
+            if spec.get("owner") == "companion_v2" else
+            self._provider(spec, installed.get(spec["plugin_id"], []), discovery, terminated)
+            for spec in OPTIONAL_PROVIDERS
+        ]
         conflicts = {plugin_id for plugin_id, code in native_issues if code == "capability_descriptor_conflict"}
         for provider in providers:
             if provider["plugin_id"] in conflicts:
@@ -53,6 +60,64 @@ class IntegrationRegistry:
                         "installed_count": sum(p["installed"] for p in providers),
                         "missing_count": sum(p["integration_state"] == "missing" for p in providers)},
         }
+
+    @staticmethod
+    def _bundled_provider(spec, application, native_extensions, terminated):
+        item = {**spec, "owner": "companion_v2", "installed": False, "activated": True,
+                "version": PRODUCT_VERSION, "status_connected": True, "enabled": False,
+                "runtime_ready": False, "execution_owner": "astrbot_plugin_private_companion_v2",
+                "execution_integrated": True, "integration_state": "missing",
+                "reason": "尚未装配", "pages": [], "update_available": False,
+                "installed_package_version": None}
+        if terminated:
+            item.update(integration_state="stopped", reason="V2 宿主已停止")
+            return item
+        extension_id = spec["extension_id"]
+        declarations = [entry[0] for entry in getattr(native_extensions, "_entries", {}).values()
+                        if entry[0].descriptor.package.extension_id == extension_id]
+        current = bool(declarations and all(
+            native_extensions.current_declaration(declaration.host_tool_id) == declaration
+            for declaration in declarations))
+        item["runtime_ready"] = current
+        if declarations:
+            item["package_id"] = declarations[0].descriptor.package.package_id
+            item["version"] = declarations[0].descriptor.package.package_version
+        if not current:
+            item.update(integration_state="degraded", reason="V2 拓展执行器未就绪")
+            return item
+        runtime = getattr(application, "runtime", None)
+        if runtime is None:
+            item.update(integration_state="unknown", reason="V2 数据运行库尚未就绪")
+            return item
+        installation = CapabilityRepository(runtime).installation(extension_id=extension_id)
+        if not installation.is_success:
+            if installation.failure.code != "capability_not_installed":
+                item.update(integration_state="degraded", reason="拓展安装状态无法读取")
+            return item
+        installed = installation.unwrap()
+        same_package = bool(declarations and (installed.package_id, installed.package_version,
+            installed.artifact_hash) == (declarations[0].descriptor.package.package_id,
+            declarations[0].descriptor.package.package_version,
+            declarations[0].descriptor.package.artifact_hash))
+        item.update(installed=installed.desired_state is not CapabilityDesiredState.DISCARDED,
+                    enabled=installed.desired_state is CapabilityDesiredState.ACTIVE,
+                    installed_revision=installed.revision, desired_state=installed.desired_state.value,
+                    installed_package_version=installed.package_version)
+        if installed.desired_state is CapabilityDesiredState.DISCARDED:
+            item.update(integration_state="missing", reason="拓展已卸载；V2 数据保留，可重新装配")
+        elif not same_package:
+            update_available = installed.desired_state in (
+                CapabilityDesiredState.ACTIVE, CapabilityDesiredState.PAUSED,
+            )
+            item.update(integration_state="degraded", update_available=update_available,
+                reason="已装配内容与当前 V2 内置版不同；可同步内置版，拓展数据会保留")
+        elif installed.desired_state is CapabilityDesiredState.ACTIVE:
+            item.update(integration_state="connected", reason="V2 拓展已装配")
+        elif installed.desired_state is CapabilityDesiredState.PAUSED:
+            item.update(integration_state="disabled", reason="拓展已暂停")
+        else:
+            item.update(integration_state="degraded", reason="拓展正在移除")
+        return item
 
     @staticmethod
     def _provider(spec, matches, discovery, terminated):
@@ -166,6 +231,7 @@ class UnifiedCompanionExtensionAPI:
         session = controller.session or controller.last_session
         return controller.integration.snapshot(host_status=controller.status(),
             application=session.application if session else None, terminated=controller._terminated,
+            native_extensions=getattr(controller, "native_extensions", None),
             native_issues=getattr(getattr(controller, "native_extensions", None), "issues", ()))
 
     def status(self):

@@ -10,8 +10,8 @@ window.CompanionNativePerceptionPage = (() => {
     core_access_required:"当前账号没有管理权限。",
     dashboard_identity_required:"请从已登录的管理界面打开陪伴小屋。",
     contact_private_required:"这项设置只适用于私聊对象。",
-    staging_not_initialized:"请先在账号与会话加载 V2 运行实例。",
-    staging_host_terminated:"宿主已停止，请重新打开插件页面。",
+    staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
+    staging_host_terminated:"插件已停止，请重新打开插件页面。",
     bridge_timeout:"连接超时，原请求可能已保存；请核对后重试。",
     invalid_response:"配置数据不完整，请刷新核对。",
   };
@@ -21,36 +21,26 @@ window.CompanionNativePerceptionPage = (() => {
   const codeOf = wrapped => wrapped?.data?.code
     || (CODE.test(wrapped?.message || "") ? wrapped.message : "") || "";
   const newsSourceOptions = [
-    ["host", "宿主默认来源"],
+    ["host", "默认数据源"],
     ["disabled", "停用资讯源"],
     ["bilibili", "B 站动态"],
     ["rss", "RSS / Atom"],
     ["json", "HTTPS JSON"],
   ];
   const fields = {
-    environment:[
-      ["planning_timezone","角色日历时区","text","用于角色计划和天气地点的日期判断。"],
-      ["planning_annual_calendars","自定义年度日历","textarea","高级选项：仅在需要覆盖宿主日历时填写。"],
-      ["planning_weather_enabled","启用角色天气感知","bool","打开后，私聊询问天气时按需读取配置地点实况；日常计划也可参考。关闭后两者都不读取。"],
-      ["planning_weather_max_age_minutes","天气信息最长沿用（分钟）","number","5 至 120。超过这段时间的天气不再用于私聊回答或计划参考，避免沿用旧实况。"],
-      ["location_name","所在城市或区域","text","填写后可自动补齐坐标；已配置和风天气时，实况与预警都使用和风。"],
-      ["location_latitude","纬度（高级）","number","和风天气需要坐标；留空时由系统按地点解析。"],
-      ["location_longitude","经度（高级）","number","和风天气需要坐标；留空时由系统按地点解析。"],
-      ["location_alert_city","预警城市（可选）","text","需要精确匹配官方预警时填写。"],
-      ["location_alert_area","预警区域（可选）","text","与预警城市同时填写。"],
-    ],
+    environment:[],
     model:[
-      ["calendar_enabled","提供本地日期上下文","bool","仅陈述明确可核实的日历信息。"],
-      ["calendar_timezone","对话日期时区","text","使用 IANA 时区名称。"],
-      ["holiday_enabled","提供节假日与工作日","bool","识别中国大陆节假日、调休；日历库不可用时按周末判断。"],
-      ["holiday_country","节假日识别地区","select","当前提供中国大陆节假日表，或仅按周末区分。",[["CN","中国大陆"],["WEEKEND_ONLY","仅按周末识别"]]],
-      ["lunar_enabled","提供农历日期","bool","农历日期由本地历法换算，不需要联网。"],
-      ["automatic_solar_terms_enabled","提供节气日期","bool","启用后由宿主按年份查表；未装配节气表时不提供。"],
-      ["almanac_enabled","提供黄历宜忌","bool","只陈述由历法数据得出的宜忌，不据此推断吉凶。"],
-      ["platform_enabled","标明当前平台","bool","帮助模型区分消息来自哪个平台。"],
-      ["model_route_enabled","标明模型路由","bool","让模型知道当前任务的路由标识。"],
-      ["configured_modalities_enabled","标明已配置的输入模态","bool","仅说明能力配置；实际图像、语音和视频仍需真实输入与授权。"],
-      ["guidance","感知表达偏好","textarea","补充角色如何表达观察；不改变实际权限与工具结果。"],
+      ["calendar_enabled","提供当前日期信息","bool","只提供日期背景，不修改角色日程。"],
+      ["calendar_timezone","对话日期时区","text","IANA 时区名称。"],
+      ["holiday_enabled","提供节假日与工作日","bool","识别节假日与调休；无日历库时按周末判断。"],
+      ["holiday_country","节假日识别地区","select","",[["CN","中国大陆"],["WEEKEND_ONLY","仅按周末识别"]]],
+      ["lunar_enabled","提供农历日期","bool","本地换算，无需联网。"],
+      ["automatic_solar_terms_enabled","提供节气日期","bool","需要已安装节气表。"],
+      ["almanac_enabled","提供黄历宜忌","bool","仅提供历法数据中的宜忌。"],
+      ["platform_enabled","标明当前平台","bool",""],
+      ["model_route_enabled","标明模型路由","bool",""],
+      ["configured_modalities_enabled","标明已配置的输入模态","bool","不授予图像、语音或视频权限。"],
+      ["guidance","感知表达偏好","textarea","最多 2 KiB。"],
     ],
     news:[
       ["news_share_enabled","允许分享外部资讯","bool","只会考虑有来源、时间和链接的实际条目。"],
@@ -61,10 +51,18 @@ window.CompanionNativePerceptionPage = (() => {
       ["news_source_url","RSS / JSON 地址","text","仅在来源选择 RSS / Atom 或 HTTPS JSON 时填写地址。"],
     ],
   };
-  const locationFields = ["location_name","location_latitude","location_longitude","location_alert_city","location_alert_area"];
   let nodes = null, path = "", scope = "", status = null, drafts = {}, notices = {}, busy = false;
   let generation = 0, abort = null;
+  let refreshTimer = null;
   const subscribers = new Set();
+  /* 工作区会随路由卸载，已读取的配置与未提交的普通字段草稿按角色范围
+     留在当前页面内存。这里不写 localStorage，也不缓存天气凭据（本页没有
+     凭据字段）；宿主返回新 revision 后 merge 会自然替换对应快照。 */
+  const stateByScope = new Map();
+  const cacheKey = () => `${scope}:${path}`;
+  function rememberState() {
+    if (status) stateByScope.set(cacheKey(), {status, drafts});
+  }
   const active = ticket => ticket === generation && nodes?.environment?.isConnected && scope === product.scopeKey();
   const error = (code, confirmed = false) => Object.assign(new Error(errors[code] || "操作未完成，请刷新核对。"), {code, confirmed});
 
@@ -88,8 +86,8 @@ window.CompanionNativePerceptionPage = (() => {
       const response = await Promise.race([call, new Promise((_, reject) => {
         timer = setTimeout(() => reject(error("bridge_timeout")), 15000);
       })]);
-      const wrapped = ["ok","error"].includes(response?.status) ? response
-        : ["ok","error"].includes(response?.data?.status) ? response.data : null;
+      const wrapped = ["ok","error"].includes(response?.status) && response?.data !== undefined ? response
+        : ["ok","error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
       if (wrapped?.status === "error") throw error(codeOf(wrapped) || "invalid_response", true);
       const value = wrapped ? wrapped.data : response;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw error("invalid_response");
@@ -97,9 +95,15 @@ window.CompanionNativePerceptionPage = (() => {
     } finally { clearTimeout(timer); }
   }
   function checked(value) {
-    return ["environment","model","news"].every(section => value?.[section]?.settings
+    const environmentFields=["planning_timezone","planning_annual_calendars","planning_weather_enabled",
+      "planning_weather_location","planning_weather_max_age_minutes"];
+    return environmentFields.every(name=>typeof value?.environment?.settings?.[name]
+        ===(name==="planning_weather_enabled"?"boolean":name==="planning_weather_max_age_minutes"?"number":"string"))
+      &&value?.environment?.sources&&["model","news"].every(section => value?.[section]?.settings
+      &&(value.environment.sources.weather_provider === undefined
+        || typeof value.environment.sources.weather_provider === "string")
       && typeof value[section].edit_token === "string"
-      && fields[section].filter(([name]) => !name.startsWith("location_")).every(([name, , type]) =>
+      && fields[section].every(([name, , type]) =>
         typeof value[section].settings[name] === (type === "bool" ? "boolean" : type === "number" ? "number" : "string")));
   }
   function publicSnapshot() {
@@ -122,15 +126,23 @@ window.CompanionNativePerceptionPage = (() => {
         dates:typeof contact.important_dates === "string" ? contact.important_dates : "[]",
         lookaheadDays:Number.isInteger(contact.important_date_lookahead_days)
           ? contact.important_date_lookahead_days : 0,
-        timezone:contact.quiet_timezone || ""},
-      news:{ready:!!status.news.source?.ready, label:status.news.source?.label || "",
+        timezone:contact.quiet_timezone || "",
+        balanceAwarenessEnabled:contact.balance_awareness_enabled === true,
+        automaticAllowed:status.contact?.effective?.automatic_allowed === true},
+      news:{ready:!!status.news.source?.ready, assembled:!!(status.news.source?.assembled ?? status.news.source?.ready),
+        label:status.news.source?.label || "",
         sourceKind:status.news.source?.kind || contact.news_source_kind || "",
+        networkStatus:status.news.diagnostic?.network_status || "not_checked",
+        itemCount:Number(status.news.diagnostic?.item_count) || 0,
+        feedItems:Array.isArray(status.news.diagnostic?.items) ? status.news.diagnostic.items.slice(0, 32) : [],
         explorationEnabled:contact.web_exploration_enabled === true,
         explorationInterests:contact.web_exploration_interests || "",
         explorationIntervalHours:contact.web_exploration_min_interval_hours ?? null,
         explorationResultCount:contact.web_exploration_result_count ?? null,
         externalSelfLinkEnabled:contact.external_event_self_link_enabled === true,
+        lastAttemptAt:status.news.diagnostic?.last_attempt_at || "",
         lastCheckedAt:status.news.diagnostic?.last_checked_at || "",
+        lastSuccessAt:status.news.diagnostic?.last_success_at || status.news.diagnostic?.last_checked_at || "",
         failureCode:status.news.diagnostic?.failure?.code || ""},
     };
   }
@@ -140,20 +152,7 @@ window.CompanionNativePerceptionPage = (() => {
       try { listener(snapshot); } catch (_) {}
     }
   }
-  function values(section, data) {
-    const result = {...data.settings};
-    if (section === "environment") {
-      let location = {};
-      try { location = JSON.parse(result.planning_weather_location || "{}"); } catch (_) {}
-      if (!location || typeof location !== "object" || Array.isArray(location)) location = {};
-      result.location_name = location.name || "";
-      result.location_latitude = location.latitude ?? "";
-      result.location_longitude = location.longitude ?? "";
-      result.location_alert_city = location.alert_city || "";
-      result.location_alert_area = location.alert_area || "";
-    }
-    return result;
-  }
+  function values(_section, data) { return {...data.settings}; }
   function merge(next, force = "") {
     if (!checked(next)) throw error("invalid_response");
     status = next;
@@ -166,6 +165,7 @@ window.CompanionNativePerceptionPage = (() => {
         current.stale = true;
       }
     }
+    rememberState();
     publishStatus();
   }
   function field(section, spec, draft) {
@@ -175,7 +175,7 @@ window.CompanionNativePerceptionPage = (() => {
     if (type === "bool") return `<div class="perception-setting perception-setting-toggle"><span><strong>${label}</strong>${hint ? `<small>${hint}</small>` : ""}</span><label class="model-switch"><input ${common} type="checkbox" ${value ? "checked" : ""}><i></i></label></div>`;
     if (type === "select") return `<label class="perception-setting" for="${id}"><strong>${label}</strong><select ${common}>${(options || []).map(([option, text]) => `<option value="${esc(option)}" ${value === option ? "selected" : ""}>${esc(text)}</option>`).join("")}</select>${hint ? `<small>${hint}</small>` : ""}</label>`;
     const control = type === "textarea"
-      ? `<textarea ${common} rows="${name === "planning_annual_calendars" ? 5 : 3}" spellcheck="false">${esc(value)}</textarea>`
+      ? `<textarea ${common} rows="3" spellcheck="false">${esc(value)}</textarea>`
       /* 只有纬度经度容忍小数；其余整数字段必须 step=1，
          否则浏览器会放过 12.5 这类值，到后端才被拒。 */
       : `<input ${common} type="${type === "number" ? "number" : "text"}" value="${esc(value)}" ${type === "number" ? `step="${name.startsWith("location_") ? "any" : "1"}"` : 'autocomplete="off"'}>`;
@@ -184,45 +184,78 @@ window.CompanionNativePerceptionPage = (() => {
   function context(section) {
     if (section === "environment") {
       const sources = status.environment.sources || {};
-      return `<div class="native-perception-meta"><span>${sources.weather_ready ? "天气源已装配" : "天气源尚未就绪"}</span><span>${sources.alerts_ready ? "预警源已装配" : "预警源尚未就绪"}</span></div>`;
+      const providers = {qweather:"和风天气", "open-meteo":"Open-Meteo"};
+      const provider = providers[sources.weather_provider] || "自动选择";
+      return `<div class="native-perception-meta"><span>${sources.weather_ready ? `当前实况来源 · ${provider}` : "实况天气源尚未就绪"}</span><span>${sources.alerts_ready ? "官方预警源已就绪 · 和风天气" : "官方预警源尚未就绪 · 需和风凭据"}</span></div>`;
     }
-    if (section === "model") return '<p class="perception-note">下一轮对话生效。</p>';
+    if (section === "model" || section === "calendar") return "";
     const news = status.news, source = news.source || {};
     const diagnostic = news.diagnostic || {}, failure = diagnostic.failure || {};
-    const sourceText = source.ready ? `资讯源已装配 · ${esc(source.label || "未命名")}` : "资讯源尚未就绪";
-    const checkText = diagnostic.last_checked_at
-      ? `最近检查 ${esc(diagnostic.last_checked_at)} · ${Number(diagnostic.item_count) || 0} 条`
-      : "尚未完成检查";
-    const failureText = failure.code
-      ? `最近失败 ${esc(failure.code)}${failure.http_status ? ` · HTTP ${esc(failure.http_status)}` : ""}`
-      : "最近检查未报告错误";
-    return `<div class="native-perception-meta"><span>${sourceText}</span><span>${checkText}</span><span>${failureText}</span><span>${news.contact_enabled ? "主动联系总开关已开启" : "主动联系总开关已关闭"}</span><span>${news.automatic_enabled ? "后台联系已开启" : "后台联系已关闭"}</span></div><p class="perception-note">检查来源不会发送消息。</p><button class="button small" type="button" data-native-action="diagnose" data-native-section="news" ${busy ? "disabled" : ""}>检查来源</button>`;
+    const assembled = source.assembled ?? source.ready;
+    const sourceText = assembled ? `资讯源已装配 · ${esc(source.label || "未命名")}` : "资讯源未装配";
+    const networkStatus = diagnostic.network_status || (failure.code ? "failed"
+      : diagnostic.last_checked_at ? "succeeded" : assembled ? "not_checked" : "not_configured");
+    const checkText = networkStatus === "succeeded"
+      ? `网络检查通过 · ${esc(diagnostic.last_checked_at || "")} · ${Number(diagnostic.item_count) || 0} 条`
+      : networkStatus === "failed" ? `最近尝试失败${diagnostic.last_attempt_at ? ` · ${esc(diagnostic.last_attempt_at)}` : ""}`
+      : networkStatus === "not_configured" ? "网络状态：未配置资讯源" : "后台维护：等待首次同步 · 网络状态：尚未检查";
+    const successText = networkStatus === "failed" && diagnostic.last_checked_at
+      ? `上次成功检查 ${esc(diagnostic.last_checked_at)}`
+      : failure.code ? "最近检查未完成，请核对资讯来源与连接。" : "";
+    return `<div class="native-perception-meta"><span>${sourceText}</span><span>${checkText}</span>${successText ? `<span>${successText}</span>` : ""}<span>${news.contact_enabled ? "主动联系总开关已开启" : "主动联系总开关已关闭"}</span><span>${news.automatic_enabled ? "后台联系已开启" : "后台联系已关闭"}</span></div><p class="perception-note">检查来源不会发送消息。</p><button class="button small" type="button" data-native-action="diagnose" data-native-section="news" ${busy ? "disabled" : ""}>检查来源</button>`;
+  }
+  function feedMarkup(news) {
+    const diagnostic = news?.diagnostic || {}, items = Array.isArray(diagnostic.items) ? diagnostic.items.slice(0, 8) : [];
+    const label = news?.source?.label || "外部资讯源";
+    const isDaily = /AI\s*(早报|日报)|橘鸦/i.test(label);
+    const last = diagnostic.last_success_at || diagnostic.last_checked_at || "";
+    const lastText = last ? `最近同步 ${esc(last)}` : "等待后台首次同步";
+    const itemMarkup = items.length ? `<ol class="native-news-feed-list">${items.map(item => {
+      const published = typeof item.published_at === "string" ? item.published_at.slice(0, 16).replace("T", " ") : "日期待核对";
+      return `<li><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer"><strong>${esc(item.title || "未命名资讯")}</strong><span>${esc(item.source || label)} · ${esc(published)}</span><p>${esc(item.summary || "暂无摘要")}</p></a></li>`;
+    }).join("")}</ol>` : `<p class="memory-notice native-news-feed-empty">${diagnostic.network_status === "failed" ? "最近同步失败；后台会按间隔自动重试。" : "后台正在维护来源，首次同步完成后会在这里显示。"}</p>`;
+    return `<section class="native-news-feed" aria-label="已获取资讯"><header><div><span class="perception-section-index">PERSISTED FEED</span><h4>${isDaily ? "AI 日报" : "已获取资讯"}</h4><p>${esc(label)} · ${lastText} · 已保留 ${items.length} 条</p></div><span class="native-news-feed-state">后台自动维护</span></header>${itemMarkup}</section>`;
   }
   function renderSection(section) {
     const node = nodes?.[section]; if (!node) return;
-    if (!product.hosted()) { node.innerHTML = '<p class="memory-notice" role="status">未读取到宿主目录。</p><div class="native-perception-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button></div>'; return; }
+    if (!product.hosted()) { node.innerHTML = '<p class="memory-notice" role="status">角色与会话目录暂未读到。</p><div class="native-perception-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button></div>'; return; }
     if (!path) { node.innerHTML = '<p class="memory-notice">请选择有管理权限的私聊对象和角色。</p>'; return; }
     if (!status) {
       node.innerHTML = `<p class="memory-notice" role="status">${esc(notices.load || "正在读取当前配置…")}</p><button class="button small" type="button" data-native-action="refresh">重新读取</button>`;
       return;
     }
-    const draft = drafts[section], pending = !!draft.pending;
-    const message = draft.stale ? errors.configuration_revision_conflict : notices[section] || "";
-    if (section === "news") {
-      node.innerHTML = `${context(section)}<p class="perception-note">来源、资讯分享、网络探索和事件自关联设置在本面板下方统一编辑。</p><div class="native-perception-actions"><button class="button small" type="button" data-native-action="diagnose" data-native-section="news" ${busy ? "disabled" : ""}>${busy && notices.news ? "正在检查…" : "检查来源"}</button><button class="button small" type="button" data-native-action="refresh" ${busy ? "disabled" : ""}>刷新状态</button></div><p class="perception-save-status" role="status" aria-live="polite">${esc(message)}</p>`;
+    if (section === "environment") {
+      const settings=status.environment.settings||{};
+      let location={};
+      try {location=JSON.parse(settings.planning_weather_location||"{}");} catch (_) {}
+      if(!location||typeof location!=="object"||Array.isArray(location))location={};
+      node.innerHTML=`${context(section)}<div class="native-environment-summary"><dl>
+        <div><dt>角色所在地</dt><dd>${esc(location.name||"尚未设置")}</dd></div>
+        <div><dt>角色天气</dt><dd>${settings.planning_weather_enabled?"已开启":"已关闭"} · 同一角色的私聊共用</dd></div>
+        <div><dt>天气信息时效</dt><dd>${esc(settings.planning_weather_max_age_minutes)} 分钟</dd></div>
+      </dl>
+        <div class="native-perception-actions"><button class="button small" type="button" data-shell-furniture="calendar">打开日程与规划</button><button class="button small" type="button" data-native-action="refresh">刷新状态</button></div></div>`;
       return;
     }
-    const title=({environment:"角色环境",model:"对话感知",news:"资讯联系"})[section];
-    const formMarkup=`<form class="perception-settings-form native-perception-form" data-native-section="${section}">
+    const sourceSection=section==="calendar"?"model":section;
+    const draft = drafts[sourceSection], pending = !!draft.pending;
+    const message = draft.stale ? errors.configuration_revision_conflict : notices[sourceSection] || "";
+    if (section === "news") {
+      node.innerHTML = `${context(section)}${feedMarkup(status.news)}<div class="native-perception-actions"><button class="button small" type="button" data-native-action="refresh" ${busy ? "disabled" : ""}>刷新状态</button></div><p class="perception-save-status" role="status" aria-live="polite">${esc(message)}</p>`;
+      return;
+    }
+    const specs=sourceSection==="model"?(section==="calendar"?fields.model.slice(0,7):fields.model.slice(7)):fields[section];
+    const title=section==="calendar"?"日期与历法":({model:"来源标识与表达偏好"})[section];
+    const formMarkup=`<form class="perception-settings-form native-perception-form" data-native-section="${sourceSection}">
       <div class="perception-settings-heading"><div><h4>${title}</h4></div>
       <button class="button small" type="submit" ${busy ? "disabled" : ""}>${pending ? "核对原保存" : "保存设置"}</button></div>
-      <fieldset class="perception-settings-grid native-perception-fieldset" ${pending || busy ? "disabled" : ""}>${section === "environment" ? `<label class="perception-setting perception-setting-primary" for="native-environment-location_name"><strong>所在城市或区域</strong><input id="native-environment-location_name" data-native-field="location_name" type="text" value="${esc(draft.values.location_name)}" autocomplete="address-level2" placeholder="输入城市、区县或镇街"><small>用于定位天气。已配置和风天气时，实况与官方预警都来自和风；不会读取精确 GPS。</small></label><div class="perception-setting perception-setting-toggle"><span><strong>启用角色天气感知</strong><small>私聊询问天气时按需读取；日常计划也会参考。仅使用这里配置的地点。</small></span><label class="model-switch"><input data-native-field="planning_weather_enabled" type="checkbox" ${draft.values.planning_weather_enabled ? "checked" : ""}><i></i></label></div><details class="perception-advanced-settings"><summary>高级设置</summary><div class="perception-settings-grid">${fields[section].filter(spec => !["location_name","planning_weather_enabled"].includes(spec[0])).map(spec => field(section, spec, draft)).join("")}</div></details>` : fields[section].map(spec => field(section, spec, draft)).join("")}</fieldset>
+      <fieldset class="perception-settings-grid native-perception-fieldset" ${pending || busy ? "disabled" : ""}>${specs.map(spec => field(sourceSection, spec, draft)).join("")}</fieldset>
       <p class="perception-save-status ${draft.stale ? "native-perception-warning" : ""}" role="status" aria-live="polite">${esc(message)}</p>
-      <div class="native-perception-actions"><button class="button small" type="button" data-native-action="refresh" ${busy ? "disabled" : ""}>刷新</button>${draft.stale ? `<button class="button small" type="button" data-native-action="rebase" data-native-section="${section}" ${busy ? "disabled" : ""}>采用最新版本</button>` : ""}</div>
+      <div class="native-perception-actions"><button class="button small" type="button" data-native-action="refresh" ${busy ? "disabled" : ""}>刷新</button>${draft.stale ? `<button class="button small" type="button" data-native-action="rebase" data-native-section="${sourceSection}" ${busy ? "disabled" : ""}>采用最新版本</button>` : ""}</div>
     </form>`;
-    node.innerHTML = `${context(section)}${section === "environment" ? formMarkup : `<details class="perception-settings-disclosure" ${section === "model" ? "open" : ""}><summary><span>${title}</span><small>${fields[section].length} 项配置</small></summary>${formMarkup}</details>`}`;
+    node.innerHTML = `${context(section)}<details class="perception-settings-disclosure" open><summary><span>${title}</span></summary>${formMarkup}</details>`;
   }
-  function render() { for (const section of Object.keys(fields)) renderSection(section); }
+  function render() { for (const section of ["environment","calendar","model","news"]) renderSection(section); }
   async function load() {
     if (!path || busy) return;
     const ticket = ++generation;
@@ -235,8 +268,16 @@ window.CompanionNativePerceptionPage = (() => {
       render();
     } }
     catch (failure) { if (active(ticket)) {
-      notices.load = failure.message || "读取失败，请重试。";
-      if (status) for (const section of Object.keys(fields)) notices[section] = notices.load;
+      notices.load = errors[failure.code || failure.message] || "读取失败，请重试。";
+      /* 读取失败时清掉旧状态，避免把上一份环境、模型和资讯配置继续画成
+         当前生效值。输入过但尚未保存的草稿留在内存，并在下一次成功读取时由
+         merge() 按令牌核对；没有 status 时 publicSnapshot() 也会明确 ready:false。 */
+      status = null;
+      stateByScope.delete(cacheKey());
+      for (const draft of Object.values(drafts)) {
+        if (draft && (draft.touched?.size || draft.pending)) draft.stale = true;
+      }
+      for (const section of Object.keys(fields)) notices[section] = notices.load;
       publishStatus();
       render();
     } }
@@ -247,43 +288,10 @@ window.CompanionNativePerceptionPage = (() => {
   function patch(section, draft) {
     const changes = {};
     for (const [name, , type] of fields[section]) {
-      if (name.startsWith("location_") || !draft.touched.has(name)) continue;
+      if (!draft.touched.has(name)) continue;
       let value = draft.values[name];
       if (type === "number") value = Number(value);
       if (value !== draft.original[name]) changes[name] = value;
-    }
-    if (section === "environment") {
-      if (changes.planning_timezone && !timezone(changes.planning_timezone)) throw new Error("请填写有效的角色日历时区。");
-      if (Object.hasOwn(changes, "planning_annual_calendars") && changes.planning_annual_calendars.trim()) {
-        let annual; try { annual = JSON.parse(changes.planning_annual_calendars); } catch (_) { throw new Error("年度日历需要有效的 JSON 数组。"); }
-        if (!Array.isArray(annual) || annual.length < 1 || annual.length > 3) throw new Error("年度日历请提供 1 至 3 个年份的数据。");
-      }
-      if (locationFields.some(name => draft.touched.has(name))) {
-        const source = draft.values, name = String(source.location_name).trim();
-        const latitude = String(source.location_latitude).trim(), longitude = String(source.location_longitude).trim();
-        const city = String(source.location_alert_city).trim(), area = String(source.location_alert_area).trim();
-        let location = "";
-        if (name || latitude || longitude || city || area) {
-          if (!name) throw new Error("请填写城市或区域名称。");
-          if ((latitude && !Number.isFinite(Number(latitude))) || (longitude && !Number.isFinite(Number(longitude)))
-              || (latitude && (Number(latitude) < -90 || Number(latitude) > 90))
-              || (longitude && (Number(longitude) < -180 || Number(longitude) > 180)))
-            throw new Error("纬度和经度需要成对填写，或全部留空由系统自动解析。");
-          if (!!latitude !== !!longitude) throw new Error("纬度和经度需要成对填写，或全部留空由系统自动解析。");
-          if (!!city !== !!area) throw new Error("预警城市和区域请同时填写，或同时留空。");
-          location = JSON.stringify({name, ...(latitude ? {latitude:Number(latitude), longitude:Number(longitude)} : {}),
-            ...(city ? {alert_city:city, alert_area:area} : {})});
-        }
-        if (location !== draft.original.planning_weather_location) changes.planning_weather_location = location;
-      }
-      if ((changes.planning_weather_enabled ?? draft.original.planning_weather_enabled)
-          && !(changes.planning_weather_location ?? draft.original.planning_weather_location))
-        throw new Error("启用天气前，请先设置角色地点。");
-      /* 沿用时长后端限定 5–120 的整数；这里判一次，避免整份设置被后端退回。 */
-      if (Object.hasOwn(changes, "planning_weather_max_age_minutes")) {
-        const age = changes.planning_weather_max_age_minutes;
-        if (!Number.isInteger(age) || age < 5 || age > 120) throw new Error("天气信息最长沿用时间应为 5 至 120 分钟的整数。");
-      }
     }
     if (section === "model") {
       if (changes.calendar_timezone && !timezone(changes.calendar_timezone)) throw new Error("请填写有效的对话日期时区。");
@@ -326,7 +334,7 @@ window.CompanionNativePerceptionPage = (() => {
         draft.pending = null;
         if (failure.code === "configuration_revision_conflict") draft.stale = true;
       }
-      notices[section] = failure.message || "保存未完成，请核对原请求。";
+      notices[section] = errors[failure.code || failure.message] || "保存未完成，请核对原请求。";
     } finally { if (active(ticket)) { busy = false; render(); } }
   }
   async function diagnose() {
@@ -340,7 +348,7 @@ window.CompanionNativePerceptionPage = (() => {
       merge(response.status);
       notices.news = response.diagnostic?.failure ? "检查完成，来源返回错误。" : "检查完成。";
     } catch (failure) {
-      if (active(ticket)) notices.news = failure.message || "来源检查失败，请重试。";
+      if (active(ticket)) notices.news = errors[failure.code || failure.message] || "来源检查失败，请重试。";
     } finally { if (active(ticket)) { busy = false; render(); } }
   }
   function rebase(section) {
@@ -359,8 +367,14 @@ window.CompanionNativePerceptionPage = (() => {
     try { path = product.hosted() && product.role()?.perception_native_api
       ? relative(product.role().perception_native_api) : ""; }
     catch (failure) { path = ""; notices.load = failure.message; }
-    for (const section of Object.keys(fields)) {
-      const node = nodes?.[section]; if (!node) continue;
+    const cached = path ? stateByScope.get(cacheKey()) : null;
+    if (cached?.status && cached?.drafts) {
+      status = cached.status;
+      drafts = cached.drafts;
+      publishStatus();
+    }
+    for (const [nodeName, section] of [["environment","environment"],["calendar","model"],["model","model"],["news","news"]]) {
+      const node = nodes?.[nodeName]; if (!node) continue;
       node.addEventListener("input", event => {
         const input = event.target.closest("[data-native-field]");
         if (!input || !drafts[section]) return;
@@ -384,9 +398,30 @@ window.CompanionNativePerceptionPage = (() => {
       }, {signal:abort.signal});
     }
     render(); load();
+    /* 后台同步独立于页面操作：来源抓取完成后，当前打开的页面也应自动看到
+       最新日报/资讯，不能要求用户手动刷新整个拓展页。页面隐藏时暂停轮询，
+       重新回到前台后立即读取一次。 */
+    const schedule = typeof window.setInterval === "function" ? window.setInterval.bind(window)
+      : (typeof setInterval === "function" ? setInterval : null);
+    if (schedule && typeof document !== "undefined") refreshTimer = schedule(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (busy) return;
+      load();
+    }, 30000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && !busy) load();
+    };
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function")
+      document.addEventListener("visibilitychange", onVisibility, {signal:abort.signal});
   }
   function unmount() {
     generation++; abort?.abort(); abort = null;
+    if (refreshTimer !== null) {
+      const cancel = typeof window.clearInterval === "function" ? window.clearInterval.bind(window)
+        : (typeof clearInterval === "function" ? clearInterval : null);
+      if (cancel) cancel(refreshTimer);
+      refreshTimer = null;
+    }
     nodes = null; path = ""; scope = ""; status = null; drafts = {}; notices = {}; busy = false;
     publishStatus();
   }

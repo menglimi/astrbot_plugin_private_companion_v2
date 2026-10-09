@@ -10,8 +10,9 @@ from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.identity_policy.private_domain import source_ref
 from companion_v2.memory.models import AtomRef
 from companion_v2.memory.pinned import visible_fact
-from companion_v2.role_work.growth.configuration import INFLUENCE_NOTES, skill_settings
-from .planning_config import configured_annual_calendars, configured_weather_location, configured_weather_max_age, planning_values
+from companion_v2.role_work.growth.configuration import INFLUENCE_NOTES, skill_settings, skills_enabled
+from .planning_config import (SCHEDULE_MODE_ORCHESTRATED, configured_annual_calendars,
+                              configured_weather_location, configured_weather_max_age, planning_values)
 from .weather_material import planning_weather_material
 
 
@@ -55,12 +56,17 @@ def planning_calendar_context(at, end, zone, annual_calendars=()):
                 "years": sorted(item.year for item in annual_calendars), "days": days, "partial": partial}}
 
 
-def capture(planner, context, instruction, mode, slot, occurrence=None, *, weather=None, weather_location=None):
+def capture(planner, context, instruction, mode, slot, occurrence=None, *, weather=None, weather_location=None,
+            manual=False, refresh=False):
     app, at = planner.app, planner.tasks.now()
     app.calendar.access.check(context, "calendar.write", at=at)
     settings = planning_values(app.role_state.settings(context)[0])
-    if not settings["planning_enabled"] or not settings["calendar_enabled"]:
-        raise TaskError("planning_disabled", "enable automatic planning and calendar access first")
+    if not settings["calendar_enabled"]:
+        raise TaskError("calendar_disabled", "enable the role-wide calendar switch in schedule and planning settings")
+    if not manual and not settings["planning_enabled"]:
+        raise TaskError("planning_disabled", "enable automatic planning in schedule and planning settings")
+    if settings["schedule_simulation_mode"] != SCHEDULE_MODE_ORCHESTRATED:
+        raise TaskError("planning_mode_inactive", "automatic planning is inactive in continuous schedule mode")
     zone = ZoneInfo(settings["planning_timezone"])
     end = (datetime.combine(at.astimezone(zone).date() + timedelta(days=1), time(), zone)
            if mode == "daily" else at + timedelta(days=settings["planning_horizon_days"]))
@@ -142,8 +148,11 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
         reader = app.role_growth_context.reader
         candidates = reader.candidates(context, at)
         coverage["goals_partial"] = candidates.truncated or bool(candidates.skipped)
+        use_skills = skills_enabled(app.runtime, context)
         for candidate in candidates.items[:8]:
             record = reader.ledger.record(candidate.reference["growth_id"], owner=reader.owner(context))
+            if record.kind.value == "skill" and not use_skills:
+                continue
             value = json.loads(candidate.payload)
             for key in ("description", "progress_note"):
                 if len(value[key]) > 512:
@@ -180,8 +189,18 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
                 experience_refs.append(reference)
         except TaskError:
             coverage["memory_partial"] = True
+    refresh_plans = []
+    if manual and refresh and mode == "daily":
+        today = at.astimezone(zone).date()
+        for item in inventory["items"]:
+            basis = item.get("planning") or {}
+            if (item["state"] == "accepted" and item["kind"] == "role_plan"
+                    and basis.get("mode") == "daily"
+                    and datetime.fromisoformat(item["schedule"]["anchor"]).astimezone(zone).date() == today):
+                refresh_plans.append({"id": item["id"], "revision": item["revision"]})
+    refresh_ids = {item["id"] for item in refresh_plans}
     existing = [(item["title"], item["schedule"]["anchor"], item["duration_minutes"])
-                for item in inventory["items"] if item["state"] != "cancelled"]
+                for item in inventory["items"] if item["state"] != "cancelled" and item["id"] not in refresh_ids]
     material = {"mode": mode, "now": at.isoformat(), "end": end.isoformat(),
         "timezone": settings["planning_timezone"], "max_items": settings["planning_max_items"],
         "planning_preferences": settings["planning_prompt"], "calendar_context": calendar_context,
@@ -194,7 +213,7 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
     return {"context": context, "instruction": instruction, "mode": mode, "slot": slot, "at": at, "end": end,
         "settings": settings, "sources": tuple(sources), "calendar_snapshot": digest(inventory),
         "goal_refs": goal_refs, "calendar_refs": calendar_refs, "memory_refs": memory_refs, "growth_refs": growth_refs,
-        "experience_refs": experience_refs, "existing": existing,
+        "experience_refs": experience_refs, "existing": existing, "refresh_plans": refresh_plans,
         "occurrence": occurrence, "material": material}
 
 

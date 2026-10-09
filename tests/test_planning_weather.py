@@ -10,6 +10,7 @@ from companion_v2.agenda.planning import planning_profile
 from companion_v2.agenda.planning_config import (DEFAULTS as PLANNING_DEFAULTS, MAXIMUMS as PLANNING_MAXIMUMS,
     WEATHER_MAX_AGE_MINIMUM, WeatherLocation, configured_weather_location, configured_weather_max_age)
 from companion_v2.agenda.weather_material import MAX_AGE, planning_weather_material
+from companion_v2.agenda.weather_reading import WeatherReading
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.execution.models import TaskError
@@ -92,6 +93,43 @@ class WeatherContractTests(unittest.TestCase):
         for rejected in (0, WEATHER_MAX_AGE_MINIMUM - 1, 121, True, "45", None):
             with self.subTest(value=rejected):
                 self.assertEqual(configured_weather_max_age({"planning_weather_max_age_minutes": rejected}), MAX_AGE)
+
+
+class WeatherReadingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_failure_keeps_only_a_still_valid_observation_as_stale(self):
+        at = [NOW]
+
+        class Port:
+            calls = 0
+            fail = False
+
+            async def fetch(self, location):
+                self.calls += 1
+                if self.fail:
+                    raise OSError("offline")
+                return WeatherSnapshot("open-meteo", location.name, at[0], 22, "小雨", 75, 12, ())
+
+        port, reader = Port(), WeatherReading()
+        live = await reader.read(port, LOCATION, max_age=timedelta(minutes=30), now=lambda: at[0])
+        self.assertEqual(live["state"], "live")
+        self.assertEqual(port.calls, 1)
+        at[0] += timedelta(minutes=6)
+        port.fail = True
+        stale = await reader.read(port, LOCATION, max_age=timedelta(minutes=30), now=lambda: at[0])
+        self.assertEqual(stale["state"], "stale")
+        self.assertEqual(stale["condition"], "小雨")
+        self.assertEqual(port.calls, 2)
+        at[0] += timedelta(seconds=10)
+        limited = await reader.read(port, LOCATION, max_age=timedelta(minutes=30), now=lambda: at[0], force=True)
+        self.assertTrue(limited["refresh_throttled"])
+        self.assertEqual(port.calls, 2)
+        at[0] += timedelta(seconds=21)
+        refreshed = await reader.read(port, LOCATION, max_age=timedelta(minutes=30), now=lambda: at[0], force=True)
+        self.assertFalse(refreshed.get("refresh_throttled", False))
+        self.assertEqual(port.calls, 3)
+        at[0] += timedelta(minutes=25)
+        expired = await reader.read(port, LOCATION, max_age=timedelta(minutes=30), now=lambda: at[0])
+        self.assertEqual(expired["state"], "unavailable")
 
 
 class OpenMeteoPortTests(unittest.IsolatedAsyncioTestCase):

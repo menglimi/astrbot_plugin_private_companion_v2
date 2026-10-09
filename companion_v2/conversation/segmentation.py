@@ -12,8 +12,8 @@ from .segment_control import LLM_SEGMENT_MARKER, controlled_parts, protected_ran
 from .text_processing import literal_ranges
 
 
-DEFAULT_SPLIT_WORDS = ("。", "？", "！", "~", "…", "“", "\n")
-DEFAULT_RULE_REGEX = r".*?[。？！~…\n]+|.+$"
+DEFAULT_SPLIT_WORDS = ("。", "？", "！", "~", "～", "?", ".", "!", ";", "；", "……", "）", "“", "，", "…")
+DEFAULT_RULE_REGEX = r"(?<=[。！？!?…~～])\s*|\n+"
 PART_GAP_MODES = frozenset(("fixed", "random", "log"))
 
 
@@ -29,7 +29,7 @@ def part_gap_seconds(settings, text, seed):
     if mode == "random":
         return lower + (upper - lower) * fraction
     if mode == "log":
-        base = settings.get("part_gap_log_base", 1.8)
+        base = settings.get("part_gap_log_base", 2.1)
         characters = (len(text.split()) if all(ord(char) < 128 for char in text)
                       else sum(char.isalnum() for char in text))
         nominal = math.log(characters + 1, base)
@@ -45,7 +45,7 @@ def minimum_part_gap_seconds(settings, text):
     if mode == "random":
         return settings.get("part_gap_min_ms", 1500) / 1000
     if mode == "log":
-        base = settings.get("part_gap_log_base", 1.8)
+        base = settings.get("part_gap_log_base", 2.1)
         characters = (len(text.split()) if all(ord(char) < 128 for char in text)
                       else sum(char.isalnum() for char in text))
         return min(60.0, max(0.1, math.log(characters + 1, base)))
@@ -116,28 +116,43 @@ def _word_boundaries(text, words, protected):
     return boundaries
 
 
-DEFAULT_PROMPT = (
-    "你可以自行决定将本轮回复作为多条消息发送。日常聊天可用短句分段；长文、教程、代码尽量少拆。"
-    "每个消息边界只用完整标记 {{split_marker}}，在 text 字符串内单独占一行；"
-    "不要加引号，不要放进代码、引用、列表或链接。JSON 内换行仍需正确转义。"
-    "普通换行和空行本身不是模型指定的消息边界。仅在确有必要时使用。"
-    "claims 中使用各段正文原句，不包含分段标记。"
+COHERENCE_PROMPT = (
+    "消息正文组织（只影响表达与排版，不改变角色、事实、来源和本轮任务）："
+    "先把同一个意思自然说完整，紧接的回应与理由保持连贯；不要为制造聊天感，"
+    "把一次接话写成一串反问、称呼、否认和重复解释。称呼和语气词随语境使用，不必每句都补。"
+    "标点按语义使用，不为凑消息条数额外添加标点、换行或短句，分段上限不是需要达到的目标。"
+    "日常短消息正文内部不插入空行，每条正文首尾不填充空行；换行只用于实际内容格式或已配置的分段边界，"
+    "不用空白制造停顿。代码、列表、引用和表格保持原有格式。"
 )
 
 
+DEFAULT_PROMPT = (
+    "你可以自行决定将本轮回复作为多条消息发送：熟悉的日常聊天可按自然停顿拆成简短、各自读得通的气泡，"
+    "一两句通常就够；不要把一句话、称呼与回应、因果解释或紧密相连的步骤拆散。"
+    "完整回应之后的自然追问可以另发一条；模型指定的边界无需凑够规则分段的最短字数。每条正文首尾不要填充空行。"
+    "长文、教程、代码、引用、列表、表格、链接和带格式的内容尽量保持完整，只有清楚的主题转折才考虑分段。"
+    "每个消息边界只用完整标记 {{split_marker}}，在 text 字符串内单独占一行；"
+    "标记只表达消息边界，不是正文，也不能借此删改、概括或重排原文。不要加引号，不要放进代码、引用、列表或链接。"
+    "JSON 内换行仍需正确转义。普通换行和空行本身不是模型指定的消息边界；仅在确有必要时使用标记。"
+    "claims 中使用各段正文原句，不包含分段标记。"
+)
+
 @dataclass(frozen=True)
 class SegmentationPolicy:
-    enabled: bool = False
-    llm_controlled: bool = True
-    rules_enabled: bool = False
+    enabled: bool = True
+    llm_controlled: bool = False
+    # Kept only so profiles written before the rules became unconditional can
+    # still be parsed.  The value is intentionally ignored by ``parts``.
+    rules_enabled: bool = True
     rule_mode: str = "words"
     split_words: str = json.dumps(DEFAULT_SPLIT_WORDS, ensure_ascii=False)
     match_width_variants: bool = True
     rule_regex: str = DEFAULT_RULE_REGEX
-    threshold: int = 120
-    min_segment_chars: int = 12
-    max_segments: int = 4
+    threshold: int = 500
+    min_segment_chars: int = 5
+    max_segments: int = 5
     prompt: str = ""
+    streaming_mode: str = "buffered"
 
     def __post_init__(self):
         if any(type(value) is not bool for value in (self.enabled, self.llm_controlled,
@@ -145,6 +160,8 @@ class SegmentationPolicy:
             raise ValueError("segmentation switches must be booleans")
         if self.rule_mode not in ("words", "regex", "sentences", "paragraphs"):
             raise ValueError("segmentation rule mode is invalid")
+        if self.streaming_mode not in ("buffered", "incremental"):
+            raise ValueError("streaming segmentation mode is invalid")
         if type(self.split_words) is not str or len(self.split_words.encode("utf-8")) > 4096:
             raise ValueError("segmentation words need a bounded JSON list")
         try:
@@ -171,11 +188,13 @@ class SegmentationPolicy:
 
     @property
     def instruction(self):
-        if not self.enabled or not self.llm_controlled:
+        if not self.enabled:
             return ""
+        if not self.llm_controlled:
+            return COHERENCE_PROMPT + "本轮由程序按当前规则分段，直接生成连贯正文即可。"
         prompt = re.sub(r"\{\{\s*split_marker\s*\}\}", lambda _: LLM_SEGMENT_MARKER,
                         self.prompt or DEFAULT_PROMPT, flags=re.IGNORECASE)
-        return prompt + f"\n分段标记为 {LLM_SEGMENT_MARKER}；本轮建议最多 {self.max_segments} 条，保持语意连贯。"
+        return COHERENCE_PROMPT + "\n" + prompt + f"\n分段标记为 {LLM_SEGMENT_MARKER}；本轮建议最多 {self.max_segments} 条，保持语意连贯。"
 
     def parts(self, text):
         if not isinstance(text, str) or not text.strip() or len(text) > 65536:
@@ -192,7 +211,13 @@ class SegmentationPolicy:
         parts = list(parts)
         if len(parts) > self.max_segments:
             parts[self.max_segments - 1:] = ["".join(parts[self.max_segments - 1:])]
-        if self.rules_enabled:
+        within_rule_limit = sum(map(len, parts)) <= self.threshold
+        # Rule completion is part of the segmentation pipeline whenever the
+        # overall segmentation switch is on.  ``rules_enabled`` remains a
+        # compatibility field for old profiles, but it is no longer a user
+        # choice and must never disable the deterministic fallback.
+        apply_rules = within_rule_limit
+        if apply_rules:
             # Repeatedly consider remaining unsplit candidates in source order,
             # preferring the longest, without splitting a rule result twice.
             while True:
@@ -201,13 +226,44 @@ class SegmentationPolicy:
                 if count >= self.max_segments or not candidates:
                     break
                 index = max(candidates, key=lambda i: (len(parts[i]), -i))
-                parts[index] = self._rule_parts(parts[index], self.max_segments - count + 1)
+                rule_parts = self._rule_parts(parts[index], self.max_segments - count + 1)
+                parts[index] = tuple(self._merge_short_parts(rule_parts))
             parts = [item for p in parts for item in (p if isinstance(p, tuple) else (p,))]
         return tuple(parts)
 
-    def _rule_parts(self, text, limit):
-        if len(text) < self.threshold or limit <= 1:
-            return (text,)
+    def _merge_short_parts(self, parts):
+        if len(parts) <= 1:
+            return parts
+
+        def visible_length(value):
+            return sum(not char.isspace() for char in value)
+
+        def atomic_excerpt(value):
+            stripped = value.strip()
+            return (stripped.startswith("「") and stripped.endswith("」")
+                    and visible_length(stripped[1:-1]) >= self.min_segment_chars)
+
+        merged, index = [], 0
+        while index < len(parts):
+            current = parts[index]
+            if atomic_excerpt(current):
+                merged.append(current)
+                index += 1
+                continue
+            while (index + 1 < len(parts)
+                   and visible_length(current) < self.min_segment_chars
+                   and not atomic_excerpt(parts[index + 1])):
+                current += parts[index + 1]
+                index += 1
+            if (merged and not atomic_excerpt(merged[-1]) and not atomic_excerpt(current)
+                    and visible_length(current) < self.min_segment_chars):
+                merged[-1] += current
+            else:
+                merged.append(current)
+            index += 1
+        return merged
+
+    def rule_boundaries(self, text):
         protected = tuple(sorted((*literal_ranges(text), *(match.span() for match in _FILE_SUFFIX.finditer(text)))))
         if self.rule_mode == "words":
             words = tuple(json.loads(self.split_words))
@@ -220,15 +276,19 @@ class SegmentationPolicy:
                        r"[。！？!?；;]+[”’）】]*|(?:\r?\n[ \t]*){2,}")
             try:
                 boundaries = [(match.start(), match.end()) for match in regex.finditer(
-                    pattern, text, timeout=0.05) if match.start() < match.end()]
+                    pattern, text, timeout=0.05) if match.end() > 0]
             except TimeoutError as error:
                 raise ValueError("segmentation regex exceeded its execution budget") from error
+        return tuple(end for boundary in boundaries
+                     if (end := boundary if isinstance(boundary, int) else boundary[1]) > 0
+                     and (isinstance(boundary, int) or not any(a < end <= b for a, b in protected)))
+
+    def _rule_parts(self, text, limit):
+        if limit <= 1:
+            return (text,)
         start, parts = 0, []
-        for boundary in boundaries:
-            end = boundary if isinstance(boundary, int) else boundary[1]
+        for end in self.rule_boundaries(text):
             if end <= start:
-                continue
-            if not isinstance(boundary, int) and any(a < end <= b for a, b in protected):
                 continue
             if (len(text[start:end].strip()) < self.min_segment_chars
                     or len(text[end:].strip()) < self.min_segment_chars):

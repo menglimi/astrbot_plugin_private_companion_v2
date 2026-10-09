@@ -29,6 +29,17 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt.operation_id, envelope.operation_id)
         self.assertEqual(api.calls[0][1]["self_id"], "100")
 
+    async def test_signed_message_ids_are_confirmed_without_changing_accounts(self):
+        envelope = await self.envelope()
+        api = self.native.platform.client._api._wsr_api
+        for message_id in (-123, "-456"):
+            with self.subTest(message_id=message_id):
+                api.result = {"message_id": message_id}
+                receipt = await self.native_sender.send(envelope)
+                self.assertEqual(receipt.status, "delivered")
+                self.assertTrue(receipt.platform_ref.endswith(":" + str(message_id)))
+                self.assertEqual(api.calls[-1][1]["self_id"], "100")
+
     async def test_qq_emoji_format_applies_only_to_catalog_reactions(self):
         envelope = await self.envelope()
         captured = picture()
@@ -54,7 +65,8 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
     async def test_no_message_id_boolean_timeout_and_failure_are_unknown(self):
         envelope = await self.envelope()
         api = self.native.platform.client._api._wsr_api
-        for result in (True, None, {}, {"message_id": -123}, {"message_id": 0}, {"message_id": True}):
+        for result in (True, None, {}, {"message_id": "-01"}, {"message_id": -1},
+                       {"message_id": "-1"}, {"message_id": 0}, {"message_id": True}):
             with self.subTest(result=result):
                 api.result = result
                 receipt = await self.native_sender.send(envelope)
@@ -62,7 +74,7 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(receipt.delivered_at)
         api.error = TimeoutError("the response might be lost")
         self.assertEqual((await self.native_sender.send(envelope)).status, "unknown")
-        self.assertEqual(len(api.calls), 7)
+        self.assertEqual(len(api.calls), 9)
 
     async def test_disconnected_original_login_never_uses_another_available_login(self):
         envelope = await self.envelope()

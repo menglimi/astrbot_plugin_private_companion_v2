@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+from datetime import timedelta
 from unittest.mock import patch
 
 from tests.multi_host_support import MultiFixture, multi_config
@@ -13,6 +14,7 @@ from astrbot.api.web import PluginRequest, bind_request_context
 from starlette.requests import Request
 from astrbot_host.management_identity import dashboard_operator
 from companion_v2.agenda.models import Schedule
+from companion_v2.proactive.external_materials import WeatherSnapshot
 from companion_v2.execution.models import encode
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -33,8 +35,8 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_success, result.failure)
         return self.controller.session.application
 
-    async def request(self, target="first", role="role-a", *, data=None, username="admin", query="", gate=None):
-        path = self.paths[(target, role)] + ("/command" if data is not None else "")
+    async def request(self, target="first", role="role-a", *, data=None, username="admin", query="", gate=None, suffix=""):
+        path = self.paths[(target, role)] + suffix + ("/command" if data is not None else "")
         body = json.dumps(data, ensure_ascii=False).encode("utf-8") if data is not None else b""
         async def receive():
             if gate is not None:
@@ -75,12 +77,39 @@ class MultiStateTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(private), 4)
         for path in private:
             self.assertIn(path, self.routes)
+            self.assertIn(path + "/weather", self.routes)
             self.assertIn(path + "/command", self.routes)
         self.assertTrue(all(path is None for (target, _), path in self.paths.items() if target.startswith("group-")))
         self.assertFalse(any("/targets/group-" in path and (path.endswith("/state") or "/state/" in path) for path in self.routes))
         for target in ("first", "second"):
             for role in ("role-a", "role-b"):
                 self.assertEqual((await self.status(target, role))["presentation"], {"state": "preview"})
+
+    async def test_weather_route_is_scoped_to_selected_private_role(self):
+        app = await self.initialize()
+        locations = {
+            ("first", "role-a"): ("第一对象城市", 31.2, 121.4),
+            ("second", "role-a"): ("第二对象城市", 23.1, 113.3),
+        }
+        calls = []
+
+        class WeatherPort:
+            async def fetch(self, location):
+                calls.append(location.name)
+                return WeatherSnapshot("open-meteo", location.name, app.now() - timedelta(minutes=5), 22,
+                                       "晴", 40, 8, ())
+
+        app.calendar_planning.weather_port = WeatherPort()
+        for (target, role), (name, latitude, longitude) in locations.items():
+            configured = await self.configure(target, role, key="weather-" + target,
+                planning_weather_enabled=True, planning_weather_location=json.dumps({"name":name,
+                    "latitude":latitude,"longitude":longitude}, ensure_ascii=False))
+            self.assertTrue(configured["operation_id"].startswith("state-config:"))
+            response = self.ok(await self.request(target, role, suffix="/weather"))
+            self.assertEqual((response["state"], response["location"]), ("live", name))
+        self.assertCountEqual(calls, ["第一对象城市", "第二对象城市"])
+        self.assertEqual(self.native.provider.client.state.calls, [])
+        self.assertTrue(all(not p.client._api._wsr_api.calls for p in self.native.platforms.values()))
 
     async def test_two_accounts_two_personas_keep_settings_state_cycle_calendar_and_receipts(self):
         await self.initialize()

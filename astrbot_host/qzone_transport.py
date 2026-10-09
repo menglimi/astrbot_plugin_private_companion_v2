@@ -44,7 +44,10 @@ def manual_qzone_cookie(data_root=None):
 
 
 def build_qzone_transport(context, *, data_root=None, bot_selector=None):
-    """A transport bound to this host's context; nothing is sent until it is used."""
+    """Build an available transport; absent accounts and credentials expose no tools."""
+    if not qzone_bot_candidates(context) and not manual_qzone_cookie(data_root):
+        return None
+
     def bot():
         candidates = qzone_bot_candidates(context)
         if bot_selector is not None:

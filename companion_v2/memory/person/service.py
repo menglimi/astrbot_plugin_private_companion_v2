@@ -44,7 +44,9 @@ class PersonAcquaintance:
     def intake_observer(self, context):
         """Resolve once per admitted message whether counting participates, so the
         configuration read stays outside the intake transaction."""
-        return self.observe if self.available(context) else None
+        if not self.available(context):
+            return None
+        return self.observe if self.settings.read(context).get("person.acquaintance_learning_enabled", True) else None
 
     def observe(self, context, event, connection):
         """Count one admitted input. Optional derived data never rejects intake."""
@@ -118,7 +120,20 @@ class PersonAcquaintance:
                 break
         return payload
 
-    def card_contribution(self, context, at):
+    def capture(self, context, at):
+        material = self.card_contribution(context, at)
+        return {"version": 1, "context_key": context.key,
+                "payload": material.payload if material is not None else None}
+
+    @staticmethod
+    def validate_snapshot(snapshot, context):
+        if (type(snapshot) is not dict or set(snapshot) != {"version", "context_key", "payload"}
+                or snapshot["version"] != 1 or snapshot["context_key"] != context.key
+                or snapshot["payload"] is not None and (type(snapshot["payload"]) is not str
+                    or len(snapshot["payload"].encode("utf-8")) > 4096)):
+            raise TaskError("acquaintance_snapshot_invalid", "card must retain its original conversation")
+
+    def card_contribution(self, context, at, *, snapshot=None):
         """The current speaker's bounded card, or None when the feature has
         nothing to say. A failed optional check only drops the card."""
         if not self.available(context):
@@ -127,6 +142,14 @@ class PersonAcquaintance:
             self.check(context, at=at)
         except TaskError:
             return None
+        if snapshot is not None:
+            self.validate_snapshot(snapshot, context)
+            if snapshot["payload"] is None:
+                return None
+            # Intake may advance counters while a tool is running. This card
+            # describes what the sealed turn saw; access is still checked above.
+            return ContextContribution("person-speaker-card", OWNER, "current_person_card",
+                                       ContributionState.READY, snapshot["payload"])
         row = self.row(owner_key(context))
         if row is None or row["state"] != "active":
             return None
@@ -142,6 +165,8 @@ class PersonAcquaintance:
         subject is the current speaker; a number must resolve through the
         trusted binding table."""
         self.check(context)
+        if not self.available(context):
+            return {"state": "disabled"}
         if speaker_id is None:
             subject_id = context.actor.subject.subject_id
             native = context.actor.principal.native_account_id

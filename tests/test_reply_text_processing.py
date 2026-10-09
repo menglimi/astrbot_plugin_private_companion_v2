@@ -11,7 +11,7 @@ from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 
 
 def policy(**changes):
-    return ReplyTextPolicy(**changes)
+    return ReplyTextPolicy(**{"content_cleanup_enabled": False, "content_cleanup_scope": "all", **changes})
 
 
 class ReplyTextProcessingTests(unittest.TestCase):
@@ -45,20 +45,46 @@ class ReplyTextProcessingTests(unittest.TestCase):
             validate({**asdict(SegmentationPolicy()), "streaming": True, "part_gap_ms": 0,
                       **fields, "recall_forbidden_scope": "invalid"})
 
-    def test_defaults_use_word_cleanup_and_v1_newline_list(self):
-        presentation = policy()
+    def test_defaults_use_v1_enabled_punctuation_cleanup(self):
+        presentation = ReplyTextPolicy()
         self.assertEqual(presentation.content_cleanup_mode, "words")
-        self.assertEqual(json.loads(presentation.content_cleanup_words), ["\n"])
-        self.assertFalse(presentation.content_cleanup_enabled)
-        self.assertEqual(replace(presentation, content_cleanup_enabled=True).clean_parts(("甲\n乙。",)),
-                         ("甲乙。",))
+        self.assertEqual(presentation.content_cleanup_scope, "trailing")
+        self.assertEqual(json.loads(presentation.content_cleanup_words), ["。", "，"])
+        self.assertTrue(presentation.content_cleanup_enabled)
+        self.assertEqual(presentation.clean_parts(("甲\n乙。",)), ("甲\n乙",))
+        self.assertEqual(presentation.clean_parts(("甲，乙。丙。， \n", "丁，戊，")),
+                         ("甲，乙。丙", "丁，戊"))
+
+    def test_internal_reaction_expression_metadata_is_removed_before_segmentation(self):
+        metadata = ('<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无奈",'
+                    '"intensity":2}</pc_reaction_expression>')
+        prepared = prepare_reply("在的在的，刚刚被签到局屏蔽过去了...不是不理你啦。\n" + metadata,
+                                 SegmentationPolicy(enabled=False), policy())
+        self.assertEqual(prepared.visible, "在的在的，刚刚被签到局屏蔽过去了...不是不理你啦。\n")
+        self.assertEqual(prepared.parts, (prepared.visible.rstrip("\n"),))
+        incomplete = prepare_reply("正文。<pc_reaction_expression>{\"emotion\":\"无奈\"",
+                                   SegmentationPolicy(), policy())
+        self.assertEqual(incomplete.parts, ("正文。",))
+        escaped = prepare_reply("正文。&lt;pc_reaction_expression&gt;{&quot;emotion&quot;:&quot;无奈&quot;}"
+                                "&lt;/pc_reaction_expression&gt;", SegmentationPolicy(), policy())
+        self.assertEqual(escaped.parts, ("正文。",))
+        hexadecimal = prepare_reply("正文。&#x3C;pc_reaction_expression&#x3E;{}"
+                                    "&#x3C;/pc_reaction_expression&#x3E;", SegmentationPolicy(), policy())
+        self.assertEqual(hexadecimal.parts, ("正文。",))
+
+    def test_voice_wrappers_are_not_visible_when_voice_is_disabled(self):
+        prepared = prepare_reply("<pc_tts>前置。</pc_tts>普通正文。", SegmentationPolicy(), policy())
+        self.assertEqual(prepared.parts, ("前置。普通正文。",))
+        self.assertNotIn("pc_tts", prepared.visible)
+        encoded = prepare_reply("&#x3C;pc_tts&#x3E;正文。&#x3C;/pc_tts&#x3E;", SegmentationPolicy(), policy())
+        self.assertEqual(encoded.parts, ("正文。",))
 
     def test_ordered_replacements_precede_rule_length_and_support_tokens(self):
         presentation = policy(content_replacement_enabled=True,
             content_replacements=json.dumps(["hi => 你好呀", {"from": "呀", "to": "哇"},
                                               "<tab> => <space>", "删 => <empty>"]))
         segmentation = SegmentationPolicy(enabled=True, rules_enabled=True,
-            threshold=7, min_segment_chars=1, max_segments=3)
+            threshold=500, min_segment_chars=1, max_segments=3)
         result = prepare_reply("hi。hi。\t删", segmentation, presentation)
         self.assertEqual(result.parts, ("你好哇。", "你好哇。 "))
         self.assertIn("格式数据", presentation.instruction)
@@ -107,7 +133,7 @@ class ReplyTextProcessingTests(unittest.TestCase):
         presentation = policy(content_cleanup_enabled=True, content_cleanup_words='["删", "\\n"]',
                               content_replacement_enabled=True,
                               content_replacements='["说 => 改", "语 => 换"]')
-        segmentation = SegmentationPolicy(enabled=True)
+        segmentation = SegmentationPolicy(enabled=True, llm_controlled=True)
         voice = VoiceReplyPolicy(generation_mode="model_tag", segment_mode="first")
         text = f"删\n{MARKER}\n<pc_tts>语。</pc_tts>说\n{MARKER}\n后文"
         prepared = prepare_reply(text, segmentation, presentation, voice)
@@ -122,8 +148,8 @@ class ReplyTextProcessingTests(unittest.TestCase):
     def test_reserved_markers_survive_replacements_until_normal_segmentation(self):
         presentation = policy(content_replacement_enabled=True,
                               content_replacements='["PRIVATE => OTHER", "甲 => 嗨"]')
-        prepared = prepare_reply(f"甲\n{MARKER}\n乙", SegmentationPolicy(enabled=True), presentation)
-        self.assertEqual(prepared.parts, ("嗨\n", "乙"))
+        prepared = prepare_reply(f"甲\n{MARKER}\n乙", SegmentationPolicy(enabled=True, llm_controlled=True), presentation)
+        self.assertEqual(prepared.parts, ("嗨", "乙"))
 
     def test_settings_are_complete_or_legacy_and_invalid_rules_fail_before_save(self):
         legacy = {**asdict(SegmentationPolicy()), "streaming": False, "part_gap_ms": 0}

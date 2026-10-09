@@ -1,0 +1,347 @@
+/* Editable V2 image backends. One draft is shared by the overview and detail page. */
+"use strict";
+window.CompanionOutputPage=(()=>{
+  const BACKENDS={auto:"自动：在线 API → ComfyUI → SD WebUI",online_api:"在线 API",comfyui:"ComfyUI",sd_webui:"SD WebUI"};
+  const PLATFORMS={auto:"自动",openai:"OpenAI 兼容",minimax:"MiniMax"};
+  const ERRORS={model_image_output_unavailable:"请更新并加载生图伴侣，以启用 V2 后端配置。",
+    model_image_output_unavailable:"生图伴侣尚未加载。",model_image_output_conflict:"配置已在其他页面更新，请重新读取后核对。",
+    model_image_output_busy:"正在执行生图任务，请等待当前任务结束后保存。",
+    model_image_output_invalid:"配置未保存，请核对地址、端点和数值。",
+    model_image_output_failed:"操作未完成，请重新读取状态。"};
+  let root=null,abort=null,ticket=0,scope="",base=null,draft=null,revision="",busy="",notice="",bad=false,hostRegistered=false,expanded=new Set(),tests=new Map(),testKeys=new Map(),observation=null,observationBusy=false,observationError="",sceneEditorOpen=false,sceneDraft=null,sceneError="",sceneSaving=false;
+  const product=()=>window.CompanionProduct;
+  const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const icon=name=>`<i data-lucide="${name}" aria-hidden="true"></i>`;
+  const clone=value=>JSON.parse(JSON.stringify(value));
+  const live=id=>root?.isConnected&&id===ticket&&scope===(product()?.scopeKey?.()||"");
+  const dirty=()=>!!draft&&JSON.stringify(draft)!==JSON.stringify(base);
+  const endpoint=()=>product().relative(product().role().model_api)+"/image/output";
+  const observationEndpoint=()=>product().relative(product().role().model_api)+"/image/observability";
+  const options=(values,current)=>Object.entries(values).map(([key,label])=>`<option value="${esc(key)}"${key===current?" selected":""}>${esc(label)}</option>`).join("");
+  function updateMarkup(node,html){
+    if(node.outputMarkup===html)return;
+    node.outputMarkup=html;node.innerHTML=html;
+  }
+  const field=(label,path,value,type="text",attrs="")=>`<label class="output-native-field"><span>${label}</span><input type="${type}" data-output-native-field="${esc(path)}" value="${esc(value)}" ${attrs}${busy?" disabled":""}></label>`;
+  const keyField=(path,item)=>`<div class="output-key-field">${field("API Key",path+".api_key","","password",`autocomplete="new-password" placeholder="${item.api_key_set?"已保存 · 留空保留":"尚未配置"}"`)}${item.api_key_set?`<label class="output-native-check"><input type="checkbox" data-output-native-field="${esc(path)}.clear_api_key"${item.clear_api_key?" checked":""}${busy?" disabled":""}>清除已保存密钥</label>`:""}</div>`;
+  const actions=()=>`<div class="output-native-actions"><button type="button" class="button small primary" data-output-native-action="save"${busy||!dirty()?" disabled":""}>${busy==="save"?"保存中…":"保存生图后端"}</button><button type="button" class="button small" data-output-native-action="refresh"${busy?" disabled":""}>重新读取</button><span>${dirty()?"有未保存的改动":"已保存"}</span></div>`;
+  function formatTime(value){
+    if(!value)return "—";
+    const time=new Date(value);
+    return Number.isNaN(time.getTime())?"—":new Intl.DateTimeFormat("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}).format(time);
+  }
+  function renderScenePresets(){
+    const host=root?.querySelector("#outputScenePresetList");
+    const editor=root?.querySelector("#outputScenePresetEditor");
+    if(!host||!editor)return;
+    const field=root.querySelector('[data-wb-field="scene_presets_json"]');
+    const configuration=root.querySelector("#imageOutputWorkspace")?.companionConfigEditor?.state?.instances?.[0]?.state;
+    root.querySelectorAll('[data-output-native-action="refresh-preferences"]').forEach(button=>{button.disabled=sceneSaving||!!configuration?.pending;});
+    const manager=root.querySelector('[data-output-native-action="manage-scenes"]');
+    if(manager){
+      manager.disabled=!field||sceneSaving;
+      manager.title=field?"管理场景预设":"角色配置尚未就绪";
+    }
+    field?.closest(".wb-field")?.classList.add("is-scene-json-managed");
+    let presets=[];
+    try{presets=field?JSON.parse(field.value):null;}catch{presets=null;}
+    const html=!field?`<span class="output-observation-muted">场景配置暂不可用</span><button type="button" class="output-inline-link" data-go="manage" data-manage="host">账号与会话 ${icon("arrow-up-right")}</button>`
+      :!Array.isArray(presets)?'<span class="output-observation-muted">场景预设需要修正</span>'
+      :presets.length?presets.map(item=>`<span class="output-scene-preset">${esc(item.name||"未命名")}</span>`).join("")
+      :'<span class="output-observation-muted">没有配置场景预设</span>';
+    updateMarkup(host,html);
+    editor.hidden=!sceneEditorOpen;
+    if(!sceneEditorOpen)return;
+    if(!field){
+      editor.innerHTML='<p class="output-observation-muted">角色配置尚未就绪</p>';
+      return;
+    }
+    if(!Array.isArray(sceneDraft))sceneDraft=Array.isArray(presets)?clone(presets):[];
+    const editorHTML=`<div class="output-scene-editor-list">${sceneDraft.map((item,index)=>`<article class="output-scene-editor-row"><label><span>场景名称</span><input type="text" maxlength="24" data-output-scene-index="${index}" data-output-scene-field="name" value="${esc(item.name||"")}"${sceneSaving?" disabled":""}></label><label><span>画面提示词</span><textarea rows="2" maxlength="800" data-output-scene-index="${index}" data-output-scene-field="prompt"${sceneSaving?" disabled":""}>${esc(item.prompt||"")}</textarea></label><button type="button" class="output-icon-button" data-output-native-action="remove-scene" data-output-scene-index="${index}" aria-label="移除${esc(item.name||"场景")}" title="移除场景"${sceneSaving?" disabled":""}>${icon("x")}</button></article>`).join("")}</div><div class="output-scene-editor-actions"><span role="status">${esc(sceneError||`${sceneDraft.length} / 12 个场景`)}</span><button type="button" class="button small" data-output-native-action="refresh-preferences"${sceneSaving||configuration?.pending?" disabled":""}>${icon("refresh-cw")}重新读取</button><button type="button" class="button small" data-output-native-action="add-scene"${sceneSaving||sceneDraft.length>=12?" disabled":""}>${icon("plus")}添加场景</button><button type="button" class="button small primary" data-output-native-action="save-scenes"${sceneSaving?" disabled":""}>${sceneSaving?"正在保存…":"保存场景预设"}</button></div>`;
+    updateMarkup(editor,editorHTML);
+    window.lucide?.createIcons?.({attrs:{"aria-hidden":"true"}});
+  }
+  async function saveScenePresets(){
+    if(sceneSaving)return;
+    const field=root.querySelector('[data-wb-field="scene_presets_json"]');
+    if(!field||!Array.isArray(sceneDraft)){sceneError="场景配置尚未读取";renderScenePresets();return;}
+    const names=sceneDraft.map(item=>String(item.name||"").trim());
+    if(sceneDraft.length>12||names.some(name=>!name)||sceneDraft.some(item=>!String(item.prompt||"").trim())
+      ||new Set(names).size!==names.length){sceneError="请填写不重复的场景名称和画面提示词";renderScenePresets();return;}
+    sceneDraft=sceneDraft.map((item,index)=>({...item,name:names[index],prompt:String(item.prompt||"").trim()}));
+    const id=ticket;
+    sceneSaving=true;
+    sceneError="正在保存场景预设…";
+    renderScenePresets();
+    const editor=root.querySelector("#imageOutputWorkspace")?.companionConfigEditor;
+    let result;
+    try{
+      result=await editor?.saveField?.("image.output","scene_presets_json",JSON.stringify(sceneDraft))||{state:"unavailable"};
+    }catch(error){result={state:"unknown",message:error?.message||""};}
+    if(!live(id))return;
+    sceneSaving=false;
+    sceneError=result.state==="saved"?"场景预设已保存"
+      :result.state==="conflict"?(result.message||"配置已更新，请重新读取后核对。")
+        :result.state==="rejected"?(result.message||"场景预设保存失败")
+          :result.state==="unknown"?"保存结果尚未确认，请核对原保存结果"
+            :result.state==="dirty"?"请先保存配置工作区中的其他改动，再保存场景预设"
+            :result.state==="unchanged"?(result.message||"场景预设没有变化")
+              :"场景配置当前不可用，请先读取角色配置";
+    renderScenePresets();
+  }
+  async function refreshPreferences(){
+    if(sceneSaving)return;
+    const editor=root?.querySelector("#imageOutputWorkspace")?.companionConfigEditor;
+    if(!editor)return;
+    const configuration=editor.state.instances[0]?.state;
+    if(configuration?.busy||configuration?.loading)return;
+    if(configuration?.pending){sceneError="请先核对原保存结果";renderScenePresets();return;}
+    const id=ticket;
+    sceneSaving=true;sceneError="正在读取最新配置…";renderScenePresets();
+    try{
+      await editor.read("image.output");
+      if(live(id))sceneError=configuration?.status?"已读取最新配置":"配置暂不可读，请重试";
+    }catch{if(live(id))sceneError="配置暂不可读，请重试";}
+    finally{if(live(id)){sceneSaving=false;renderScenePresets();}}
+  }
+  function renderObservation(){
+    if(!root?.isConnected)return;
+    const host=root.querySelector("#outputObservationWorkspace");
+    if(!host)return;
+    if(observationBusy){host.innerHTML='<span class="output-observation-muted">正在读取最近调用…</span>';return;}
+    if(!observation){
+      host.innerHTML=`<div class="output-observation-empty" role="status">${esc(observationError||"还没有读取到生图记录")}<button type="button" class="output-inline-link" data-output-native-action="observability">重新读取 ${icon("refresh-cw")}</button></div>`;
+      return;
+    }
+    const status={queued:"排队中",running:"生成中",succeeded:"已完成",failed:"失败",unknown:"结果未确认"};
+    const action={"image.generate":"文生图","image.edit":"改图","image.mask_edit":"蒙版改图"};
+    const items=observation.items||[];
+    const rows=items.map(item=>`<li class="output-observation-row"><span class="output-observation-state is-${esc(item.state)}"></span><span class="output-observation-main"><strong>${esc(action[item.action]||item.action)}</strong><small>${esc(formatTime(item.created_at))}</small></span><span class="output-observation-result">${esc(status[item.state]||item.state)}${item.elapsed_ms==null?"":` · ${(item.elapsed_ms/1000).toFixed(1)} 秒`}${item.error_code?` · ${esc(item.error_code)}`:""}</span></li>`).join("");
+    host.innerHTML=`<div class="output-observation-summary">${Number(observation.total)||0} 次调用 <span>最近 ${items.length} 条</span></div>${rows?`<ul class="output-observation-list">${rows}</ul>`:'<div class="output-observation-empty">当前角色还没有生图调用记录</div>'}`;
+  }
+  function updateContentSummary(content){
+    const available=content?.available===true;
+    const works=available?Number(content.works_count)||0:null;
+    const candidates=available?Number(content.candidate_count)||0:null;
+    const updated=available?formatTime(content.updated_at):"—";
+    root?.querySelectorAll('[data-output-content-stat="works"]').forEach(node=>{node.textContent=works===null?"—":String(works);});
+    root?.querySelectorAll('[data-output-content-stat="candidates"]').forEach(node=>{node.textContent=candidates===null?"—":String(candidates);});
+    root?.querySelectorAll('[data-output-content-stat="updated"]').forEach(node=>{node.textContent=updated;});
+    const body=available?`${works} 部已关联作品 · ${candidates} 份续写候选稿`:"Content 作品数据暂不可用";
+    const meta=available?`最近更新 ${updated}`:"—";
+    for(const selector of ["[data-output-content-preview]","[data-output-content-teaser]"])root?.querySelectorAll(selector).forEach(node=>{node.textContent=body;});
+    for(const selector of ["[data-output-content-preview-count]","[data-output-content-teaser-meta]"])root?.querySelectorAll(selector).forEach(node=>{node.textContent=available?`${works} 部已关联`:"—";});
+    root?.querySelectorAll("[data-output-content-preview-updated]").forEach(node=>{node.textContent=meta;});
+  }
+  function selector(){
+    const host=root?.querySelector("[data-output-native-selector]");
+    if(!host)return;
+    host.innerHTML=draft?`<label class="output-backend-selector"><span>生图后端</span><select data-output-native-field="backend"${busy?" disabled":""}>${options(BACKENDS,draft.backend)}</select></label><label class="output-backend-enable"><input type="checkbox" data-output-native-field="enabled"${draft.enabled?" checked":""}${busy?" disabled":""}>启用生图后端</label>${!hostRegistered&&draft.enabled?`<div class="output-config-unavailable" role="status">当前 V2 工具目录尚未接入此图片提供方。<button type="button" class="button small" data-output-native-action="reconnect"${busy?" disabled":""}>重连 V2 执行器</button></div>`:""}${actions()}`:`<div class="output-config-unavailable" role="status">${esc(notice||"正在读取生图后端…")}</div>`;
+  }
+  function queue(){
+    if(!draft)return `<div class="output-config-unavailable" role="status"><span>${esc(notice||"正在读取生图后端…")}</span><button type="button" class="button small" data-output-native-action="refresh">重新读取</button></div>`;
+    return `<section class="output-capability-queue"><header class="output-capability-heading"><h2>在线生图 API 队列</h2><span>${draft.endpoints.length} 个端点</span><div><button type="button" class="button small" data-output-native-action="add"${busy||draft.endpoints.length>=24?" disabled":""}>${icon("plus")}添加端点</button></div></header>
+      <div class="output-endpoint-list">${draft.endpoints.map((item,index)=>{
+        const open=expanded.has(item.id),path=`endpoints.${index}`;
+        const test=tests.get(item.id);
+        return `<article class="output-endpoint-card${index===0?" is-primary":""}"><header><button type="button" class="output-endpoint-toggle" data-output-native-action="expand" data-output-endpoint="${esc(item.id)}" aria-expanded="${open}">${icon(open?"chevron-down":"chevron-right")}<strong>#${index+1} ${esc(item.name||"未命名端点")}</strong></button><div class="output-endpoint-tools"><label class="output-native-check"><input type="checkbox" data-output-native-field="${path}.enabled"${item.enabled?" checked":""}${busy?" disabled":""}>${item.enabled?"已启用":"已停用"}</label><button type="button" class="button small" data-output-native-action="test" data-output-endpoint="${esc(item.id)}"${busy||dirty()||!item.enabled?" disabled":""}>${busy===`test:${item.id}`?"测试中…":test?.status==="unknown"?"核对测试":"纯文测试"}</button><button type="button" class="output-icon-button" aria-label="上移端点" data-output-native-action="up" data-output-endpoint="${esc(item.id)}"${busy||index===0?" disabled":""}>${icon("arrow-up")}</button><button type="button" class="output-icon-button" aria-label="下移端点" data-output-endpoint="${esc(item.id)}" data-output-native-action="down"${busy||index===draft.endpoints.length-1?" disabled":""}>${icon("arrow-down")}</button><button type="button" class="output-icon-button" aria-label="删除端点" data-output-native-action="remove" data-output-endpoint="${esc(item.id)}"${busy?" disabled":""}>${icon("x")}</button></div></header>
+        <div class="output-endpoint-edit"${open?"":" hidden"}><div class="output-endpoint-grid"><label class="output-native-field"><span>平台</span><select data-output-native-field="${path}.platform"${busy?" disabled":""}>${options(PLATFORMS,item.platform)}</select></label>${field("图片模型",path+".model",item.model)}${field("宽 / 高（像素）",path+".width",item.width,"number",'min="64" max="8192" step="64"')}${field("高度",path+".height",item.height,"number",'min="64" max="8192" step="64"')}</div><div class="output-endpoint-address">${field("API 地址",path+".base_url",item.base_url,"url")}${keyField(path,item)}</div><div class="output-endpoint-extra">${field("端点名称",path+".name",item.name)}${field("超时秒数",path+".timeout_seconds",item.timeout_seconds,"number",'min="1" max="1800" step="1"')}</div></div>
+        ${test?`<div class="output-endpoint-result${test.status==="succeeded"?" is-ready":""}" role="status">${test.status==="succeeded"?"最近测试通过":test.status==="unknown"?"测试结果尚未确认":"测试未通过"} · ${Math.round(test.elapsed_ms||0)/1000} 秒${test.status!=="succeeded"?` · ${esc(test.error||"请核对接口配置")}`:""}</div>`:""}</article>`;
+      }).join("")||'<div class="output-endpoint-empty">尚未添加在线生图端点</div>'}</div>${actions()}</section>`;
+  }
+  function local(){
+    if(!draft)return "";
+    return `<section class="output-capability-card"><header><h2>本地与工具后端</h2></header>${["comfyui","sd_webui"].map(name=>{
+      const item=draft[name]||{};
+      return `<section class="output-local-editor"><header><h3>${BACKENDS[name]}</h3></header><div class="output-endpoint-address">${field("API 地址",name+".base_url",item.base_url||"","url")}${keyField(name,item)}</div><div class="output-local-grid">${field("等待秒数",name+".timeout_seconds",item.timeout_seconds||300,"number",'min="1" max="1800"')}</div><label class="output-native-field"><span>${name==="comfyui"?"文生图 / 改图工作流（JSON）":"生成参数（JSON）"}</span><textarea rows="3" spellcheck="false" data-output-native-field="${name}.${name==="comfyui"?"workflows":"parameters"}"${busy?" disabled":""}>${esc(typeof item[name==="comfyui"?"workflows":"parameters"]==="string"?item[name==="comfyui"?"workflows":"parameters"]:JSON.stringify(item[name==="comfyui"?"workflows":"parameters"]||{},null,2))}</textarea></label></section>`;
+    }).join("")}${actions()}</section>`;
+  }
+  function render(){
+    if(!root?.isConnected)return;
+    selector();
+    const queueHost=root.querySelector("#outputBackendWorkspace"),localHost=root.querySelector("#outputLocalWorkspace");
+    if(queueHost)queueHost.innerHTML=queue();
+    if(localHost)localHost.innerHTML=local();
+    root.querySelectorAll("[data-output-native-notice]").forEach(host=>{host.textContent=notice;host.hidden=!notice;host.classList.toggle("is-error",bad);});
+    renderScenePresets();
+    renderObservation();
+    window.lucide?.createIcons?.({attrs:{"aria-hidden":"true"}});
+  }
+  async function refreshPreview(){
+    const id=ticket,image=root?.querySelector("[data-output-preview-image]"),frame=root?.querySelector(".output-image-frame"),status=root?.querySelector(".output-image-status span");
+    if(!image||!frame||!status)return;
+    const role=product()?.role?.();
+    if(!role?.image_material_api){image.hidden=true;image.removeAttribute("src");status.textContent="当前角色尚无可读取的图片相册";frame.dataset.imageState="unavailable";return;}
+    try{
+      const data=await product().request("GET",product().relative(role.image_material_api)+"/album");
+      if(!live(id))return;
+      const latest=data?.items?.[0];
+      if(!latest?.thumbnail){image.hidden=true;image.removeAttribute("src");status.textContent="还没有生成图片";frame.dataset.imageState="unavailable";return;}
+      image.alt=`${latest.width||""} × ${latest.height||""} 最近生成图片`;
+      image.hidden=false;image.src=latest.thumbnail;
+      status.textContent="最近生成的图片暂不可用";
+    }catch{
+      if(!live(id))return;
+      image.hidden=true;image.removeAttribute("src");status.textContent="图片相册暂不可用";frame.dataset.imageState="unavailable";
+    }
+  }
+  async function refreshObservability(){
+    if(observationBusy)return;
+    const id=ticket;observationBusy=true;observationError="";renderObservation();
+    try{
+      const data=await product().request("GET",observationEndpoint());
+      if(!live(id))return;
+      observation=data?.images||{total:0,items:[]};
+      updateContentSummary(data?.content||null);
+    }catch(error){
+      if(!live(id))return;
+      observation=null;observationError=ERRORS[error.code]||ERRORS[error.message]||"观测记录暂不可读";
+      updateContentSummary(null);
+    }finally{
+      if(live(id)){observationBusy=false;renderObservation();window.lucide?.createIcons?.({attrs:{"aria-hidden":"true"}});}
+    }
+  }
+  async function refresh(){
+    if(busy)return;
+    const id=ticket;busy="read";notice="";render();
+    try{
+      if(!product()?.role()?.model_api)throw Error("当前角色尚未绑定模型配置接口");
+      const data=await product().request("GET",endpoint());
+      if(!live(id))return;
+      if(!data?.settings||typeof data.revision!=="string")throw Error("返回的生图后端配置不完整");
+      base=clone(data.settings);draft=clone(data.settings);revision=data.revision;hostRegistered=data.host_registered===true;bad=false;
+      if(!expanded.size&&draft.endpoints[0])expanded.add(draft.endpoints[0].id);
+      void refreshReviewModels(id);
+    }catch(error){if(live(id)){bad=true;notice=ERRORS[error.code]||ERRORS[error.message]||error.message||"生图后端暂不可读";}}
+    finally{if(live(id)){busy="";render();}}
+  }
+  async function save(){
+    if(busy||!dirty())return;
+    const id=ticket;busy="save";notice="";render();
+    try{
+      const data=await product().request("POST",endpoint()+"/save",{revision,changes:clone(draft)});
+      if(!live(id))return;
+      base=clone(data.settings);draft=clone(data.settings);revision=data.revision;hostRegistered=data.host_registered===true;bad=false;
+      notice="生图后端已保存";
+    }catch(error){if(live(id)){bad=true;notice=ERRORS[error.code]||ERRORS[error.message]||"保存结果尚未确认，请重新读取核对。";}}
+    finally{if(live(id)){busy="";render();}}
+  }
+  async function refreshReviewModels(id){
+    try{
+      const path=product().relative(product().role().model_api)+"/image/review/providers";
+      const data=await product().request("GET",path);
+      if(!live(id))return;
+      const choices={"":"跟随任务路由"};
+      for(const item of data.providers||[])if(typeof item.id==="string"&&item.id)choices[item.id]=item.name||item.id;
+      window.CompanionImageReviewModelChoices=choices;
+      window.dispatchEvent(new Event("companion:catalogs-updated"));
+    }catch{}
+  }
+  async function reconnect(){
+    if(busy)return;
+    const id=ticket;busy="reconnect";notice="正在重连 V2 执行器…";bad=false;render();
+    try{
+      const data=await product().request("POST",endpoint()+"/reconnect",{});
+      if(!live(id))return;
+      hostRegistered=Boolean(data.reconnected);notice=hostRegistered?"V2 图片能力已接入当前会话":"V2 会话未能接入图片能力";bad=!hostRegistered;
+    }catch(error){if(live(id)){bad=true;notice=ERRORS[error.code]||ERRORS[error.message]||"V2 执行器重连失败，请重新读取状态。";}}
+    finally{if(live(id)){busy="";render();}}
+  }
+  async function testEndpoint(endpointId){
+    if(busy||dirty())return;
+    const id=ticket;busy=`test:${endpointId}`;notice="";render();
+    const previous=tests.get(endpointId);
+    if(previous?.status!=="unknown")testKeys.set(endpointId,crypto.randomUUID());
+    try{
+      const bridge=await product().bridgeFor();
+      const data=product().unwrap(await bridge.apiPost(endpoint()+"/test",{endpoint_id:endpointId,operation_key:testKeys.get(endpointId)}));
+      if(live(id)){tests.set(endpointId,data);bad=false;}
+    }catch(error){if(live(id)){tests.set(endpointId,{status:"unknown",error:"请核对原测试结果"});bad=true;notice=ERRORS[error.code]||ERRORS[error.message]||"测试结果暂不可读";}}
+    finally{if(live(id)){busy="";render();}}
+  }
+  function input(event){
+    const target=event.target;
+    if(target.matches("[data-output-scene-index][data-output-scene-field]")&&Array.isArray(sceneDraft)){
+      const index=Number(target.dataset.outputSceneIndex);
+      if(sceneDraft[index])sceneDraft[index][target.dataset.outputSceneField]=target.value;
+      sceneError="";
+      return;
+    }
+    if(target.matches('[data-wb-field="scene_presets_json"]')){renderScenePresets();return;}
+    if(!target.matches("[data-output-native-field]")||!draft||busy)return;
+    const path=target.dataset.outputNativeField.split(".");let object=draft;
+    for(const key of path.slice(0,-1)){object[key]??={};object=object[key];}
+    object[path.at(-1)]=target.type==="checkbox"?target.checked:target.type==="number"?Number(target.value):target.value;
+    if(path.at(-1)==="clear_api_key"&&target.checked)object.api_key="";
+    if(path.at(-1)==="api_key"&&target.value)object.clear_api_key=false;
+    if(path.at(-1)==="enabled")render();
+    root.querySelectorAll('[data-output-native-action="save"]').forEach(button=>{button.disabled=!dirty();});
+    root.querySelectorAll('[data-output-native-action="test"]').forEach(button=>{button.disabled=dirty()||!draft.endpoints.find(item=>item.id===button.dataset.outputEndpoint)?.enabled;});
+    if(target.dataset.outputNativeField==="backend"||target.dataset.outputNativeField==="enabled")render();
+  }
+  function click(event){
+    const target=event.target.closest("[data-output-native-action]");
+    if(!target||!root?.contains(target)||target.disabled||busy)return;
+    const action=target.dataset.outputNativeAction,identifier=target.dataset.outputEndpoint;
+    if(action==="refresh"){refresh();return;}
+    if(action==="save"){save();return;}
+    if(action==="test"){testEndpoint(identifier);return;}
+    if(action==="reconnect"){reconnect();return;}
+    if(action==="refresh-preferences"){void refreshPreferences();return;}
+    if(action==="observability"){refreshObservability();return;}
+    if(action==="jump-observability"){
+      root.querySelector('#output-tab-capabilities')?.click();
+      requestAnimationFrame(()=>root.querySelector("#outputObservationSection")?.scrollIntoView({behavior:"smooth",block:"start"}));
+      return;
+    }
+    if(action==="manage-scenes"){
+      const field=root.querySelector('[data-wb-field="scene_presets_json"]');
+      if(!field){sceneError="角色配置尚未就绪";sceneEditorOpen=true;renderScenePresets();return;}
+      try{sceneDraft=clone(JSON.parse(field.value));}catch{sceneDraft=[];}
+      sceneEditorOpen=!sceneEditorOpen;sceneError="";renderScenePresets();
+      if(sceneEditorOpen)root.querySelector("#outputScenePresetEditor")?.scrollIntoView({behavior:"smooth",block:"nearest"});
+      return;
+    }
+    if(action==="add-scene"){
+      if(sceneSaving||!Array.isArray(sceneDraft)||sceneDraft.length>=12)return;
+      sceneDraft.push({id:`scene-${crypto.randomUUID().replace(/-/g,"").slice(0,12)}`,name:"新场景",prompt:""});
+      sceneError="";renderScenePresets();return;
+    }
+    if(action==="remove-scene"){
+      if(sceneSaving||!Array.isArray(sceneDraft))return;
+      sceneDraft.splice(Number(target.dataset.outputSceneIndex),1);
+      sceneError="";renderScenePresets();return;
+    }
+    if(action==="save-scenes"){
+      void saveScenePresets();
+      return;
+    }
+    if(!draft)return;
+    const index=draft.endpoints.findIndex(item=>item.id===identifier);
+    if(action==="expand"){expanded.has(identifier)?expanded.delete(identifier):expanded.add(identifier);}
+    if(action==="add"){
+      const item={id:crypto.randomUUID(),name:draft.endpoints.length?"备用端点":"主用端点",enabled:false,
+        platform:"auto",base_url:"",api_key:"",model:"",width:1024,height:1024,timeout_seconds:180};
+      draft.endpoints.push(item);expanded.add(item.id);
+    }
+    if(action==="remove"&&index>=0)draft.endpoints.splice(index,1);
+    if((action==="up"||action==="down")&&index>=0){
+      const next=index+(action==="up"?-1:1);
+      if(next>=0&&next<draft.endpoints.length)[draft.endpoints[index],draft.endpoints[next]]=[draft.endpoints[next],draft.endpoints[index]];
+    }
+    render();
+  }
+  function unmount(){ticket++;abort?.abort();abort=null;root=null;draft=base=null;busy="";scope="";observation=null;observationBusy=false;sceneEditorOpen=false;sceneDraft=null;sceneSaving=false;}
+  function mount(node){
+    unmount();root=node;scope=product()?.scopeKey?.()||"";expanded=new Set();tests=new Map();testKeys=new Map();notice="";bad=false;observation=null;observationError="";sceneError="";
+    if(!root)return;
+    abort=new AbortController();
+    root.addEventListener("input",input,{signal:abort.signal});
+    root.addEventListener("change",input,{signal:abort.signal});
+    root.addEventListener("click",click,{signal:abort.signal});
+    refresh();
+    refreshPreview();
+    refreshObservability();
+  }
+  return {mount,unmount,refresh,refreshObservability,configUpdated:renderScenePresets};
+})();

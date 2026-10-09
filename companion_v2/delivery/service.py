@@ -36,12 +36,17 @@ class DeliveryRequest:
     payload_hash: str
     not_before: datetime
     deadline_at: datetime
+    sequence: int = 0
+    part_count: int = 1
 
     def __post_init__(self):
         for name in ("owner", "logical_key", "source_ref", "payload_hash"):
             _opaque(getattr(self, name), field=name)
         if not isinstance(self.context, TaskContext):
             raise ValueError("delivery requires an original context")
+        if (type(self.sequence) is not int or type(self.part_count) is not int
+                or not 0 <= self.sequence < self.part_count <= 64):
+            raise ValueError("delivery sequence must identify one bounded part")
         for name in ("not_before", "deadline_at"):
             object.__setattr__(self, name, normalize_utc(getattr(self, name), field=name))
         if self.not_before >= self.deadline_at:
@@ -49,7 +54,9 @@ class DeliveryRequest:
 
     @property
     def delivery_id(self):
-        return "outbound-" + digest([self.owner, self.logical_key])
+        identity = ([self.owner, self.logical_key] if self.part_count == 1
+                    else [self.owner, self.logical_key, self.sequence])
+        return "outbound-" + digest(identity)
 
     @classmethod
     def restore(cls, payload):
@@ -127,7 +134,8 @@ class OutboundDelivery:
             if isinstance(content, str):
                 content = DeliveryContent(content)
             elif isinstance(content, ImageDeliveryContent):
-                content = DeliveryContent(content.text, tuple(content.images))
+                content = DeliveryContent(content.text, tuple(content.images),
+                                          allow_cross_scope_images=content.allow_cross_scope_images)
         except (TypeError, ValueError) as error:
             raise TaskError("delivery_payload_changed", "source returned an unsupported delivery payload") from error
         if not isinstance(content, DeliveryContent):
@@ -136,14 +144,15 @@ class OutboundDelivery:
         # re-read them from its own sealed record, and they never enter the
         # fingerprint that authorized this payload.
         text, images = content.text, content.images
-        if (not isinstance(text, str) or not text.strip() or len(text) > 65536
+        if (not isinstance(text, str) or (not text.strip() and not images) or len(text) > 65536
                 or (images and not self.sender.supports_images)
                 or payload_hash(text, images) != request.payload_hash):
             raise TaskError("delivery_payload_changed", "source no longer provides the original bounded payload")
         if images:
-            ImageDeliveryEnvelope(request.delivery_id, request.delivery_id, request.context, 0,
+            ImageDeliveryEnvelope(request.delivery_id, request.delivery_id, request.context, request.sequence,
                                   text, request.payload_hash, self.sender.binding, images=images,
-                                  voice=content.voice, poke=content.poke)
+                                  voice=content.voice, poke=content.poke,
+                                  allow_cross_scope_images=content.allow_cross_scope_images)
         return content
 
     @outcome
@@ -156,7 +165,11 @@ class OutboundDelivery:
             identifier = request.delivery_id
             prior = connection.execute("SELECT * FROM background_deliveries WHERE delivery_id = ?", (identifier,)).fetchone()
             if prior is not None:
-                if prior["request_json"] != encode(request) or prior["sender_json"] != encode(self.sender.binding):
+                try:
+                    same_request = DeliveryRequest.restore(prior["request_json"]) == request
+                except (TypeError, ValueError, KeyError):
+                    same_request = False
+                if not same_request or prior["sender_json"] != encode(self.sender.binding):
                     raise TaskError("delivery_idempotency_conflict", "an original delivery cannot change its payload or authority")
                 return require(self.tasks.read(request.context, prior["task_id"]))
             task_id = "send-" + identifier
@@ -188,10 +201,11 @@ class OutboundDelivery:
             connection.execute("""UPDATE background_deliveries SET state = 'dispatched', operation_id = ?,
                 dispatched_at = ? WHERE delivery_id = ?""", (operation.operation_id, stamp(self.tasks.now()), row["delivery_id"]))
             envelope = ImageDeliveryEnvelope if images else DeliveryEnvelope
-            return envelope(row["delivery_id"], operation.operation_id, request.context, 0,
+            return envelope(row["delivery_id"], operation.operation_id, request.context, request.sequence,
                 text, row["payload_hash"], self.sender.binding, run.validate,
                 voice=content.voice, poke=content.poke,
-                **({"images": images} if images else {}))
+                **({"images": images, "allow_cross_scope_images": content.allow_cross_scope_images}
+                   if images else {}))
 
     def _operation_state(self, row, state):
         current = require(self.operations.get(row["operation_id"]))

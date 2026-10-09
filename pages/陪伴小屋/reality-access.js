@@ -18,7 +18,7 @@ window.CompanionRealityAccess = (() => {
     camera_tool_unavailable:"摄像头工具尚未进入当前对话。",
     reality_private_required:"现实触及的个人数据和设备能力只适用于已绑定的私聊窗口。",
     reality_camera_private_required:"摄像头观察只适用于已绑定的私聊窗口。",
-    staging_not_initialized:"请先在账号与会话中加载 V2 运行实例。",
+    staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
     staging_host_terminated:"V2 已停止，请重新加载插件。",
     core_access_required:"当前账号没有管理此授权的权限。",
     dashboard_identity_required:"请从已登录的 AstrBot 管理界面打开。",
@@ -59,23 +59,27 @@ window.CompanionRealityAccess = (() => {
   let node = null, scope = "", paths = {}, statuses = {}, pending = {}, busy = new Set();
   let notices = {}, generation = 0;
   const pendingByScope = new Map();
+  /* 授权读取结果按私聊角色范围暂存于本页内存。这样切换工作区后先能看到
+     上次确认的状态，再由当前宿主请求刷新；不同能力、路由或范围不会串用。 */
+  const statusByScope = new Map();
   const current = ticket => ticket === generation && node?.isConnected && scope === product.scopeKey();
   const scopeKey = kind => `${scope}:${kind}`;
+  const statusKey = kind => `${scopeKey(kind)}:${paths[kind] || ""}`;
   const errorText = error => messages[error?.code] || messages[error?.message]
     || "暂时无法核对授权，请重新读取。";
   function identityLine() {
-    const target = product.target(), selection = product.selection();
-    return `Bot ${target?.bot_id || "未选择"} · 人格 ${selection.role_id || "未选择"} · 窗口 ${selection.target_id || "未选择"}`;
+    return product.scopeLabel?.() || "当前私聊窗口";
   }
   function panel(kind) {
     const meta = labels[kind], status = statuses[kind], command = pending[kind];
-    const stateLabel = !status ? "读取失败" : status.invokable ? "可调用"
+    const canManage = status?.can_manage !== false;
+    const stateLabel = !status ? "读取失败" : !canManage ? "只读" : status.invokable ? "可调用"
       : status.consented ? "未接通" : "未授权";
-    const text = notices[kind] || (status?.invokable ? meta.ready
+    const text = notices[kind] || (!canManage ? messages.core_access_required : status?.invokable ? meta.ready
       : status ? messages[status.reason] || "此项能力尚未进入当前对话。" : "正在读取此项授权…");
     const button = command
-      ? `<button class="button small" type="button" data-reality-access-action="${kind}-retry" ${busy.has(kind) ? "disabled" : ""}>${busy.has(kind) ? "正在核对…" : "核对原请求"}</button>`
-      : status && paths[kind]
+      ? canManage ? `<button class="button small" type="button" data-reality-access-action="${kind}-retry" ${busy.has(kind) ? "disabled" : ""}>${busy.has(kind) ? "正在核对…" : "核对原请求"}</button>` : ""
+      : status && paths[kind] && canManage
         ? `<button class="button small ${status.consented ? "secondary" : "primary"}" type="button" data-reality-access-action="${kind}-${status.consented ? "disable" : "enable"}" ${busy.has(kind) ? "disabled" : ""}>${busy.has(kind) ? "正在保存…" : status.consented ? meta.revoke : meta.allowed}</button>`
         : "";
     return `<article class="reality-consent-panel ${status?.invokable ? "is-ready" : ""}">
@@ -103,8 +107,13 @@ window.CompanionRealityAccess = (() => {
           || typeof result?.consented !== "boolean" || typeof result?.edit_token !== "string")
         throw {code:"invalid_response"};
       statuses[kind] = result;
+      statusByScope.set(statusKey(kind), result);
     } catch (error) {
-      if (current(ticket)) { statuses[kind] = null; notices[kind] = errorText(error); }
+      if (current(ticket)) {
+        statuses[kind] = null;
+        statusByScope.delete(statusKey(kind));
+        notices[kind] = errorText(error);
+      }
     } finally {
       if (current(ticket)) { busy.delete(kind); render(); }
     }
@@ -129,7 +138,7 @@ window.CompanionRealityAccess = (() => {
       if (result?.status?.action !== labels[kind].capability
           || typeof result?.status?.invokable !== "boolean" || typeof result?.status?.consented !== "boolean")
         throw {code:"invalid_response"};
-      statuses[kind] = result.status; pending[kind] = null;
+      statuses[kind] = result.status; statusByScope.set(statusKey(kind), result.status); pending[kind] = null;
       notices[kind] = command.enabled ? labels[kind].saved : labels[kind].removed;
     } catch (error) {
       if (current(ticket)) {
@@ -137,6 +146,7 @@ window.CompanionRealityAccess = (() => {
         if (["reality_access_changed","reality_package_changed","reality_request_invalid",
              "core_access_required","dashboard_identity_required"].includes(error.code || error.message)) {
           pendingByScope.delete(key); pending[kind] = null;
+          statusByScope.delete(statusKey(kind)); statuses[kind] = null;
         }
       }
     } finally { if (current(ticket)) { busy.delete(kind); render(); } }
@@ -170,6 +180,7 @@ window.CompanionRealityAccess = (() => {
       paths = relative ? Object.fromEntries(Object.entries(labels).map(([kind, meta]) =>
         [kind, relative + meta.path])) : {};
     } catch (_) { paths = {}; }
+    for (const kind of Object.keys(labels)) statuses[kind] = statusByScope.get(statusKey(kind)) || null;
     node.addEventListener("click", click);
     render();
     const ticket = generation;

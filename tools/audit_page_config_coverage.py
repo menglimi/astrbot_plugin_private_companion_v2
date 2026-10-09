@@ -45,7 +45,7 @@ MODULES = {
     # QQ 空间拓展的角色级开关与节流；安装与逐会话同意不在这张表里（归能力安装路由）。
     "qzone": "companion_v2.qzone.configuration",
     "group_participation": "companion_v2.conversation.participation",
-    # 唯一一个四层组（安装/角色/关系/窗口），158 个字段；此前不在表里，
+    # 唯一一个四层组（安装/角色/关系/窗口），160 个字段；此前不在表里，
     # 于是整组不参与自检——92 项没有控件的字段也一直是「通过」。
     "proactive.contact": "companion_v2.proactive.configuration",
 }
@@ -60,6 +60,14 @@ INTENTIONAL = {
         "online_status_enabled": "保存时会撤销对应 grant，与授权流程耦合",
     },
     "role.life": {},
+}
+
+# 在其他页面单独维护的字段。审计时确认它们仍由指定页面承接，避免把
+# 拆分后的成员编辑器误报成通用工作台缺少控件。
+EXTERNAL_CONTROLS = {
+    "person": {
+        "acquaintance_learning_enabled": "pages/关系与权限/member-editor.js",
+    },
 }
 
 
@@ -118,7 +126,12 @@ def main():
         order = set(entry.get("order", []))
         labels = set(entry.get("labels", {}))
         sections = {name for section in entry.get("sections", []) for name in section["fields"]}
-        excused = set(INTENTIONAL.get(group, {}))
+        external = EXTERNAL_CONTROLS.get(kind, {})
+        for name, owner in external.items():
+            owner_path = ROOT / owner
+            if name not in short or not owner_path.is_file() or name not in owner_path.read_text(encoding="utf-8"):
+                problems.append(f"{kind} ({group}): 外部控件声明 {name} 未在 {owner} 中找到")
+        excused = set(INTENTIONAL.get(group, {})) | (set(external) & short)
 
         for name in sorted(short - order - excused):
             problems.append(f"{kind} ({group}): 字段 {name} 没有控件声明（order 缺）")
@@ -135,8 +148,9 @@ def main():
         return 1
     total = sum(len(names) for names in counted.values())
     excused = sum(len(group) for group in INTENTIONAL.values())
+    external = sum(len(group) for group in EXTERNAL_CONTROLS.values())
     print(f"全部 {len(counted)} 个分区覆盖自检通过"
-          f"（共 {total} 字段，其中 {excused} 项为有意不接，已豁免）")
+          f"（共 {total} 字段，其中 {excused} 项有意不接、{external} 项由其他页面维护）")
     return 0
 
 

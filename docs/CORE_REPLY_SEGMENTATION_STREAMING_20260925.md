@@ -33,17 +33,19 @@
   "model": {"streaming": true},
   "segmentation": {
     "enabled": true,
-    "llm_controlled": true,
-    "rules_enabled": false,
-    "rule_mode": "sentences",
-    "threshold": 120,
-    "min_segment_chars": 12,
-    "max_segments": 4,
+    "llm_controlled": false,
+    "rules_enabled": true,
+    "rule_mode": "words",
+    "threshold": 500,
+    "min_segment_chars": 5,
+    "max_segments": 5,
     "prompt": ""
   },
   "runtime": {"part_gap_seconds": 2}
 }
 ```
+
+规则字数阈值表示自动分段的正文上限；超过上限时保留整段，模型明确给出的边界仍保留。规则分段会合并过短的气泡。分段词采用每行一项的编辑格式，配置仍保存为 JSON 字符串数组。
 
 沿用宿主的固定运行档规则：初始化前配置；已经初始化的运行档不允许悄悄替换指纹，改变这些选项需使用匹配的新运行档。此轮未改变真实运行配置或自动启动插件。
 

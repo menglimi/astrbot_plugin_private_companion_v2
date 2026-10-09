@@ -14,6 +14,9 @@ from companion_v2.model_gateway.models import ToolSpec
 from companion_v2.storage.semantic import SemanticStore
 from companion_v2.memory.semantic import MemorySemanticRecall
 from companion_v2.memory.group.slang import GroupSlang, INSTRUCTION as SLANG_INSTRUCTION
+from companion_v2.proactive.news_context import (INSTRUCTION as NEWS_INSTRUCTION,
+                                                 UNAVAILABLE_INSTRUCTION,
+                                                 ConversationNewsContext)
 from .reaction_configuration import read_settings as read_reaction_settings
 from .reaction_configuration import read_snapshot as read_reaction_configuration
 from .reactions import ReactionLibrary, INSTRUCTION
@@ -26,6 +29,7 @@ FIELDS = {"reaction.search": (("intent",), ()), "slang.search": (("query",), ())
 # Reaction vector backfill shares the one background registry with memory, under
 # a namespaced key so ``prepare_memory`` still finds the memory job by owner.
 REACTION_BACKFILL_KEY = "reaction-backfill:"
+REACTION_CAPTURE_KEY = "reaction-capture:"
 
 
 class SemanticService:
@@ -39,9 +43,11 @@ class SemanticService:
         self.slang = GroupSlang(self)
         self.reactions = ReactionLibrary(self)
         self.reaction_preferences = ReactionPreferences(self)
+        self.news_context = ConversationNewsContext(app)
         self.search = CatalogSearch(self.store, self.gateway, self.validate_item)
         self.locks, self.background, self.errors = {}, {}, {}
         self.backfill_runs = {}
+        self.reaction_capture_runs = {}
         self.prepared = set()
         self.closed = False
         descriptions = {"reaction.search": "按角色想怎样回应检索表情原图，可提供安慰、吐槽等用途及否定语境；找不到可不发。",
@@ -113,6 +119,30 @@ class SemanticService:
                     pass
         return tuple(available)
 
+    def catalog_filter_reason(self, context, action):
+        """Return a content-free reason code for one omitted semantic action."""
+        cfg = self.store.settings()
+        if self.closed:
+            return "semantic_stopped"
+        if not cfg["enabled"]:
+            return "semantic_disabled"
+        if action == "reaction.search":
+            if not cfg["reactions_enabled"]:
+                return "reactions_disabled"
+            if not self.reaction_enabled(context, cfg):
+                return "reactions_disabled_for_scope"
+            if not self.app.messages.reply_images.enabled:
+                return "reply_images_unavailable"
+            return "reaction_preferences_or_media_unavailable"
+        if not cfg["slang_enabled"]:
+            return "slang_disabled"
+        try:
+            self.slang.memory.access.check(context,
+                "group.memory.write" if action == "slang.learn" else "group.memory.read")
+        except TaskError as error:
+            return error.code
+        return "semantic_action_unavailable"
+
     def validate_arguments(self, action, args):
         required, optional = FIELDS[action]
         if type(args) is not dict or set(required) - set(args) or set(args) - set(required) - set(optional):
@@ -129,7 +159,8 @@ class SemanticService:
         if call.action == "reaction.search":
             payload = await self.reactions.search(context, batch_id, call.call_id, args["intent"])
         elif call.action == "slang.search":
-            payload = {"kind": "slang", **await self.search.search(self.owner(context), "slang", args["query"], context=context)}
+            _, historical = self._slang_context_texts(context, batch_id)
+            payload = {"kind": "slang", **await self.slang.search(context, args["query"], recent_texts=historical)}
             self.store.offer(batch_id, call.call_id, self.owner(context), payload)
         else:
             item = self.slang.learn(context, batch_id, **args)
@@ -161,13 +192,40 @@ class SemanticService:
         rows = self.app.runtime.read_all("SELECT result_json FROM conversation_tool_calls WHERE batch_id=? AND action='slang.learn' AND state='succeeded'", (batch_id,))
         return {item["id"] for row in rows for item in json.loads(row["result_json"])["payload"]["items"]}
 
+    def _slang_context_texts(self, context, batch_id):
+        from companion_v2.conversation.messages import source_from_document
+        rows = self.app.runtime.read_all("SELECT event_json FROM conversation_inputs WHERE batch_id=? AND withdrawn=0 ORDER BY position",
+                                        (batch_id,))
+        texts = [self.app.messages._read_source(source_from_document(json.loads(row["event_json"])["source"]),
+                    context, "text", self.app.now()).payload for row in rows]
+        historical = []
+        try:
+            batch = self.app.messages.batch(batch_id)
+            snapshot = json.loads(batch["contributions_json"]).get("group_context")
+            if snapshot is not None:
+                items = self.app.messages.group_context.read(snapshot, context, batch_id, self.app.now())
+                historical = [item["text"] for item, _ in items if item.get("type") == "group_member_message"
+                              and type(item.get("text")) is str and item["text"].strip()][-4:]
+        except Exception as error:
+            logger.debug("V2 group slang history unavailable: %s", type(error).__name__)
+        return [text for text in texts if type(text) is str], historical
+
     async def prepare_turn(self, run):
         cfg = self.store.settings()
-        if not cfg["enabled"] or run.task.task_id in self.prepared:
+        if run.task.task_id in self.prepared:
             return
         self.prepared.add(run.task.task_id)
         context = run.task.spec.context
         self.check(context)
+        try:
+            if await self.news_context.prepare_turn(run, self.app.now()):
+                self.errors.pop("news_recall", None)
+        except Exception as exc:
+            self.errors["news_recall"] = getattr(exc, "code", type(exc).__name__)
+        if not cfg["enabled"]:
+            if len(self.prepared) > 1024:
+                self.prepared = {run.task.task_id}
+            return
         self.gateway.timeout = cfg["timeout_seconds"]
         self.reaction_preferences.prepare(context, run.task.spec.request_ref)
         # Learning runs before opening the model session, so its material is stable.
@@ -179,68 +237,43 @@ class SemanticService:
                         self.errors.pop("slang_learning", None)
                     except Exception as exc:
                         self.errors["slang_learning"] = getattr(exc, "code", type(exc).__name__)
-                    rows = self.app.runtime.read_all("SELECT event_json FROM conversation_inputs WHERE batch_id=? AND withdrawn=0 ORDER BY position",
-                        (run.task.spec.request_ref,))
-                    from companion_v2.conversation.messages import source_from_document
-                    texts = [self.app.messages._read_source(source_from_document(json.loads(r["event_json"])["source"]),
-                        context, "text", self.app.now()).payload for r in rows]
-                    result = await self.search.search(self.owner(context), "slang", "\n".join(texts)[:2000], context=context, limit=2)
+                    texts, historical = self._slang_context_texts(context, run.task.spec.request_ref)
+                    result = await self.slang.search(context, "\n".join(texts), recent_texts=historical, limit=2)
                     self.store.offer(run.task.spec.request_ref, "__slang_context", self.owner(context), {"kind": "slang", **result})
             except Exception as exc:
                 self.errors["slang_recall"] = getattr(exc, "code", type(exc).__name__)
         else:
-            # Private memory is sealed before generation starts.  Prepare the
-            # current wording while the owner lock is held, then merge only
-            # exact revisions into that sealed snapshot.  A model outage must
-            # leave the lexical snapshot usable and must never block a reply.
+            # Only the current query belongs on the reply path. Both memory
+            # kinds use the same vector; document indexing uses the background
+            # owner lock, so a previous fill cannot hold up this turn.
             if cfg["memory_enabled"]:
-                key = self.owner(context)
                 try:
-                    async with self.locks.setdefault(key, asyncio.Lock()):
-                        rows = self.app.runtime.read_all(
-                            "SELECT event_json FROM conversation_inputs "
-                            "WHERE batch_id=? AND withdrawn=0 ORDER BY position",
-                            (run.task.spec.request_ref,),
-                        )
-                        from companion_v2.conversation.messages import source_from_document
-                        texts = []
-                        for row in rows:
-                            event = json.loads(row["event_json"])
-                            source = source_from_document(event["source"])
-                            try:
-                                record = self.app.messages._read_source(
-                                    source, context, "text", self.app.now()
-                                )
-                            except Exception as error:
-                                logger.warning("V2 semantic batch source read failed: %s", type(error).__name__)
-                                continue
-                            if isinstance(record.payload, str) and record.payload.strip():
-                                texts.append(record.payload)
-                        intent = "\n".join(texts)[-2000:]
-                        if intent:
-                            prepared = []
-                            for kind in ("experiences", "facts"):
-                                try:
-                                    result = await self.memory.prepare(
-                                        context, {"query_intent": intent, "kind": kind}
-                                    )
-                                except Exception as exc:
-                                    self.errors["memory_recall"] = getattr(exc, "code", type(exc).__name__)
-                                    result = {}
-                                if result.get("vector") and result.get("model"):
-                                    prepared.append(result)
-                            if prepared:
-                                try:
-                                    self.app.memory.context.enrich_semantic(
-                                        context,
-                                        run.task.spec.request_ref,
-                                        intent,
-                                        prepared[0]["vector"],
-                                        prepared[0]["model"],
-                                    )
-                                    self.errors.pop("memory_recall", None)
-                                except Exception as exc:
-                                    self.errors["memory_recall"] = getattr(exc, "code", type(exc).__name__)
+                    rows = self.app.runtime.read_all(
+                        "SELECT event_json FROM conversation_inputs "
+                        "WHERE batch_id=? AND withdrawn=0 ORDER BY position",
+                        (run.task.spec.request_ref,),
+                    )
+                    from companion_v2.conversation.messages import source_from_document
+                    texts = []
+                    for row in rows:
+                        event = json.loads(row["event_json"])
+                        source = source_from_document(event["source"])
+                        try:
+                            record = self.app.messages._read_source(source, context, "text", self.app.now())
+                        except Exception as error:
+                            logger.warning("V2 semantic batch source read failed: %s", type(error).__name__)
+                            continue
+                        if isinstance(record.payload, str) and record.payload.strip():
+                            texts.append(record.payload)
+                    intent = "\n".join(texts)[-2000:]
+                    if intent:
+                        prepared = await self.memory.prepare_query(context, {"query_intent": intent})
+                        if prepared.get("vector") and prepared.get("model"):
+                            self.app.memory.context.enrich_semantic(
+                                context, run.task.spec.request_ref, intent,
+                                prepared["vector"], prepared["model"],
+                            )
+                            self.errors.pop("memory_recall", None)
                 except Exception as exc:
                     # Source expiry, indexing, and provider failures are
                     # optional enrichment; the sealed lexical context remains
@@ -321,6 +354,14 @@ class SemanticService:
             return await self.memory.prepare(context, args)
 
     def augment(self, batch, context, request):
+        news_material = self.news_context.material(batch["generation_task_id"], context, self.app.now())
+        if news_material is not None:
+            request = replace(request, context=replace(request.context,
+                materials=request.context.materials + (news_material,)),
+                instruction=request.instruction + "\n" + NEWS_INSTRUCTION)
+        elif self.news_context.unavailable(batch["generation_task_id"]):
+            request = replace(request, instruction=request.instruction + "\n" + UNAVAILABLE_INSTRUCTION)
+        self.schedule_reaction_collection(batch["batch_id"], context, request)
         request = self.reactions.augment(batch, context, request)
         if context.scope.kind is ScopeKind.GROUP:
             from companion_v2.conversation.foreground import PromptMaterial
@@ -341,6 +382,95 @@ class SemanticService:
             request = replace(request, instruction=request.instruction + "\n" + SLANG_INSTRUCTION)
         return request
 
+    @staticmethod
+    def _reaction_collection_fields(context):
+        if context.scope.kind is ScopeKind.PRIVATE:
+            return "reactions_collection_private_enabled", "reactions_collection_private_probability", "private_capture"
+        if context.scope.kind is ScopeKind.GROUP:
+            return "reactions_collection_group_enabled", "reactions_collection_group_probability", "group_capture"
+        return None
+
+    def schedule_reaction_collection(self, batch_id, context, request):
+        fields = self._reaction_collection_fields(context)
+        if fields is None:
+            return
+        enabled_field, probability_field, source = fields
+        settings = self.store.settings()
+        if self.closed or not settings["enabled"] or not settings[enabled_field]:
+            return
+        direct_sources = {material.source for material in request.context.materials
+                          if material.purpose.startswith("input_image:") and material.source is not None}
+        if not direct_sources or not getattr(request.event, "images", ()):
+            return
+        owner = self.owner(context)
+        run_key = digest(["reaction-capture.v1", owner, batch_id])
+        key = REACTION_CAPTURE_KEY + run_key
+        now = time.monotonic()
+        self.reaction_capture_runs = {key: at for key, at in self.reaction_capture_runs.items()
+                                      if now - at < 600}
+        if run_key in self.reaction_capture_runs or key in self.background:
+            return
+        sample = int(digest(["reaction-capture-sample.v1", owner, batch_id])[:16], 16) / 2**64
+        if sample >= settings[probability_field]:
+            return
+        try:
+            images = self.app.messages.images.read(context, (request.event,), self.app.now())
+        except Exception as error:
+            self.errors["reaction_collection"] = getattr(error, "code", type(error).__name__)
+            self._record_reaction_collection(owner, run_key, source, "failed",
+                                             code=getattr(error, "code", type(error).__name__))
+            return
+        images = tuple(image for image in images if image.source in direct_sources)
+        if not images:
+            return
+        self.reaction_capture_runs[run_key] = now
+        if len(self.reaction_capture_runs) > 512:
+            oldest = min(self.reaction_capture_runs, key=self.reaction_capture_runs.get)
+            self.reaction_capture_runs.pop(oldest, None)
+        index = int(digest(["reaction-capture-image.v1", owner, batch_id])[:16], 16) % len(images)
+        try:
+            candidate = self.reactions.capture_prompt_image(images[index])
+        except Exception as error:
+            self.errors["reaction_collection"] = getattr(error, "code", type(error).__name__)
+            self._record_reaction_collection(owner, run_key, source, "failed",
+                                             code=getattr(error, "code", type(error).__name__))
+            return
+        self._record_reaction_collection(owner, run_key, source, "checking")
+        def validate_capture():
+            self.check(context)
+            current = self.store.settings()
+            if self.closed or not current["enabled"] or not current[enabled_field]:
+                raise TaskError("reaction_capture_disabled", "automatic reaction collection was disabled")
+
+        async def collect():
+            try:
+                status, item = await self.reactions.collect_candidate(owner, candidate, source, validate_capture)
+                self._record_reaction_collection(owner, run_key, source, status,
+                                                 item_id=item["id"] if item else None)
+                self.errors.pop("reaction_collection", None)
+            except TaskError as error:
+                if error.code == "reaction_capture_disabled" or self.closed:
+                    self._record_reaction_collection(owner, run_key, source, "cancelled", code=error.code)
+                else:
+                    self.errors["reaction_collection"] = error.code
+                    self._record_reaction_collection(owner, run_key, source, "failed", code=error.code)
+            except Exception as error:
+                if not self.closed:
+                    code = getattr(error, "code", type(error).__name__)
+                    self.errors["reaction_collection"] = code
+                    self._record_reaction_collection(owner, run_key, source, "failed", code=code)
+            finally:
+                self.background.pop(key, None)
+
+        self.background[key] = asyncio.create_task(collect(), name="v2-reaction-collection")
+
+    def _record_reaction_collection(self, owner, run_key, scope, status, *, code=None, item_id=None):
+        try:
+            self.store.record_reaction_collection(owner, run_key, scope, status,
+                at=self.app.now().timestamp(), code=code, item_id=item_id)
+        except Exception as error:
+            self.errors["reaction_collection_log"] = getattr(error, "code", type(error).__name__)
+
     @property
     def active_handles(self):
         return tuple("semantic:" + k for k,t in self.background.items() if not t.done())
@@ -353,6 +483,7 @@ class SemanticService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.reactions.clear_lookups()
+        self.news_context.close()
         self.gateway.clear()
 
     async def configure(self, changes, revision):
