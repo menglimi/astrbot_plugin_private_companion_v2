@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 import inspect
 from logging import getLogger
 from time import perf_counter
@@ -16,7 +17,7 @@ from typing import Awaitable, Callable, Mapping
 
 from companion_v2.foundation.outcome import Outcome
 
-from .models import Lane, TaskClaim, TaskError, TaskRecord, TaskResult, require
+from .models import Lane, TaskClaim, TaskDeferred, TaskError, TaskRecord, TaskResult, require
 from .service import TaskSupervisor
 
 
@@ -27,6 +28,7 @@ logger = getLogger(__name__)
 class RunResult:
     task: TaskRecord | None
     failure_code: str | None = None
+    retry_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,11 @@ class _TaskRunner:
                         result = worker.result()
                     except (Exception, asyncio.CancelledError) as error:
                         code = error.code if isinstance(error, TaskError) else "unhandled_exception"
+                        if isinstance(error, TaskDeferred):
+                            logger.info("[CompanionV2] 后台任务等待本地预算 task=%s kind=%s code=%s retry_at=%s",
+                                        task.task_id, task.spec.kind, code, error.retry_at.isoformat())
+                            return Outcome.success(RunResult(require(self._stopped(claim, "worker_error")),
+                                                             code, error.retry_at))
                         logger.error("[CompanionV2] 后台任务执行失败 task=%s kind=%s code=%s error_type=%s",
                                      task.task_id, task.spec.kind, code, type(error).__name__)
                         logger.debug("[CompanionV2][开发者追踪] 后台任务异常 task=%s kind=%s code=%s",

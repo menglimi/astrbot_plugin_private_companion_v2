@@ -5,6 +5,7 @@ import unittest
 from companion_v2.conversation.delivery import DeliveryEnvelope
 from companion_v2.conversation.media.models import PromptImage
 from companion_v2.delivery.media import ImageDeliveryEnvelope, payload_hash
+from companion_v2.delivery.plan import PokePlan
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import SourceRef, VersionRef
@@ -76,6 +77,31 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.native_sender.send(envelope)).status, "unknown")
         self.assertEqual(len(api.calls), 9)
 
+    async def test_qq_eventchecker_1200_is_a_known_refusal(self):
+        envelope = await self.envelope()
+        api = self.native.platform.client._api._wsr_api
+        api.error = RuntimeError("QQ/NTQQ 拒绝发送（retcode=1200，EventChecker sendMsg）")
+
+        receipt = await self.native_sender.send(envelope)
+
+        self.assertEqual(receipt.status, "not_sent")
+        self.assertEqual(receipt.failure_code, "qq_eventchecker_1200")
+        self.assertIsNone(receipt.delivered_at)
+        api.error = None
+        api.result = {"status": "failed", "retcode": 1200, "message": "EventChecker sendMsg"}
+        receipt = await self.native_sender.send(envelope)
+        self.assertEqual(receipt.status, "not_sent")
+        self.assertEqual(receipt.failure_code, "qq_eventchecker_1200")
+
+    async def test_non_eventchecker_send_exception_remains_unknown(self):
+        envelope = await self.envelope()
+        self.native.platform.client._api._wsr_api.error = RuntimeError("retcode=1200 but unrelated")
+
+        receipt = await self.native_sender.send(envelope)
+
+        self.assertEqual(receipt.status, "unknown")
+        self.assertIsNone(receipt.failure_code)
+
     async def test_disconnected_original_login_never_uses_another_available_login(self):
         envelope = await self.envelope()
         self.native.platform.client._wsr_api_clients.pop("100")
@@ -118,8 +144,36 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         actor = replace(envelope.context.actor, principal=replace(envelope.context.actor.principal, native_account_id="201"))
         self.assertEqual((await self.native_sender.send(replace(envelope, context=replace(envelope.context, actor=actor)))).status, "not_sent")
         self.native.selected = "changed"
-        self.assertEqual((await self.native_sender.send(envelope)).status, "not_sent")
+        with self.assertLogs("companion_v2.adapters.astrbot.onebot", level="WARNING") as captured:
+            receipt = await self.native_sender.send(envelope)
+        self.assertEqual(receipt.status, "not_sent")
+        self.assertIn("stage=final_dispatch_check", captured.output[0])
+        self.assertIn("reason=host_persona_unmapped", captured.output[0])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_text_delivery_verifies_live_persona_once_at_dispatch(self):
+        envelope = await self.envelope()
+        lookups = self.native.role_lookups
+        receipt = await self.native_sender.send(envelope)
+        self.assertEqual(receipt.status, "delivered")
+        self.assertEqual(self.native.role_lookups - lookups, 1)
+
+    async def test_persona_change_after_poke_keeps_combined_result_unknown(self):
+        envelope = await self.envelope()
+        api = self.native.platform.client._api._wsr_api
+        original = api.call_action
+
+        async def action(name, **params):
+            result = await original(name, **params)
+            if name == "friend_poke":
+                self.native.selected = "changed"
+            return result
+
+        api.call_action = action
+        receipt = await self.native_sender.send(replace(envelope, poke=PokePlan()))
+
+        self.assertEqual(receipt.status, "unknown")
+        self.assertEqual([name for name, _ in api.calls], ["friend_poke"])
 
     async def test_unknown_send_is_not_replayed_or_written_to_confirmed_history(self):
         snapshot = await self.capture()

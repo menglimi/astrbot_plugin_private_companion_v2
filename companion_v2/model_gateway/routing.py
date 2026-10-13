@@ -13,6 +13,7 @@ from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.execution.runner import TaskRun
 
 from .models import LocalProvider, ModelEnvelope, ModelTaskProfile
+from .refusal import parse_refusal_terms
 from .replacement_rules import checked_rules, match_route, validate_targets
 
 
@@ -29,11 +30,14 @@ def configuration_fields(profiles: tuple[ModelTaskProfile, ...]) -> tuple[FieldD
             ("max_output_tokens", ValueKind.INTEGER, profile.max_output_tokens),
             ("replacement_rules", ValueKind.TEXT, profile.replacement_rules),
             ("fallback_on_refusal", ValueKind.BOOLEAN, profile.fallback_on_refusal),
+            ("refusal_terms", ValueKind.TEXT, profile.refusal_terms),
             ("timeout_seconds", ValueKind.INTEGER, profile.timeout_seconds),
             ("replacement_scope", ValueKind.TEXT, profile.replacement_scope),
         ):
             boundaries = ({"minimum": 1, "maximum": 600} if suffix == "timeout_seconds" else
                           {"minimum": 1, "maximum": 32768} if kind is ValueKind.INTEGER else {})
+            if suffix == "refusal_terms":
+                boundaries = {"maximum_chars": 4096}
             fields.append(FieldDefinition(profile.group + "." + suffix, profile.group, CONSUMER,
                                           kind, default, **boundaries))
     return tuple(fields)
@@ -73,8 +77,7 @@ class ModelRouter:
             return None
         if snapshot is not None:
             primary = snapshot.fields[profile.group + ".provider"]
-            fallback = snapshot.fields[profile.group + ".fallback"]
-            if primary.explicit and (fallback.explicit or profile.default_fallback):
+            if primary.source is not None:
                 return None
         provider_id = self.default_provider_resolver(context, profile)
         if provider_id is not None and provider_id not in self.providers:
@@ -88,7 +91,7 @@ class ModelRouter:
         fields = dict(snapshot.fields)
         for suffix in ("provider", "fallback"):
             key = profile.group + "." + suffix
-            if not fields[key].explicit and (suffix == "provider" or not profile.default_fallback):
+            if fields[key].source is None and (suffix == "provider" or not profile.default_fallback):
                 fields[key] = replace(fields[key], value=provider_id)
         # This projection only supplies routing values. Adoption must retain
         # the original saved snapshot; the host selection belongs in the audit.
@@ -207,7 +210,8 @@ class ModelRouter:
                 "evaluated_at": evaluated_at.isoformat(), "input_basis": "sealed_current_inputs"},
         }
         return ResolvedModelPlan(ModelEnvelope(request, values["prompt"], values["max_output_tokens"],
-                                              snapshot.resolution_token, model_override=match.model if match else ""),
+                                              snapshot.resolution_token, model_override=match.model if match else "",
+                                              refusal_terms=parse_refusal_terms(values["refusal_terms"])),
                                  snapshot, tuple(selected), self.generation, audit)
 
     def validate_plan(self, plan: ResolvedModelPlan):

@@ -1,4 +1,4 @@
-"""Synthetic group admission, preview and privacy acceptance on the shared runtime."""
+"""Synthetic group admission, native delivery and privacy on the shared runtime."""
 
 import asyncio
 from copy import deepcopy
@@ -42,9 +42,20 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         session = self.controller.session
         await wait_for_batch(session, batch)
         parts = session.runtime.read_all("SELECT text, state FROM conversation_parts WHERE batch_id = ?", (batch,))
-        self.assertEqual([(p["text"], p["state"]) for p in parts], [("我在这里。", "failed")],
+        self.assertEqual([(p["text"], p["state"]) for p in parts], [("我在这里。", "delivered")],
                          dict(session.application.flow.row(batch)))
         return TaskContext.restore(json.loads(session.application.messages.batch(batch)["context_json"])), batch
+
+    async def test_shared_role_personas_resolve_the_selected_group_persona(self):
+        await self.start_host()
+        context, _ = await self.accept_group()
+        bridge = self.controller.session.bridge
+        projection = bridge.groups.personas[(context.scope.bot_id, 'original')]
+        bridge.groups.personas[(projection.bot_id, 'private-persona')] = replace(
+            projection, persona_id='private-persona', instruction_hash=digest('私聊的人格表达'))
+        current = await bridge.verified_persona(context.scope, context.role_binding)
+        self.assertEqual(current['persona_id'], 'original')
+        self.assertEqual(current['account_id'], context.scope.account_id)
 
     async def test_group_only_installation_and_configuration_conflicts(self):
         config = group_config(targets=[])
@@ -182,15 +193,19 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(group.role_binding.role, private.role_binding.role)
         self.assertEqual(app.memory.writer.read(group, AtomRef(saved["atom_id"], 1)).failure.code,
                          "memory_private_context_required")
-        self.assertEqual({tool.action for tool in app.tools.catalog_for(group)},
-                         app.tools.group_memory.actions | app.tools.group_participation.actions)
+        actions = {tool.action for tool in app.tools.catalog_for(group)}
+        self.assertTrue(actions.isdisjoint(app.tools.memory.actions))
+        self.assertTrue(app.tools.group_memory.actions.issubset(actions))
         messages = self.native.provider.client.state.calls[0][0]["messages"]
         user_materials = [json.loads(message["content"]) for message in messages if message["role"] == "user"]
         prompt = json.dumps([messages, user_materials], ensure_ascii=False)
         self.assertNotIn("不喝咖啡", prompt)
         self.assertIn("当前是群聊", prompt)
         sealed = json.loads(app.messages.batch(batch)["contributions_json"])
-        self.assertEqual(set(sealed), {"inputs", "materials", "group_context", "group_memory"})
+        self.assertTrue({'group_context', 'group_memory'}.issubset(sealed))
+        self.assertTrue(set(sealed).isdisjoint({'memory_context', 'relationship_context', 'life_context',
+            'role_growth', 'role_self_review', 'role_state', 'open_items', 'background_history',
+            'perception', 'important_dates'}))
         self.assertFalse(any(binding[0].scope.kind is ScopeKind.GROUP for binding in app.state_maintenance.bindings.values()))
 
     async def test_private_authorization_never_sends_group_messages(self):

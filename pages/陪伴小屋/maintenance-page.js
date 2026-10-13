@@ -18,7 +18,7 @@ window.CompanionMaintenancePage = (() => {
     const amount = value == null || String(value).trim() === "" ? NaN : Number(value);
     return Number.isFinite(amount) ? new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 6}).format(amount) : "—";
   };
-  const cost = value => "US$" + ((Number(value) || 0) / 1000000).toFixed(6);
+  const cost = value => value == null ? "费用未观测" : "US$" + ((Number(value) || 0) / 1000000).toFixed(6);
   const percent = value => value == null ? "—" : Math.max(0, Number(value) || 0).toFixed(1) + "%";
   const localDay = value => {
     const date = value instanceof Date ? value : new Date(value || Date.now());
@@ -34,6 +34,7 @@ window.CompanionMaintenancePage = (() => {
   };
   const taskName = value => ({
     "conversation.reply": "对话回复", "proactive.compose": "主动联系",
+    "conversation.astrbot_core": "AstrBot 核心对话",
     "proactive.judge": "主动联系复核", "memory.reflect": "记忆整理",
     "role.state.maintain": "角色状态", "calendar.plan": "日程规划",
     "role.reading.consume": "阅读理解", "role.growth.progress": "成长进展",
@@ -46,9 +47,14 @@ window.CompanionMaintenancePage = (() => {
     "screen.peek": "屏幕速览", "role.state.maintenance": "状态维护",
     "role.calendar.plan": "日历规划", "memory.reflection": "记忆反思",
     "conversation.group.review": "群聊审核",
+    "reality_touch_camera": "摄像头视觉分析",
+    "reality_touch": "现实陪伴文案", "wakeup_alarm_message": "起床提醒文案",
+    "wakeup_feedback_intent": "起床反馈理解", "live_bili_reply": "直播回复",
+    "game_persona_reply": "游戏角色回复", "game_room_model": "海龟汤主持",
+    "game_draw_guess": "游戏画面识别",
   })[value] || "其他模型任务";
   const promptTaskGroups = [
-    ["对话", [["conversation.reply", "对话回复", "当前私聊的正文生成"]]],
+    ["对话", [["conversation.reply", "对话回复", "AstrBot 核心回复的 V2 附加提示"]]],
     ["主动与记忆", [["proactive.compose", "主动联系", "有真实契机时组织联系内容"], ["proactive.judge", "主动联系复核", "复核是否符合当前人格与来源"], ["memory.reflect", "记忆整理", "从已授权素材整理认识"]]],
     ["生活与成长", [["calendar.plan", "日程规划", "基于已有目标规划下一步"], ["role.state.maintain", "角色状态", "维护角色的连续生活状态"], ["role.reading.consume", "阅读理解", "阅读实际提供的原文"], ["role.growth.progress", "成长进展", "根据已完成确认提出进展"], ["role.self_review", "自我复盘", "回看已完成的角色生活记录"], ["role.expression.learn", "表达学习", "从已授权表达样本提炼风格"]]],
     ["私人书写", [["role.journal.diary", "日记", "保存私人书写"], ["role.journal.dream", "梦境", "保存梦境记录"], ["role.journal.derive", "书写整理", "整理已有文字素材"], ["role.journal.select", "素材选择", "选择本次书写素材"]]],
@@ -59,6 +65,7 @@ window.CompanionMaintenancePage = (() => {
   const promptTaskInfo = kind => promptTaskNames.get(kind) || {group: "其他任务", label: taskName(kind), description: "V2 注册任务"};
   const stateName = value => ({
     generated: "已完成", discarded: "已收束", unknown: "结果未知",
+    returned: "模型已返回", failed: "失败", started: "调用中",
     dispatched: "处理中", reserved: "已预留", not_started: "未发送",
   })[value] || "状态待核对";
   const flowStateName = value => ({
@@ -100,7 +107,8 @@ window.CompanionMaintenancePage = (() => {
     conversation_task_expired: "对话任务超时",
   })[value] || ("未回复 · " + String(value || "原因未知"));
   const failureName = value => ({
-    model_budget_exhausted: "模型预算额度不足",
+    model_budget_exhausted: "插件本地硬预算已触发",
+    model_budget_soft_deferred: "插件本地软限额已触发",
     model_budget_policy_changed: "模型预算策略已变化",
     request_preparation_failed: "请求准备失败", provider_request_failed: "Provider 请求失败",
     native_response_parse_failed: "响应解析失败", provider_recheck_failed: "Provider 状态复核失败",
@@ -110,15 +118,23 @@ window.CompanionMaintenancePage = (() => {
   })[value] || "调用异常";
   const tokenSources = [
     ["companion", "角色总用量", "已连接"],
-    ["conversation", "对话主链 · V2 接管", "已连接"],
+    ["conversation", "对话 · AstrBot 核心与历史", "已连接"],
+    ["astrbot_core", "AstrBot 核心回复", "已连接"],
+    ["legacy_conversation", "历史 V2 回复", "已连接"],
     ["plugin", "插件附加任务", "已连接"],
     ["memory", "外部记忆插件", "未接入"],
     ["together", "一起房间", "未接入"],
-    ["main", "AstrBot 默认主链", "未接入"],
+    ["reality", "现实观察", "未接入"],
+    ["live", "直播与表演", "未接入"],
+    ["game", "共同游玩", "未接入"],
+    ["main", "AstrBot 全部会话", "未接入"],
   ];
-  const localSourceNames = {companion: "角色总用量", conversation: "对话主链 · V2 接管", plugin: "插件附加任务"};
+  const nativeTokenSources = new Set(["together", "reality", "live", "game"]);
+  const localSourceNames = {companion: "角色总用量", conversation: "对话 · AstrBot 核心与历史",
+    astrbot_core: "AstrBot 核心回复", legacy_conversation: "历史 V2 回复", plugin: "插件附加任务"};
   const sourceIcons = {companion: "layers-3", conversation: "messages-square", plugin: "shield-check",
-    memory: "brain", together: "users-round", main: "workflow"};
+    astrbot_core: "workflow", legacy_conversation: "history", memory: "brain", together: "users-round",
+    reality: "camera", live: "radio", game: "gamepad-2", main: "workflow"};
   const diagnosticCategories = [
     ["all", "全部", "所有运行信号"], ["model", "模型链路", "Provider、失败与未确认"],
     ["identity", "身份隔离", "管理身份与角色账本边界"],
@@ -131,11 +147,16 @@ window.CompanionMaintenancePage = (() => {
   const IMAGE_GENERATION_ACTION = "image.generate";
   const imageActionReady = (actions, action) => actions.some(row => row.action === action && row.registered && row.current);
   const sourceDescriptions = {
-    conversation: ["对话主链 · V2 接管", "分项统计尚未同步。", "重新加载 V2 后刷新统计。"],
+    conversation: ["对话 · AstrBot 核心与历史", "分项统计尚未同步。", "重新加载 V2 后刷新统计。"],
+    astrbot_core: ["AstrBot 核心回复", "核心回复观测尚未同步。", "本页只统计已映射到当前角色的核心回复，收到实际模型回执后显示用量。"],
+    legacy_conversation: ["历史 V2 回复", "历史统计尚未同步。", "旧 V2 回复账本保留供历史对照。"],
     plugin: ["插件附加任务", "分项统计尚未同步。", "重新加载 V2 后刷新统计。"],
     memory: ["外部记忆插件 Token", "该独立插件账本没有接入 V2 的授权统计合同。", "接入后才能显示记忆任务、Provider、最近调用与余额；当前角色数据不会替代它。"],
-    together: ["一起房间 Token", "V2 当前页面无法读取该独立插件的 Token 记录。", "接入后才能显示房间任务、Provider、逐次回执与余额；不会拼入角色账本。"],
-    main: ["AstrBot 默认主链", "AstrBot 默认回复流程的统计未接入。", "V2 接管会话的正文生成见「对话主链」。"],
+    together: ["一起房间 Token", "一起房间内部统计暂不可用。", "内置能力提供房间任务、Provider 与实际用量回执；单独统计，不计入角色预算。"],
+    reality: ["现实观察 Token", "现实观察内部统计暂不可用。", "摄像头视觉分析与现实提醒文案按模型真实回执记录；没有回执时显示未知，不计入普通核心回复。"],
+    live: ["直播与表演 Token", "直播与表演内部统计暂不可用。", "直播模型任务按实际回执单独统计，缺失用量和缓存字段保留未知，不计入普通核心回复。"],
+    game: ["共同游玩 Token", "共同游玩内部统计暂不可用。", "游戏回复、海龟汤和画面识别按实际模型回执单独统计，不计入普通核心回复。"],
+    main: ["AstrBot 全部会话", "AstrBot 全局统计未接入。", "当前角色已观测的核心回复见「AstrBot 核心回复」；不会重复合计其他角色和全部会话账本。"],
   };
   const routeError = code => ({
     dashboard_identity_required: "请从已登录的 AstrBot 管理页面打开。",
@@ -206,7 +227,8 @@ window.CompanionMaintenancePage = (() => {
     return tokenSources.map(([key, label, baseStatus]) => {
       const source = state.data?.external_token_sources?.[key];
       const status = localSourceNames[key] ? (localUsage(state.data || {}, key) ? baseStatus : "待同步") : key === "main" ? "未接入"
-        : source?.available ? "已连接" : source?.installed ? "暂不可用" : "未安装";
+        : source?.available ? "已连接" : source?.installed ? "暂不可用"
+        : nativeTokenSources.has(key) ? "未就绪" : "未安装";
       return fmt(
       '<button type="button" data-token-source="{{0}}" role="tab" aria-selected="{{1}}" class="{{2}}"><i data-lucide="{{3}}"></i><span>{{4}}</span><small data-state="{{5}}">{{5}}</small></button>',
       key, state.tokenSource === key, state.tokenSource === key ? "is-active" : "", sourceIcons[key], label, status);
@@ -217,7 +239,9 @@ window.CompanionMaintenancePage = (() => {
     const local = Boolean(localSourceNames[source]);
     const [title, reason, detail] = sourceDescriptions[source] || sourceDescriptions.memory;
     const pluginTitle = summary?.display_name ? summary.display_name + " Token" : title;
-    const status = summary?.installed ? "插件已加载，统计桥暂不可用" : reason;
+    const status = summary?.installed
+      ? nativeTokenSources.has(source) ? "内部能力已装配，统计暂不可用" : "插件已加载，统计桥暂不可用"
+      : reason;
     const explanation = summary?.reason || detail;
     return '<div class="maint-source-unavailable" role="status"><div class="maint-source-glyph"><i data-lucide="plug-zap"></i></div><div class="maint-source-copy">' +
       '<span class="maint-eyebrow">SOURCE / ' + (summary?.installed ? "BRIDGE UNAVAILABLE" : "NOT CONNECTED") + '</span><strong>' + escapeHtml(pluginTitle) + '</strong><p>' + escapeHtml(status) + '</p><small>' + escapeHtml(explanation) +
@@ -258,23 +282,13 @@ window.CompanionMaintenancePage = (() => {
     for (const day of rows.filter(row => (row.day || row.key || "") >= startDay && (row.day || row.key || "") <= end)) {
       for (const item of Array.isArray(day[property]) ? day[property] : []) {
         const key = String(item.key || "未知");
-        const value = totals.get(key) || {key, calls: 0, tokens: 0, input_tokens: 0, output_tokens: 0,
-          failures: 0, reported_tokens: 0, estimated_tokens: 0, cached_input_tokens: 0, cache_creation_tokens: 0,
-          cache_reported_calls: 0, cache_telemetry_calls: 0, cache_input_tokens: 0, cache_other_input_tokens: 0,
-          latency_total: 0, latency_samples: 0};
-        for (const name of ["calls", "tokens", "input_tokens", "output_tokens", "failures", "reported_tokens", "estimated_tokens", "cached_input_tokens", "cache_creation_tokens", "cache_reported_calls", "cache_telemetry_calls", "cache_input_tokens", "cache_other_input_tokens"]) {
-          value[name] += Number(item[name]) || 0;
-        }
-        if (item.avg_latency_ms != null) {
-          value.latency_total += (Number(item.avg_latency_ms) || 0) * (Number(item.calls) || 1);
-          value.latency_samples += Number(item.calls) || 1;
-        }
+        const value = totals.get(key) || {key, samples: []};
+        value.samples.push(item);
         totals.set(key, value);
       }
     }
-    return [...totals.values()].map(item => ({...item,
-      avg_latency_ms: item.latency_samples ? Math.round(item.latency_total / item.latency_samples) : null,
-    })).sort((a, b) => b.tokens - a.tokens).slice(0, 32);
+    return [...totals.values()].map(item => ({key: item.key, ...aggregateUsage(item.samples)}))
+      .sort((a, b) => (b.tokens || 0) - (a.tokens || 0)).slice(0, 32);
   }
 
   function externalRankingMarkup(items) {
@@ -284,7 +298,7 @@ window.CompanionMaintenancePage = (() => {
     return '<div class="maint-ranking">' + rows.map((row, index) => {
       const share = Math.max(0, Math.min(100, Math.round((Number(row.tokens) || 0) * 1000 / total) / 10));
       return fmt('<div class="maint-ranking-row" data-series="{{4}}"><span class="maint-ranking-label">{{0}}</span><span class="maint-ranking-track"><i style="--rank-width:{{1}}%"></i></span><strong>{{2}}</strong><small>{{3}}%</small></div>',
-        escapeHtml(row.key || "未知"), share, number(row.tokens), share, index % 7 + 1);
+        escapeHtml(row.key || "未知"), share, row.tokens == null ? "暂无回执" : number(row.tokens), share, index % 7 + 1);
     }).join("") + '</div>';
   }
 
@@ -331,7 +345,8 @@ window.CompanionMaintenancePage = (() => {
         textCell(escapeHtml(taskName(row.kind)), "col-text") + textCell(escapeHtml(row.provider), "col-text") +
         numCell(row.tokens, "col-primary") + pairCell(row.input_tokens, row.output_tokens) +
         textCell(row.cache_hit_rate == null ? (row.cache_hit_reported ? "0%" : "暂无回执") : percent(row.cache_hit_rate), "col-text") +
-        pairCell(row.reported_tokens, row.estimated_tokens) + textCell(escapeHtml(stateName(row.state)), "col-text") +
+        pairCell(row.reported_tokens, row.estimated_tokens) + textCell(escapeHtml(stateName(row.state)) +
+          (row.tokens == null ? '<small>用量回执未知</small>' : ""), "col-text") +
         '<td>' + (row.latency_ms == null ? "—" : number(row.latency_ms) + " ms") + '</td></tr>').join("") +
       '</tbody></table></div>';
   }
@@ -363,6 +378,7 @@ window.CompanionMaintenancePage = (() => {
   }
 
   function numCell(value, cls) {
+    if (value == null) return '<td class="' + (cls || "") + '">—</td>';
     const zero = Number(value) === 0 ? " is-zero" : "";
     return '<td class="' + (cls ? cls + zero : zero.trim()) + '">' + number(value) + '</td>';
   }
@@ -384,7 +400,7 @@ window.CompanionMaintenancePage = (() => {
 
   function budgetMarkup(budget, spent, held, limit, budgetPct, softEnabled, softPct, softLimit, softState) {
     const used = spent + held;
-    const stateName = limit && used / limit >= 0.9 ? "warn" : "ok";
+    const budgetState = limit && used / limit >= 0.9 ? "warn" : "ok";
     const softPos = limit && softEnabled ? Math.max(0, Math.min(100, Math.round(softLimit * 100 / limit))) : null;
     let meterline;
     if (limit) {
@@ -399,19 +415,41 @@ window.CompanionMaintenancePage = (() => {
     } else {
       meterline = '<div class="maint-budget-track" aria-hidden="true"><i style="--budget-progress:0%"></i></div>';
     }
-    const hardLimit = limit ? number(limit) + ' Token' : '未设置硬预算';
-    return '<div class="maint-budget-block maint-token-summary-card" data-state="' + stateName + '" data-focus-target="budget-block"><div class="maint-token-card-heading"><span>今日插件任务预算</span><small>仅插件任务 · V2 可选后台任务</small></div>' +
-      '<div class="maint-budget-reading"><strong>' + (limit ? budgetPct + '%' : '—') + '</strong><span>' + (limit ? number(used) + ' / ' + hardLimit : '当前无硬上限') + '</span></div>' + meterline +
-      '<div class="maint-budget-values"><span>已入账 <b>' + number(spent) + '</b></span><span>预留中 <b>' + number(held) + '</b></span><span>上限 <b>' + (limit ? number(limit) : '未设置') + '</b></span></div>' +
+    const hardLimit = limit ? number(limit) + ' Token' : '硬预算关闭';
+    const pending = Number(budget.pending_usage_calls) || 0;
+    const sources = Array.isArray(budget.reservation_sources) ? budget.reservation_sources : [];
+    const pendingDetail = pending ? '<details><summary>等待用量回执 ' + number(pending) + ' 次 · 占用预留 ' + number(budget.pending_usage_tokens) + ' Token</summary>' +
+      sources.map(item => '<div class="maint-budget-values"><span>' + escapeHtml(taskName(item.kind)) + ' · ' + escapeHtml(stateName(item.state)) + '</span><span>' + number(item.calls) + ' 次 · <b>' + number(item.held_tokens) + ' Token</b></span></div>').join('') + '</details>' : '';
+    return '<div class="maint-budget-block maint-token-summary-card" data-state="' + budgetState + '" data-focus-target="budget-block"><div class="maint-token-card-heading"><span>今日插件任务预算</span><small>仅插件任务 · V2 后台任务</small></div>' +
+      '<div class="maint-budget-reading"><strong>' + (limit ? budgetPct + '%' : '关闭') + '</strong><span>' + (limit ? number(used) + ' / ' + hardLimit : '仅统计用量 · 硬预算关闭') + '</span></div>' + meterline +
+      '<div class="maint-budget-values"><span>已入账 <b>' + number(spent) + '</b></span><span>预留中 <b>' + number(held) + '</b></span><span>硬上限 <b>' + (limit ? number(limit) : '关闭') + '</b></span></div>' +
+      pendingDetail +
       '<div class="maint-soft-limit" data-state="' + softState + '"><div><span>后台软限额</span><strong>' + (softEnabled ? softPct + '%' : '关闭') + '</strong></div>' +
       (limit && softEnabled ? '' : '<div class="maint-soft-meter"><i style="--soft-progress:' + softPct + '%"></i></div>') +
       '<small>' +
-      (softEnabled ? softPct >= 100 ? '已触发 · 暂缓新建可选后台任务' : '阈值 ' + number(softLimit) + ' Token · 不影响正在运行的任务' : '未启用 · 不限制可选后台任务') + '</small></div></div>';
+      (softEnabled ? softPct >= 100 ? '已触发 · 暂缓新建可选后台任务' : '阈值 ' + number(softLimit) + ' Token · 不影响正在运行的任务' : limit ? '软限额关闭 · 本地硬预算已启用' : '本地限额已关闭 · 保留用量统计') + '</small></div></div>';
+  }
+
+  function memoryLinkageMarkup(linkage) {
+    if (!linkage) return "";
+    if (linkage.state === "ready") {
+      const categories = Array.isArray(linkage.categories) ? linkage.categories : [];
+      const labels = {profile: "个人资料", preference: "偏好", relationship: "关系", private_conversation: "私聊内容", other: "其他"};
+      return '<section class="maint-memory-linkage" aria-label="V2 记忆联动计数"><div><strong>V2 联动摘要</strong><span>' +
+        escapeHtml(linkage.display_name || "记忆插件") + ' · 只读分类计数，不含记忆正文</span></div><dl>' +
+        categories.map(item => '<div><dt>' + escapeHtml(labels[item.key] || "其他") + '</dt><dd>' + number(item.count) + '</dd></div>').join("") +
+        '<div><dt>合计</dt><dd>' + number(linkage.counts?.total) + '</dd></div></dl></section>';
+    }
+    if (linkage.state === "not_owner") {
+      return '<section class="maint-memory-linkage is-muted"><div><strong>V2 联动摘要</strong><span>当前长期记忆由 V2 提供，外部摘要未读取。</span></div></section>';
+    }
+    return '<section class="maint-memory-linkage is-muted"><div><strong>V2 联动摘要暂不可用</strong><span>外部 Token 账本与 V2 角色预算仍分别统计。</span></div></section>';
   }
 
   function externalTokenMarkup(sourceKey) {
     const source = state.data?.external_token_sources?.[sourceKey];
-    if (!source?.available) return unavailableSourceMarkup(sourceKey, source);
+    const linkageMarkup = sourceKey === "memory" ? memoryLinkageMarkup(source?.linkage) : "";
+    if (!source?.available) return linkageMarkup + unavailableSourceMarkup(sourceKey, source);
     const data = {generated_at: state.data.generated_at, history: source.history || source.daily || [], daily: source.daily || [],
       hourly: source.hourly || [], recent: source.recent || [], windows: {}, totals: source.totals || {}};
     const row = externalBucketForPeriod(source, data);
@@ -420,7 +458,7 @@ window.CompanionMaintenancePage = (() => {
     const taskRows = externalDimensions(source, row, "tasks");
     const day = state.period === "date" ? state.selectedDate : localDay(data.generated_at);
     const label = ({today: "今日", "7d": "近 7 日", "30d": "近 30 日", total: "累计", date: day})[state.period] || "今日";
-    const stats = {tokens: Number(row.tokens) || 0,
+    const stats = {tokens: row.tokens == null ? null : Number(row.tokens) || 0,
       day: state.period === "date" ? state.selectedDate : localDay(data.generated_at)};
     const compare = comparisonMarkup(usageComparison(data, stats));
     const selectedRecent = data.recent.filter(item => {
@@ -437,12 +475,14 @@ window.CompanionMaintenancePage = (() => {
     const trendEndDay = state.period === "date" ? state.selectedDate : localDay(data.generated_at);
     const externalMetric = (key, suffix = "") => row[key] == null ? "无回执" : number(row[key]) + suffix;
     const activeDetail = ["daily", "providers", "tasks", "recent"].includes(state.tokenDetailView) ? state.tokenDetailView : "daily";
-    const externalMetrics = '<div class="maint-external-kpis"><div class="maint-token-card-heading"><span>来源计量</span><small>以外部回执为准</small></div><div><span>已确认 Token</span><strong>' + externalMetric("reported_tokens") + '</strong></div><div><span>估算 Token</span><strong>' + externalMetric("estimated_tokens") + '</strong></div><div><span>输入 / 输出</span><strong>' + (row.input_tokens == null && row.output_tokens == null ? "无回执" : externalMetric("input_tokens") + ' / ' + externalMetric("output_tokens")) + '</strong></div><div><span>失败 / 平均延迟</span><strong>' + (row.failures == null ? "无回执" : number(row.failures)) + ' / ' + (row.avg_latency_ms == null ? "无回执" : number(row.avg_latency_ms) + ' ms') + '</strong></div></div>';
+    const externalMetrics = '<div class="maint-external-kpis"><div class="maint-token-card-heading"><span>来源计量</span><small>以模型回执为准</small></div><div><span>已确认 Token</span><strong>' + externalMetric("reported_tokens") + '</strong></div><div><span>估算 Token</span><strong>' + externalMetric("estimated_tokens") + '</strong></div><div><span>输入 / 输出</span><strong>' + (row.input_tokens == null && row.output_tokens == null ? "无回执" : externalMetric("input_tokens") + ' / ' + externalMetric("output_tokens")) + '</strong></div><div><span>失败 / 平均延迟</span><strong>' + (row.failures == null ? "无回执" : number(row.failures)) + ' / ' + (row.avg_latency_ms == null ? "无回执" : number(row.avg_latency_ms) + ' ms') + '</strong></div></div>';
     return '<div class="maint-external-source"><div class="maint-token-source-note"><i data-lucide="layers-3"></i><span>' +
-      escapeHtml(source.display_name || (sourceKey === "memory" ? "外部记忆插件" : "一起房间")) + ' 独立账本 · 不计入 V2 角色预算 · Provider 本地价格未提供</span></div>' +
-      '<div class="maint-token-hero maint-token-summary maint-external-hero"><div class="maint-usage-total maint-token-summary-card"><span>' + escapeHtml(label) + ' · 外部来源 Token</span><strong>' + number(row.tokens) + '</strong><small>Token</small><div class="maint-usage-subline"><span>' + number(row.calls) + ' 次调用</span><i></i><span>费用未提供</span></div></div>' +
+      escapeHtml(source.display_name || tokenSources.find(([key]) => key === sourceKey)?.[1] || "模型来源") + ' 独立账本 · 不计入 V2 角色预算 · Provider 本地价格未提供</span></div>' +
+      linkageMarkup +
+      '<div class="maint-token-hero maint-token-summary maint-external-hero"><div class="maint-usage-total maint-token-summary-card"><span>' + escapeHtml(label) + ' · 来源 Token</span><strong>' + (row.tokens == null ? "未知" : number(row.tokens)) + '</strong><small>Token</small><div class="maint-usage-subline"><span>' + number(row.calls) + ' 次调用</span><i></i><span>费用未提供</span>' +
+      (Number(row.unconfirmed_calls) ? '<i></i><span>用量回执未知 ' + number(row.unconfirmed_calls) + ' 次</span>' : "") + '</div></div>' +
       externalMetrics + '</div>' +
-      '<details class="maint-token-drill"><summary>周期对比与缓存回执</summary><div class="maint-token-drill-content">' + compare + '<div class="maint-token-kpis maint-external-cache-kpis"><div><span>缓存命中</span><strong>' + (cacheRate == null ? "暂无回执" : number(row.cached_input_tokens)) + '</strong></div><div><span>命中率</span><strong>' + (cacheRate == null ? "暂无命中率" : percent(cacheRate)) + '</strong></div><div><span>缓存写入</span><strong>' + (Number(row.cache_telemetry_calls) ? number(row.cache_creation_tokens) : "暂无回执") + '</strong></div><div><span>回执覆盖</span><strong>' + (cacheCoverage == null ? "暂无" : percent(cacheCoverage)) + '</strong></div></div></div></details>' +
+      '<details class="maint-token-drill"><summary>周期对比与缓存回执</summary><div class="maint-token-drill-content">' + compare + '<div class="maint-token-kpis maint-external-cache-kpis"><div><span>缓存命中</span><strong>' + (cacheRate == null ? "暂无回执" : number(row.cached_input_tokens)) + '</strong></div><div><span>命中率</span><strong>' + (cacheRate == null ? "暂无命中率" : percent(cacheRate)) + '</strong></div><div><span>缓存写入</span><strong>' + (row.cache_creation_tokens == null ? "暂无回执" : number(row.cache_creation_tokens)) + '</strong></div><div><span>回执覆盖</span><strong>' + (cacheCoverage == null ? "暂无" : percent(cacheCoverage)) + '</strong></div></div></div></details>' +
       '<div class="maint-token-analytics" id="maint-trends">' + trendPanelMarkup(data, stats, rows, trendEndDay, "用量趋势", "选择日期查看该日统计") +
       breakdownPanelMarkup(providerRows, taskRows, label, [], [], true) + '</div>' +
       '<section class="maint-history-panel maint-token-details" id="maint-history"><div class="maint-subhead"><div><strong>调用与用量明细</strong><span>最多保留一年逐日统计；外部状态与计量未作推断</span></div></div>' +
@@ -458,7 +498,8 @@ window.CompanionMaintenancePage = (() => {
         const usage = report ? statsFor(report) : null;
         return {key, label, status: report ? "当前角色" : "待同步", available: Boolean(report),
           tokens: usage?.tokens, calls: usage?.calls, cache: usage?.cacheRate, coverage: usage?.cacheCoverage,
-          scope: key === "companion" ? "对话主链 + 插件附加任务" : key === "conversation" ? "会话正文与工具续轮" : "主动、记忆、日程等附加调用"};
+          scope: key === "companion" ? "对话合计 + 插件附加任务" : key === "conversation" ? "核心回复 + 历史 V2 回复" :
+            key === "astrbot_core" ? "真实核心请求与工具续轮" : key === "legacy_conversation" ? "旧 V2 模型账本" : "主动、记忆、日程等附加调用"};
       }
       const source = data.external_token_sources?.[key];
       if (!source?.available) return {key, label, status: source?.installed ? "桥不可用" : baseStatus,
@@ -469,14 +510,14 @@ window.CompanionMaintenancePage = (() => {
       const receiptCalls = Number(bucket.cache_reported_calls) || 0;
       const telemetryCalls = Number(bucket.cache_telemetry_calls) || 0;
       return {key, label: source.display_name || label, status: "已连接", available: true,
-        tokens: Number(bucket.tokens) || 0, calls: Number(bucket.calls) || 0,
+        tokens: bucket.tokens == null ? null : Number(bucket.tokens) || 0, calls: Number(bucket.calls) || 0,
         cache: receiptCalls > 0 && denominator > 0 ? Math.round((Number(bucket.cached_input_tokens) || 0) * 1000 / denominator) / 10 : null,
         coverage: Number(bucket.calls) > 0 ? Math.round(telemetryCalls * 1000 / Number(bucket.calls)) / 10 : null,
         scope: "独立账本 · 不计入 V2 预算"};
     });
     const periodLabel = ({today: "今日", "7d": "近 7 日", "30d": "近 30 日", total: "累计", date: state.selectedDate})[state.period] || "当前范围";
     const rows = sourceRows.map(row => {
-      const value = row.available ? number(row.tokens) : "—";
+      const value = row.available ? row.tokens == null ? "未知" : number(row.tokens) : "—";
       const calls = row.available ? number(row.calls) : "—";
       const cache = row.cache == null ? "暂无" : percent(row.cache);
       const coverage = row.coverage == null ? "暂无" : percent(row.coverage);
@@ -700,7 +741,9 @@ window.CompanionMaintenancePage = (() => {
     return '<section class="maint-prompt-composition" aria-label="运行时提示组成"><div class="maint-prompt-subhead"><strong>运行时提示组成</strong><span>不读取单次请求正文</span></div><ol class="maint-prompt-layers">' +
       layers.map(layer => '<li><strong>' + escapeHtml(layer.label || layer.key) + '</strong><span data-editable="' + Boolean(layer.editable) + '">' +
         (layer.editable ? "本页可编辑" : "运行端提供") + '</span><p>' + escapeHtml(layer.description || "") + '</p></li>').join("") +
-      '</ol><div class="maint-prompt-dynamics"><div class="maint-prompt-subhead"><strong>本轮动态内容</strong></div><p>角色设定、已选由头、新闻与历史材料按当前会话注入；此处查看模板，不包含某次调用的完整 messages。</p></div></section>';
+      '</ol><div class="maint-prompt-dynamics"><div class="maint-prompt-subhead"><strong>本轮动态内容</strong></div><p>' +
+      (task.execution_path === "astrbot_core" ? "人格、历史、图片与音视频由 AstrBot 构造；V2 按窗口权限附加角色、关系、记忆、生活和主动灵感。本页编辑对话附加提示并查看 V2 背景规则。" :
+        "角色设定、已选由头、新闻与历史材料按当前会话注入；此处查看模板，不包含某次调用的完整 messages。") + '</p></div></section>';
   }
 
   function promptViewMarkup() {
@@ -737,7 +780,9 @@ window.CompanionMaintenancePage = (() => {
     const dynamicFields = task.dynamicFields.length
       ? '<div class="maint-prompt-dynamics"><div class="maint-prompt-subhead"><strong>动态字段</strong><span>由 V2 运行端注入</span></div><div class="maint-prompt-dynamic-list">' +
         task.dynamicFields.map(field => '<div><code>{{' + escapeHtml(field.name) + '}}</code><span>' + escapeHtml(field.description) + '</span></div>').join("") + '</div></div>'
-      : '<div class="maint-prompt-dynamics"><div class="maint-prompt-subhead"><strong>动态字段</strong><span>当前正文未声明模板变量</span></div><p>运行时上下文仍由 V2 请求合同独立注入，本页不会展示消息正文或动态值。</p></div>';
+      : '<div class="maint-prompt-dynamics"><div class="maint-prompt-subhead"><strong>动态字段</strong><span>当前正文未声明模板变量</span></div><p>' +
+        (task.execution_path === "astrbot_core" ? "AstrBot 提供当前人格和会话历史，V2 附加获准的陪伴背景；本页不读取单次消息。" :
+          "运行时上下文由任务运行端注入，本页不会展示消息正文或动态值。") + '</p></div>';
     const header = '<div class="maint-prompt-editor-head"><div class="maint-prompt-task-identity"><div class="maint-prompt-task-meta"><span>' + escapeHtml(task.group) + '</span><code>' + escapeHtml(task.kind) + '</code></div><h4>' + escapeHtml(task.label) + '</h4><p>' + escapeHtml(task.description) + '</p></div><span class="maint-prompt-badge" data-state="' + (task.customized ? "custom" : "default") + '"><i data-lucide="' + (task.customized ? "circle-check" : "circle-dot") + '"></i><span>' + (task.customized ? "已自定义" : "继承默认") + '</span></span></div>';
     const tabs = promptViewMarkup();
     const panel = content => '<div class="maint-prompt-view">' + content + '</div>';
@@ -796,13 +841,19 @@ window.CompanionMaintenancePage = (() => {
     const result = Object.fromEntries(fields.map(name => [name, 0]));
     let latencyWeighted = 0;
     let latencySamples = 0;
+    let pricedRows = 0;
     for (const row of rows) {
       for (const name of fields) result[name] += Number(row[name]) || 0;
+      if (row.cost_microusd != null) pricedRows += 1;
       const samples = Number(row.latency_samples) || (row.avg_latency_ms == null ? 0 : Number(row.calls) || 0);
       latencyWeighted += (Number(row.avg_latency_ms) || 0) * samples;
       latencySamples += samples;
     }
     result.avg_latency_ms = latencySamples ? Math.round(latencyWeighted / latencySamples) : null;
+    for (const name of ["tokens", "reported_tokens", "input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_tokens"]) {
+      if (rows.length && !rows.some(row => row[name] != null)) result[name] = null;
+    }
+    if (rows.length && !pricedRows) result.cost_microusd = null;
     return result;
   }
 
@@ -818,7 +869,8 @@ window.CompanionMaintenancePage = (() => {
       row, day: selectedDay(data), calls, knownCalls,
       confirmedRate: calls ? Math.round(knownCalls * 1000 / calls) / 10 : null,
       tokens: Number(row.tokens) || 0,
-      cost: Number(row.cost_microusd) || 0, failures: Number(row.failures) || 0,
+      cost: data.execution_path === "astrbot_core" || row.cost_microusd == null ? null : Number(row.cost_microusd) || 0,
+      failures: Number(row.failures) || 0,
       unconfirmed, unknown: Number(row.unknown_calls) || 0, active: Number(row.active_calls) || 0,
       cacheCalls, cacheTelemetryCalls: Number(row.cache_telemetry_calls) || 0,
       cacheInput, cached, creation: Number(row.cache_creation_tokens) || 0,
@@ -849,6 +901,8 @@ window.CompanionMaintenancePage = (() => {
     });
     if (!previousRows.length) return {label: days === 1 ? "较前一日" : "较前 " + days + " 日", empty: true};
     const previous = aggregateUsage(previousRows);
+    if (stats.tokens == null || previous.tokens == null) return {
+      label: days === 1 ? "较前一日" : "较前 " + days + " 日", unavailable: true};
     const delta = stats.tokens - previous.tokens;
     const rate = previous.tokens ? delta * 100 / previous.tokens : null;
     return {label: days === 1 ? "较前一日" : "较前 " + days + " 日", previous: previous.tokens, delta, rate};
@@ -857,6 +911,7 @@ window.CompanionMaintenancePage = (() => {
   function comparisonMarkup(comparison) {
     if (!comparison) return "";
     if (comparison.empty) return '<div class="maint-period-comparison" data-state="unknown"><span>周期对比</span><strong>前期暂无记录</strong><small>' + escapeHtml(comparison.label) + '</small></div>';
+    if (comparison.unavailable) return '<div class="maint-period-comparison" data-state="unknown"><span>周期对比</span><strong>用量回执不完整</strong><small>' + escapeHtml(comparison.label) + '</small></div>';
     const tone = comparison.delta > 0 ? "up" : comparison.delta < 0 ? "down" : "flat";
     const change = comparison.rate == null
       ? comparison.delta > 0 ? "新增 " + number(comparison.delta) + " Token" : comparison.delta < 0 ? "减少 " + number(Math.abs(comparison.delta)) + " Token" : "持平"
@@ -880,30 +935,84 @@ window.CompanionMaintenancePage = (() => {
     const peak = Math.max(0, ...visible.map(row => Number(row.tokens) || 0));
     const componentsPeak = Math.max(0, ...visible.map(row =>
       (Number(row.input_tokens) || 0) + (Number(row.output_tokens) || 0)));
-    const maximum = Math.max(1, peak, componentsPeak);
+    const maximum = Math.max(peak, componentsPeak);
+    const rawStep = maximum ? maximum / 5 : 1;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const stepRatio = rawStep / magnitude;
+    const axisStep = (stepRatio <= 1 ? 1 : stepRatio <= 2 ? 2 : stepRatio <= 2.5 ? 2.5 : stepRatio <= 5 ? 5 : 10) * magnitude;
+    const axisMaximum = maximum ? axisStep * 5 : 1;
+    const scaleMaximum = axisMaximum || 1;
+    const chartHeight = 108;
     const labelStep = visible.length > 20 ? 5 : visible.length > 10 ? 2 : 1;
+    const tickLabel = value => {
+      if (value >= 1000000) return (value / 1000000).toFixed(value % 1000000 ? 1 : 0).replace(/\.0$/, "") + "M";
+      if (value >= 1000) return (value / 1000).toFixed(value % 1000 ? 1 : 0).replace(/\.0$/, "") + "K";
+      return value < 10 && value % 1 ? value.toFixed(1) : number(value);
+    };
+    const axisLabels = Array.from({length: 6}, (_, index) => {
+      const value = axisMaximum * (5 - index) / 5;
+      const label = maximum ? tickLabel(value) : index === 5 ? "0" : "";
+      return '<span style="--tick-position:' + index * 20 + '%">' + escapeHtml(label) + '</span>';
+    }).join("");
+    const gridLines = Array.from({length: 6}, (_, index) => {
+      const y = (chartHeight * index / 5).toFixed(2);
+      return '<line class="' + (index === 5 ? "maint-chart-grid-line is-baseline" : "maint-chart-grid-line") + '" x1="0" y1="' + y + '" x2="1000" y2="' + y + '"></line>';
+    }).join("");
+    const points = visible.map((row, index) => {
+      if (row.tokens == null || !Number.isFinite(Number(row.tokens))) return null;
+      return {
+        index,
+        x: ((index + 0.5) * 1000 / visible.length).toFixed(2),
+        y: (chartHeight - Math.max(0, Number(row.tokens)) / scaleMaximum * chartHeight).toFixed(2),
+      };
+    });
+    const lineRuns = [];
+    let lineRun = [];
+    points.forEach(point => {
+      if (point) lineRun.push(point);
+      else if (lineRun.length) { lineRuns.push(lineRun); lineRun = []; }
+    });
+    if (lineRun.length) lineRuns.push(lineRun);
+    const lines = lineRuns.filter(run => run.length > 1).map((run, index) =>
+      '<polyline class="maint-chart-total-line" pathLength="100" style="--line-delay:' + Math.min(index * 100, 300) + 'ms" points="' +
+      run.map(point => point.x + "," + point.y).join(" ") + '"></polyline>').join("");
+    const dots = points.map(point => point
+      ? '<circle class="maint-chart-total-dot" style="--point-delay:' + Math.min(point.index * 22, 440) + 'ms" cx="' + point.x + '" cy="' + point.y + '" r="3"></circle>' : "").join("");
     return '<div class="maint-chart-summary"><span>最高日 ' + number(peak) + ' Token</span><span>近 ' + visible.length + ' 日 · 可选柱条查看日期</span></div>' +
+      '<div class="maint-chart-frame"><div class="maint-chart-axis" aria-hidden="true">' + axisLabels + '</div>' +
       '<div class="maint-chart" data-count="' + visible.length + '" data-slots="' + visible.length + '" style="--day-count:' + visible.length + '" aria-label="最近 ' + visible.length + ' 日 Token 趋势">' +
+      '<svg class="maint-chart-overlay" viewBox="0 0 1000 ' + chartHeight + '" preserveAspectRatio="none" aria-hidden="true">' + gridLines + lines + dots + '</svg>' +
       visible.map((row, index) => {
         const tokens = Number(row.tokens) || 0;
         const day = row.day || row.key || "";
-        const totalHeight = tokens ? Math.max(2, Math.round(tokens / maximum * 72)) : 0;
+        const tokensKnown = row.tokens != null && Number.isFinite(Number(row.tokens));
+        const totalHeight = tokensKnown && tokens ? Math.max(2, Math.round(tokens / scaleMaximum * chartHeight)) : 0;
         const input = Math.max(0, Number(row.input_tokens) || 0);
         const cached = Math.min(input, Math.max(0, Number(row.cached_input_tokens) || 0));
         const uncached = Math.max(0, input - cached);
         const output = Math.max(0, Number(row.output_tokens) || 0);
         const componentsKnown = row.input_tokens != null && row.output_tokens != null && (input || output || !tokens);
+        const cachedHeight = Math.round(cached / scaleMaximum * chartHeight);
+        const uncachedHeight = Math.round(uncached / scaleMaximum * chartHeight);
+        const outputHeight = Math.round(output / scaleMaximum * chartHeight);
         const bar = componentsKnown
-          ? '<i data-series="cached" style="--segment-height:' + Math.round(cached / maximum * 72) + 'px"></i><i data-series="input" style="--segment-height:' + Math.round(uncached / maximum * 72) + 'px"></i><i data-series="output" style="--segment-height:' + Math.round(output / maximum * 72) + 'px"></i>'
+          ? '<i data-series="cached" style="--segment-height:' + cachedHeight + 'px;--segment-offset:0px"></i><i data-series="input" style="--segment-height:' + uncachedHeight + 'px;--segment-offset:' + cachedHeight + 'px"></i><i data-series="output" style="--segment-height:' + outputHeight + 'px;--segment-offset:' + (cachedHeight + uncachedHeight) + 'px"></i>'
           : '<i data-series="total" style="--segment-height:' + totalHeight + 'px"></i>';
+        const point = tokensKnown
+          ? '<span class="maint-chart-day-point" style="--point-height:' + totalHeight + 'px" aria-hidden="true"></span>' : "";
         const parsed = new Date(day + "T00:00:00");
         const label = Number.isNaN(parsed.getTime()) ? day : new Intl.DateTimeFormat("zh-CN", {month: "numeric", day: "numeric"}).format(parsed);
         const selected = state.period === "date" && state.selectedDate === day;
-        const showLabel = index % labelStep === 0 || index === visible.length - 1;
-        return fmt('<button class="maint-chart-day" type="button" data-select-day="{{0}}" aria-pressed="{{5}}" aria-label="选择 {{1}}，{{2}} Token，{{3}} 次调用" title="{{1}} · {{2}} Token · {{3}} 次调用"><span class="maint-chart-column{{9}}" style="--total-height:{{4}}px;--trend-delay:{{10}}ms">{{6}}</span><small {{7}}>{{8}}</small></button>',
-          escapeHtml(day), escapeHtml(day), number(tokens), number(row.calls), totalHeight, selected, bar,
-          showLabel ? "" : "aria-hidden=\"true\"", escapeHtml(label), tokens ? " has-total" : "", Math.min(index * 22, 440));
-      }).join("") + "</div>";
+        const showLabel = index === visible.length - 1 || index % labelStep === 0
+          && (visible.length <= 10 || index !== visible.length - 2);
+        const detail = componentsKnown
+          ? ' · 缓存输入 ' + number(cached) + ' · 未命中缓存输入 ' + number(uncached) + ' · 输出 ' + number(output) : "";
+        const title = day + " · " + (tokensKnown ? number(tokens) : "未知") + " Token · " + number(row.calls) + " 次调用" + detail;
+        return fmt('<button class="maint-chart-day" type="button" data-select-day="{{0}}" aria-pressed="{{5}}" aria-label="选择 {{1}}，{{2}} Token，{{3}} 次调用" title="{{12}}"><span class="maint-chart-column{{9}}" style="--total-height:{{4}}px;--trend-delay:{{10}}ms">{{6}}{{11}}</span><small {{7}}>{{8}}</small></button>',
+          escapeHtml(day), escapeHtml(day), row.tokens == null ? "未知" : number(tokens), number(row.calls), totalHeight, selected, bar,
+          showLabel ? "" : "aria-hidden=\"true\"", escapeHtml(label), tokensKnown ? " has-total" : "", Math.min(index * 22, 440),
+          point, escapeHtml(title));
+      }).join("") + "</div></div>";
   }
 
   function hourlyMarkup(data, stats) {
@@ -918,7 +1027,7 @@ window.CompanionMaintenancePage = (() => {
     return '<div class="maint-hour-chart" aria-label="' + escapeHtml(stats.day) + ' 每小时 Token 趋势">' + values.map(row => {
       const height = Number(row.tokens) ? Math.max(4, Math.round(row.tokens / maximum * 56)) : 2;
       return fmt('<div class="maint-hour-bar" title="{{0}}:00 · {{1}} Token · {{2}} 次"><span style="--bar-height:{{3}}px"></span><small>{{4}}</small></div>',
-        row.hour, number(row.tokens), number(row.calls), height, Number(row.hour) % 3 === 0 ? row.hour : "");
+        row.hour, row.tokens == null ? "未知" : number(row.tokens), number(row.calls), height, Number(row.hour) % 3 === 0 ? row.hour : "");
     }).join("") + "</div>";
   }
 
@@ -1006,7 +1115,7 @@ window.CompanionMaintenancePage = (() => {
     const hourly = trendHourlyMarkup(data, stats);
     return '<section class="maint-trend-panel maint-token-analytics-panel"><div class="maint-subhead"><div><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(hint) +
       '</span></div><div class="maint-trend-tabs" role="group" aria-label="Token 趋势粒度"><button type="button" data-trend-mode="daily" aria-pressed="' + (active === "daily") + '">按日</button><button type="button" data-trend-mode="hourly" aria-pressed="' + (active === "hourly") + '">按时</button></div></div>' +
-      '<div class="maint-token-trend-panel" data-trend-panel="daily"' + (active === "daily" ? "" : " hidden") + '><div class="maint-chart-legend"><span data-series="cached">缓存命中输入</span><span data-series="input">其他输入</span><span data-series="output">输出</span><span data-series="total">Provider 总量</span></div>' + daily + '</div>' +
+      '<div class="maint-token-trend-panel" data-trend-panel="daily"' + (active === "daily" ? "" : " hidden") + '><div class="maint-chart-legend"><span data-series="cached">缓存输入</span><span data-series="input">未命中缓存输入</span><span data-series="output">输出</span><span data-series="total">总计</span></div>' + daily + '</div>' +
       '<div class="maint-token-trend-panel" data-trend-panel="hourly"' + (active === "hourly" ? "" : " hidden") + '><div class="maint-chart-legend"><span data-series="total">Token 总量</span><small>小时回执仅按可用总量显示</small></div>' + hourly + '</div></section>';
   }
 
@@ -1113,18 +1222,28 @@ window.CompanionMaintenancePage = (() => {
       const states = {not_received: "未收到完整响应", raw_observed: "原始响应已取得", native_parsed: "宿主已解析",
         native_rejected: "宿主解析失败", stream_rejected: "流式校验失败", contract_rejected: "回复格式校验失败",
         validated: "回复已通过校验", tools: "工具请求已通过校验", captured: "已交给记忆解析", refusal: "模型拒绝"};
-      const stages = diagnostic ? ["raw", "parsed", "visible"].map((name, stage) => {
-        const text = diagnostic[name];
-        const label = ["原始", "宿主解析", "待呈现"][stage];
-        return text ? label + " " + number(text.chars) + " 字" + (text.has_internal_markers ? " · 含标签样式标记" : "")
-          : label + "未取得文本";
-      }).join(" → ") : "";
-      const response = diagnostic ? "<span>" + escapeHtml(states[diagnostic.parse_state] || "解析状态未知")
-        + " · 结束原因 " + escapeHtml(diagnostic.finish_reason || "未知") + "</span><span>" + escapeHtml(stages) + "</span>" : "";
-      return fmt('<details class="maint-call-row" {{0}}><summary><span class="maint-call-time">{{1}}</span><span class="maint-call-task">{{2}}</span><span class="maint-call-provider">{{3}}</span><span class="maint-call-total">{{4}}</span><span class="maint-call-state" data-state="{{5}}">{{6}}</span></summary><div class="maint-call-detail"><span>输入 {{7}} · 输出 {{8}}</span><span>{{9}}</span><span>{{10}} 本地计价</span><span>{{11}}</span>{{12}}{{13}}</div></details>',
+      const response = diagnostic ? (() => {
+        const finishReason = !diagnostic.completion_present || diagnostic.finish_reason === "missing"
+          ? "未返回" : diagnostic.finish_reason || "未记录";
+        const errorMeta = [diagnostic.status_code ? "HTTP " + number(diagnostic.status_code) : "",
+          diagnostic.error_type || "", diagnostic.error_code || ""].filter(Boolean).join(" · ") || "错误类型未记录";
+        const textStages = diagnostic.completion_present
+          ? ["原始", "宿主解析", "待呈现"].map((label, index) => {
+              const value = [diagnostic.raw, diagnostic.parsed, diagnostic.visible][index];
+              return label + " " + (value ? number(value.chars) + " 字" +
+                (value.has_internal_markers ? " · 含标签样式标记" : "") : "未记录");
+            }).join(" · ")
+          : "未收到响应正文";
+        return '<div class="maint-call-response" data-state="' + escapeHtml(diagnostic.parse_state || "unknown") + '">' +
+          '<div><strong>' + escapeHtml(states[diagnostic.parse_state] || "解析状态未知") + '</strong><span>结束原因 ' +
+          escapeHtml(finishReason) + '</span><span>' + escapeHtml(errorMeta) + '</span></div><small>' +
+          escapeHtml(textStages) + '</small></div>';
+      })() : "";
+      return fmt('<details class="maint-call-row" {{0}}><summary><span class="maint-call-time">{{1}}</span><span class="maint-call-task">{{2}}</span><span class="maint-call-provider">{{3}}</span><span class="maint-call-total">{{4}}</span><span class="maint-call-state" data-state="{{5}}">{{6}}</span></summary><div class="maint-call-detail"><div class="maint-call-facts"><span>输入 {{7}} · 输出 {{8}}</span><span>{{9}}</span><span>{{10}}</span><span>{{11}}</span>{{12}}</div>{{13}}</div></details>',
         index === 0 ? "open" : "", escapeHtml(time(row.at)), escapeHtml(taskName(row.kind)),
         escapeHtml(row.provider || "未知 Provider"), escapeHtml(tokens), escapeHtml(row.state), escapeHtml(stateName(row.state)),
-        number(row.input_tokens), number(row.output_tokens), escapeHtml(cache), cost(row.cost_microusd),
+        row.input_tokens == null ? "未观测" : number(row.input_tokens), row.output_tokens == null ? "未观测" : number(row.output_tokens), escapeHtml(cache),
+        row.cost_microusd == null ? "费用未观测" : cost(row.cost_microusd) + " 本地计价",
         row.latency_ms == null ? "耗时未记录" : number(row.latency_ms) + " ms", failure, response);
     }).join("") + "</div>";
   }
@@ -1165,7 +1284,7 @@ window.CompanionMaintenancePage = (() => {
         if (fallback && !byId.has(fallback)) add("warn", task.kind === "conversation.reply" ? "model" : "tasks", title + "的备用 Provider 不可用", fallback + " 未出现在当前 V2 模型路由中。", "route");
       }
     }
-    const limit = Number(data.budget?.limit_tokens) || 0;
+    const limit = data.budget?.hard_limit_enabled === true ? Number(data.budget.limit_tokens) || 0 : 0;
     const used = (Number(data.budget?.spent_tokens) || 0) + (Number(data.budget?.held_tokens) || 0);
     if (limit && used / limit >= .9) add("warn", "budget", "今日硬预算接近上限", number(used) + " / " + number(limit) + " Token。", "budget");
     else if (data.budget?.soft_limit_enabled && Number(data.budget?.soft_limit_tokens) > 0 && used >= Number(data.budget.soft_limit_tokens)) {
@@ -1238,7 +1357,7 @@ window.CompanionMaintenancePage = (() => {
     return diagnosticCategories.map(([key, label, description]) => {
       const count = key === "all" ? items.length : items.filter(item => item.category === key).length;
       const evidence = categoryEvidence(key, items, data, stats);
-      return fmt('<button type="button" data-diagnostic-category="{{0}}" role="tab" aria-selected="{{1}}" class="{{2}}" title="{{3}}"><span>{{4}}</span><b>{{5}}</b><small>{{6}}</small></button>',
+      return fmt('<button type="button" data-diagnostic-category="{{0}}" aria-pressed="{{1}}" class="{{2}}" title="{{3}}"><span>{{4}}</span><b>{{5}}</b><small>{{6}}</small></button>',
         key, state.category === key, state.category === key ? "is-active" : "", escapeHtml(description + " · " + evidence), escapeHtml(label), count, escapeHtml(evidence));
     }).join("");
   }
@@ -1300,7 +1419,7 @@ window.CompanionMaintenancePage = (() => {
       note = "合成测试只生成短音频，不发送给联系人；Provider 可能计费。";
     } else if (currentCategory === "storage") {
       facts = [["日志模式", String(storage.journal_mode || "未知").toUpperCase()], ["外键", storage.foreign_keys ? "开启" : "关闭"], ["最近检查", state.storageTest?.title || "尚未运行"]];
-      addAction("storage-block", "运行只读检查");
+      addAction("test-zone", "运行只读检查");
       note = "完整性检查使用 quick_check 与外键核对，不修改数据库。";
     } else if (currentCategory === "prompt") {
       facts = [["材料来源", number(materials.length)], ["统计范围", "最近 20 条输入"], ["显示正文", "从不展示"]];
@@ -1324,7 +1443,8 @@ window.CompanionMaintenancePage = (() => {
     const actionMarkup = actions.map(item => item.target === "low-cache-calls"
       ? '<button type="button" data-set-call-filter="cache-low">' + escapeHtml(item.label) + '</button>'
       : fmt('<button type="button" data-focus-panel="{{0}}">{{1}}</button>', item.target, escapeHtml(item.label))).join("");
-    return '<section class="maint-diagnostic-focus" data-category="' + escapeHtml(currentCategory) + '"><div class="maint-diagnostic-focus-copy"><span class="maint-eyebrow">FOCUS / ' + escapeHtml(category[1]) + '</span><h4>' + escapeHtml(category[1]) + '工作区</h4><p>' + escapeHtml(note) + '</p></div><div class="maint-diagnostic-focus-facts">' + factMarkup + '</div><div class="maint-diagnostic-focus-actions">' + actionMarkup + '</div></section>';
+    const workspaceTitle = currentCategory === "delivery" ? "消息收口工作区" : category[1] + "工作区";
+    return '<section class="maint-diagnostic-focus" data-category="' + escapeHtml(currentCategory) + '" id="maint-diagnostic-focus-pane"><div class="maint-diagnostic-focus-copy"><span class="maint-eyebrow">当前排查范围</span><h4>' + escapeHtml(workspaceTitle) + '</h4><p>' + escapeHtml(note) + '</p></div><div class="maint-diagnostic-focus-facts">' + factMarkup + '</div><div class="maint-diagnostic-focus-actions">' + actionMarkup + '</div></section>';
   }
 
   function timelineMarkup(data) {
@@ -1423,8 +1543,7 @@ window.CompanionMaintenancePage = (() => {
       escapeHtml(String(storage.journal_mode || "状态未知").toUpperCase()) + '</span></div><div class="maint-evidence-stats">' +
       '<div><span>同步级别</span><b>' + escapeHtml(sync) + '</b></div><div><span>锁等待</span><b>' + number(storage.busy_timeout_ms) + ' ms</b></div>' +
       '<div><span>外键</span><b>' + (storage.foreign_keys ? "开启" : "关闭") + '</b></div><div><span>数据库页</span><b>' + number(storage.page_count) + '</b></div></div>' +
-      '<div class="maint-storage-check"><button type="button" class="maint-probe-button" data-storage-test ' + (state.storageTesting ? "disabled" : "") + '><i data-lucide="database-zap"></i><span>' +
-      (state.storageTesting ? "检查中" : "运行 SQLite 完整检查") + '</span></button><small>只读执行 quick_check 与外键一致性检查；不修改数据库。</small></div>' + resultMarkup(state.storageTest) + '</section>');
+      '</section>');
     if (show(["delivery", "model"])) sections.push('<section data-evidence-kind="delivery" data-focus-target="delivery-evidence"><div class="maint-subhead"><strong>消息收口与投递</strong><span>当前身份 / 角色范围</span></div><div class="maint-evidence-flow">' + flowRows + '</div></section>');
     if (show(["delivery"])) sections.push('<section data-evidence-kind="no-reply" data-focus-target="delivery-evidence"><div class="maint-subhead"><strong>未回复记录</strong><span>最多保留 500 条</span></div><div class="maint-evidence-flow">' + noReplyRows + '</div><p class="maint-evidence-note">仅显示时间、类别、原因和随机事件编号；不含消息正文或用户、群号。</p></section>');
     if (show(["delivery"])) sections.push('<section data-evidence-kind="debounce" data-focus-target="debounce-evidence"><div class="maint-subhead"><strong>消息聚合与防抖追踪</strong><span>最近 ' + number(debounce.length) + ' 条</span></div>' +
@@ -1432,7 +1551,7 @@ window.CompanionMaintenancePage = (() => {
     if (show(["prompt", "model"])) sections.push('<section data-evidence-kind="prompt" data-focus-target="prompt-evidence"><div class="maint-subhead"><strong>上下文注入来源</strong><span>最近 20 条输入</span></div><p class="maint-evidence-note">只显示材料来源与状态，不显示任何提示词、消息或注入正文。</p><div class="maint-material-list">' + materialRows + '</div></section>');
     if (show(["proactive"])) sections.push('<section data-evidence-kind="proactive" data-focus-target="proactive-evidence"><div class="maint-subhead"><strong>主动触达记录</strong><span>当前身份 / 角色范围</span></div><div class="maint-proactive-snapshot"><strong>' + number(proactive.calls) + '</strong><span>条已记录主动触达</span><small>最近记录 · ' + escapeHtml(time(proactive.latest_at)) + '</small></div><p class="maint-evidence-note">主动候选拦截原因与完整评分链尚未接入此 V2 面板。</p></section>');
     if (!sections.length) return "";
-    return '<details class="maint-evidence-drawer" open><summary><span>运行证据台</span><small>按当前问题类型聚焦</small></summary>' +
+    return '<details class="maint-evidence-drawer"><summary><span>详细运行证据</span><small>身份隔离、消息收口、上下文来源与主动触达</small></summary>' +
       '<div class="maint-evidence-grid">' + sections.join("") + '</div></details>';
   }
 
@@ -1511,6 +1630,8 @@ window.CompanionMaintenancePage = (() => {
       escapeHtml(item.id), item.id === state.voiceProvider ? "selected" : "")).join("");
     const imageOptions = actions.map(item => fmt('<option value="{{0}}" {{1}}>{{0}}</option>',
       escapeHtml(item.action), item.action === state.imageAction ? "selected" : "")).join("");
+    const storage = data.runtime?.storage || {};
+    const showStorage = ["all", "storage"].includes(state.category);
     let imageResult = null;
     if (state.imageTest) {
       const ok = state.imageTest.registered && state.imageTest.current;
@@ -1530,8 +1651,12 @@ window.CompanionMaintenancePage = (() => {
     if (showImage) tests.push('<div class="maint-test-row maint-test-row--image"><div><strong>原生图片工具</strong><small>只验证扩展注册状态，不会提交图片生成请求。</small></div><div class="maint-test-controls">' +
       '<select data-image-action ' + (imageOptions ? "" : "disabled") + '>' + (imageOptions || '<option value="">未发现图片工具</option>') + '</select>' +
       '<button class="maint-probe-button" type="button" data-image-test ' + (!imageOptions || state.imageTesting ? "disabled" : "") + '><i data-lucide="' + (state.imageTesting ? "loader-circle" : "image-check") + '"></i><span>' + (state.imageTesting ? "检查中" : "检查") + '</span></button></div></div>' + resultMarkup(imageResult));
+    if (showStorage) tests.push('<div class="maint-test-row maint-test-row--storage"><div><strong>SQLite 完整性</strong><small>' +
+      escapeHtml(String(storage.journal_mode || "状态未知").toUpperCase()) + ' · quick_check 与外键核对，只读且不会改写数据库。</small></div><div class="maint-test-controls">' +
+      '<button class="maint-probe-button" type="button" data-storage-test ' + (state.storageTesting ? "disabled" : "") + '><i data-lucide="' +
+      (state.storageTesting ? "loader-circle" : "database-zap") + '"></i><span>' + (state.storageTesting ? "检查中" : "检查") + '</span></button></div></div>' + resultMarkup(state.storageTest));
     const body = tests.length ? tests.join("") : '<div class="maint-test-empty"><span data-lucide="activity"></span><div><strong>此问题类型没有安全的主动测试</strong><small>检查结果来自运行回执与只读证据；不会对用户发送消息或重放未知请求。</small></div></div>';
-    return '<div class="maint-test-zone" data-focus-target="test-zone"><div class="maint-test-head"><span class="maint-eyebrow">LIVE TESTS</span><h4>链路与扩展测试</h4></div>' + body + '</div>';
+    return '<div class="maint-test-zone" data-focus-target="test-zone"><div class="maint-test-head"><div><span class="maint-eyebrow">组件检测</span><h4>Provider、语音、图片与存储</h4></div><span>按需运行 · 不会自动触发</span></div>' + body + '</div>';
   }
 
   function diagnosticFaqMarkup(data, stats) {
@@ -1543,7 +1668,7 @@ window.CompanionMaintenancePage = (() => {
       ],
       identity: [
         ["REQ-041 结果为什么只显示状态？", "管理身份与角色授权通过后才会返回本页；页面只给出当前请求的校验结论，不显示身份、账号、会话或角色标识。", "identity-evidence", "查看隔离证据"],
-        ["Token 统计范围包含哪些对象？", "当前角色的对话主链与插件附加任务分别统计，共同组成角色总用量。外部插件和 AstrBot 默认主链单独列出。", "identity-evidence", "查看账本边界"],
+        ["Token 统计范围包含哪些对象？", "当前角色的 AstrBot 核心回复、历史 V2 回复和插件附加任务组成角色总用量，各来源只合计一次。其他 AstrBot 会话和外部插件不并入。", "identity-evidence", "查看账本边界"],
       ],
       model: [
         ["探测通过就代表真实回复正常吗？", "探测只确认 Provider 可响应，不会走角色提示、消息接收和投递链路；异常时再结合调用回执定位。", "test-zone", "测试 Provider"],
@@ -1571,8 +1696,8 @@ window.CompanionMaintenancePage = (() => {
         ["TTS Provider 不可用？", "确认 AstrBot 已加载对应语音 Provider，并检查所选语言绑定后重新探测。", "test-zone", "检查语音绑定"],
       ],
       storage: [
-        ["SQLite 检查会修改数据吗？", "不会。检查通过只读快照执行 quick_check 和外键一致性核对。", "storage-block", "运行只读检查"],
-        ["WAL 状态异常怎么办？", "先运行完整检查并核对插件连接状态；不要在页面中清理或重置数据库。", "storage-block", "检查存储"],
+        ["SQLite 检查会修改数据吗？", "不会。检查通过只读快照执行 quick_check 和外键一致性核对。", "test-zone", "运行只读检查"],
+        ["WAL 状态异常怎么办？", "先运行完整检查并核对插件连接状态；不要在页面中清理或重置数据库。", "test-zone", "检查存储"],
       ],
       prompt: [
         ["为什么看不到提示词正文？", "本页只保留材料来源、用途与纳入状态，不显示或记录提示词、消息和注入正文。", "prompt-evidence", "查看来源"],
@@ -1752,8 +1877,8 @@ window.CompanionMaintenancePage = (() => {
         escapeHtml(item.title), escapeHtml(item.detail), action);
     }).join("") : '<div class="maint-empty"><span class="maint-empty-mark">✓</span><p>此分类与严重程度下没有待处理信号。</p></div>';
     const audit = ["all", "model", "tasks"].includes(state.category)
-      ? '<div class="maint-task-audit" data-focus-target="task-audit"><div class="maint-subhead"><strong>模型任务路由</strong><span>' +
-        (taskCount == null ? "状态未知" : number(taskCount) + " 项") + '</span></div>' + taskAuditMarkup() + '</div>' : "";
+      ? '<details class="maint-task-audit" data-focus-target="task-audit"' + (state.category === "tasks" ? " open" : "") + '><summary><strong>模型任务路由</strong><span>' +
+        (taskCount == null ? "状态未知" : number(taskCount) + " 项") + '</span></summary>' + taskAuditMarkup() + '</details>' : "";
     const refreshButton = '<button type="button" class="maint-diagnostic-refresh" data-refresh ' + (state.loading ? "disabled" : "") + '><i data-lucide="refresh-cw"></i><span>' + (state.loading ? "正在检查" : "重新检查") + '</span></button>';
     const clearResultsButton = '<button type="button" class="maint-diagnostic-clear" data-clear-diagnostic-results ' +
       (hasDiagnosticResults() ? "" : "disabled") + ' title="清除本页测试结果，不删除运行账本" aria-label="清除本页测试结果"><i data-lucide="eraser"></i><span>清除本次结果</span></button>';
@@ -1766,37 +1891,40 @@ window.CompanionMaintenancePage = (() => {
       (selectedErrors ? selectedErrors + " 项错误待处理" : selectedWarnings ? selectedWarnings + " 项信号待关注"
         : visible.length ? "当前筛选下没有待处理信号" : "没有待处理信号") +
       '</strong><span>' + categoryLabel + ' · 本类 ' + visible.length + ' 项 · 全局错误 ' + errors + ' / 警告 ' + warnings + '</span></div>';
-    const overviewMarkup = '<section class="maint-diagnostic-overview" aria-label="状态概览与问题分类">' +
-      summaryMarkup + '<div class="maint-diagnostic-categories" role="tablist" aria-label="问题类型">' +
-      categoriesMarkup(items, data, stats) + '</div>' + categoryFocusMarkup(data, stats, items) + '</section>';
+    const overviewMarkup = '<aside class="maint-diagnostic-rail" aria-label="问题类型与筛选状态">' +
+      summaryMarkup + '<div class="maint-diagnostic-nav-heading"><strong>排查范围</strong><span>' + items.length + ' 项信号</span></div>' +
+      '<nav class="maint-diagnostic-categories" role="group" aria-label="问题类型">' +
+      categoriesMarkup(items, data, stats) + '</nav></aside>';
     const signalsMarkup = '<section class="maint-diagnostic-signals" aria-labelledby="maint-diagnostic-signals-heading">' +
       '<div class="maint-diagnostic-section-heading"><div><span class="maint-eyebrow">SIGNALS / 02</span>' +
-      '<h4 id="maint-diagnostic-signals-heading">其他运行诊断</h4><p>以下信号独立于上方主动消息测试</p></div>' +
+      '<h4 id="maint-diagnostic-signals-heading">其他运行诊断</h4><p>先处理当前分类信号，再运行按需检测</p></div>' +
       '<div class="maint-diagnostic-filter" role="group" aria-label="按严重程度筛选">' + severityButtons + '</div></div>' +
       '<div class="maint-diagnostic-items">' + issueRows + '</div></section>';
     const checksMarkup = '<section class="maint-diagnostic-checks" aria-labelledby="maint-diagnostic-checks-heading">' +
       '<div class="maint-diagnostic-section-heading"><div><span class="maint-eyebrow">CHECKS / 03</span>' +
-      '<h4 id="maint-diagnostic-checks-heading">按需检测</h4></div></div>' +
+      '<h4 id="maint-diagnostic-checks-heading">按需检测</h4><p>真实投递需确认；Provider 与 TTS 可能计费。</p></div></div>' +
       proactiveTestMarkup() + memoryDiagnosticMarkup() + integrationsMarkup(data) + '</section>';
     const laneTitle = state.category === "all" ? "事件时间线"
       : "最近 · " + escapeHtml((diagnosticCategories.find(item => item[0] === state.category) || ["", "问题"])[1]);
-    const evidenceMarkup = '<section class="maint-diagnostic-evidence" aria-label="运行事件与证据">' +
-      '<div class="maint-diagnostic-lanes" aria-label="事件时间线与运行快照"><section class="maint-event-lane"><div class="maint-subhead"><strong>' +
+    const activityMarkup = '<div class="maint-diagnostic-activity" aria-label="近期事件与运行快照"><section class="maint-event-lane"><div class="maint-subhead"><strong>' +
       laneTitle + '</strong><span>当前角色真实回执</span></div>' + timelineMarkup(data) +
       '</section><section class="maint-runtime-lane"><div class="maint-subhead"><strong>运行快照</strong><span>' +
       escapeHtml(time(data.generated_at)) + '</span></div><div class="maint-runtime-grid">' +
       runtime.map(item => fmt('<div data-state="{{0}}" data-runtime-category="{{1}}"><span>{{2}}</span><strong>{{3}}</strong></div>',
         item[3], item[0], escapeHtml(item[1]), escapeHtml(item[2]))).join("") +
-      '</div><p>当前数据来自 V2 已选角色账本；路由检查仅读元数据。</p>' + audit + '</section></div>' +
-      operationsMarkup(data) + '</section>';
+      '</div><p>当前数据来自 V2 已选角色账本；路由检查仅读元数据。</p>' + audit + '</section></div>';
+    const evidenceMarkup = operationsMarkup(data);
+    const faqMarkup = '<details class="maint-faq"' + faqOpen + '><summary>诊断说明与常见问题 · ' +
+      escapeHtml((diagnosticCategories.find(item => item[0] === state.category) || ["", "全部"])[1]) +
+      '</summary><div>' + diagnosticFaqMarkup(data, stats) + '</div></details>';
     return '<section class="maint-diagnostics-panel" aria-labelledby="maint-diagnostics-heading"><div class="maint-panel-heading"><div>' +
       '<span class="maint-eyebrow">DIAGNOSTICS / 01</span><h3 id="maint-diagnostics-heading">排障与测试</h3></div>' +
       '<div class="maint-diagnostic-heading-actions"><span class="maint-check-state" data-state="' + (errors || warnings ? "warn" : "ok") + '">' +
       (errors ? errors + " 项错误" : warnings ? warnings + " 项关注" : "运行正常") + '</span>' + clearResultsButton + refreshButton +
-      '</div></div>' + resultNotice + overviewMarkup + signalsMarkup + checksMarkup + evidenceMarkup +
-      '<details class="maint-faq"' + faqOpen + '><summary>诊断说明与常见问题 · ' +
-      escapeHtml((diagnosticCategories.find(item => item[0] === state.category) || ["", "全部"])[1]) +
-      '</summary><div>' + diagnosticFaqMarkup(data, stats) + '</div></details></section>';
+      '</div></div>' + resultNotice + '<div class="maint-diagnostic-workspace">' + overviewMarkup +
+      '<div class="maint-diagnostic-main">' + categoryFocusMarkup(data, stats, items) +
+      '<div class="maint-diagnostic-inspection">' + signalsMarkup + activityMarkup + '</div>' +
+      checksMarkup + evidenceMarkup + faqMarkup + '</div></div></section>';
   }
 
   const proactivePurposes = [
@@ -2154,7 +2282,7 @@ window.CompanionMaintenancePage = (() => {
   }
 
   function cacheControlsMarkup(today) {
-    const sources = [["companion", "全部 V2"], ["conversation", "对话主链"], ["plugin", "插件任务"]].map(([key, label]) =>
+    const sources = [["companion", "角色总用量"], ["conversation", "对话合计"], ["astrbot_core", "核心回复"], ["legacy_conversation", "历史 V2"], ["plugin", "插件任务"]].map(([key, label]) =>
       '<button type="button" data-token-source="' + key + '" aria-pressed="' + (state.tokenSource === key) +
       '" class="' + (state.tokenSource === key ? "is-active" : "") + '">' + label + '</button>').join("");
     return '<div class="maint-cache-filters"><div class="maint-cache-source-control"><span>当前角色来源</span><div class="maint-periods" role="group" aria-label="缓存诊断来源">' +
@@ -2190,10 +2318,11 @@ window.CompanionMaintenancePage = (() => {
       '<div class="maint-empty"><span class="maint-empty-mark">↗</span><p>' + (stats.cacheLowCalls > 0
         ? "本周期精确统计到 " + number(stats.cacheLowCalls) + " 条；近期 80 条调用样本没有覆盖这些记录。"
         : noTelemetry ? "收到缓存用量后，这里会列出低命中请求。" : "当前范围没有符合条件的低命中调用。") + '</p></div>';
-    const note = noTelemetry
+    const note = (data.execution_path === "astrbot_core"
+      ? "核心请求签名来自实际 Agent 本轮上下文与工具；SDK 默认缓存 0 不作为缓存实报。" : "") + (noTelemetry
       ? stats.calls === 0 ? "这个范围没有模型调用。收到 Provider 缓存确认后，会显示真实读写与命中数据。" : "当前范围没有缓存字段确认；命中率只在 Provider 同时报告输入量和缓存命中量时计算。"
       : noHitSamples ? "收到缓存相关字段，但没有可计算命中率的完整确认；写入量仍按 Provider 实报展示。"
-        : "命中率与 Token 均来自 Provider 回执；低命中是排查线索，不等于缓存一定失效。";
+        : "命中率与 Token 均来自 Provider 回执；低命中是排查线索，不等于缓存一定失效。");
     const changeLabels = {provider_change: "Provider 切换", system_prompt_change: "system 指令变化", system_order_drift: "system 顺序变化",
       tool_definition_change: "工具定义变化", tool_order_drift: "工具顺序变化", model_change: "模型切换",
       context_reset: "参考上下文骤减", context_order_drift: "参考材料顺序变化",
@@ -2426,13 +2555,13 @@ window.CompanionMaintenancePage = (() => {
   function tokenDashboardControlsMarkup(today, roleData) {
     return '<div class="maint-token-toolbar"><div class="maint-token-source-control"><span>统计来源</span><div class="maint-source-tabs" role="tablist" aria-label="Token 统计来源">' + sourceTabsMarkup() + '</div></div>' +
       periodControlsMarkup(today, "Token 统计时间范围") + '</div><div class="maint-token-calibration-row"><span><i data-lucide="shield-check"></i>Provider 已确认用量；未知调用不估算，外部账本独立统计。</span>' +
-      '<details class="maint-source-details"><summary><i data-lucide="info"></i><span>统计口径</span></summary><div class="maint-source-grid"><article data-state="active"><span>纳入统计</span><strong>当前角色的 V2 模型任务</strong><small>对话主链与插件附加任务分列；总量用于核对</small></article><article data-state="limited"><span>单独统计</span><strong>AstrBot 默认主链与外部插件</strong><small>默认主链未接入；外部来源不并入 V2 预算</small></article><article data-state="limited"><span>未采集字段</span><strong>思考 Token</strong><small>当前账本没有独立字段，不推算该数值</small></article></div></details>' +
+      '<details class="maint-source-details"><summary><i data-lucide="info"></i><span>统计口径</span></summary><div class="maint-source-grid"><article data-state="active"><span>纳入统计</span><strong>当前角色的核心回复与插件任务</strong><small>核心观测、历史 V2 回复和插件任务分列；对话合计与角色总量各计一次</small></article><article data-state="limited"><span>其他来源</span><strong>AstrBot 全部会话与外部插件</strong><small>全局统计未接入；外部来源不并入角色预算</small></article><article data-state="limited"><span>可用性</span><strong>实际多轮与最后响应分列</strong><small>核心费用未知；SDK 默认缓存 0 不等同缓存实报</small></article></div></details>' +
       '<details class="maint-token-source-comparison"><summary>来源同周期对照</summary>' + sourceComparisonMarkup(roleData) + '</details></div>';
   }
 
   function localTokenDashboardMarkup(data, stats, label, today, periodComparison, providerRows, taskRows, chartData) {
     const budget = data.budget || {};
-    const limit = Math.max(0, Number(budget.limit_tokens) || 0);
+    const limit = budget.hard_limit_enabled === true ? Math.max(0, Number(budget.limit_tokens) || 0) : 0;
     const spent = Math.max(0, Number(budget.spent_tokens) || 0);
     const held = Math.max(0, Number(budget.held_tokens) || 0);
     const budgetPct = limit ? Math.min(100, Math.round((spent + held) * 100 / limit)) : 0;
@@ -2442,7 +2571,14 @@ window.CompanionMaintenancePage = (() => {
     const softState = !softEnabled ? "off" : spent + held >= softLimit ? "warn" : "ok";
     const endDay = state.period === "date" ? stats.day : today;
     const activeDetail = ["daily", "providers", "tasks", "recent"].includes(state.tokenDetailView) ? state.tokenDetailView : "daily";
-    return '<div class="maint-token-hero maint-token-summary maint-token-dashboard-summary">' + balanceMarkup() + '<div class="maint-usage-total maint-token-summary-card"><span>' + escapeHtml(label) + ' · Provider 已确认 Token</span><strong>' + number(stats.tokens) + '</strong><small>Token</small><div class="maint-usage-subline"><span>已确认 ' + number(stats.knownCalls) + ' 次</span><i></i><span>未确认 ' + number(stats.unconfirmed) + ' 次</span><i></i><span>' + cost(stats.cost) + ' 已确认本地计价</span></div></div>' + budgetMarkup(budget, spent, held, limit, budgetPct, softEnabled, softPct, softLimit, softState) + '</div>' +
+    const coreCoverage = data.execution_path === "astrbot_core" ? data.coverage : data.usage_sources?.astrbot_core?.coverage;
+    const priceNote = data.execution_path === "astrbot_core" ? "核心费用未提供" : stats.cost == null ? "费用未观测" :
+      cost(stats.cost) + " 已计价部分" + (data.cost_availability === "partial" ? " · 核心费用未提供" : "");
+    const observationNote = coreCoverage ? '<p class="maint-scope-note">核心累计观测 ' + number(coreCoverage.turns) + ' 回合 · ' +
+      number(coreCoverage.observed_requests) + ' 次实际请求 · ' + number(coreCoverage.fallback_usage_observations) +
+      ' 条汇总或最后响应。' + (coreCoverage.partial_request_observation_turns ? number(coreCoverage.partial_request_observation_turns) +
+        ' 回合仅观测部分请求，含工具参数重查。' : "") + '无法观测的多轮次数保持未知，核心费用不计为零。</p>' : "";
+    return '<div class="maint-token-hero maint-token-summary maint-token-dashboard-summary">' + balanceMarkup() + '<div class="maint-usage-total maint-token-summary-card"><span>' + escapeHtml(label) + ' · Provider 已确认 Token</span><strong>' + number(stats.tokens) + '</strong><small>Token</small><div class="maint-usage-subline"><span>已确认 ' + number(stats.knownCalls) + ' 次</span><i></i><span>未确认 ' + number(stats.unconfirmed) + ' 次</span><i></i><span>' + priceNote + '</span></div></div>' + budgetMarkup(budget, spent, held, limit, budgetPct, softEnabled, softPct, softLimit, softState) + '</div>' + observationNote +
       '<details class="maint-token-drill"><summary>更多用量指标与周期对比</summary><div class="maint-token-drill-content">' + periodComparison + '<div class="maint-token-kpis"><div><span>输入 / 输出</span><strong>' + number(stats.input) + ' / ' + number(stats.output) + '</strong></div><div><span>平均每次</span><strong>' +
       (stats.calls ? number(stats.tokens / stats.calls) : "—") + ' Token</strong></div><div><span>平均延迟</span><strong>' + (stats.latency == null ? "—" : number(stats.latency) + " ms") +
       '</strong></div><div><span>失败 / 未确认调用</span><strong>' + number(stats.failures) + ' / ' + number(stats.unconfirmed) + '</strong></div><div><span>估算 Token</span><strong>不估算</strong></div><div><span>缓存命中 / 命中率</span><strong>' +
@@ -2473,39 +2609,88 @@ window.CompanionMaintenancePage = (() => {
     const coverage = report?.coverage || {};
     const samples = Array.isArray(report?.recent) ? report.recent : [];
     const sampleCount = Number(summary.samples) || 0;
+    const hasCore = Boolean(report?.by_source?.astrbot_core?.samples || coverage.core_samples);
+    const hasLegacy = !hasCore || Boolean(report?.by_source?.legacy_v2_conversation?.samples);
     const metrics = [
-      ["P50 端到端", "median_end_to_end_ms"], ["P95 端到端", "p95_end_to_end_ms"],
-      ["P50 首段送达", "median_first_reply_ms"], ["P50 消息至模型", "median_pre_model_ms"],
-      ["P50 末条消息至模型", "median_last_input_to_model_ms"], ["P50 模型往返区间", "median_model_ms"],
-      ["P50 模型至发送", "median_post_model_ms"],
-      ["P50 分段投递", "median_delivery_ms"],
+      ...(hasCore ? [["核心 P50 发送返回", "median_end_to_end_send_returned_ms"], ["核心 P95 发送返回", "p95_end_to_end_send_returned_ms"],
+        ["核心 P50 首次发送返回", "median_first_send_returned_ms"], ["核心 P50 首 Token", "median_ttft_ms"],
+        ["P50 插件准备", "median_plugin_preparation_ms"], ["P50 已观测模型请求", "median_model_request_ms"],
+        ["P50 工具执行累计", "median_tool_ms"], ["P50 Agent 总时长", "median_agent_ms"]] : []),
+      ...(hasLegacy ? [[hasCore ? "历史 P50 平台回执" : "P50 端到端", "median_end_to_end_ms"], [hasCore ? "历史 P95 平台回执" : "P95 端到端", "p95_end_to_end_ms"],
+      [hasCore ? "历史 P50 首段回执" : "P50 首段送达", "median_first_reply_ms"],
+      ["P50 模型至发送", "median_post_model_ms"], ["P50 分段投递", "median_delivery_ms"]] : []),
+      ["P50 消息至模型", "median_pre_model_ms"],
+      ...(hasLegacy ? [["P50 末条消息至模型", "median_last_input_to_model_ms"]] : []), ["P50 模型往返区间", "median_model_ms"],
+      ...(hasCore ? [["P50 发送区间", "median_send_ms"]] : []),
+      ["P50 Laya 决策", "median_laya_ms"],
     ];
     const coverageStages = [
       ["received", "消息收到"], ["model_started", "模型启动"], ["model_finished", "模型完成"],
       ["first_dispatched", "开始发送"], ["first_delivered", "首段回执"], ["final_delivered", "完整回执"],
+      ...(hasCore ? [["core_send_returned", "核心发送返回"], ["core_request_observation", "核心逐轮观测"],
+        ["core_preparation", "插件准备明细"]] : []),
     ];
     const outcomeLabels = {
       completed: ["已送达", "ok"], partial: ["部分送达", "warn"], unknown: ["结果未知", "unknown"],
       pending: ["处理中", "pending"], no_reply: ["未回复", "warn"], incomplete: ["未完成", "unknown"],
+      failed: ["发送失败", "error"], denied: ["未获准发送", "warn"],
     };
     const metricMarkup = metrics.map(([label, key]) => '<div class="maint-efficiency-metric"><span>' + label +
       '</span><strong>' + efficiencyDuration(summary[key]) + '</strong></div>').join("");
     const coverageMarkup = coverageStages.map(([key, label]) => {
-      const observed = Math.min(sampleCount, Math.max(0, Number(coverage[key]) || 0));
-      const width = sampleCount ? Math.round(observed * 100 / sampleCount) : 0;
+      const total = key.startsWith("core_") ? Number(coverage.core_samples) || 0 :
+        hasCore && ["first_delivered", "final_delivered"].includes(key) ? Math.max(0, sampleCount - (Number(coverage.core_samples) || 0)) : sampleCount;
+      const observed = Math.min(total, Math.max(0, Number(coverage[key]) || 0));
+      const width = total ? Math.round(observed * 100 / total) : 0;
       return '<div class="maint-efficiency-coverage-row"><span>' + label + '</span><strong>' + number(observed) +
-        ' / ' + number(sampleCount) + '</strong><i style="--coverage-width:' + width + '%"></i></div>';
+        ' / ' + number(total) + '</strong><i style="--coverage-width:' + width + '%"></i></div>';
     }).join("");
     const daily = Array.isArray(report?.daily) ? report.daily : [];
-    const dailyMax = Math.max(0, ...daily.map(item => Number(item.median_end_to_end_ms) || 0));
+    const dailyValues = daily.flatMap(item => [
+      hasCore ? item.median_end_to_end_send_returned_ms : null,
+      hasLegacy ? item.median_end_to_end_ms : null,
+    ]).filter(value => Number.isFinite(value) && value >= 0);
+    const dailyObservedMax = Math.max(0, ...dailyValues);
+    const targetTick = dailyObservedMax > 0 ? dailyObservedMax / 4 : 1;
+    const tickMagnitude = 10 ** Math.floor(Math.log10(targetTick));
+    const tickRatio = targetTick / tickMagnitude;
+    const dailyTick = (tickRatio <= 1 ? 1 : tickRatio <= 2 ? 2 : tickRatio <= 5 ? 5 : 10) * tickMagnitude;
+    const dailyMax = dailyTick * 4;
+    const dailyLegend = [
+      ...(hasCore ? [['core', '核心发送返回']] : []),
+      ...(hasLegacy ? [['legacy', hasCore ? '历史平台回执' : '平台回执']] : []),
+    ].map(([key, label]) => '<span class="maint-efficiency-legend-item"><i data-series="' + key + '" aria-hidden="true"></i>' + label + '</span>').join("");
     const dailyMarkup = daily.map(item => {
-      const median = item.median_end_to_end_ms;
-      const width = median == null || dailyMax <= 0 ? 0 : Math.max(2, Math.round(Number(median) * 100 / dailyMax));
-      return '<div class="maint-efficiency-day"><time>' + escapeHtml(item.day || "") + '</time><i style="--day-width:' +
-        width + '%"></i><strong>' + efficiencyDuration(median) + '</strong><small>' + number(item.samples) + ' 条</small></div>';
-    }).join("");
+      const day = typeof item.day === 'string' ? item.day : '';
+      const dayLabel = /^\d{4}-\d{2}-\d{2}$/.test(day)
+        ? Number(day.slice(5, 7)) + '/' + Number(day.slice(8, 10)) : day;
+      const points = [
+        ...(hasCore ? [['core', '核心发送返回', item.median_end_to_end_send_returned_ms, item.p95_end_to_end_send_returned_ms]] : []),
+        ...(hasLegacy ? [['legacy', hasCore ? '历史平台回执' : '平台回执', item.median_end_to_end_ms, item.p95_end_to_end_ms]] : []),
+      ];
+      const readouts = points.filter(([, , value]) => Number.isFinite(value) && value >= 0);
+      const daySummary = readouts.length
+        ? day + '：' + readouts.map(([, label, value, p95]) => label + ' P50 ' + efficiencyDuration(value) +
+          (Number.isFinite(p95) && p95 >= 0 ? '，P95 ' + efficiencyDuration(p95) : '')).join('；')
+        : day + '：回复时长未观测';
+      const bars = points.map(([key, label, value, p95]) => {
+        if (!Number.isFinite(value) || value < 0) {
+          return '<span class="maint-efficiency-trend-gap" data-series="' + key + '" aria-hidden="true"></span>';
+        }
+        const height = Math.max(value === 0 ? 1 : 0, Math.round(value * 100 / dailyMax));
+        const tooltip = label + ' · ' + day + ' · P50 ' + efficiencyDuration(value) +
+          (Number.isFinite(p95) && p95 >= 0 ? ' · P95 ' + efficiencyDuration(p95) : '');
+        return '<i class="maint-efficiency-trend-bar" data-series="' + key + '" style="--bar-height:' + height +
+          '%" title="' + escapeHtml(tooltip) + '" aria-hidden="true"></i>';
+      }).join('');
+      return '<div class="maint-efficiency-day" role="group" aria-label="' + escapeHtml(daySummary) + '" title="' +
+        escapeHtml(daySummary) + '"><div class="maint-efficiency-day-bars">' + bars + '</div><time datetime="' +
+        escapeHtml(day) + '">' + escapeHtml(dayLabel) + '</time><small>' + number(item.samples) + ' 条</small></div>';
+    }).join('');
     const recentMarkup = samples.map(sample => {
-      const status = outcomeLabels[sample.outcome] || ["状态未知", "unknown"];
+      const core = sample.execution_path === "astrbot_core";
+      const status = core && sample.outcome === "completed" ? ["核心发送已返回", "ok"] :
+        core && sample.outcome === "partial" ? ["部分发送返回", "warn"] : outcomeLabels[sample.outcome] || ["状态未知", "unknown"];
       const times = sample.timestamps || {};
       const stages = sample.stages || {};
       const activeCalls = Math.max(0, Number(sample.active_model_calls) || 0);
@@ -2539,12 +2724,21 @@ window.CompanionMaintenancePage = (() => {
       };
       const materials = Array.isArray(trace.materials) ? trace.materials : [];
       const offeredTools = Array.isArray(trace.offered_tools) ? trace.offered_tools : [];
-      const materialStateLabels = {ready: "已注入", deferred: "已延后", unavailable: "不可用", unknown: "状态未知"};
+      const materialStateLabels = {ready: "已注入", deferred: "已延后", unavailable: "不可用", empty: "无可用素材", not_injected: "未注入", unknown: "状态未知"};
+      const materialLabels = {expression_preferences: "表达偏好", task_prompt: "对话附加提示", role_profile: "角色档案",
+        person_card: "相识资料", perception: "时空与环境", proactive_inspirations: "主动灵感", relationship_profile: "关系档案",
+        memory: "记忆召回", relationship: "相处背景", life: "角色生活", growth: "角色成长", self_review: "自我提醒",
+        open_items: "未完成事项", role_state: "角色状态", group_participation: "群聊参与", group_speaker: "当前发言者",
+        group_network: "群成员与互动", group_memory: "群公共记忆", expression_style: "表达习惯"};
       const materialRows = materials.map(item => {
-        const source = [item.owner, item.purpose].filter(Boolean).map(value => String(value)).join(" / ") || "提示素材";
+        const source = core && materialLabels[item.purpose] ? materialLabels[item.purpose] :
+          [item.owner, item.purpose].filter(Boolean).map(value => String(value)).join(" / ") || "提示素材";
         const state = materialStateLabels[item.state] ? item.state : "unknown";
+        const details = [materialStateLabels[state]];
+        if (Number.isFinite(item.elapsed_ms)) details.push(efficiencyDuration(item.elapsed_ms));
+        if (Number.isFinite(item.chars) && item.chars > 0) details.push(number(item.chars) + ' 字符');
         return '<li class="maint-efficiency-material" data-state="' + state + '"><span>' + escapeHtml(source) +
-          '</span><small>' + materialStateLabels[state] + '</small></li>';
+          '</span><small>' + details.join(' · ') + '</small></li>';
       }).join("");
       const toolRows = offeredTools.map(action => '<li class="maint-efficiency-offered-tool"><span>' +
         escapeHtml(String(action)) + '</span><small>可调用</small></li>').join("");
@@ -2554,19 +2748,39 @@ window.CompanionMaintenancePage = (() => {
       const readyMaterials = materials.filter(item => item.state === "ready").length;
       const injectionMarkup = materialRows || toolRows
         ? '<ul class="maint-efficiency-injection-list">' + materialRows + toolRows + '</ul>'
-        : '<p class="maint-efficiency-trace-empty">无可归类的补充素材或可用工具</p>';
+        : '<p class="maint-efficiency-trace-empty">' + (core ? "补充素材目录未观测；工具数量以核心请求签名为准。" : "无可归类的补充素材或可用工具") + '</p>';
       const callStateLabels = {
         generated: "完成", dispatched: "进行中", reserved: "等待中", not_started: "未启动", discarded: "已跳过",
-        queued: "排队中", running: "执行中", succeeded: "完成", failed: "失败", unknown: "结果未知", started: "执行中",
+        queued: "排队中", running: "执行中", succeeded: "完成", failed: "失败", skipped: "跳过", unknown: "结果未知", started: "执行中", returned: "已返回",
+      };
+      const callFailureLabels = {
+        provider_request_failed: "Provider 请求失败", provider_wait_timed_out: "Provider 等待超时",
+        native_response_parse_failed: "宿主响应解析失败", response_contract_rejected: "响应校验未通过",
+        request_preparation_failed: "请求准备失败", provider_recheck_failed: "Provider 状态复核失败",
+        role_recheck_failed: "角色状态复核失败", provider_wait_interrupted: "Provider 等待中断",
+        adapter_failed: "适配器异常", request_recheck_failed: "请求状态复核失败",
+      };
+      const parseStateLabels = {
+        not_received: "未收到响应", raw_observed: "已收到原始响应", native_parsed: "宿主已解析",
+        native_rejected: "宿主解析失败", stream_rejected: "流式校验失败", contract_rejected: "回复校验失败",
+        validated: "回复已通过校验", tools: "工具请求已通过校验", captured: "已交给记忆解析", refusal: "模型拒绝",
       };
       const callDetails = [];
+      const preparationLabels = {context_build: "素材准备", request_authorization: "请求授权", prompt_injection: "提示词注入",
+        tool_injection: "工具注入", send_tool_injection: "发送工具注入"};
+      (Array.isArray(trace.preparation_steps) ? trace.preparation_steps : []).forEach(step => {
+        callDetails.push({at: step.started_at, kind: "preparation", label: "插件准备 · " + (preparationLabels[step.name] || "准备阶段"),
+          state: step.state, elapsed: step.elapsed_ms});
+      });
       (Array.isArray(trace.model_calls) ? trace.model_calls : []).forEach((call, index) => {
+        const usageObservation = core && call.measurement_basis && call.measurement_basis !== "provider_response";
         callDetails.push({
           at: call.started_at,
           kind: "model",
-          label: "模型请求 " + number(Number.isFinite(call.position) ? call.position + 1 : index + 1),
+          label: (usageObservation ? "用量观察 " : "模型请求 ") + number(Number.isFinite(call.position) ? call.position + (core ? 0 : 1) : index + 1),
           state: call.state,
           elapsed: call.elapsed_ms,
+          record: call,
         });
       });
       (Array.isArray(trace.tool_calls) ? trace.tool_calls : []).forEach(call => {
@@ -2574,9 +2788,22 @@ window.CompanionMaintenancePage = (() => {
         callDetails.push({
           at: extension ? (call.extension_started_at || call.started_at) : call.started_at,
           kind: extension ? "extension" : "builtin",
-          label: (extension ? "扩展插件 · " : "内置工具 · ") + String(call.action || "未命名工具"),
+          label: (extension ? "扩展插件 · " : core ? "核心工具 · " : "内置工具 · ") + String(call.action || "未命名工具"),
           state: call.state,
           elapsed: extension ? call.extension_elapsed_ms : call.elapsed_ms,
+        });
+      });
+      const laya = trace.laya || {};
+      (Array.isArray(laya.events) ? laya.events : []).forEach(event => {
+        const decision = event.decision && typeof event.decision === "object"
+          ? Object.entries(event.decision).map(([key, value]) => key + " " + value).join(" · ") : "";
+        callDetails.push({
+          at: event.observed_at,
+          kind: "laya",
+          label: "Laya 决策 · " + (event.mode || "未知模式"),
+          state: event.status,
+          elapsed: event.elapsed_ms,
+          record: {failure_code: event.reason_code, detail: event.reason || decision},
         });
       });
       callDetails.sort((left, right) => {
@@ -2588,11 +2815,40 @@ window.CompanionMaintenancePage = (() => {
       const callDetailsMarkup = callDetails.map(call => {
         const callTime = efficiencyTimestamp(call.at);
         const state = callStateLabels[call.state] || "状态未知";
-        return '<li class="maint-efficiency-call" data-kind="' + call.kind + '"><div><strong>' +
+        const row = call.record || {};
+        const failure = row.failure_code ? (callFailureLabels[row.failure_code] || "调用失败") : "";
+        const detail = row.detail || "";
+        const provider = row.provider ? "Provider " + row.provider : "";
+        const usage = (row.tokens == null ? "用量未确认" : number(row.tokens) + " Token") +
+          (row.measurement_basis === "last_response_only" ? " · 仅最后响应" : row.measurement_basis === "runner_aggregate" ? " · Agent 汇总，调用次数未知" :
+            row.measurement_basis === "last_tool_requery_only" ? " · 仅末次工具参数重查，次数未知" : "");
+        const tokenParts = "输入 " + (row.input_tokens == null ? "未确认" : number(row.input_tokens)) +
+          " · 输出 " + (row.output_tokens == null ? "未确认" : number(row.output_tokens));
+        const diag = row.response_diagnostics;
+        const responseMeta = diag ? [
+          parseStateLabels[diag.parse_state] || "解析状态未知",
+          "结束原因 " + (diag.completion_present && diag.finish_reason !== "missing" ? diag.finish_reason : "未返回"),
+          diag.status_code ? "HTTP " + number(diag.status_code) : "",
+          diag.error_type || "",
+          diag.error_code || "",
+        ].filter(Boolean).join(" · ") : "响应诊断未采集";
+        const textCounts = diag ? (diag.completion_present
+          ? ["原始", "宿主解析", "待呈现"].map((label, index) => {
+              const summary = [diag.raw, diag.parsed, diag.visible][index];
+              return label + " " + (summary ? number(summary.chars) + " 字" +
+                (summary.has_internal_markers ? " · 含标签样式标记" : "") : "未取得");
+            }).join(" · ")
+          : "未收到完整响应内容") : "";
+        return '<li class="maint-efficiency-call" data-kind="' + call.kind + '" data-state="' + escapeHtml(call.state || "unknown") + '"><div><strong>' +
           escapeHtml(call.label) + '</strong><small>' + escapeHtml(callTime.text) + ' · ' + state +
-          '</small></div><b>' + efficiencyDuration(call.elapsed) + '</b></li>';
+          (failure ? ' · <em>' + escapeHtml(failure) + '</em>' : "") + '</small>' +
+          (call.kind === "model" ? '<small>' + escapeHtml([provider, usage, tokenParts].filter(Boolean).join(" · ")) + '</small>' +
+            '<small class="maint-efficiency-call-diagnostic">' + escapeHtml(responseMeta) +
+            (textCounts ? ' · ' + escapeHtml(textCounts) : "") + '</small>' :
+            call.kind === "laya" && detail ? '<small class="maint-efficiency-call-diagnostic">' + escapeHtml(detail) + '</small>' : "") +
+          '</div><b>' + efficiencyDuration(call.elapsed) + '</b></li>';
       }).join("");
-      const originLabel = sample.received_time_source === "input_event" ? "首条消息" : "批次创建";
+      const originLabel = core ? "原生消息" : sample.received_time_source === "input_event" ? "首条消息" : "批次创建";
       const multipleInputs = Number(sample.input_count) > 1;
       const receivedLabel = sample.received_time_source === "input_event" ? "首条消息" : "批次创建";
       const deliveryLabel = sample.outcome === "completed" ? "末段回执" :
@@ -2601,7 +2857,12 @@ window.CompanionMaintenancePage = (() => {
       const lastReceipt = times.last_delivered_at;
       const sameReceipt = Boolean(firstReceipt && lastReceipt && Date.parse(firstReceipt) === Date.parse(lastReceipt));
       const mergedReceipt = sameReceipt && sample.outcome === "completed";
-      const timelineRows = [
+      const timelineRows = core ? [
+        ["received_at", "原生消息收到"], ["generation_started_at", "插件请求准备完成"], ["agent_started_at", "Agent 启动"],
+        ["first_model_started_at", "模型启动"], ["last_model_finished_at", "末次模型返回（已观测）"], ["agent_finished_at", "Agent 完成"],
+        ["first_dispatched_at", "首次开始发送"], ["first_send_returned_at", "首次发送返回"], ["last_send_returned_at", "末次发送返回"],
+      ].sort(([left], [right]) => (Date.parse(times[left]) || Infinity) - (Date.parse(times[right]) || Infinity))
+        .map(([key, label]) => eventRow(key, label)).join("") : [
         eventRow("received_at", receivedLabel),
         ...(multipleInputs ? [eventRow("last_input_received_at", "末条消息")] : []),
         stageRow("input_wait", "末条消息 → 防抖结束"),
@@ -2619,36 +2880,53 @@ window.CompanionMaintenancePage = (() => {
         ...(mergedReceipt ? [] : [eventRow("last_delivered_at", deliveryLabel)]),
       ].join("");
       const cumulativeMarkup = [
-        ["到模型启动", "pre_model_ms"], ["到首段回执", "first_reply_ms"], ["到完整回执", "end_to_end_ms"],
+        ["到模型启动", "pre_model_ms"], [core ? "到首次发送返回" : "到首段回执", core ? "first_send_returned_ms" : "first_reply_ms"],
+        [core ? "到末次发送返回" : "到完整回执", core ? "end_to_end_send_returned_ms" : "end_to_end_ms"],
       ].map(([label, key]) => '<div class="maint-efficiency-cumulative-item"><span>' + label + '</span><strong>' +
         efficiencyDuration(stages[key]) + '</strong></div>').join("");
+      const stageBreakdown = core ? '<section class="maint-efficiency-cumulative" aria-label="单次回复分项耗时">' +
+        '<div class="maint-efficiency-cumulative-head"><strong>分项耗时</strong><span>累计与区间存在重叠</span></div>' +
+        '<div class="maint-efficiency-cumulative-grid">' + [["插件准备", "plugin_preparation_ms"], ["已观测模型请求累计", "model_request_ms"],
+          ["工具执行累计", "tool_ms"], ["Agent 总时长", "agent_ms"], ["发送区间", "send_ms"], ["首 Token", "ttft_ms"]]
+        .map(([label, key]) => '<div class="maint-efficiency-cumulative-item"><span>' + label + '</span><strong>' +
+          efficiencyDuration(stages[key]) + '</strong></div>').join("") + '</div></section>' : "";
       const pluginCallCount = Array.isArray(trace.tool_calls)
-        ? number(trace.tool_calls.filter(call => call.kind === "extension").length) + ' 次'
+        ? number(trace.tool_calls.filter(call => core || call.kind === "extension").length) + ' 次'
         : '未观测';
+      const modelCountLabel = core && sample.model_call_count_complete !== true
+        ? '已观测请求 ' + number(sample.model_calls) + ' 次 · 完整次数未知'
+        : '模型调用 ' + number(sample.model_calls) + ' 次';
+      const usageObservationCount = sample.usage_observation_count ??
+        (Array.isArray(trace.model_calls) ? trace.model_calls.length : 0);
       const sampleFacts = [number(sample.input_count) + ' 条输入',
-        number(sample.delivered_parts) + ' / ' + number(sample.part_count) + ' 段送达',
-        '模型 ' + number(sample.model_calls) + ' 次', '插件 ' + pluginCallCount];
+        core ? number(sample.send_returned_parts) + ' 次发送返回' : number(sample.delivered_parts) + ' / ' + number(sample.part_count) + ' 段送达',
+        modelCountLabel,
+        (core ? '核心工具 ' : '插件 ') + pluginCallCount];
+      if (core) sampleFacts.push('AstrBot 核心 · 平台确认未观测');
+      if (laya.calls || laya.skipped) sampleFacts.push('Laya ' + number(laya.calls) + ' 次调用 / ' + number(laya.skipped) + ' 次跳过');
       if (Number(sample.failed_parts) > 0) sampleFacts.push('失败 ' + number(sample.failed_parts) + ' 段');
-      if (Number(sample.unknown_parts) > 0) sampleFacts.push('回执未知 ' + number(sample.unknown_parts) + ' 段');
-      if (Number(sample.pending_parts) > 0) sampleFacts.push('待回执 ' + number(sample.pending_parts) + ' 段');
-      return '<details class="maint-efficiency-sample"><summary><div class="maint-efficiency-sample-overview">' +
+      if (Number(sample.unknown_parts) > 0) sampleFacts.push((core ? '发送结果未知 ' : '回执未知 ') + number(sample.unknown_parts) + ' 段');
+      if (Number(sample.pending_parts) > 0) sampleFacts.push((core ? '等待返回 ' : '待回执 ') + number(sample.pending_parts) + ' 段');
+      const sampleKey = String(sample.turn_id || sample.batch_id || sample.received_at || "");
+      return '<details class="maint-efficiency-sample" data-reply-sample="' + escapeHtml(sampleKey) + '"' +
+        (state.openReplySamples?.has(sampleKey) ? ' open' : '') + '><summary><div class="maint-efficiency-sample-overview">' +
         '<div class="maint-efficiency-sample-overview-head"><time>' + escapeHtml(time(sample.received_at)) +
         '</time><span class="maint-efficiency-status" data-state="' + status[1] + '">' + status[0] +
         '</span></div><span class="maint-efficiency-sample-facts">' + sampleFacts.join(' · ') +
-        '</span></div><div class="maint-efficiency-sample-timings"><div><span>首段响应</span><strong>' +
-        efficiencyDuration(stages.first_reply_ms) + '</strong></div><div><span>完整送达</span><strong>' +
-        efficiencyDuration(stages.end_to_end_ms) + '</strong></div></div></summary><div class="maint-efficiency-detail">' +
+        '</span></div><div class="maint-efficiency-sample-timings"><div><span>' + (core ? '首次发送返回' : '首段响应') + '</span><strong>' +
+        efficiencyDuration(core ? stages.first_send_returned_ms : stages.first_reply_ms) + '</strong></div><div><span>' + (core ? '末次发送返回' : '完整送达') + '</span><strong>' +
+        efficiencyDuration(core ? stages.end_to_end_send_returned_ms : stages.end_to_end_ms) + '</strong></div></div></summary><div class="maint-efficiency-detail">' +
         '<section class="maint-efficiency-cumulative" aria-label="起点累计耗时"><div class="maint-efficiency-cumulative-head">' +
         '<strong>起点累计</strong><span>从' + originLabel + '起算</span></div><div class="maint-efficiency-cumulative-grid">' +
-        cumulativeMarkup + '</div></section><section class="maint-efficiency-flow" aria-label="单次回复时间线">' +
-        '<div class="maint-efficiency-flow-head"><strong>回复流程</strong><span>模型调用 ' + number(sample.model_calls) + ' 次' +
+        cumulativeMarkup + '</div></section>' + stageBreakdown + '<section class="maint-efficiency-flow" aria-label="单次回复时间线">' +
+        '<div class="maint-efficiency-flow-head"><strong>回复流程</strong><span>' + modelCountLabel +
         (activeCalls ? ' · 活跃 ' + number(activeCalls) + ' 次' : "") + '</span></div><ol class="maint-efficiency-timeline">' +
         timelineRows + '</ol><div class="maint-efficiency-trace-grid"><section class="maint-efficiency-trace-section" aria-label="上下文与工具注入">' +
         '<div class="maint-efficiency-trace-head"><strong>上下文与工具注入</strong><span>' + number(readyMaterials) +
         ' 项素材已注入 · ' + escapeHtml(toolCountLabel) + '</span></div>' + injectionMarkup +
         '</section><section class="maint-efficiency-trace-section" aria-label="模型和插件调用明细">' +
-        '<div class="maint-efficiency-trace-head"><strong>模型与插件调用</strong><span>模型 ' +
-        number(Array.isArray(trace.model_calls) ? trace.model_calls.length : 0) + ' 次 · 工具 ' +
+        '<div class="maint-efficiency-trace-head"><strong>模型与插件调用</strong><span>' + (core ? '用量观察 ' +
+        number(usageObservationCount) + ' 条' : '模型 ' + number(Array.isArray(trace.model_calls) ? trace.model_calls.length : 0) + ' 次') + ' · 工具 ' +
         number(Array.isArray(trace.tool_calls) ? trace.tool_calls.length : 0) + ' 次</span></div>' +
         (callDetailsMarkup ? '<ol class="maint-efficiency-call-list">' + callDetailsMarkup + '</ol>' :
           '<p class="maint-efficiency-trace-empty">调用明细未观测</p>') +
@@ -2660,12 +2938,18 @@ window.CompanionMaintenancePage = (() => {
         (report ? "近 7 日暂无对话样本。" : "回复效率数据暂不可用。") + '</p></div>';
     return '<div class="maint-efficiency-page"><section class="maint-efficiency-panel" aria-label="近七日耗时概览">' +
       '<div class="maint-panel-heading"><div><span class="maint-eyebrow">REPLY / 7 DAYS</span><h3>近 7 日耗时概览</h3></div><span class="maint-efficiency-count">' +
-      number(sampleCount) + ' 条对话 · ' + number(summary.completed) + ' 条完整送达</span></div><div class="maint-efficiency-metrics">' +
-      metricMarkup + '</div></section><div class="maint-efficiency-analysis"><section class="maint-efficiency-panel" aria-label="阶段观测覆盖率">' +
+      number(sampleCount) + ' 条对话 · ' + (hasCore ? number(summary.send_returned_samples) + ' 条核心发送返回 · ' +
+        number(report?.by_source?.legacy_v2_conversation?.completed) + ' 条历史完整送达' : number(summary.completed) + ' 条完整送达') + ' · Laya ' + number(summary.laya_calls || 0) +
+      ' 次调用 / ' + number(summary.laya_skipped || 0) + ' 次跳过 / ' + number(summary.laya_failed || 0) + ' 次失败</span></div><div class="maint-efficiency-metrics">' +
+      metricMarkup + '</div>' + (hasCore ? '<p class="maint-scope-note">核心指标以原生发送方法返回为终点；流式发送可能早于 Agent 完成。平台确认未观测，历史平台回执另列。</p>' : "") + '</section><div class="maint-efficiency-analysis"><section class="maint-efficiency-panel" aria-label="阶段观测覆盖率">' +
       '<div class="maint-panel-heading"><div><span class="maint-eyebrow">OBSERVABILITY</span><h3>阶段观测覆盖</h3></div></div>' +
       (coverageStages.length && sampleCount ? '<div class="maint-efficiency-coverage">' + coverageMarkup + '</div>' : emptyMarkup) +
-      '</section><section class="maint-efficiency-panel" aria-label="每日回复趋势"><div class="maint-panel-heading"><div><span class="maint-eyebrow">DAILY / P50</span><h3>每日完整回复</h3></div></div>' +
-      (daily.some(item => item.samples) ? '<div class="maint-efficiency-daily">' + dailyMarkup + '</div>' : '<div class="maint-empty"><span class="maint-empty-mark">—</span><p>暂无完整送达样本。</p></div>') +
+      '</section><section class="maint-efficiency-panel" aria-label="每日回复趋势"><div class="maint-panel-heading"><div><span class="maint-eyebrow">DAILY / P50</span><h3>每日回复时长</h3></div></div>' +
+      (daily.some(item => item.samples) ? '<div class="maint-efficiency-daily"><div class="maint-efficiency-legend">' + dailyLegend +
+        '</div><div class="maint-efficiency-trend-chart" role="group" aria-label="每日回复时长中位数柱状图，共用纵轴"><div class="maint-efficiency-trend-axis" aria-hidden="true"><span>' +
+        efficiencyDuration(dailyMax) + '</span><span>' + efficiencyDuration(dailyMax / 2) + '</span><span>0</span></div><div class="maint-efficiency-trend-plot"><div class="maint-efficiency-trend-guides" aria-hidden="true"><i></i><i></i><i></i></div><div class="maint-efficiency-trend-columns">' +
+        dailyMarkup + '</div></div></div></div>' : '<div class="maint-empty"><span class="maint-empty-mark">—</span><p>' +
+        (hasCore ? '暂无核心发送返回或历史回执样本。' : '暂无完整送达样本。') + '</p></div>') +
       '</section></div><section class="maint-efficiency-panel maint-efficiency-recent" aria-label="近期回复样本"><div class="maint-panel-heading"><div><span class="maint-eyebrow">RECENT / ' +
       number(samples.length) + '</span><h3>近期回复样本</h3></div></div>' +
       (recentMarkup || emptyMarkup) + '</section></div>';
@@ -2673,6 +2957,9 @@ window.CompanionMaintenancePage = (() => {
 
   function render() {
     if (!root || !state) return;
+    const samples = root.querySelectorAll?.("details[data-reply-sample]");
+    if (samples?.length) state.openReplySamples = new Set(Array.from(samples)
+      .filter(item => item.open).map(item => item.dataset.replySample));
     if (!state.data && state.loading) {
       root.innerHTML = '<div class="maint-loading"><span class="maint-loading-mark"><i data-lucide="activity"></i></span><strong>正在读取角色账本与运行快照</strong><span class="maint-loading-line"></span></div>';
       window.lucide?.createIcons?.();
@@ -2707,8 +2994,8 @@ window.CompanionMaintenancePage = (() => {
       : localSourceNames[state.tokenSource] ? recentMarkup(recentData)
         : externalRecentMarkup(filteredRecent(recentData), state.showAllCalls ? 80 : 10);
     const ledgerNote = state.activeMaintenanceNav === "efficiency"
-      ? "时间源：入站事件 · 模型调用 · 平台投递回执"
-      : localSource ? "数据源：V2 模型调用账本 · 成本为本地计价 · 缓存字段来自 Provider 确认"
+      ? "时间源：核心模型与发送观测 · 历史 V2 回执 · 发送返回与平台确认分列"
+      : localSource ? "数据源：AstrBot 核心观测与 V2 插件账本 · 只计已观测用量 · 缓存以 Provider 实报为准"
       : externalSource?.available ? "数据源：" + (externalSource.display_name || "外部插件") + "独立账本 · 外部费用未提供"
         : "数据源：所选来源尚未接入 · 不展示其他账本记录";
     const exportMarkup = state.activeMaintenanceNav === "efficiency" ? ""
@@ -2727,7 +3014,7 @@ window.CompanionMaintenancePage = (() => {
       '<button type="button" data-maint-nav="' + item[0] + '" aria-current="' + (state.activeMaintenanceNav === item[0] ? "page" : "false") + '">' + item[1] + '</button>').join("") + '</nav>';
     const boardTitles = {overview: "Token 管理", diagnostics: "运行排障", cache: "缓存诊断", efficiency: "近期回复效率",
       recent: "最近调用", prompts: "任务提示词"};
-    const boardDescriptions = {efficiency: "近 7 日 · 收到消息至平台回执"};
+    const boardDescriptions = {efficiency: "近 7 日 · 核心发送耗时与历史投递耗时"};
     const boardTitle = boardTitles[state.activeMaintenanceNav] || "运行态势";
     root.innerHTML = '<div class="maint-board"><header class="maint-board-head"><div class="maint-board-copy"><span class="maint-eyebrow">COMPANION / SIGNAL ROOM</span><h2>' + boardTitle + '</h2><p>' +
       (boardDescriptions[state.activeMaintenanceNav] || "运行态势 · 当前角色用量、预算与调用构成。") + '</p></div>' +
@@ -3007,8 +3294,9 @@ window.CompanionMaintenancePage = (() => {
       if (ticket !== generation || state !== current) return;
       const latestTask = Array.isArray(latest?.tasks) ? latest.tasks.find(item => item?.kind === selectedKind) : null;
       if (!latestTask) throw new Error("当前任务已从 V2 注册目录移除，请刷新维护页。" );
-      const accepted = typeof window.confirm === "function"
-        ? window.confirm("已读取最新任务配置。确认后会替换当前草稿，未保存内容将丢失。") : true;
+      const accepted = typeof window.CompanionConfirm === "function"
+        && await window.CompanionConfirm({title:"载入最新任务配置",message:"确认后会替换当前草稿，未保存内容将丢失。",confirmText:"替换草稿",danger:true});
+      if (ticket !== generation || state !== current) return;
       if (!accepted) {
         current.promptMessage = "已保留当前草稿。";
         current.promptMessageKind = "warn";
@@ -3036,7 +3324,7 @@ window.CompanionMaintenancePage = (() => {
     if (!state?.data || !localUsage(state.data, state.tokenSource) || typeof document === "undefined" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return;
     const data = selectedUsage();
     const stats = statsFor(data);
-    const rows = [["类型", "日期或名称", "Token", "调用", "失败", "输入", "缓存命中", "缓存写入", "输出", "本地计价微美元", "平均延迟毫秒", "Provider / 任务"]];
+    const rows = [["类型", "日期或名称", "Token", "调用", "失败", "输入", "缓存命中", "缓存写入", "输出", "已计价部分微美元（未知留空）", "平均延迟毫秒", "Provider / 任务"]];
     rows.push(["统计范围", state.period, stats.tokens, stats.calls, stats.failures, stats.input, stats.cached,
       stats.creation, stats.output, stats.cost, stats.latency ?? "", localSourceNames[state.tokenSource]]);
     for (const item of dimensions(data, stats, "providers")) {
@@ -3212,7 +3500,12 @@ window.CompanionMaintenancePage = (() => {
         setMaintenanceView(focusView);
         render();
       }
-      root.querySelector(targetSelector)?.scrollIntoView?.({behavior: "smooth", block: "center"});
+      const focusTarget = root.querySelector(targetSelector);
+      const evidenceDrawer = focusTarget?.closest?.("details.maint-evidence-drawer");
+      const routeDrawer = focusTarget?.closest?.("details.maint-task-audit");
+      if (evidenceDrawer) evidenceDrawer.open = true;
+      if (routeDrawer) routeDrawer.open = true;
+      focusTarget?.scrollIntoView?.({behavior: "smooth", block: "center"});
       return;
     }
     if (target.closest("[data-refresh]")) { void refresh(); return; }
@@ -3343,7 +3636,7 @@ window.CompanionMaintenancePage = (() => {
       activeMaintenanceNav: ["overview", "diagnostics", "cache", "efficiency", "recent", "prompts"].includes(options.activeView) ? options.activeView : "overview",
       onViewChange: typeof options.onViewChange === "function" ? options.onViewChange : null,
       period: "today", selectedDate: localDay(), selectedHour: "", category: "all", severity: "all", callFilter: "all",
-      callQuery: "", traceFilter: null, showAllCalls: false, modelStatus: null,
+      callQuery: "", traceFilter: null, showAllCalls: false, modelStatus: null, openReplySamples: new Set(),
       promptQuery: "", promptMode: "all", promptGroup: "all", promptSelectedKind: "",
       promptSelectedSection: "task_prompt", promptView: "edit", promptRuleKey: "",
       promptDraft: "", promptInitial: "", promptEditToken: "", promptInitialized: false,

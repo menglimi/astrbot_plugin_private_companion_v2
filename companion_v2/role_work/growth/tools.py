@@ -142,7 +142,8 @@ class RoleGrowthTools:
         if type(arguments) is not dict or not set(required).issubset(arguments) or set(arguments) - set(required) - set(optional):
             raise ValueError("growth tool arguments do not match its registered contract")
         with self.runtime.transaction():
-            self.messages.owned(context, batch_id)
+            from companion_v2.conversation.native_tool_sources import validate_tool_turn
+            validate_tool_turn(self.messages, context, batch_id, evidence=action in MUTATIONS)
             at = self.reader.tasks.now()
             self._authorize(context, action, at)
             if action == "role.growth.list":

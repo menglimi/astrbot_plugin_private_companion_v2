@@ -11,6 +11,7 @@ import unittest
 
 from companion_v2.legacy.data_migration import (
     build_data_plan,
+    load_reference_image,
     load_reaction_asset,
     map_legacy_worldbook,
     next_reaction_batch,
@@ -113,6 +114,79 @@ class LegacyDataMigrationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "image_changed_after_preview"):
             load_reaction_asset(self.root, item)
+
+    def test_reference_gallery_and_wardrobe_preview_preserve_text_and_enforce_role_acl(self):
+        reference_directory = self.root / "photo_reference_images"
+        asset_directory = self.root / "photo_reference_assets"
+        reference_directory.mkdir()
+        asset_directory.mkdir()
+        (reference_directory / "portrait.png").write_bytes(ONE_PIXEL_PNG)
+        (asset_directory / "shared.png").write_bytes(ONE_PIXEL_PNG)
+        self.write_profile({
+            "photo_reference_assets": [
+                {"id": "role-wide", "scope": "relation_role", "path": "photo_reference_assets/shared.png",
+                 "image_access": {"subject_ref": None, "allow_generation": True,
+                     "readers": ["*"], "audiences": ["*"], "routes": ["*"]}},
+                {"id": "restricted", "scope": "relation_role", "path": "photo_reference_assets/shared.png",
+                 "image_access": {"subject_ref": None, "allow_generation": True,
+                     "readers": ["owner"], "audiences": ["*"], "routes": ["*"]}},
+            ],
+        })
+        configuration = {
+            "photo_reference_catalog": [
+                {"id": "portrait", "source": "photo_reference_images/portrait.png",
+                 "note": "主视觉", "reference_roles": ["identity"]},
+                {"id": "remote", "source": "https://example.invalid/image.png"},
+            ],
+            "wardrobe_items": [
+                {"id": "scarf", "name": "红围巾", "description": "羊毛材质", "tags": ["冬季"],
+                 "source": "photo_reference_images/portrait.png"},
+                {"id": "dress", "name": "白裙", "description": "仅保留文字描述",
+                 "url": "https://example.invalid/dress.png"},
+                {"id": "gloves", "name": "手套", "description": "没有旧图片"},
+            ],
+        }
+
+        plan = build_data_plan(self.root, v1_configuration=configuration)
+        preview = plan.document(reference_slots_available=24, wardrobe_slots_available=24)
+
+        self.assertEqual(len(plan.reference_images), 1)
+        self.assertEqual(preview["reference_images"]["batch_count"], 1)
+        self.assertEqual(preview["wardrobe_items"]["batch_count"], 3)
+        self.assertEqual(preview["wardrobe_items"]["image_count"], 1)
+        self.assertEqual(preview["wardrobe_items"]["image_skipped_count"], 1)
+        self.assertIn("remote_url_not_downloaded",
+                      {item["reason"] for item in preview["reference_images"]["rejected"]})
+        self.assertIn("image_access_not_role_wide",
+                      {item["reason"] for item in preview["reference_images"]["rejected"]})
+        self.assertNotIn("asset:role-wide",
+                         {item.get("source_id") for item in preview["reference_images"]["rejected"]})
+        self.assertEqual({item.name for item in plan.wardrobe_items}, {"红围巾", "白裙", "手套"})
+        self.assertEqual(next(item for item in plan.wardrobe_items if item.name == "白裙").image_reason,
+                         "remote_url_not_downloaded")
+
+    def test_cleared_reference_catalog_does_not_restore_legacy_paths_and_rechecks_hash(self):
+        directory = self.root / "photo_reference_images"
+        directory.mkdir()
+        source = directory / "portrait.png"
+        source.write_bytes(ONE_PIXEL_PNG)
+        self.write_profile({})
+        configuration = {
+            "photo_reference_catalog": [],
+            "photo_reference_catalog_user_cleared": True,
+            "photo_persona_reference_image_path": "photo_reference_images/portrait.png",
+            "photo_reference_library": ["photo_reference_images/portrait.png"],
+        }
+
+        cleared = build_data_plan(self.root, v1_configuration=configuration)
+        self.assertEqual(cleared.reference_images, ())
+
+        catalogued = build_data_plan(self.root, v1_configuration={
+            "photo_reference_catalog": [{"id": "portrait", "source": "photo_reference_images/portrait.png"}],
+        })
+        source.write_bytes(ONE_PIXEL_PNG + b"changed")
+        with self.assertRaisesRegex(ValueError, "image_changed_after_preview"):
+            load_reference_image(self.root, catalogued.reference_images[0])
 
     def test_owned_reaction_catalog_is_included_without_enabling_when_disabled(self):
         library = self.root / "owned_reaction_assets"

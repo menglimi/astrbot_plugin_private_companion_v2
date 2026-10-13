@@ -8,6 +8,7 @@ from unittest.mock import patch
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.execution.models import TaskError
+from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from tests.contact_schedule_support import ContactScheduleFixture
 from tests.test_management_access import INSTALLATION, SCOPE
@@ -15,6 +16,66 @@ from tests.test_role_tool_loop import answered
 
 
 class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_group_flows_are_not_considered_for_private_contact(self):
+        host, batch_id = await self.scheduled()
+        app = host.application
+        context = self.contact_context()
+        original = app.runtime.read_one("SELECT context_json FROM conversation_batches WHERE batch_id = ?",
+                                        (batch_id,))["context_json"]
+        document = json.loads(original)
+        document["audience"]["scope"]["kind"] = "group"
+        with app.runtime.transaction() as connection:
+            connection.execute("UPDATE conversation_batches SET context_json = ? WHERE batch_id = ?",
+                               (json.dumps(document, ensure_ascii=False), batch_id))
+
+        self.assertEqual(app.contact_schedule._legacy_rows(0), ())
+
+    async def test_full_task_history_blocks_repeated_contact_planning_with_reason(self):
+        host, _ = await self.scheduled()
+        app = host.application
+        retained = app.runtime.read_one("SELECT COUNT(*) FROM execution_tasks", ())[0]
+        with (patch.object(app.tasks, "limits", replace(app.tasks.limits, retained_tasks=retained)),
+              patch.object(app.tasks, "check_generation", return_value=Outcome.success(True))):
+            app.contact_schedule.advance()
+
+        diagnostic = app.contact_schedule.diagnostic_for(
+            self.contact_context(), at=self.clock.now(), host_state="running")
+        self.assertEqual(diagnostic["scheduler"]["state"], "blocked")
+        self.assertEqual(diagnostic["scheduler"]["reason_code"], "task_storage_full")
+
+    async def test_contact_admission_failure_is_recorded_after_candidate_queue(self):
+        host, _ = await self.scheduled()
+        app = host.application
+        context = self.contact_context()
+        row = app.contact_schedule.latest_conversation(context)
+        self.clock.advance(timedelta(seconds=60))
+        plan = app.contact_schedule._plan(row, self.clock.now())
+        self.assertIsNotNone(plan)
+
+        async def full_capacity(*args, **kwargs):
+            return Outcome.failed("task_queue_full", "capacity reached")
+
+        with patch.object(app.proactive, "contact", new=full_capacity):
+            result = await app.contact_schedule._run(plan)
+
+        self.assertEqual(result.failure.code, "task_queue_full")
+        diagnostic = app.contact_schedule.diagnostic_for(context, at=self.clock.now(), host_state="running")
+        self.assertEqual(diagnostic["evaluation"]["stage"], "task_admission")
+        self.assertEqual(diagnostic["evaluation"]["reason_code"], "task_queue_full")
+
+    async def test_private_window_exposes_the_last_automatic_schedule_gate(self):
+        host, _ = await self.scheduled(automatic=False)
+        app = host.application
+        app.contact_schedule.advance()
+
+        diagnostic = app.contact_schedule.diagnostic_for(
+            self.contact_context(), at=self.clock.now(), host_state=app.state)
+        self.assertEqual(diagnostic["scheduler"]["state"], "running")
+        self.assertEqual(diagnostic["evaluation"]["outcome"], "skipped")
+        self.assertEqual(diagnostic["evaluation"]["stage"], "settings")
+        self.assertEqual(diagnostic["evaluation"]["reason_code"], "automatic_contact_disabled")
+        self.assertNotIn("conversation_ref", diagnostic["evaluation"])
+
     async def test_unanswered_slowdown_applies_to_ordinary_check_in_and_new_input_resets_pause(self):
         host, _ = await self.scheduled(automatic=False)
         app = host.application

@@ -110,8 +110,7 @@ class EmbeddingTests(unittest.IsolatedAsyncioTestCase):
                 row = db.execute("SELECT * FROM reaction_inputs WHERE event_key='event'").fetchone()
                 self.assertEqual((row["actor"], row["received_at"], row["signal"]),
                                  ("speaker", None, None))
-                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
-
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 8)
 
 class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_foreground_query_embeds_once_without_waiting_for_index_lock(self):
@@ -131,13 +130,14 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
             enrich.assert_called_once()
         self.assertEqual(self.port.calls.count("想要安慰和抱抱"), 1)
 
-    async def semantic_host(self, *, images=False, automatic_reactions=True):
+    async def semantic_host(self, *, images=False, automatic_reactions=True, reaction_role_count=0):
         if images:
             self.sender = replace(self.sender, supports_images=True)
             self.providers = tuple(replace(p, capabilities=("text", "tools", "image")) for p in self.providers)
         host = self.host()
         self.port = SemanticPort()
-        self.semantic = host.application.attach_semantics(self.port)
+        self.semantic = host.application.attach_semantics(self.port,
+                                                          reaction_role_count=reaction_role_count)
         if images and automatic_reactions:
             settings = self.semantic.store.settings()
             self.semantic.store.configure({"reactions_trigger_probability": 1.0,
@@ -175,7 +175,7 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
 
         app.messages.images.read = lambda current, events, at: (prompt_image,)
         self.semantic.reactions.capture_prompt_image = lambda image: captured
-        owner = self.semantic.owner(context)
+        owner = self.semantic.ensure_reaction_catalog(context)
 
         def request(purpose):
             return SimpleNamespace(event=SimpleNamespace(images=(captured.descriptor,)),
@@ -661,7 +661,8 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         first = host.receive(self.event("reaction-feedback-source", text="有点难过")).unwrap()
         context = self.context(app, first)
         owner = self.semantic.owner(context)
-        item = self.semantic.reactions.import_image(owner, picture(),
+        catalog_owner = self.semantic.ensure_reaction_catalog(context)
+        item = self.semantic.reactions.import_image(catalog_owner, picture(),
             {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
         self.advance(app)
         self.assertEqual((await self.done(app, first))["state"], "complete")
@@ -700,17 +701,84 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({preferences.actor(value) for value in
                               (context, other_speaker, other_session)}), 3)
 
+    async def test_reaction_catalog_is_shared_by_role_and_promotes_legacy_window_data(self):
+        host = await self.semantic_host(images=True)
+        batch = host.receive(self.event("role-catalog", text="问候")).unwrap()
+        context = self.context(host.application, batch)
+        legacy_owner = self.semantic.owner(context)
+        item = self.semantic.reactions.import_image(legacy_owner, picture(),
+            {"name": "挥手", "description": "友好问候", "intents": "问候"})
+        animated = self.semantic.reactions.import_image(legacy_owner, animation(),
+            {"name": "挥手动画", "description": "动画问候", "intents": "问候"})
+        offer = {"kind": "reaction", "items": [{"id": item["id"], "revision": item["revision"]}]}
+        self.semantic.store.offer(batch, "legacy-reaction-call", legacy_owner, offer)
+
+        other_scope = replace(context.scope, native_scope_id="native-other",
+                              conversation_id="conversation-other", session_id="session-other")
+        other_window = replace(context,
+            role_binding=replace(context.role_binding, scope=other_scope),
+            audience=replace(context.audience, scope=other_scope))
+        owner = self.semantic.ensure_reaction_catalog(other_window)
+        self.assertEqual(owner, self.semantic.reaction_owner(context))
+        self.assertEqual(self.semantic.store.get(owner, "reaction", item["id"])["id"], item["id"])
+        self.assertEqual(self.semantic.store.get(legacy_owner, "reaction", item["id"])["id"], item["id"])
+        moved_animation = self.semantic.store.get(owner, "reaction", animated["id"])
+        self.assertEqual(len(self.semantic.reactions.captured(moved_animation).frames), 2)
+        self.assertEqual(dict(self.semantic.store.offers(batch, owner))["legacy-reaction-call"], offer)
+
+        other_role = replace(context.role_binding.role, subject_id="persona-other")
+        different_role = replace(other_window,
+            role_binding=replace(other_window.role_binding, role=other_role))
+        self.assertNotEqual(owner, self.semantic.reaction_owner(different_role))
+
+    async def test_unclaimed_v1_reaction_catalog_is_copied_when_one_role_is_configured(self):
+        host = await self.semantic_host(images=True, automatic_reactions=False, reaction_role_count=1)
+        batch = host.receive(self.event("single-role-v1-catalog", text="问候")).unwrap()
+        context = self.context(host.application, batch)
+        source_owner = "unclaimed-v1-reactions"
+        imported = self.semantic.reactions.import_image(source_owner, picture(),
+            {"name": "历史表情", "description": "V1 迁入素材"}, collection_source="legacy_migration")
+        manual = self.semantic.reactions.import_image("unclaimed-manual-reactions", animation(),
+            {"name": "独立手动素材", "description": "不应跨 owner 合并"}, collection_source="manual")
+
+        owner = self.semantic.ensure_reaction_catalog(context)
+
+        self.assertEqual(self.semantic.store.get(owner, "reaction", imported["id"])["id"], imported["id"])
+        self.assertEqual(self.semantic.store.get(source_owner, "reaction", imported["id"])["id"],
+                         imported["id"], "recovery keeps the original catalog intact")
+        with self.assertRaises(TaskError):
+            self.semantic.store.get(owner, "reaction", manual["id"])
+        with self.semantic.store.db() as db:
+            self.assertIsNotNone(db.execute("SELECT 1 FROM reaction_owner_migrations WHERE source_owner=? AND target_owner=?",
+                                             (source_owner, owner)).fetchone())
+
+    async def test_unclaimed_v1_reaction_catalog_is_not_merged_when_multiple_roles_are_configured(self):
+        host = await self.semantic_host(images=True, automatic_reactions=False, reaction_role_count=2)
+        batch = host.receive(self.event("multi-role-v1-catalog", text="问候")).unwrap()
+        context = self.context(host.application, batch)
+        source_owner = "unclaimed-v1-reactions"
+        imported = self.semantic.reactions.import_image(source_owner, picture(),
+            {"name": "其他角色表情", "description": "V1 迁入素材"}, collection_source="legacy_migration")
+
+        owner = self.semantic.ensure_reaction_catalog(context)
+
+        with self.assertRaises(TaskError):
+            self.semantic.store.get(owner, "reaction", imported["id"])
+        self.assertEqual(self.semantic.store.get(source_owner, "reaction", imported["id"])["id"],
+                         imported["id"])
+
     async def test_feedback_stays_on_latest_delivery_and_changes_selection(self):
         host = await self.semantic_host(images=True)
         app = host.application
         batch = host.receive(self.event("feedback-ranking", text="有点难过")).unwrap()
         context = self.context(app, batch)
         owner = self.semantic.owner(context)
-        first = self.semantic.reactions.import_image(owner, picture(),
+        catalog_owner = self.semantic.ensure_reaction_catalog(context)
+        first = self.semantic.reactions.import_image(catalog_owner, picture(),
             {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
         alternative_bytes = io.BytesIO()
         Image.new("RGB", (2, 2), "red").save(alternative_bytes, format="PNG")
-        second = self.semantic.reactions.import_image(owner, inspect_image(alternative_bytes.getvalue(), 0),
+        second = self.semantic.reactions.import_image(catalog_owner, inspect_image(alternative_bytes.getvalue(), 0),
             {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
         actor = self.semantic.reaction_preferences.actor(context)
         at = self.clock.now().timestamp()
@@ -741,7 +809,8 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         batch = host.receive(self.event("feedback-expired", text="有点难过")).unwrap()
         context = self.context(host.application, batch)
         owner = self.semantic.owner(context)
-        item = self.semantic.reactions.import_image(owner, picture(),
+        catalog_owner = self.semantic.ensure_reaction_catalog(context)
+        item = self.semantic.reactions.import_image(catalog_owner, picture(),
             {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
         actor = self.semantic.reaction_preferences.actor(context)
         delivered_at = self.clock.now().timestamp()
@@ -765,7 +834,7 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         app = host.application
         first = host.receive(self.event("first-reaction", text="有些难过")).unwrap()
         context = self.context(app, first)
-        owner = self.semantic.owner(context)
+        owner = self.semantic.ensure_reaction_catalog(context)
         alternative_bytes = io.BytesIO()
         Image.new("RGB", (2, 2), "red").save(alternative_bytes, format="PNG")
         alternative = inspect_image(alternative_bytes.getvalue(), 0)
@@ -798,7 +867,8 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         app = host.application
         batch = host.receive(self.event("late-reaction", text="难过")).unwrap()
         context = self.context(app, batch)
-        owner = self.semantic.owner(context)
+        scope_owner = self.semantic.owner(context)
+        owner = self.semantic.ensure_reaction_catalog(context)
         item = self.semantic.reactions.import_image(owner, picture(),
             {"name": "抱抱", "description": "温柔安慰", "intents": "安慰"})
         self.advance(app)
@@ -807,7 +877,7 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM uses").fetchone()[0], 0)
         delivered_at = self.clock.now()
         self.clock.advance(timedelta(seconds=1))
-        self.semantic.reaction_preferences._observe(owner, self.semantic.reaction_preferences.actor(context),
+        self.semantic.reaction_preferences._observe(scope_owner, self.semantic.reaction_preferences.actor(context),
             "late-feedback", "刚才那张表情包不合适", self.clock.now().timestamp())
         self.assertEqual(self.semantic.reaction_preferences.scores(context), {})
         self.semantic.store.put(owner, "reaction", item["id"],
@@ -834,7 +904,7 @@ class SemanticConversationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         host = await self.semantic_host(images=True)
         batch = host.receive(self.event("lookup")).unwrap()
         context = self.context(host.application, batch)
-        owner = self.semantic.owner(context)
+        owner = self.semantic.ensure_reaction_catalog(context)
         self.semantic.reactions.import_image(owner, picture(), {"name": "抱抱", "description": "安慰"})
         self.port.failing = True
         result = await self.semantic.search.search(owner, "reaction", "抱抱", context=context)

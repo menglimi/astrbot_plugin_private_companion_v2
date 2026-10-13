@@ -11,6 +11,7 @@ window.CompanionPerceptionOverviewPage = (() => {
   let recallStatus = null, recallState = "loading", mihomeStatus = null, mihomeState = "loading";
   let balanceConfig = null, balanceDraft = null, balanceExpanded = false, balanceConfigLoading = false;
   let balanceWorkspace = null, balanceMarkup = "", selectedDestination = "", selectedModelTab = "";
+  let balanceStatus = null, balanceStatusLoading = false, balanceStatusRefreshQueued = false, balanceStatusError = "";
   let balanceSaving = false, balanceTesting = false, balanceTestResult = null;
   let balanceResultScope = "", balanceResultConfigToken = "", balanceResultConfigKey = "", balanceResultIsDraft = false;
   let balanceMessage = "", balanceError = "", balanceTestError = "";
@@ -97,6 +98,29 @@ window.CompanionPerceptionOverviewPage = (() => {
     };
   }
 
+  function safeBalanceStatus(value) {
+    if (!value || typeof value !== "object" || typeof value.configured !== "boolean"
+        || typeof value.available !== "boolean") return null;
+    const amount = Number(value.amount);
+    if (value.available && (!Number.isFinite(amount) || amount < 0)) return null;
+    return {
+      configured:value.configured, available:value.available,
+      provider:typeof value.provider === "string" ? value.provider : "newapi",
+      provider_label:typeof value.provider_label === "string" ? value.provider_label : "NewAPI",
+      currency_label:typeof value.currency_label === "string" ? value.currency_label : "额度",
+      amount:value.available ? formatBalanceAmount(amount) : null,
+      observed_at:typeof value.observed_at === "string" ? value.observed_at : "",
+      state:typeof value.state === "string" ? value.state : value.available ? "available" : "unavailable",
+    };
+  }
+
+  function balanceStatusMessage(value) {
+    if (value?.available) return "";
+    if (value?.state === "not_configured" || value?.configured === false) return "尚未配置服务余额数据源。";
+    if (value?.state === "configuration_invalid") return "余额数据源配置无效，请检查配置。";
+    return "余额读取失败，请检查 NewAPI 地址、令牌和网络。";
+  }
+
   function balanceConfigKey(value) {
     const config = safeBalanceConfig(value);
     return config ? JSON.stringify(config) : "";
@@ -108,8 +132,10 @@ window.CompanionPerceptionOverviewPage = (() => {
     const config = safeBalanceConfig(balanceConfig);
     const draft = safeBalanceDraft(balanceDraft);
     const observation = safeBalanceObservation(balanceTestResult);
+    const status = safeBalanceStatus(balanceStatus);
     if (config) entry.config = config;
     if (draft) entry.draft = draft;
+    if (status) entry.status = status;
     if (observation) {
       entry.observation = observation;
       entry.observationIsDraft = balanceResultIsDraft === true;
@@ -123,6 +149,8 @@ window.CompanionPerceptionOverviewPage = (() => {
     const entry = balanceCache.get(nextScope) || {};
     balanceConfig = entry.config ? {...entry.config} : null;
     balanceDraft = entry.draft ? {...entry.draft, api_key: ""} : null;
+    balanceStatus = safeBalanceStatus(entry.status);
+    balanceStatusError = balanceStatus ? balanceStatusMessage(balanceStatus) : "";
     balanceTestResult = entry.observation ? {...entry.observation} : null;
     balanceResultScope = balanceTestResult ? nextScope : "";
     balanceResultConfigToken = "";
@@ -259,7 +287,7 @@ window.CompanionPerceptionOverviewPage = (() => {
       fallback:fallback ? fallback.model || fallback.id : ""};
   }
   function providerSignal(id) {
-    const provider = product.provider(id);
+    const provider = product.capability(id);
     if (!provider) return {state:"unknown", title:"尚未读取扩展", detail:"能力目录尚未提供状态"};
     const names = {connected:"已连接", installed:"已安装", missing:"未安装", disabled:"已停用",
       waiting:"等待就绪", degraded:"状态待检查", conflict:"重复安装", stopped:"插件已停止"};
@@ -368,8 +396,16 @@ window.CompanionPerceptionOverviewPage = (() => {
       <p>${esc(balanceError || "余额数据源配置暂不可读。")}</p><button type="button" data-balance-reload ${balanceSaving || balanceTesting ? "disabled" : ""}>重新读取</button></div>`;
     const draft = balanceDraft || emptyBalanceDraft(balanceConfig);
     const busy = balanceConfigLoading || balanceSaving || balanceTesting;
+    const balanceActionLabel = balanceDraftIsCurrent() ? "重新读取余额" : "测试连接";
     const testable = !draft.clear_configuration && (balanceDraftIsCurrent()
       || (draft.url && (draft.api_key || balanceConfig.has_api_key)));
+    const displayObservation = balanceResultIsDraft ? balanceTestResult
+      : balanceStatus?.available ? balanceStatus : balanceTestResult;
+    const displayMessage = displayObservation
+      ? (balanceResultIsDraft ? "草稿测试成功" : "当前余额已读取") + "：" + formatBalanceAmount(displayObservation.amount)
+        + " " + (displayObservation.currency_label || "额度") + " · " + (displayObservation.observed_at || "时间未知")
+      : balanceStatusLoading ? "正在读取当前余额…" : balanceStatusError
+        || (balanceStatus?.state === "not_configured" ? "尚未配置服务余额数据源。" : "");
     const sourceMessage = balanceConfig.source === "plugin" ? "本页保存的 NewAPI 数据源优先用于查询与主动联系。"
       : balanceConfig.source === "environment" ? "当前数据源来自插件环境配置；在这里保存后将优先使用本页配置。"
         : balanceConfig.source_state === "invalid" ? "检测到数据源配置，但读取失败；请检查地址、令牌和环境变量。"
@@ -393,12 +429,12 @@ window.CompanionPerceptionOverviewPage = (() => {
       ${balanceConfig.source === "plugin" ? `<label class="perception-balance-clear"><input type="checkbox" name="clear_configuration" data-balance-field="clear_configuration" ${draft.clear_configuration ? "checked" : ""} ${busy ? "disabled" : ""}><span>移除本页保存的数据源</span><small>移除后会继续使用插件环境配置（如果已设置）。</small></label>` : ""}
       <p class="perception-balance-message" role="status" aria-live="polite" ${balanceMessage ? "" : "hidden"}>${esc(balanceMessage)}</p>
       <p class="perception-balance-message is-error" role="alert" ${balanceError ? "" : "hidden"}>${esc(balanceError)}</p>
-      <p class="perception-balance-message" data-balance-test-result role="status" aria-live="polite" ${balanceTestResult ? "" : "hidden"}>${balanceTestResult ? `连接成功：当前余额 ${esc(formatBalanceAmount(balanceTestResult.amount))} ${esc(balanceTestResult.currency_label)} · ${esc(balanceTestResult.observed_at)}` : ""}</p>
+      <p class="perception-balance-message" data-balance-test-result role="status" aria-live="polite" ${displayMessage ? "" : "hidden"}>${esc(displayMessage)}</p>
       <p class="perception-balance-message is-error" role="alert" ${balanceTestError ? "" : "hidden"}>${esc(balanceTestError)}</p>
       <footer class="perception-balance-actions">
         <button type="button" class="perception-balance-contact" data-go="manage" data-manage="contact" data-contact-view="sources">${icon("settings-2")}<span>前往主动联系 · 外部触发源</span></button>
         <span class="perception-balance-buttons">
-          <button type="button" class="perception-balance-test" data-balance-test ${busy || !testable ? "disabled" : ""}>${balanceTesting ? "正在测试…" : "测试连接"}</button>
+          <button type="button" class="perception-balance-test" data-balance-test ${busy || !testable || (balanceStatusLoading && balanceDraftIsCurrent()) ? "disabled" : ""}>${balanceTesting ? balanceDraftIsCurrent() ? "正在读取…" : "正在测试…" : balanceActionLabel}</button>
           <button type="submit" class="perception-balance-save" ${busy ? "disabled" : ""}>${balanceSaving ? "正在保存…" : draft.clear_configuration ? "移除数据源" : "保存数据源"}</button>
         </span>
       </footer>
@@ -467,7 +503,11 @@ window.CompanionPerceptionOverviewPage = (() => {
     const balanceAllowed = snapshot?.contact?.automaticAllowed;
     const balanceSourceConfigured = balanceConfig?.source_state === "configured";
     const balanceSourceInvalid = balanceConfig?.source_state === "invalid";
-    const balanceObservation = balanceTestResult?.available === true ? balanceTestResult : null;
+    const balanceDraftObservation = balanceResultIsDraft && balanceTestResult?.available === true ? balanceTestResult : null;
+    const balanceObservation = balanceDraftObservation || (balanceStatus
+      ? balanceStatus.available ? balanceStatus : null
+      : balanceTestResult?.available === true ? balanceTestResult : null);
+    const balanceObservationIsDraft = balanceObservation === balanceDraftObservation && !!balanceDraftObservation;
     const balanceValue = !ready ? `${balanceSourceConfigured ? "数据源已配置；" : ""}余额联系设置${configurationState === "读取失败" ? "读取失败" : "正在读取"}` : balanceEnabled === true
       ? balanceAllowed === true ? "服务余额联系已启用" : "余额契机已开，但后台自动联系未开启"
       : balanceSourceConfigured ? "数据源已配置，余额联系未开启"
@@ -669,7 +709,7 @@ window.CompanionPerceptionOverviewPage = (() => {
       tag:!ready ? configurationFailed ? "读取失败" : "读取中" : externalState === "ready" ? "检查通过" : externalState === "off" ? "未启用" : news.networkStatus === "failed" ? "检查失败" : "待检查"});
     channel("ext-balance", "external", {tab:"config-balance:perception-detail-balance-source", icon:"wallet-cards", title:"余额感知",
       value:balanceValue, detail:[balanceDetail, balanceObservation ? `${balanceResultIsDraft ? "草稿测试" : "最近查询"} ${formatBalanceAmount(balanceObservation.amount)} ${balanceObservation.currency_label || "额度"}` : "尚无余额查询结果"].join(" · "),
-      state:balanceObservation ? "ready" : balanceSourceConfigured || balanceSourceInvalid || balanceEnabled === true || !ready || balanceError || balanceTestError ? "pending" : "off",
+      state:balanceObservation ? "ready" : balanceSourceConfigured || balanceSourceInvalid || balanceEnabled === true || !ready || balanceError || balanceTestError || balanceStatusError ? "pending" : "off",
       tag:balanceTag});
 
     channel("device-location", "devices", {tab:tabDevice, icon:"smartphone", title:"用户定位",
@@ -753,10 +793,11 @@ window.CompanionPerceptionOverviewPage = (() => {
     })();
     const externalCard = (() => {
       const balance = channelById("ext-balance"), external = channelById("ext-external"), recall = channelById("device-recalls"), injection = channelById("ext-injection");
-      const balanceReadLabel = balanceObservation ? balanceResultIsDraft ? "草稿测试结果" : "最近一次查询"
-        : balanceTesting ? "查询中" : balanceTestError || balanceError ? "读取失败" : balanceConfigLoading ? "读取中" : balanceSourceInvalid ? "配置无效" : balanceSourceConfigured ? "尚未查询" : balanceConfig ? "未配置" : "尚未查询";
-      const balanceReadDetail = balanceTestError || balanceError || (balanceObservation ? balanceObservation.provider_label || "NewAPI"
-        : balanceSourceInvalid ? "请检查数据源配置" : balanceSourceConfigured ? "点击后测试连接，读取服务余额" : "点击后配置数据源并测试连接");
+      const balanceReadLabel = balanceObservation ? balanceObservationIsDraft ? "草稿测试结果" : "最近一次查询"
+        : balanceTesting || balanceStatusLoading ? "查询中" : balanceTestError || balanceError || balanceStatusError ? "读取失败"
+          : balanceStatus?.state === "not_configured" || balanceConfig ? "未配置" : balanceConfigLoading ? "读取中" : balanceSourceInvalid ? "配置无效" : "等待读取";
+      const balanceReadDetail = balanceTestError || balanceError || balanceStatusError || (balanceObservation ? balanceObservation.provider_label || "NewAPI"
+        : balanceSourceInvalid ? "请检查数据源配置" : balanceSourceConfigured ? "读取服务余额中" : "配置数据源后读取服务余额");
       const newsSummary = !ready ? externalValue : networkSucceeded
         ? `${Number.isInteger(news.itemCount) && news.itemCount >= 0 ? `最近检查 ${news.itemCount} 条` : "最近检查通过"} · ${news.label || "资讯来源"}`
         : news.networkStatus === "failed" ? "上次检查失败 · 请检查来源" : externalValue;
@@ -968,28 +1009,34 @@ window.CompanionPerceptionOverviewPage = (() => {
     if (!validRoot(ticket)) return;
     mihomeState = "loading"; render();
     try {
-      if (typeof window.fetch !== "function") throw new Error("fetch unavailable");
-      const statusResponse = await window.fetch("/api/plugin/astrbot_plugin_mihome/status", {
-        credentials:"same-origin", cache:"no-store",
-      });
-      if (!statusResponse?.ok) throw new Error("device status unavailable");
-      const status = await statusResponse.json();
+      const bridge = product.bridgeNow?.() || await product.bridgeFor();
+      const value = product.unwrap(await bridge.apiGet("extensions", {}));
       if (!validRoot(ticket)) return;
-      if (status?.ok !== true || typeof status.tools?.enable_readonly_tool !== "boolean")
-        throw new Error("invalid device capability status");
-      if (!status.tools.enable_readonly_tool) {
+      const reality = value?.extensions?.reality;
+      const settings = reality?.settings;
+      const mihome = reality?.management?.mihome;
+      if (!settings || !mihome || mihome.available === false || !Array.isArray(mihome.devices)
+          || typeof mihome.tool_settings?.enable_readonly_tool !== "boolean")
+        throw new Error("invalid native MiHome status");
+      if (settings.enabled === false || settings.mihome?.enabled === false
+          || !mihome.tool_settings.enable_readonly_tool) {
         mihomeStatus = null; mihomeState = "disabled"; forgetOverview("mihomeStatus", "mihomeState");
         render();
         return;
       }
-      const devicesResponse = await window.fetch("/api/plugin/astrbot_plugin_mihome/devices", {
-        credentials:"same-origin", cache:"no-store",
-      });
-      if (!devicesResponse?.ok) throw new Error("device status unavailable");
-      const devices = await devicesResponse.json();
-      if (!validRoot(ticket)) return;
-      if (devices?.ok !== true || !Array.isArray(devices.devices)) throw new Error("invalid device status");
-      mihomeStatus = {...devices, enabled:true, tools:status.tools}; mihomeState = "ready";
+      mihomeStatus = {
+        enabled:true,
+        snapshot_at:typeof mihome.snapshot_at === "string" ? mihome.snapshot_at : "",
+        devices:mihome.devices.filter(item => item?.configured === true || item?.aliases?.length)
+          .map(item => ({
+            configured:true,
+            name:typeof item.name === "string" ? item.name.slice(0, 160) : "",
+            aliases:Array.isArray(item.aliases)
+              ? item.aliases.filter(alias => typeof alias === "string").slice(0, 20).map(alias => alias.slice(0, 120)) : [],
+            online:item.online === true ? true : item.online === false ? false : null,
+          })),
+      };
+      mihomeState = "ready";
       rememberOverview("mihomeStatus", mihomeStatus, "mihomeState", "ready");
     } catch (_) {
       if (!validRoot(ticket)) return;
@@ -1016,6 +1063,47 @@ window.CompanionPerceptionOverviewPage = (() => {
       forgetOverview("runtimeSnapshot", "runtimeState");
     }
     render();
+  }
+  async function requestCurrentBalance(ticket) {
+    const endpoint = product.role()?.model_api;
+    if (typeof endpoint !== "string" || !endpoint) throw new Error("当前角色没有可用的模型余额接口。");
+    const route = product.relative(endpoint.replace(/\/$/, "") + "/balance");
+    const value = product.unwrap(await product.request("GET", route));
+    if (!validRoot(ticket)) return null;
+    const status = safeBalanceStatus(value);
+    if (!status) throw new Error("余额接口返回的数据无效。");
+    return status;
+  }
+  function unavailableBalanceStatus() {
+    const configured = balanceConfig?.source_state === "configured" || balanceConfig?.source_state === "invalid";
+    return {configured, available:false, provider:balanceConfig?.provider || "newapi",
+      provider_label:"NewAPI", currency_label:"额度", amount:null, observed_at:"",
+      state:configured ? "unavailable" : "not_configured"};
+  }
+  async function refreshCurrentBalance(ticket = generation) {
+    if (!validRoot(ticket)) return;
+    if (balanceStatusLoading) {balanceStatusRefreshQueued = true; return;}
+    balanceStatusLoading = true; balanceStatusError = ""; render();
+    try {
+      const status = await requestCurrentBalance(ticket);
+      if (!validRoot(ticket) || !status) return;
+      balanceStatus = status;
+      balanceStatusError = balanceStatusMessage(status);
+    } catch (error) {
+      if (!validRoot(ticket)) return;
+      balanceStatus = unavailableBalanceStatus();
+      balanceStatusError = error.message || "余额读取失败，请检查数据源配置。";
+    } finally {
+      if (validRoot(ticket)) {
+        balanceStatusLoading = false;
+        rememberBalanceCache();
+        render();
+        if (balanceStatusRefreshQueued) {
+          balanceStatusRefreshQueued = false;
+          void refreshCurrentBalance(ticket);
+        }
+      }
+    }
   }
   async function readBalanceConfig(ticket = generation) {
     if (!validRoot(ticket) || balanceConfigLoading || balanceSaving || balanceTesting) return;
@@ -1078,6 +1166,7 @@ window.CompanionPerceptionOverviewPage = (() => {
       balanceMessage = clear ? "已移除本页数据源；环境变量数据源仍可继续使用。" : "已保存并立即生效。";
       balanceDraft = emptyBalanceDraft(balanceConfig);
       clearBalanceResult(); balanceTestError = "";
+      void refreshCurrentBalance(ticket);
     } catch (error) {
       if (!validRoot(ticket)) return;
       balanceError = error.message || "余额数据源保存失败。";
@@ -1097,7 +1186,8 @@ window.CompanionPerceptionOverviewPage = (() => {
     dashboard_identity_required:"请登录 AstrBot Dashboard 后再测试数据源。",
   };
   async function testBalanceConfig(form) {
-    if (!balanceConfig?.edit_token || balanceSaving || balanceTesting) return;
+    if (!balanceConfig?.edit_token || balanceSaving || balanceTesting
+        || (balanceStatusLoading && balanceDraftIsCurrent())) return;
     const pendingFocus = balanceFocus(form);
     const draft = rememberBalanceDraft(form);
     let changes, usesCurrent = false;
@@ -1105,7 +1195,6 @@ window.CompanionPerceptionOverviewPage = (() => {
       balanceTestError = "先取消移除数据源，再测试当前连接。"; render(); return;
     }
     if (balanceDraftIsCurrent()) {
-      changes = {use_current:true};
       usesCurrent = true;
     } else {
       if (!draft.url || !/^https:\/\//i.test(draft.url)) {
@@ -1127,23 +1216,39 @@ window.CompanionPerceptionOverviewPage = (() => {
     const ticket = generation;
     render();
     try {
-      const bridge = product.bridgeNow?.() || (product.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
-      if (!bridge?.apiPost) throw new Error("页面连接尚未就绪，请稍后重试。");
-      const value = product.unwrap(await bridge.apiPost("host-options/balance/test", {
-        edit_token:balanceConfig.edit_token, changes,
-      }));
-      if (!validRoot(ticket)) return;
-      if (value?.tested !== true || value?.available !== true || !["number", "string"].includes(typeof value.amount)
-          || String(value.amount).trim() === "" || !Number.isFinite(Number(value.amount)) || Number(value.amount) < 0)
-        throw new Error("NewAPI 未返回可用余额，请检查配置后重试。");
-      balanceTestResult = {...value, amount:formatBalanceAmount(value.amount)};
-      balanceResultScope = scope;
-      balanceResultConfigToken = usesCurrent ? balanceConfig.edit_token : "";
-      balanceResultConfigKey = usesCurrent ? balanceConfigKey(balanceConfig) : "";
-      balanceResultIsDraft = !usesCurrent;
+      if (usesCurrent) {
+        const status = await requestCurrentBalance(ticket);
+        if (!validRoot(ticket) || !status) return;
+        balanceStatus = status;
+        balanceStatusError = balanceStatusMessage(status);
+        balanceTestError = balanceStatusError;
+        if (status.available) {
+          balanceTestError = "";
+          balanceMessage = "余额已重新读取。";
+        }
+      } else {
+        const bridge = product.bridgeNow?.() || (product.bridgeFor ? await product.bridgeFor() : window.AstrBotPluginPage);
+        if (!bridge?.apiPost) throw new Error("页面连接尚未就绪，请稍后重试。");
+        const value = product.unwrap(await bridge.apiPost("host-options/balance/test", {
+          edit_token:balanceConfig.edit_token, changes,
+        }));
+        if (!validRoot(ticket)) return;
+        if (value?.tested !== true || value?.available !== true || !["number", "string"].includes(typeof value.amount)
+            || String(value.amount).trim() === "" || !Number.isFinite(Number(value.amount)) || Number(value.amount) < 0)
+          throw new Error("NewAPI 未返回可用余额，请检查配置后重试。");
+        balanceTestResult = {...value, amount:formatBalanceAmount(value.amount)};
+        balanceResultScope = scope;
+        balanceResultConfigToken = "";
+        balanceResultConfigKey = "";
+        balanceResultIsDraft = true;
+      }
       rememberBalanceCache();
     } catch (error) {
       if (!validRoot(ticket)) return;
+      if (usesCurrent) {
+        balanceStatus = unavailableBalanceStatus();
+        balanceStatusError = error.message || "余额读取失败，请检查数据源配置。";
+      }
       const code = error.code || "";
       balanceTestError = balanceTestErrors[code]
         || (error.message && error.message !== code ? error.message : "连接失败，请检查数据源配置后重试。");
@@ -1163,16 +1268,17 @@ window.CompanionPerceptionOverviewPage = (() => {
     if (!["url", "user_id", "value_divisor", "api_key", "clear_configuration"].includes(name)) return;
     if (!balanceDraft) balanceDraft = emptyBalanceDraft(balanceConfig);
     balanceDraft[name] = name === "clear_configuration" ? field.checked === true : field.value;
-    const hadObservation = !!balanceTestResult;
-    balanceError = ""; balanceTestError = ""; clearBalanceResult();
-    rememberBalanceCache();
+    const hadDraftObservation = !!balanceTestResult && balanceResultIsDraft;
+    balanceError = ""; balanceTestError = "";
+    if (hadDraftObservation) clearBalanceResult();
+    else rememberBalanceCache();
     const form = field.closest?.("[data-balance-form]");
     const result = form?.querySelector("[data-balance-test-result]");
-    if (result) result.hidden = true;
+    if (result && hadDraftObservation) result.hidden = true;
     const test = form?.querySelector("[data-balance-test]");
-    if (test) test.disabled = balanceSaving || balanceTesting || balanceDraft.clear_configuration
+    if (test) test.disabled = balanceSaving || balanceTesting || (balanceStatusLoading && balanceDraftIsCurrent()) || balanceDraft.clear_configuration
       || !(balanceDraftIsCurrent() || (balanceDraft.url && (balanceDraft.api_key || balanceConfig?.has_api_key)));
-    if (hadObservation) render({balanceSource:false});
+    if (hadDraftObservation) render({balanceSource:false});
   }
   function click(event) {
     const testButton = event.target.closest("[data-balance-test]");
@@ -1193,11 +1299,13 @@ window.CompanionPerceptionOverviewPage = (() => {
       return;
     }
     if (event.target.closest("[data-balance-reload]")) {readBalanceConfig(generation); return;}
+    if (event.target.closest("[data-balance-refresh]")) {void refreshCurrentBalance(generation); return;}
     if (!event.target.closest("[data-context-refresh]")) return;
     window.CompanionNativePerceptionPage?.refresh?.();
     const ticket = generation;
     refreshModel(ticket); refreshRuntime(ticket); refreshVoice(ticket); refreshImage(ticket);
     refreshSemanticStatus(ticket); refreshRecalls(ticket); refreshMihome(ticket);
+    void refreshCurrentBalance(ticket);
     if (!balanceConfig || balanceDraftIsCurrent()) void readBalanceConfig(ticket);
   }
   function change(event) {
@@ -1211,7 +1319,8 @@ window.CompanionPerceptionOverviewPage = (() => {
     const button = form.querySelector('button[type="submit"]');
     if (button) button.textContent = clear.checked ? "移除数据源" : "保存数据源";
     const test = form.querySelector("[data-balance-test]");
-    if (test) test.disabled = clear.checked || balanceTesting || balanceSaving;
+    if (test) test.disabled = clear.checked || balanceTesting || balanceSaving
+      || (balanceStatusLoading && balanceDraftIsCurrent());
   }
   function mount(node) {
     unmount();
@@ -1249,6 +1358,7 @@ window.CompanionPerceptionOverviewPage = (() => {
     render();
     refreshModel(ticket); refreshRuntime(ticket); refreshVoice(ticket); refreshImage(ticket);
     refreshSemanticStatus(ticket); refreshRecalls(ticket); refreshMihome(ticket); readBalanceConfig(ticket);
+    void refreshCurrentBalance(ticket);
     clockTimer = setInterval(updateClock, 1000);
   }
   function unmount() {
@@ -1262,6 +1372,7 @@ window.CompanionPerceptionOverviewPage = (() => {
     lastDay = ""; selectedDestination = ""; selectedModelTab = "";
     balanceWorkspace = null; balanceMarkup = "";
     balanceConfig = null; balanceDraft = null; balanceExpanded = false; balanceConfigLoading = false;
+    balanceStatus = null; balanceStatusLoading = false; balanceStatusRefreshQueued = false; balanceStatusError = "";
     balanceSaving = false; balanceTesting = false;
     balanceTestResult = null; balanceResultScope = ""; balanceResultConfigToken = ""; balanceResultConfigKey = ""; balanceResultIsDraft = false;
     balanceMessage = ""; balanceError = ""; balanceTestError = "";

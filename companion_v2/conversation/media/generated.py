@@ -53,6 +53,7 @@ class GeneratedAlbumImage:
     action: str
     descriptor: ImageDescriptor
     content: bytes = field(repr=False)
+    parent: SourceRef | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -154,8 +155,8 @@ class GeneratedImages:
         if not invocation_id or len(invocation_id) > 128:
             raise TaskError("generated_image_missing", "the selected album image is unavailable")
         identifier = "generated-images-" + digest(invocation_id)
-        parent = SourceRef(identifier, OWNER, context.scope, VersionRef(identifier, 1),
-                           datetime.fromisoformat(item.created_at))
+        parent = item.parent or SourceRef(identifier, OWNER, context.scope, VersionRef(identifier, 1),
+                                          datetime.fromisoformat(item.created_at))
         source, asset = ConversationImages.references(
             _AlbumView(parent, context.actor.principal, context.scope), item.descriptor)
         return parent, source, asset
@@ -207,8 +208,8 @@ class GeneratedImages:
                FROM extension_tool_invocations i JOIN conversation_batches b ON b.batch_id=i.batch_id
                WHERE """ + " AND ".join(where) + " ORDER BY i.created_at DESC, i.invocation_id DESC LIMIT 128",
             tuple(parameters))
-        if not rows:
-            return {"items": (), "next_cursor": None}
+        from .native_generated_album import page as native_page
+        native_items, native_more = native_page(self, context, at, before=before, limit=limit)
         by_batch = {}
         items = []
         for row in rows:
@@ -228,9 +229,10 @@ class GeneratedImages:
                 items.append(item)
             if len(items) >= limit + 1:
                 break
+        items.extend(native_items)
         items.sort(key=lambda item: (item.created_at, item.image_id.split(":")[1], item.descriptor.position),
                     reverse=True)
-        more = len(items) > limit or len(rows) == 128
+        more = len(items) > limit or len(rows) == 128 or native_more
         page = tuple(items[:limit])
         next_cursor = self._encode_album_cursor(page[-1]) if page and more else None
         return {"items": page, "next_cursor": next_cursor}
@@ -252,6 +254,9 @@ class GeneratedImages:
                FROM extension_tool_invocations i JOIN conversation_batches b ON b.batch_id=i.batch_id
                WHERE """ + where + " ORDER BY i.created_at DESC, i.invocation_id DESC LIMIT ?",
             (*parameters, limit))
+        from .native_generated_album import diagnostics
+        native_count, native_rows = diagnostics(self, context, limit=limit)
+        rows = sorted([dict(row) for row in rows] + native_rows, key=lambda row: row["created_at"], reverse=True)[:limit]
         items = []
         for row in rows:
             elapsed_ms = None
@@ -264,7 +269,7 @@ class GeneratedImages:
             items.append({"action": row["action"], "state": row["state"],
                           "error_code": row["error_code"], "created_at": row["created_at"],
                           "finished_at": row["finished_at"], "elapsed_ms": elapsed_ms})
-        return {"total": int(count["total"] if count is not None else 0), "items": tuple(items)}
+        return {"total": int(count["total"] if count is not None else 0) + native_count, "items": tuple(items)}
 
     def album_image(self, context, at, image_id):
         """Re-read one exact accepted image after checking its original context and receipt."""
@@ -284,7 +289,8 @@ class GeneratedImages:
                WHERE i.invocation_id=? AND b.origin_key=? AND i.action IN (?,?,?) AND i.state='succeeded'""",
             (invocation_id, context.key, *sorted(IMAGE_ACTIONS)))
         if row is None:
-            raise TaskError("generated_image_missing", "the selected album image is unavailable")
+            from .native_generated_album import image
+            return image(self, context, at, invocation_id, position)
         reference = self.reference(row, context)
         for image in self.read_batch(row["batch_id"], context, at):
             if image.parent.source_id == reference.source_id and image.descriptor.position == position:

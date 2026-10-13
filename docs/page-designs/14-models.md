@@ -17,13 +17,15 @@
 ### 任务档清单
 
 - 前端 `groups` 常量（`models-page.js:10-15`）**11 个任务档**、4 组：对话（`conversation.reply`）；主动与记忆（`proactive.compose`、`memory.reflect`）；生活与成长（`calendar.plan`、`role.state.maintain`、`role.reading.consume`、`role.growth.progress`）；私人书写（`role.journal.diary/dream/derive/select`）。
-- 后端注册 **15 个任务档 × 8 字段 = 120 项**（`companion_v2/adapters/astrbot/staging.py:209-217`）：上表 11 个 + `model.proactive.judge`、`model.screen.interpretation`、`model.content.authoring.draft/review`——后端另注册的四档未在前端分组常量单列，由通用渲染兜底。
+- 后端注册 **15 个任务档 × 9 字段 = 135 项**（`companion_v2/adapters/astrbot/staging.py:209-217`）：上表 11 个 + `model.proactive.judge`、`model.screen.interpretation`、`model.content.authoring.draft/review`——后端另注册的四档未在前端分组常量单列，由通用渲染兜底。
+
+替换策略按设计稿使用「策略分段栏 + 单一编辑面板」；任务选择、作用范围与保存动作留在同一工具栏。拒答策略编辑与精确配置共用的备用 Provider，并可编辑匹配词；普通对话核心任务不进入替换任务选择器。
 
 ## 三、配置部分
 
-### `model.*`（15 档 × 8 字段）— installation+role+window，下一轮生效 — 通道 ② `/model` 专用工作台
+### `model.*`（15 档 × 9 字段）— installation+role+window，下一轮生效 — 通道 ② `/model` 专用工作台
 
-每档 8 字段（`models-page.js:6-9`）：`provider` 主 Provider、`fallback` 备用（主失败/超时/拒答时尝试一次）、`prompt` 附加提示词、`max_output_tokens` 输出上限、`timeout_seconds` 请求超时 1–600、`replacement_rules` 替换规则、`fallback_on_refusal` 拒答替代、`replacement_scope` 替换作用范围。保存前校验 `validatePatch`（`:114-123`）；保存 `POST {model_api}/configure`（patch：operation_key+edit_token+changes/reset，`:261-284`），失败可「核对原保存结果」重试（`:285-294`）。
+每档 9 字段（`models-page.js:6-9`）：`provider` 主 Provider、`fallback` 备用（主失败/超时/拒答时尝试一次）、`prompt` 附加提示词、`max_output_tokens` 输出上限、`timeout_seconds` 请求超时 1–600、`replacement_rules` 替换规则、`fallback_on_refusal` 拒答替代、`refusal_terms` 拒答匹配词、`replacement_scope` 替换作用范围。拒答词每行或分号分隔，保存后由模型网关匹配本次模型正文；提供方结构化拒答标记始终保留。保存前校验 `validatePatch`（`:114-123`）；保存 `POST {model_api}/configure`（patch：operation_key+edit_token+changes/reset，`:261-284`），失败可「核对原保存结果」重试（`:285-294`）。
 
 **测试与保存分离**：测试按钮 `POST /test {provider_id}` 只探测连接不写配置（`:224,369-370,882-892`）；批量测试逐 Provider 探测。
 

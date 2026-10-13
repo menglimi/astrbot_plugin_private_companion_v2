@@ -1,11 +1,12 @@
 """Read-only projection of current, governed sources for proactive contact."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import json
 
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
 
+from .configuration import GROUP as CONTACT_OWNER, PURPOSES
 from .balance_events import SOURCE_OWNER as BALANCE_OWNER
 from .calendar_events import SOURCE_OWNER as CALENDAR_OWNER
 from .events import SOURCE_OWNER as ACTIVITY_OWNER
@@ -38,6 +39,23 @@ SOURCE_LABELS = {
     BALANCE_OWNER: "服务余额",
     NEWS_OWNER: "资讯源",
     SCREEN_OWNER: "授权屏幕回执",
+}
+THOUGHT_ORIGINS = {
+    "relationship_event": "关系话题",
+    "followup_event": "旧话题接续",
+    "burst_event": "近期对话",
+    "greeting_event": "问候时机",
+    "activity_event": "角色生活片段",
+    "journal_event": "角色日记",
+    "calendar_event": "已接受的约定",
+    "date_event": "日期节点",
+    "meal_event": "饭点语境",
+    "screen_event": "授权屏幕观察",
+    "weather_change_event": "天气变化",
+    "official_alert_event": "天气预警",
+    "weather_event": "当前天气",
+    "balance_event": "服务余额",
+    "news_event": "资讯分享",
 }
 
 
@@ -112,6 +130,7 @@ def _record_projection(record, settings, at):
             detail += " · " + _text(str(body.get("amount")) + str(body.get("currency") or ""), 64)
         note = ""
     elif owner == NEWS_OWNER:
+        category = _text(body.get("category"), 48) or category
         title = _text(body.get("title"), 180) or "外部资讯"
         detail = _text(body.get("summary"), 360)
         note = _text(body.get("source"), 100)
@@ -120,19 +139,23 @@ def _record_projection(record, settings, at):
         detail = _text(body.get("interpretation"), 360)
         note = _text(body.get("observed_at"), 64)
 
-    return {"id": digest([record.reference.source_id, record.reference.version.lineage_id,
+    projection = {"id": digest([record.reference.source_id, record.reference.version.lineage_id,
                            record.reference.version.revision])[:20],
             "category": category, "purpose": purpose, "title": title, "detail": detail,
             "note": note, "source": SOURCE_LABELS[owner], "captured_at": record.reference.issued_at.isoformat(),
             "expires_at": expires_at.isoformat() if expires_at else None}
+    if owner == NEWS_OWNER:
+        projection["url"] = body.get("url", "")
+    return projection
 
 
 def _latest_conversation(schedule, context, at, settings):
     if context.scope.kind is not ScopeKind.PRIVATE:
         return None
-    row = schedule.runtime.read_one("""SELECT f.state AS flow_state, b.batch_id FROM conversation_flows f
-        JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
-        ORDER BY f.sequence DESC LIMIT 1""", (context.scope.key,))
+    reader = getattr(schedule, "latest_conversation", None)
+    row = (reader(context) if callable(reader) else schedule.runtime.read_one("""SELECT f.state AS flow_state, b.batch_id
+        FROM conversation_flows f JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
+        ORDER BY f.sequence DESC LIMIT 1""", (context.scope.key,)))
     if row is None:
         return None
     try:
@@ -154,6 +177,192 @@ def _latest_conversation(schedule, context, at, settings):
         return None
 
 
+def _response_observation(interaction, delivered_at, observed_at):
+    observation = {"status": "unknown", "observed_through": observed_at.isoformat()}
+    if type(interaction) is not dict or not isinstance(delivered_at, str):
+        return observation
+    try:
+        delivered = datetime.fromisoformat(delivered_at)
+        observed = observed_at
+        if delivered.tzinfo is None or observed.tzinfo is None:
+            return observation
+        delivered = delivered.astimezone(timezone.utc)
+        observed = observed.astimezone(timezone.utc)
+        if delivered > observed:
+            return observation
+    except (TypeError, ValueError, OverflowError, OSError):
+        return observation
+    if "last_input_at" not in interaction:
+        return observation
+    last_input_at = interaction.get("last_input_at")
+    if last_input_at is None:
+        observation["status"] = "no_input_after_delivery"
+        return observation
+    if not isinstance(last_input_at, str):
+        return observation
+    try:
+        latest_input = datetime.fromisoformat(last_input_at)
+        if latest_input.tzinfo is None:
+            return observation
+        latest_input = latest_input.astimezone(timezone.utc)
+        if latest_input > observed:
+            return observation
+    except (TypeError, ValueError, OverflowError, OSError):
+        return observation
+    observation["status"] = ("input_after_delivery" if latest_input > delivered
+                             else "no_input_after_delivery")
+    if observation["status"] == "input_after_delivery":
+        observation["input_at"] = last_input_at
+    return observation
+
+
+def _thought_origin(data):
+    for key in ("automatic_origin", "diagnostic_origin"):
+        origin = data.get(key)
+        if type(origin) is not dict:
+            continue
+        for event, label in THOUGHT_ORIGINS.items():
+            if event not in origin:
+                continue
+            if event == "relationship_event" and type(origin[event]) is dict:
+                purpose = origin[event].get("purpose")
+                return PURPOSES.get(purpose, label) if isinstance(purpose, str) else label
+            if event == "news_event":
+                provenance = data.get("news_provenance")
+                category = _text(provenance.get("category"), 48) if type(provenance) is dict else ""
+                return label + (" · " + category if category else "")
+            return label
+        if isinstance(origin.get("batch_id"), str) and origin["batch_id"]:
+            return "近期对话"
+
+    sources = data.get("sources")
+    if isinstance(sources, list):
+        labels = []
+        for source in sources:
+            owner = source.get("owner") if type(source) is dict else None
+            label = SOURCE_LABELS.get(owner) if isinstance(owner, str) else None
+            if label and label not in labels:
+                labels.append(label)
+        if labels:
+            return "、".join(labels[:2])
+    return "主动分享"
+
+
+def _contact_history(schedule, context, *, interaction=None, observed_at=None):
+    runtime = getattr(schedule, "runtime", None)
+    snapshot = getattr(runtime, "read_only_snapshot", None)
+    origin_key = getattr(context, "key", None)
+    if not isinstance(origin_key, str) or not origin_key:
+        return [], 0
+    if not callable(snapshot):
+        return [], 0
+
+    with snapshot() as connection:
+        total = connection.execute("""SELECT COUNT(*) FROM proactive_contacts
+            WHERE origin_key = ? AND body != ''""", (origin_key,)).fetchone()[0]
+        contacts = connection.execute("""SELECT contact_id, record_json, body, payload_hash, created_at
+            FROM proactive_contacts WHERE origin_key = ? AND body != ''
+            ORDER BY created_at DESC, contact_id DESC LIMIT 128""", (origin_key,)).fetchall()
+        if not contacts:
+            return [], total
+        contact_ids = tuple(row["contact_id"] for row in contacts)
+        placeholders = ",".join("?" for _ in contact_ids)
+        deliveries = connection.execute(f"""SELECT request_json, payload_hash, state, receipt_ref, delivered_at
+            FROM background_deliveries WHERE owner = ? AND origin_key = ?
+              AND json_extract(request_json, '$.source_ref') IN ({placeholders})""",
+            (CONTACT_OWNER, origin_key, *contact_ids)).fetchall()
+
+    by_contact = {contact_id: [] for contact_id in contact_ids}
+    for delivery in deliveries:
+        try:
+            request = json.loads(delivery["request_json"])
+            contact_id = request.get("source_ref")
+            if (request.get("owner") != CONTACT_OWNER or request.get("logical_key") != contact_id
+                    or contact_id not in by_contact):
+                continue
+            by_contact[contact_id].append((request, delivery))
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+    items = []
+    for row in contacts:
+        try:
+            data = json.loads(row["record_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        parts = data.get("parts")
+        if not isinstance(parts, list) or not parts:
+            parts = [{"text": row["body"], "payload_hash": row["payload_hash"]}]
+        if len(parts) > 64:
+            continue
+
+        records, delivery_states = [], []
+        seen_sequences = set()
+        for request, delivery in by_contact[row["contact_id"]]:
+            sequence = request.get("sequence", 0)
+            part_count = request.get("part_count", 1)
+            if (type(sequence) is not int or type(part_count) is not int
+                    or not 0 <= sequence < len(parts) or part_count != len(parts)):
+                continue
+            part = parts[sequence]
+            if (not isinstance(part, dict) or request.get("payload_hash") != part.get("payload_hash")
+                    or delivery["payload_hash"] != part.get("payload_hash")):
+                continue
+            delivery_states.append(delivery["state"])
+            delivered_at = delivery["delivered_at"]
+            receipt_ref = delivery["receipt_ref"]
+            if (delivery["state"] != "delivered" or sequence in seen_sequences
+                    or not isinstance(delivered_at, str) or not isinstance(receipt_ref, str) or not receipt_ref):
+                continue
+            try:
+                datetime.fromisoformat(delivered_at)
+            except ValueError:
+                continue
+            seen_sequences.add(sequence)
+            records.append({"sequence": sequence, "delivered_at": delivered_at,
+                            "text": _text(part.get("text"), 360)})
+
+        delivered_count = len(records)
+        if delivered_count == len(parts):
+            status = "delivered"
+        elif delivered_count:
+            status = "partial"
+        elif any(state in ("dispatched", "accepted", "unknown") for state in delivery_states):
+            status = "unconfirmed"
+        elif "pending" in delivery_states or data.get("decision") == "send":
+            status = "pending"
+        elif "failed" in delivery_states:
+            status = "failed"
+        elif "cancelled" in delivery_states:
+            status = "cancelled"
+        elif data.get("decision") == "skip":
+            status = "not_sent"
+        else:
+            status = "reviewing"
+
+        records.sort(key=lambda item: item["sequence"])
+        used_at = records[-1]["delivered_at"] if records else None
+        created_at = used_at or row["created_at"]
+        summary = _text(data.get("thought_summary"), 120)
+        purpose = data.get("purpose")
+        purpose_label = PURPOSES.get(purpose, purpose) if isinstance(purpose, str) else ""
+        usage = {"status": status, "delivered_parts": delivered_count,
+            "total_parts": len(parts), "last_used_at": used_at, "records": records,
+            "thought_origin": _thought_origin(data)}
+        if delivered_count == len(parts) and used_at is not None and observed_at is not None:
+            usage["followup_observation"] = _response_observation(interaction, used_at, observed_at)
+        items.append({"id": digest([CONTACT_OWNER, row["contact_id"]])[:20],
+            "category": "未发送的念头" if status == "not_sent" else "主动消息",
+            "purpose": _text(purpose_label, 80),
+            "title": summary or "主动联系记录", "detail": _text(row["body"], 2000),
+            "note": "", "source": "主动念头记录" if status == "not_sent" else "主动消息记录",
+            "captured_at": created_at,
+            "expires_at": None, "usage": usage})
+    return items, total
+
+
 def read_material_pool(schedule, context, *, observed_at, settings):
     """Return only current, recipient-readable materials for one private target."""
     if context.scope.kind is not ScopeKind.PRIVATE:
@@ -172,5 +381,82 @@ def read_material_pool(schedule, context, *, observed_at, settings):
     conversation = _latest_conversation(schedule, context, observed_at, settings)
     if conversation is not None:
         items.append(conversation)
+    interaction = None
+    history = getattr(getattr(schedule, "contacts", None), "history", None)
+    reader = getattr(history, "interaction", None)
+    if callable(reader):
+        try:
+            interaction = reader(context, observed_at, action=CONTACT_OWNER)
+        except (TaskError, KeyError, TypeError, ValueError, UnicodeError, OSError, AttributeError):
+            interaction = None
+    contact_history, history_count = _contact_history(
+        schedule, context, interaction=interaction, observed_at=observed_at)
+    items.extend(contact_history)
     items.sort(key=lambda item: (item["captured_at"], item["id"]), reverse=True)
-    return {"observed_at": observed_at.isoformat(), "items": items[:128], "count": len(items[:128])}
+    return {"observed_at": observed_at.isoformat(), "items": items[:128], "count": len(items[:128]),
+            "history_count": history_count}
+
+
+def read_shared_material_pool(schedule, context, *, observed_at, settings):
+    """Read role-wide public discoveries without projecting private window data."""
+    events = getattr(schedule, "news_events", None)
+    if events is None or context.scope.kind is not ScopeKind.PRIVATE:
+        return {"observed_at": observed_at.isoformat(), "checked_at": None,
+                "state": "unavailable", "failure": None, "items": [], "count": 0}
+    snapshot = events.shared_materials(context, settings, observed_at)
+    items = snapshot.get("items", []) if type(snapshot) is dict else []
+    return {"observed_at": observed_at.isoformat(),
+            "checked_at": snapshot.get("checked_at"),
+            "state": snapshot.get("state", "unavailable"),
+            "failure": snapshot.get("failure"),
+            "items": items, "count": len(items)}
+
+
+def read_role_material_pool(schedule, *, observed_at, settings):
+    """Read public role discoveries without requiring a selected private window."""
+    events = getattr(schedule, "news_events", None)
+    if events is None:
+        snapshot = {"state": "unavailable", "checked_at": None, "failure": None, "items": []}
+    else:
+        snapshot = events.role_materials(settings, observed_at)
+    items = snapshot.get("items", []) if type(snapshot) is dict else []
+    items = [{**item, "scope": "role"} for item in items if type(item) is dict][:128]
+    return {"observed_at": observed_at.isoformat(),
+            "checked_at": snapshot.get("checked_at") if type(snapshot) is dict else None,
+            "state": snapshot.get("state", "unavailable") if type(snapshot) is dict else "unavailable",
+            "failure": snapshot.get("failure") if type(snapshot) is dict else None,
+            "relationship_count": 0, "history_count": 0,
+            "shared_count": len(items), "items": items, "count": len(items)}
+
+
+def read_active_material_pool(schedule, context, *, observed_at, settings):
+    """Unify current relationship materials with public role-wide discoveries."""
+    relationship = read_material_pool(schedule, context, observed_at=observed_at, settings=settings)
+    shared = read_shared_material_pool(schedule, context, observed_at=observed_at, settings=settings)
+    items, seen_urls = [], set()
+    for item in (*shared.get("items", ()), *relationship.get("items", ())):
+        if type(item) is not dict:
+            continue
+        url = item.get("url")
+        if type(url) is str and url:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+        items.append(item)
+
+    def captured_at(item):
+        try:
+            return datetime.fromisoformat(item.get("captured_at", "")).timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return 0
+
+    items.sort(key=lambda item: (captured_at(item), item.get("id", "")), reverse=True)
+    items = items[:128]
+    return {"observed_at": observed_at.isoformat(),
+            "checked_at": shared.get("checked_at"),
+            "state": shared.get("state", "unavailable"),
+            "failure": shared.get("failure"),
+            "relationship_count": relationship.get("count", 0),
+            "history_count": relationship.get("history_count", 0),
+            "shared_count": shared.get("count", 0),
+            "items": items, "count": len(items)}

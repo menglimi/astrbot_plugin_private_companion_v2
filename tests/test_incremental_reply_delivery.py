@@ -163,6 +163,31 @@ class IncrementalReplyDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTe
         self.assertEqual(self.texts(), ["第一句话完成。"])
         self.assertEqual(self.parts(host.application, batch)[0]["state"], "unknown")
 
+    async def test_confirmed_pre_dispatch_failure_names_failed_part_and_withholds_tail(self):
+        self.client_state.text = ordered_text("第一句话完成。第二句话也完成。")
+        checks = 0
+
+        def authorize():
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                self.native.selected = "changed"
+
+        self.native_sender.authorize = authorize
+        host = await self.start_stream_host(segmentation=SegmentationPolicy(
+            streaming_mode="buffered", llm_controlled=False))
+        app = host.application
+        batch = host.receive(await self.capture()).unwrap()
+        with self.assertLogs("companion_v2.diagnostics.inbound", level="WARNING") as captured:
+            result = await self.done(app, batch)
+
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(result["reason"], "message_delivery_failed")
+        parts = self.parts(app, batch)
+        self.assertEqual([part["state"] for part in parts], ["failed", "pending"])
+        self.assertEqual(self.texts(), [])
+        self.assertIn("part=%s:failed" % parts[0]["part_id"], captured.output[0])
+
     async def test_spacing_wait_keeps_receiving_stream_and_starts_after_previous_receipt(self):
         text = "第一句话完成。第二句话完成。第三句话完成。"
         received, release = asyncio.Event(), asyncio.Event()
@@ -218,16 +243,22 @@ class IncrementalReplyDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTe
         await self.until(lambda: self.client_state.streams[0].closed)
         self.assertEqual(self.texts(), ["第一句话完成。"])
 
-    async def test_invalid_observed_evidence_never_creates_sendable_parts(self):
+    async def test_invalid_observed_evidence_sends_only_the_local_failure_notice(self):
+        from companion_v2.conversation.generation import MODEL_FAILURE_NOTICE
+
         text = "这是一条事实。后面也要校验。"
         self.client_state.text = ordered_text(text, claims=[{"id": "bad", "kind": "observed", "statement": text,
                                                           "evidence": "e_not_offered"}])
         snapshot = await self.capture()
         host = await self.start_incremental()
         batch = host.receive(snapshot).unwrap()
-        self.assertEqual((await self.done(host.application, batch))["state"], "blocked")
-        self.assertEqual(self.texts(), [])
-        self.assertEqual(self.parts(host.application, batch), ())
+        app = host.application
+        self.assertEqual((await self.done(app, batch))["state"], "complete")
+        self.assertEqual("".join(self.texts()), MODEL_FAILURE_NOTICE)
+        self.assertNotIn(text, "".join(self.texts()))
+        self.assertTrue(all(part["state"] == "delivered" for part in self.parts(app, batch)))
+        self.assertEqual(app.runtime.read_all("SELECT * FROM conversation_reply_streams WHERE batch_id = ?", (batch,)), ())
+        self.assertIsNone(app.runtime.read_one("SELECT call_id FROM conversation_batches WHERE batch_id = ?", (batch,))["call_id"])
 
     async def test_code_and_decimal_dots_keep_their_literal_text(self):
         text = "版本是3.14。后面这一句话。\n\n```py\nprint('保持。代码。')\n```"

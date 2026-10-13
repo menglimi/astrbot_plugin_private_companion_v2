@@ -15,6 +15,7 @@ from .repositories import CapabilityRepository
 
 ACTION = "reality.snapshot.read"
 EXTENSION = "reality"
+PACKAGE_ID = "astrbot_plugin_private_companion_v2.reality"
 OWNER = "capability.reality-access"
 
 
@@ -27,7 +28,7 @@ class RealitySnapshotAccess:
         self.identities = PersistentIdentityDirectory(self.runtime)
         self.policy = ObjectAccessPolicy(self.runtime)
         if (package.extension_id != EXTENSION
-                or package.package_id != "astrbot_plugin_reality_companion"
+                or package.package_id != PACKAGE_ID
                 or capability not in package.capabilities):
             raise TaskError("reality_provider_changed", "the loaded Reality package changed")
 

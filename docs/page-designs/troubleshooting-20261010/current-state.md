@@ -98,12 +98,12 @@
 | 7 | 余额接口可用性 | `balance` API（available/configured） | 预算证据卡 stats 补「余额接口：已配置 · 可用」 |
 | 8 | 同步状态指示 | `maint-live`（已连接/正在同步/同步异常） | 页头 `syncLive` 状态点 |
 
-**v1 有而 V2 无后端合同（是否移植待产品拍板，未进设计稿）：**
+**v1 有而 V2 无后端合同（链路测试已于 10-10 进设计稿，其余待产品拍板）：**
 
 | v1 能力 | 位置 | 备注 |
 |---|---|---|
+| 链路测试 | `chain_tests`（proactive_message / image_generation_text2img / image_generation_selfie / tts_generation）+ `normalize_diagnostic_result` 信封 + 测试诊断弹窗（步骤 / 诊断记录 / 结果预览 / 复制诊断） | **已进设计稿**（10-10）：抽屉分「链路测试 + 单点探测」双区；主动消息链 = V2 现有合同（14 阶段），文生图 / 自拍 / TTS 链带「后端待补」徽标；后端合同落码时补 |
 | 警告抑制 | `suppressed_warning_types` + 屏蔽管理器 + summary「已屏蔽 N 类」 | V2 后端无此字段 |
-| 链路测试 | `troubleshootingChainTestMarkup`（含屏幕伴侣 / QQ 空间 / 最近生图 / 链路步骤预览） | V2 只有单点探测 |
 | 提示词注入追踪 | `troubleshootingPromptInjectionMarkup`（module 分组注入明细） | V2 只保留来源元数据 |
 | 主动触达强度 | `troubleshootingProactiveIntensityMarkup` | V2 只有触达计数 |
 | ok 作为信号级别 | summary「错误/警告/信息/正常」四级 | V2 ok 只是计算状态，不进信号清单 |

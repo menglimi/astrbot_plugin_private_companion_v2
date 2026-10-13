@@ -199,6 +199,8 @@ class LocalConversationDelivery:
                 AND state != 'delivered' ORDER BY sequence LIMIT 1""", (batch_id,)).fetchone()
             if part is None:
                 return DeliveryQueueResult(None)
+            if part["state"] == "failed":
+                raise TaskError("message_delivery_failed", "the original part was confirmed not sent")
             if part["state"] != "pending":
                 raise TaskError("message_delivery_unresolved", "original part requires reconciliation; no new send was queued")
             if part["task_id"]:

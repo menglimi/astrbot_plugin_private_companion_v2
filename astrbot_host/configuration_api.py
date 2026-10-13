@@ -1,14 +1,11 @@
 """Dashboard-only editors for the configuration groups the cottage edits itself.
 
 Groups that already had owners and consumers but no read-write route get one
-here. Each section keeps its own edit token because the scopes differ: the daily
-allowance is an installation/role ceiling while review, reaction retrieval,
-retracted-text reading, screen material, acquaintance cards and role growth are
-per-conversation window settings, and the shelf, wardrobe and reference material
-are role settings a single window must not narrow. Contact preferences are the
-first group with a relationship layer in the middle of the chain, so it publishes
-four layers; its two relationship-wide allowances stay unwritable at window layer
-and say so through the field contract.
+here. Each section keeps its own edit token because the scopes differ: reaction
+retrieval is installation-wide, the daily allowance is an installation/role
+ceiling, and role behavior settings prefer role defaults with object pages
+providing explicit window overrides. Personal permissions and private material
+remain on their user, device or relationship routes.
 """
 
 import json
@@ -25,7 +22,8 @@ from companion_v2.configuration.management import (AcquaintanceManagement, BusyG
                                                    PrivateAccessManagement,
                                                    ReactionRetrievalManagement,
                                                    RecallManagement, ReferenceManagement,
-                                                   RoleGrowthManagement, RoleGrowthSkillsManagement,
+                                                   RoleGrowthSkillsManagement,
+                                                   ExpressionLearningManagement,
                                                    RoleProfileManagement,
                                                    RelationshipProfileManagement,
                                                    QzoneManagement,
@@ -49,19 +47,18 @@ SECTIONS = {"quota": ImageQuotaManagement, "image_review": ImageReviewManagement
             "recall": RecallManagement, "screen": ScreenManagement,
             # QQ 空间拓展的角色级开关与节流；安装与逐会话同意不在这里，归能力安装路由。
             "qzone": QzoneManagement,
-            "person": AcquaintanceManagement, "role_growth": RoleGrowthManagement,
+            "person": AcquaintanceManagement,
             # 私聊用户权限的默认值与拒绝文案（层只有安装与角色：默认值不跟窗口走）。
             "private_access": PrivateAccessManagement,
             "role.growth.skills": RoleGrowthSkillsManagement,
+            "expression.learning": ExpressionLearningManagement,
             "knowledge": KnowledgeManagement, "life": DiaryAndRestManagement,
             "role_profile": RoleProfileManagement,
             "relationship_profile": RelationshipProfileManagement,
             "library": LibraryManagement,
             "wardrobe": WardrobeManagement, "photo.reference": ReferenceManagement,
             "group_participation": GroupParticipationManagement,
-            # 主动联系偏好是唯一一个四层组（安装/角色/关系/窗口），也是此前 158 项里
-            # 92 项在任何页面上都点不到的那一组。它的两个关系级额度按窗口写入会被拒
-            # （contact_relationship_budget_scope），编辑器会在字段契约里去掉窗口层。
+            # 公共联系设置全局保存；个人偏好和授权在私聊用户页单独维护。
             "proactive.contact": ProactiveContactManagement}
 
 
@@ -84,13 +81,20 @@ def _document(raw, *, expected):
 class ConfigurationWebAPI:
     """One route family for the groups the cottage edits outside their own page."""
 
-    def __init__(self, controller):
+    def __init__(self, controller, *, allowed_sections=None):
         self.controller = controller
+        if allowed_sections is None:
+            self.sections = SECTIONS
+        else:
+            names = tuple(allowed_sections)
+            if not names or set(names) - set(SECTIONS) or len(set(names)) != len(names):
+                raise ValueError("invalid configuration section allowlist")
+            self.sections = {name: SECTIONS[name] for name in names}
 
     def routes(self):
-        return [(PREFIX, self.status, ["GET"], "Read image, reaction and budget settings"),
+        return [(PREFIX, self.status, ["GET"], "Read allowed configuration sections"),
                 (PREFIX + "/configure", self.configure, ["POST"],
-                 "Save one of those groups with its own edit token")]
+                 "Save one allowed section with its own edit token")]
 
     async def _run(self, action):
         from .web_api import outcome_response
@@ -107,7 +111,7 @@ class ConfigurationWebAPI:
                 if len(raw) > 32768:
                     raise ValueError("configuration request is too large")
                 data = _document(raw, expected={"section", "operation_key", "edit_token", "changes"})
-                if data["section"] not in SECTIONS:
+                if data["section"] not in self.sections:
                     raise TaskError("configuration_request_invalid", "unknown configuration section")
                 if (type(data["operation_key"]) is not str or not data["operation_key"].strip()
                         or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
@@ -141,18 +145,17 @@ class ConfigurationWebAPI:
             return outcome_response(Outcome.failed("configuration_request_invalid",
                                                    "invalid UTF-8 configuration request"))
 
-    @staticmethod
-    def _requested(query):
+    def _requested(self, query):
         raw = query.get("sections", "") or ""
-        wanted = tuple(SECTIONS) if not raw else tuple(part.strip() for part in raw.split(",") if part.strip())
-        if not wanted or set(wanted) - set(SECTIONS) or len(set(wanted)) != len(wanted):
+        wanted = tuple(self.sections) if not raw else tuple(part.strip() for part in raw.split(",") if part.strip())
+        if not wanted or set(wanted) - set(self.sections) or len(set(wanted)) != len(wanted):
             raise TaskError("configuration_request_invalid", "unknown configuration section")
         return wanted
 
     async def _status(self, app, context, operator, query, *, host_context=None, section_names=None):
         sections = {}
         for name in section_names if section_names is not None else self._requested(query):
-            sections[name] = {**SECTIONS[name](app, context).status(operator).unwrap(), "section": name}
+            sections[name] = {**self.sections[name](app, context).status(operator).unwrap(), "section": name}
             if name == "knowledge":
                 section = sections[name]
                 try:

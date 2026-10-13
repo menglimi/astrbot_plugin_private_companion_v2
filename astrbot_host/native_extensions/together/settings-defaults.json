@@ -1,0 +1,56 @@
+{
+  "server": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 6321,
+    "public_base_url": "",
+    "ticket_ttl_minutes": 10
+  },
+  "conversation": {
+    "primary_user_id": "",
+    "bot_qq_id": "",
+    "persona_id": "",
+    "chat_provider_id": "",
+    "vision_provider_id": "",
+    "history_turns": 12,
+    "enable_memory_context": true,
+    "call_proactive_enabled": true,
+    "model_hangup_enabled": true,
+    "call_idle_seconds": 120,
+    "sync_astrbot_conversation": true,
+    "record_visible_turns": false,
+    "system_prompt": ""
+  },
+  "speech": {
+    "stt_mode": "auto",
+    "stt_provider_id": "",
+    "stt_correction_enabled": true,
+    "browser_language": "zh-CN",
+    "tts_provider_id": "",
+    "browser_tts_fallback": true,
+    "direct_multilingual_tts": true,
+    "tts_timeout_seconds": 60,
+    "tts_volume_percent": 100,
+    "realtime_duplex_enabled": false
+  },
+  "watch": {
+    "prepare_knowledge": true,
+    "auto_comment": true,
+    "comment_interval_seconds": 60,
+    "scene_min_interval_seconds": 18,
+    "memory_refresh_seconds": 240,
+    "duck_video_volume": true,
+    "duck_volume_percent": 28
+  },
+  "library": {
+    "enabled": true,
+    "max_upload_mb": 40,
+    "import_admin_only": true
+  },
+  "novel": {
+    "retrieval_top_k": 8,
+    "spoiler_policy": "strict",
+    "answer_with_sources": true,
+    "auto_save_progress": true
+  }
+}

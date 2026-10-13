@@ -73,12 +73,17 @@ async function run({browser, outputDir, bridgePath, replyOnly=false, identityOnl
       return ok({sections:{[params.sections]:{settings:{},fields:{},provenance:{},edit_token:'c'.repeat(64),
         revision:1,scope:'role',layers:['installation','role'],section:params.sections}}});
     }
-    if(endpoint==='integration/manifest')return ok({product:{version:'2.0.0'},host:{enabled:true},
+    if(endpoint==='integration/manifest')return ok({product:{version:'2.1.0'},host:{enabled:true},
       core:[{id:'life',label:'生活、日记与成长',description:'已实现的本体生活模块'}],
-      providers:[{capability_id:'image',plugin_id:'astrbot_plugin_image_companion',label:'生图与相册',description:'生成与编辑',version:'1.0',enabled:false,runtime_ready:null,installed:true,status_connected:true,integration_state:'disabled',reason:'提供方配置已关闭',pages:[]},
-        {capability_id:'screen',plugin_id:'astrbot_plugin_screen_companion',label:'屏幕陪伴',version:'1.0',enabled:true,runtime_ready:true,installed:true,status_connected:true,execution_integrated:false,integration_state:'connected',reason:'状态已接入',pages:['屏幕伴侣']},
-        {capability_id:'reality',plugin_id:'astrbot_plugin_reality_companion',label:'现实触及',version:'1.0',enabled:true,runtime_ready:false,installed:true,status_connected:true,execution_integrated:false,integration_state:'waiting',reason:'提供方尚未就绪',pages:['reality-companion']}],
-      summary:{connected_count:3,installed_count:3,missing_count:5}});
+      extensions:[
+        {capability_id:'content',extension_id:'content',owner:'companion_v2',label:'创作与 QQ 空间',description:'生成与编辑',version:'2.1.0',enabled:true,runtime_ready:true,assembled:true,installed_revision:1,installed_package_version:'2.1.0',status_connected:true,integration_state:'connected',reason:'V2 原生模块已启用'},
+        {capability_id:'image',extension_id:'image',owner:'companion_v2',label:'生图与相册',description:'生成与编辑',version:'2.1.0',enabled:false,runtime_ready:false,assembled:true,installed_revision:2,installed_package_version:'2.1.0',status_connected:true,integration_state:'disabled',reason:'模块已暂停'},
+        {capability_id:'screen',extension_id:'companion.screen.native',owner:'companion_v2',label:'屏幕陪伴',version:'2.1.0',enabled:true,runtime_ready:true,assembled:true,installed_revision:1,installed_package_version:'2.1.0',status_connected:true,integration_state:'connected',reason:'V2 原生模块已启用'},
+        {capability_id:'reality',extension_id:'reality',owner:'companion_v2',label:'现实触及',version:'2.1.0',enabled:true,runtime_ready:true,assembled:true,installed_revision:1,installed_package_version:'2.1.0',status_connected:true,integration_state:'connected',reason:'V2 原生模块已启用'},
+        {capability_id:'together',extension_id:'together',owner:'companion_v2',label:'共处与实时活动',version:'2.1.0',enabled:true,runtime_ready:true,assembled:true,installed_revision:1,installed_package_version:'2.1.0',status_connected:true,integration_state:'connected',reason:'V2 原生模块已启用'},
+        {capability_id:'game',extension_id:'game',owner:'companion_v2',label:'共同游玩',version:'2.1.0',enabled:true,runtime_ready:true,assembled:true,installed_revision:1,installed_package_version:'2.1.0',status_connected:true,integration_state:'connected',reason:'V2 原生模块已启用'},
+        {capability_id:'live',extension_id:'live',owner:'companion_v2',label:'直播与表演',version:'2.1.0',enabled:true,runtime_ready:true,assembled:true,installed_revision:1,installed_package_version:'2.1.0',status_connected:true,integration_state:'connected',reason:'V2 原生模块已启用'}],
+      providers:[], summary:{connected_count:6,extension_ready_count:6,unassembled_extension_count:0,installed_count:0,missing_count:0}});
     if(endpoint==='staging/status')return {status:'error',message:'未找到该路由',data:{}};
     if(endpoint==='host/status')return ok({mode:'multi',enabled:true,...internalIdentity,state:'new',accepting:false,
       delivery_mode:'preview',group_delivery_mode:'preview',targets:accountDirectory().discovered.targets});
@@ -317,7 +322,7 @@ async function run({browser, outputDir, bridgePath, replyOnly=false, identityOnl
     assert.equal(await extensionRows.count(),7);
     assert.deepEqual(await extensionRows.locator('.home-item-main strong').allTextContents(),
       ['创作书架','画面工作室','共处电话','游戏棋桌','屏幕台','现实设备台','直播与表演']);
-    checks.push('all seven optional providers remain in the home furniture directory');
+    checks.push('all seven native extensions remain in the home furniture directory');
     await shell().locator('#railBrand').click();
     await shell().locator('[data-detail="arrange"]').click();
     await capture('product-room-editor');
@@ -376,11 +381,8 @@ async function run({browser, outputDir, bridgePath, replyOnly=false, identityOnl
     await shell().locator('[data-shell-section="perception"]').click();
     await shell().locator('[data-perception-tab="config-screen"]').click();
     await shell().locator('#perception-detail-device-access summary').click();
-    assert.match(await shell().locator('#perception-url-screen').inputValue(),/\/#\/plugin-page\/astrbot_plugin_screen_companion\//);
-    assert.match(await shell().locator('#perception-url-reality').inputValue(),/\/#\/plugin-page\/astrbot_plugin_reality_companion\//);
-    await shell().locator('[data-copy-perception="screen"]').click();
-    await shell().locator('#toast').filter({hasText:/配置地址已复制|地址已选中/}).waitFor();
-    await shell().locator('#toast:not(.show)').waitFor();
+    await shell().locator('#perceptionProviderWorkspace [data-native-extension-host="reality"]').waitFor();
+    assert.doesNotMatch(await shell().locator('#perceptionProviderWorkspace').innerText(),/plugin-page|extension\/plugins|astrbot_plugin_.*_companion/);
     await layout();await page.setViewportSize({width:390,height:844});await layout();
     await shell().locator('body').evaluate(()=>{location.hash='#manage/semantic';});
     await shell().locator('body').evaluate(()=>new Promise(resolve=>{
@@ -388,7 +390,7 @@ async function run({browser, outputDir, bridgePath, replyOnly=false, identityOnl
       addEventListener('hashchange',resolve,{once:true});
     }));
     assert.equal(await shell().locator('body').evaluate(()=>location.hash),'#manage/perception');
-    checks.push('perception provider addresses and retired links remain usable on narrow screens');
+    checks.push('perception uses the V2 native Reality panel and exposes no legacy plugin page links');
     qa.mode='nested';await shell().locator('[data-product-refresh]').click();await ready();
     await shell().locator('#railBrand').press('Enter');
     assert.equal(await shell().locator('body').evaluate(()=>location.hash),'#life');

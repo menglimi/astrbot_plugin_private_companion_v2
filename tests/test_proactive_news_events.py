@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import closing
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -21,6 +21,7 @@ from companion_v2.conversation.reply_management import ReplyManagement
 from companion_v2.conversation.segment_control import LLM_SEGMENT_MARKER
 from companion_v2.conversation.text_processing import TEXT_DEFAULTS
 from companion_v2.execution.models import TaskError, encode
+from companion_v2.proactive.material_pool import read_shared_material_pool
 from companion_v2.storage.runtime import StorageOpenError, StorageRuntime
 from companion_v2.storage.schema import SCHEMA_VERSION, SCHEMA_VERSION_V37, V37_SCHEMA_STATEMENTS
 from tests.contact_schedule_support import ContactScheduleFixture
@@ -58,8 +59,55 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.settings(app, {"news_share_enabled": enabled, "chat.enabled": False}).unwrap()
         return app, self.context(app, batch)
 
+    async def test_news_patrol_builds_one_shared_pool_for_multiple_private_contacts(self):
+        article = self.article("curious-find")
+        article["category"] = "趣事"
+        port = NewsPort(self.clock, [[article]])
+        app, first = await self.setup_news(port, enabled=False)
+        events = app.contact_schedule.news_events
+        first_preferences = self.preferences(app, first)
+
+        events.maintain(first, first_preferences)
+        workers = tuple(events._maintenance_workers.values())
+        self.assertEqual(len(workers), 1)
+        await asyncio.gather(*workers)
+
+        pool = read_shared_material_pool(app.contact_schedule, first, observed_at=self.clock.now(),
+                                         settings=first_preferences.values)
+        self.assertEqual(pool["state"], "ready")
+        self.assertEqual(pool["count"], 1)
+        self.assertEqual(pool["items"][0]["title"], "有日期的资讯 curious-find")
+        self.assertEqual(pool["items"][0]["category"], "趣事")
+        self.assertEqual(pool["items"][0]["source"], "共享资讯池")
+        self.assertNotIn("recipient", pool["items"][0])
+
+        second = self.other_window_context("friend-b")
+        second_preferences = self.preferences(app, second)
+        events.maintain(second, second_preferences)
+        await asyncio.sleep(0)
+        self.assertEqual(port.calls, 1, "windows using the same feed reuse the shared patrol result")
+        second_pool = read_shared_material_pool(app.contact_schedule, second, observed_at=self.clock.now(),
+                                                settings=second_preferences.values)
+        self.assertEqual(second_pool["items"][0]["id"], pool["items"][0]["id"])
+
+    async def test_role_material_refresh_needs_no_private_window_and_reads_global_feed(self):
+        port = NewsPort(self.clock, [[self.article("role-shared")]])
+        app, context = await self.setup_news(port, enabled=False)
+        settings = dict(self.preferences(app, context).values)
+        events = app.contact_schedule.news_events
+
+        events.maintain_role(settings)
+        await asyncio.gather(*tuple(events._maintenance_workers.values()))
+        pool = events.role_materials(settings, self.clock.now())
+
+        self.assertEqual(pool["state"], "ready")
+        self.assertEqual([item["title"] for item in pool["items"]], ["有日期的资讯 role-shared"])
+        self.assertEqual(port.calls, 1)
+
     async def test_opt_in_material_and_source_recheck(self):
-        port = NewsPort(self.clock, [[self.article()]])
+        article = self.article()
+        article["category"] = "趣事"
+        port = NewsPort(self.clock, [[article]])
         app, context = await self.setup_news(port, enabled=False)
         self.advance(app, 60)
         app.contact_schedule.advance()
@@ -73,12 +121,14 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         body = json.loads(material.payload)
         self.assertEqual(body["event"], "external_news_item")
         self.assertEqual(body["source"], "示例媒体")
+        self.assertEqual(body["category"], "趣事")
         self.assertEqual(body["url"], "https://news.example/story-a")
         self.assertNotIn("_receipt", body)
         contact_body = self.contacts(app)[0]["body"]
         self.assertNotIn("https://", contact_body)
         saved = json.loads(self.contacts(app)[0]["record_json"])
         self.assertEqual(saved["news_provenance"]["source"], "示例媒体")
+        self.assertEqual(saved["news_provenance"]["category"], "趣事")
         self.assertEqual(saved["news_provenance"]["url"], body["url"])
         self.assertEqual(datetime.fromisoformat(saved["news_provenance"]["published_at"]),
                          datetime.fromisoformat(body["published_at"]))
@@ -334,6 +384,26 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         with self.assertRaises(TaskError):
             inspirations.read(snapshot, context, self.clock.now())
 
+    async def test_prompt_contribution_reuses_the_single_receipt_validation_pass(self):
+        port = NewsPort(self.clock, [[self.article()]])
+        app, context = await self.setup_news(port)
+        self.advance(app, 60)
+        await self.automatic_delivery(app)
+        inspirations = app.proactive.inspirations
+        contact = self.contacts(app)[0]
+        delivered_ids = {row["delivery_id"] for row in app.proactive._delivery_rows(contact["task_id"])}
+
+        with (patch.object(inspirations, "_entry", wraps=inspirations._entry) as validate_entry,
+              patch.object(app.proactive.delivery, "_row", wraps=app.proactive.delivery._row) as read_delivery):
+            material = inspirations.capture_contribution(context, self.clock.now())
+
+        self.assertIsNotNone(material)
+        self.assertEqual(validate_entry.call_count, 1)
+        queried_ids = [call.args[0] for call in read_delivery.call_args_list]
+        self.assertTrue(delivered_ids)
+        self.assertTrue(all(queried_ids.count(delivery_id) == 1 for delivery_id in delivered_ids))
+        self.assertIn("https://news.example/story-a", material.payload)
+
     async def test_casual_reply_does_not_receive_private_source_details(self):
         from tests.test_semantic_integration import SemanticPort
 
@@ -538,6 +608,10 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.assertFalse(app.proactive.sources.validate_reference_for_audience(
             old_source, recipient=context.actor.subject, observed_at=self.clock.now()).is_success)
 
+        immediate = await events.prepare(context, select()[1])
+        self.assertIsNone(immediate, "reenabling a contact reuses the shared feed until its patrol interval expires")
+        self.assertEqual(port.calls, 1)
+        self.clock.advance(timedelta(minutes=180))
         second = await events.prepare(context, select()[1])
         self.assertEqual(port.calls, 2)
         self.assertNotEqual(first[0].opportunity_id, second[0].opportunity_id)
@@ -598,6 +672,17 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
 
 
 class NewsAdapterTests(unittest.TestCase):
+    def test_feed_projection_accepts_an_article_without_optional_category(self):
+        from types import SimpleNamespace
+        from companion_v2.proactive.news_events import NewsContactEvents
+
+        article = SimpleNamespace(title="有日期的资讯", summary="公开摘要", source="示例媒体",
+            url="https://news.example/story", published_at=datetime(2026, 10, 1, tzinfo=timezone.utc))
+        projected = NewsContactEvents._feed_item(article)
+
+        self.assertIsNotNone(projected)
+        self.assertEqual(projected["category"], "")
+
     def test_explicit_https_json_feed_and_environment(self):
         with self.assertRaises(ValueError):
             NewsJsonPort(url="http://news.example/feed")
@@ -625,6 +710,7 @@ class NewsAdapterTests(unittest.TestCase):
         <rss version="2.0"><channel><title>橘鸦AI早报</title><item>
         <guid>2026-10-02</guid><title>2026-10-02</title>
         <link>https://daily.juya.uk/issues/2026-10-02/</link>
+        <category>人工智能</category>
         <pubDate>Fri, 02 Oct 2026 02:01:50 GMT</pubDate>
         <description>OpenAI 发布新模型与工具。</description>
         </item></channel></rss>""".encode("utf-8")
@@ -636,6 +722,7 @@ class NewsAdapterTests(unittest.TestCase):
         self.assertEqual(item.url, "https://daily.juya.uk/issues/2026-10-02/")
         self.assertEqual(item.summary, "OpenAI 发布新模型与工具。")
         self.assertEqual(item.published_at.isoformat(), "2026-10-02T02:01:50+00:00")
+        self.assertEqual(item.category, "人工智能")
 
 
 class NewsStorageTests(unittest.TestCase):

@@ -11,18 +11,97 @@ from .types import NativeImageError, fingerprint
 
 BACKENDS = {"auto", "online_api", "sd_webui", "comfyui"}
 PLATFORMS = {"auto", "openai", "minimax"}
+IMAGE_OPERATIONS = ("generate", "edit")
+LOCAL_ROUTES = {"comfyui", "sd_webui"}
+
+
+def _default_operation_routes(value):
+    selected = value.get("backend", "auto")
+    endpoints = value.get("endpoints", [])
+    if not isinstance(selected, str) or selected not in BACKENDS:
+        selected = "auto"
+    if not isinstance(endpoints, list):
+        endpoints = []
+    online = ["online:" + item["id"] for item in endpoints
+              if isinstance(item, dict) and isinstance(item.get("id"), str)]
+    routes = []
+    if selected in {"auto", "online_api"}:
+        routes.extend(online)
+    if selected in {"auto", "comfyui"}:
+        routes.append("comfyui")
+    if selected in {"auto", "sd_webui"}:
+        routes.append("sd_webui")
+    return {operation: list(routes) for operation in IMAGE_OPERATIONS}
+
+
+def _stored_operation_routes(value):
+    defaults = _default_operation_routes(value)
+    raw = value.get("operation_routes")
+    if not isinstance(raw, dict) or raw.keys() - set(IMAGE_OPERATIONS):
+        return defaults
+    endpoints = value.get("endpoints", [])
+    endpoint_ids = {item["id"] for item in endpoints
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)}
+    result = {}
+    for operation in IMAGE_OPERATIONS:
+        routes = raw.get(operation)
+        if not isinstance(routes, list):
+            result[operation] = defaults[operation]
+            continue
+        seen = set()
+        normalized = []
+        for route in routes:
+            if not isinstance(route, str) or route in seen:
+                continue
+            if route in LOCAL_ROUTES or (route.startswith("online:") and route[7:] in endpoint_ids):
+                normalized.append(route)
+                seen.add(route)
+        result[operation] = normalized
+    return result
+
+
+def _validate_operation_routes(value, endpoints):
+    raw = value.get("operation_routes")
+    if raw is None:
+        return _default_operation_routes(value)
+    if not isinstance(raw, dict) or raw.keys() - set(IMAGE_OPERATIONS):
+        raise NativeImageError("invalid_configuration")
+    endpoint_ids = {item["id"] for item in endpoints}
+    result = {}
+    for operation in IMAGE_OPERATIONS:
+        routes = raw.get(operation)
+        if not isinstance(routes, list) or len(routes) > 26:
+            raise NativeImageError("invalid_configuration")
+        seen = set()
+        normalized = []
+        for route in routes:
+            if not isinstance(route, str) or route in seen:
+                raise NativeImageError("invalid_configuration")
+            if route in LOCAL_ROUTES:
+                normalized.append(route)
+            elif route.startswith("online:") and route[7:] in endpoint_ids:
+                normalized.append(route)
+            else:
+                raise NativeImageError("invalid_configuration")
+            seen.add(route)
+        result[operation] = normalized
+    return result
 
 
 def settings(plugin):
     native = plugin.config.get("native_v2", {})
     saved = native.get("output")
     if isinstance(saved, dict):
-        return copy.deepcopy(saved)
+        result = copy.deepcopy(saved)
+        result["operation_routes"] = _stored_operation_routes(result)
+        return result
     connection = copy.deepcopy(native.get("connection", {}))
-    return {"enabled": native.get("enabled") is True,
-            "backend": native.get("backend", "sd_webui"), "endpoints": [],
-            "sd_webui": connection if native.get("backend") != "comfyui" else {},
-            "comfyui": connection if native.get("backend") == "comfyui" else {}}
+    result = {"enabled": native.get("enabled") is True,
+              "backend": native.get("backend", "sd_webui"), "endpoints": [],
+              "sd_webui": connection if native.get("backend") != "comfyui" else {},
+              "comfyui": connection if native.get("backend") == "comfyui" else {}}
+    result["operation_routes"] = _default_operation_routes(result)
+    return result
 
 
 def public_configuration(plugin):
@@ -77,7 +156,8 @@ def save_configuration(plugin, revision, changes):
     before = settings(plugin)
     if fingerprint(before) != revision:
         raise NativeImageError("configuration_conflict")
-    if not isinstance(changes, dict) or changes.keys() - {"enabled", "backend", "endpoints", "sd_webui", "comfyui"}:
+    if not isinstance(changes, dict) or changes.keys() - {
+            "enabled", "backend", "endpoints", "sd_webui", "comfyui", "operation_routes"}:
         raise NativeImageError("invalid_configuration")
     candidate = {**before, **copy.deepcopy(changes)}
     if type(candidate.get("enabled")) is not bool or candidate.get("backend") not in BACKENDS:
@@ -108,6 +188,20 @@ def save_configuration(plugin, revision, changes):
         normalized[-1].pop("api_key_set", None)
         normalized[-1].pop("clear_api_key", None)
     candidate["endpoints"] = normalized
+    if "operation_routes" not in changes:
+        if "backend" in changes and changes["backend"] != before.get("backend"):
+            candidate["operation_routes"] = _default_operation_routes(candidate)
+        else:
+            valid_refs = {"online:" + item["id"] for item in normalized} | LOCAL_ROUTES
+            routes = before.get("operation_routes") or _default_operation_routes(before)
+            candidate["operation_routes"] = {
+                operation: [route for route in routes.get(operation, []) if route in valid_refs]
+                for operation in IMAGE_OPERATIONS}
+            previous_ids = {item["id"] for item in before.get("endpoints", []) if isinstance(item, dict)}
+            new_refs = ["online:" + item["id"] for item in normalized if item["id"] not in previous_ids]
+            for operation in IMAGE_OPERATIONS:
+                candidate["operation_routes"][operation].extend(new_refs)
+    candidate["operation_routes"] = _validate_operation_routes(candidate, normalized)
     if candidate["enabled"] and candidate["backend"] == "online_api" and not any(
             endpoint["enabled"] and endpoint["base_url"] and endpoint["model"]
             for endpoint in normalized):

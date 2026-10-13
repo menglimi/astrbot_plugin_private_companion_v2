@@ -40,7 +40,10 @@ async def run_image(root, guard, report):
         async def acceptance_catalog(self):
             registry = self.create_image_port(self.root.parent / "image-native-v2", self.clock.now)
             self.acceptance_backends, self.acceptance_owners = [self.image_backend], [self.image_owner]
-            self.image_context.get_all_stars = lambda: guard.catalog([self.image_star])
+            self.image_context.get_all_stars = lambda: guard.catalog(())
+            assert self.image_context.get_all_stars() == []
+            assert registry._bundled_extensions == (self.image_lease,)
+            assert self.image_lease.port is self.image_port
             package = registry.declarations()[0].descriptor.package
             repository = CapabilityRepository(self.runtime)
             assert repository.descriptors(extension_id=package.extension_id) == ()
@@ -65,8 +68,12 @@ async def run_image(root, guard, report):
                 self.acceptance_owners = []
             self.acceptance_backends.append(self.image_backend)
             self.acceptance_owners.append(self.image_owner)
-            self.image_context.get_all_stars = lambda: guard.catalog([self.image_star])
-            assert len(self.image_context.get_all_stars()) == 1
+            self.image_context.get_all_stars = lambda: guard.catalog(())
+            assert self.image_context.get_all_stars() == []
+            assert registry._bundled_extensions == (self.image_lease,)
+            assert self.image_lease.port is self.image_port
+            assert all(registry.current_declaration(item.host_tool_id) == item
+                       for item in registry.declarations())
             return registry
 
         async def acceptance_lookup_original_and_restart(self):

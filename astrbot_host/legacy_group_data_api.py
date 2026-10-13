@@ -86,7 +86,8 @@ class LegacyGroupDataWebAPI:
     def _remap_group_members(members, source_group_id, target_group_id):
         return tuple(MemberEntry(item.entry_id, name=item.name, aliases=item.aliases,
             declared_account_ids=item.declared_account_ids, gender=item.gender, content=item.content,
-            priority=item.priority,
+            priority=item.priority, identity_note=item.identity_note, boundary_note=item.boundary_note,
+            important_memories=item.important_memories,
             group_ids=(target_group_id,) if source_group_id in item.group_ids else item.group_ids)
             for item in members)
 

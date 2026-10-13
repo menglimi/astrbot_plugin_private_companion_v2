@@ -1,7 +1,10 @@
 """Authenticated V2 semantic settings and owned reaction/vocabulary catalog."""
 
 import base64
+from collections import OrderedDict
+import io
 import json
+from PIL import Image
 from astrbot.api.web import request
 from companion_v2.execution.models import TaskContext, TaskError, require
 from companion_v2.foundation.outcome import Outcome
@@ -18,6 +21,7 @@ FIELDS = ("name", "description", "visible_text", "tags", "emotions", "intents")
 class SemanticWebAPI:
     def __init__(self, controller):
         self.controller = controller
+        self._preview_cache = OrderedDict()
 
     def routes(self):
         return [(PREFIX, self.get, ["GET"], "Read semantic catalog and actual model status"),
@@ -89,6 +93,12 @@ class SemanticWebAPI:
         service = session.application.semantics
         if service is None or service.closed:
             raise TaskError("semantic_stopped", "start V2 to manage semantic resources")
+        global_value = selection.get("global")
+        is_global = global_value is True or (type(global_value) is str and global_value.lower() in {"1", "true"})
+        if is_global:
+            if set(selection) != {"global"}:
+                raise ValueError("global semantic settings cannot include a chat selection")
+            return service, None
         target_id, role_id = selection.get("target_id"), selection.get("role_id")
         if not all(type(v) is str and 0 < len(v) <= 200 for v in (target_id, role_id)):
             raise ValueError("select a configured target and role")
@@ -129,29 +139,62 @@ class SemanticWebAPI:
             result["vector_ready"] = item["vector_ready"]
         return result
 
+    def reaction_thumbnail(self, service, item):
+        key = (item["owner"], item["id"])
+        cached = self._preview_cache.get(key)
+        if cached is not None:
+            self._preview_cache.move_to_end(key)
+            return cached
+        try:
+            captured = service.reactions.captured(item)
+            frame = captured.frames[0] if getattr(captured, "frames", ()) else captured
+            with Image.open(io.BytesIO(frame.content)) as source:
+                source.seek(0)
+                has_alpha = "A" in source.getbands() or "transparency" in source.info
+                preview = source.convert("RGBA" if has_alpha else "RGB")
+                preview.thumbnail((160, 160), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                if has_alpha:
+                    preview.save(output, format="PNG", optimize=True)
+                    mime_type = "image/png"
+                else:
+                    preview.save(output, format="JPEG", quality=78, optimize=True)
+                    mime_type = "image/jpeg"
+            value = "data:" + mime_type + ";base64," + base64.b64encode(output.getvalue()).decode("ascii")
+        except Exception:
+            return ""
+        self._preview_cache[key] = value
+        self._preview_cache.move_to_end(key)
+        if len(self._preview_cache) > 96:
+            self._preview_cache.popitem(last=False)
+        return value
+
     def status(self, service, context):
         result = service.status()
-        result.update(selection_ready=context is not None, scope_kind=context.scope.kind.value if context else "group",
-                      settings_scope="v2_profile", catalog={})
+        result.update(selection_ready=context is not None, scope_kind=context.scope.kind.value if context else "global",
+                      settings_scope="installation", catalog={})
         if context:
-            owner = service.owner(context)
+            reaction_owner = service.ensure_reaction_catalog(context)
+            slang_owner = service.owner(context)
             with service.store.db() as db:
                 for kind in ("reaction","slang"):
+                    owner = reaction_owner if kind == "reaction" else slang_owner
                     counts = {str(r[0]):r[1] for r in db.execute("SELECT enabled,COUNT(*) FROM items WHERE owner=? AND kind=? GROUP BY enabled",(owner,kind))}
                     embedded = db.execute("""SELECT COUNT(*) FROM vectors v JOIN items i ON i.owner=v.owner AND i.kind=v.kind AND i.id=v.id
                         WHERE v.owner=? AND v.kind=? AND v.model=? AND v.revision=i.revision AND i.enabled=1""",(owner,kind,result["model_binding"])).fetchone()[0]
                     result["catalog"][kind] = {"enabled":counts.get("1",0),"disabled":counts.get("0",0),
                                                "total":sum(counts.values()),"embedded":embedded}
-            result["reaction_collection"] = (service.store.reaction_collection_summary(service.owner(context))
+            result["reaction_collection"] = (service.store.reaction_collection_summary(reaction_owner)
                                              if context else {"totals": {}, "recent": []})
         return result
 
     async def get(self):
         try:
             query = request.query
-            if set(query.keys())-{"target_id","role_id","session_id","kind","after","id"} or any(len(query.getlist(k))!=1 for k in query.keys()):
+            if set(query.keys())-{"target_id","role_id","session_id","kind","after","id","global"} or any(len(query.getlist(k))!=1 for k in query.keys()):
                 raise ValueError("unexpected or duplicate fields")
-            service, context = self.resolve(query)
+            selection = {key:query[key] for key in ("target_id","role_id","session_id","global") if key in query}
+            service, context = self.resolve(selection)
             result = self.status(service,context)
             if hasattr(self.controller.settings, "all_targets"):
                 target = self.controller.settings.target(query["target_id"])
@@ -163,7 +206,8 @@ class SemanticWebAPI:
                 raise ValueError("unknown catalog")
             result.update(items=[],next_after=None)
             if context:
-                owner = service.owner(context)
+                owner = (service.ensure_reaction_catalog(context) if kind == "reaction"
+                         else service.owner(context))
                 if query.get("id"):
                     item = service.store.get(owner,kind,query["id"])
                     result["item"] = self.public(item)
@@ -179,7 +223,10 @@ class SemanticWebAPI:
                                 AND model=? AND revision=?""",
                                 (owner, kind, item["id"], result["model_binding"], item["revision"])
                                 if result["model_binding"] else (owner, kind, item["id"], "", item["revision"])).fetchone()
-                            items.append({**self.public({**item, "vector_ready": vector is not None}),
+                            public_item = self.public({**item, "vector_ready": vector is not None})
+                            if kind == "reaction":
+                                public_item["thumbnail_url"] = self.reaction_thumbnail(service, item)
+                            items.append({**public_item,
                                 "source_valid": service.slang.validate(item,context) if kind=="slang" else True})
                     result["items"] = items
                     result["next_after"] = page[23]["id"] if len(page)>24 else None
@@ -206,9 +253,9 @@ class SemanticWebAPI:
             fields = {"configure":("changes","revision"),"import":("content","metadata"),"analyze":("id",),
                       "edit":("id","kind","revision","values","enabled"),"delete":("id","kind","revision"),
                       "search":("kind","query"),"reindex":()}
-            if action not in fields or set(data)-{"target_id","role_id","session_id","action",*fields[action]}:
+            if action not in fields or set(data)-{"target_id","role_id","session_id","global","action",*fields[action]}:
                 raise ValueError("unsupported action or fields")
-            selection = {k:data[k] for k in ("target_id","role_id","session_id") if k in data}
+            selection = {k:data[k] for k in ("target_id","role_id","session_id","global") if k in data}
             service,context = self.resolve(selection)
             validate = lambda:self.recheck(selection,service,context)
             if action=="configure":
@@ -216,8 +263,23 @@ class SemanticWebAPI:
                 validate()
                 return self.response({"settings":result})
             if context is None:
-                raise TaskError("semantic_group_input_required","wait for an authorized message in this group session")
-            owner = service.owner(context)
+                settings = self.controller.settings
+                target_id = selection.get("target_id")
+                if (target_id and hasattr(settings, "all_targets")
+                        and isinstance(settings.target(target_id), GroupTarget)):
+                    raise TaskError("semantic_group_input_required",
+                                    "the selected group session has no verified member input")
+                raise TaskError("semantic_target_unavailable","select a chat scope for semantic catalog data")
+            if action == "search":
+                kind = data["kind"]
+                owner = (service.ensure_reaction_catalog(context) if kind == "reaction"
+                         else service.owner(context))
+            elif action == "edit":
+                kind = data["kind"]
+                owner = (service.ensure_reaction_catalog(context) if kind == "reaction"
+                         else service.owner(context))
+            else:
+                owner = service.ensure_reaction_catalog(context)
             if action=="import":
                 if type(data["content"]) is not str or type(data.get("metadata",{})) is not dict:
                     raise ValueError("image and metadata required")
@@ -262,8 +324,11 @@ class SemanticWebAPI:
                 validate()
                 result = service.store.delete(owner,"reaction",data["id"],expected=data["revision"])
             else:
+                reaction_owner = service.ensure_reaction_catalog(context)
+                slang_owner = service.owner(context)
                 with service.store.db() as db:
-                    db.execute("DELETE FROM vectors WHERE owner=?",(owner,))
+                    db.execute("DELETE FROM vectors WHERE owner=? AND kind='reaction'", (reaction_owner,))
+                    db.execute("DELETE FROM vectors WHERE owner=? AND kind='slang'", (slang_owner,))
                 service.gateway.clear()
                 service.schedule_memory(context)
                 result = {"state":"scheduled","note":"catalog rebuilds on search; private memory fills in background"}

@@ -25,8 +25,13 @@ from companion_v2.storage.schema import (
     V35_REQUIRED_TABLES, V35_MIGRATION_STATEMENTS,
     MIGRATION_V34_TO_V35_ID, MIGRATION_V34_TO_V35_FINGERPRINT,
     V36_MIGRATION_STATEMENTS, MIGRATION_V35_TO_V36_ID, SCHEMA_VERSION_V35,
+    MIGRATION_V54_TO_V55_FINGERPRINT, MIGRATION_V54_TO_V55_ID, SCHEMA_VERSION_V54, SCHEMA_VERSION_V55,
+    MIGRATION_V56_TO_V57_FINGERPRINT, MIGRATION_V56_TO_V57_ID, SCHEMA_VERSION_V56, SCHEMA_VERSION_V57,
+    MIGRATION_V57_TO_V58_FINGERPRINT, MIGRATION_V57_TO_V58_ID, SCHEMA_VERSION_V58,
+    MIGRATION_V58_TO_V59_FINGERPRINT, MIGRATION_V58_TO_V59_ID, SCHEMA_VERSION_V59,
+    MIGRATION_V59_TO_V60_FINGERPRINT, MIGRATION_V59_TO_V60_ID, SCHEMA_VERSION_V60,
 )
-from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36, remove_v52, remove_v53
+from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36, remove_v52, remove_v53, remove_v55, remove_v57, remove_v58, remove_v59
 
 
 class StorageMigrationTests(unittest.TestCase):
@@ -93,6 +98,9 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertIn("presentation_action", columns)
         self.assertIsNotNone(runtime.read_one(
             "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V51_TO_V52_ID,),
+        ))
+        self.assertIsNotNone(runtime.read_one(
+            "SELECT * FROM sqlite_master WHERE type = 'table' AND name = 'laya_decision_events'", (),
         ))
 
     def assert_v1_unchanged(self) -> None:
@@ -185,6 +193,139 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertIsNotNone(upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V53_TO_V54_ID,)))
         self.assertEqual(upgraded.read_all("SELECT * FROM conversation_reply_streams", ()), ())
         self.assertEqual(upgraded.read_one("SELECT state FROM outbox", ())["state"], "unknown")
+
+    def test_v54_upgrade_persists_timeout_failures_and_preserves_existing_records(self):
+        self.open_runtime().close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v55(connection)
+            connection.execute("""INSERT INTO execution_tasks VALUES
+                ('failure-task', 'origin-a', 'fixture.read', 'foreground', 'failure-dedupe', 'request-hash',
+                 1, 'failed', 1, 1, 'failure-attempt', '2026-10-10T00:00:00+00:00',
+                 '2026-10-10T00:01:00+00:00', '2026-10-10T00:00:00+00:00',
+                 '2026-10-10T00:00:01+00:00', '{}')""")
+            connection.execute("""INSERT INTO execution_attempts VALUES
+                ('failure-attempt', 'failure-task', 1, 1, 'foreground', 'fixture.read',
+                 'origin-a', 'scope-a', 0, '2026-10-10T00:01:00+00:00', '{}')""")
+            connection.execute("INSERT INTO model_requests VALUES (?, ?, ?, ?)",
+                               ('failure-task', 'request-hash', '{}', '2026-10-10T00:00:00+00:00'))
+            connection.execute("""INSERT INTO model_calls
+                (call_id, task_id, attempt_id, position, state, provider_json, reserved_tokens, reserved_cost)
+                VALUES ('failure-call', 'failure-task', 'failure-attempt', 0, 'unknown', '{}', 1, 0)""")
+            connection.execute("INSERT INTO model_call_failures VALUES (?, ?, ?)",
+                               ('failure-call', 'provider_request_failed', '2026-10-10T00:00:01+00:00'))
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V54,))
+            connection.execute("DELETE FROM schema_migrations WHERE migration_id = ?",
+                               (MIGRATION_V54_TO_V55_ID,))
+            connection.commit()
+
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V54_TO_V55_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V54, SCHEMA_VERSION_V55, MIGRATION_V54_TO_V55_FINGERPRINT))
+        self.assertEqual(upgraded.read_one("SELECT code FROM model_call_failures WHERE call_id = 'failure-call'", ())["code"],
+                         "provider_request_failed")
+        with upgraded.transaction() as connection:
+            connection.execute("UPDATE model_call_failures SET code = 'provider_wait_timed_out' WHERE call_id = 'failure-call'")
+        self.assertEqual(upgraded.read_one("SELECT code FROM model_call_failures WHERE call_id = 'failure-call'", ())["code"],
+                         "provider_wait_timed_out")
+
+    def test_v56_upgrade_adds_platform_circuit_table_and_rolls_back_on_failure(self):
+        self.open_runtime().close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v57(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V56,))
+            connection.commit()
+
+        with patch("companion_v2.storage.runtime.V57_MIGRATION_STATEMENTS",
+                   ("CREATE TABLE proactive_platform_circuits (account_key TEXT PRIMARY KEY)", "INVALID UPGRADE")):
+            with self.assertRaises(StorageOpenError):
+                self.open_runtime()
+        self.assertEqual(self.version(), SCHEMA_VERSION_V56)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proactive_platform_circuits'").fetchone())
+
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V56_TO_V57_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V56, SCHEMA_VERSION_V57, MIGRATION_V56_TO_V57_FINGERPRINT))
+        self.assertIsNotNone(upgraded.read_one(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proactive_platform_circuits'", ()))
+
+    def test_v57_upgrade_adds_default_applicability_to_existing_expression_rules(self):
+        runtime = self.open_runtime()
+        runtime.close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("""INSERT INTO expression_style_runs
+                (run_id, owner_key, scope_key, sample_json, material_hash, summary, state, created_at, decided_at)
+                VALUES ('legacy-style-run', 'owner', 'scope', '{\"source_kind\":\"shared_pack\",\"opened_at\":\"2026-10-01T00:00:00+00:00\",\"closed_at\":\"2026-10-01T00:00:00+00:00\",\"handles\":[],\"characters\":0}', 'hash', '旧规则', 'pending', '2026-10-01T00:00:00+00:00', NULL)""")
+            connection.execute("""INSERT INTO expression_style_signals
+                (signal_id, run_id, owner_key, scope_key, dimension, observation, proposal, confidence,
+                 evidence_json, state, created_at, decided_at, decided_by, decision_key, ordinal)
+                VALUES ('legacy-style-signal', 'legacy-style-run', 'owner', 'scope', 'diction',
+                        '旧观察', '旧规则', 0.5, '[]', 'adopted', '2026-10-01T00:00:00+00:00',
+                        '2026-10-01T00:00:00+00:00', 'operator', 'adopt', 0)""")
+            remove_v58(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V57,))
+            connection.commit()
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V57_TO_V58_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V57, SCHEMA_VERSION_V58, MIGRATION_V57_TO_V58_FINGERPRINT))
+        rule = upgraded.read_one("SELECT applicability_json FROM expression_style_signals WHERE signal_id = ?",
+                                 ("legacy-style-signal",))
+        self.assertIn('"intent":"any"', rule["applicability_json"])
+        self.assertIn('"relationship_stages":["any"]', rule["applicability_json"])
+
+    def test_v58_upgrade_adds_laya_request_response_and_processing_diagnostics(self):
+        runtime = self.open_runtime()
+        runtime.close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v59(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V58,))
+            connection.commit()
+
+        with patch("companion_v2.storage.runtime.V59_MIGRATION_STATEMENTS",
+                   ("ALTER TABLE laya_decision_events ADD COLUMN request_json TEXT", "INVALID UPGRADE")):
+            with self.assertRaises(StorageOpenError):
+                self.open_runtime()
+        self.assertEqual(self.version(), SCHEMA_VERSION_V58)
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(laya_decision_events)")}
+            self.assertNotIn("request_json", columns)
+
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V58_TO_V59_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V58, SCHEMA_VERSION_V59, MIGRATION_V58_TO_V59_FINGERPRINT))
+        columns = {row["name"] for row in upgraded.read_all("PRAGMA table_info(laya_decision_events)", ())}
+        self.assertTrue({"request_json", "response_json", "processing_json"}.issubset(columns))
+
+    def test_v59_upgrade_adds_bounded_per_window_contact_schedule_diagnostics(self):
+        self.open_runtime().close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP TABLE proactive_schedule_diagnostics")
+            connection.execute("DELETE FROM schema_migrations WHERE migration_id = ?",
+                               (MIGRATION_V59_TO_V60_ID,))
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V59,))
+            connection.commit()
+
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V59_TO_V60_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V59, SCHEMA_VERSION_V60, MIGRATION_V59_TO_V60_FINGERPRINT))
+        self.assertIsNotNone(upgraded.read_one(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proactive_schedule_diagnostics'", ()))
 
     def test_v52_upgrade_adds_response_diagnostics_and_rolls_back_on_failure(self):
         runtime = self.open_runtime()

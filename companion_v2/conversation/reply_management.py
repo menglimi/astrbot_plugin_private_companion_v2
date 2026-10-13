@@ -15,7 +15,8 @@ from companion_v2.model_gateway.response_diagnostics import checked_response_dia
 
 from .media.models import MAX_INPUT_IMAGES
 from .media.understanding import SCOPE_PERMISSION_FIELDS
-from .reply_settings import DIAGNOSTIC_DEFAULTS, GROUP, OWNER, group_wakeup_settings, target_for, validate, voice_policy
+from .reply_settings import (DIAGNOSTIC_DEFAULTS, GROUP, OWNER, ROLE_SHARED_FIELDS,
+    GROUP_WAKEUP_GROUP_FIELDS, group_wakeup_settings, target_for, validate, voice_policy)
 from .outbound_plan import component_order
 from .segmentation import minimum_part_gap_seconds, part_gap_seconds
 from .segmentation import DEFAULT_PROMPT, LLM_SEGMENT_MARKER
@@ -24,14 +25,18 @@ from .text_processing import text_policy
 
 
 class ReplyManagement:
-    def __init__(self, app, context=None, *, target=None):
+    def __init__(self, app, context=None, *, target=None, layer=ConfigLayer.WINDOW):
         if (context is None) == (target is None):
             raise ValueError("select one private context or group configuration target")
         if target is not None and (type(target) is not ConfigTarget or target.layer is not ConfigLayer.WINDOW
-                                   or target.scope.kind is not ScopeKind.GROUP):
-            raise ValueError("group reply configuration requires an exact group window")
+                                   or target.scope is None or target.scope.kind not in
+                                   (ScopeKind.PRIVATE, ScopeKind.GROUP)):
+            raise ValueError("object reply configuration requires an exact private or group window")
+        if target is None and layer not in (ConfigLayer.ROLE, ConfigLayer.WINDOW):
+            raise ValueError("reply configuration supports role defaults or one private window")
         self.app, self.context = app, context
-        self.target = target if target is not None else target_for(context)
+        self.target = target if target is not None else target_for(context, layer)
+        self.scope = self.target.scope if self.target.scope is not None else context.scope
         self.access = RoleLifeManagement(app, context) if context is not None else ObjectAccessPolicy(app.runtime)
 
     def _snapshot(self, operator):
@@ -50,10 +55,10 @@ class ReplyManagement:
             settings = {key.removeprefix(GROUP + "."): value for key, value in snapshot.values.items()}
             recent_limit = settings.get("reply_diagnostic_limit", DIAGNOSTIC_DEFAULTS["reply_diagnostic_limit"])
             participation = {}
-            if self.target.scope.kind is ScopeKind.GROUP:
+            if self.scope.kind is ScopeKind.GROUP:
                 limit = group_wakeup_settings(settings)["group_wakeup_log_limit"]
                 participation = {"participation_recent": self.app.tools.group_participation.diagnostics(
-                    self.target.scope, self.target.role, limit), "participation_limit": limit,
+                    self.scope, self.target.role, limit), "participation_limit": limit,
                     "timing_apply_mode": "next_accepted_input"}
             batch_select = """SELECT b.batch_id, b.state, b.created_at, b.context_json, b.contributions_json,
                 b.generation_task_id, b.part_count, f.state AS flow_state, f.reason,
@@ -63,8 +68,8 @@ class ReplyManagement:
             if self.context is not None:
                 batches = self.app.runtime.read_all(batch_select + """b.origin_key = ?
                     ORDER BY b.created_at DESC, b.rowid DESC LIMIT ?""", (self.context.key, recent_limit))
-            elif self.target.scope.kind is ScopeKind.GROUP:
-                scope = self.target.scope
+            elif self.scope.kind is ScopeKind.GROUP:
+                scope = self.scope
                 batches = self.app.runtime.read_all(batch_select + """
                     json_extract(b.context_json, '$.role_binding.scope.installation_id') = ?
                     AND json_extract(b.context_json, '$.role_binding.scope.platform') = ?
@@ -129,17 +134,31 @@ class ReplyManagement:
                     "filtered_tools": plan.get("tool_filters", []),
                     "rounds": round_details,
                     "tool_calls": [dict(call) for call in tools]})
+            from .native_reply_diagnostics import recent as native_recent
+            recent.extend(native_recent(self.app.runtime, self.scope, self.target.role, limit=recent_limit))
+            recent.sort(key=lambda item: (item["created_at"], item["batch_id"]), reverse=True)
+            recent = recent[:recent_limit]
             fields = contract_of(self.app.configuration.registry, GROUP)
-            for name in SCOPE_PERMISSION_FIELDS:
-                fields[name]["editable_layers"] = ["role", "window"]
+            for name in fields:
+                if name in ROLE_SHARED_FIELDS:
+                    fields[name]["editable_layers"] = ["role", "window"]
+                    fields[name]["write_layer"] = self.target.layer.value
+                elif (self.target.layer is ConfigLayer.WINDOW and self.scope.kind is ScopeKind.GROUP
+                      and name in GROUP_WAKEUP_GROUP_FIELDS):
+                    fields[name]["editable_layers"] = ["window"]
+                    fields[name]["write_layer"] = "window"
+                else:
+                    fields[name]["editable_layers"] = []
+                    fields[name]["write_layer"] = None
             return {"settings": settings, "edit_token": snapshot.edit_token, "revision": snapshot.revision,
                 "configuration_token": snapshot.resolution_token, "apply_mode": "next_sealed_reply",
                 "host_state": self.app.state, "recent": recent, "recent_limit": recent_limit, "marker": LLM_SEGMENT_MARKER,
                 "default_prompt": DEFAULT_PROMPT,
                 # The same three extras every config section publishes, so the shared
                 # workbench can draw its layer rail without a page-local copy of
-                # GROUP limits. ``conversation.presentation`` is window-scoped.
-                "scope": "window", "layers": layers_of(self.target),
+                # GROUP limits. Role defaults are inherited into the exact private
+                # or group window that owns this reply editor.
+                "scope": self.target.layer.value, "layers": layers_of(self.target),
                 "provenance": provenance_of(snapshot, GROUP),
                 "fields": fields, **participation}
 
@@ -195,33 +214,39 @@ class ReplyManagement:
 
     @outcome
     def expression_status(self, operator):
-        """Read the expression-learning bounds for this same conversation window.
-
-        The bounds live in their own registered group but belong to the same
-        window as the reply settings, so they are read and written through the
-        same authorization and edit-token contract instead of a second route.
-
-        ``layers``/``provenance``/``fields`` are part of the same contract every
-        other config section publishes, so the shared workbench can draw its layer
-        rail here too instead of that page keeping a private copy of the bounds.
-        """
-        from companion_v2.expression.configuration import DEFAULTS, GROUP as EXPRESSION_GROUP
+        """Read only the local learning switch for this relationship or group."""
+        from companion_v2.expression.configuration import (DEFAULTS, GROUP as EXPRESSION_GROUP,
+            GROUP_DEFAULTS, PRIVATE_DEFAULTS, local_configuration, target_for as expression_target_for)
         with self.app.runtime.read_snapshot():
             self._snapshot(operator)
-            snapshot = require(self.app.configuration.read(operator, target=self.target,
-                group_id=EXPRESSION_GROUP, observed_at=self.app.now()))
-            fields = contract_of(self.app.configuration.registry, EXPRESSION_GROUP)
-        return {"settings": {key.removeprefix(EXPRESSION_GROUP + "."): value
-                             for key, value in snapshot.values.items()},
-                "defaults": dict(DEFAULTS), "edit_token": snapshot.edit_token,
+            target, definitions, group, _ = local_configuration(self.context, target=self.target)
+            snapshot = require(self.app.configuration.read(operator, target=target,
+                group_id=group, observed_at=self.app.now()))
+            installation_id = self.scope.installation_id
+            shared = require(self.app.configuration.read(operator,
+                target=expression_target_for(self.context, installation_id=installation_id),
+                group_id=EXPRESSION_GROUP,
+                observed_at=self.app.now()))
+            fields = contract_of(self.app.configuration.registry, group)
+        defaults = PRIVATE_DEFAULTS if group.endswith(".private") else GROUP_DEFAULTS
+        settings = {key.removeprefix(group + "."): value for key, value in snapshot.values.items()}
+        resolved_defaults = dict(defaults)
+        for name in ("private_learning_enabled", "group_learning_enabled"):
+            local_key = group + "." + name
+            role_key = EXPRESSION_GROUP + "." + name
+            if local_key in snapshot.fields and not snapshot.fields[local_key].explicit:
+                settings[name] = shared.values.get(role_key, DEFAULTS[name])
+                resolved_defaults[name] = settings[name]
+        return {"settings": settings,
+                "defaults": resolved_defaults, "edit_token": snapshot.edit_token,
                 "revision": snapshot.revision, "configuration_token": snapshot.resolution_token,
-                "apply_mode": "next_sealed_reply", "group_id": EXPRESSION_GROUP,
-                "scope": "window", "layers": layers_of(self.target),
-                "provenance": provenance_of(snapshot, EXPRESSION_GROUP), "fields": fields}
+                "apply_mode": "immediate", "group_id": group,
+                "scope": target.layer.value, "layers": layers_of(target),
+                "provenance": provenance_of(snapshot, group), "fields": fields}
 
     @outcome
     def expression_configure(self, operator, data):
-        from companion_v2.expression.configuration import GROUP as EXPRESSION_GROUP
+        from companion_v2.expression.configuration import local_configuration
         if (type(data) is not dict or set(data) != {"operation_key", "edit_token", "changes"}
                 or type(data["operation_key"]) is not str or not data["operation_key"].strip()
                 or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
@@ -230,39 +255,45 @@ class ReplyManagement:
             raise TaskError("expression_configuration_invalid", "provide explicit learning bound changes")
         with self.app.runtime.transaction():
             self._snapshot(operator)
+            target, definitions, group, owner = local_configuration(self.context, target=self.target)
             if self.context is None:
                 require(self.access.scope_access(operator, scope=self.target.scope,
                     action="configuration.write", observed_at=self.app.now(), core_only=True))
             op_id = "expression-config:" + digest([operator.subject,
-                self.context.key if self.context is not None else self.target.key, data["operation_key"]])
-            receipt = require(self.app.configuration.patch(operator, target=self.target,
-                group_id=EXPRESSION_GROUP,
-                operation=OperationRef(op_id, EXPRESSION_GROUP, self.target.authorization_scope,
+                target.key, data["operation_key"]])
+            receipt = require(self.app.configuration.patch(operator, target=target,
+                group_id=group,
+                operation=OperationRef(op_id, owner.owner_id, target.authorization_scope,
                                        VersionRef(op_id, 1), op_id),
                 expected_edit_token=data["edit_token"],
-                changes={EXPRESSION_GROUP + "." + name: value for name, value in data["changes"].items()},
+                changes={group + "." + name: value for name, value in data["changes"].items()},
                 observed_at=self.app.now()))
             return {"replayed": receipt.replayed, "operation_id": op_id,
                     "status": require(self.expression_status(operator))}
 
     @outcome
     def configure(self, operator, data):
-        if type(data) is not dict or set(data) != {"operation_key", "edit_token", "changes"}:
+        if (type(data) is not dict or not {"operation_key", "edit_token", "changes"} <= set(data)
+                or set(data) - {"operation_key", "edit_token", "changes", "reset_to_inherit"}):
             raise TaskError("reply_configuration_invalid", "provide explicit setting changes")
         key, token, changes = data["operation_key"], data["edit_token"], data["changes"]
+        resets = data.get("reset_to_inherit", [])
         if type(key) is not str or not key.strip() or len(key) > 128 or type(token) is not str or len(token) != 64:
             raise TaskError("reply_configuration_invalid", "provide a stable operation key and edit token")
-        if type(changes) is not dict or not changes:
+        if (type(changes) is not dict or type(resets) is not list
+                or any(type(name) is not str for name in resets)
+                or not changes and not resets or set(changes).intersection(resets)
+                or len(set(resets)) != len(resets)):
             raise TaskError("reply_configuration_invalid", "provide explicit setting changes")
         with self.app.runtime.transaction():
             self._snapshot(operator)
-            op_id = "reply-settings:" + digest([operator.subject,
-                self.context.key if self.context is not None else self.target.key, key])
+            op_id = "reply-settings:" + digest([operator.subject, self.target.key, key])
             if self.context is None:
-                require(self.access.scope_access(operator, scope=self.target.scope,
+                require(self.access.scope_access(operator, scope=self.scope,
                     action="configuration.write", observed_at=self.app.now(), core_only=True))
             receipt = require(self.app.configuration.patch(operator, target=self.target, group_id=GROUP,
-                operation=OperationRef(op_id, OWNER, self.target.scope, VersionRef(op_id, 1), op_id),
+                operation=OperationRef(op_id, OWNER, self.target.authorization_scope, VersionRef(op_id, 1), op_id),
                 expected_edit_token=token, changes={GROUP + "." + name: value for name, value in changes.items()},
+                reset_to_inherit=tuple(GROUP + "." + name for name in resets),
                 observed_at=self.app.now()))
             return {"replayed": receipt.replayed, "operation_id": op_id, "status": require(self.status(operator))}

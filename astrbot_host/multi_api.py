@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from astrbot.api.web import request
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from .memory_api import MemoryWebAPI, PREFIX as MEMORY_PREFIX
 from .state_api import StateWebAPI, PREFIX as STATE_PREFIX
 from .reply_api import ReplyWebAPI, PREFIX as REPLY_PREFIX
-from .configuration_api import ConfigurationWebAPI, PREFIX as CONFIGURATION_PREFIX
+from .configuration_api import ConfigurationWebAPI, PREFIX as CONFIGURATION_PREFIX, SECTIONS
 from .model_api import ModelWebAPI, PREFIX as MODEL_PREFIX
 from .life_api import LifeWebAPI, PREFIX as LIFE_PREFIX
 from .relationships_api import RelationshipWebAPI, MANAGEMENT_PREFIX as RELATIONSHIP_PREFIX
@@ -24,6 +25,7 @@ from .semantic_api import SemanticWebAPI
 from .setup_api import SetupWebAPI
 from .account_session_api import AccountSessionWebAPI
 from .perception_api import PerceptionWebAPI
+from .native_extension_api import NativeExtensionWebAPI
 from .native_perception_api import NativePerceptionWebAPI, PREFIX as NATIVE_PERCEPTION_PREFIX
 from .persona_workshop_api import PersonaWorkshopWebAPI, PREFIX as PERSONA_PREFIX
 from .legacy_api import LegacyMigrationWebAPI, PREFIX as LEGACY_PREFIX
@@ -40,17 +42,21 @@ from .identity_derivation import role_display_name
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/host"
+INSTALLATION_CONFIGURATION_SECTIONS = ("proactive.contact",)
+TARGET_CONFIGURATION_SECTIONS = tuple(name for name in SECTIONS
+    if name != "proactive.contact")
 
 
-def configuration_routes(reply_route, view):
+def configuration_routes(reply_route, view, *, allowed_sections=None):
     """Rebuild the shared configuration routes on one role's own path.
 
     ``reply_route`` ends with ``/reply``; the configuration routes keep their own
     ``/config`` suffix, so the prefix is swapped rather than stripped.
     """
     base = reply_route[: -len("/reply")] if reply_route.endswith("/reply") else reply_route
+    api = ConfigurationWebAPI(view, allowed_sections=allowed_sections)
     return tuple((path.replace(CONFIGURATION_PREFIX, base + "/config", 1), handler, methods, description)
-                 for path, handler, methods, description in ConfigurationWebAPI(view).routes())
+                 for path, handler, methods, description in api.routes())
 
 
 class TargetControllerView:
@@ -69,6 +75,31 @@ class TargetControllerView:
             return None
         context = controller.authority.context(self.target_id, self.role_id)
         return SimpleNamespace(application=session.application, profile=SimpleNamespace(target=context))
+
+    @property
+    def last_session(self):
+        return self.session
+
+
+class InstallationControllerView:
+    """Give installation-only editors a management scope, never a chat window."""
+
+    def __init__(self, controller):
+        self.controller = controller
+
+    def __getattr__(self, name):
+        return getattr(self.controller, name)
+
+    @property
+    def session(self):
+        controller = self.controller
+        session = controller.session or controller.last_session
+        if session is None or controller.runtime is None:
+            return None
+        scope = ScopeRef(controller.runtime.installation_id, "companion", ScopeKind.SYSTEM,
+                         "page.management")
+        return SimpleNamespace(application=session.application,
+                               profile=SimpleNamespace(target=SimpleNamespace(scope=scope)))
 
     @property
     def last_session(self):
@@ -103,6 +134,7 @@ class MultiHostWebAPI:
              "reply_api": PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/reply",
              "config_api": (None if isinstance(target, GroupTarget) else
                             PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/config"),
+             "role_config_api": None,
              "model_api": (None if isinstance(target, GroupTarget) else
                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/model"),
              "perception_native_api": (None if isinstance(target, GroupTarget) else
@@ -196,6 +228,7 @@ class MultiHostWebAPI:
         routes += SetupWebAPI(self.controller).routes()
         routes += AccountSessionWebAPI(self.controller).routes()
         routes += PerceptionWebAPI(self.controller).routes()
+        routes += NativeExtensionWebAPI(self.controller).routes()
         # 备份是安装级的：它不需要目标，快照覆盖当前运行档的那棵 V2 数据根
         # （多目标下是 installations/<installation_key>/runtime）。所以这里挂一次，
         # 不像其它域路由那样按角色重挂。暂存还原的生效点在 multi_controller
@@ -203,6 +236,9 @@ class MultiHostWebAPI:
         routes += BackupWebAPI(self.controller).routes()
         routes += HostOptionsWebAPI(self.controller).routes()
         routes += StorageWebAPI(self.controller).routes()
+        # Shared defaults stay on an installation route, away from selected chats.
+        routes += ConfigurationWebAPI(InstallationControllerView(self.controller),
+            allowed_sections=INSTALLATION_CONFIGURATION_SECTIONS).routes()
         routes.append((PREFIX + "/preview", self.api_preview, ["GET"], "Companion V2 conversation preview"))
         routes.append((PREFIX + "/batches", self.api_batches, ["GET"], "Companion V2 recent target batches"))
         for action, method in (("probe", "probe"), ("initialize", "initialize_profile"), ("start", "start"),
@@ -255,7 +291,8 @@ class MultiHostWebAPI:
                 if role.get("legacy_api") is not None:
                     routes.extend((role["legacy_api"] + path.removeprefix(LEGACY_PREFIX), handler, methods, description)
                                   for path, handler, methods, description in LegacyMigrationWebAPI(view).routes())
-                routes.extend(configuration_routes(role["reply_api"], view))
+                routes.extend(configuration_routes(role["reply_api"], view,
+                    allowed_sections=TARGET_CONFIGURATION_SECTIONS))
                 routes.extend((role["image_material_api"] + path.removeprefix(IMAGE_MATERIAL_PREFIX),
                                handler, methods, description)
                               for path, handler, methods, description in ImageMaterialsWebAPI(view).routes())

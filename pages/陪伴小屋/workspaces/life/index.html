@@ -29,11 +29,11 @@
     <details id="settings"><summary>日程与偏好</summary>
       <form id="config-form">
         <div class="config-grid">
-          <label class="check"><input id="enabled" type="checkbox">启用生活日程与执行权限</label>
+          <label class="check"><input id="enabled" type="checkbox">启用生活日程总开关</label>
           <label>日记时区<input id="timezone" type="text" value="Asia/Shanghai" required></label>
           <label class="check"><input id="diary_enabled" type="checkbox">每天写日记</label>
           <label>日记时间<input id="diary_time" type="time" value="23:50" required></label>
-          <label class="check"><input id="sleep_enabled" type="checkbox">按日程入睡</label>
+          <label class="check"><input id="sleep_enabled" type="checkbox">按角色作息自动入睡</label>
           <label>入睡时间<input id="sleep_time" type="time" value="00:30" required></label>
           <label>入睡时区<input id="sleep_timezone" type="text" value="Asia/Shanghai" required></label>
           <label>自然浮动上限（分钟）<input id="sleep_variation_minutes" type="number" min="0" max="120" value="20" required>
@@ -42,7 +42,7 @@
           <label class="check"><input id="reading_enabled" type="checkbox">自动阅读书架中的待读片段</label>
           <label class="check"><input id="derive_enabled" type="checkbox">正文保存后提取摘要与梦境碎片</label>
         </div>
-        <div class="form-footer"><p class="muted">睡眠按角色共享；日记、阅读和权限按当前窗口保存。</p>
+        <div class="form-footer"><p class="muted">自动入睡需同时开启生活日程总开关和「按角色作息自动入睡」，并有已授权的私聊执行窗口；角色状态页的睡眠状态模拟是另一项设置。作息按角色共享。</p>
           <button class="primary" type="submit">保存设置</button></div>
       </form>
     </details>

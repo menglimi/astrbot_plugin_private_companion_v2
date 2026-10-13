@@ -12,12 +12,10 @@
  *   次圈 · 活动曲线      proactive_hour_activity_enabled / proactive_hour_activity_curve（24 权重）
  *   三圈 · 强度档位       proactive_intensity_preset（缩放间隔与门槛，不放宽额度）
  *   内圈 · 问候窗口       greeting_morning/noon/evening_window + 失眠窗口
- * 环心是**此刻**：现在处于哪一段、此刻能不能开口、不能的话是哪一条。
+ * 环心预览安装级默认时段，不表示任何私聊用户的授权结果。
  *
- * 读出口是角色目录的 perception_native_api，其中 contact 来自 ContactManagement.status。
- * 它给 160 个 settings、15 个 purposes（各带 allowed + 唯一阻断原因）、
- * 以及 effective 上的四层判定。写出口是另一个：POST /config/configure 的
- * proactive.contact 段（native 那条只放行 6 个 news 字段，写不动其余 152 项）。
+ * 全局设置通过 /config 读取，写入 installation 层的 proactive.contact 段。
+ * 页面不读取宿主当前打开的会话；单个私聊用户的覆盖与授权在私聊用户页管理。
  *
  * 关于额度：budget.py 的滚动额度（max_contacts_24h 等）**只有写入口，没有读出口**。
  * 所以页面上这些一律画成「上限刻度」，不画成「已用量表」——不知道的就不画，
@@ -38,6 +36,8 @@ window.CompanionContactPage = (() => {
   const HISTORY_PENDING = "__companion_contact_pending_v1";
   const HISTORY_PREVIOUS = "__companion_contact_previous_state_v1";
   const pendingWrites = new Map();
+  const proactiveTestGuards = new Map();
+  const TEST_GUARD_RESET = "__reset_proactive_test_guard__";
   const AUTO_RECOVERY_INITIAL_DELAY = 400;
   const AUTO_RECOVERY_MAX_DELAY = 30000;
   const AUTO_RECOVERY_MAX_EXPONENT = 8;
@@ -165,10 +165,10 @@ window.CompanionContactPage = (() => {
     staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；已保存可重新读取状态。",
     staging_host_terminated:"插件已停止，请重新打开拓展页。",
     core_access_required:"当前账号没有联系设置权限。",
-    authorization_denied:"当前对象尚未授予联系权限。",
+    authorization_denied:"当前账号没有安装级联系配置权限。",
     binding_revoked:"管理账号的授权已撤销。", binding_rebound:"管理账号的绑定已变化，请重新进入。",
-    proactive_contact_scope_invalid:"主动联系偏好按会话生效，请选择一个已初始化的私聊对象。",
-    proactive_contact_target_changed:"当前对象或角色绑定已变化，请重新读取。",
+    proactive_contact_scope_invalid:"全局联系配置接口不可用，请重新读取安装配置。",
+    proactive_contact_target_changed:"全局联系配置目标已变化，请重新读取。",
     proactive_contact_configuration_invalid:"请核对设置：数值需在各自范围内，枚举项需在下拉选项内。",
     proactive_contact_clock_invalid:"请填写二十四小时制的时刻，形如 23:00 或 07:45。",
     proactive_contact_window_invalid:"问候窗口形如 07:45-10:20，且必须当天内结束，不能跨午夜。",
@@ -191,6 +191,7 @@ window.CompanionContactPage = (() => {
     bridge_unavailable:"页面还没有接上 AstrBot。若这是从管理界面打开的插件页，刷新一次通常就好；若反复出现，请确认插件已启用。",
     bridge_timeout:"未收到服务确认，请刷新核对。",
     invalid_response:"服务返回的数据不完整，请刷新核对。",
+    material_pool_unavailable:"角色共享素材暂时无法读取，请稍后重试。",
     proactive_quiet_hours:"当前处于免打扰时段。", proactive_paused:"当前已暂停主动联系。",
     proactive_disabled:"主动联系总开关已关闭。", contact_automatic_disabled:"后台自动联系未开启。",
     model_task_unregistered:"请先登记主动联系模型。", host_not_running:"当前运行实例尚未启动。",
@@ -201,13 +202,21 @@ window.CompanionContactPage = (() => {
   const e = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const reason = code => errors[code] || "联系条件暂时无法核对，请重新读取状态。";
   const problem = code => Object.assign(new Error(reason(code)), {code});
-  function recoveryFailure(code) {
+  function recoveryFailure(error) {
+    const code = typeof error?.code === "string" ? error.code : "";
     if (code === "bridge_timeout" || code === "bridge_unavailable") {
       return "自动核对暂时没有收到服务确认；原请求已保留，系统会继续核对。";
     }
     if (errors[code]) return "核对未完成：" + errors[code];
-    const detail = CODE.test(code || "") ? `（错误码：${code}）` : "";
-    return `核对请求未收到确认${detail}；原保存请求已保留。`;
+    const message = typeof error?.message === "string" ? error.message.replace(/[\u0000-\u001f\u007f]+/g, " ")
+      .replace(/\s+/g, " ").trim().slice(0, 120) : "";
+    let detail = CODE.test(code) ? `错误码：${code}`
+      : CODE.test(message) ? `错误码：${message}`
+        : /^plugin bridge request failed\.?$/i.test(message) ? "宿主页面桥接请求未返回结果"
+          : /failed to fetch|networkerror|network request failed/i.test(message) ? "网络连接中断"
+            : message ? `错误信息：${message}` : "";
+    const suffix = detail ? `（${detail}）` : "";
+    return `核对请求未收到确认${suffix}；原保存请求已保留。`;
   }
   function automaticNotice(effective) {
     if (!effective || effective.automatic_allowed !== false) return null;
@@ -297,18 +306,27 @@ window.CompanionContactPage = (() => {
     proactive_intensity_preset:"tier",
   };
   let root = null, bridge = null, version = 0, data = null;
-  /* 联系设置有不少页面内筛选与未保存草稿。路由切换会卸载本页，按当前
-     角色/会话在内存保留这些普通字段；令牌不进入缓存，回来后由真实接口
+  /* 联系设置有不少页面内筛选与未保存草稿。路由切换会卸载本页，按安装
+     和管理账号在内存保留这些普通字段；令牌不进入缓存，回来后由真实接口
      重新读取。 */
   const contactCache = new Map();
   let contactScope = "";
   function currentContactScope() {
-    try { return window.CompanionProduct?.scopeKey?.() || "default"; } catch (_) { return "default"; }
+    try {
+      const identity = window.CompanionProduct?.identity?.() || {};
+      return JSON.stringify([identity.installation_id || "", identity.operator_id || ""]);
+    } catch (_) { return "default"; }
   }
   function cacheContact() {
     if (!data || !contactScope) return;
+    const hasGlobalSettings = data.configurationLoaded && data.configScope === "installation"
+      && data.settings && typeof data.settings === "object";
     contactCache.set(contactScope, {
-      ...data, editToken:"", configToken:"", busy:false, loading:false, contractLoading:false,
+      ...data, settings:hasGlobalSettings ? {...data.settings} : null, editToken:"", configToken:"",
+      configurationLoaded:!!hasGlobalSettings, busy:false, loading:false, contractLoading:false,
+      ready:false, effective:null, effectiveSettings:null, purposes:{},
+      confirmTest:"", testBusy:"", testUncertain:data.testUncertain || !!data.testBusy,
+      testGuard:data.testGuard || (data.testBusy ? {purpose:data.testBusy, state:"pending"} : null),
       contractError:"", contractErrorCode:"", materialsLoading:false, touched:[...data.touched],
       draft:{...data.draft}, pulse:new Set(), pulseNow:[], flip:null, flipNow:null, viewShift:null, viewShiftNow:null,
     });
@@ -317,6 +335,12 @@ window.CompanionContactPage = (() => {
     const identity = window.CompanionProduct?.identity?.() || {};
     return STORE + "pending:" + JSON.stringify([
       identity.installation_id || "", identity.operator_id || "", contactScope, data?.configPath || "",
+    ]);
+  }
+  function proactiveTestGuardKey() {
+    const identity = window.CompanionProduct?.identity?.() || {};
+    return STORE + "test-guard:" + JSON.stringify([
+      identity.installation_id || "", identity.operator_id || "", contactScope,
     ]);
   }
   function writeHistoryPending(key, value) {
@@ -341,6 +365,37 @@ window.CompanionContactPage = (() => {
       const stored = window.history.state?.[HISTORY_PENDING]?.[key];
       return typeof stored === "string" ? JSON.parse(stored) : null;
     } catch { return null; }
+  }
+  function storeProactiveTestGuard(value) {
+    const key = proactiveTestGuardKey();
+    if (value) proactiveTestGuards.set(key, JSON.stringify(value));
+    else proactiveTestGuards.delete(key);
+    if (value) {
+      for (const storage of [() => localStorage, () => sessionStorage]) {
+        try { storage().setItem(key, JSON.stringify(value)); return true; } catch {}
+      }
+      return writeHistoryPending(key, value);
+    }
+    let removed = false;
+    for (const storage of [() => localStorage, () => sessionStorage]) {
+      try { storage().removeItem(key); removed = true; } catch {}
+    }
+    return writeHistoryPending(key, null) || removed;
+  }
+  function restoreProactiveTestGuard() {
+    const key = proactiveTestGuardKey();
+    for (const read of [
+      () => proactiveTestGuards.get(key),
+      () => localStorage.getItem(key),
+      () => sessionStorage.getItem(key),
+      () => readHistoryPending(key),
+    ]) try {
+      const stored = read();
+      const value = typeof stored === "string" ? JSON.parse(stored) : stored;
+      if (value && PURPOSE_META[value.purpose]
+          && ["pending", "unknown"].includes(value.state)) return value;
+    } catch {}
+    return null;
   }
   function storePendingWrite() {
     const key = pendingWriteKey();
@@ -401,7 +456,7 @@ window.CompanionContactPage = (() => {
     autoRecoveryTimer = setTimeout(() => {
       autoRecoveryTimer = null;
       if (!live(ticket) || data.pendingWrite?.body?.operation_key !== operationKey) return;
-      if (!data.ready || data.busy || data.loading) {
+      if (!settingsAvailable() || data.busy || data.loading || data.contractLoading) {
         schedulePendingRecovery(ticket);
         return;
       }
@@ -422,12 +477,15 @@ window.CompanionContactPage = (() => {
     return {view:"dial", purposeQuery:"", purposeBucket:"all", purposeFilter:"all",
       testQuery:"", testBucket:"all", testCoverage:"all", materialQuery:"", materialCategory:"all",
       nativePath:"", configPath:"",
-      settings:null, effective:null, purposes:{}, hostState:"",
+      settings:null, effective:null, effectiveSettings:null, purposes:{}, hostState:"",
       materialItems:[], materialsLoaded:false, materialsLoading:false, materialsError:"",
-       editToken:"", configToken:"", contractLoading:false, contractError:"", contractErrorCode:"",
+      materialsState:"not_checked", materialsCheckedAt:"", materialsPatrolPolls:0,
+       editToken:"", configToken:"", configScope:"", configurationLoaded:false,
+       contractLoading:false, contractError:"", contractErrorCode:"",
       /* 草稿：只放用户真的改过的字段。提交时只发这些，未动的字段一个都不发——
          避免把「没看过的字段」当成「要保持的值」写回去。 */
       draft:{}, touched:new Set(), tierDraft:null, pendingWrite:null,
+      confirmTest:"", testBusy:"", testUncertain:false, testGuard:null, testResults:{},
       /* pulse 是「下一次渲染要闪哪几片盘面」，pulseNow 是这一帧真正在闪的。
          两者分开是因为 render() 每次都会重写 DOM，类必须由渲染时的状态决定，
          当场往节点上加类会被紧接着的重写丢掉（切档位那次动画就是这么消失的）。 */
@@ -445,6 +503,8 @@ window.CompanionContactPage = (() => {
       notice:"", error:false, savedAt:null};
   }
   const value = name => name in (data?.draft || {}) ? data.draft[name] : data?.settings?.[name];
+  const observedValue = name => data?.settings?.[name];
+  const settingsAvailable = () => !!data?.settings && data.configurationLoaded === true;
   function rel(absolute) {
     if (typeof absolute !== "string" || !absolute.startsWith(PREFIX)) throw problem("invalid_response");
     const route = absolute.slice(PREFIX.length);
@@ -453,16 +513,26 @@ window.CompanionContactPage = (() => {
     }
     return route;
   }
-  async function bounded(promise) {
+  async function bounded(promise, timeoutMs = 15000) {
     let timeout;
     try {
       return await Promise.race([promise, new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(problem("bridge_timeout")), 15000);
+        timeout = setTimeout(() => reject(problem("bridge_timeout")), timeoutMs);
       })]);
     } finally { clearTimeout(timeout); }
   }
-  async function api(method, path, body) {
-    const response = await bounded(method === "GET" ? bridge.apiGet(path, body) : bridge.apiPost(path, body));
+  async function api(method, path, body, timeoutMs = 15000) {
+    let response;
+    try {
+      response = await bounded(method === "GET" ? bridge.apiGet(path, body) : bridge.apiPost(path, body), timeoutMs);
+    } catch (error) {
+      const message = typeof error?.message === "string" ? error.message.trim() : "";
+      if (!error?.code && CODE.test(message) && Object.prototype.hasOwnProperty.call(errors, message)
+          && message !== "bridge_timeout" && message !== "bridge_unavailable") {
+        throw Object.assign(problem(message), {confirmed:true});
+      }
+      throw error;
+    }
     const wrapped = ["ok","error"].includes(response?.status) && response?.data !== undefined ? response
       : ["ok","error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
     if (wrapped?.status === "error") throw Object.assign(problem(CODE.test(wrapped.data?.code || wrapped.message || "")
@@ -475,42 +545,7 @@ window.CompanionContactPage = (() => {
   function notice(message, error = false) { data.notice = message; data.error = error; }
 
   /* ---- 读 ------------------------------------------------------------- */
-  async function load() {
-    if (!data.nativePath || data.busy) return;
-    const ticket = version;
-    data.loading = true; render();
-    try {
-      const payload = await api("GET", data.nativePath);
-      const status = payload.contact;
-      if (!live(ticket)) return;
-      if (!status?.settings || typeof status.settings !== "object") throw problem("invalid_response");
-      const effective = status.effective;
-      if (!effective || typeof effective !== "object"
-          || typeof effective.allowed !== "boolean"
-          || typeof effective.automatic_allowed !== "boolean") throw problem("invalid_response");
-      data.settings = status.settings;
-      data.effective = effective;
-      data.purposes = status.purposes && typeof status.purposes === "object" ? status.purposes : {};
-      data.hostState = typeof status.host_state === "string" ? status.host_state : "";
-      data.editToken = typeof status.edit_token === "string" ? status.edit_token : "";
-      data.ready = true; data.scanning = true;
-      /* 成功读到一份新的联系快照后，旧的网络/保存错误已经没有继续
-         挂在页面上的意义；保存成功提示（error=false）仍然保留。 */
-      if (data.error) { data.notice = ""; data.error = false; }
-    } catch (error) {
-      if (!live(ticket)) return;
-      data.settings = null; data.effective = null; data.purposes = {}; data.editToken = "";
-      data.ready = false;
-      notice(error.code ? reason(error.code) : "连接中断，已清空旧内容。请刷新核对。", true);
-    } finally {
-      if (live(ticket)) {
-        data.loading = false; data.busy = false; render();
-        if (data.ready && data.pendingWrite) schedulePendingRecovery(ticket);
-      }
-    }
-  }
-  /* 配置侧只要 edit_token 与字段契约——值仍旧从 native 那份读，
-     两处读出的值必须一致，不一致就说明两端读的不是同一层。 */
+  /* 全局页只读取安装级配置，不依赖宿主当前打开的会话。 */
   async function loadContract() {
     if (!data.configPath || data.contractLoading) return;
     const ticket = version;
@@ -521,42 +556,66 @@ window.CompanionContactPage = (() => {
       const payload = await api("GET", data.configPath, {sections: GROUP});
       if (!live(ticket)) return;
       const section = payload?.sections?.[GROUP];
-      if (!section || typeof section !== "object"
-          || typeof section.edit_token !== "string" || !section.edit_token) throw problem("invalid_response");
+      if (!section || typeof section !== "object" || section.scope !== "installation"
+          || typeof section.edit_token !== "string" || !section.edit_token
+          || !section.settings || typeof section.settings !== "object" || Array.isArray(section.settings))
+        throw problem("invalid_response");
       data.configToken = section.edit_token;
+      data.settings = {...section.settings};
+      data.configurationLoaded = true;
+      data.configScope = typeof section.scope === "string" ? section.scope : "";
+      data.ready = true; data.scanning = true;
       data.contractError = "";
       data.contractErrorCode = "";
     } catch (error) {
       if (live(ticket)) {
         data.contractErrorCode = typeof error.code === "string" ? error.code : "";
-        data.contractError = data.ready
-          ? "联系状态已读取；配置编辑信息未读到，保存暂不可用。"
-          : "配置编辑信息未能读取，请稍后重试。";
+        data.contractError = "全局设置未能读取，当前不会使用会话设置代替；请重新读取配置。";
       }
     } finally {
-      if (live(ticket)) { data.contractLoading = false; render(); }
+      if (live(ticket)) {
+        data.contractLoading = false; render();
+        if (settingsAvailable() && data.pendingWrite) schedulePendingRecovery(ticket);
+      }
     }
   }
-  async function loadMaterials() {
+  async function loadMaterials({patrolPoll = false} = {}) {
     if (!data.nativePath || data.materialsLoading) return;
+    if (!patrolPoll) data.materialsPatrolPolls = 0;
     const ticket = version;
     data.materialsLoading = true;
     data.materialsError = "";
+    let receivedStatus = false;
     render();
     try {
       const payload = await api("GET", data.nativePath + "/materials");
       if (!live(ticket)) return;
       if (!Array.isArray(payload?.items)) throw problem("invalid_response");
       data.materialItems = payload.items.filter(item => item && typeof item === "object"
+        && item.scope === "role" && !item.usage
         && typeof item.id === "string" && typeof item.title === "string");
+      data.materialsState = typeof payload.state === "string" ? payload.state : "ready";
+      data.materialsCheckedAt = typeof payload.checked_at === "string" ? payload.checked_at : "";
       data.materialsLoaded = true;
+      receivedStatus = true;
     } catch (error) {
       if (!live(ticket)) return;
-      data.materialItems = [];
-      data.materialsLoaded = false;
       data.materialsError = error.code ? reason(error.code) : "素材暂时无法读取，请重试。";
     } finally {
-      if (live(ticket)) { data.materialsLoading = false; render(); }
+      if (live(ticket)) {
+        data.materialsLoading = false; render();
+        if (receivedStatus && ["refreshing", "not_checked"].includes(data.materialsState)
+            && data.materialsPatrolPolls < 3) {
+          data.materialsPatrolPolls += 1;
+          const delay = [1500, 3500, 5000][data.materialsPatrolPolls - 1];
+          setTimeout(() => {
+            if (live(ticket) && data.view === "materials" && !data.materialsLoading)
+              void loadMaterials({patrolPoll:true});
+          }, delay);
+        } else if (!["refreshing", "not_checked"].includes(data.materialsState)) {
+          data.materialsPatrolPolls = 0;
+        }
+      }
     }
   }
   /* ---- 写 -------------------------------------------------------------
@@ -565,7 +624,7 @@ window.CompanionContactPage = (() => {
      （native 那条路由只写 news 六个字段，其余交给 config 段）。 */
   async function save() {
     if (!data.configPath || data.busy || (!data.pendingWrite && !data.touched.size)) return;
-    if (!data.ready) { notice("还没有读到当前设置，不能保存。", true); render(); return; }
+    if (!settingsAvailable()) { notice("还没有读到当前设置，不能保存。", true); render(); return; }
     if (!data.configToken && !data.pendingWrite) { notice("缺少配置令牌，请重新读取后再保存。", true); render(); return; }
     const ticket = version;
     data.busy = true;
@@ -596,19 +655,18 @@ window.CompanionContactPage = (() => {
       const status = payload?.status?.sections?.[GROUP];
       const hasFreshConfigToken = typeof status?.edit_token === "string" && status.edit_token.length === 64;
       if (hasFreshConfigToken) {
-        data.editToken = status.edit_token;
-        data.configToken = data.editToken;
+        data.configToken = status.edit_token;
       }
       data.pendingWrite = null; storePendingWrite();
       clearPendingRecovery(pending.body.operation_key);
+      if (data.configurationLoaded) data.settings = {...data.settings, ...changes};
       data.touched.clear(); data.draft = {}; data.tierDraft = null;
       data.savedAt = Date.now(); data.busy = false;
       const savedNotice = "已保存 " + Object.keys(changes).length + " 项。改动从下一轮主动评估开始生效。";
       notice(savedNotice);
-      await load();
-      if (live(ticket) && !hasFreshConfigToken) await loadContract();
+      if (live(ticket)) await loadContract();
       if (live(ticket)) {
-        const refreshed = data.ready;
+        const refreshed = settingsAvailable() && !!data.configToken;
         notice(refreshed ? savedNotice : "已保存 " + Object.keys(changes).length + " 项，但当前状态未能刷新；请稍后重新读取。", !refreshed);
         render();
       }
@@ -621,11 +679,10 @@ window.CompanionContactPage = (() => {
         clearPendingRecovery(pending?.body?.operation_key);
       }
       const unresolved = !!data.pendingWrite && !error.confirmed;
-      notice(unresolved ? recoveryFailure(code) : reason(code), true);
+      notice(unresolved ? recoveryFailure(error) : reason(code), true);
       if (["configuration_revision_conflict", "proactive_contact_revision_conflict",
         "proactive_contact_target_changed"].includes(code)) {
         data.touched.clear(); data.draft = {}; data.tierDraft = null;
-        await load();
         await loadContract();
         if (live(ticket) && !data.error) {
           notice("设置已有其他更新，已读取最新值。", false);
@@ -639,12 +696,11 @@ window.CompanionContactPage = (() => {
       }
     }
   }
-  /* 幂等键：同一份草稿重复提交沿用同一个键，后端按 operation_key 去重，
-     网络重试不会写成两次。键里带 native 路由（每个角色一套），
-     所以不同角色不会撞到同一个键上。 */
+  /* The backend combines the operation key with the authorized target, so the
+     key stays short even when a target's route contains long opaque identifiers. */
   let opCounter = 0;
   function operationKey() {
-    return STORE + data.nativePath + ":" + (data.savedAt || 0) + ":" + opCounter++;
+    return STORE + Date.now().toString(36) + ":" + Math.random().toString(36).slice(2, 10) + ":" + opCounter++;
   }
   function set(name, value) {
     if (data.pendingWrite) return;
@@ -663,12 +719,10 @@ window.CompanionContactPage = (() => {
   }
   function dirty(name) { return data.touched.has(name); }
 
-  /* ---- 此刻 -------------------------------------------------------------
-     环心那句话必须与后端同源：能不能开口看 effective，具体卡在哪一条看
-     purposes 的 reason。页面不自己推断「现在几点了应该在免打扰里吗」——
-     时区在服务端，页面上的时钟是访客的钟，两者经常不是同一个。 */
-  function currentMinute() {
-    const zone = value("quiet_timezone");
+  /* This page shows installation defaults only. Per-person authorization and
+     delivery readiness belong to the private contact view. */
+  function currentMinute(settings) {
+    const zone = settings ? settings.quiet_timezone : value("quiet_timezone");
     if (typeof zone !== "string" || !zone.trim()) return null;
     try {
       const parts = new Intl.DateTimeFormat("en-GB", {timeZone:zone, hour:"2-digit", minute:"2-digit",
@@ -678,51 +732,55 @@ window.CompanionContactPage = (() => {
       return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
     } catch { return null; }
   }
-  function quietSpan() {
-    const from = minutes(value("quiet_start")), to = minutes(value("quiet_end"));
+  function quietSpan(settings) {
+    const from = minutes(settings ? settings.quiet_start : value("quiet_start"));
+    const to = minutes(settings ? settings.quiet_end : value("quiet_end"));
     if (from === null || to === null) return null;
     return {from, to};
   }
-  function inQuiet(minute) {
-    const span = quietSpan();
-    if (span === null || !value("quiet_enabled") || minute === null) return false;
+  function inQuiet(minute, settings) {
+    const span = quietSpan(settings);
+    if (span === null || !(settings ? settings.quiet_enabled : value("quiet_enabled")) || minute === null) return false;
     const {from, to} = span;
-    return from > to ? (minute >= from || minute < to) : (minute >= from && minute < to);
+    return from === to || (from > to ? (minute >= from || minute < to) : (minute >= from && minute < to));
   }
-  function currentWeight(minute) {
-    if (!value("proactive_hour_activity_enabled") || minute === null) return null;
-    return curveOf(value("proactive_hour_activity_curve"))[Math.floor(minute / 60) % 24];
+  function currentWeight(minute, settings) {
+    if (!(settings ? settings.proactive_hour_activity_enabled : value("proactive_hour_activity_enabled")) || minute === null) return null;
+    return curveOf(settings ? settings.proactive_hour_activity_curve : value("proactive_hour_activity_curve"))[Math.floor(minute / 60) % 24];
   }
-  /* 环心状态。四档，顺序即优先级：
-     后端说不允许 → 看它给的原因；后端说允许但此刻在免打扰 → 说免打扰；
-     曲线权重低 → 说节律；否则说可开口。 */
+  /* Project the saved installation settings onto the configured quiet hours
+     and activity curve; never present this as a per-person authorization check. */
   function verdict() {
-    if (!data.ready || !data.settings || !data.effective) {
-      return {tone:"blocked", title:"联系状态尚未读取", detail:"读取设置后再判断当前联系条件。", code:"", automatic:false};
+    if (!settingsAvailable()) {
+      return {tone:"blocked", title:"全局设置尚未读取", detail:"当前页面只显示安装级默认配置。", code:"", automatic:false};
     }
-    const automatic = automaticNotice(data.effective);
-    const minute = currentMinute();
-    const blocked = data.effective && data.effective.allowed === false;
-    if (blocked) {
-      const code = data.effective.reason;
-      return {tone:"blocked", title:"当前不会开口", detail:reason(code),
-        code:code || "", automatic};
+    const settings = data.settings;
+    const minute = currentMinute(settings);
+    const pauseUntil = observedValue("pause_until");
+    if (observedValue("enabled") === false) {
+      return {tone:"blocked", title:"全局默认已关闭", detail:"具体私聊用户可在私聊用户页单独设置。", code:"", automatic:false};
     }
-    if (inQuiet(minute)) {
-      return {tone:"quiet", title:"免打扰中", detail:quietSpanText(),
-        code:"proactive_quiet_hours", automatic};
+    if (typeof pauseUntil === "string" && Date.parse(pauseUntil) > Date.now()) {
+      return {tone:"blocked", title:"全局暂停中", detail:"暂缓至 " + pauseUntil.slice(0, 16).replace("T", " "), code:"", automatic:false};
     }
-    const weight = currentWeight(minute);
+    if (inQuiet(minute, settings)) {
+      return {tone:"quiet", title:"全局免打扰时段", detail:quietSpanText(settings),
+        code:"", automatic:false};
+    }
+    const weight = currentWeight(minute, settings);
     if (weight !== null && weight < 0.3) {
-      return {tone:"low", title:"节律低谷", detail:"这一小时的活动权重 " + weight.toFixed(2)
-        + "，低于 0.30；这条曲线只删格子，不放宽额度。", code:"", automatic};
+      return {tone:"low", title:"全局节律低谷", detail:"这一小时的活动权重 " + weight.toFixed(2)
+        + "，低于 0.30；这条曲线只删格子，不放宽额度。", code:"", automatic:false};
     }
-    return {tone:"open", title:"此刻可以开口", detail:minute === null
-      ? "未设时区，只能按服务端的判定。" : "本地时间 " + hm(minute) + "，不在免打扰内。",
+    const automatic = observedValue("automatic_enabled") === true ? null
+      : {text:"后台自动联系默认关闭"};
+    return {tone:"open", title:"全局默认已开启", detail:minute === null
+      ? "具体用户的授权与私聊设置在私聊用户页管理。"
+      : "按 " + hm(minute) + " 的全局时段规则；具体用户的授权与私聊设置在私聊用户页管理。",
       code:"", automatic};
   }
-  function quietSpanText() {
-    const span = quietSpan();
+  function quietSpanText(settings) {
+    const span = quietSpan(settings);
     if (span === null) return "免打扰时段未设完整。";
     return span.from > span.to
       ? hm(span.from) + " 至次日 " + hm(span.to) + " 不打扰"
@@ -822,6 +880,7 @@ window.CompanionContactPage = (() => {
     return `<header class="ct-head">
       <div class="ct-head-main">
         <h2>${e(label)}</h2>
+        <span class="ct-badge">全局设置</span>
         <span class="ct-verdict is-${v.tone}"><i class="ct-dot"></i>${e(v.title)}</span>
       </div>
       <div class="ct-head-actions">
@@ -850,7 +909,7 @@ window.CompanionContactPage = (() => {
       + `<span>${pendingText}`
       + `${data.error && data.notice ? `<small>${e(data.notice)}</small>` : ""}</span>`
       + `<button type="button" class="ct-notice-retry" data-action="retry-pending"`
-      + `${data.busy || data.loading || !data.ready ? " disabled" : ""}>${ICON.refresh}`
+      + `${data.busy || data.loading || data.contractLoading || !settingsAvailable() ? " disabled" : ""}>${ICON.refresh}`
       + `<span>${data.busy ? "处理中" : "立即核对"}</span></button></div>`);
     } else if (data.notice) notices.push(`<p class="ct-notice${data.error ? " is-error" : ""}" role="status">${data.error ? ICON.alert : ICON.check}`
       + `<span>${e(data.notice)}</span><button type="button" data-action="dismiss" aria-label="关闭">×</button></p>`);
@@ -864,9 +923,9 @@ window.CompanionContactPage = (() => {
     return notices.join("");
   }
   function emptyMarkup() {
-    if (data.loading) return `<div class="ct-empty"><span class="ct-spinner"></span>正在读取联系设置…</div>`;
-    if (!data.nativePath) return `<div class="ct-empty">${ICON.alert}<strong>还没有可管理的私聊对象</strong>
-      <p>请先选择已初始化的私聊对象与角色。</p></div>`;
+    if (data.loading || data.contractLoading) return `<div class="ct-empty"><span class="ct-spinner"></span>正在读取全局设置…</div>`;
+    if (!data.configPath) return `<div class="ct-empty">${ICON.alert}<strong>全局设置接口未就绪</strong>
+      <p>请确认 CompanionV2 已启动后重新读取。</p></div>`;
     return `<div class="ct-empty">${ICON.alert}<strong>还没有读到设置</strong>
       <p>${e(data.notice || "请重新读取；若反复失败，先在账号与会话中确认 V2 已启动。")}</p>
       <button type="button" class="ct-btn" data-action="refresh">${ICON.refresh}<span>重新读取</span></button></div>`;
@@ -897,16 +956,14 @@ window.CompanionContactPage = (() => {
         <div class="ct-center is-${v.tone}">
           <span class="ct-center-title">${e(v.title)}</span>
           <span class="ct-center-detail">${e(v.detail)}</span>
-          ${["authorization_denied", "configuration_relationship_required"].includes(v.code)
-            ? `<button type="button" class="ct-center-action" data-go="manage" data-manage="identity" aria-label="前往关系与权限，核对主动联系授权">前往关系与权限</button>` : ""}
           ${v.automatic ? `<span class="ct-center-flag">${ICON.alert}${e(v.automatic.text)}</span>` : ""}
         </div>
         ${data.scanning ? `<div class="ct-scan-hint">时间游标按 ${e(value("quiet_timezone") || "未设时区")} 走</div>` : ""}
       </div>
       <div class="ct-controls">
-        ${fieldBlock("总开关", [
-          toggle("enabled", "允许主动联系", "关闭时下面每一类契机都不会开口。"),
-          toggle("automatic_enabled", "后台自动联系", "关闭后只有你自己触发的联系会发出，后台不再自行决定开口。"),
+        ${fieldBlock("全局开关", [
+          toggle("enabled", "允许主动联系", "单个用户的开关在私聊用户页调整。"),
+          toggle("automatic_enabled", "后台自动联系", "未单独设置的用户跟随此值。"),
         ])}
         ${fieldBlock("免打扰 · 外圈", [
           toggle("quiet_enabled", "启用免打扰时段", "免打扰只决定「现在不开口」，不改动已登记的日程。"),
@@ -1052,13 +1109,13 @@ window.CompanionContactPage = (() => {
       <div class="ct-purposes-summary" aria-label="契机概况">
         <div class="ct-purpose-stat"><strong>${ALL_PURPOSES.length}</strong><span>类契机</span></div>
         <div class="ct-purpose-stat"><strong>${enabled}</strong><span>单项已开启</span></div>
-        <div class="ct-purpose-stat"><strong>${allowed}</strong><span>当前可开口</span></div>
+        <div class="ct-purpose-stat"><strong>${allowed}</strong><span>全局默认开启</span></div>
         <div class="ct-purpose-stat"><strong>${paused}</strong><span>暂缓中</span></div>
       </div>
       <div class="ct-purpose-tools">
         <label class="ct-purpose-search"><span>查找</span>
-          <input type="search" data-purpose-search aria-label="搜索契机名称或限制原因"
-            value="${e(data.purposeQuery)}" placeholder="名称、类别或限制原因">
+          <input type="search" data-purpose-search aria-label="搜索契机名称或类别"
+            value="${e(data.purposeQuery)}" placeholder="名称或类别">
         </label>
         <label class="ct-purpose-filter"><span>类别</span>
           <select data-purpose-bucket-filter aria-label="按契机类别筛选">
@@ -1066,10 +1123,10 @@ window.CompanionContactPage = (() => {
             ${PURPOSE_BUCKETS.map(bucket => `<option value="${bucket.id}"${data.purposeBucket === bucket.id ? " selected" : ""}>${e(bucket.label)}</option>`).join("")}
           </select>
         </label>
-        <label class="ct-purpose-filter"><span>当前状态</span>
-          <select data-purpose-filter aria-label="按当前状态筛选">
+        <label class="ct-purpose-filter"><span>全局状态</span>
+          <select data-purpose-filter aria-label="按全局默认状态筛选">
             ${[["all","全部状态"],["enabled","单项已开启"],["disabled","单项已关闭"],
-              ["available","当前可开口"],["paused","暂缓中"],["unavailable","当前不可开口"]]
+              ["available","全局默认开启"],["paused","全局暂缓中"],["unavailable","总开关关闭"]]
               .map(([key, label]) => `<option value="${key}"${data.purposeFilter === key ? " selected" : ""}>${label}</option>`).join("")}
           </select>
         </label>
@@ -1107,8 +1164,16 @@ window.CompanionContactPage = (() => {
       </dl>
       <section class="ct-test-prompt"><h4>类型指令</h4><p>${e(item.instruction)}</p></section>
       <p class="ct-test-expect"><strong>通过条件</strong>${e(item.expect)}</p>
-      <footer class="ct-test-actions"><button type="button" class="ct-btn ct-test-copy"
-        data-test-copy="${e(item.id)}">${ICON.copy}<span>复制测试指令</span></button></footer>
+      ${testResultMarkup(item.id)}
+      <footer class="ct-test-actions">
+        <button type="button" class="ct-btn is-primary ct-test-run" data-test-run="${e(item.id)}"
+          ${data.testBusy || data.testUncertain || item.coverage !== "ready" ? " disabled" : ""}>
+          ${data.testBusy === item.id ? '<span class="ct-spinner" aria-hidden="true"></span><span>测试中…</span>'
+            : data.testUncertain ? `${ICON.alert}<span>先核对投递结果</span>`
+            : `${ICON.test}<span>运行测试</span>`}
+        </button>
+        <button type="button" class="ct-btn ct-test-copy" data-test-copy="${e(item.id)}">${ICON.copy}<span>复制提示词</span></button>
+      </footer>
     </article>`).join("");
     return `<div class="ct-tests">
       <div class="ct-test-overview">
@@ -1118,8 +1183,13 @@ window.CompanionContactPage = (() => {
           <span><i class="is-partial"></i>只有资格检查 <strong>${counts.partial}</strong></span>
           <span><i class="is-missing"></i>尚无独立生产器 <strong>${counts.missing}</strong></span>
         </div>
-        <p class="ct-test-boundary">复制只生成测试文本，不调用模型，也不向真实会话投递。</p>
+        <p class="ct-test-boundary">运行测试会调用对应的真实来源和角色模型；若通过人格复核，会真实投递到核心管理员私聊。每次发送前都会再次确认。</p>
       </div>
+      ${data.testUncertain ? `<div class="ct-test-lock" role="alert">
+        <span>${data.testGuard?.state === "pending" ? "上次测试没有收到最终回执。" : "上次测试结果未确认。"}请先核对核心管理员私聊；确认前不能再次启动测试，以免重复投递。</span>
+        <button type="button" class="ct-btn" data-test-action="unlock">核实后解除测试锁</button>
+      </div>` : ""}
+      ${data.testBusy ? `<p class="ct-test-running" role="status"><span class="ct-spinner" aria-hidden="true"></span>正在运行 ${e(PURPOSE_META[data.testBusy]?.label || "主动消息")} 测试；可能需要等待模型与平台回执。</p>` : ""}
       <div class="ct-test-tools">
         <label class="ct-test-search"><span>查找类型</span>
           <input type="search" data-test-search aria-label="搜索主动消息类型和测试指令"
@@ -1141,7 +1211,108 @@ window.CompanionContactPage = (() => {
       </div>
       <div class="ct-tests-grid">${cards}</div>
       <p class="ct-test-empty" hidden>没有匹配的消息类型</p>
+      ${testConfirmationMarkup()}
     </div>`;
+  }
+  const TEST_STAGE_LABELS = {
+    request:"诊断请求", authorization:"管理员身份", binding:"管理员私聊绑定", runtime:"运行环境",
+    settings:"主动联系设置", purpose:"联系目的", trusted_candidate:"真实来源", contact_admission:"主动联系准入",
+    attempt_budget:"本私聊 24 小时尝试额度", relationship_attempt_budget:"关系级 24 小时尝试额度",
+    delivery_budget:"本私聊 24 小时投递额度", relationship_delivery_budget:"关系级 24 小时投递额度",
+    model_route:"主动联系模型路由", model_generation:"模型生成", persona_review:"人格复核",
+    delivery:"平台投递", receipt:"投递回执", execution:"端到端执行",
+  };
+  const TEST_STAGE_STATES = {
+    passed:"通过", failed:"失败", pending:"待检查", skipped:"未执行", not_required:"无需复核",
+    not_started:"未开始", checking:"检查中", running:"运行中", unknown:"结果未知",
+  };
+  const TEST_SKIP_REASONS = {
+    duplicate:"与近期已发送内容重复", low_confidence:"模型把握不足，按沉默阈值暂缓发送",
+    persona_review:"人格复核未放行", framework_guard:"正文含框架标记，发送前检查拦截",
+    presentation_empty:"文字清理后正文为空", forbidden_word:"命中当前禁用词规则",
+    source_coverage:"来源材料不足以支持当前表述", no_sendable_content:"处理后没有可发送正文",
+    model_decision:"模型判断当前不适合发送", unknown:"系统没有记录具体跳过原因",
+  };
+  const TEST_MODEL_SKIP_REASONS = {
+    insufficient_context:"可用材料不足", no_natural_opening:"当前没有自然的开口点",
+    purpose_mismatch:"材料与测试目的不匹配", repetitive:"内容可能重复",
+    respect_user_boundary:"为尊重对方边界而保持沉默", other:"模型选择暂不发送",
+  };
+  const TEST_DELIVERY_STATES = {
+    delivered:"平台已确认投递", failed:"平台明确返回失败", unknown:"平台投递结果未知",
+    accepted:"平台已接收请求，但尚无最终投递回执", pending:"等待平台投递回执",
+    dispatched:"已提交平台，等待投递回执",
+  };
+  function testStageMarkup(result) {
+    const stages = Array.isArray(result.stages) ? result.stages.filter(item =>
+      item && typeof item.stage === "string" && typeof item.state === "string") : [];
+    const rows = stages.length ? stages : result.stage ? [{stage:result.stage,
+      state:result.state === "unknown" ? "unknown" : result.state === "pending" ? "pending" : "failed"}] : [];
+    if (!rows.length) return "";
+    return `<section class="ct-test-diagnosis" aria-label="诊断步骤"><h4>诊断步骤</h4>
+      <ol>${rows.map(item => `<li data-state="${e(item.state)}"><span>${e(TEST_STAGE_LABELS[item.stage] || item.stage)}</span>
+        <strong>${e(TEST_STAGE_STATES[item.state] || item.state)}</strong>${item.detail ? `<small>${e(item.detail)}</small>` : ""}</li>`).join("")}</ol>
+    </section>`;
+  }
+  function testResultMarkup(id) {
+    const result = data.testResults[id];
+    if (!result) return "";
+    const state = ["passed", "skipped", "failed", "unknown", "pending"].includes(result.state)
+      ? result.state : "unknown";
+    const title = state === "passed" ? "测试通过 · 已投递"
+      : state === "skipped" ? "测试完成 · 本次未发送"
+      : state === "failed" ? "测试未通过"
+      : state === "pending" ? "测试仍在处理中 · 请勿重试" : "结果未知 · 请勿重试";
+    const stage = result.stage ? TEST_STAGE_LABELS[result.stage] || result.stage : "";
+    const skipReason = TEST_SKIP_REASONS[result.skip_reason] || result.skip_reason || "";
+    const modelSkipReason = TEST_MODEL_SKIP_REASONS[result.model_skip_reason] || result.model_skip_reason || "";
+    const usage = result.budget_usage;
+    const budget = usage && Number.isFinite(Number(usage.used)) && Number.isFinite(Number(usage.limit))
+      ? `已用 ${Number(usage.used)} / ${Number(usage.limit)} 次（滚动 24 小时）` : "";
+    const technical = result.code || result.error ? `<details class="ct-test-technical"><summary>展开技术详情</summary>
+      ${result.code ? `<code>${e(result.code)}</code>` : ""}${result.error ? `<pre>${e(result.error)}</pre>` : ""}</details>` : "";
+    const delivery = TEST_DELIVERY_STATES[result.delivery_state] || "";
+    return `<section class="ct-test-result is-${state}" role="status" aria-live="polite">
+      <strong>${e(title)}${state === "failed" && stage ? ` · 卡在${e(stage)}` : ""}</strong>
+      ${result.failure_title ? `<p class="ct-test-cause"><b>失败原因</b>${e(result.failure_title)}</p>` : ""}
+      ${result.explanation ? `<p class="ct-test-explanation">${e(result.explanation)}</p>` : ""}
+      ${result.route?.label || result.variant?.label ? `<p>来源：${e(result.route?.label || result.variant.label)}</p>` : ""}
+      ${result.purpose_label ? `<p>测试用途：${e(result.purpose_label)} · 收件人：核心管理员</p>` : ""}
+      ${delivery ? `<p>投递状态：${e(delivery)}</p>` : ""}
+      ${skipReason ? `<p class="ct-test-cause"><b>未发送原因</b>${e(skipReason)}${modelSkipReason ? `：${e(modelSkipReason)}` : ""}</p>` : ""}
+      ${budget ? `<p class="ct-test-budget">当前额度：${e(budget)}</p>` : ""}
+      ${testStageMarkup(result)}
+      ${result.suggestion ? `<p class="ct-test-next"><b>下一步</b>${e(result.suggestion)}</p>` : ""}
+      ${technical}
+    </section>`;
+  }
+  function testConfirmationMarkup() {
+    if (!data.confirmTest) return "";
+    if (data.confirmTest === TEST_GUARD_RESET) return `<dialog class="ct-test-dialog" data-test-confirm-dialog aria-labelledby="ct-test-confirm-title">
+      <div class="ct-test-dialog-body">
+        <p class="ct-test-dialog-kicker">上一轮结果未确认</p>
+        <h2 id="ct-test-confirm-title">解除主动测试锁？</h2>
+        <p>请先核对核心管理员私聊，并确认上一轮测试已经结束。解除后可以重新发起测试，仍可能产生另一条真实消息。</p>
+        <div class="ct-test-dialog-actions">
+          <button type="button" class="ct-btn" data-test-action="cancel">继续等待</button>
+          <button type="button" class="ct-btn is-primary" data-test-action="confirm-unlock">我已核实，解除锁定</button>
+        </div>
+      </div>
+    </dialog>`;
+    const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === data.confirmTest);
+    if (!item) return "";
+    return `<dialog class="ct-test-dialog" data-test-confirm-dialog aria-labelledby="ct-test-confirm-title">
+      <div class="ct-test-dialog-body">
+        <p class="ct-test-dialog-kicker">真实投递测试</p>
+        <h2 id="ct-test-confirm-title">运行「${e(item.label)}」测试？</h2>
+        <p>将读取当前有效来源，调用角色配置的模型并执行人格复核。只有模型决定发送且复核通过时，才会真实投递到核心管理员私聊。</p>
+        <p class="ct-test-dialog-warning">测试不占日常联系额度。若结果未知，请先核对管理员私聊，不要重新运行。</p>
+        <div class="ct-test-dialog-actions">
+          <button type="button" class="ct-btn" data-test-action="cancel">取消</button>
+          <button type="button" class="ct-btn is-primary" data-test-action="confirm">确认并运行</button>
+        </div>
+      </div>
+    </dialog>`;
   }
   function testMatches(id) {
     const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === id);
@@ -1169,30 +1340,26 @@ window.CompanionContactPage = (() => {
     if (empty) empty.hidden = visible > 0;
   }
   function purposeStatus(name) {
-    const info = data.purposes[name] || {};
     if (value(name + ".enabled") === false) return "disabled";
     if (value("enabled") === false) return "unavailable";
-    if (info.reason === "proactive_paused") return "paused";
-    if (info.allowed === true) return "available";
-    if (info.allowed === false) return "unavailable";
-    return "unknown";
+    if ([value(name + ".pause_until"), value("pause_until")]
+      .some(until => typeof until === "string" && Date.parse(until) > Date.now())) return "paused";
+    return "available";
   }
   function purposeRow(name, label) {
-    const info = data.purposes[name] || {};
     const enabled = value(name + ".enabled") !== false;
     const weight = Number(value(name + ".weight"));
     const status = purposeStatus(name);
     const pauseUntil = [value(name + ".pause_until"), value("pause_until")]
       .filter(until => typeof until === "string" && Date.parse(until) > Date.now())
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
-    const blocked = info.allowed === false && status === "unavailable" && info.reason !== "proactive_disabled";
     const scale = Math.max(0, Math.min(5, Number.isFinite(weight) ? weight : 1));
-    return `<article class="ct-purpose${blocked ? " is-blocked" : ""}${enabled ? " is-on" : ""}"
+    return `<article class="ct-purpose${enabled ? " is-on" : ""}"
       data-purpose="${e(name)}">
       <label class="ct-check">
         <input type="checkbox" data-field="${e(name)}.enabled"${enabled ? " checked" : ""}>
         <span class="ct-check-box">${ICON.check}</span>
-        <span class="ct-purpose-name">${e(info.label || label)}</span></label>
+        <span class="ct-purpose-name">${e(label)}</span></label>
       <div class="ct-weight" title="相对权重 ${Number.isFinite(weight) ? weight.toFixed(2) : "—"}">
         <input type="range" min="0.1" max="5" step="0.1" data-field="${e(name)}.weight"
           value="${Number.isFinite(weight) ? weight : 1}" aria-label="${e(label)} 相对权重">
@@ -1202,24 +1369,18 @@ window.CompanionContactPage = (() => {
       <div class="ct-purpose-state">
         ${status === "disabled" ? `<span class="ct-chip">已关闭</span>`
           : status === "paused" ? `<span class="ct-chip is-paused">${pauseUntil ? "暂缓至 " + e(pauseUntil.slice(0, 16).replace("T", " ")) : "暂缓中"}</span>`
-          : status === "unavailable" ? value("enabled") === false
-            ? `<span class="ct-chip is-risk">总开关关闭</span>`
-            : `<span class="ct-chip is-risk" title="${e(reason(info.reason))}">${e(shortReason(info.reason))}</span>`
-          : status === "available" ? `<span class="ct-chip is-ok">可开口</span>`
-          : blocked
-          ? `<span class="ct-chip is-risk" title="${e(reason(info.reason))}">${e(shortReason(info.reason))}</span>`
-          : `<span class="ct-chip">待核对</span>`}
+          : status === "unavailable" ? `<span class="ct-chip is-risk">全局总开关关闭</span>`
+          : status === "available" ? `<span class="ct-chip is-ok">全局默认开启</span>`
+          : `<span class="ct-chip">待配置</span>`}
       </div>
     </article>`;
   }
   function purposeMatches(name) {
-    const meta = PURPOSE_META[name], info = data.purposes[name] || {};
+    const meta = PURPOSE_META[name];
     const query = data.purposeQuery.trim().toLocaleLowerCase();
     if (data.purposeBucket !== "all" && meta.bucket.id !== data.purposeBucket) return false;
     if (query) {
-      const searchable = [name, meta.label, meta.bucket.label, info.label, info.reason,
-        info.reason ? reason(info.reason) : ""]
-        .filter(Boolean).join(" ").toLocaleLowerCase();
+      const searchable = [name, meta.label, meta.bucket.label].join(" ").toLocaleLowerCase();
       if (!searchable.includes(query)) return false;
     }
     switch (data.purposeFilter) {
@@ -1259,39 +1420,37 @@ window.CompanionContactPage = (() => {
     return text.length > 14 ? text.slice(0, 13) + "…" : text;
   }
 
-  /* 开口闸门视图：后端判定的顺序，一圈一圈往外。
-     这一屏回答的是「为什么此刻不开口」，所以先把 effective 摆第一。 */
+  /* These gates describe available global settings, not a live delivery check. */
   function gatesView() {
-    const v = verdict();
+    const settings = data.settings;
+    const minute = currentMinute(settings);
+    const pauseUntil = value("pause_until");
     const gates = [
-      {id:"allowed", title:"联系授权", ok:data.effective?.allowed !== false, code:data.effective?.reason,
-       note:"由身份与关系授权决定；关闭总开关会同时撤销这条授权。"},
-      {id:"automatic", title:"后台自动联系", ok:data.effective?.automatic_allowed !== false,
-       code:data.effective?.automatic_reason, note:"只影响后台自行决定的开口，不影响你主动触发的。"},
-      {id:"model", title:"主动联系模型", ok:data.effective?.model_registered !== false, code:"model_task_unregistered",
-       note:"未登记模型时，即使前两闸都开也不会生成内容。"},
-      {id:"host", title:"角色运行", ok:data.hostState === "running", code:"host_not_running",
-       note:"角色未运行时所有后台判定暂停。"},
-      {id:"quiet", title:"免打扰时段", ok:!inQuiet(currentMinute()), code:"proactive_quiet_hours",
-       note:quietSpanText()},
-      {id:"curve", title:"小时活动曲线", ok:(() => { const w = currentWeight(currentMinute()); return w === null || w >= 0.3; })(),
+      {id:"enabled", title:"全局主动联系默认", ok:value("enabled") !== false,
+       note:"逐用户授权与单独设置在私聊用户页管理。"},
+      {id:"automatic", title:"后台自动联系默认", ok:value("automatic_enabled") === true,
+       note:"关闭时仍可由你主动触发联系。"},
+      {id:"quiet", title:"免打扰时段", ok:!inQuiet(minute, settings), code:"proactive_quiet_hours",
+       note:quietSpanText(settings)},
+      {id:"curve", title:"小时活动曲线", ok:(() => { const w = currentWeight(minute, settings); return w === null || w >= 0.3; })(),
        code:"", note:value("proactive_hour_activity_enabled") ? "当前小时权重决定这一格是否保留。" : "未启用，不做小时过滤。"},
-      {id:"pause", title:"临时暂停", ok:!value("pause_until"), code:"proactive_paused",
-       note:value("pause_until") ? "已暂缓至 " + String(value("pause_until")).slice(0, 16).replace("T", " ") : "未设暂停。"},
+      {id:"pause", title:"临时暂停", ok:!(Date.parse(pauseUntil) > Date.now()), code:"proactive_paused",
+       note:pauseUntil ? "已暂缓至 " + String(pauseUntil).slice(0, 16).replace("T", " ") : "未设暂停。"},
     ];
     const blocked = gates.filter(g => !g.ok).length;
+    const paused = Date.parse(pauseUntil) > Date.now();
     return `<div class="ct-gates">
-      <p class="ct-gates-sum${blocked ? " is-shut" : " is-open"}">${blocked ? `有 <strong>${blocked}</strong> 道闸门此刻是关的` : "全部闸门此刻都是开的"}</p>
+      <p class="ct-gates-sum${paused || value("enabled") === false ? " is-shut" : blocked ? " is-shut" : " is-open"}">${paused ? "全局暂停生效中" : value("enabled") === false ? "全局主动联系默认关闭" : "全局默认配置已读取"}</p>
       ${gates.map((g, i) => `<article class="ct-gate${g.ok ? " is-ok" : " is-shut"}" style="--i:${i}">
         <span class="ct-gate-mark">${g.ok ? ICON.check : ICON.alert}</span>
         <div class="ct-gate-body"><strong>${e(g.title)}</strong>
-          ${g.ok ? "" : `<small>${e(g.code ? reason(g.code) : g.note)}</small>`}</div>
+          ${g.ok ? `<small>${e(g.note)}</small>` : `<small>${e(g.note)}</small>`}</div>
         <span class="ct-gate-state">${g.ok ? "开" : "关"}</span></article>`).join("")}
       <section class="ct-gate-settings-brief" aria-label="回复与补看设置">
         <div class="ct-gate-settings-copy">
           <span class="ct-gate-settings-eyebrow">回复与补看</span>
           <h3>忙碌延迟、休息判定与醒后补看</h3>
-          <p>这里查看当前判定，下面统一调整对应规则。</p>
+          <p>此页编辑全局默认，逐用户设置与授权在私聊用户页管理。</p>
         </div>
         <button type="button" class="ct-btn is-primary ct-gate-settings-button" data-action="open-gate-settings">
           ${ICON.gate}<span>调整开口闸门</span>
@@ -1302,7 +1461,7 @@ window.CompanionContactPage = (() => {
           <span class="ct-field-label">暂缓全部联系至<small>留空表示不暂停</small></span>
           <input type="datetime-local" data-field="pause_until"
             value="${e(datetimeLocal(value("pause_until")))}">
-          <small class="ct-field-help">清空后继承上级暂停设置。</small></label>
+          <small class="ct-field-help">留空取消全局暂停。</small></label>
         <label class="ct-field${dirty("note") ? " is-dirty" : ""}">
           <span class="ct-field-label">补充联系偏好</span>
           <textarea data-field="note" rows="3" placeholder="只是写进提示词的材料，不改变权限、频率或去重">${e(value("note") || "")}</textarea></label>
@@ -1536,48 +1695,95 @@ window.CompanionContactPage = (() => {
       month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit",
     });
   }
+  function materialLink(value) {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && !url.username && !url.password ? url.href : "";
+    } catch { return ""; }
+  }
   function materialCard(item) {
-    const search = [item.category, item.purpose, item.title, item.detail, item.note, item.source]
+    const records = Array.isArray(item.usage?.records) ? item.usage.records : [];
+    const search = [item.category, item.purpose, item.title, item.detail, item.note, item.source, item.url,
+      item.usage?.status, item.usage?.thought_origin, item.usage?.followup_observation?.status,
+      ...records.map(record => record.text)]
       .filter(Boolean).join(" ").toLocaleLowerCase();
     const source = item.source || "已核验来源";
+    const href = materialLink(item.url);
+    const usage = item.usage && typeof item.usage === "object" ? item.usage : null;
+    const usageLabels = {delivered:"已送达", partial:"部分送达", unconfirmed:"结果待确认", not_sent:"未发送",
+      pending:"等待投递", failed:"投递失败", cancelled:"已取消", reviewing:"等待审核"};
+    const usageHistory = records;
+    const thoughtOrigin = typeof usage?.thought_origin === "string" ? usage.thought_origin : "";
+    const followup = usage?.status === "delivered" ? usage.followup_observation : null;
+    const followupLabels = {input_after_delivery:"送达后出现新输入",
+      no_input_after_delivery:"暂无后续输入", unknown:"后续输入状态未知"};
+    const followupTime = followup?.input_at ? " · " + materialTime(followup.input_at)
+      : followup?.status === "no_input_after_delivery" && followup.observed_through
+        ? " · 截至 " + materialTime(followup.observed_through) : "";
+    const followupMarkup = followup && typeof followup === "object" ? `<span title="仅表示时间上出现后续输入，不代表这条消息已读或得到回应。">
+      ${e(followupLabels[followup.status] || "后续输入状态未知")}${e(followupTime)}</span>` : "";
+    const usageMarkup = usage ? `<div class="ct-material-usage">
+      <strong>使用记录 · ${e(usageLabels[usage.status] || "状态未知")}</strong>
+      ${thoughtOrigin ? `<span>念头来由 · ${e(thoughtOrigin)}</span>` : ""}
+      <span>${e(usage.delivered_parts ?? 0)} / ${e(usage.total_parts ?? 0)} 段已确认送达</span>
+      ${followupMarkup}
+      ${usageHistory.length ? `<ol>${usageHistory.map(record => `<li><time datetime="${e(record.delivered_at || "")}">
+        第 ${e(Number.isInteger(record.sequence) ? record.sequence + 1 : "-")} 段 · ${e(materialTime(record.delivered_at))}</time><span>${e(record.text || "")}</span></li>`).join("")}</ol>` : ""}
+    </div>` : "";
     return `<article class="ct-material-card" data-material-card data-category="${e(item.category || "")}" data-search="${e(search)}">
       <header class="ct-material-card-head"><span class="ct-material-category">${e(item.category || "素材")}</span>
         <span class="ct-material-purpose">${e(item.purpose || "")}</span></header>
-      <h3>${e(item.title || "主动素材")}</h3>
+      <h3>${e(item.title || "主动念头")}</h3>
       ${item.detail ? `<p class="ct-material-detail">${e(item.detail)}</p>` : ""}
+      ${usageMarkup}
       ${item.note ? `<p class="ct-material-note">${e(item.note)}</p>` : ""}
       <footer><span>${e(source)}</span><time datetime="${e(item.captured_at || "")}">${e(materialTime(item.captured_at))}</time>
-        <span>${item.expires_at ? "有效至 " + e(materialTime(item.expires_at)) : "有效期未设"}</span></footer>
+        <span>${usage ? "历史记录" : item.expires_at ? "有效至 " + e(materialTime(item.expires_at)) : "有效期未设"}</span>
+        ${href ? `<a class="ct-material-source-link" href="${e(href)}" target="_blank" rel="noopener noreferrer">查看来源</a>` : ""}</footer>
     </article>`;
   }
   function materialsView() {
     const items = Array.isArray(data.materialItems) ? data.materialItems : [];
     const count = items.length;
-    const categories = [["all","全部类别"],["对话","对话"],["生活记录","生活记录"],
-      ["约定","约定"],["环境与状态","环境与状态"],["资讯","资讯"],["屏幕观察","屏幕观察"]];
+    const categories = [...new Set(items.map(item => item.category).filter(value => typeof value === "string" && value))];
     let content = "";
     if (data.materialsLoading && !data.materialsLoaded) {
-      content = `<div class="ct-material-empty"><span class="ct-spinner"></span><strong>正在读取素材</strong></div>`;
-    } else if (data.materialsError) {
+      content = `<div class="ct-material-empty"><span class="ct-spinner"></span><strong>正在读取角色共享素材</strong></div>`;
+    } else if (data.materialsError && !data.materialsLoaded) {
       content = `<div class="ct-material-empty is-error">${ICON.alert}<strong>素材读取失败</strong><p>${e(data.materialsError)}</p>
         <button type="button" class="ct-btn" data-action="refresh-materials"${data.materialsLoading ? " disabled" : ""}>${ICON.refresh}<span>重试</span></button></div>`;
     } else if (!count) {
-      content = `<div class="ct-material-empty">${ICON.source}<strong>当前没有通过核验的主动素材</strong></div>`;
+      const messages = {refreshing:"正在获取角色共享资讯", not_checked:"正在等待首次巡视",
+        not_configured:"尚未启用角色共享资讯来源", failed:"最近一次巡视失败，暂无有效素材",
+        unavailable:"角色共享素材当前不可用",
+        ready:"暂时没有仍在有效期内的角色共享素材"};
+      const message = messages[data.materialsState] || messages.ready;
+      content = `<div class="ct-material-empty${data.materialsState === "failed" ? " is-error" : ""}">${ICON.source}<strong>${e(message)}</strong>
+        ${data.materialsError ? `<p>${e(data.materialsError)}</p>` : ""}</div>`;
     } else {
       content = `<div class="ct-material-grid">${items.map(materialCard).join("")}</div>
         <p class="ct-material-filter-empty" hidden>没有匹配的素材</p>`;
     }
+    const refreshed = data.materialsCheckedAt ? `最近巡视 ${e(materialTime(data.materialsCheckedAt))}` : "";
+    const stale = data.materialsState === "stale" ? "最近一次巡视未成功，当前仍显示有效素材"
+      : data.materialsState === "failed" && count ? "资讯巡视失败，当前仍显示有效共享素材" : "";
     return `<div class="ct-materials">
+      <div class="ct-material-heading"><strong>角色共享素材池</strong></div>
       <div class="ct-material-tools">
         <label class="ct-material-search"><span>查找素材</span>
-          <input type="search" data-material-search aria-label="搜索主动素材" value="${e(data.materialQuery)}" placeholder="名称、内容或来源">
+          <input type="search" data-material-search aria-label="搜索角色共享素材" value="${e(data.materialQuery)}" placeholder="名称、内容或来源">
         </label>
-        <label><span>来源类别</span><select data-material-category aria-label="按来源类别筛选">
-          ${categories.map(([value, label]) => `<option value="${e(value)}"${data.materialCategory === value ? " selected" : ""}>${e(label)}</option>`).join("")}
+        <label><span>素材类别</span><select data-material-category aria-label="按素材类别筛选">
+          <option value="all"${data.materialCategory === "all" ? " selected" : ""}>全部类别</option>
+          ${categories.map(category => `<option value="${e(category)}"${data.materialCategory === category ? " selected" : ""}>${e(category)}</option>`).join("")}
         </select></label>
-        <span class="ct-material-count" data-material-result-count>${count} 项素材</span>
+        <span class="ct-material-count" data-material-result-count>${count} 条共享素材</span>
+        <button type="button" class="ct-btn ct-material-refresh" data-action="refresh-materials" title="刷新共享素材" aria-label="刷新共享素材"${data.materialsLoading ? " disabled" : ""}>${ICON.refresh}</button>
       </div>
-      ${data.materialsLoading && data.materialsLoaded ? `<p class="ct-material-updating" role="status">正在更新</p>` : ""}
+      ${refreshed ? `<p class="ct-material-updating">${refreshed}</p>` : ""}
+      ${stale ? `<p class="ct-material-updating is-error" role="status">${e(stale)}</p>` : ""}
+      ${data.materialsLoading && data.materialsLoaded ? `<p class="ct-material-updating" role="status">正在读取更新</p>` : ""}
+      ${data.materialsError && data.materialsLoaded ? `<p class="ct-material-updating is-error" role="status">${e(data.materialsError)}</p>` : ""}
       ${content}
     </div>`;
   }
@@ -1594,14 +1800,14 @@ window.CompanionContactPage = (() => {
       if (matches) visible++;
     }
     const count = root.querySelector("[data-material-result-count]");
-    if (count) count.textContent = visible + " / " + cards.length + " 项素材";
+    if (count) count.textContent = visible + " / " + cards.length + " 条共享素材";
     const empty = root.querySelector(".ct-material-filter-empty");
     if (empty) empty.hidden = visible > 0 || cards.length === 0;
   }
   function body() {
     if (data.view === "tests") return testsView();
     if (data.view === "materials") return materialsView();
-    if (!data.ready) return emptyMarkup();
+    if (!settingsAvailable()) return emptyMarkup();
     return {"dial":dialView, "purposes":purposesView, "gates":gatesView,
       "budgets":budgetsView, "sources":sourcesView}[data.view]();
   }
@@ -1615,7 +1821,6 @@ window.CompanionContactPage = (() => {
     data.viewShift = to > from ? 1 : to < from ? -1 : null;
     data.view = next;
     data.notice = "";
-    if (next === "materials") void loadMaterials();
   }
   function render() {
     if (!root) return;
@@ -1637,6 +1842,8 @@ window.CompanionContactPage = (() => {
     if (data.view === "purposes") updatePurposeFilters();
     if (data.view === "tests") updateTestFilters();
     if (data.view === "materials") updateMaterialFilters();
+    const testDialog = root.querySelector?.("[data-test-confirm-dialog]");
+    if (testDialog && typeof testDialog.showModal === "function" && !testDialog.open) testDialog.showModal();
     if (data.scanning && data.ready) {
       data.scanning = false;
       const dial = root.querySelector(".ct-dial");
@@ -1663,17 +1870,41 @@ window.CompanionContactPage = (() => {
   }
   function clicked(event) {
     const view = event.target.closest("[data-view]");
-    if (view) { switchView(view.dataset.view); render(); return; }
+    if (view) {
+      switchView(view.dataset.view); render();
+      if (view.dataset.view === "materials") void loadMaterials();
+      return;
+    }
+    const testAction = event.target.closest("[data-test-action]")?.dataset.testAction;
+    if (testAction === "cancel") { data.confirmTest = ""; render(); return; }
+    if (testAction === "confirm") { void runProactiveTest(data.confirmTest); return; }
+    if (testAction === "unlock") {
+      if (data.testUncertain) { data.confirmTest = TEST_GUARD_RESET; render(); }
+      return;
+    }
+    if (testAction === "confirm-unlock") {
+      storeProactiveTestGuard(null);
+      data.confirmTest = ""; data.testGuard = null; data.testUncertain = false;
+      data.testResults = {};
+      notice("已解除测试锁。下一轮测试仍可能真实投递到核心管理员私聊。");
+      render(); return;
+    }
+    const testRun = event.target.closest("[data-test-run]")?.dataset.testRun;
+    if (testRun) {
+      if (data.testBusy || data.testUncertain) return;
+      data.confirmTest = testRun;
+      render(); return;
+    }
     const testCopy = event.target.closest("[data-test-copy]")?.dataset.testCopy;
     if (testCopy) { copyTestInstruction(testCopy); return; }
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action === "refresh") {
-      data.notice = ""; data.error = false; load(); loadContract();
+      data.notice = ""; data.error = false; loadContract();
       if (data.view === "materials") void loadMaterials();
       return;
     }
-    if (action === "retry-contract") { void loadContract(); return; }
     if (action === "refresh-materials") { void loadMaterials(); return; }
+    if (action === "retry-contract") { void loadContract(); return; }
     if (action === "open-gate-settings") { focusGateSettings(); return; }
     if (action === "save") { save(); return; }
     if (action === "retry-pending") { save(); return; }
@@ -1789,6 +2020,57 @@ window.CompanionContactPage = (() => {
     }
     render();
   }
+  async function runProactiveTest(id) {
+    const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === id);
+    if (!item || data.testBusy || data.testUncertain) return;
+    const ticket = version;
+    const guard = {purpose:id, state:"pending", started_at:Date.now()};
+    if (!storeProactiveTestGuard(guard)) {
+      data.confirmTest = "";
+      data.testResults[id] = {state:"failed", failure_title:"测试没有启动",
+        error:"浏览器未能保存防重复测试状态。", suggestion:"请允许此页面使用浏览器存储后再运行。"};
+      notice("未能保存防重复测试状态，因此没有启动测试。", true);
+      render(); return;
+    }
+    data.confirmTest = "";
+    data.testBusy = id;
+    data.testGuard = guard;
+    data.testResults[id] = null;
+    notice("正在检查真实来源、生成主动消息并等待投递回执…");
+    render();
+    try {
+      const result = await api("POST", "setup/proactive-diagnostic",
+        {purpose: id, confirm_delivery: true}, 180000);
+      if (!live(ticket)) return;
+      if (!["passed", "skipped", "failed", "unknown", "pending"].includes(result.state)) {
+        throw problem("invalid_response");
+      }
+      data.testResults[id] = result;
+      const uncertain = ["unknown", "pending"].includes(result.state);
+      data.testUncertain = uncertain;
+      data.testGuard = uncertain ? {...guard, state:result.state} : null;
+      storeProactiveTestGuard(data.testGuard);
+      notice(uncertain ? "测试结果未确认。请先核对核心管理员私聊；不要重试。"
+        : result.state === "passed" ? "测试通过，消息已投递到核心管理员私聊。"
+        : result.state === "skipped" ? "测试完成，模型按当前素材判断本次不发送。"
+        : "测试未通过，查看卡片中的阶段和建议。", result.state === "failed");
+    } catch (error) {
+      if (!live(ticket)) return;
+      const uncertain = error?.confirmed !== true;
+      data.testUncertain = uncertain;
+      data.testGuard = uncertain ? {...guard, state:"unknown"} : null;
+      storeProactiveTestGuard(data.testGuard);
+      data.testResults[id] = {
+        state: uncertain ? "unknown" : "failed",
+        error: uncertain ? "请求未收到可核验的最终结果。" : reason(error.code),
+        suggestion: uncertain ? "请核对核心管理员私聊；确认是否收到前，不要再次启动测试。" : "修正提示的问题后可重新运行测试。",
+      };
+      notice(uncertain ? "测试请求结果未知。请先核对核心管理员私聊，不要重试。"
+        : "测试请求被拒绝，未启动测试。", true);
+    } finally {
+      if (live(ticket)) { data.testBusy = ""; render(); }
+    }
+  }
   /* 曲线拖涂。按下开始，横向移动换算成小时，纵向换算成权重——
      这是这一页唯一一个「直接画数据」的地方，因为 24 个数字确实没人愿意输。 */
   function plotRect() { return root?.querySelector('[data-role="curvePlot"]')?.getBoundingClientRect() || null; }
@@ -1866,14 +2148,9 @@ window.CompanionContactPage = (() => {
     });
   }
   function addresses() {
-    /* 状态与配置都采用目录中当前对象、角色的路径，避免多目标时读写全局路由。 */
-    const role = window.CompanionProduct.role?.();
-    const native = role?.perception_native_api, config = role?.config_api;
-    if (typeof native !== "string" || !native || typeof config !== "string" || !config) {
-      throw problem("proactive_contact_scope_invalid");
-    }
-    data.nativePath = rel(native);
-    data.configPath = rel(config);
+    /* 配置和共享素材读取都走固定安装级路由。 */
+    data.configPath = rel(PREFIX + "config");
+    data.nativePath = rel(PREFIX + "perception-native");
   }
   async function mount(host) {
     /* 顺序有讲究：unmount() 会 ++version 并清掉 data，所以
@@ -1884,7 +2161,15 @@ window.CompanionContactPage = (() => {
     unmount();
     root = host; contactScope = currentContactScope();
     const cached = contactCache.get(contactScope);
-    data = cached ? {...blank(), ...cached, touched:new Set(cached.touched || []), draft:{...(cached.draft || {})}, pulse:new Set(), pulseNow:[], flip:null, flipNow:null, viewShift:null, viewShiftNow:null} : blank();
+    data = cached ? {...blank(), ...cached, confirmTest:"", testBusy:"", touched:new Set(cached.touched || []), draft:{...(cached.draft || {})}, pulse:new Set(), pulseNow:[], flip:null, flipNow:null, viewShift:null, viewShiftNow:null} : blank();
+    const testGuard = restoreProactiveTestGuard();
+    if (testGuard) {
+      data.testGuard = testGuard;
+      data.testUncertain = true;
+      data.testResults[testGuard.purpose] = {state:"unknown",
+        error:"页面没有收到上一轮测试的最终回执。",
+        suggestion:"请核对核心管理员私聊；确认上一轮结束后再解除测试锁。"};
+    }
     /* 页面切换只缓存草稿和筛选，不把旧的网络错误带回新的读取周期。 */
     if (data.error) { data.notice = ""; data.error = false; }
     const ticket = ++version;
@@ -1905,8 +2190,7 @@ window.CompanionContactPage = (() => {
       if (context?.pluginName !== HOST) throw problem("bridge_unavailable");
       addresses();
       data.pendingWrite = restorePendingWrite();
-      await load(); await loadContract();
-      if (data.view === "materials") await loadMaterials();
+      await loadContract();
       if (live(ticket)) render();
     } catch (error) {
       if (!live(ticket)) return;

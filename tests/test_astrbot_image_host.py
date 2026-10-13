@@ -34,9 +34,9 @@ class AstrBotImageHostTests(unittest.IsolatedAsyncioTestCase):
                                                    native_types=self.types, now=lambda: NOW)
         self.addAsyncCleanup(self.controller.terminate)
 
-    async def start_host(self):
+    async def start_host(self, *, review_only=False):
         (await self.controller.initialize_profile()).unwrap()
-        (await self.controller.start()).unwrap()
+        (await self.controller.start(review_only=review_only)).unwrap()
 
     def event(self):
         event = FakeEvent(self.native)
@@ -47,7 +47,7 @@ class AstrBotImageHostTests(unittest.IsolatedAsyncioTestCase):
         installed = installed_native_types()
         self.assertIs(installed.image, Image)
         self.assertIs(installed.image_loader, load_native_image)
-        await self.start_host()
+        await self.start_host(review_only=True)
         event = self.event()
         self.assertTrue(self.controller.claims(event))
         batch = (await self.controller.receive_claimed(event)).unwrap()
@@ -70,7 +70,7 @@ class AstrBotImageHostTests(unittest.IsolatedAsyncioTestCase):
         wire = build_wire(ModelEnvelope(request, "本轮原任务", 100, "fixture"))
         # Exercise the installed pure preparation code with no SDK/network client.
         native = object.__new__(ProviderOpenAIOfficial)
-        native.provider_config = {}
+        native.provider_config = {"id": "fixture", "type": "openai_chat_completion", "model": "fixture"}
         native.model_name = "fixture"
         native.client = NS(base_url=NS(host="fixture.invalid"))
         native._materialize_context_image_parts = AsyncMock(side_effect=lambda values: deepcopy(values))

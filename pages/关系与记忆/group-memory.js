@@ -8,6 +8,48 @@ window.CompanionGroupMemoryPage = (() => {
     return wrapped ? wrapped.data : response;
   };
   const labels = {pending:"待审阅", reviewed:"已审阅", dismissed:"已忽略"};
+  function confirmAction(message) {
+    const dialog = document.createElement("dialog");
+    dialog.className = "gm-confirm-dialog";
+    dialog.setAttribute("aria-labelledby", "gm-confirm-title");
+    dialog.setAttribute("aria-describedby", "gm-confirm-message");
+    const title = document.createElement("h2");
+    title.id = "gm-confirm-title";
+    title.textContent = "确认撤回群公共陈述";
+    const description = document.createElement("p");
+    description.id = "gm-confirm-message";
+    description.textContent = message;
+    const actions = document.createElement("div");
+    actions.className = "gm-confirm-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button"; cancel.className = "secondary"; cancel.textContent = "取消";
+    const accept = document.createElement("button");
+    accept.type = "button"; accept.className = "danger"; accept.textContent = "确认撤回";
+    actions.append(cancel, accept);
+    dialog.append(title, description, actions);
+    document.body.append(dialog);
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = accepted => {
+        if (settled) return;
+        settled = true;
+        if (dialog.open) dialog.close();
+        dialog.remove();
+        resolve(accepted);
+      };
+      cancel.addEventListener("click", () => finish(false));
+      accept.addEventListener("click", () => finish(true));
+      dialog.addEventListener("cancel", event => { event.preventDefault(); finish(false); });
+      dialog.addEventListener("click", event => {
+        if (event.target !== dialog) return;
+        const bounds = dialog.getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.right
+            || event.clientY < bounds.top || event.clientY > bounds.bottom) finish(false);
+      });
+      try { dialog.showModal(); cancel.focus({preventScroll:true}); }
+      catch { finish(false); }
+    });
+  }
   function mount(bridge, context) {
     const main = document.querySelector("main");
     if (!main) return;
@@ -82,7 +124,7 @@ window.CompanionGroupMemoryPage = (() => {
       finally {state.busy=false;$("gm-list").setAttribute("aria-busy","false");renderList();}
     }
     async function retractItem(item) {
-      if(!window.confirm("确认由管理员撤回这条群公共陈述？后续对话将不再引用，原始成员消息不会删除。"))return;
+      if(!await confirmAction("后续对话将不再引用这条陈述；原始成员消息不会删除。"))return;
       const body={memory_id:item.memory_id,expected_revision:item.revision,view_token:item.view_token,reason:"管理员在群公共记忆页面撤回"};
       const fingerprint=JSON.stringify(body);if(state.pending?.fingerprint!==fingerprint)state.pending={fingerprint,key:crypto.randomUUID()};body.operation_key=state.pending.key;
       state.busy=true;try{const result=await post("group-memory/retract",body);state.receipt=await get("group-memory/operation",{operation_id:result.operation_id});state.pending=null;notice("群公共陈述已撤回；原始消息未删除。",false);await load();}

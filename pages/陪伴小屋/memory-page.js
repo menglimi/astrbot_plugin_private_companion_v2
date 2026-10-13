@@ -22,6 +22,8 @@ window.CompanionMemoryPage = (() => {
   const HOST = "astrbot_plugin_private_companion_v2";
   const PREFIX = "/" + HOST + "/";
   const STORE = "companion-memory-page-v1:";
+  const askConfirm = options => typeof window.CompanionConfirm === "function"
+    ? window.CompanionConfirm(options) : Promise.resolve(false);
   /* 事实预读：这一层不做服务端分页（后端 list 只支持游标 + limit<=50），
      而是把前几页一次读进内存，之后筛选、搜索、计数全在本地完成——
      筛选时不用再等一个往返，比例带也才有完整分母。 */
@@ -124,7 +126,7 @@ window.CompanionMemoryPage = (() => {
     return {catalog:null, target:0, role:0, area:"facts", tab:"facts",
       /* 语料：一次预读多页，本地筛选。corpus 是全量（含已归档提示），
          filter 只影响渲染，不改动数据。 */
-      corpus:[], cursors:[""], page:0, next:null, hasMore:false,
+      corpus:[], cursors:[""], page:0, next:null, hasMore:false, overview:null, history:false,
       filter:"all", search:"", selId:null,
       detail:null, detailId:null, factDetail:null, revisions:[], clearPreview:null,
       queryText:"", queryKind:"all", queryResult:null, querySession:null, sourceResult:null,
@@ -388,6 +390,56 @@ window.CompanionMemoryPage = (() => {
     </section>`;
   }
 
+  function overviewMarkup() {
+    const overview = data.overview;
+    if (!overview) return `<section class="mem-block"><div class="mem-block-body"><p class="mem-plain">${
+      data.loading ? "正在读取全量统计与记忆联动状态…" : "全量统计暂不可用，下面仍显示当前读取到的事实。"}</p></div></section>`;
+    const local = overview.local || {};
+    const facts = local.facts || {};
+    const experiences = local.experiences || {};
+    const sources = local.sources || {};
+    const reflections = local.reflections || {};
+    const states = reflections.by_state || {};
+    const countValue = value => Number.isInteger(value) && value >= 0 ? num(value) : "尚未统计";
+    const historyCounts = ["complete", "empty", "failed", "partial", "running", "prepared", "received", "modelled", "selecting"]
+      .filter(key => Number.isInteger(states[key]) && states[key] > 0)
+      .map(key => `${stateLabels[key] || key} ${num(states[key])}`).join(" · ") || "尚无整理批次";
+    const linkage = overview.linkage || {};
+    let linkageTitle = "外部记忆摘要未接通";
+    let linkageNote = "本地事实与经历仍由 V2 保存。";
+    let linkageTone = "is-warn";
+    if (linkage.state === "ready") {
+      linkageTitle = `${ownerName(linkage.display_name, "记忆插件")}摘要已接通`;
+      linkageNote = "按当前私聊对象只读分类计数，不读取或展示记忆正文。";
+      linkageTone = "is-ok";
+    } else if (linkage.state === "not_owner") {
+      linkageTitle = "当前由 V2 提供长期记忆";
+      linkageNote = "外部记忆插件没有接管当前角色，因此没有读取其摘要。";
+    } else if (linkage.reason === "unsupported_scope") {
+      linkageTitle = "当前对象不支持外部私聊摘要";
+      linkageNote = "切换到已授权的私聊对象后可读取对应摘要。";
+    } else if (linkage.reason) {
+      linkageNote = `读取状态：${String(linkage.reason).replace(/_/g, " ")}。本地记忆不受影响。`;
+    }
+    const categoryLabels = {profile:"个人资料", preference:"偏好", relationship:"关系", private_conversation:"私聊内容", other:"其他"};
+    const categories = Array.isArray(linkage.categories) ? linkage.categories : [];
+    return `<section class="mem-block mem-overview-block">
+      <div class="mem-block-head"><h3>当前记忆概况</h3><span class="mem-badge">当前对象 · 当前角色</span></div>
+      <div class="mem-overview-grid">
+        <div><span>已保存事实 / 全部事实</span><strong>${countValue(facts.active)} / ${countValue(facts.total)}</strong></div>
+        <div><span>共同经历</span><strong>${countValue(experiences.active)} / ${countValue(experiences.total)}</strong></div>
+        <div><span>可用对话消息</span><strong>${countValue(sources.available_messages)}</strong></div>
+        <div><span>整理批次</span><strong>${countValue(reflections.total)}</strong><small>${e(historyCounts)}</small></div>
+      </div>
+      <section class="mem-linkage" aria-label="外部记忆联动">
+        <div class="mem-linkage-head"><div><h4>记忆插件联动</h4><p>${e(linkageNote)}</p></div><span class="mem-badge ${linkageTone}">${e(linkageTitle)}</span></div>
+        ${linkage.state === "ready" ? `<dl class="mem-linkage-counts">${categories.map(item =>
+          `<div><dt>${e(categoryLabels[item.key] || "其他")}</dt><dd>${countValue(item.count)}</dd></div>`).join("")}
+          <div><dt>合计</dt><dd>${countValue(linkage.counts?.total)}</dd></div></dl>` : ""}
+      </section>
+    </section>`;
+  }
+
   function filtersMarkup() {
     const stats = tally(data.corpus);
     const chips = [["all","全部",stats.total],...LIFECYCLE.map(entry=>[entry.key,entry.label,stats[entry.key]])];
@@ -506,7 +558,7 @@ window.CompanionMemoryPage = (() => {
   }
 
   function factsMarkup() {
-    return `${vitalsMarkup()}
+    return `${overviewMarkup()}${vitalsMarkup()}
       <section class="mem-block">
         <div class="mem-split">
           <div>
@@ -570,7 +622,14 @@ window.CompanionMemoryPage = (() => {
 
   function reflectionsMarkup() {
     const list = data.items;
+    const byState = data.overview?.local?.reflections?.by_state || {};
+    const pendingCount = Object.entries(byState).reduce((sum, [key, value]) =>
+      sum + (["complete", "empty"].includes(key) ? 0 : Number(value) || 0), 0);
     return `<section class="mem-block">
+      <div class="mem-reflection-views" role="group" aria-label="整理批次范围">
+        <button type="button" data-reflection-view="pending" aria-pressed="${!data.history}">待处理 <b>${num(pendingCount)}</b></button>
+        <button type="button" data-reflection-view="history" aria-pressed="${data.history}">全部批次 <b>${num(data.overview?.local?.reflections?.total || 0)}</b></button>
+      </div>
       <div class="mem-split">
         <div>
           <div class="mem-filters" style="justify-content:space-between">
@@ -596,7 +655,7 @@ window.CompanionMemoryPage = (() => {
                       <small>已处理 ${num(Object.keys(item.receipts || {}).length)} 项 · 剩余来源 ${e(count(item.remaining_sources))}</small>
                     </button>`;
                   }).join("")
-                : `<div class="mem-empty"><h3>没有待处理的整理批次</h3></div>`}</div>
+                : `<div class="mem-empty"><h3>${data.history ? "当前范围还没有整理记录" : "没有待处理的整理批次"}</h3></div>`}</div>
         </div>
         <section class="mem-detail${data.detailId?" is-open":""}" aria-label="整理详情">${detailMarkup()}</section>
       </div>
@@ -903,9 +962,14 @@ window.CompanionMemoryPage = (() => {
     try {
       const path = endpoint();
       if (data.area === "facts") {
-        const preload = await preloadFacts(ticket);
-        if (!preload || !live(ticket)) return;
+        const [preloadResult, overviewResult] = await Promise.allSettled([
+          preloadFacts(ticket), api("GET", path + "/overview"),
+        ]);
+        if (!live(ticket)) return;
+        if (preloadResult.status === "rejected") throw preloadResult.reason;
+        const preload = preloadResult.value;
         data.corpus = preload.items; data.next = preload.next; data.hasMore = preload.hasMore;
+        data.overview = overviewResult.status === "fulfilled" ? overviewResult.value : null;
         /* 已打开的事实如果被改过版本就关掉详情，避免显示过期内容。 */
         if (data.selId && !data.corpus.some(item=>item.atom_id===data.selId)) {
           data.selId = null; data.factDetail = null; data.revisions = []; data.sourceResult = null;
@@ -915,20 +979,29 @@ window.CompanionMemoryPage = (() => {
             data.factDetail = null; data.revisions = []; data.sourceResult = null;
           }
         }
-        notice(preload.failed ? `只读到了最近 ${preload.items.length} 条事实，更早的部分读取失败：${reason(preload.failed.code)}` : "", Boolean(preload.failed));
+        if (preload.failed) notice(`只读到了最近 ${preload.items.length} 条事实，更早的部分读取失败：${reason(preload.failed.code)}`, true);
+        else if (overviewResult.status === "rejected") notice("事实列表已读取；全量统计与外部记忆联动暂不可用。", true);
+        else notice("");
       } else if (data.area === "reflections") {
-        const query = {limit:20};
+        const query = {limit:20, history:data.history ? "1" : "0"};
         if (data.cursors[data.page]) query.after_id = data.cursors[data.page];
-        const [listed, detail] = await Promise.all([
+        const [listedResult, detailResult, overviewResult] = await Promise.allSettled([
           api("GET", path + "/reflections", query),
           data.detailId ? api("GET", path + "/reflections", {batch_id:data.detailId}) : null,
+          api("GET", path + "/overview"),
         ]);
         if (!live(ticket)) return;
+        if (listedResult.status === "rejected") throw listedResult.reason;
+        const listed = listedResult.value;
+        if (data.detailId && detailResult.status === "rejected") throw detailResult.reason;
+        const detail = detailResult.status === "fulfilled" ? detailResult.value : null;
         if (!Array.isArray(listed.items) || (detail && detail.batch_id !== data.detailId)) throw problem("invalid_response");
         data.items = listed.items; data.next = listed.next_cursor || null;
+        data.overview = overviewResult.status === "fulfilled" ? overviewResult.value : null;
         data.detail = detail || listed.items[0] || null;
         data.detailId = data.detail?.batch_id || null;
-        notice("");
+        notice(overviewResult.status === "rejected" ? "整理批次已读取；全量状态统计暂不可用。" : "",
+          overviewResult.status === "rejected");
       } else {
         const query = {limit:20};
         if (data.cursors[data.page]) query.after_id = data.cursors[data.page];
@@ -1085,7 +1158,15 @@ window.CompanionMemoryPage = (() => {
   async function mutateFact(action, value) {
     const item = data.factDetail?.item;
     if (!item || item.state !== "active" || data.busy || data.loading) return;
-    if (["retract","forget"].includes(action) && !window.confirm(action==="forget"?"确认遗忘这条事实？它会从当前记忆中隐藏，并保留可审计的遗忘记录。":"确认撤回这条事实？这会产生一个新版本。")) return;
+    const confirmationVersion = version;
+    if (["retract","forget"].includes(action)) {
+      const accepted = await askConfirm({
+        title:action==="forget"?"遗忘这条事实":"撤回这条事实",
+        message:action==="forget"?"这条事实会从当前记忆中隐藏，并保留可审计的遗忘记录。":"这会产生一个新版本。",
+        confirmText:action==="forget"?"遗忘事实":"撤回事实",danger:true,
+      });
+      if (!accepted || !live(confirmationVersion) || data.factDetail?.item?.atom_id!==item.atom_id) return;
+    }
     const restored = data.pendingMutation?.kind === "fact" && data.pendingMutation.atom_id===item.atom_id && data.pendingMutation.action===action;
     if (restored && !data.pendingMutation.body) { notice("此操作曾提交但确认未确认；请先刷新事实、查看版本历史，再由你决定是否重新操作。",true); render(); return; }
     const pending = restored ? data.pendingMutation : {kind:"fact",operation_key:crypto.randomUUID(),atom_id:item.atom_id,action,
@@ -1139,7 +1220,9 @@ window.CompanionMemoryPage = (() => {
     const chosen = snapshot.items || [];
     if (!chosen.length) { notice("当前没有可归档的条目。"); render(); return; }
     /* 后端以预览版本核对并归档全部符合条件的条目。 */
-    if (!window.confirm(`将归档 ${chosen.length} 条长期闲置的持久事实。它们会移出工作集，但可以随时移回；不会删除任何内容。继续吗？`)) return;
+    const confirmationVersion = version;
+    if (!await askConfirm({title:"归档长期闲置事实",message:`将归档 ${chosen.length} 条长期闲置的持久事实。它们会移出工作集，但可以随时移回；不会删除任何内容。`,confirmText:"归档事实"})
+        || !live(confirmationVersion) || data.archivePreview!==snapshot) return;
     const restored = data.pendingMutation?.kind === "archive";
     const pending = restored ? data.pendingMutation
       : {kind:"archive",operation_key:crypto.randomUUID(),revision_token:snapshot.archive_token,idle_days:snapshot.idle_days};
@@ -1167,7 +1250,9 @@ window.CompanionMemoryPage = (() => {
     const ids = [...root.querySelectorAll("[data-archive-restore]:checked")].map(item=>item.dataset.archiveRestore);
     if (!ids.length) { notice("请选择要移回的记忆记录。", true); return; }
     if (ids.length > 512) { notice("一次最多移回 512 条。", true); render(); return; }
-    if (!window.confirm(`将 ${ids.length} 条事实移回工作集。它们会重新参与检索。继续吗？`)) return;
+    const confirmationVersion = version;
+    if (!await askConfirm({title:"移回工作集",message:`将 ${ids.length} 条事实移回工作集。它们会重新参与检索。`,confirmText:"移回事实"})
+        || !live(confirmationVersion)) return;
     const ticket = ++version; data.busy = true; stopTimer(); render();
     try {
       const result = await api("POST",endpoint()+"/archive/restore",{atom_ids:ids,operation_key:crypto.randomUUID()});
@@ -1232,7 +1317,9 @@ window.CompanionMemoryPage = (() => {
   async function commitImport() {
     const preview = data.importPreview;
     if (!preview || data.busy || data.loading) return;
-    if (!window.confirm(`将导入 ${preview.counts?.new ?? 0} 条新事实（已存在的会跳过）。继续吗？`)) return;
+    const confirmationVersion = version;
+    if (!await askConfirm({title:"导入记忆包",message:`将导入 ${preview.counts?.new ?? 0} 条新事实（已存在的会跳过）。`,confirmText:"导入事实"})
+        || !live(confirmationVersion) || data.importPreview!==preview) return;
     const ticket = ++version; data.busy = true; notice("正在导入记忆包…"); render();
     try {
       const result = await api("POST",endpoint()+"/import",{bundle:preview.bundle,
@@ -1252,7 +1339,10 @@ window.CompanionMemoryPage = (() => {
     const active=Number(snapshot.counts?.active)||0;
     const restored=data.pendingMutation?.kind==="clear";
     if(!active && !restored) {notice("当前范围没有仍有效的事实。",false);render();return;}
-    if(!window.confirm(restored?"上次清理确认未确认。沿用相同操作标识和预览版本重新核对结果？":`将遗忘当前私聊关系中的 ${active} 条有效事实。来源原文不会由此物理删除。继续吗？`))return;
+    const confirmationVersion = version;
+    if(!await askConfirm({title:restored?"核对上次清理结果":"遗忘当前私聊事实",
+      message:restored?"上次清理结果尚未确认。将沿用相同操作标识和预览版本重新核对结果。":`将遗忘当前私聊关系中的 ${active} 条有效事实。来源原文不会由此物理删除。`,
+      confirmText:restored?"重新核对":"遗忘事实",danger:true})||!live(confirmationVersion)||data.clearPreview!==snapshot)return;
     const pending=data.pendingMutation?.kind==="clear"?data.pendingMutation:{kind:"clear",operation_key:crypto.randomUUID(),revision_token:snapshot.revision_token};
     const payload={operation_key:pending.operation_key,expected_revision_token:pending.revision_token};
     pending.body=payload;data.pendingMutation=pending;saveMutation();
@@ -1356,6 +1446,15 @@ window.CompanionMemoryPage = (() => {
       return;
     }
     if (id === "memory-detail-close") { closeDetail(); return; }
+    if (el.dataset.reflectionView) {
+      const history = el.dataset.reflectionView === "history";
+      if (history !== data.history) {
+        data.history = history; data.cursors = [""]; data.page = 0;
+        data.items = []; data.detailId = null; data.detail = null;
+        load();
+      }
+      return;
+    }
     if (id === "memory-queue") { queue(); return; }
     if (id === "memory-recover") {
       if (data.pending.uncertain) queue(true);

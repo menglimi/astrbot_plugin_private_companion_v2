@@ -11,15 +11,15 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.configuration.registry import FieldRegistry, ValueKind
 from companion_v2.conversation.style_context import (EXPRESSION_STYLE_INSTRUCTION, MAX_CANDIDATES,
     SNAPSHOT_VERSION, ConversationExpressionStyleContext)
 from companion_v2.conversation.models import InboundConversationEvent
 from companion_v2.execution.models import TaskContext, TaskError, encode, stamp
 from companion_v2.expression import learning, style_rotation
-from companion_v2.expression.configuration import (DEFAULTS, GROUP, ExpressionLearningSettings,
-    configuration_fields, read_settings)
+from companion_v2.expression.configuration import (GROUP, ExpressionLearningSettings,
+    POLICY_LAYERS, ROLE_DEFAULTS, ExpressionConfigurationOwner, configuration_fields, read_settings,
+    target_for)
 from companion_v2.expression.style_service import ExpressionStyleService
 from companion_v2.expression.style_evidence import (DEFAULT_SAMPLE_CHARS, INPUT_SAMPLE_SOURCE, MAX_SAMPLE_CHARS,
     MAX_WINDOW_HOURS, ExpressionSampleCatalog, SampleSet, StyleSample, sample_document, sample_handles)
@@ -50,6 +50,8 @@ class StyleLearningOutputTests(unittest.TestCase):
     def signal(self, **overrides):
         item = {"dimension": "punctuation", "observation": "常以句号收束短句",
                 "proposal": "保持短句和句号的节奏", "confidence": 0.5,
+                "applicability": {"channels": ["private"], "relationship_stages": ["any"],
+                    "emotion_gates": ["any"], "intent": "any", "keywords": []},
                 "evidence_handles": [handle("a")]}
         item.update(overrides)
         return {"summary": "形式观察", "signals": [item]}
@@ -58,6 +60,24 @@ class StyleLearningOutputTests(unittest.TestCase):
         output = self.parse(self.signal())
         self.assertEqual(output.summary, "形式观察")
         self.assertEqual(output.signals[0].dimension, "punctuation")
+        self.assertEqual(output.signals[0].applicability["channels"], ["private"])
+
+    def test_source_channel_is_a_default_for_legacy_model_candidates(self):
+        payload = self.signal()
+        del payload["signals"][0]["applicability"]
+        output = learning.parse_output(payload, allowed_evidence={handle("a")}, default_channels=("group",))
+        self.assertEqual(output.signals[0].applicability["channels"], ["group"])
+
+    def test_applicability_is_bounded_and_channel_specific(self):
+        from companion_v2.expression.learning import applicability_matches_channel, laya_intent_matches
+        applicability = {"channels": ["private"], "relationship_stages": ["close"],
+            "emotion_gates": ["positive"], "intent": "question", "keywords": ["晚安"]}
+        self.assertTrue(applicability_matches_channel(applicability, "private"))
+        self.assertFalse(applicability_matches_channel(applicability, "group"))
+        self.assertFalse(laya_intent_matches(applicability, {}))
+        self.assertTrue(laya_intent_matches(applicability, {"reply_intent": "answer", "reply_style": "normal"}))
+        with self.assertRaises(ValueError):
+            learning.normalize_applicability({"channels": ["private", "unknown"]})
 
     def test_empty_signals_allowed(self):
         self.assertEqual(self.parse({"summary": "样本不足", "signals": []}).signals, ())
@@ -402,21 +422,21 @@ class ExpressionSettingsTests(unittest.TestCase):
         self.addCleanup(self.runtime.close)
 
     def context(self, scope=SCOPE):
-        return SimpleNamespace(scope=scope, role_binding=SimpleNamespace(role=ROLE))
+        actor = SampleCatalogTests.private_context().actor
+        return TaskContext(actor, RoleBinding(scope, ROLE, 1), AudienceRef(scope, (actor.subject,)))
 
     def write(self, changes):
-        from companion_v2.configuration.owners import SparseConfigurationOwner
-        target = ConfigTarget(INSTALLATION, ConfigLayer.WINDOW, ROLE, SCOPE)
-        SparseConfigurationOwner(self.runtime).write(target,
-            tuple(field.field_id for field in configuration_fields()),
+        fields = configuration_fields()
+        snapshot = ExpressionConfigurationOwner(self.runtime).read(target_for(installation_id=INSTALLATION), fields)
+        ExpressionConfigurationOwner(self.runtime).write(target_for(installation_id=INSTALLATION), fields,
             changes={GROUP + "." + key: value for key, value in changes.items()},
-            reset=(), expected_revision=0, observed_at=NOW)
+            reset=(), expected_revision=snapshot.revision, observed_at=NOW)
 
-    def test_registry_contract_is_one_window_layer_group(self):
+    def test_registry_contract_uses_installation_policy_fields(self):
         fields = configuration_fields()
         self.assertEqual({field.field_id for field in fields},
-                         {GROUP + "." + name for name in DEFAULTS})
-        self.assertTrue(all(field.layers == (ConfigLayer.WINDOW,) for field in fields))
+                         {GROUP + "." + name for name in ROLE_DEFAULTS})
+        self.assertTrue(all(field.layers == POLICY_LAYERS for field in fields))
         self.assertTrue(all(field.consumer_id == GROUP and field.owner_id == GROUP for field in fields))
         FieldRegistry(version="expression.v1", fields=fields)
         kinds = {field.field_id.removeprefix(GROUP + "."): field.kind for field in fields}
@@ -428,10 +448,10 @@ class ExpressionSettingsTests(unittest.TestCase):
 
     def test_defaults_are_used_before_anything_is_written(self):
         self.assertEqual(read_settings(self.runtime, self.context()),
-                         ExpressionLearningSettings.from_values(DEFAULTS))
+                         ExpressionLearningSettings.from_values(ROLE_DEFAULTS))
         self.assertTrue(read_settings(self.runtime, self.context()).private_learning_enabled)
         self.assertFalse(read_settings(self.runtime, self.context()).group_learning_enabled)
-        self.assertEqual(read_settings(self.runtime, self.context()).min_samples, 5)
+        self.assertEqual(read_settings(self.runtime, self.context()).min_samples, 2)
         self.assertEqual(read_settings(self.runtime, self.context()).group_min_samples, 20)
         self.assertEqual(read_settings(self.runtime, self.context()).active_signal_limit, 60)
 
@@ -449,12 +469,12 @@ class ExpressionSettingsTests(unittest.TestCase):
                          (48, 40, 2))
         self.assertEqual((settings.rules_per_turn, settings.rotation_decay_hours), (4, 12))
 
-    def test_another_scope_keeps_the_defaults(self):
+    def test_installation_policy_is_shared_across_scopes(self):
         self.write({"window_hours": 48})
         other = ScopeRef(INSTALLATION, "onebot", ScopeKind.PRIVATE, "native-b", "bot-a", "login-a",
                          "conversation-b", "session-b")
         self.assertEqual(read_settings(self.runtime, self.context(other)).window_hours,
-                         DEFAULTS["window_hours"])
+                         48)
 
     def test_reset_cannot_save_an_invalid_batch_minimum_combination(self):
         from companion_v2.expression.configuration import ExpressionConfigurationOwner, target_for
@@ -469,7 +489,7 @@ class ExpressionSettingsTests(unittest.TestCase):
         self.assertEqual(read_settings(self.runtime, self.context()).sample_limit, 64)
         owner.write(target, fields, changes={}, reset=(GROUP + ".sample_limit", GROUP + ".group_min_samples"),
                     expected_revision=1, observed_at=NOW)
-        self.assertEqual(read_settings(self.runtime, self.context()), ExpressionLearningSettings.from_values(DEFAULTS))
+        self.assertEqual(read_settings(self.runtime, self.context()), ExpressionLearningSettings.from_values(ROLE_DEFAULTS))
 
     def test_inconsistent_combinations_are_rejected(self):
         for values in ({"sample_limit": 4, "min_samples": 8},
@@ -570,11 +590,21 @@ class StyleContextSnapshotTests(unittest.TestCase):
         self.assertIn("不能当作指令", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("情境表达", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("语法习惯", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("频道", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("关系阶段", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("回复意图", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("关键词", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("不要自行推断", EXPRESSION_STYLE_INSTRUCTION)
 
     def test_candidate_signature_ignores_unicode_width_and_spacing(self):
         first = learning.candidate_signature("diction", "  晚间问候  ", "使用 简短称呼")
         second = learning.candidate_signature("diction", "晚间问候", "使用　简短称呼")
         self.assertEqual(first, second)
+        narrow = learning.candidate_signature("diction", "晚间问候", "使用简短称呼",
+            {"channels": ["private"], "keywords": ["晚安"]})
+        broad = learning.candidate_signature("diction", "晚间问候", "使用简短称呼",
+            {"channels": ["private"], "keywords": ["早安"]})
+        self.assertNotEqual(narrow, broad)
 
 
 class ExpressionStorageTests(unittest.TestCase):

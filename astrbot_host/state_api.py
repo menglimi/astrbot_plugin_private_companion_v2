@@ -148,6 +148,11 @@ class StateWebAPI:
             action = data["action"]
             if action == "configure":
                 required = allowed = {"action", "operation_key", "edit_token", "changes"}
+                allowed = allowed | {"role_edit_token"}
+            elif action == "configure_role":
+                required = allowed = {"action", "operation_key", "role_edit_token", "changes"}
+            elif action == "configure_window":
+                required = allowed = {"action", "operation_key", "edit_token", "changes"}
             elif action == "state.write":
                 required, allowed = common | {"data"}, common | {"data", "sources"}
             elif action == "cycle.align":

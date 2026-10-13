@@ -379,6 +379,14 @@ class ReplyTextPolicy:
 
 
 TEXT_DEFAULTS = asdict(ReplyTextPolicy())
+OUTPUT_TEXT_FIELDS = tuple(key for key in TEXT_DEFAULTS
+                           if key.startswith(("content_cleanup_", "content_replacement"))) + (
+    "framework_error_guard_enabled",
+    "enable_forbidden_word_recall",
+    "recall_forbidden_words",
+    "recall_forbidden_scope",
+    "recall_forbidden_word_case_sensitive",
+)
 
 
 def text_policy(values):

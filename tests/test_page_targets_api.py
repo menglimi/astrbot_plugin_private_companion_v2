@@ -110,6 +110,53 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assert_read_only_platform()
 
+    async def test_stored_relationship_directory_returns_before_native_discovery_or_name_queries(self):
+        (await self.controller.initialize_profile()).unwrap()
+        routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
+        directory = routes[PREFIX + "/acquaintance"]
+        native_query = self.native.platform.client._api._wsr_api
+        native_query.call_action = AsyncMock(side_effect=AssertionError("first paint must not query OneBot"))
+        request = Request({"type": "http", "method": "GET", "path": PREFIX + "/acquaintance",
+                           "headers": [], "query_string": b"read_mode=stored"})
+        before_grants = self.controller.runtime.read_all("SELECT grant_id FROM identity_grants ORDER BY grant_id", ())
+        with bind_request_context(PluginRequest(request, username="admin")), \
+                patch.object(self.controller.session_topology, "inventory", AsyncMock(
+                    side_effect=AssertionError("first paint must not discover sessions"))) as inventory:
+            response = await asyncio.wait_for(directory(), 1)
+        self.assertEqual(response["status"], "ok", response)
+        self.assertTrue(response["data"]["directory_refresh_pending"])
+        self.assertTrue(response["data"]["persons"])
+        inventory.assert_not_awaited()
+        native_query.call_action.assert_not_awaited()
+        self.assertEqual(self.controller.runtime.read_all("SELECT grant_id FROM identity_grants ORDER BY grant_id", ()),
+                         before_grants)
+
+    async def test_relationship_directory_only_discovers_group_sessions(self):
+        (await self.controller.initialize_profile()).unwrap()
+        directory = next(handler for path, handler, _, _ in self.native.registered_web_apis
+                         if path == PREFIX + "/acquaintance")
+        with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
+                patch.object(self.controller.session_topology, "inventory", AsyncMock(return_value=[])) as inventory:
+            response = await directory()
+        self.assertEqual(response["status"], "ok", response)
+        self.assertFalse(response["data"]["directory_refresh_pending"])
+        inventory.assert_awaited_once_with(scope_kind="group")
+
+    async def test_stored_directory_keeps_login_and_strict_query_validation(self):
+        (await self.controller.initialize_profile()).unwrap()
+        directory = next(handler for path, handler, _, _ in self.native.registered_web_apis
+                         if path == PREFIX + "/acquaintance")
+        for query, username, code in (
+                (b"read_mode=stored", "api_key:synthetic", "dashboard_identity_required"),
+                (b"read_mode=other", "admin", "acquaintance_request_invalid"),
+                (b"read_mode=stored&read_mode=stored", "admin", "acquaintance_request_invalid"),
+                (b"read_mode=stored&subject_id=another", "admin", "acquaintance_request_invalid")):
+            request = Request({"type": "http", "method": "GET", "path": PREFIX + "/acquaintance",
+                               "headers": [], "query_string": query})
+            with bind_request_context(PluginRequest(request, username=username)):
+                response = await directory()
+            self.assertEqual(response["data"]["code"], code, response)
+
     async def test_group_used_for_model_replies_appears_from_relationship_network(self):
         (await self.controller.initialize_profile()).unwrap()
         settings = self.controller.resolved_settings()
@@ -223,7 +270,10 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(progress["data"]["binding"]["pinned"])
         pinned = self.controller._read_intent()
         self.assertEqual(progress["data"]["binding"]["role_id"], pinned.persona.role.subject_id)
-        self.assertEqual(set(choices["data"]), {"accounts", "personas", "targets"})
+        self.assertEqual(set(choices["data"]), {"accounts", "personas", "targets", "directory"})
+        self.assertEqual(set(choices["data"]["directory"]), {"complete", "issues"})
+        self.assertIsInstance(choices["data"]["directory"]["complete"], bool)
+        self.assertIsInstance(choices["data"]["directory"]["issues"], list)
         self.assertEqual(self.controller.resolved_settings().role_id, pinned.persona.role.subject_id)
         self.assertEqual(self.controller.status()["session_state"], before)
         self.assertEqual(self.native.provider.client.state.calls, [])

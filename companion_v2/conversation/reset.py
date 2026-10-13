@@ -170,6 +170,17 @@ def reset_window(runtime, window, *, reset_id, at):
         connection.execute("""UPDATE memory_sessions SET expires_at = ?, state_json = ? WHERE context_key IN
             (SELECT b.origin_key FROM conversation_batches b WHERE """ + where + ")",
             (stamp(at), encode({"reads": [], "notes": [], "pages": {}}), *values))
+        from .native_observations import observations_available
+        if observations_available(runtime):
+            native_where, native_values = window.sql("context_json", "$.audience.scope")
+            connection.execute("""UPDATE memory_sessions SET expires_at = ?, state_json = ? WHERE context_key IN
+                (SELECT context_key FROM conversation_native_observations WHERE """ + native_where + ")",
+                (stamp(at), encode({"reads": [], "notes": [], "pages": {}}), *native_values))
+            from .native_turns import turns_available
+            if turns_available(runtime):
+                connection.execute("""UPDATE conversation_native_turns SET generation_state = 'failed', phase_at = ?
+                    WHERE generation_state IN ('prepared', 'running') AND """ + native_where,
+                    (stamp(at), *native_values))
         from companion_v2.memory.reset import expire_temporary
         expired = expire_temporary(runtime, window, at=at)
         if window.kind is ScopeKind.GROUP:

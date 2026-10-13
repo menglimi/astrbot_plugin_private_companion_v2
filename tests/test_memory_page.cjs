@@ -64,9 +64,9 @@ function harness(routes, ownerDocument) {
       /* 归属是静态读数，随手回答掉。若让它排队，用例里那些「手动回答目录、
          再 settle() 若干拍」的写法会卡在这一条上：目录请求根本还没发出去，
          测试就把 settle 走完了。 */
-      apiGet: route => new Promise((resolve, reject) => {
+      apiGet: (route, values) => new Promise((resolve, reject) => {
         if (route === 'page/ownership') { resolve(ownershipDocument); return; }
-        requests.push({method: 'GET', route, resolve, reject});
+        requests.push({method: 'GET', route, values, resolve, reject});
       }),
       apiPost: (route, values) => new Promise((resolve, reject) => requests.push({method: 'POST', route, values, resolve, reject})),
     },
@@ -240,6 +240,63 @@ test('语料比例带按生命周期统计，未知状态不算进有效', async
   assert.equal((band.match(/mem-state-superseded/g) || []).length, 1);
 });
 
+test('事实页读取全量统计并展示已授权的外部记忆分类计数', async () => {
+  const h = harness();
+  await boot(h, [fact('a-1', 1)], {'/overview': {
+    local: {
+      facts: {total: 13, active: 9, by_state: {active: 9, superseded: 2, retracted: 1, forgotten: 1}},
+      experiences: {total: 4, active: 3}, sources: {available_messages: 27},
+      reflections: {total: 12, by_state: {complete: 3, empty: 4, failed: 2, running: 3}},
+    },
+    linkage: {state: 'ready', display_name: '记忆插件', counts: {profile: 2, preference: 3,
+      relationship: 1, private_conversation: 5, other: 0, total: 11}, categories: [
+      {key: 'profile', count: 2}, {key: 'preference', count: 3}, {key: 'relationship', count: 1},
+      {key: 'private_conversation', count: 5}, {key: 'other', count: 0},
+    ]},
+  }});
+  const markup = h.element.innerHTML.replace(/<[^>]*>/g, '');
+  assert.match(markup, /9 \/ 13/);
+  assert.match(markup, /3 \/ 4/);
+  assert.match(markup, /27/);
+  assert.match(markup, /整理完成 3/);
+  assert.match(markup, /记忆插件摘要已接通/);
+  assert.match(markup, /个人资料/);
+  assert.match(markup, /私聊内容/);
+  assert.equal(h.page.state.data.overview.linkage.counts.total, 11);
+});
+
+test('整理视图可切到全部批次并请求完成与无新增记录', async () => {
+  const h = harness();
+  await boot(h, []);
+  const area = {disabled: false, id: 'memory-area-reflections', dataset: {}};
+  area.closest = () => area;
+  h.element.__inside.add(area);
+  h.element.dispatch('click', {target: area});
+  await h.settle();
+  const pending = h.requests.find(item => item.route === 'memory/reflections');
+  assert.equal(pending.values.history, '0');
+  h.reply(pending, {items: [], next_cursor: null});
+  const firstOverview = h.requests.filter(item => item.route === 'memory/overview').at(-1);
+  h.reply(firstOverview, {local: {reflections: {total: 2, by_state: {complete: 1, empty: 1}}}, linkage: {state: 'not_owner'}});
+  await h.settle();
+
+  const toggle = {disabled: false, id: '', dataset: {reflectionView: 'history'}};
+  toggle.closest = () => toggle;
+  h.element.__inside.add(toggle);
+  h.element.dispatch('click', {target: toggle});
+  await h.settle();
+  const history = h.requests.filter(item => item.route === 'memory/reflections').at(-1);
+  assert.equal(history.values.history, '1');
+  h.reply(history, {items: [{batch_id: 'complete-batch', state: 'complete', state_label: '整理完成',
+    summary: '已保存结果', receipts: {}, remaining_sources: 0}], next_cursor: null});
+  const secondOverview = h.requests.filter(item => item.route === 'memory/overview').at(-1);
+  h.reply(secondOverview, {local: {reflections: {total: 2, by_state: {complete: 1, empty: 1}}}, linkage: {state: 'not_owner'}});
+  await h.settle();
+  assert.equal(h.page.state.data.history, true);
+  assert.match(h.element.innerHTML, /全部批次/);
+  assert.match(h.element.innerHTML, /整理完成/);
+});
+
 test('筛选与搜索都在本地完成，不再发请求', async () => {
   const h = harness();
   await boot(h, [
@@ -305,7 +362,7 @@ test('选中事实会读详情，并顺手带出版本历史', async () => {
 test('归档恢复显示可读记录并提交原始标识', async () => {
   const h = harness();
   await boot(h, []);
-  h.window.confirm = () => true;
+  h.window.CompanionConfirm = () => Promise.resolve(true);
   const area = {disabled: false, id: 'memory-area-archive', dataset: {}};
   area.closest = () => area;
   h.element.__inside.add(area);

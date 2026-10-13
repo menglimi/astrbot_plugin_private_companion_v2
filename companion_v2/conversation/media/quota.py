@@ -3,8 +3,8 @@
 Mirrors V1's four photo generation scopes: attempts are counted per requester
 for the local day of the conversation timezone, and a call is admitted only
 when its scope limit is -1 (unlimited) or the used count is below the limit.
-Counts derive from extension_tool_invocations rows, so an attempt is counted
-exactly when its invocation is persisted and unknown results never re-count.
+Counts derive from legacy invocations and native operation tasks, so an attempt
+is counted when its invocation is persisted and unknown results never re-count.
 """
 
 from datetime import timezone
@@ -59,6 +59,13 @@ class ImageQuotaGate:
         """Raise when this parent task may not dispatch another image action today."""
         context = task.spec.context
         scope = self._classify(task)
+        self._admit(context, scope, at)
+
+    def admit_native(self, context, at):
+        """Apply the configured limits to a new core tool call without a reply task."""
+        self._admit(context, self._classify_context(context), at)
+
+    def _admit(self, context, scope, at):
         from .output_settings import effective_settings
         settings = effective_settings(self.runtime, context)
         if scope != "proactive" and (not settings["allow_user_requests"] or settings["trigger_mode"] == "off"):
@@ -79,9 +86,11 @@ class ImageQuotaGate:
                             "raise the limit or set it to -1 to remove the cap")
 
     def _classify(self, task):
-        context = task.spec.context
         if task.spec.kind == PROACTIVE_COMPOSE_KIND:
             return "proactive"
+        return self._classify_context(task.spec.context)
+
+    def _classify_context(self, context):
         if context.scope.kind is ScopeKind.GROUP:
             return "group"
         row = self.runtime.read_one("SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
@@ -100,7 +109,7 @@ class ImageQuotaGate:
         # every stored timestamp, so the comparison would silently count attempts
         # from before the local day.
         cutoff = stamp(self._day_start(at, context))
-        predicates = ["i.action IN ('image.generate', 'image.edit', 'image.mask_edit')", "i.created_at >= ?",
+        predicates = [
                       "json_extract(p.record_json, '$.spec.context.role_binding.scope.installation_id') = ?",
                       "json_extract(p.record_json, '$.spec.context.role_binding.scope.bot_id') = ?",
                       "json_extract(p.record_json, '$.spec.context.role_binding.role.subject_id') = ?",
@@ -121,8 +130,20 @@ class ImageQuotaGate:
             predicates.append("COALESCE(s.tier, 'standard') " + ("= 'core'" if scope == "private_owner" else "!= 'core'"))
         row = self.runtime.read_one(f"""SELECT COUNT(*) FROM extension_tool_invocations i
             JOIN execution_tasks p ON p.task_id = i.parent_task_id {join}
-            WHERE {' AND '.join(predicates)}""", tuple(parameters))
-        return row[0]
+            WHERE i.action IN ('image.generate', 'image.edit', 'image.mask_edit') AND i.created_at >= ?
+            AND {' AND '.join(predicates)}""", tuple(parameters))
+        if scope == "proactive":
+            return row[0]
+        # Native operations have their own real child task. They share the role,
+        # requester and local-day limits with legacy user image requests, but are
+        # never counted as proactive composition or as a fabricated reply batch.
+        from companion_v2.conversation.native_tool_results import PREFIX
+        native = self.runtime.read_one(f"""SELECT COUNT(*) FROM runtime_metadata n
+            JOIN execution_tasks p ON p.task_id = json_extract(n.value, '$.task_id') {join}
+            WHERE substr(n.key, 1, ?) = ?
+            AND json_extract(n.value, '$.action') IN ('image.generate', 'image.edit', 'image.mask_edit')
+            AND p.created_at >= ? AND {' AND '.join(predicates)}""", (len(PREFIX), PREFIX, *parameters))
+        return row[0] + native[0]
 
     def _day_start(self, at, context=None):
         """The local day boundary, resolved the same way the role's calendar is.

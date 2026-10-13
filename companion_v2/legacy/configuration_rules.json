@@ -2632,7 +2632,7 @@
       "transform": "identity",
       "contract": {
         "type": "bool",
-        "default": true
+        "default": false
       }
     },
     {
@@ -2712,7 +2712,7 @@
       "transform": "minutes_to_seconds",
       "contract": {
         "type": "int",
-        "default": 900,
+        "default": 21600,
         "minimum": 60,
         "maximum": 86400
       }
@@ -5581,7 +5581,7 @@
       "target": "expression.learning.sample_chars",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "三档预设取消，改为逐项显式上下限：expression.learning.sample_chars(40-4000，默认 800)、sample_limit(4-64，默认 24)、rules_per_turn(1-16，默认 8)、rotation_candidate_limit(1-64)、rotation_decay_hours(1-8760)（companion_v2/expression/configuration.py:24-48；读取 companion_v2/expression/style_service.py:113-116,131-132、companion_v2/conversation/style_context.py:42-52,164-168）。V1 预设的三个自由度（样本长度、样本量、每轮引用量）在 V2 都有独立字段，V1 硬编码的每轮最多 2 条改由 rules_per_turn 配置"
+      "summary": "三档预设取消，改为逐项显式上下限：expression.learning.sample_chars(40-4000，默认 800)、sample_limit(4-64，默认 60)、rules_per_turn(1-16，默认 2)、rotation_candidate_limit(1-64)、rotation_decay_hours(1-8760)（companion_v2/expression/configuration.py；读取 companion_v2/expression/style_service.py 与 companion_v2/conversation/style_context.py）。V1 预设的样本长度、样本量和每轮引用量在 V2 都有独立字段；每轮引用默认值现与 V1 的 2 条对齐，仍可由用户配置"
     },
     {
       "source": "memory_habit_config.enable_expression_manual_review",
@@ -7993,7 +7993,7 @@
       "target": "",
       "verdict": "not-migrated-by-design",
       "confidence": "high",
-      "summary": "无对应项，且被 V2 架构排除：群参与配置的完整声明集不含本机图片路径（companion_v2/conversation/participation.py:55-76 CONFIG_DEFAULTS 收录了 group_repeat_interrupt_text 与全部复读概率/阈值字段，独缺图片路径；:89-99 configuration_fields() 按该字典注册，:106-131 group_participation_settings 按注册定义读取）；打断策略只有文本一路（companion_v2/conversation/group_timing.py:36-49 RepeatPolicy 字段 enabled/threshold/distinct_users_only/follow_probability/interrupt_probability/interrupt_step/interrupt_text/window_seconds/cooldown_seconds/max_daily，:151 与 :154 返回 {\"action\":\"interrupt\",\"text\":policy.interrupt_text}，无 image/image_path 载荷）；消费端与提示词同样只处理文本（companion_v2/conversation/partic"
+      "summary": "V2 已支持本地复读打断图（conversation.group_participation.group_repeat_interrupt_image_path）；V1 的本机路径不自动采用，管理员需在 V2 重新配置宿主可读的图片路径。迁移不会自动复制或读取 V1 图片。"
     },
     {
       "source": "group_interject_config.group_interject_min_interval_minutes",
@@ -8898,11 +8898,11 @@
     {
       "source": "photo_action_config.photo_generation_backend",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.backend",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "无对应字段；后端选择由 Image 能力提供方自身配置承担（native_v2.backend/connection 与旧 image.photo_generation_backend），V2 只按注册的能力提供方目录调用 image.generate/image.edit。"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.custom_photo_tool_name",
@@ -9277,163 +9277,163 @@
       "source": "photo_action_config.external_image_api_platform",
       "source_type": "string",
       "resolved_kind": "external",
-      "target": "",
+      "target": "image.output.endpoints[].platform",
       "verdict": "implemented-elsewhere",
-      "confidence": "medium",
-      "summary": "不再是 V2 本体配置项；在线生图的平台/后端选择落到 Image 提供方的原生配置（执行路线 route 的 backend 与 ComfyUI/SD WebUI 连接段）"
+      "confidence": "high",
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.EXTERNAL_IMAGE_API_BASE_URL",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].base_url",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "V2 本体无此字段（_conf_schema.json 387 行内无 image/photo 键，companion_v2/ 与 astrbot_host/ 全库无 external_image* 命中）；落点是 image 能力提供方 astrbot_plugin_image_companion 的 image.external_image_api_base_url，V2 经 astrbot_host/model_api.py:114-118,572-624 的 /model/image 路由管理该提供方"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.EXTERNAL_IMAGE_API_KEY",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].api_key",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.external_image_api_key（secret），V2 本体不持有任何生图密钥字段"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。 密钥保存在 V2 独立运行档。"
     },
     {
       "source": "photo_action_config.EXTERNAL_IMAGE_API_MODEL",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].model",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.external_image_api_model"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.external_image_api_size",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].width,height",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.external_image_api_size"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.external_image_api_timeout_seconds",
       "source_type": "int",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].timeout_seconds",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.external_image_api_timeout_seconds"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.external_image_api_custom_headers",
       "source_type": "string",
-      "resolved_kind": "unresolved",
+      "resolved_kind": "external",
       "target": "",
-      "verdict": "implemented-elsewhere",
+      "verdict": "not-migrated-by-design",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.external_image_api_custom_headers"
+      "summary": "V2 原生在线生图只支持 Bearer API Key，没有 V1 custom_headers 的等价配置；显式迁移时若此项非空应停止并提示。当前已迁移的 V1 端点未配置自定义请求头。"
     },
     {
       "source": "photo_action_config.external_image_download_proxy",
       "source_type": "string",
       "resolved_kind": "external",
       "target": "",
-      "verdict": "implemented-elsewhere",
-      "confidence": "medium",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的下载会话运行期属性 external_image_download_proxy（提供方 _conf_schema.json 已无 proxy 键，仅运行期读取）"
+      "verdict": "not-migrated-by-design",
+      "confidence": "high",
+      "summary": "V2 原生在线生图使用 trust_env=False 且没有代理配置项，不迁移 V1 下载代理。当前 V1 代理未配置。"
     },
     {
       "source": "photo_action_config.external_image_download_use_environment_proxy",
       "source_type": "bool",
       "resolved_kind": "external",
       "target": "",
-      "verdict": "implemented-elsewhere",
-      "confidence": "medium",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的下载会话运行期属性 external_image_download_use_environment_proxy（继承 HTTP_PROXY/HTTPS_PROXY/NO_PROXY）"
+      "verdict": "not-migrated-by-design",
+      "confidence": "high",
+      "summary": "V2 原生在线生图使用 trust_env=False 且没有代理配置项，不迁移 V1 下载代理。当前 V1 代理未配置。"
     },
     {
       "source": "photo_action_config.enable_backup_external_image_api",
       "source_type": "bool",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].enabled",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.enable_backup_external_image_api（作为备选端点 enabled 开关）"
+      "summary": "V2 没有单独的备份开关；端点队列中的 enabled 控制该端点参与调用，数组顺序控制尝试顺序。"
     },
     {
       "source": "photo_action_config.backup_external_image_api_platform",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].platform",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.backup_external_image_api_platform"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.BACKUP_EXTERNAL_IMAGE_API_BASE_URL",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].base_url",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.backup_external_image_api_base_url（同名小写键），旧大写键由提供方桥接读取"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.BACKUP_EXTERNAL_IMAGE_API_KEY",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].api_key",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.backup_external_image_api_key（secret），旧大写键由提供方桥接读取"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。 密钥保存在 V2 独立运行档。"
     },
     {
       "source": "photo_action_config.BACKUP_EXTERNAL_IMAGE_API_MODEL",
       "source_type": "string",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "external",
+      "target": "image.output.endpoints[].model",
       "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 的 image.backup_external_image_api_model，旧大写键由提供方桥接读取"
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.backup_external_image_api_size",
       "source_type": "string",
       "resolved_kind": "external",
-      "target": "",
+      "target": "image.output.endpoints[].width,height",
       "verdict": "implemented-elsewhere",
-      "confidence": "medium",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 备选端点组装时读取的同名属性 backup_external_image_api_size（image_runtime.py:19006 的 f\"{prefix}external_image_api_size\"，prefix=backup_）；提供方 schema 未声明该键"
+      "confidence": "high",
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.backup_external_image_api_timeout_seconds",
       "source_type": "int",
       "resolved_kind": "external",
-      "target": "",
+      "target": "image.output.endpoints[].timeout_seconds",
       "verdict": "implemented-elsewhere",
-      "confidence": "medium",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 备选端点组装时读取的同名属性 backup_external_image_api_timeout_seconds（image_runtime.py:19008）；提供方 schema 未声明该键"
+      "confidence": "high",
+      "summary": "V2 本体内置的 Image 拓展在当前运行档的 native_v2.output 管理端点；选择 online_api 后按端点数组顺序尝试。V1 external 对应 online_api，地址、密钥、模型、尺寸和超时映射到各端点字段；迁移经 V2 原生配置保存接口校验，不触发生图。"
     },
     {
       "source": "photo_action_config.backup_external_image_api_custom_headers",
       "source_type": "string",
       "resolved_kind": "external",
       "target": "",
-      "verdict": "implemented-elsewhere",
-      "confidence": "medium",
-      "summary": "image 能力提供方 astrbot_plugin_image_companion 备选端点组装时读取的同名属性 backup_external_image_api_custom_headers（image_runtime.py:19009）；提供方把自定义头收敛为“当前生效端点”一份（18981-18983）"
+      "verdict": "not-migrated-by-design",
+      "confidence": "high",
+      "summary": "V2 原生在线生图只支持 Bearer API Key，没有 V1 custom_headers 的等价配置；显式迁移时若此项非空应停止并提示。当前已迁移的 V1 端点未配置自定义请求头。"
     },
     {
       "source": "photo_action_config.external_image_api_endpoints",
       "source_type": "list",
-      "resolved_kind": "unresolved",
-      "target": "",
-      "verdict": "not-migrated-by-design",
-      "confidence": "medium",
-      "summary": "无对应配置项。V2 不再自持任何在线生图 API 端点或凭据队列：生图作为外部能力提供方接入，动作名固定为 image.generate/image.edit（companion_v2/conversation/media/generated.py:23 IMAGE_ACTIONS、companion_v2/conversation/tool_loop.py:26、companion_v2/conversation/media/quota.py:95），提供方由宿主插件 astrbot_plugin_image_companion 以 capability_id=image 注册（astrbot_host/integration_catalog.py:21-26），调用时把模型给出的工具实参原样落库与转发（companion_v2/conversation/external_tools.py:332-340），凭据与端点留在提供方插件自己的配置里，V2 只存引用。V2 根 _conf_schema.json 全 387 行无任何 endpoint/凭据字段；companion_v2/ 与 astrbot_host/ 全集对 external_image_api_endpoints 零命中。"
+      "resolved_kind": "external",
+      "target": "image.output.endpoints",
+      "verdict": "implemented-elsewhere",
+      "confidence": "high",
+      "summary": "V2 原生 Image 拓展支持 image.output.endpoints 在线端点队列。V1 数组顺序、启用状态、平台、地址、密钥、模型和超时可迁移；size 拆分为 width/height。V2 只发送 Bearer API Key，不支持自定义请求头；显式迁移时遇到非空 custom_headers 应停止并提示。"
     },
     {
       "source": "photo_action_config.photo_generation_prompt_format",

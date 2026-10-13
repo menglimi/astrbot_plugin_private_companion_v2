@@ -61,9 +61,11 @@ class GroupDeliveryTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         before = deepcopy(self.controller.config["multi_host"]["group_targets"])
         enabled = await change(True)
         self.assertEqual(enabled["status"], "ok", enabled)
-        self.assertTrue(enabled["data"]["requires_initialize"])
+        self.assertFalse(enabled["data"]["requires_initialize"])
         self.assertFalse(enabled["data"]["requires_reload"])
         target_id = enabled["data"]["target_id"]
+        self.assertIsNotNone(self.controller.session)
+        self.assertIn(target_id, {target.target_id for target in self.controller.settings.group_targets})
         self.assertEqual(target_id, "group-" + digest(("qq-main", "100", "399"))[:20])
         rows = self.controller.config["multi_host"]["group_targets"]
         self.assertEqual(len(rows), len(before) + 1)
@@ -73,8 +75,10 @@ class GroupDeliveryTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         removed = await change(False)
         self.assertEqual(removed["status"], "ok", removed)
         self.assertFalse(removed["data"]["configured"])
-        self.assertTrue(removed["data"]["requires_initialize"])
+        self.assertFalse(removed["data"]["requires_initialize"])
         self.assertFalse(removed["data"]["requires_reload"])
+        self.assertIsNotNone(self.controller.session)
+        self.assertNotIn(target_id, {target.target_id for target in self.controller.settings.group_targets})
         self.assertEqual(self.controller.config["multi_host"]["group_targets"], before)
 
         unavailable = await change(True, "999")

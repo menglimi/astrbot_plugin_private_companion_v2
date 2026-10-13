@@ -119,9 +119,26 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
         batch = await self.generate()
 
         self.assertEqual(seen_facts[0]["user_text"], "private input input-1")
-        self.assertEqual(len(self.called), 1)
+        self.assertEqual(len(self.called), 0)
         self.assertEqual(self.rows(), ())
         self.assertEqual(self.parts(batch), ())
+        self.assertEqual(self.messages.batch(batch)["presentation_action"], "silent")
+        self.assertIsNone(self.messages.batch(batch)["call_id"])
+
+    async def test_laya_clarification_decision_keeps_a_visible_text_reply(self):
+        class DecisionService:
+            async def decide(self, _facts):
+                return {"status": "ok", "decision": {
+                    "turn_state": "complete", "action": "clarify", "reply_intent": "ask",
+                    "reply_style": "normal", "reply_form": "text", "segment_mode": "single",
+                    "tool_need": "none", "reason_codes": [],
+                }}
+
+        self.messages.laya_decision_resolver = lambda _context: DecisionService()
+        batch = await self.generate()
+
+        self.assertEqual(len(self.called), 1)
+        self.assertTrue(self.parts(batch))
 
     async def test_refreshed_owner_guidance_keeps_the_original_tool_turn_instructions(self):
         augment = self.tools.augment
@@ -365,18 +382,18 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result.result_json)["state"], "unknown")
         self.assertEqual(self.rows()[0]["state"], "unknown")
 
-    async def test_provider_cannot_request_tools_without_capability_or_in_final_round(self):
+    async def test_final_round_tool_request_gets_local_notice_without_an_extra_execution(self):
         async def respond(envelope):
             return requested(call("explain-" + str(len(envelope.tool_history)), "diagnostics.explain", topic="operation"))
         self.responses["primary"] = respond
         batch, run = await self.manual_run()
-        with self.assertRaises(TaskError) as failure:
-            await self.generator.generate(run)
-        self.assertEqual(failure.exception.code, "model_tools_unavailable")
+        result = await self.generator.generate(run)
+        self.assertEqual(result.status, "succeeded")
         self.assertEqual(len(self.rows()), 8)
         self.assertEqual(len(self.called), 9)
         self.assertEqual(self.called[-1][1].tools, ())
-        self.assertEqual(self.parts(batch), ())
+        from companion_v2.conversation.generation import MODEL_FAILURE_NOTICE
+        self.assertEqual([part["text"] for part in self.parts(batch)], [MODEL_FAILURE_NOTICE])
 
     async def test_unknown_usage_remains_reserved_across_successful_continuation(self):
         async def respond(envelope):

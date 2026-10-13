@@ -50,6 +50,11 @@ class NativeGroupImageFlowTests(GroupImageDeliveryFixture, unittest.IsolatedAsyn
             repository.set_authorization(extension_id=self.package.extension_id, capability_id=capability,
                 subject=context.actor.subject, scope=context.scope, state=CapabilityAuthorizationState.ACTIVE,
                 expected_revision=0, observed_at=self.clock.now()).unwrap()
+        # The management API reconciles a module acquired after host startup.
+        # Repository writes alone intentionally do not start native services.
+        await registry.reconcile_service(self.package.extension_id)
+        await registry._lease(self.package.extension_id).start()
+        self.assertEqual(registry.status(self.package.extension_id)["state"], "running")
         self.capabilities = repository
         self.native.provider.client.state.behavior = self.native_image_model
         return context

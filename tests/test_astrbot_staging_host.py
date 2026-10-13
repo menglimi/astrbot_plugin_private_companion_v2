@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ if _previous_astrbot_root is None:
     os.environ["ASTRBOT_ROOT"] = _astrbot_import_root.name
 
 from astrbot_host.controller import AstrBotStagingController
+from astrbot_host.management_identity import dashboard_operator
 from astrbot_host.host_options_api import HostOptionsWebAPI
 from astrbot_host.native_extensions.builtins import BundledNativeLease
 from astrbot_host.native_extensions.screen_provider import NativeScreenProvider, PLUGIN_ID as SCREEN_PACKAGE_ID
@@ -27,7 +29,9 @@ from astrbot_host.web_api import API_PREFIX
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
 from companion_v2.capabilities.models import FurnitureDescriptor
+from companion_v2.conversation.generation import MODEL_FAILURE_NOTICE
 from companion_v2.execution.models import TaskError
+from companion_v2.capabilities.screen_access import ScreenAccess
 from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS, SCREEN_READ
 from tests.native_adapter_support import completion, FakeEvent, FakeHostContext, FakeProvider, FakeReverseApi
 from tests.staging_bootstrap_support import database_contents, wait_for_batch
@@ -71,7 +75,7 @@ def host_config(**changes):
             "foreground_slots": 2,
             "background_slots": 1,
             "queued_per_lane": 64,
-            "retained_tasks": 2048,
+            "retained_tasks": 10000,
         },
     }
     for section, values in changes.items():
@@ -236,6 +240,16 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         self.load_screen_provider(version="3.3.1")
         self.controller = self.make_controller()
         (await self.controller.load_existing()).unwrap()
+        declaration = next(item for item in self.controller.native_extensions.declarations()
+                           if item.descriptor.tool.action == "screen.capture")
+        operator = dashboard_operator(self.controller.runtime, "admin", at=NOW)
+        screen_status = ScreenAccess(self.controller.session.application,
+            self.controller.session.profile.target, declaration.descriptor).status(operator, NOW)
+        self.assertTrue(screen_status["upgrade_available"])
+        self.assertEqual(screen_status["installed_package_version"], "3.3.0")
+        self.assertEqual(screen_status["package_version"], "3.3.1")
+        self.assertEqual(screen_status["installed_revision"], previous.revision)
+        self.assertEqual(screen_status["installed_artifact_hash"], previous.artifact_hash)
         before = database_contents(self.controller.runtime)
         rejected = await self.controller.upgrade_screen(username="admin", previous_version=previous.package_version,
             previous_hash="incorrect-hash", expected_revision=previous.revision)
@@ -295,6 +309,10 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(database_contents(self.controller.runtime), before)
 
     async def test_probe_initialize_start_and_official_sender_records_real_delivery(self):
+        async def forbid_host_persona_lookup(*_args, **_kwargs):
+            raise AssertionError("the staging probe must use its V2 persona binding")
+
+        self.native.conversation_manager.get_conversation = forbid_host_persona_lookup
         probe = await self.controller.probe()
         self.assertTrue(probe.is_success, probe.failure)
         self.assertFalse(probe.unwrap()["pinned"])
@@ -377,7 +395,7 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         other = self.make_controller()
         try:
             result = await other.probe()
-            self.assertEqual(result.failure.code, "staging_persona_invalid")
+            self.assertEqual(result.failure.code, "staging_persona_unavailable")
             self.assertEqual(self.native.provider.client.state.calls, before_model)
             self.assertEqual(self.native.platform.client._api._wsr_api.calls, before_send)
         finally:
@@ -417,13 +435,17 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await other.terminate()
 
-    async def test_inspect_route_exposes_persisted_redacted_model_failure_without_send(self):
+    async def test_inspect_route_exposes_redacted_failure_and_one_notice_without_model_replay(self):
         private_response = "private malformed model reply"
 
         async def malformed(*_):
             return completion(private_response)
 
         self.native.provider.client.state.behavior = malformed
+        # This fixture pins its clock. Keep the local failure notice in one part
+        # so inter-part timing cannot prevent the diagnostic view from settling.
+        self.controller.config["segmentation"] = {"enabled": False}
+        self.controller.refresh_settings()
         self.controller.register_routes()
         await self.initialize_and_start()
         batch = (await self.controller.receive_claimed(FakeEvent(self.native))).unwrap()
@@ -440,9 +462,16 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["failure"]["phase"], "response_validation")
         self.assertEqual(call["failure"]["code"], "response_contract_rejected")
         self.assertNotIn(private_response, json.dumps(response))
-        self.assertEqual(response["data"]["delivery_receipts"], [])
+        self.assertTrue(response["data"]["confirmed_delivery"])
+        self.assertEqual([receipt["state"] for receipt in response["data"]["delivery_receipts"]], ["delivered"])
         self.assertEqual(len(self.native.provider.client.state.calls), 1)
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        sends = self.native.platform.client._api._wsr_api.calls
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0][0], "send_private_msg")
+        self.assertEqual(sends[0][1]["user_id"], 200)
+        visible = "".join(component["data"]["text"] for component in sends[0][1]["message"]
+                          if component["type"] == "text")
+        self.assertEqual(visible, MODEL_FAILURE_NOTICE)
 
     async def test_reload_only_loads_existing_profile_and_keeps_it_stopped(self):
         initialized = await self.controller.initialize_profile()
@@ -745,16 +774,20 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
             "delivery_mode": "onebot_private",
         }))
         entered, release = asyncio.Event(), asyncio.Event()
+        original_types = sender.native_types
+
+        async def delayed(_umo):
+            entered.set()
+            await release.wait()
+            return "original"
+
         try:
             self.assertTrue((await sender.initialize_profile()).is_success)
             granted = (await sender.authorize_delivery()).unwrap()
             self.assertEqual((granted["authorized"], granted["required"]), (True, False))
 
-            async def delayed(_):
-                entered.set()
-                await release.wait()
-
-            self.native.before_resolve = delayed
+            sender.native_types = replace(original_types, session_persona_override_lookup=delayed)
+            sender.native.native_types = sender.native_types
             starting = asyncio.create_task(sender.start())
             await asyncio.wait_for(entered.wait(), 2)
             revoking = asyncio.create_task(sender.revoke_delivery())
@@ -768,7 +801,6 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sender.status()["delivery_authorization"]["state"], "not_required")
         finally:
             release.set()
-            self.native.before_resolve = None
             await sender.terminate()
 
     async def test_incomplete_probe_discovers_account_and_default_provider_without_writes(self):

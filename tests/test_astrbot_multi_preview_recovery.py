@@ -1,4 +1,4 @@
-"""Multi-target previews retain their owners, media and fences across reloads."""
+"""Multi-target receipt views retain their owners, media and fences across reloads."""
 
 from dataclasses import replace
 import json
@@ -43,7 +43,8 @@ class MultiPreviewRecoveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         before = database_contents(self.controller.runtime)
         preview = self.controller.preview("first", self.batch).unwrap()
         self.assertEqual([p["text"] for p in preview["parts"]], ["我在这里。"])
-        self.assertFalse(preview["sent"])
+        self.assertTrue(preview["sent"])
+        self.assertEqual([part["state"] for part in preview["parts"]], ["delivered"])
         self.assertEqual(self.controller.preview("second", self.batch).failure.code, "host_target_mismatch")
         self.assertIsNone(self.app.tasks.generation)
         self.assertFalse(self.controller.status()["accepting"])
@@ -51,8 +52,9 @@ class MultiPreviewRecoveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             observed_at=self.clock.now()).failure.code, "supervisor_fenced")
         self.assertEqual(database_contents(self.controller.runtime), before)
         self.assertEqual(len(self.native.provider.client.state.calls), 1)
-        for platform in self.native.platforms.values():
-            self.assertEqual(platform.client._api._wsr_api.calls, [])
+        self.assertEqual([action for action, _ in self.native.platforms["qq-main"].client._api._wsr_api.calls],
+                         ["send_private_msg"])
+        self.assertEqual(self.native.platforms["qq-second"].client._api._wsr_api.calls, [])
 
     async def test_image_preview_reuses_recovered_materials_and_rechecks_revocation(self):
         await self.prepare(images=True)

@@ -8,7 +8,7 @@
 window.CompanionConfigEditors = (() => {
   const PREFIX = "/astrbot_plugin_private_companion_v2/";
 
-  /* 主动联系偏好（proactive.contact）是唯一一个四层组：安装 → 角色 → 关系 → 窗口。
+  /* 主动联系支持四层历史数据；公共入口只编辑全局默认，个人覆盖在私聊用户页。
      160 个字段平铺成一张卡没法用，所以按「一条链一段」拆成 23 段：
      总闸 → 节奏与额度 → 强度与连发 → 关系级配额 → 免打扰 → 重复抑制 → 开口判定，
      然后是三类契机，最后是各契机自己的触发源（问候、三餐、纪念日、天气、资讯、
@@ -53,12 +53,10 @@ window.CompanionConfigEditors = (() => {
               "proactive_hour_activity_curve", "proactive_closing_grace_minutes",
               "proactive_closing_contacts_threshold", "proactive_share_probability"]},
     {id: "relationship_budget", title: "关系级每日配额",
-     help: "这两项的保存层级是安装 / 角色 / 关系，不是这一次会话：它们限制同一对象与角色的整段关系，"
-           + "所有会话加在一起。在窗口层保存会被拒绝，所以层轨上这两项没有窗口节点。",
+     help: "同一用户与角色的所有会话合计，个人上限在私聊用户页调整。",
      fields: ["max_relationship_contacts_24h", "max_relationship_attempts_24h"]},
     {id: "quiet", title: "免打扰与临时暂停",
-     help: "免打扰与暂停只决定「现在不开口」，不改动已登记的日程；暂停按层继承——本层清空后，"
-           + "祖先层更晚的到期时间仍然生效。",
+     help: "全局暂停与个人暂停取较晚的结束时间；已登记的日程继续执行。",
      fields: ["quiet_enabled", "quiet_start", "quiet_end", "quiet_timezone", "pause_until"]},
     {id: "dedup", title: "重复与抑制",
      help: "关闭总闸后不再做任何内容去重；这里管理最近回复与已发同类内容的窗口。",
@@ -356,6 +354,7 @@ window.CompanionConfigEditors = (() => {
     reaction: {
       title: "表情检索",
       note: "决定表情素材怎么被检索与复用；视觉复核仍需扩展可用。",
+      scopeNote: "插件安装全局",
       labels: {
         low_latency_enabled: "低延迟模式",
         embedding_backfill_enabled: "后台补齐向量",
@@ -412,12 +411,13 @@ window.CompanionConfigEditors = (() => {
     },
     budget: {
       title: "每日 Token 软限额",
-      note: "只决定可选的后台工作是否开始；交互回复不受它影响。按安装与角色生效。",
+      note: "默认关闭。全局开启后角色设置才生效，普通回复不受影响。",
       labels: {
         enable_daily_token_soft_limit: "启用每日软限额",
         daily_token_soft_limit: "每日软限额（token）",
       },
-      helps: {daily_token_soft_limit: "达到后当天不再开始新的可选后台任务，已开始的会走完。"},
+      helps: {enable_daily_token_soft_limit: "全局关闭后，角色开关不能重新开启限额。",
+              daily_token_soft_limit: "达到后暂缓新的可选后台任务，已开始的会走完。"},
       order: ["enable_daily_token_soft_limit", "daily_token_soft_limit"],
     },
     recall: {
@@ -491,23 +491,52 @@ window.CompanionConfigEditors = (() => {
          fields: ["stranger_notice_enabled", "stranger_notice_daily_cap"]},
       ],
     },
-    role_growth: {
-      title: "成长与技能",
-      note: "读取角色的成长记录，并决定成长目标能在多大程度上影响日程安排。",
+    "expression.learning": {
+      title: "表达学习策略",
+      note: "",
       labels: {
-        read_enabled: "读取成长记录",
-        proposals_enabled: "允许提出成长建议",
+        window_hours: "样本回看时长 / 小时",
+        sample_limit: "单次样本上限",
+        min_samples: "私聊样本门槛",
+        group_min_samples: "群聊样本门槛",
+        sample_chars: "单条样本长度上限",
+        active_signal_limit: "待审与启用规则上限",
+        rules_per_turn: "每轮注入规则数",
+        payload_chars: "注入长度上限",
+        rotation_candidate_limit: "轮换候选数",
+        rotation_decay_hours: "规则轮换间隔 / 小时",
+        scan_interval_minutes: "私聊学习扫描间隔 / 分钟",
+        group_scan_interval_minutes: "群聊学习扫描间隔 / 分钟",
+        learning_mode: "学习强度",
+        private_application_enabled: "私聊应用规则",
+        group_application_enabled: "群聊应用规则",
+        sample_review_enabled: "审核原始样本",
+        style_review_enabled: "发送前表达复核",
+        group_daily_batch_limit: "全局群聊每日学习批次",
+        group_new_messages: "群聊新增消息门槛",
       },
-      helps: {
-        read_enabled: "关闭后角色不再把成长记录作为参考。",
-        proposals_enabled: "开启后角色可以基于实际进展提出新的成长方向。",
-      },
-      choices: {},
-      order: ["read_enabled", "proposals_enabled"],
+      helps: {},
+      choices: {learning_mode: {light: "轻量", balanced: "均衡", aggressive: "深入"}},
+      order: ["learning_mode", "private_application_enabled", "group_application_enabled",
+        "sample_review_enabled", "style_review_enabled", "window_hours", "sample_limit",
+        "min_samples", "group_min_samples", "sample_chars", "scan_interval_minutes",
+        "group_scan_interval_minutes",
+        "group_daily_batch_limit", "group_new_messages", "active_signal_limit",
+        "rules_per_turn", "payload_chars", "rotation_candidate_limit", "rotation_decay_hours"],
+      sections: [
+        {id: "behavior", title: "应用与复核", fields: ["learning_mode", "private_application_enabled",
+          "group_application_enabled", "sample_review_enabled", "style_review_enabled"]},
+        {id: "sampling", title: "采样策略", fields: ["window_hours", "sample_limit", "min_samples",
+          "group_min_samples", "sample_chars", "scan_interval_minutes", "group_scan_interval_minutes",
+          "group_daily_batch_limit",
+          "group_new_messages"]},
+        {id: "rotation", title: "规则容量", fields: ["active_signal_limit", "rules_per_turn",
+          "payload_chars", "rotation_candidate_limit", "rotation_decay_hours"]},
+      ],
     },
     "role.growth.skills": {
       title: "技能领域",
-      note: "证据驱动的技能成长设置。技能属于角色本身，不随会话改变；个别会话可以单独覆盖，不影响角色级的值。",
+      note: "",
       labels: {
         enabled: "启用技能成长",
         custom_skills: "自定义技能领域",
@@ -515,15 +544,14 @@ window.CompanionConfigEditors = (() => {
       },
       helps: {
         enabled: "关闭后暂停技能进展提案和自动日程、生活状态参考；已有记录保留，仍可管理。",
-        custom_skills: "用逗号、换行分隔，也可以直接写 JSON 数组；最多 8 项，每项取前 24 字。第一次设置会把这份清单记为角色级，之后其他会话都继承它。",
-        schedule_influence_strength: "0 不影响日程；数值越大，安排越倾向于为练习留出时间。同样按角色共享，可在本会话单独覆盖。",
+        custom_skills: "最多 8 项，每项不超过 24 字。",
+        schedule_influence_strength: "",
       },
       choices: {schedule_influence_strength: {0: "不影响", 1: "轻微参考", 2: "留出练习时间",
                                               3: "优先安排相关活动"}},
       order: ["enabled", "custom_skills", "schedule_influence_strength"],
-      /* 保存层级必须说清：这个组的默认落点是角色级，只有本会话覆盖才写会话层。 */
       sections: [
-        {id: "shared", title: "角色级技能领域", help: "这一组按角色保存，会话之间共享。",
+        {id: "shared", title: "全局技能领域",
          fields: ["enabled", "custom_skills", "schedule_influence_strength"]},
       ],
     },
@@ -577,6 +605,11 @@ window.CompanionConfigEditors = (() => {
         platform_names: "平台称呼补充",
         world_adaptation_mode: "世界观适配模式",
         world_adaptation: "世界观适配指引",
+        main_companion_subject: "主要陪伴对象",
+        expression_private_source_mode: "私聊学习来源",
+        expression_private_source_subject_ids: "指定学习来源",
+        expression_private_application_mode: "私聊规则应用范围",
+        expression_private_application_subject_ids: "指定规则应用对象",
       },
       helps: {
         name: "角色在设定中的姓名；上方角色展示会优先显示这里。",
@@ -625,9 +658,16 @@ window.CompanionConfigEditors = (() => {
         platform_names: "保留原来的平台转写文字；逐个平台的对应称呼在上方填写。",
         world_adaptation_mode: "自动参考世界设定，也可以指定现代、幻想、科幻、自定义规则或关闭转写。",
         world_adaptation: "说明日程、资料柜、屏幕和外部平台如何用设定内说法自然表达；现代日常角色可留空。",
+        main_companion_subject: "对应 V1 的 owner 身份。只从当前角色已绑定的私聊对象中选择；AstrBot 管理员身份不会自动成为 owner。",
+        expression_private_source_mode: "决定哪些私聊可作为表达学习来源；每段关系自己的学习开关、授权和素材撤回仍然有效。",
+        expression_private_source_subject_ids: "仅在来源设为“指定对象”时使用。只会读取目录中属于当前角色的私聊关系。",
+        expression_private_application_mode: "决定哪些私聊可以使用本角色在获准来源关系中学到的规则。群聊仍只使用本群规则。",
+        expression_private_application_subject_ids: "仅在应用范围设为“指定对象”时使用。",
       },
       choices: {world_adaptation_mode: {auto: "自动", modern: "现代日常", fantasy: "幻想世界",
-        sci_fi: "科幻世界", custom: "自定义", off: "关闭"}},
+        sci_fi: "科幻世界", custom: "自定义", off: "关闭"},
+        expression_private_source_mode: {owner: "主要陪伴对象", selected: "指定对象", all: "所有获准私聊"},
+        expression_private_application_mode: {owner: "主要陪伴对象", selected: "指定对象", all: "所有私聊"}},
       rows: {identity: 4, appearance: 4, personality: 5, first_person: 2, speech_style: 3, motivations: 4, boundaries: 4,
              world: 5, platform_names: 4, world_adaptation: 4, image_identity_hint: 3, network: 3, world_extra: 3,
              key_lore: 3, character_extra: 3, emotional_style: 3, social_distance: 3,
@@ -642,20 +682,25 @@ window.CompanionConfigEditors = (() => {
         hair: "line", eyes: "line", clothing: "line", image_identity_hint: "line",
         world_name: "line", era: "line", tone: "line",
         platform_group_chat: "line", platform_screen: "line", platform_bilibili: "line",
-        platform_qzone: "line", platform_library: "line"},
+        platform_qzone: "line", platform_library: "line", main_companion_subject: "catalog-select",
+        expression_private_source_subject_ids: "identity-checklist",
+        expression_private_application_subject_ids: "identity-checklist"},
       chipOptions: {
         gender: {mode: "single", options: ["女", "男", "无性别"]},
         species: {mode: "single", options: ["人类", "精灵", "仿生人", "AI", "兽人"]},
         first_person: {mode: "single", options: ["我", "人家", "吾", "本座"]},
       },
-      segmentedChoices: ["world_adaptation_mode"],
+      segmentedChoices: ["world_adaptation_mode", "expression_private_source_mode",
+        "expression_private_application_mode"],
       order: ["name", "species", "birthday", "age", "gender", "occupation", "identity", "key_lore", "character_extra", "appearance_points", "hair", "eyes",
         "clothing", "image_identity_hint", "appearance", "personality", "first_person", "speech_style", "emotional_style", "social_distance",
         "reaction_patterns", "voice_examples", "signature_phrases", "daily_habits", "motivations",
         "core_values", "desire", "hobbies", "boundaries", "taboos", "world_name", "era", "tone",
         "rules", "scenes", "network", "world_extra", "world", "platform_group_chat",
         "platform_screen", "platform_bilibili", "platform_qzone", "platform_library", "platform_names",
-        "world_adaptation_mode", "world_adaptation"],
+        "world_adaptation_mode", "world_adaptation", "main_companion_subject",
+        "expression_private_source_mode", "expression_private_source_subject_ids",
+        "expression_private_application_mode", "expression_private_application_subject_ids"],
       scopeNote: "当前角色 · 所有会话共享",
       onStatus: updateRoleProfileSummary,
       sections: [
@@ -667,6 +712,7 @@ window.CompanionConfigEditors = (() => {
         {id: "boundaries", title: "相处边界", help: "互动偏好、禁忌与关系资料入口。", fields: ["boundaries", "taboos"]},
         {id: "world", title: "世界蓝图", help: "世界、时代、规则、场景与人物网络。", fields: ["world_name", "era", "tone", "rules", "scenes", "network", "world_extra", "world"]},
         {id: "platform_names", title: "平台称呼与世界观适配", help: "选择转写模式，填写平台称呼与自定义规则。", fields: ["platform_group_chat", "platform_screen", "platform_bilibili", "platform_qzone", "platform_library", "platform_names", "world_adaptation_mode", "world_adaptation"]},
+        {id: "expression_learning", title: "表达学习范围", help: "选择角色的主要陪伴对象，以及私聊表达规则的学习来源和应用对象。", fields: ["main_companion_subject", "expression_private_source_mode", "expression_private_source_subject_ids", "expression_private_application_mode", "expression_private_application_subject_ids"]},
       ],
     },
     relationship_profile: {
@@ -720,12 +766,15 @@ window.CompanionConfigEditors = (() => {
         inject_enabled: "在对话中引用所选资料",
         inject_max_entries: "每轮最多引用条数",
         inject_max_chars: "每轮引用字符上限",
-        member_recognition_enabled: "启用成员线索",
-        member_match_aliases: "成员线索匹配别名",
-        member_inject_limit: "每轮成员线索条数",
-        member_clue_chars: "单条成员线索字数",
+        member_recognition_enabled: "启用成员资料注入",
+        member_match_aliases: "按消息中的别名匹配成员",
+        member_inject_limit: "每轮成员资料条数",
+        member_clue_chars: "每轮成员资料字数",
       },
-      helps: {},
+      helps: {
+        member_recognition_enabled: "按当前发言者账号，或本轮提及的唯一名称，选取已有成员资料供回复参考。",
+        member_clue_chars: "本轮所有成员资料合计的字数上限。",
+      },
       inputs: {source_ids: "source-checklist"},
       catalogs: {source_ids: (status) => status?.knowledge_sources || []},
       order: ["source_ids", "entry_limit", "entry_char_limit", "source_limit",
@@ -737,20 +786,20 @@ window.CompanionConfigEditors = (() => {
                   "source_limit", "candidate_char_budget"]},
         {id: "inject", title: "在对话中引用", fields: [
           "inject_enabled", "inject_max_entries", "inject_max_chars"]},
-        {id: "members", title: "群聊成员线索",
+        {id: "members", title: "成员相处资料",
          fields: ["member_recognition_enabled", "member_match_aliases", "member_inject_limit",
                   "member_clue_chars"]},
       ],
     },
     life: {
       title: "日记、梦境与休息",
-      note: "日记、睡眠与阅读的日程，加上日记与梦境的写作偏好和休息时段的回复判定。这些字段按窗口生效，但同一角色可在角色层统一覆盖。",
+      note: "日记与阅读日程、生活执行权限和写作偏好按配置范围生效；自动睡眠时刻与时长按角色共享。角色状态页的睡眠状态模拟是另一项设置。",
       labels: {
-        enabled: "启用生活例程",
+        enabled: "启用生活日程总开关",
         diary_enabled: "每天自动写日记",
         diary_time: "写日记的时刻（HH:MM）",
         timezone: "生活例程时区",
-        sleep_enabled: "按作息自动进入睡眠",
+        sleep_enabled: "按角色作息自动入睡",
         sleep_time: "入睡时刻（HH:MM）",
         sleep_timezone: "作息时区",
         sleep_variation_minutes: "自然浮动上限（分钟）",
@@ -772,11 +821,11 @@ window.CompanionConfigEditors = (() => {
         rest_backlog_max_messages: "补看消息上限",
       },
       helps: {
-        enabled: "关闭这一项时，日记、睡眠与阅读的日程都不再登记，下面各项都不起作用。",
+        enabled: "关闭后日记、自动睡眠与阅读例程都不再登记或执行。自动睡眠还需单独开启「按角色作息自动入睡」。",
         diary_enabled: "只登记一个每日写作日程；写成什么、写不写由角色按实际情况决定。",
         diary_time: "按下面的时区解释，24 小时制，形如 23:50。",
         timezone: "日记日程使用的 IANA 时区，如 Asia/Shanghai。",
-        sleep_enabled: "开启后按入睡时刻自动进入睡眠，醒来时间由睡眠时长算出。",
+        sleep_enabled: "角色共享的作息开关。自动入睡还需要生活日程总开关开启，并有已授权的私聊执行窗口；这与角色状态页的睡眠状态模拟是两件事。",
         sleep_time: "这是入睡时间的中心点；实际时间会在浮动上限内缓慢提前或延后，连续几天变化不会突然跳动。按作息时区解释，24 小时制。",
         sleep_timezone: "作息可以独立于日记时区，例如角色作息按另一个城市算。",
         sleep_variation_minutes: "这是节律自然变化的最大范围，不是每天重新抽取一次。偏移会沿用前几天的趋势并逐步变化；同一角色、同一天在重启和窗口切换后保持一致。设为 0 即固定，最多 ±120 分钟。",
@@ -815,7 +864,7 @@ window.CompanionConfigEditors = (() => {
       sections: [
         {id: "routine", title: "生活例程", help: "关闭总闸时，日记、睡眠与阅读的日程都不再登记，下面各项都不起作用。",
          fields: ["enabled", "diary_enabled", "diary_time", "timezone", "reading_enabled", "derive_enabled"]},
-        {id: "sleep", title: "睡眠作息", help: "人格共享作息；执行会选择已授权的有效窗口。",
+        {id: "sleep", title: "睡眠作息", help: "角色共享作息；自动执行需开启生活日程总开关，并选择已授权的有效窗口。睡眠状态模拟在角色状态页单独设置。",
          fields: ["sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes"]},
         {id: "writing", title: "日记与梦境", help: "写作偏好，只影响日记与梦境的文本，不改变任何权限或事实。",
          fields: ["diary_style_prompt", "dream_theme_candidates", "dream_mixed_themes_enabled",
@@ -969,13 +1018,14 @@ window.CompanionConfigEditors = (() => {
         group_interject_max_daily: "每日插话上限",
         enable_group_interjection_feedback: "按反馈调整插话",
         group_interject_feedback_window_seconds: "反馈统计时间窗（秒）",
-        enable_group_repeat_follow: "允许跟读复读",
+        enable_group_repeat_follow: "开启复读参与（跟读／打断）",
         group_repeat_count_distinct_users_only: "只在多人重复时触发",
-        group_repeat_trigger_threshold: "触发跟读的重复次数",
+        group_repeat_trigger_threshold: "触发复读动作的重复次数",
         group_repeat_follow_probability: "跟读概率",
         group_repeat_interrupt_probability: "打断复读的初始概率",
-        group_repeat_interrupt_probability_step: "打断概率每次递增",
+        group_repeat_interrupt_probability_step: "未命中后概率递增",
         group_repeat_interrupt_text: "打断复读时说的话",
+        group_repeat_interrupt_image_path: "打断复读时发的图片",
         group_repeat_window_seconds: "统计重复的时间窗（秒）",
         group_context_max_age_hours: "群聊历史回看时长（小时）",
       },
@@ -991,13 +1041,14 @@ window.CompanionConfigEditors = (() => {
         group_interject_min_interval_minutes: "0 表示不限间隔；调小会让插话更频繁。",
         group_interject_max_daily: "0 表示不在群里主动插话。",
         group_interject_feedback_window_seconds: "统计这段时间里群友对插话的反应；调小只参考最近的反馈。",
-        enable_group_repeat_follow: "关闭时下面七项都不起作用，角色不参与复读。",
+        enable_group_repeat_follow: "复读只会跟读原句或打断，不生成普通回答。关闭后不参与复读。",
         group_repeat_count_distinct_users_only: "开启后同一人连发多次不算数，必须多人重复才跟读。",
-        group_repeat_trigger_threshold: "同一句话被重复到该次数后才考虑跟读；3 最敏感，20 最保守。",
+        group_repeat_trigger_threshold: "同一句话连续重复到该次数后才考虑跟读或打断；图片、语音等占位消息不计数。",
         group_repeat_follow_probability: "0 到 1 之间；越大越容易跟一句。",
-        group_repeat_interrupt_probability: "判定要不要用「打断语」收尾，而不是跟着复读。",
-        group_repeat_interrupt_probability_step: "复读持续越久、打断概率越高，每一次按这个幅度累加。",
-        group_repeat_interrupt_text: "不打字时用的一句短语，最多 80 个字，只能是一行。",
+        group_repeat_interrupt_probability: "命中时发送配置的打断图或打断语；跟读和打断共用每日自主插话额度。",
+        group_repeat_interrupt_probability_step: "达到阈值后若没有命中动作，下次两种概率都按此幅度增加。每次连续复读最多动作一次。",
+        group_repeat_interrupt_text: "打断时发送的短语，最多 80 个字，只能是一行；打断图不可用时也使用这句话。",
+        group_repeat_interrupt_image_path: "填写 AstrBot 所在机器上的本地图片完整路径。配置有效图片时只发图片；留空、文件缺失或无效时使用打断语。",
         group_repeat_window_seconds: "在这段时间内的重复才计入次数；调大更容易触发。",
         group_context_max_age_hours: "只把这段时间内已验证的群友发言和已送达回复纳入历史；更早内容不会参与本轮上下文。",
       },
@@ -1011,7 +1062,7 @@ window.CompanionConfigEditors = (() => {
               "enable_group_repeat_follow", "group_repeat_count_distinct_users_only",
               "group_repeat_trigger_threshold", "group_repeat_follow_probability",
               "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step",
-              "group_repeat_interrupt_text", "group_repeat_window_seconds",
+              "group_repeat_interrupt_text", "group_repeat_interrupt_image_path", "group_repeat_window_seconds",
               "group_context_max_age_hours"],
       /* 三条链各自独立：氛围参考有一层总闸，插话与跟读各有自己的总闸与预算。
          不分组的话，关掉总闸后调下面的数字会毫无反应，看着像坏了。 */
@@ -1028,22 +1079,22 @@ window.CompanionConfigEditors = (() => {
          fields: ["enable_group_interjection", "group_interject_min_interval_minutes",
                   "group_interject_max_daily", "enable_group_interjection_feedback",
                   "group_interject_feedback_window_seconds"]},
-        {id: "repeat", title: "复读跟读", help: "",
+        {id: "repeat", title: "复读（跟读／打断）", help: "",
          fields: ["enable_group_repeat_follow", "group_repeat_count_distinct_users_only",
                   "group_repeat_trigger_threshold", "group_repeat_follow_probability",
                   "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step",
-                  "group_repeat_interrupt_text", "group_repeat_window_seconds"]},
+                  "group_repeat_interrupt_text", "group_repeat_interrupt_image_path", "group_repeat_window_seconds"]},
         {id: "history", title: "群聊上下文", help: "按消息到达或回复送达时间过滤历史；不改变当前消息准入。",
          fields: ["group_context_max_age_hours"]},
       ],
     },
-    /* 主动联系偏好：唯一一个四层组，也是最长的一个分区（160 项 / 23 段）。
+    /* 主动联系全局默认，也是最长的一个分区（160 项 / 23 段）。
        它此前四个触点全缺，92 个字段在任何页面上都点不到；段落声明在这里，
        段落之外的字段会被内核悄悄附到最后一段，所以 order 由段落拼出来。 */
     "proactive.contact": {
       title: "主动联系偏好",
-      note: "按本对象与角色的这一段关系保存：默认写在窗口层，安装 / 角色 / 关系层的值会被继承下来。"
-            + "改动从下一轮主动评估开始生效，不会立刻发消息。",
+      note: "全局默认；个人偏好在私聊用户页调整。",
+      scopeNote: "全局默认设置",
       labels: {
         enabled: "允许主动联系",
         automatic_enabled: "启用后台自动联系",
@@ -1051,8 +1102,8 @@ window.CompanionConfigEditors = (() => {
         interval_seconds: "两次联系至少间隔（秒）",
         idle_seconds: "对话结束后至少等候（秒）",
         event_max_age_seconds: "生活事件可接续时长（秒）",
-        max_contacts_24h: "本会话 24 小时内最多联系（次）",
-        max_attempts_24h: "本会话 24 小时内最多尝试（次）",
+        max_contacts_24h: "每个会话 24 小时内最多联系（次）",
+        max_attempts_24h: "每个会话 24 小时内最多尝试（次）",
         unanswered_slowdown_start: "连续未回应几次后开始放慢",
         unanswered_pause_after: "连续未回应几次后暂停（0 表示不暂停）",
         unanswered_max_interval_multiplier: "放慢后的最大间隔倍数",
@@ -1170,7 +1221,7 @@ window.CompanionConfigEditors = (() => {
       },
       /* 只写「这一项为什么重要」和它跟别项的关系；单位已在标签里。 */
       helps: {
-        enabled: "总闸只表示偏好允许。能不能真的开口还取决于这个对象是否持有主动联系授权：在上方「联系节奏」里开启时会一并签发，只改这里的开关不会签发授权。",
+        enabled: "设置全局默认；个人偏好与主动联系授权在私聊用户页调整。",
         automatic_enabled: "关闭时资讯、天气、余额、屏幕这些自动契机都不再发起；提醒与约定由日程自己负责，不受这里影响。",
         note: "写成自己的话，作为联系偏好写进提示词；不改变权限、频率或去重。",
         interval_seconds: "两次主动开口之间的最短间隔；连续未回应的次数越多，实际间隔按下面的倍数放大。",
@@ -1192,13 +1243,13 @@ window.CompanionConfigEditors = (() => {
         proactive_closing_grace_minutes: "连续联系达到下面的条数后，安静这段时间再恢复普通机会；0 表示不进入收尾静默。",
         proactive_closing_contacts_threshold: "一轮连续联系达到该条数即进入收尾静默。",
         proactive_share_probability: "只作用于「分享自己的生活」与「作品与阅读」两类契机；提醒与预警不受影响，100 表示每次都发。",
-        max_relationship_contacts_24h: "按同一对象与角色的整段关系计数，所有会话加在一起；这是关系级上限，不是这一次会话的上限，因此不在窗口层保存。",
-        max_relationship_attempts_24h: "同样按整段关系计数，包含被判定为「沉默」而没有发出的尝试；同样不在窗口层保存。",
+        max_relationship_contacts_24h: "同一用户与角色的所有会话合计。",
+        max_relationship_attempts_24h: "同一用户与角色的所有尝试合计，包含判定为沉默的尝试。",
         quiet_enabled: "免打扰时段内不会开口，这是全局时段，不区分契机。",
         quiet_start: "24 小时制，形如 23:00；与结束时间相同表示全天免打扰。",
         quiet_end: "可以早于开始时间，表示跨午夜。",
         quiet_timezone: "IANA 时区名，如 Asia/Shanghai；小时活跃曲线也按这个时区对齐。",
-        pause_until: "留空表示本层不设暂停，但祖先层更晚的到期时间仍然生效——在窗口层清空只会恢复本层，不会覆盖角色或关系层的暂停。填 UTC 时间点，形如 2026-09-28T12:00:00+00:00。",
+        pause_until: "留空取消全局暂停；个人暂停仍生效。时间需带时区，形如 2026-09-28T12:00:00+00:00。",
         dedup_enabled: "关闭时不再做任何内容去重，重复话题会照常发出。",
         dedup_last_message_enabled: "与角色最后一条回复比对，避免把刚说过的话再说一遍。",
         dedup_last_message_window_minutes: "只回看这段时间内角色的最后一条回复。",
@@ -1215,7 +1266,7 @@ window.CompanionConfigEditors = (() => {
         proactive_persona_judge_daily_limit: "每天最多复核多少次，超出后按未复核处理。",
         proactive_persona_judge_exempt_purposes: "逗号分隔的契机名，可填 affection、care、play、repair、chat、greeting、life、creation、news、followup、invitation、reminder、environment、meal、screen。",
         ...Object.fromEntries(CONTACT_PURPOSES.map(([, name]) =>
-          [name + ".pause_until", "留空表示本层不暂缓；祖先层更晚的到期时间仍然生效。填 UTC 时间点，形如 2026-09-28T12:00:00+00:00。"])),
+          [name + ".pause_until", "留空取消该契机的全局暂停；个人暂停仍生效。时间需带时区。"])),
         enable_daily_greetings: "关闭时三个问候窗口都不再开口。",
         greeting_morning_window: "本地时间 HH:MM-HH:MM，必须当天内结束，不能跨午夜。",
         greeting_noon_window: "本地时间 HH:MM-HH:MM，必须当天内结束，不能跨午夜。",
@@ -1318,9 +1369,7 @@ window.CompanionConfigEditors = (() => {
         insomnia_night_start: "time", insomnia_night_end: "time",
       },
       audit: contactAudit,
-      /* 四层链上的值来自安装 / 角色 / 关系三层，默认那句「角色共享」会漏掉
-         真正管着这一段关系的那一层。 */
-      scopeNote: "安装 / 角色 / 关系共享 · 本会话可覆盖",
+      scopeNote: "全局默认设置",
       sections: CONTACT_SECTIONS,
       /* order 由段落拼出来：手写一份 160 项的 order 只会与段落声明漂移，
          而漂移的表现是「字段没有控件」或「同一个字段出现两次」，都不报错。 */
@@ -1332,7 +1381,7 @@ window.CompanionConfigEditors = (() => {
      * 提供，页面上只能刷新它，不能在这里填。所以这些项回答三件事——角色能不能
      * 在空间里公开动作（总闸 + 三个能力开关）、一轮能做多少（间隔、条数、
      * 每日上限），以及一条说说要满足什么条件才发得出去（主题判定 + 七个主题）。
-     * 值按角色共享，与 life / role_growth 同一个口径：窗口层只作为旧值的回落，
+     * 值按角色共享，窗口层只作为旧值的回落，
      * 卡片右上角那句由内核按继承链写，不需要自己声明 scopeNote。
      *
      * 注册表里这一组是 47 项：9 项全局 + 7 个主题各 5 项。主题那 35 项由下面
@@ -1488,7 +1537,7 @@ window.CompanionConfigEditors = (() => {
     image_quota_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     image_review_scope_invalid: "群图审核按会话生效，请选择一个已初始化的私聊对象。",
     image_review_target_changed: "当前对象或角色绑定已变化，请重新读取。",
-    reaction_configuration_scope_invalid: "表情检索按会话生效，请选择一个已初始化的私聊对象。",
+    reaction_configuration_scope_invalid: "表情检索配置按插件安装全局生效，请使用管理员账号。",
     reaction_configuration_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     busy_gate_scope_invalid: "繁忙闸门按会话生效，请选择一个已初始化的私聊对象。",
     busy_gate_target_changed: "当前对象或角色绑定已变化，请重新读取。",
@@ -1502,7 +1551,7 @@ window.CompanionConfigEditors = (() => {
     screen_configuration_invalid: "请核对开关与素材字数上限。",
     person_scope_invalid: "熟人卡按对象生效，请选择一个已初始化的私聊对象。",
     person_target_changed: "当前对象或角色绑定已变化，请重新读取。",
-    role_growth_scope_invalid: "成长与技能按会话生效，请选择一个已初始化的私聊对象。",
+    role_growth_scope_invalid: "请从私聊用户页打开对应用户后再调整成长权限。",
     role_growth_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     growth_target_changed: "当前对象或角色绑定已变化，请重新读取后再保存。",
     library_scope_invalid: "书架按角色生效，请选择一个已初始化的私聊对象。",
@@ -1526,8 +1575,7 @@ window.CompanionConfigEditors = (() => {
     group_participation_scope_invalid: "群聊参与按会话生效，请选择一个已初始化的私聊对象。",
     group_participation_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     group_participation_configuration_invalid: "请核对群聊参与设置：概率需在 0 到 1 之间，数字项需在各自范围内；打断语只能是一行、不超过 80 字。",
-    /* 主动联系偏好：两个关系级额度按窗口写入会被后端拒绝，这条文案要说明去哪儿改。 */
-    proactive_contact_scope_invalid: "主动联系偏好按会话生效，请选择一个已初始化的私聊对象。",
+    proactive_contact_scope_invalid: "当前对象的联系状态不可用，请选择已建立私聊的用户。",
     proactive_contact_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     proactive_contact_configuration_invalid: "请核对主动联系设置：数值需在各自范围内，枚举项需在下拉选项内。",
     contact_relationship_budget_scope: "关系级配额（同一关系 24 小时内的联系与尝试上限）按安装 / 角色 / 关系层设置，不能按会话保存。",
@@ -1580,11 +1628,26 @@ window.CompanionConfigEditors = (() => {
     const names = (kinds || []).filter(kind => Object.hasOwn(spec, kind));
     if (!names.length || !endpoint) return null;
     if (!window.CompanionWorkbench?.create) return null;
+    let rolePeople = [];
 
     const instances = names.map(kind => {
       const base = spec[kind];
       const view = views?.[kind];
       let current = base;
+      if (kind === "role_profile") {
+        const people = () => {
+          const entries = {"": "请选择私聊对象"};
+          rolePeople.forEach(person => {
+            const name = person.display_name || person.admin_nickname || person.native_account_id || person.subject_id;
+            entries[person.subject_id] = `${name}${person.platform ? ` · ${person.platform}` : ""}`;
+          });
+          return entries;
+        };
+        current = {...current, catalogs: {...current.catalogs,
+          main_companion_subject: people,
+          expression_private_source_subject_ids: people,
+          expression_private_application_subject_ids: people}};
+      }
       if (Array.isArray(view?.sectionIds)) {
         const selected = new Set(view.sectionIds);
         const sections = (base.sections || []).filter(section => selected.has(section.id));
@@ -1642,6 +1705,20 @@ window.CompanionConfigEditors = (() => {
       });
     }).filter(Boolean);
     if (!instances.length) return null;
+
+    if (names.includes("role_profile") && typeof product.acquaintanceDirectory === "function") {
+      const roleId = product.role()?.role_id;
+      const botId = product.roleTarget()?.bot_id;
+      Promise.resolve(product.acquaintanceDirectory()).then(directory => {
+        if (product.role()?.role_id !== roleId || product.roleTarget()?.bot_id !== botId) return;
+        rolePeople = (directory?.persons || []).filter(person => person.private_target === true
+          && person.role_id === roleId && person.bot_id === botId && person.subject_id);
+        window.dispatchEvent(new Event("companion:catalogs-updated"));
+      }).catch(() => {
+        rolePeople = [];
+        window.dispatchEvent(new Event("companion:catalogs-updated"));
+      });
+    }
 
     return {
       /* 草稿由工作台自行从 sessionStorage 恢复。 */

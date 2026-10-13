@@ -10,7 +10,7 @@ import traceback
 from uuid import uuid4
 
 from companion_v2.adapters.astrbot.native import (
-    HostPersona, NativePrivateBridge, account_number, persona_instruction,
+    HostPersona, NativePrivateBridge, account_number, bounded_native_lookup, persona_instruction,
 )
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
@@ -44,14 +44,6 @@ from .shared_host_migration import recover_repeated_single_target
 
 
 logger = logging.getLogger(__name__)
-
-
-def laya_target_id_for_scope(settings, scope):
-    if getattr(scope, "kind", None) is not ScopeKind.PRIVATE:
-        return "installation"
-    target = settings.private_target(scope.platform, scope.account_id, scope.native_scope_id)
-    configured_target = settings.template_for(target) if target is not None else None
-    return configured_target.target_id if configured_target is not None else "installation"
 
 
 class AstrBotMultiController:
@@ -154,6 +146,22 @@ class AstrBotMultiController:
     def binding_state(self):
         parked = self._parked_binding()
         if parked is None:
+            if self.runtime is not None and self.authority is not None:
+                try:
+                    target = self._resolve_proactive_diagnostic_target()
+                except (TaskError, HostControlError) as error:
+                    return {"bound": False, "pinned": False, "pending": False,
+                            "confirmed": False, "error": getattr(error, "code", "host_binding_unavailable")}
+                settings = self.settings
+                personas = [item for item in settings.personas if item.bot_id == target.bot_id]
+                role_ids = {item.role_id for item in personas}
+                persona_ids = {item.persona_id for item in personas}
+                return {"bound": True, "pinned": False, "pending": False, "confirmed": True,
+                        "recovered": True, "verification": "persistent_core_identity",
+                        "configured_target": True, "platform_id": target.platform_id,
+                        "account_id": target.account_id, "participant_id": target.participant_id,
+                        "bot_id": target.bot_id, "role_id": next(iter(role_ids)) if len(role_ids) == 1 else "",
+                        "persona_id": next(iter(persona_ids)) if len(persona_ids) == 1 else ""}
             return {"bound": False, "pinned": False, "pending": False, "confirmed": False}
         try:
             identity = parked.identity()
@@ -179,6 +187,50 @@ class AstrBotMultiController:
                                            for persona in settings.personas):
             return None
         return match
+
+    async def proactive_diagnostic_target(self):
+        """Resolve a unique configured private route owned by a current core user.
+
+        The setup binding file can be lost independently of the shared identity
+        ledger. A diagnostic may recover its recipient from that ledger, but only
+        when exactly one explicit private target still resolves to a core identity.
+        """
+        await self._open_async()
+        return await asyncio.to_thread(self._resolve_proactive_diagnostic_target)
+
+    def _resolve_proactive_diagnostic_target(self):
+        settings = self._settings()
+        if self.runtime is None or self.authority is None:
+            raise TaskError("setup_binding_confirmation_required",
+                            "the shared identity store is not available to verify a core administrator")
+
+        from companion_v2.identity_policy.models import AuthorizationTier
+
+        core_subjects = {row["subject_id"] for row in self.runtime.read_all(
+            "SELECT subject_id FROM subject_access_tiers WHERE subject_kind = 'human' AND tier = ?",
+            (AuthorizationTier.CORE.value,),
+        )}
+        candidates = []
+        for target in settings.targets:
+            if target.participant_id == "*":
+                continue
+            subject = self.authority.subject(target)
+            if subject.subject_id not in core_subjects:
+                continue
+            try:
+                actor = self.authority.actor(target)
+            except TaskError:
+                continue
+            if actor.subject == subject:
+                candidates.append(target)
+
+        if len(candidates) != 1:
+            code = "setup_core_window_ambiguous" if candidates else "setup_binding_confirmation_required"
+            reason = ("more than one configured private target belongs to a core administrator"
+                      if candidates else
+                      "confirm the private window or configure one exact target for a core administrator")
+            raise TaskError(code, reason)
+        return candidates[0]
 
     def _register_core_binding(self, binding):
         """Seed the first shared target from the Dashboard-confirmed private window."""
@@ -308,6 +360,9 @@ class AstrBotMultiController:
     def confirm_binding(self):
         parked = self._parked_binding()
         if parked is None:
+            binding = self.binding_state()
+            if binding.get("recovered"):
+                return {"confirmed": True, "binding": binding}
             return {"confirmed": False, "reason": "setup_binding_missing",
                     "detail": "send companion_bind from the core administrator private window first"}
         try:
@@ -354,7 +409,9 @@ class AstrBotMultiController:
                 SubjectRef(settings.installation_id, SubjectKind.BOT, mapping.role_id), digest(persona_instruction(native))))
         bridge = NativePrivateBridge(self.context, version=self.native_types.version, event_type=self.native_types.event,
             installation_id=settings.installation_id, host_id=HOST_ID, identities=None,
-            accounts=settings.accounts, personas=tuple(personas), now=self.now)
+            accounts=settings.accounts, personas=tuple(personas), now=self.now,
+            session_persona_override_lookup=self.native_types.session_persona_override_lookup,
+            persona_snapshot_lookup=self.native_types.persona_snapshot_lookup)
         conversations = {}
         for account in settings.accounts:
             platform = self.context.get_platform_inst(account.platform_id)
@@ -369,7 +426,15 @@ class AstrBotMultiController:
                 continue
             if target in settings.targets:
                 umo = bridge._umo(target.platform_id, target.participant_id)
-                conversation_id, _, _, _ = await bridge._selected_persona(account, umo)
+                # Global profile preparation provisions every configured role; the window
+                # persona is resolved later for live input admission.
+                conversation_manager = self.context.conversation_manager
+                conversation_id = await bounded_native_lookup(
+                    conversation_manager.get_curr_conversation_id(umo), operation="conversation_id")
+                verified_conversation_id = await bounded_native_lookup(
+                    conversation_manager.get_curr_conversation_id(umo), operation="conversation_verify")
+                if verified_conversation_id != conversation_id:
+                    raise TaskError("host_conversation_changed", "host conversation changed during startup probe")
                 conversations[target.target_id] = {
                     "target": target, "conversation_id": bridge._conversation_key(umo, conversation_id),
                     "role_ids": tuple(sorted({item.role_id for item in settings.personas if item.bot_id == target.bot_id})),
@@ -410,29 +475,48 @@ class AstrBotMultiController:
         return manifest, conversations
 
     def _open(self):
-        settings = self._settings()
         if self.runtime is None:
-            root = self.profile_root
-            if root is None:
-                raise HostControlError("staging_settings_invalid", "a profile directory could not be resolved")
-            # Apply restores before opening SQLite, while replacing the database is safe.
-            storage = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
-            backup_directory = selected_backup_directory(
-                root / "runtime", storage.get("backup_path", "") if isinstance(storage, dict) else "",
-                settings.installation_id, plugin_root=self.data_root)
-            self.last_restore = apply_staged_restore(root / "runtime", installation_id=settings.installation_id,
-                                                     backup_directory=backup_directory)
-            self.runtime = StorageRuntime.open(data_root=root / "runtime", installation_id=settings.installation_id)
-            self.runtime.backup_directory = backup_directory
-            self.authority = MultiAuthority(self.runtime, settings, now=self.now)
+            self.runtime, self.authority, self.last_restore = self._create_storage()
 
-    def _assemble(self, manifest):
+    def _create_storage(self):
+        settings = self._settings()
+        root = self.profile_root
+        if root is None:
+            raise HostControlError("staging_settings_invalid", "a profile directory could not be resolved")
+        # Apply restores before opening SQLite, while replacing the database is safe.
+        storage = self.config.get("storage", {}) if isinstance(self.config, dict) else {}
+        backup_directory = selected_backup_directory(
+            root / "runtime", storage.get("backup_path", "") if isinstance(storage, dict) else "",
+            settings.installation_id, plugin_root=self.data_root)
+        last_restore = apply_staged_restore(root / "runtime", installation_id=settings.installation_id,
+                                            backup_directory=backup_directory)
+        runtime = StorageRuntime.open(data_root=root / "runtime", installation_id=settings.installation_id)
+        runtime.backup_directory = backup_directory
+        try:
+            from companion_v2.expression.configuration import migrate_legacy_policy_values
+            from companion_v2.expression.reaction_configuration import migrate_window_values
+            migrate_legacy_policy_values(runtime)
+            migrate_window_values(runtime)
+        except BaseException:
+            runtime.close()
+            raise
+        return runtime, MultiAuthority(runtime, settings, now=self.now), last_restore
+
+    async def _open_async(self):
+        if self.runtime is None:
+            opened = await asyncio.to_thread(self._create_storage)
+            if self.runtime is None:
+                self.runtime, self.authority, self.last_restore = opened
+            else:
+                opened[0].close()
+
+    async def _assemble(self, manifest):
         personas = tuple(HostPersona(item["bot_id"], item["persona_id"],
             SubjectRef(item["role"]["installation_id"], SubjectKind.BOT, item["role"]["subject_id"]), item["instruction_hash"])
             for item in manifest["personas"])
         if self.native_extensions is not None:
-            self.native_extensions.close()
-        bundled_extensions, bundled_issues = create_bundled_extensions(self.runtime.data_root, now=self.now)
+            await self.native_extensions.aclose()
+        bundled_extensions, bundled_issues = create_bundled_extensions(self.runtime.data_root, now=self.now, context=self.context, controller=self)
         self.native_extensions = NativeExtensionRegistry(self.context, now=self.now,
             together_execution=together_execution_binding(self.settings.common),
             image_settings_path=self.data_root / "model_image_routes.json",
@@ -453,21 +537,17 @@ class AstrBotMultiController:
         attach_official_knowledge(self.session.application, self.context)
         from .semantic_models import NativeSemanticModels, configured_slang_search_port
         self.session.application.attach_semantics(NativeSemanticModels(self.context, self.settings.common.provider_id,
-                                                                      configured_slang_search_port()))
+                                                                      configured_slang_search_port()),
+            reaction_role_count=len({(item.bot_id, item.role_id) for item in self.settings.personas}))
         from companion_v2.decision import LayaDecisionService, LayaSettingsStore
+        from .laya_client import LayaDecisionClient, start_laya_warmup
 
         def laya_for_context(context):
-            scope = context.scope
-            role = context.role_binding.role
-            # `native_scope_id` identifies the peer, while the Dashboard
-            # persists settings under the configured target id.  Resolve the
-            # same target mapping used during admission, including templates.
-            target_id = laya_target_id_for_scope(self.settings, scope)
-            return LayaDecisionService(LayaSettingsStore(
-                self.data_root, target_id,
-                getattr(role, "subject_id", "default")))
+            return LayaDecisionService(LayaSettingsStore(self.data_root),
+                runtime=self.session.application.runtime, origin_key=context.key, client_factory=LayaDecisionClient)
 
         self.session.application.attach_laya_decision(laya_for_context)
+        start_laya_warmup(LayaSettingsStore(self.data_root))
 
     def _idle(self):
         if self.session is not None and self.session.application.state not in ("new", "stopped"):
@@ -493,14 +573,19 @@ class AstrBotMultiController:
                     if self._terminated:
                         raise TaskError("host_terminated", "the shared host is stopping or terminated")
                     self._idle()
-                    receipt = self._initialize_manifest_locked(manifest, conversations)
+                    receipt = await self._initialize_manifest_locked(manifest, conversations)
                 self.last_failure = None
                 return Outcome.success(receipt)
             except Exception as error:
                 return self._failure(error, operation="initialize_profile")
 
-    def _initialize_manifest_locked(self, manifest, conversations):
-        self._open()
+    async def _initialize_manifest_locked(self, manifest, conversations):
+        await self._open_async()
+        receipt = await asyncio.to_thread(self._initialize_manifest_storage, manifest, conversations)
+        await self._assemble(manifest)
+        return receipt
+
+    def _initialize_manifest_storage(self, manifest, conversations):
         with self.runtime.transaction():
             receipt = self.authority.initialize(manifest, allow_legacy_staging=self._adopting_legacy_profile)
             for conversation in conversations.values():
@@ -512,7 +597,6 @@ class AstrBotMultiController:
                         target.participant_id, target.bot_id, target.account_id,
                         persona_conversation(conversation["conversation_id"], role), target.participant_id)
                     self.authority.provision_scope(target, scope, role)
-        self._assemble(manifest)
         return receipt
 
     async def apply_bindings(self, candidate):
@@ -570,7 +654,7 @@ class AstrBotMultiController:
                         self.runtime = self.authority = None
                     raise
                 if self.native_extensions is not None:
-                    self.native_extensions.close()
+                    await self.native_extensions.aclose()
                     self.native_extensions = None
                 self.session = self.last_session = None
                 self.refresh_settings()
@@ -612,9 +696,9 @@ class AstrBotMultiController:
                     if self._terminated:
                         raise TaskError("host_terminated", "the shared host is stopping or terminated")
                     self._idle()
-                    self._open()
+                    await self._open_async()
                     try:
-                        self.authority.require_manifest(probed)
+                        await asyncio.to_thread(self.authority.require_manifest, probed)
                     except TaskError as error:
                         if error.code != "host_binding_changed":
                             raise
@@ -623,7 +707,7 @@ class AstrBotMultiController:
                         if not repaired:
                             raise
                         probed = self._recover_saved_mapping(candidate, probed)
-                    self._assemble(probed)
+                    await self._assemble(probed)
                 self.last_failure = None
                 return Outcome.success({"loaded": True, "started": False})
             except Exception as error:
@@ -668,19 +752,18 @@ class AstrBotMultiController:
                         raise TaskError("host_terminated", "the shared host is stopping or terminated")
                     self._settings()
                     self._idle()
-                    self._open()
+                    await self._open_async()
                     try:
-                        self.authority.require_manifest(manifest)
+                        await asyncio.to_thread(self.authority.require_manifest, manifest)
                     except TaskError as error:
                         if error.code != "host_not_initialized":
                             raise
-                        self._initialize_manifest_locked(manifest, conversations)
-                        self.authority.require_manifest(manifest)
+                        await self._initialize_manifest_locked(manifest, conversations)
+                        await asyncio.to_thread(self.authority.require_manifest, manifest)
                     if self.session is None or self.session.application.state != "new":
-                        self._assemble(manifest)
+                        await self._assemble(manifest)
                     session = self.session
-                    task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
-                    model = self.runtime.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?", ("model_gateway",))
+                    task, model = await asyncio.to_thread(self._startup_generations)
                     task_generation = task["generation"] if task else 0
                     model_generation = model["generation"] if model else 0
                 result = await session.start(expected_task_generation=task_generation,
@@ -694,6 +777,12 @@ class AstrBotMultiController:
             except Exception as error:
                 self._accepting = False
                 return self._failure(error, operation="start")
+
+    def _startup_generations(self):
+        task = self.runtime.read_one("SELECT generation FROM task_supervisor WHERE singleton = 1", ())
+        model = self.runtime.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?",
+                                      ("model_gateway",))
+        return task, model
 
     def target_for_event(self, event):
         if type(event) is not self.native_types.event or self.settings is None:
@@ -789,6 +878,90 @@ class AstrBotMultiController:
         if not self.claims(event) or session is None or not isinstance(target, GroupTarget):
             return Outcome.failed("host_not_claimed", "group reply candidate requires an active configured target")
         return await session.prepare_group(event, target, reply_candidate=True)
+
+    async def receive_group_repeat(self, event, admission, *, prepared=None):
+        """Forward the two literal repeat actions without a model fallback."""
+        from .group_repeat import receive_group_repeat
+
+        try:
+            target = self.target_for_event(event)
+            if not self.claims(event) or not isinstance(target, GroupTarget):
+                return Outcome.failed("host_not_claimed", "repeat requires an active configured group")
+            if not isinstance(admission, dict) or admission.get("reason") != "repeat":
+                raise TaskError("group_repeat_admission_required", "a repeat candidate is required")
+            if prepared is not None and (
+                    prepared.get("target_id") != target.target_id
+                    or prepared.get("event_id") != admission.get("event_id")
+                    or getattr(prepared.get("context"), "key", None) != admission.get("context_key")):
+                raise TaskError("group_admission_changed", "repeat input changed after its decision")
+            return Outcome.success(await receive_group_repeat(self, event, target, admission, prepared=prepared))
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except Exception as error:
+            logger.warning("[CompanionV2] 群复读动作未完成 error_type=%s", type(error).__name__)
+            return Outcome.failed("group_repeat_failed", "the literal repeat action could not be completed")
+
+    async def prepare_core_reply(self, event, target=None, *, group_admission=None):
+        try:
+            session = self.session
+            current_target = self.target_for_event(event)
+            if target is not None and target != current_target:
+                raise TaskError("host_target_mismatch", "the requested core reply target is not the current native route")
+            target = current_target
+            if not self.claims(event) or session is None or target is None:
+                return Outcome.failed("host_not_claimed", "the native event is outside the active configured targets")
+            return await session.prepare_core_reply(event, target, group_admission=group_admission)
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except Exception as error:
+            logger.error("[CompanionV2] 核心回复准入失败 error_type=%s", type(error).__name__)
+            return Outcome.failed("host_core_reply_prepare_failed", "core reply admission could not be prepared")
+
+    async def authorize_core_reply(self, event, prepared_or_target=None, prepared=None, *, target=None):
+        try:
+            if target is not None:
+                requested_target = target
+                prepared = prepared if prepared is not None else prepared_or_target
+            elif prepared is None:
+                prepared, requested_target = prepared_or_target, None
+            else:
+                requested_target = prepared_or_target
+            session = self.session
+            target = self.target_for_event(event)
+            if requested_target is not None and requested_target != target:
+                raise TaskError("host_target_mismatch", "the requested core reply target is not the current native route")
+            if not self.claims(event) or session is None or target is None:
+                return Outcome.failed("host_not_claimed", "the native event is outside the active configured targets")
+            return await session.authorize_core_reply(event, target, prepared)
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except Exception as error:
+            logger.error("[CompanionV2] 核心回复发前复核失败 error_type=%s", type(error).__name__)
+            return Outcome.failed("host_core_reply_authorize_failed", "core reply authorization failed")
+
+    async def receive_core_command(self, event):
+        """Proxy the calendar command route without entering V2 reply generation."""
+        try:
+            session = self.session
+            target = self.target_for_event(event)
+            if not self.claims(event) or session is None or target is None:
+                return Outcome.failed("host_not_claimed", "the native event is outside the active configured targets")
+            result = await receive_calendar_command(
+                self, event, session, target=target if is_private_message(event) else None)
+            return result if result is not None else Outcome.success({"handled": False})
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except Exception as error:
+            logger.error("[CompanionV2] 核心命令处理失败 error_type=%s", type(error).__name__)
+            return Outcome.failed("host_core_command_failed", "the core command could not be processed")
+
+    async def refuse_core_reply(self, event):
+        """Send the configured private denial notice recorded during core admission."""
+        session = self.session
+        context = getattr(session, "last_refusal", None) if session is not None else None
+        if session is None or context is None or context.scope.kind is not ScopeKind.PRIVATE:
+            return None
+        return await self._refuse_private(session, event)
 
     async def receive_claimed(self, event, *, on_refusal=None, group_admission=None):
         session, target = self.session, self.target_for_event(event)
@@ -963,6 +1136,7 @@ class AstrBotMultiController:
         if self._termination_task is not None:
             return
         try:
+            await self.session_topology.close()
             result = await self.stop(grace_seconds=2)
             if result.is_success:
                 report = result.unwrap()
@@ -984,7 +1158,7 @@ class AstrBotMultiController:
                 self.runtime.close()
                 self.runtime = self.authority = None
             if self.native_extensions is not None:
-                self.native_extensions.close()
+                await self.native_extensions.aclose()
                 self.native_extensions = None
 
     async def _finish_termination(self):

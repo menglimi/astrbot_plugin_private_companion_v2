@@ -130,7 +130,7 @@ class CycleVariationClockTests(unittest.TestCase):
         self.assertNotIn("variation_enabled", observed)
         self.assertNotIn("phase_plan", observed)
         updated = cycle.evolve(legacy, None, VARIED, NOW + timedelta(days=33))
-        self.assertEqual({k: v for k, v in view(updated, 33).items() if k != "pending_plan"}, observed)
+        self.assertEqual({k: v for k, v in view(updated, 33).items() if k not in ("pending_plan", "phase_expression")}, observed)
         self.assertEqual(encode(legacy), snapshot)
 
     def test_unknown_and_manual_inapplicability_do_not_invent_a_phase_plan(self):

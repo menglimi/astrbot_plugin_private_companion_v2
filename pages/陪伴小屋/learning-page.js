@@ -94,7 +94,7 @@ window.CompanionLearningPage = (() => {
     growth_record_unavailable:"这条记录已不在当前授权范围。",
     growth_revision_conflict:"记录已有新版本，已读取最新值。",
     growth_operation_conflict:"这个操作标识已经用于另一份内容，未重复写入。",
-    growth_scope_changed:"当前对象、角色或绑定已变化，请重新读取。",
+    growth_scope_changed:"成长记录归属已变化，请重新读取。",
     growth_transition_invalid:"当前状态不接受这个动作，已刷新可用动作。",
     growth_source_unavailable:"这条记录的原来源已不可读取，内容暂不展示。",
     growth_source_expired:"原来源已过期。",
@@ -126,7 +126,6 @@ window.CompanionLearningPage = (() => {
     track:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 17V7M12 17V4M19 17v-6"/><path d="M3 20h18"/></svg>',
     review:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="13" rx="2"/><path d="M8 9h8M8 13h5"/><path d="m9 20 3-3 3 3"/></svg>',
     source:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h9"/><circle cx="18" cy="18" r="2.4"/></svg>',
-    gate:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
     refresh:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 4v4h-4"/></svg>',
     check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7"/></svg>',
     alert:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5M12 16h.01"/></svg>',
@@ -138,11 +137,13 @@ window.CompanionLearningPage = (() => {
   function blank() {
     return {view:"track",layout:"default",roleLabel:"",
       path:"", profileId:"", operatorName:"",
+      sources:[], listCursors:{}, reviewCursors:{},
+      accesses:{},
+      recordFocus:null,
       items:[], cursor:"", next:null, stateFilter:"", kindFilter:"",
       reviews:[], reviewCursor:"", reviewNext:null,
       detailId:null, detail:null,
       evidenceId:"",evidence:[],evidenceLoading:false,evidenceError:false,
-      access:null, accessToken:"",
       form:null, busy:false, loading:false, loadingReviews:false, writing:false, ready:false,
       notice:"", error:false, entered:new Set(), confirm:null};
   }
@@ -175,12 +176,34 @@ window.CompanionLearningPage = (() => {
     return value;
   }
   function live(ticket) { return ticket === version && root?.isConnected; }
+  function validAccess(value) {
+    return !!value && typeof value === "object"
+      && !!value.settings && typeof value.settings === "object"
+      && typeof value.settings.read_enabled === "boolean"
+      && typeof value.settings.proposals_enabled === "boolean"
+      && !!value.effective && typeof value.effective === "object"
+      && typeof value.effective.read_enabled?.allowed === "boolean"
+      && typeof value.effective.proposals_enabled?.allowed === "boolean"
+      && typeof value.edit_token === "string" && /^[0-9a-f]{64}$/.test(value.edit_token);
+  }
   function notice(message, error = false) { data.notice = message; data.error = error; }
   let opCounter = 0;
-  function operationKey(kind, id) {
-    return STORE + (data.path || "") + ":" + kind + ":" + (id || "") + ":" + opCounter++;
+  function operationKey(kind) {
+    const nonce = window.crypto?.randomUUID?.()
+      || Date.now().toString(36) + "-" + Math.random().toString(36).slice(2) + "-" + opCounter++;
+    return STORE + kind + ":" + nonce;
   }
-  function item(id) { return data.items.find(row => row.growth_id === id) || null; }
+  function item(id) { return data.items.find(row => row._rowKey === id || row.growth_id === id) || null; }
+  function sourcePath(source, suffix = "") { return source?.path ? source.path + suffix : ""; }
+  function sourceKey(source) { return source?.key || source?.path || "default"; }
+  function rowKey(row) { return data.sources.length > 1 ? row?._rowKey || row?.growth_id || "" : row?.growth_id || ""; }
+  function attachRow(source, row, id) {
+    return {...row, _source:source, _rowKey:data.sources.length > 1 ? sourceKey(source) + "::" + id : id};
+  }
+  function byUpdatedAt(left, right) {
+    return (Date.parse(right.updated_at || right.created_at || "") || 0)
+      - (Date.parse(left.updated_at || left.created_at || "") || 0);
+  }
 
   /* ---- 读 ------------------------------------------------------------- */
   function listQuery(afterId = "") {
@@ -196,48 +219,65 @@ window.CompanionLearningPage = (() => {
      整页从此卡住：动作发出去了、结果也回来了，界面却停在原地。
      两个标志职责不同：loading 管"正在读"，writing 管"正在写"。 */
   async function load() {
-    if (!data.path || data.loading) return;
+    if (!data.sources.length || data.loading) return;
     const ticket = version;
+    data.listCursors = {};
+    data.accesses = {};
     data.loading = true; render();
     try {
-      let page = await api("GET", data.path, listQuery());
-      if (!live(ticket)) return;
-      if (!Array.isArray(page.items)) throw problem("invalid_response");
-      const rows = [...page.items], cursors = new Set();
-      // Follow the selected record through pagination when arriving from overview.
-      while (data.layout === "chain" && data.detailId && !rows.some(row=>row.growth_id===data.detailId)
-             && page.next_cursor && !cursors.has(page.next_cursor)) {
-        cursors.add(page.next_cursor);
-        page = await api("GET", data.path, listQuery(page.next_cursor));
-        if (!live(ticket)) return;
+      const requests = await Promise.allSettled(data.sources.map(async source => {
+        let page = await api("GET", source.path, listQuery(data.listCursors[sourceKey(source)] || ""));
         if (!Array.isArray(page.items)) throw problem("invalid_response");
-        rows.push(...page.items);
-      }
-      data.items = [...new Map(rows.map(row=>[row.growth_id,row])).values()];
-      data.cursor = data.stateFilter || data.kindFilter ? "" : data.path;
-      data.next = typeof page.next_cursor === "string" ? page.next_cursor : null;
-      data.profileId = page.profile_id || "";
-      data.operatorName = page.operator_name || "";
-      /* 列表响应里带 access（growth_api.py 在 list 成功时 merge 进来），
-         所以权限不用另发一次请求。缺失就退化成"未读到"。 */
-      if (page.access) {
-        data.access = page.access;
-        data.accessToken = typeof page.access.edit_token === "string" ? page.access.edit_token : "";
-      }
+        const rows = page.items.map(row => attachRow(source, row, row.growth_id));
+        let cursor = page.next_cursor || null;
+        let guard = 0;
+        while (data.layout === "chain" && data.recordFocus?.growth_id
+          && data.recordFocus.target_id === source.target?.target_id
+          && data.recordFocus.role_id === source.role?.role_id
+          && !rows.some(row => row.growth_id === data.recordFocus.growth_id)
+          && cursor && guard++ < 200) {
+          page = await api("GET", source.path, listQuery(cursor));
+          if (!Array.isArray(page.items)) throw problem("invalid_response");
+          rows.push(...page.items.map(row => attachRow(source, row, row.growth_id)));
+          cursor = page.next_cursor || null;
+        }
+        return {source, rows, cursor, access:page.access || null,
+          profileId:page.profile_id || "", operatorName:page.operator_name || ""};
+      }));
+      if (!live(ticket)) return;
+      const valid = requests.filter(result => result.status === "fulfilled").map(result => result.value);
+      const failed = requests.length - valid.length;
+      if (!valid.length) throw requests.find(result => result.status === "rejected")?.reason || problem("invalid_response");
+      data.items = [...new Map(valid.flatMap(result => result.rows).map(row => [row._rowKey, row])).values()]
+        .sort(byUpdatedAt);
+      data.accesses = Object.fromEntries(valid.filter(result => validAccess(result.access))
+        .map(result => [sourceKey(result.source), result.access]));
+      data.listCursors = Object.fromEntries(valid.map(result => [sourceKey(result.source), result.cursor]));
+      data.cursor = data.stateFilter || data.kindFilter ? "" : "all";
+      data.next = Object.values(data.listCursors).some(Boolean) ? "more" : null;
+      data.profileId = "";
+      data.operatorName = valid[0]?.operatorName || "";
       data.ready = true;
+      if (failed) notice(`部分记录归属暂不可读取（${failed} 处）。`, true);
       /* 详情跟着列表刷新：列表里的那条已经变了，详情不能停在旧版本。 */
       if (data.detailId && !item(data.detailId)) {
         data.detailId = null;data.form=null;
         notice("所选记录已不在当前可读范围。", true);
       }
-      if (!data.detailId && data.layout==="chain")data.detailId=data.items[0]?.growth_id||null;
+      if (data.recordFocus?.growth_id && !data.detailId) {
+        const focused = data.items.find(row => row.growth_id === data.recordFocus.growth_id
+          && row._source?.target?.target_id === data.recordFocus.target_id
+          && row._source?.role?.role_id === data.recordFocus.role_id);
+        if (focused) data.detailId = rowKey(focused);
+      }
+      if (!data.detailId && data.layout==="chain")data.detailId=rowKey(data.items[0])||null;
       data.detail=data.detailId?item(data.detailId):null;
       if(data.layout==="chain"&&data.detailId)await loadEvidence(data.detailId);
     } catch (error) {
       if (!live(ticket)) return;
       data.items = []; data.detail = null; data.next = null;
       notice(error.code ? reason(error.code) : "连接中断，已清空旧内容。请刷新核对。", true);
-      if (denied.has(error.code)) { data.ready = false; data.path = ""; }
+      if (denied.has(error.code)) { data.ready = false; data.sources = []; data.path = ""; }
     } finally {
       if (live(ticket)) { data.loading = false; render(); }
     }
@@ -245,11 +285,12 @@ window.CompanionLearningPage = (() => {
   async function loadEvidence(id) {
     const row=item(id);
     data.evidenceId=id;data.evidence=[];data.evidenceError=false;
-    if(!row||row.unavailable_reason||!data.path){render();return;}
+    const path=sourcePath(row?._source, "/evidence");
+    if(!row||row.unavailable_reason||!path){render();return;}
     const ticket=version;
     data.evidenceLoading=true;render();
     try{
-      const result=await api("GET",data.path+"/evidence",{growth_id:id});
+      const result=await api("GET",path,{growth_id:row.growth_id});
       if(!live(ticket)||data.detailId!==id)return;
       if(!Array.isArray(result.items))throw problem("invalid_response");
       data.evidence=result.items;
@@ -261,14 +302,25 @@ window.CompanionLearningPage = (() => {
     }
   }
   async function loadMore() {
-    if (!data.next || data.loading || !data.path) return;
+    if (!data.next || data.loading || !data.sources.length) return;
     const ticket = version;
     data.loading = true; render();
     try {
-      const page = await api("GET", data.path, listQuery(data.next));
+      const sources=data.sources.filter(source=>data.listCursors[sourceKey(source)]);
+      const pages=await Promise.allSettled(sources.map(async source=>{
+        const cursor=data.listCursors[sourceKey(source)];
+        const page=await api("GET",source.path,listQuery(cursor));
+        if(!Array.isArray(page.items))throw problem("invalid_response");
+        return {source,page};
+      }));
       if (!live(ticket)) return;
-      if (Array.isArray(page.items)) data.items = [...new Map(data.items.concat(page.items).map(row=>[row.growth_id,row])).values()];
-      data.next = typeof page.next_cursor === "string" && page.next_cursor !== data.next ? page.next_cursor : null;
+      const valid=pages.filter(result=>result.status==="fulfilled").map(result=>result.value);
+      if(!valid.length&&pages.length)throw pages[0].reason||problem("invalid_response");
+      const incoming=valid.flatMap(({source,page})=>page.items.map(row=>attachRow(source,row,row.growth_id)));
+      data.items=[...new Map(data.items.concat(incoming).map(row=>[row._rowKey,row])).values()].sort(byUpdatedAt);
+      for(const {source,page} of valid)data.listCursors[sourceKey(source)]=page.next_cursor||null;
+      data.next=Object.values(data.listCursors).some(Boolean)?"more":null;
+      if(valid.length<pages.length)notice("部分记录归属暂不可读取，已显示其余记录。",true);
     } catch (error) {
       if (live(ticket)) notice(error.code ? reason(error.code) : "下一页没有读到。", true);
     } finally {
@@ -280,14 +332,24 @@ window.CompanionLearningPage = (() => {
      随后调用的 loadReviews() 会直接早退——审阅队列永远是空的，
      而用户看到的只是"没有待审阅"，不会报错。 */
   async function loadReviews() {
-    if (!data.path || data.loadingReviews) return;
+    if (!data.sources.length || data.loadingReviews) return;
     const ticket = version;
+    data.reviewCursors = {};
     data.loadingReviews = true; render();
     try {
-      const page = await api("GET", data.path + "/progress");
+      const results=await Promise.allSettled(data.sources.map(async source=>{
+        const page=await api("GET",source.path+"/progress");
+        if(!Array.isArray(page.items))throw problem("invalid_response");
+        return {source,page};
+      }));
       if (!live(ticket)) return;
-      data.reviews = Array.isArray(page.items) ? page.items : [];
-      data.reviewNext = typeof page.next_cursor === "string" ? page.next_cursor : null;
+      const valid=results.filter(result=>result.status==="fulfilled").map(result=>result.value);
+      if(!valid.length&&results.length)throw results.find(result=>result.status==="rejected")?.reason||problem("invalid_response");
+      data.reviews=valid.flatMap(({source,page})=>page.items.map(row=>attachRow(source,row,row.review_id)))
+        .sort(byUpdatedAt);
+      data.reviewCursors=Object.fromEntries(valid.map(({source,page})=>[sourceKey(source),page.next_cursor||null]));
+      data.reviewNext=Object.values(data.reviewCursors).some(Boolean)?"more":null;
+      if(valid.length<results.length)notice("部分审阅记录归属暂不可读取。",true);
       data.ready = true;
     } catch (error) {
       if (!live(ticket)) return;
@@ -302,10 +364,19 @@ window.CompanionLearningPage = (() => {
     const ticket = version;
     data.loadingReviews = true; render();
     try {
-      const page = await api("GET", data.path + "/progress", {after_id: data.reviewNext});
+      const sources=data.sources.filter(source=>data.reviewCursors[sourceKey(source)]);
+      const pages=await Promise.allSettled(sources.map(async source=>{
+        const page=await api("GET",source.path+"/progress",{after_id:data.reviewCursors[sourceKey(source)]});
+        if(!Array.isArray(page.items))throw problem("invalid_response");
+        return {source,page};
+      }));
       if (!live(ticket)) return;
-      if (Array.isArray(page.items)) data.reviews = data.reviews.concat(page.items);
-      data.reviewNext = typeof page.next_cursor === "string" ? page.next_cursor : null;
+      const valid=pages.filter(result=>result.status==="fulfilled").map(result=>result.value);
+      if(!valid.length&&pages.length)throw pages[0].reason||problem("invalid_response");
+      data.reviews=data.reviews.concat(valid.flatMap(({source,page})=>page.items.map(row=>attachRow(source,row,row.review_id))))
+        .sort(byUpdatedAt);
+      for(const {source,page} of valid)data.reviewCursors[sourceKey(source)]=page.next_cursor||null;
+      data.reviewNext=Object.values(data.reviewCursors).some(Boolean)?"more":null;
     } catch (error) {
       if (live(ticket)) notice(error.code ? reason(error.code) : "下一页审阅没有读到。", true);
     } finally {
@@ -329,10 +400,10 @@ window.CompanionLearningPage = (() => {
     const ticket = version;
     data.writing = true; render();
     try {
-      const body = {action, operation_key:operationKey(action, id), view_token:row.view_token,
-        growth_id:id, expected_revision:row.revision};
+      const body = {action, operation_key:operationKey(action), view_token:row.view_token,
+        growth_id:row.growth_id, expected_revision:row.revision};
       if (extra) Object.assign(body, extra);
-      const payload = await api("POST", data.path + "/command", body);
+      const payload = await api("POST", sourcePath(row._source, "/command"), body);
       if (!live(ticket)) return;
       data.detailId = data.layout === "chain" ? id : null;
       data.detail = null; data.form = null;
@@ -354,43 +425,18 @@ window.CompanionLearningPage = (() => {
      来源凭证由对话侧或迁移侧签发，页面只负责把它们带上。
      所以提出入口只在你确实拿到了凭证时才可用，并用一行说明这件事。 */
   async function propose(form) {
-    if (data.writing) return;
+    if (data.writing || !data.sources.length) return;
     const ticket = version;
     data.writing = true; render();
     try {
-      const body = {action:"propose", operation_key:operationKey("propose", form.kind),
+      const body = {action:"propose", operation_key:operationKey("propose"),
         view_token:form.view_token, kind:form.kind, title:form.title, description:form.description,
         progress_note:form.progress_note, sources:form.sources};
-      const payload = await api("POST", data.path + "/command", body);
+      const payload = await api("POST", sourcePath(data.sources[0], "/command"), body);
       if (!live(ticket)) return;
       data.form = null;
       data.writing = false;
       notice("已提出，等待确认。");
-      await load();
-    } catch (error) {
-      if (!live(ticket)) return;
-      data.writing = false; notice(reason(error.code), true); render();
-    }
-  }
-  /* 权限开关。两个布尔，且 proposals 在 read 关闭时由后端强制跟从——
-     页面上要照实画出这个从属，而不是并排放两个独立开关。 */
-  async function saveAccess(changes) {
-    if (data.writing || !data.accessToken || !Object.keys(changes).length) return;
-    const ticket = version;
-    data.writing = true; render();
-    try {
-      const payload = await api("POST", data.path + "/command", {
-        action:"configure", operation_key:operationKey("access", "permissions"),
-        edit_token:data.accessToken, changes});
-      if (!live(ticket)) return;
-      if (payload?.access) {
-        data.access = payload.access;
-        data.accessToken = typeof payload.access.edit_token === "string" ? payload.access.edit_token : data.accessToken;
-      }
-      /* 保存成功后立刻解除写入态。load() 只负责重新读列表，若把标志留在
-         true，读回完成后页面仍会把权限控件和按钮当成“正在保存”而锁住。 */
-      data.writing = false;
-      notice("权限已保存。");
       await load();
     } catch (error) {
       if (!live(ticket)) return;
@@ -412,11 +458,11 @@ window.CompanionLearningPage = (() => {
     const ticket = version;
     data.writing = true; render();
     try {
-      await api("POST", data.path + "/progress/command", {
+      await api("POST", sourcePath(row._source, "/progress/command"), {
         review_id:row.review_id, action, expected_revision:row.base_revision,
-        view_token:row.view_token, operation_key:operationKey("review", row.review_id)});
+        view_token:row.view_token, operation_key:operationKey("review")});
       if (!live(ticket)) return;
-      data.reviews = data.reviews.filter(entry => entry.review_id !== row.review_id);
+      data.reviews = data.reviews.filter(entry => entry._rowKey !== row._rowKey);
       data.writing = false;
       notice(action === "accept" ? "已采纳，进展写进目标。" : "已记下这次审阅。");
       await load();
@@ -427,9 +473,35 @@ window.CompanionLearningPage = (() => {
     }
   }
 
+  async function updateAccess(source, field, enabled) {
+    const key = sourceKey(source), access = data.accesses[key];
+    if (data.writing || !access || !["read_enabled", "proposals_enabled"].includes(field)
+        || typeof enabled !== "boolean" || access.settings[field] === enabled) return;
+    const ticket = version;
+    data.writing = true; render();
+    try {
+      const result = await api("POST", sourcePath(source, "/command"), {
+        action:"configure", operation_key:operationKey("configure-" + field),
+        edit_token:access.edit_token, changes:{[field]:enabled},
+      });
+      if (!live(ticket)) return;
+      if (!validAccess(result.access)) throw problem("invalid_response");
+      data.accesses[key] = result.access;
+      data.writing = false;
+      notice("已更新「" + (source.label || data.roleLabel || "当前私聊对象") + "」的成长权限。");
+      render();
+    } catch (error) {
+      if (!live(ticket)) return;
+      data.writing = false;
+      notice(reason(error.code), true);
+      if (error.code === "configuration_revision_conflict") await load();
+      else render();
+    }
+  }
+
   /* ---- 渲染 ------------------------------------------------------------ */
   const VIEWS = [["track","培育轨道",ICON.track],["reviews","待审阅",ICON.review],
-                 ["sources","来源与凭证",ICON.source],["gate","权限开关",ICON.gate]];
+                 ["sources","来源与凭证",ICON.source]];
   /* 列表分页。后端 limit 上限是 20（页面传 20），游标是 after_id。
      这一页不做本地全量预读（记忆页那样）——因为成长记录条数天然远小于事实，
      而且每一条都可能带动作，预读多页会把动作列表读旧。 */
@@ -440,12 +512,41 @@ window.CompanionLearningPage = (() => {
       <div class="lea-head-main">
         <h2>${e(label)}</h2>
         ${pending ? `<span class="lea-pill">${pending} 条待审阅</span>` : ""}
-        ${data.profileId ? `<span class="lea-id" title="记录归属">${e(data.roleLabel||"当前角色")}</span>` : ""}
+        ${data.sources.length > 1 ? `<span class="lea-id">汇总 ${data.sources.length} 个记录归属</span>` : ""}
       </div>
       <div class="lea-head-actions">
         <button type="button" class="lea-btn" data-action="refresh"${data.loading || data.writing ? " disabled" : ""}>${ICON.refresh}<span>重新读取</span></button>
       </div>
     </header>`;
+  }
+  function gateView() {
+    const rows = data.sources.flatMap(source => {
+      const access = data.accesses[sourceKey(source)];
+      if (!access) return [];
+      const read = access.settings.read_enabled === true;
+      const label = source.label || data.roleLabel || "当前私聊对象";
+      const toggle = (field, title, description) => {
+        const checked = access.settings[field] === true;
+        const effective = access.effective[field]?.allowed === true;
+        return `<div class="lea-switch${field === "proposals_enabled" && !read ? " is-following" : ""}">
+          <label><input type="checkbox" data-access="${field}" data-source="${e(sourceKey(source))}"
+            aria-label="${e(label)}：${e(title)}"${checked ? " checked" : ""}${data.writing ? " disabled" : ""}>
+            <span class="lea-switch-track" aria-hidden="true"><i></i></span>
+            <span class="lea-switch-text"><strong>${e(title)}</strong><small>${e(description)}</small></span></label>
+          <p class="lea-switch-note${effective ? "" : " is-warn"}">${effective ? "当前已生效" : "当前未生效"}</p>
+        </div>`;
+      };
+      return [`<section class="lea-gate" aria-label="${e(label)}成长授权">
+        <header class="lea-gate-head"><div><h3>私聊对象授权</h3><p>仅影响此对象与当前角色，不会修改其他私聊窗口。</p></div><span>${e(label)}</span></header>
+        <div class="lea-gate-list">
+          ${toggle("read_enabled", "读取成长记录", "允许角色在对话中读取已确认的技能与目标。")}
+          ${toggle("proposals_enabled", "提出成长建议", read
+            ? "允许角色依据当前对话提出新技能或长期目标，仍需你确认。"
+            : "读取权限关闭时，提案授权暂不生效；开启读取后按此设置恢复。")}
+        </div>
+      </section>`];
+    }).join("");
+    return rows;
   }
   function railMarkup() {
     return `<nav class="lea-rail" aria-label="学习与反思工作台">${VIEWS.map(([id, text, icon]) =>
@@ -460,8 +561,7 @@ window.CompanionLearningPage = (() => {
   }
   function emptyMarkup() {
     if (data.loading) return `<div class="lea-empty"><span class="lea-spinner"></span>正在读取成长记录…</div>`;
-    if (!data.path) return `<div class="lea-empty">${ICON.alert}<strong>还没有可管理的角色成长记录</strong>
-      <p>角色数据尚未加载，请重新读取。</p></div>`;
+    if (!data.sources.length) return `<div class="lea-empty">${ICON.alert}<strong>还没有可读取的成长记录</strong></div>`;
     return `<div class="lea-empty">${ICON.alert}<strong>还没有读到记录</strong>
       <p>${e(data.notice || "暂无成长记录")}</p>
       <button type="button" class="lea-btn" data-action="refresh">${ICON.refresh}<span>重新读取</span></button></div>`;
@@ -513,9 +613,10 @@ window.CompanionLearningPage = (() => {
     /* 来源不可用时后端把 title/description 都置 null。这不是缺字段，
        所以文案必须说清"读不到"而不是显示成一张空卡。 */
     const blind = !!row.unavailable_reason;
-    const entering = data.entered.has(row.growth_id);
+    const key = rowKey(row);
+    const entering = data.entered.has(key);
     return `<article class="lea-card${blind ? " is-blind" : ""}${entering ? " is-entered" : ""}"
-      data-id="${e(row.growth_id)}" tabindex="0" role="button"
+      data-id="${e(key)}" tabindex="0" role="button"
       aria-label="${e(blind ? "来源不可读取的记录" : row.title || "未命名记录")}">
       <div class="lea-card-top">
         <span class="lea-kind">${e(KIND_LABEL[row.kind] || "成长记录")}</span>
@@ -525,10 +626,10 @@ window.CompanionLearningPage = (() => {
       ${blind ? `<p class="lea-card-why">${e(reason(row.unavailable_reason))}</p>`
         : row.progress_note ? `<p class="lea-card-note">${e(row.progress_note)}</p>` : ""}
       <div class="lea-card-foot">
-        <span class="lea-card-meta">${e(row.source_count ?? 0)} 条来源 · ${e(when(row.updated_at))}</span>
+        <span class="lea-card-meta">记录归属 · ${e(row._source?.label||"")} · ${e(row.source_count ?? 0)} 条依据 · ${e(when(row.updated_at))}</span>
         ${(row.actions || []).length ? `<span class="lea-card-actions">${(row.actions || []).slice(0, 2).map(a =>
           `<button type="button" class="lea-mini${ACTIONS[a]?.kind === "primary" ? " is-primary" : ""}"
-            data-act="${e(a)}" data-id="${e(row.growth_id)}">${e(ACTIONS[a]?.label || "处理记录")}</button>`).join("")}</span>` : ""}
+            data-act="${e(a)}" data-id="${e(key)}">${e(ACTIONS[a]?.label || "处理记录")}</button>`).join("")}</span>` : ""}
       </div>
     </article>`;
   }
@@ -547,6 +648,7 @@ window.CompanionLearningPage = (() => {
         <span class="lea-pill">${e(stage.label || "状态待核对")}</span>
         <span class="lea-kind">${e(KIND_LABEL[row.kind] || "成长记录")}</span>
         <span class="lea-rev">v${e(row.revision)}</span>
+        <span class="lea-review-target">记录归属 · ${e(row._source?.label||"")}</span>
       </header>
       ${blind ? `<div class="lea-blind">
           ${ICON.sourceKey}
@@ -570,7 +672,7 @@ window.CompanionLearningPage = (() => {
         ${(row.actions || []).length ? `<div class="lea-action-row">${(row.actions || []).map(a => {
           const spec = ACTIONS[a] || {label:"处理记录", kind:"", note:""};
           return `<button type="button" class="lea-btn${spec.kind === "primary" ? " is-primary" : spec.kind === "quiet" ? " is-quiet" : ""}"
-            data-act="${e(a)}" data-id="${e(row.growth_id)}"${data.writing ? " disabled" : ""}>
+            data-act="${e(a)}" data-id="${e(rowKey(row))}"${data.writing ? " disabled" : ""}>
             <span>${e(spec.label)}</span></button>`;
         }).join("")}</div>`
         : `<p class="lea-lane-empty">当前状态没有可用动作。</p>`}
@@ -583,11 +685,12 @@ window.CompanionLearningPage = (() => {
     const current=data.detailId?item(data.detailId):data.items[0];
     const rows=data.items.map(row=>{
       const stage=STATE_BY_KEY[row.state]||{};
-      return `<button type="button" class="lea-chain-row${current?.growth_id===row.growth_id?" is-selected":""}"
-        data-open="${e(row.growth_id)}" aria-pressed="${current?.growth_id===row.growth_id}">
+      const key=rowKey(row);
+      return `<button type="button" class="lea-chain-row${rowKey(current)===key?" is-selected":""}"
+        data-open="${e(key)}" aria-pressed="${rowKey(current)===key}">
         <span class="lea-lane-dot ${stage.tone||""}" aria-hidden="true"></span>
         <span class="lea-chain-row-copy"><strong>${e(row.unavailable_reason?"来源已不可读取":row.title||"未命名记录")}</strong>
-          <small>${e(KIND_LABEL[row.kind]||"成长记录")} · v${e(row.revision)} · ${e(row.source_count??0)} 条来源 · ${e(when(row.updated_at))}</small></span>
+        <small>记录归属 · ${e(row._source?.label||"")} · ${e(KIND_LABEL[row.kind]||"成长记录")} · v${e(row.revision)} · ${e(row.source_count??0)} 条依据 · ${e(when(row.updated_at))}</small></span>
         <span class="lea-pill ${stage.tone||""}">${e(stage.label||"待核对")}</span></button>`;
     }).join("");
     const evidence=rowEvidenceMarkup(current);
@@ -599,20 +702,19 @@ window.CompanionLearningPage = (() => {
       <div class="lea-chain-right"><section class="lea-chain-detail lea-block"><header><h3>记录详情 · 工作台</h3><button type="button" class="lh-refresh" data-action="refresh" aria-label="重新读取" title="重新读取"${data.loading||data.writing?" disabled":""}>${ICON.refresh}</button></header>${detailView()}</section>
       ${current?.actions?.includes("revise")?`<section class="lea-chain-revision"><header><h3>修订 · 生成新版本</h3></header>${reviseForm(current)}</section>`:""}</div>
     </div>
-    <section class="lea-chain-permissions lea-block"><header><h3>权限开关</h3><span>${data.access?"已读取":""}</span></header>${gateView()}</section>
     ${data.notice?noticeMarkup():""}`;
   }
 
   function rowEvidenceMarkup(row) {
     if(!row)return `<p class="lea-lane-empty">选择一条记录</p>`;
     if(row.unavailable_reason)return `<p class="lea-card-why">${e(reason(row.unavailable_reason))}</p>`;
-    if(data.evidenceLoading&&data.evidenceId===row.growth_id)return `<p class="lea-lane-empty">正在读取依据…</p>`;
-    if(data.evidenceError&&data.evidenceId===row.growth_id)return `<p class="lea-card-why">依据暂时无法读取。</p>`;
-    if(data.evidenceId!==row.growth_id||!data.evidence.length)return `<p class="lea-lane-empty">没有可显示的来源内容</p>`;
+    if(data.evidenceLoading&&data.evidenceId===rowKey(row))return `<p class="lea-lane-empty">正在读取依据…</p>`;
+    if(data.evidenceError&&data.evidenceId===rowKey(row))return `<p class="lea-card-why">依据暂时无法读取。</p>`;
+    if(data.evidenceId!==rowKey(row)||!data.evidence.length)return `<p class="lea-lane-empty">没有可显示的来源内容</p>`;
     return `<ol>${data.evidence.map(item=>`<li><p>${e(item.text)}</p><time>${e(when(item.issued_at))}</time></li>`).join("")}</ol>`;
   }
   function reviseForm(row) {
-    const draft = data.form?.id === row.growth_id ? data.form : null;
+    const draft = data.form?.id === rowKey(row) ? data.form : null;
     return `<form class="lea-revise" data-form="revise">
       <h4>修订</h4>
       <label class="lea-field"><span>标题</span>
@@ -643,6 +745,7 @@ window.CompanionLearningPage = (() => {
         return `<article class="lea-review${blind ? " is-blind" : ""}" style="--i:${index}">
           <header>
             <span class="lea-review-target">${e(row.growth_title || "目标已不可读取")}</span>
+            <span class="lea-review-time">${e(row._source?.label||"")}</span>
             <span class="lea-rev">依据 v${e(row.base_revision)}</span>
             <span class="lea-review-time">${e(when(row.created_at))}</span>
           </header>
@@ -652,7 +755,7 @@ window.CompanionLearningPage = (() => {
           <footer>
             ${(row.actions || []).map(a => `<button type="button"
               class="lea-btn${REVIEW_ACTIONS[a]?.kind === "primary" ? " is-primary" : REVIEW_ACTIONS[a]?.kind === "quiet" ? " is-quiet" : ""}"
-              data-review="${e(a)}" data-id="${e(row.review_id)}"${data.writing ? " disabled" : ""}>
+              data-review="${e(a)}" data-id="${e(row._rowKey||row.review_id)}"${data.writing ? " disabled" : ""}>
               <span>${e(REVIEW_ACTIONS[a]?.label || "审阅记录")}</span></button>`).join("")}
           </footer>
           ${(row.actions || []).length === 1 && row.actions[0] === "reject"
@@ -675,63 +778,24 @@ window.CompanionLearningPage = (() => {
             <strong>成长记录 ${index+1}</strong>
             <span>${e(reason(row.unavailable_reason))}</span>
             <em>${e(row.source_count ?? 0)} 条来源 · v${e(row.revision)}</em>
-            <button type="button" class="lea-mini" data-open="${e(row.growth_id)}">查看</button></li>`).join("")}</ul>`
+            <button type="button" class="lea-mini" data-open="${e(rowKey(row))}">查看</button></li>`).join("")}</ul>`
         : `<p class="lea-note is-ok">${ICON.check}<span>当前所有记录的来源都可读取。</span></p>`}
       </section>
-    </div>`;
-  }
-
-  /* 权限开关。两个布尔，但**不是两个独立开关**：
-     `proposals_enabled` 在 `read_enabled` 关闭时会被后端强制跟成同一份判定。
-     所以关闭 read 时，propose 那一行要显示成"跟随 read"，而不是留一个开了也没用的开关。 */
-  function gateView() {
-    if (!data.access) {
-      return `<div class="lea-empty">${ICON.alert}<strong>还没有读到权限设置</strong>
-        <p>${e(data.notice || "权限尚未读取。")}</p>
-        <button type="button" class="lea-btn" data-action="refresh">${ICON.refresh}<span>重新读取</span></button></div>`;
-    }
-    const settings = data.access.settings || {};
-    const effective = data.access.effective || {};
-    const readOn = settings.read_enabled === true;
-    const following = !readOn;
-    const rows = [
-      {name:"read_enabled", label:"读取成长记录", note:"关闭后这一页读不到任何记录，相关页面的入口也会空着。"},
-      {name:"proposals_enabled", label:"接受角色提出的成长", note:"关闭后角色不会提出新的技能与目标；已有的不受影响。"},
-    ];
-    return `<div class="lea-gate">
-      <p class="lea-note">权限按当前窗口保存。</p>
-      <div class="lea-gate-list">
-        ${rows.map(row => {
-          const on = settings[row.name] === true;
-          const blocked = row.name === "proposals_enabled" && following;
-          const verdict = effective[row.name];
-          return `<div class="lea-switch${blocked ? " is-following" : ""}">
-            <label>
-              <input type="checkbox" data-access="${row.name}"${on ? " checked" : ""}${blocked || data.writing ? " disabled" : ""}>
-              <span class="lea-switch-track"><i></i></span>
-              <span class="lea-switch-text"><strong>${e(row.label)}</strong><small>${e(row.note)}</small></span>
-            </label>
-            ${blocked ? `<p class="lea-switch-note">${ICON.alert}<span>需先启用读取权限。</span></p>`
-              : verdict && verdict.allowed === false ? `<p class="lea-switch-note is-warn">${ICON.alert}
-                <span>已开启，但当前对象尚未获得这项权限：${e(reason(verdict.reason))}</span></p>` : ""}
-          </div>`;
-        }).join("")}
-      </div>
     </div>`;
   }
 
   function body() {
     if (!data.ready) return emptyMarkup();
     if (data.detailId) return detailView();
-    return {"track":trackView, "reviews":reviewsView, "sources":sourcesView, "gate":gateView}[data.view]();
+    return {"track":trackView, "reviews":reviewsView, "sources":sourcesView}[data.view]();
   }
   function render() {
     if (!root || !data) return;
     if(data.layout==="chain"){
-      root.innerHTML=`<div class="lea-chain-workspace">${!data.ready?emptyMarkup():chainWorkView()}</div>`;
+      root.innerHTML=`<div class="lea-chain-workspace">${gateView()}${!data.ready?emptyMarkup():chainWorkView()}</div>`;
       return;
     }
-    root.innerHTML = `<div class="lea-app">${railMarkup()}<div class="lea-main">${headMarkup()}${noticeMarkup()}${body()}</div></div>`;
+    root.innerHTML = `<div class="lea-app">${railMarkup()}<div class="lea-main">${headMarkup()}${noticeMarkup()}${gateView()}${body()}</div></div>`;
   }
 
   /* ---- 交互 ------------------------------------------------------------ */
@@ -753,7 +817,7 @@ window.CompanionLearningPage = (() => {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action === "refresh") {
       data.notice = "";
-      if (data.view === "reviews" || data.view === "track") loadReviews();
+    if (data.view === "reviews" || data.view === "track") loadReviews();
       load(); return;
     }
     if (action === "dismiss") { data.notice = ""; render(); return; }
@@ -762,9 +826,9 @@ window.CompanionLearningPage = (() => {
     if (action === "more-reviews") { loadMoreReviews(); return; }
     if (action === "close-detail") { data.detailId = null; data.form = null; render(); return; }
     const filterState = event.target.closest("[data-filter-state]")?.dataset.filterState;
-    if (filterState !== undefined) { data.stateFilter = filterState; load(); return; }
+    if (filterState !== undefined) { data.stateFilter = filterState; data.detailId=null; data.form=null; load(); return; }
     const filterKind = event.target.closest("[data-filter-kind]")?.dataset.filterKind;
-    if (filterKind !== undefined) { data.kindFilter = filterKind; load(); return; }
+    if (filterKind !== undefined) { data.kindFilter = filterKind; data.detailId=null; data.form=null; load(); return; }
     const open = event.target.closest("[data-open]")?.dataset.open;
     if (open) { data.detailId = open; data.detail = item(open); data.form = null; data.evidence=[];
       if(data.layout==="chain")void loadEvidence(open);render();return; }
@@ -789,7 +853,7 @@ window.CompanionLearningPage = (() => {
     }
     const reviewAction = event.target.closest("[data-review]");
     if (reviewAction) {
-      const row = data.reviews.find(r => r.review_id === reviewAction.dataset.id);
+      const row = data.reviews.find(r => r._rowKey === reviewAction.dataset.id || r.review_id === reviewAction.dataset.id);
       if (row) review(row, reviewAction.dataset.review);
       return;
     }
@@ -817,15 +881,17 @@ window.CompanionLearningPage = (() => {
       <button type="button" class="lea-mini" data-confirm="no">取消</button></div>`;
   }
   function change(event) {
-    const access = event.target.closest("[data-access]");
-    if (access) { saveAccess({[access.dataset.access]: access.checked}); return; }
+    const input = event.target.closest("[data-access]");
+    if (!input) return;
+    const source = data.sources.find(item => sourceKey(item) === input.dataset.source);
+    if (source) void updateAccess(source, input.dataset.access, input.checked === true);
   }
   function input(event) {
     const form=event.target.closest('[data-form="revise"]');
     if(!form||!["title","description","progress_note"].includes(event.target.name))return;
     const row=data.detail||item(data.detailId);
     if(!row)return;
-    if(data.form?.id!==row.growth_id)data.form={id:row.growth_id,title:row.title||"",description:row.description||"",progress_note:row.progress_note||""};
+    if(data.form?.id!==rowKey(row))data.form={id:rowKey(row),title:row.title||"",description:row.description||"",progress_note:row.progress_note||""};
     data.form[event.target.name]=event.target.value;
   }
   function submit(event) {
@@ -837,7 +903,7 @@ window.CompanionLearningPage = (() => {
     const values = new FormData(form);
     const title = String(values.get("title") || "").trim();
     if (!title) { notice("标题不能为空。", true); render(); return; }
-    act(row.growth_id, "revise", {title, description:String(values.get("description") || ""),
+    act(rowKey(row), "revise", {title, description:String(values.get("description") || ""),
       progress_note:String(values.get("progress_note") || "")});
   }
   function confirmClick(event) {
@@ -899,7 +965,7 @@ window.CompanionLearningPage = (() => {
     unmount();
     root = host; data = blank();
     data.layout=options.layout==="chain"?"chain":"default";
-    data.detailId=typeof options.recordId==="string"&&options.recordId?options.recordId:null;
+    data.detailId=null;
     data.roleLabel=typeof options.roleLabel==="string"?options.roleLabel:"";
     const ticket = ++version;
     root.addEventListener("click", onClick);
@@ -914,10 +980,23 @@ window.CompanionLearningPage = (() => {
       const context = await bounded(bridge.ready());
       if (!live(ticket)) return;
       if (context?.pluginName !== HOST) throw problem("bridge_unavailable");
-      const absolute = options?.growthApi;
-      if (typeof absolute !== "string" || !absolute) throw problem("relationship_required");
-      data.path = rel(absolute);
-      data.scopeKey = typeof options.scopeKey === "string" ? options.scopeKey : data.path;
+      const provided=Array.isArray(options.sources)?options.sources:[];
+      const sources=provided.map(source=>{
+        const absolute=source?.growthApi||source?.api;
+        if(typeof absolute!=="string"||!absolute)return null;
+        return {...source,path:rel(absolute)};
+      }).filter(Boolean);
+      if(!sources.length&&typeof options.growthApi==="string"&&options.growthApi){
+        const path=rel(options.growthApi);
+        sources.push({key:path,path,label:options.roleLabel||"当前记录"});
+      }
+      if(!sources.length)throw problem("relationship_required");
+      data.sources=sources;
+      data.path=sources[0].path;
+      data.recordFocus=options.recordFocus||null;
+      if(typeof options.recordId==="string"&&options.recordId){
+        data.recordFocus={growth_id:options.recordId};
+      }
       await load(); await loadReviews();
       if (live(ticket)) render();
     } catch (error) {

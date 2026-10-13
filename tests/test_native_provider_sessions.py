@@ -1,5 +1,6 @@
 """Native registration is read-only on load and refreshed on session restart."""
 
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -56,13 +57,16 @@ class NativeSingleSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(refreshed)
         self.assertEqual(refreshed.descriptor.package, declaration.descriptor.package)
 
-    async def test_no_optional_provider_starts_with_only_bundled_tool_providers(self):
+    async def test_no_optional_provider_starts_with_all_seven_bundled_providers(self):
         self.native.get_all_stars = lambda: ()
         (await self.controller.initialize_profile()).unwrap()
         (await self.controller.start()).unwrap()
         declarations = self.controller.native_extensions.declarations()
         self.assertEqual({item.descriptor.package.extension_id for item in declarations},
-                         {"image", "companion.screen.native"})
+                         {"content", "image", "companion.screen.native", "reality", "together", "game", "live"})
+        self.assertTrue(all(CapabilityRepository(self.controller.runtime).installation(
+            extension_id=extension_id).failure is not None for extension_id in
+            ("content", "image", "companion.screen.native", "reality", "together", "game", "live")))
         self.assertIsNotNone(self.controller.session.application.external)
 
     async def test_optional_provider_cannot_replace_a_managed_image_provider(self):
@@ -93,6 +97,21 @@ class NativeSingleSessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NativeMultiSessionTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_shared_host_uses_v2_window_persona_binding_for_private_and_group_bridges(self):
+        calls = []
+
+        async def lookup(umo):
+            calls.append(umo)
+            return self.window_personas.get(umo)
+
+        self.types = replace(self.types, session_persona_override_lookup=lookup)
+        self.controller = self.make_controller()
+        await self.start_host()
+
+        self.assertEqual(set(calls), {"qq-main:FriendMessage:200", "qq-second:FriendMessage:200"})
+        self.assertIs(self.controller.session.bridge.session_persona_override_lookup, lookup)
+        self.assertIs(self.controller.session.bridge.groups.session_persona_override_lookup, lookup)
+
     async def test_optional_provider_cannot_replace_a_managed_image_provider_in_shared_host(self):
         stars = [Star(Port())]
         self.native.get_all_stars = lambda: stars
@@ -141,12 +160,15 @@ class NativeMultiSessionTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(refreshed)
         self.assertEqual(refreshed.descriptor.package, declaration.descriptor.package)
 
-    async def test_no_optional_provider_starts_with_only_bundled_tool_providers(self):
+    async def test_no_optional_provider_starts_with_all_seven_bundled_providers(self):
         self.native.get_all_stars = lambda: ()
         app = await self.start_host()
         declarations = self.controller.native_extensions.declarations()
         self.assertEqual({item.descriptor.package.extension_id for item in declarations},
-                         {"image", "companion.screen.native"})
+                         {"content", "image", "companion.screen.native", "reality", "together", "game", "live"})
+        self.assertTrue(all(CapabilityRepository(self.controller.runtime).installation(
+            extension_id=extension_id).failure is not None for extension_id in
+            ("content", "image", "companion.screen.native", "reality", "together", "game", "live")))
         self.assertIsNotNone(app.external)
 
 

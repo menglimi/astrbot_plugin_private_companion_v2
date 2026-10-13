@@ -59,7 +59,7 @@ from tests.test_host_application import HostFixture
 PAGE = pathlib.Path(__file__).resolve().parents[1] / "pages" / "陪伴小屋"
 DELEGATED_NAME = "我会牢牢记住你"
 MEMORY_ACTIONS = frozenset({"memory.query", "memory.sources", "memory.proposal.submit", "memory.operation.get",
-                            "memory.forget", "memory.query.status", "memory.experience.save"})
+                            "memory.forget", "memory.query.status", "memory.experience.save", "memory.legacy.query"})
 
 
 @dataclass

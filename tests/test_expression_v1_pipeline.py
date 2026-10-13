@@ -18,13 +18,20 @@ from companion_v2.conversation.foreground import ClaimKind, DraftClaim
 from companion_v2.execution.models import TaskContext
 from companion_v2.execution.runner import RunResult
 from companion_v2.expression import learning
-from companion_v2.expression.configuration import GROUP, target_for
+from companion_v2.expression.configuration import (GROUP, PRIVATE_GROUP, private_target_for,
+    read_settings, target_for)
 from companion_v2.expression.review import expression_review_profile, reviewed_text
 from companion_v2.expression.sharing import build_pack
 from companion_v2.expression.style_management import ExpressionStyleManagement
 from companion_v2.expression.style_service import expression_learning_profile
-from companion_v2.foundation.refs import AudienceRef
+from companion_v2.conversation.style_context import EXPRESSION_STYLE_INSTRUCTION
+from companion_v2.foundation.refs import (AudienceRef, OperationRef, ScopeKind, ScopeRef,
+    SubjectKind, SubjectRef, VersionRef)
+from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.role_profile.configuration import (GROUP as ROLE_PROFILE_GROUP,
+    RoleProfileConfigurationOwner, configuration_fields as role_profile_fields,
+    target_for as role_profile_target_for)
 from types import SimpleNamespace
 from companion_v2.model_gateway.routing import configuration_fields
 from tests.proactive_support import ContactFixture
@@ -32,7 +39,7 @@ from tests.group_host_support import GroupFixture
 from tests.native_adapter_support import completion
 from tests.staging_bootstrap_support import wait_for_batch
 from tests.test_host_application import HostFixture
-from tests.test_management_access import SCOPE
+from tests.test_management_access import INSTALLATION, NOW, SCOPE
 from tests.test_role_tool_loop import answered
 
 
@@ -59,14 +66,29 @@ class ExpressionFixture:
         self.registry = FieldRegistry(version="expression-pipeline.v1", fields=configuration_fields(self.profiles))
 
     def configure_expression(self, app, changes, context=None):
-        target = target_for(context) if context else self.window
-        snapshot = app.configuration.read(self.core, target=target, group_id=GROUP,
-                                          observed_at=self.clock.now()).unwrap()
-        return app.configuration.patch(self.core, target=target, group_id=GROUP,
-            expected_edit_token=snapshot.edit_token,
-            changes={GROUP + "." + key: value for key, value in changes.items()},
-            operation=self.operation(target.authorization_scope, owner=GROUP),
-            observed_at=self.clock.now()).unwrap()
+        context = context or self.selected_context()
+        shared = {key: value for key, value in changes.items() if key != "private_learning_enabled"}
+        local = {key: value for key, value in changes.items() if key == "private_learning_enabled"}
+        receipt = None
+        if shared:
+            target = target_for(installation_id=app.runtime.installation_id)
+            snapshot = app.configuration.read(self.core, target=target, group_id=GROUP,
+                                              observed_at=self.clock.now()).unwrap()
+            receipt = app.configuration.patch(self.core, target=target, group_id=GROUP,
+                expected_edit_token=snapshot.edit_token,
+                changes={GROUP + "." + key: value for key, value in shared.items()},
+                operation=self.operation(target.authorization_scope, owner=GROUP),
+                observed_at=self.clock.now()).unwrap()
+        if local:
+            target = private_target_for(context)
+            snapshot = app.configuration.read(self.core, target=target, group_id=PRIVATE_GROUP,
+                                              observed_at=self.clock.now()).unwrap()
+            receipt = app.configuration.patch(self.core, target=target, group_id=PRIVATE_GROUP,
+                expected_edit_token=snapshot.edit_token,
+                changes={PRIVATE_GROUP + "." + key: value for key, value in local.items()},
+                operation=self.operation(target.authorization_scope, owner=PRIVATE_GROUP),
+                observed_at=self.clock.now()).unwrap()
+        return receipt
 
     def selected_context(self):
         binding = self.identity.resolve_role(SCOPE, observed_at=self.clock.now()).unwrap()
@@ -112,7 +134,14 @@ class ExpressionReplyPipelineTests(ExpressionFixture, HostFixture, unittest.Isol
 
     async def seed(self, host, *, count=6):
         app = host.application
-        self.configure_expression(app, {"private_learning_enabled": False})
+        context = self.selected_context()
+        owner = RoleProfileConfigurationOwner(app.runtime)
+        target = role_profile_target_for(context)
+        profile = owner.read(target, role_profile_fields())
+        owner.write(target, role_profile_fields(), changes={ROLE_PROFILE_GROUP + ".main_companion_subject":
+            self.important.subject.subject_id}, reset=(), expected_revision=profile.revision,
+            observed_at=self.clock.now())
+        self.configure_expression(app, {"private_learning_enabled": False}, context)
         batch = None
         for index in range(count):
             batch = host.receive(self.event("seed-" + str(index), text="嗯哼，那就这么定啦。" + str(index))).unwrap()
@@ -154,12 +183,85 @@ class ExpressionReplyPipelineTests(ExpressionFixture, HostFixture, unittest.Isol
         await self.reply(host)
         envelope = next(item for item in reversed(self.called) if item.original.output_format == "conversation")
         self.assertIn(RULE["proposal"], materials(envelope, "expression_style_rule")[0].payload)
+        self.assertIn(EXPRESSION_STYLE_INSTRUCTION, envelope.original.instruction)
         self.assertFalse(envelope.original.streaming)
         self.assertEqual([item.text.strip() for item in self.sent[before:]], REVISED.splitlines())
         self.assertFalse(app.expression_draft_review.pending)
         self.assertFalse(app.expression_draft_review.results)
         adopted = manager.list(operator=self.core, context=context, state="adopted").unwrap()["items"][0]
         self.assertEqual(adopted["injections"], 1)
+
+    async def test_private_rules_apply_across_relationships_only_while_source_is_selected(self):
+        host = await self.start()
+        app = host.application
+        source_context = await self.seed(host)
+        self.configure_expression(app, {"private_learning_enabled": True,
+                                        "style_review_enabled": False}, source_context)
+        manager = await self.learn_now(app, source_context)
+        candidate = manager.list(operator=self.core, context=source_context).unwrap()["items"][0]
+        manager.command(operator=self.core, context=source_context, signal_id=candidate["signal_id"],
+            action="adopt", view_token=candidate["view_token"], operation_key="cross-private-adopt").unwrap()
+
+        principal = replace(self.important.principal, native_account_id="secondary")
+        subject = SubjectRef(INSTALLATION, SubjectKind.HUMAN, "secondary-person")
+        self.identity.bind(binding_id="secondary-person", principal=principal, subject=subject,
+            valid_from=NOW, expected_revision=self.identity.revision)
+        actor = self.identity.resolve_authenticated(principal, observed_at=NOW).unwrap()
+        destination_scope = ScopeRef(INSTALLATION, SCOPE.platform, ScopeKind.PRIVATE, "secondary",
+            SCOPE.bot_id, SCOPE.account_id, "conversation-secondary", "session-secondary")
+        self.personas.register_route(ConversationRoute(destination_scope, user=subject), observed_at=NOW)
+        self.grant(actor, destination_scope, "text")
+        self.grant(actor, destination_scope, "conversation.reply")
+        batch = host.receive(self.event("secondary-turn", scope=destination_scope, actor=actor,
+            text="这是另一个私聊对象。")).unwrap()
+        self.advance(app)
+        await self.done(app, batch)
+        destination = self.context(app, batch)
+
+        policy = read_settings(app.runtime, destination)
+        snapshot = app.expression_style_context.capture(destination, self.clock.now(), policy=policy)
+        injected = app.expression_style_context.contributions(snapshot, destination, self.clock.now(),
+            policy=policy)
+        self.assertTrue(any(item.purpose == "expression_style_rule" for item in injected))
+
+        profile_owner = RoleProfileConfigurationOwner(app.runtime)
+        profile_target = role_profile_target_for(destination)
+        profile = profile_owner.read(profile_target, role_profile_fields())
+        profile_owner.write(profile_target, role_profile_fields(), changes={
+            ROLE_PROFILE_GROUP + ".expression_private_application_mode": "owner",
+            ROLE_PROFILE_GROUP + ".expression_private_application_subject_ids": "[]",
+        }, reset=(), expected_revision=profile.revision, observed_at=self.clock.now())
+        owner_only = app.expression_style_context.capture(destination, self.clock.now(),
+            policy=read_settings(app.runtime, destination))
+        self.assertFalse(owner_only["references"], "owner-only application excludes another relationship")
+
+        profile = profile_owner.read(profile_target, role_profile_fields())
+        profile_owner.write(profile_target, role_profile_fields(), changes={
+            ROLE_PROFILE_GROUP + ".expression_private_application_mode": "selected",
+            ROLE_PROFILE_GROUP + ".expression_private_application_subject_ids": '["secondary-person"]',
+        }, reset=(), expected_revision=profile.revision, observed_at=self.clock.now())
+        selected_application = app.expression_style_context.capture(destination, self.clock.now(),
+            policy=read_settings(app.runtime, destination))
+        self.assertTrue(selected_application["references"], "selected application includes the chosen relationship")
+
+        profile = profile_owner.read(profile_target, role_profile_fields())
+        profile_owner.write(profile_target, role_profile_fields(), changes={
+            ROLE_PROFILE_GROUP + ".expression_private_source_mode": "selected",
+            ROLE_PROFILE_GROUP + ".expression_private_source_subject_ids": '["secondary-person"]',
+        }, reset=(), expected_revision=profile.revision, observed_at=self.clock.now())
+        changed = app.expression_style_context.capture(destination, self.clock.now(),
+            policy=read_settings(app.runtime, destination))
+        self.assertFalse(changed["references"], "removing a source from selected mode lapses its rules")
+
+        profile = profile_owner.read(profile_target, role_profile_fields())
+        profile_owner.write(profile_target, role_profile_fields(), changes={
+            ROLE_PROFILE_GROUP + ".expression_private_source_mode": "owner",
+            ROLE_PROFILE_GROUP + ".expression_private_source_subject_ids": "[]",
+        }, reset=(), expected_revision=profile.revision, observed_at=self.clock.now())
+        self.configure_expression(app, {"private_learning_enabled": False}, source_context)
+        disabled = app.expression_style_context.capture(destination, self.clock.now(),
+            policy=read_settings(app.runtime, destination))
+        self.assertFalse(disabled["references"], "a source relationship's learning switch remains a gate")
 
     async def test_sample_review_pagination_and_truncation_does_not_reset_approval(self):
         host = await self.start()
@@ -204,12 +306,14 @@ class ExpressionReplyPipelineTests(ExpressionFixture, HostFixture, unittest.Isol
             view_token=candidate["view_token"], operation_key="revocable-adopt").unwrap()
         await self.reply(host, "with-rule")
         self.assertTrue(materials(self.called[-1], "expression_style_rule"))
+        self.assertIn(EXPRESSION_STYLE_INSTRUCTION, self.called[-1].original.instruction)
         source = manager.list_samples(operator=self.core, context=context).unwrap()["items"]
         for item in source:
             manager.sample_command(operator=self.core, context=context, handle=item["handle"], action="reject",
                 view_token=item["view_token"], operation_key="exclude-" + item["handle"]).unwrap()
         await self.reply(host, "revoked-rule")
         self.assertFalse(materials(self.called[-1], "expression_style_rule"))
+        self.assertNotIn(EXPRESSION_STYLE_INSTRUCTION, self.called[-1].original.instruction)
         old = manager.list(operator=self.core, context=context, state="adopted").unwrap()["items"][0]
         manager.command(operator=self.core, context=context, signal_id=old["signal_id"], action="retire",
             view_token=old["view_token"], operation_key="retire-revoked-rule").unwrap()
@@ -326,10 +430,31 @@ class ExpressionGroupPipelineTests(GroupFixture, unittest.IsolatedAsyncioTestCas
         return result["data"]
 
     async def configure(self, changes):
-        snapshot = await self.request("/expression")
-        self.sequence += 1
-        return await self.request("/expression/configure", {"changes": changes,
-            "edit_token": snapshot["edit_token"], "operation_key": "group-expression-" + str(self.sequence)})
+        app = self.controller.session.application
+        local_keys = {"group_learning_enabled", "group_member_mode", "group_member_ids"}
+        shared = {key: value for key, value in changes.items() if key not in local_keys}
+        local = {key: value for key, value in changes.items() if key in local_keys}
+        receipt = None
+        if shared:
+            target = target_for(installation_id=app.runtime.installation_id)
+            from astrbot_host.management_identity import dashboard_operator
+            operator = dashboard_operator(app.runtime, "admin", at=self.clock.now())
+            snapshot = app.configuration.read(operator, target=target, group_id=GROUP,
+                                              observed_at=self.clock.now()).unwrap()
+            self.sequence += 1
+            operation_id = "group-expression-policy:" + str(self.sequence)
+            receipt = app.configuration.patch(operator, target=target, group_id=GROUP,
+                expected_edit_token=snapshot.edit_token,
+                changes={GROUP + "." + key: value for key, value in shared.items()},
+                operation=OperationRef(operation_id, GROUP, target.authorization_scope,
+                                       VersionRef(operation_id, 1), operation_id),
+                observed_at=self.clock.now()).unwrap()
+        if local:
+            snapshot = await self.request("/expression")
+            self.sequence += 1
+            receipt = await self.request("/expression/configure", {"changes": local,
+                "edit_token": snapshot["edit_token"], "operation_key": "group-expression-" + str(self.sequence)})
+        return receipt
 
     async def input(self, sender="200"):
         self.sequence += 1

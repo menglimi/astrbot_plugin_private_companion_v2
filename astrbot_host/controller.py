@@ -421,6 +421,12 @@ class AstrBotStagingController:
         runtime = StorageRuntime.open(data_root=root / "runtime", installation_id=configuration.scope.installation_id)
         runtime.backup_directory = backup_directory
         try:
+            from companion_v2.expression.configuration import migrate_legacy_policy_values
+            from companion_v2.expression.reaction_configuration import migrate_window_values
+            from companion_v2.role_work.growth.configuration import migrate_legacy_skill_values
+            migrate_window_values(runtime)
+            migrate_legacy_policy_values(runtime)
+            migrate_legacy_skill_values(runtime)
             bootstrap = AstrBotStagingBootstrap(
                 runtime,
                 self.context,
@@ -440,12 +446,12 @@ class AstrBotStagingController:
             self._qzone_client = build_qzone_transport(self.context, data_root=getattr(self, "data_root", None))
         return self._qzone_client
 
-    def _load_session(self, *, review_only=False) -> object:
+    async def _load_session(self, *, review_only=False) -> object:
         if self.bootstrap is None:
             raise HostControlError("staging_not_initialized", "initialize the staging profile first")
         if self.native_extensions is not None:
-            self.native_extensions.close()
-        bundled_extensions, bundled_issues = create_bundled_extensions(self.runtime.data_root, now=self.now)
+            await self.native_extensions.aclose()
+        bundled_extensions, bundled_issues = create_bundled_extensions(self.runtime.data_root, now=self.now, context=self.context, controller=self)
         self.native_extensions = NativeExtensionRegistry(self.context, now=self.now,
             together_execution=together_execution_binding(self.settings),
             image_settings_path=self.data_root / "model_image_routes.json",
@@ -472,7 +478,7 @@ class AstrBotStagingController:
                                      voice_policy=self.settings.voice_reply_policy
                                          if self.settings.voice_reply_enabled else None)
         if loaded.failure is not None:
-            self.native_extensions.close()
+            await self.native_extensions.aclose()
             raise TaskError(loaded.failure.code, loaded.failure.reason)
         self.session = loaded.unwrap()
         from .knowledge_sources import attach_official_knowledge
@@ -480,18 +486,16 @@ class AstrBotStagingController:
         self.session.bridge.forward_intake = self.settings.forward_intake
         from .semantic_models import NativeSemanticModels, configured_slang_search_port
         self.session.application.attach_semantics(NativeSemanticModels(self.context, self.settings.provider_id,
-                                                                     configured_slang_search_port()))
+                                                                     configured_slang_search_port()),
+                                                  reaction_role_count=1)
         from companion_v2.decision import LayaDecisionService, LayaSettingsStore
+        from .laya_client import LayaDecisionClient, start_laya_warmup
         def laya_for_context(context):
-            # The single-target model page stores by the pinned profile and
-            # role.  The native participant id is a route fact, not the page's
-            # target key, so it must not be used for this lookup.
-            settings = self.resolved_settings()
-            return LayaDecisionService(LayaSettingsStore(
-                self.data_root, settings.profile_id,
-                getattr(context.role_binding.role, "subject_id", settings.role_id)))
+            return LayaDecisionService(LayaSettingsStore(self.data_root),
+                runtime=self.session.application.runtime, origin_key=context.key, client_factory=LayaDecisionClient)
 
         self.session.application.attach_laya_decision(laya_for_context)
+        start_laya_warmup(LayaSettingsStore(self.data_root))
         return self.session
 
     async def load_existing(self) -> Outcome[dict[str, Any]]:
@@ -507,7 +511,7 @@ class AstrBotStagingController:
                     self._check_contract(probe.configuration, pinned)
                 async with self._control_lock:
                     self._ensure_assembly(probe.configuration)
-                    self._load_session()
+                    await self._load_session()
                 self.last_failure = None
                 return Outcome.success(
                     {
@@ -553,7 +557,7 @@ class AstrBotStagingController:
                 if self._terminated:
                     raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
                 if self.session is None or self.session.application.state == "stopped":
-                    self._load_session()
+                    await self._load_session()
             receipt = initialized.unwrap()
             result = Outcome.success(
                 {
@@ -617,7 +621,7 @@ class AstrBotStagingController:
                     async with self._control_lock:
                         if self._terminated:
                             raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
-                        session = self._load_session(review_only=local_review)
+                        session = await self._load_session(review_only=local_review)
                 if session.application.state == "running":
                     session.require_intake_authorization()
                     self._accepting = True
@@ -673,7 +677,7 @@ class AstrBotStagingController:
                     self.last_session = previous
                     if self.session is previous:
                         self.session = None
-                    session = self._load_session(review_only=previous.review_only)
+                    session = await self._load_session(review_only=previous.review_only)
                     task_generation, model_generation = self._generations()
                 started = await session.start(expected_task_generation=task_generation,
                                               expected_model_generation=model_generation)
@@ -727,7 +731,7 @@ class AstrBotStagingController:
                 raise HostControlError("staging_host_terminated", "the staging host is stopping or has terminated")
             self._ensure_assembly(pinned)
             if self.session is None or self.session.application.state == "stopped":
-                self._load_session()
+                await self._load_session()
             if self.session.application.state != "new" or self._accepting:
                 raise HostControlError("staging_screen_session_active", "stop intake before changing Screen authority")
             registry = self.native_extensions
@@ -1105,6 +1109,7 @@ class AstrBotStagingController:
     async def terminate(self) -> None:
         self._accepting = False
         try:
+            await self.session_topology.close()
             result = await self.stop(grace_seconds=2.0)
             stopped = False
             if result.is_success:
@@ -1123,7 +1128,7 @@ class AstrBotStagingController:
                     self.runtime = None
         finally:
             if self.native_extensions is not None:
-                self.native_extensions.close()
+                await self.native_extensions.aclose()
                 self.native_extensions = None
             self._terminated = True
             self.unregister_routes()

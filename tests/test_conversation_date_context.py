@@ -1,3 +1,5 @@
+import builtins
+from importlib.util import module_from_spec, spec_from_file_location
 from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 import sys
@@ -5,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from companion_v2.conversation.date_context import project_local_date
+from companion_v2.conversation import date_context
 from companion_v2.agenda.annual_calendar import SCHEMA, parse_annual_calendar
 
 
@@ -63,6 +66,67 @@ class LocalDateContextTests(unittest.TestCase):
         self.assertEqual(result["lunar_status"], "unavailable")
         self.assertIsNone(result["lunar_date"])
         self.assertEqual(result["local_date"], "2026-09-24")
+
+    def test_unreadable_lunar_packages_preserve_the_gregorian_context(self):
+        original_import = builtins.__import__
+
+        def unavailable(name, *args, **kwargs):
+            if name in {"lunardate", "lunarcalendar"}:
+                raise PermissionError("optional calendar package is unreadable")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=unavailable):
+            result = project_local_date(datetime(2026, 9, 24, 12, tzinfo=timezone.utc), "UTC")
+        self.assertEqual(result["lunar_status"], "unavailable")
+        self.assertIsNone(result["lunar_date"])
+        self.assertEqual((result["local_date"], result["local_time"], result["period"]),
+                         ("2026-09-24", "12:00", "中午"))
+
+    def test_unreadable_primary_lunar_package_uses_the_available_fallback(self):
+        original_import = builtins.__import__
+
+        def unavailable(name, *args, **kwargs):
+            if name == "lunardate":
+                raise PermissionError("primary calendar package is unreadable")
+            return original_import(name, *args, **kwargs)
+
+        fallback = ModuleType("lunarcalendar")
+        fallback.Solar = lambda year, month, day: (year, month, day)
+        fallback.Converter = SimpleNamespace(Solar2Lunar=lambda _day: SimpleNamespace(
+            year=2026, month=8, day=14, isleap=False))
+        with patch.dict(sys.modules, {"lunarcalendar": fallback}), \
+                patch("builtins.__import__", side_effect=unavailable):
+            result = project_local_date(datetime(2026, 9, 24, 12, tzinfo=timezone.utc), "UTC")
+        self.assertEqual(result["lunar_status"], "available")
+        self.assertEqual(result["lunar_date"], "农历2026年八月十四")
+
+    def test_unreadable_holiday_package_does_not_prevent_module_import(self):
+        original_import = builtins.__import__
+
+        def unavailable(name, *args, **kwargs):
+            if name == "chinese_calendar":
+                raise PermissionError("holiday package is unreadable")
+            return original_import(name, *args, **kwargs)
+
+        spec = spec_from_file_location("companion_v2.conversation.date_context_import_fixture", date_context.__file__)
+        isolated = module_from_spec(spec)
+        with patch("builtins.__import__", side_effect=unavailable):
+            spec.loader.exec_module(isolated)
+        self.assertIsNone(isolated._chinese_calendar)
+        result = isolated.project_local_date(datetime(2026, 10, 3, 4, tzinfo=timezone.utc), "UTC",
+                                              lunar_enabled=False)
+        self.assertEqual(result["holiday"]["source"], "weekday_fallback")
+        self.assertEqual(result["holiday"]["label"], "周末")
+
+    def test_unreadable_holiday_data_retains_the_weekday_fallback(self):
+        def unreadable(_day):
+            raise OSError("optional holiday data could not be read")
+
+        provider = SimpleNamespace(is_holiday=unreadable)
+        with patch("companion_v2.conversation.date_context._chinese_calendar", provider):
+            result = project_local_date(datetime(2026, 10, 3, 4, tzinfo=timezone.utc), "UTC")
+        self.assertEqual(result["holiday"]["source"], "weekday_fallback")
+        self.assertEqual(result["holiday"]["label"], "周末")
 
     def test_lunar_calendar_fallback_is_used_when_primary_provider_is_missing(self):
         lunarcalendar = ModuleType("lunarcalendar")

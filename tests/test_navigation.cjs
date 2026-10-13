@@ -9,19 +9,42 @@ const page = name => fs.readFileSync(path.join(__dirname, "../pages/陪伴小屋
 
 function harness() {
   const location = {hash: ""}, writes = [], renders = [], scrolls = [], anchors = new Map(), targets = new Map();
+  const manifest = {extensions: [], providers: []};
   const history = Object.fromEntries(["pushState", "replaceState"].map(method => [method,
     (_state, _title, hash) => { writes.push({method, hash}); location.hash = hash; }]));
-  const dialog = {open: false};
+  const dialog = {open: false, showModal() {this.open = true;}, close() {this.open = false;}};
+  const nativeMounts = [], nativeUnmounts = [];
+  const dialogContent = {innerHTML: "", querySelector(selector) {
+    if (selector !== "[data-native-extension-host]") return null;
+    const match = this.innerHTML.match(/<div data-native-extension-host="([^"]+)"/);
+    return match ? {dataset: {nativeExtensionHost: match[1]}} : null;
+  }};
+  const outputTab = {dataset: {outputTab: "creation"}, attributes: {}, tabIndex: -1,
+    setAttribute(name, value) {this.attributes[name] = value;}, focus() {this.focused = true;}};
+  const outputPanel = {hidden: true};
   const document = {
     documentElement: {dataset: {}},
     addEventListener() {},
-    querySelectorAll: () => [],
-    querySelector: selector => selector === "#detailDialog" ? dialog : targets.get(selector) || null,
-    getElementById: id => anchors.get(id) || null,
+    querySelectorAll: selector => selector === "[data-output-tab]" ? [outputTab]
+      : selector === "[data-output-panel]" ? [outputPanel] : [],
+    querySelector: selector => selector === "#detailDialog" ? dialog
+      : selector === "#dialogContent" ? dialogContent : targets.get(selector) || null,
+    getElementById: id => anchors.get(id) || (id === "output-panel-creation" ? outputPanel : null),
   };
   const window = {location, history, addEventListener() {}, scrollTo(options) {scrolls.push(options);}, matchMedia: () => ({matches: true}),
     CompanionProduct: {scopeKey: () => "synthetic", workspace: (name, tab) => `${name}:${tab}`,
-      provider: () => null, statusLabel: () => "状态已读取"},
+      manifest,
+      extension: id => manifest.extensions.find(item => item.capability_id === id),
+      provider: id => manifest.providers.find(item => item.capability_id === id),
+      capability: id => manifest.extensions.find(item => item.capability_id === id)
+        || manifest.providers.find(item => item.capability_id === id),
+      providerDetail: id => ({title: manifest.extensions.find(item => item.capability_id === id)?.label || id,
+        body: `<p>${id} capability status</p>`}),
+      statusLabel: () => "状态已读取"},
+    CompanionNativeExtensionPanel: {
+      mount: (_root, options) => nativeMounts.push(options.extensionId),
+      unmount: root => nativeUnmounts.push(root.dataset.nativeExtensionHost),
+    },
   };
   const context = vm.createContext({window, document, location, history, console, renders,
     structuredClone, setTimeout, clearTimeout, requestAnimationFrame: callback => callback(), matchMedia: () => ({matches: true}),
@@ -30,14 +53,16 @@ function harness() {
   // Run the navigation and render functions without starting the live page or SDK.
   const source = page("app.js");
   vm.runInContext(source.slice(0, source.indexOf("document.addEventListener('click'")), context);
+  vm.runInContext("integrationSnapshot=window.CompanionProduct.manifest;", context);
   vm.runInContext(`render=()=>{
     if(route==='manage')window.CompanionShell.selectSection(manageTab);
     renders.push(currentNavigationHref());
   };renderShell=()=>renders.push(currentNavigationHref());`, context);
   const run = code => vm.runInContext(code, context);
-  return {window, writes, renders, scrolls, run,
+  return {window, manifest, writes, renders, scrolls, dialog, dialogContent, outputTab, outputPanel,
+    nativeMounts, nativeUnmounts, run,
     target(selector, target) {targets.set(selector, target);},
-    visit(hash) {location.hash = hash; run("syncFromHash()");},
+    visit(hash) {location.hash = hash; return run("syncFromHash()");},
     anchor(id) {
       const target = {hasAttribute: () => false, scrollIntoView() {this.scrolled = true;},
         focus() {this.focused = true;}};
@@ -53,6 +78,34 @@ test("returning home clears configuration, diary and furniture selections", () =
     assert.equal(h.window.location.hash, "#life");
     assert.equal(shell.section, null);assert.equal(shell.view, null);assert.equal(shell.furniture, null);
   }
+});
+
+test("unsaved weather changes hold navigation until the in-page confirmation resolves", async () => {
+  const h = harness(), decisions = [];
+  h.window.CompanionWeatherSourcePage = {canLeave: () => new Promise(resolve => decisions.push(resolve))};
+
+  const canceled = h.run("navigate('manage','models')");
+  assert.equal(typeof canceled.then, "function");
+  assert.equal(h.run("currentNavigationHref()"), "#life");
+  assert.equal(h.renders.length, 0);
+  decisions[0](false);
+  assert.equal(await canceled, false);
+  assert.equal(h.window.location.hash, "#life");
+  assert.equal(h.run("currentNavigationHref()"), "#life");
+
+  const accepted = h.run("navigate('manage','models')");
+  decisions[1](true);
+  assert.equal(await accepted, true);
+  assert.equal(h.window.location.hash, "#manage/models");
+  assert.equal(h.run("currentNavigationHref()"), "#manage/models");
+  assert.deepEqual(h.renders, ["#manage/models"]);
+
+  const backNavigation = h.visit("#life/diary");
+  assert.equal(typeof backNavigation.then, "function");
+  assert.equal(h.run("currentNavigationHref()"), "#manage/models");
+  decisions[2](false);
+  assert.equal(await backNavigation, false);
+  assert.equal(h.window.location.hash, "#manage/models");
 });
 
 test("task prompts stay inside maintenance while direct links select the internal view", () => {
@@ -113,12 +166,11 @@ test("reply efficiency is a deep-linkable maintenance subpage", () => {
   assert.equal(h.window.location.hash, "#manage/maintenance");
 });
 
-test("data page exposes four deep-linkable subpages", () => {
+test("data page exposes three deep-linkable subpages", () => {
   const h = harness();
   for (const [pane, title, workspace] of [
     ["storage", "存储位置与清理策略", "storageWorkspace"],
     ["backup", "备份与还原", "backupWorkspace"],
-    ["records", "各处记录的入口", "data-record-grid"],
     ["migration", "V1 数据迁移", "legacyMigrationWorkspace"],
   ]) {
     h.run(`navigate('manage','data','${pane}')`);
@@ -128,8 +180,11 @@ test("data page exposes four deep-linkable subpages", () => {
     assert.match(markup, new RegExp(`href="#manage/data/${pane}" aria-current="page"`));
     assert.match(markup, new RegExp(title));
     assert.match(markup, new RegExp(workspace));
-    assert.equal((markup.match(/href="#manage\/data\/(?:storage|backup|records|migration)"/g) || []).length, 4);
+    assert.equal((markup.match(/href="#manage\/data\/(?:storage|backup|migration)"/g) || []).length, 3);
+    assert.doesNotMatch(markup, /各处记录的入口|data-record-grid/);
   }
+  h.visit("#manage/data/records");
+  assert.equal(h.window.location.hash, "#manage/data/storage");
   h.visit("#manage/data/unknown");
   assert.equal(h.window.location.hash, "#manage/data/storage");
 });
@@ -432,22 +487,74 @@ test("home calendar action opens the calendar furniture with planning expanded",
   assert.match(h.run("renderFurniturePanel('calendar')"), /data-state-feature="planning"/);
 });
 
+test("native companion furniture opens its real workbench or settings surface", () => {
+  const h = harness();
+  const ids = ["content", "image", "screen", "reality", "together", "game", "live"];
+  h.manifest.extensions = ids.map(id => ({capability_id:id, label:`${id} label`, reason:`${id} ready`,
+    owner:"companion_v2", extension_id:id, assembled:true, desired_state:"active",
+    integration_state:"connected", installed_revision:1}));
+
+  const destinations = JSON.parse(h.run("JSON.stringify(directory.filter(item=>item.cap).map(({id,detail})=>[id,detail]))"));
+  assert.deepEqual(destinations, [["content", "books"], ["image", "cap-image"], ["together", "cap-together"],
+    ["game", "cap-game"], ["screen", "cap-screen"], ["reality", "cap-reality"], ["live", "cap-live"]]);
+
+  h.run("showDetail('books')");
+  assert.equal(h.window.location.hash, "#manage/output", "Content's bookshelf entry opens the creation workspace");
+  assert.equal(h.run("outputTabId"), "creation");
+  assert.equal(h.outputPanel.hidden, false);
+  assert.equal(h.outputTab.attributes["aria-selected"], "true");
+
+  h.dialog.classList = {add() {}, remove() {}};
+  for (const id of ids) {
+    h.run(`showDetail('cap-${id}')`);
+    assert.equal(h.dialog.open, true, `${id} opens its capability detail`);
+    if (id === "image") {
+      assert.match(h.dialogContent.innerHTML, /V2 内置能力/);
+      assert.match(h.dialogContent.innerHTML, /data-output-target="visual"/);
+      assert.match(h.dialogContent.innerHTML, /data-output-target="materials"/);
+    } else if (id === "screen") {
+      assert.match(h.dialogContent.innerHTML, /V2 内置能力/);
+      assert.match(h.dialogContent.innerHTML, /data-perception-tab-target="config-screen"/);
+    } else if (["reality", "together", "game", "live"].includes(id)) {
+      assert.match(h.dialogContent.innerHTML, new RegExp(`data-native-extension-host="${id}"`));
+      assert.equal(h.nativeMounts.at(-1), id, `${id} mounts its settings panel`);
+    } else assert.match(h.dialogContent.innerHTML, /V2 内置能力/);
+  }
+  assert.deepEqual(h.nativeMounts, ["reality", "together", "game", "live"]);
+  assert.deepEqual(h.nativeUnmounts, ["reality", "together", "game"]);
+});
+
 test("furniture directory filters, search and attention counts use the same records", () => {
   const h = harness();
-  h.window.CompanionProduct.provider = id => ({label:id === "image" ? "图片伴侣" : "扩展",
-    integration_state:id === "image" ? "connected" : "missing"});
+  const labels = {content: "创作与 QQ 空间", image: "生图与相册", together: "共处与实时活动",
+    game: "共同游玩", screen: "屏幕陪伴", reality: "现实触及", live: "直播与表演"};
+  h.manifest.extensions = Object.entries(labels).map(([capability_id, label]) => ({capability_id,
+    label, owner: "companion_v2", assembled: true, desired_state: "active", integration_state: "connected"}));
+  h.manifest.providers = [{capability_id: "image", label: "旧版图像插件", integration_state: "missing"}];
+  const extension = id => h.window.CompanionProduct.extension(id);
   const ids = () => Array.from(h.run("filteredFurniture().map(item=>item.id)"));
   h.run("furnitureFilter='extensions'");
   assert.deepEqual(ids(), ["content", "image", "together", "game", "screen", "reality", "live"]);
   h.run("furnitureFilter='base'");
   assert.equal(ids().length, 7);
-  h.run("furnitureFilter='all';furnitureQuery='图片伴侣'");
+  h.run("furnitureFilter='all';furnitureQuery='生图与相册'");
   assert.deepEqual(ids(), ["image"]);
   h.run("furnitureQuery='';furnitureFilter='attention';state.modules.image='removed'");
-  assert.equal(ids().length, 7, "locally removed furniture needs attention even when its provider is connected");
+  assert.deepEqual(ids(), [], "native service state owns availability despite an old local furniture flag or missing external plugin");
+  Object.assign(extension("together"), {desired_state: "paused", integration_state: "stopped"});
+  Object.assign(extension("game"), {desired_state: "discarded", assembled: false, integration_state: "unassembled"});
+  Object.assign(extension("screen"), {integration_state: "degraded"});
+  Object.assign(extension("live"), {desired_state: "paused", integration_state: "stopped"});
+  assert.deepEqual(ids(), ["together", "game", "screen", "live"]);
+  assert.equal(h.run("capabilityStatus('image')[0]"), "已装配");
+  assert.equal(h.run("capabilityStatus('together')[0]"), "已暂停");
+  assert.equal(h.run("capabilityStatus('game')[0]"), "未装配");
   const html = h.run("renderDirectory()");
-  assert.match(html, /data-furniture-filter="attention"[^>]*>待检查<span>7<\/span>/);
-  assert.match(html, /显示 7 \/ 14 件/);
+  assert.match(html, /data-furniture-filter="attention"[^>]*>待检查<span>4<\/span>/);
+  assert.match(html, /显示 4 \/ 14 件/);
+  Object.assign(extension("together"), {desired_state: "active", integration_state: "connected"});
+  assert.deepEqual(ids(), ["game", "screen", "live"]);
+  assert.match(h.run("renderDirectory()"), /待检查<span>3<\/span>/);
   h.run("furnitureQuery='不存在的家具'");
   assert.match(h.run("renderDirectory()"), /没有符合条件的家具/);
 });

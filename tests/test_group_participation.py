@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 from astrbot_host.group_authority import GroupAuthority
 from companion_v2.adapters.astrbot.model_wire import tool_alias
@@ -94,6 +95,32 @@ class GroupParticipationTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         b, replied, _ = await self.receive("刚才大家准备去哪里", sender="201")
         self.assertEqual([(item["speaker_id"], item["text"]) for item in self.history(b, replied)], [("200", "周末想去河边走走")])
         self.assertEqual(len(self.sent), 1)
+
+    async def test_laya_wait_completes_as_silence_without_model_call_or_platform_ack(self):
+        await self.setup_delivery()
+
+        class DecisionService:
+            async def decide(self, _facts):
+                return {"status": "ok", "decision": {
+                    "turn_state": "unfinished", "action": "wait", "reply_intent": "acknowledge",
+                    "reply_style": "brief", "reply_form": "text", "segment_mode": "single",
+                    "tool_need": "memory", "reason_codes": [],
+                }}
+
+        self.app.messages.laya_decision_resolver = lambda _context: DecisionService()
+        participation = self.choices
+        with patch.object(participation, "record_no_reply", wraps=participation.record_no_reply) as record_no_reply:
+            _, batch, _ = await self.receive("我刚刚想说的是")
+
+        record_no_reply.assert_called_once()
+        self.assertEqual(record_no_reply.call_args.args[1], batch)
+        self.assertEqual(self.native.provider.client.state.calls, [])
+        self.assertEqual(self.parts(batch), ())
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.app.messages.batch(batch)["presentation_action"], "silent")
+        self.assertEqual((self.app.flow.row(batch)["state"], self.app.flow.row(batch)["reason"]),
+                         ("complete", "model_silent"))
+        self.assertNotIn(batch, participation._frozen_turns)
 
     async def test_direct_reply_is_persisted_participation_without_an_extra_model_round(self):
         await self.setup_delivery()

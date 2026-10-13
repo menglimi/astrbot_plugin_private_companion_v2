@@ -77,7 +77,7 @@ class StagingBootstrapTests(BootstrapFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["confirmed_delivery"])
         self.assertEqual(report["conversation"]["receipt_basis"], "onebot_reverse_websocket")
         self.assertEqual(report["delivery_receipts"][0]["state"], "delivered")
-        self.assertFalse(bootstrap.delivery_authorization_status()["required"])
+        self.assertFalse(self.bootstrap.delivery_authorization_status()["required"])
         self.assertEqual(len(self.native.platform.client._api._wsr_api.calls), 1)
 
     async def test_load_does_not_implicitly_initialize(self):
@@ -85,6 +85,17 @@ class StagingBootstrapTests(BootstrapFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bootstrap.load(runtime_instance_id="new").failure.code, "staging_not_initialized")
         self.assertEqual(database_contents(self.runtime), before)
         self.assertEqual(self.native.role_lookups, 0)
+
+    async def test_initialized_application_assembly_remains_read_only(self):
+        (await self.bootstrap.initialize()).unwrap()
+        before = database_contents(self.runtime)
+
+        with patch.object(self.runtime, "transaction", side_effect=AssertionError("assembly must stay read-only")):
+            self.load_session()
+
+        self.assertEqual(database_contents(self.runtime), before)
+        self.assertEqual(self.native.provider.client.state.calls, [])
+        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
 
     async def test_official_sender_needs_no_global_delivery_authorization(self):
         bootstrap = self.make_bootstrap()

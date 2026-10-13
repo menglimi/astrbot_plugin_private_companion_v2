@@ -1,8 +1,8 @@
 /* Editable V2 image backends. One draft is shared by the overview and detail page. */
 "use strict";
 window.CompanionOutputPage=(()=>{
-  const BACKENDS={auto:"自动：在线 API → ComfyUI → SD WebUI",online_api:"在线 API",comfyui:"ComfyUI",sd_webui:"SD WebUI"};
-  const PLATFORMS={auto:"自动",openai:"OpenAI 兼容",minimax:"MiniMax"};
+  const BACKENDS={auto:"自动",online_api:"在线 API",comfyui:"ComfyUI",sd_webui:"SD WebUI"};
+  const PLATFORMS={auto:"自动识别",openai:"OpenAI 兼容接口",minimax:"MiniMax"};
   const ERRORS={model_image_output_unavailable:"请更新并加载生图伴侣，以启用 V2 后端配置。",
     model_image_output_unavailable:"生图伴侣尚未加载。",model_image_output_conflict:"配置已在其他页面更新，请重新读取后核对。",
     model_image_output_busy:"正在执行生图任务，请等待当前任务结束后保存。",
@@ -22,9 +22,10 @@ window.CompanionOutputPage=(()=>{
     if(node.outputMarkup===html)return;
     node.outputMarkup=html;node.innerHTML=html;
   }
-  const field=(label,path,value,type="text",attrs="")=>`<label class="output-native-field"><span>${label}</span><input type="${type}" data-output-native-field="${esc(path)}" value="${esc(value)}" ${attrs}${busy?" disabled":""}></label>`;
-  const keyField=(path,item)=>`<div class="output-key-field">${field("API Key",path+".api_key","","password",`autocomplete="new-password" placeholder="${item.api_key_set?"已保存 · 留空保留":"尚未配置"}"`)}${item.api_key_set?`<label class="output-native-check"><input type="checkbox" data-output-native-field="${esc(path)}.clear_api_key"${item.clear_api_key?" checked":""}${busy?" disabled":""}>清除已保存密钥</label>`:""}</div>`;
-  const actions=()=>`<div class="output-native-actions"><button type="button" class="button small primary" data-output-native-action="save"${busy||!dirty()?" disabled":""}>${busy==="save"?"保存中…":"保存生图后端"}</button><button type="button" class="button small" data-output-native-action="refresh"${busy?" disabled":""}>重新读取</button><span>${dirty()?"有未保存的改动":"已保存"}</span></div>`;
+  const field=(label,path,value,type="text",attrs="",help="")=>`<label class="output-native-field"><span>${label}</span><input type="${type}" data-output-native-field="${esc(path)}" value="${esc(value)}" ${attrs}${busy?" disabled":""}>${help?`<small class="output-native-help">${esc(help)}</small>`:""}</label>`;
+  const keyField=(path,item)=>`<div class="output-key-field">${field("API Key",path+".api_key","","password",`autocomplete="new-password" placeholder="${item.api_key_set?"已保存 · 留空保留":"粘贴服务商密钥"}"`,item.api_key_set?"输入新密钥会替换；留空会保留已保存密钥。":"如果服务商不要求鉴权，可留空。")}${item.api_key_set?`<label class="output-native-check"><input type="checkbox" data-output-native-field="${esc(path)}.clear_api_key"${item.clear_api_key?" checked":""}${busy?" disabled":""}>清除已保存密钥</label>`:""}</div>`;
+  const platformGuide=platform=>platform==="minimax"?"MiniMax 使用 /image_generation，仅支持文生图。":platform==="auto"?"自动仅按域名中的 minimax 字样识别；自建代理请手动选择协议。":"OpenAI 兼容接口使用 /images/generations；改图使用 /images/edits。";
+  const actions=()=>`<div class="output-native-actions"><button type="button" class="button small primary" data-output-native-action="save"${busy||!dirty()?" disabled":""}>${busy==="save"?"保存中…":"保存图片模型配置"}</button><button type="button" class="button small" data-output-native-action="refresh"${busy?" disabled":""}>重新读取</button><span>${dirty()?"有未保存的改动":"已保存"}</span></div>`;
   function formatTime(value){
     if(!value)return "—";
     const time=new Date(value);
@@ -136,16 +137,17 @@ window.CompanionOutputPage=(()=>{
   function selector(){
     const host=root?.querySelector("[data-output-native-selector]");
     if(!host)return;
-    host.innerHTML=draft?`<label class="output-backend-selector"><span>生图后端</span><select data-output-native-field="backend"${busy?" disabled":""}>${options(BACKENDS,draft.backend)}</select></label><label class="output-backend-enable"><input type="checkbox" data-output-native-field="enabled"${draft.enabled?" checked":""}${busy?" disabled":""}>启用生图后端</label>${!hostRegistered&&draft.enabled?`<div class="output-config-unavailable" role="status">当前 V2 工具目录尚未接入此图片提供方。<button type="button" class="button small" data-output-native-action="reconnect"${busy?" disabled":""}>重连 V2 执行器</button></div>`:""}${actions()}`:`<div class="output-config-unavailable" role="status">${esc(notice||"正在读取生图后端…")}</div>`;
+    host.innerHTML=draft?`<div class="output-native-route-summary"><strong>文生图与改图独立路由</strong><span>每个功能的模型与优先级在「模型与连接 → 生图模型」分别设置。</span></div><label class="output-backend-enable"><input type="checkbox" data-output-native-field="enabled"${draft.enabled?" checked":""}${busy?" disabled":""}>启用 V2 生图后端</label>${!hostRegistered&&draft.enabled?`<div class="output-config-unavailable" role="status">当前 V2 工具目录尚未接入此图片提供方。<button type="button" class="button small" data-output-native-action="reconnect"${busy?" disabled":""}>重连 V2 执行器</button></div>`:""}${actions()}`:`<div class="output-config-unavailable" role="status">${esc(notice||"正在读取生图模型配置…")}</div>`;
   }
   function queue(){
     if(!draft)return `<div class="output-config-unavailable" role="status"><span>${esc(notice||"正在读取生图后端…")}</span><button type="button" class="button small" data-output-native-action="refresh">重新读取</button></div>`;
-    return `<section class="output-capability-queue"><header class="output-capability-heading"><h2>在线生图 API 队列</h2><span>${draft.endpoints.length} 个端点</span><div><button type="button" class="button small" data-output-native-action="add"${busy||draft.endpoints.length>=24?" disabled":""}>${icon("plus")}添加端点</button></div></header>
+    return `<section class="output-capability-queue"><header class="output-capability-heading"><h2>在线图片模型</h2><span>${draft.endpoints.length} 个模型</span><div><button type="button" class="button small" data-output-native-action="add"${busy||draft.endpoints.length>=24?" disabled":""}>${icon("plus")}添加模型</button></div></header>
+      <div class="output-endpoint-guidance"><p>此处管理模型连接；实际优先级分别由模型页的文生图与改图队列控制。</p><p>「生成测试图」会真实提交一张图片生成请求，可能产生费用；图片不会发送到聊天。</p></div>
       <div class="output-endpoint-list">${draft.endpoints.map((item,index)=>{
         const open=expanded.has(item.id),path=`endpoints.${index}`;
         const test=tests.get(item.id);
-        return `<article class="output-endpoint-card${index===0?" is-primary":""}"><header><button type="button" class="output-endpoint-toggle" data-output-native-action="expand" data-output-endpoint="${esc(item.id)}" aria-expanded="${open}">${icon(open?"chevron-down":"chevron-right")}<strong>#${index+1} ${esc(item.name||"未命名端点")}</strong></button><div class="output-endpoint-tools"><label class="output-native-check"><input type="checkbox" data-output-native-field="${path}.enabled"${item.enabled?" checked":""}${busy?" disabled":""}>${item.enabled?"已启用":"已停用"}</label><button type="button" class="button small" data-output-native-action="test" data-output-endpoint="${esc(item.id)}"${busy||dirty()||!item.enabled?" disabled":""}>${busy===`test:${item.id}`?"测试中…":test?.status==="unknown"?"核对测试":"纯文测试"}</button><button type="button" class="output-icon-button" aria-label="上移端点" data-output-native-action="up" data-output-endpoint="${esc(item.id)}"${busy||index===0?" disabled":""}>${icon("arrow-up")}</button><button type="button" class="output-icon-button" aria-label="下移端点" data-output-endpoint="${esc(item.id)}" data-output-native-action="down"${busy||index===draft.endpoints.length-1?" disabled":""}>${icon("arrow-down")}</button><button type="button" class="output-icon-button" aria-label="删除端点" data-output-native-action="remove" data-output-endpoint="${esc(item.id)}"${busy?" disabled":""}>${icon("x")}</button></div></header>
-        <div class="output-endpoint-edit"${open?"":" hidden"}><div class="output-endpoint-grid"><label class="output-native-field"><span>平台</span><select data-output-native-field="${path}.platform"${busy?" disabled":""}>${options(PLATFORMS,item.platform)}</select></label>${field("图片模型",path+".model",item.model)}${field("宽 / 高（像素）",path+".width",item.width,"number",'min="64" max="8192" step="64"')}${field("高度",path+".height",item.height,"number",'min="64" max="8192" step="64"')}</div><div class="output-endpoint-address">${field("API 地址",path+".base_url",item.base_url,"url")}${keyField(path,item)}</div><div class="output-endpoint-extra">${field("端点名称",path+".name",item.name)}${field("超时秒数",path+".timeout_seconds",item.timeout_seconds,"number",'min="1" max="1800" step="1"')}</div></div>
+        return `<article class="output-endpoint-card"><header><button type="button" class="output-endpoint-toggle" data-output-native-action="expand" data-output-endpoint="${esc(item.id)}" aria-expanded="${open}">${icon(open?"chevron-down":"chevron-right")}<strong>${esc(item.name||item.model||"未命名模型")}</strong></button><div class="output-endpoint-tools"><label class="output-native-check"><input type="checkbox" data-output-native-field="${path}.enabled"${item.enabled?" checked":""}${busy?" disabled":""}>${item.enabled?"已启用":"已停用"}</label><button type="button" class="button small" title="${test?.status==="unknown"?"核对同一次测试，不会再次提交生成请求":"真实生成一张图片，可能产生费用"}" data-output-native-action="test" data-output-endpoint="${esc(item.id)}"${busy||dirty()||!item.enabled?" disabled":""}>${busy===`test:${item.id}`?"生成中…":test?.status==="unknown"?"核对测试结果":"生成测试图"}</button><button type="button" class="output-icon-button" aria-label="删除图片模型" title="删除图片模型" data-output-native-action="remove" data-output-endpoint="${esc(item.id)}"${busy?" disabled":""}>${icon("x")}</button></div></header>
+        <div class="output-endpoint-edit"${open?"":" hidden"}><div class="output-endpoint-grid"><label class="output-native-field"><span>平台协议</span><select data-output-native-field="${path}.platform"${busy?" disabled":""}>${options(PLATFORMS,item.platform)}</select><small class="output-native-help">${platformGuide(item.platform)}</small></label>${field("图片模型 ID",path+".model",item.model,"text",'placeholder="如 image-01"',"填写服务商提供的模型标识。")}${field("宽度（像素）",path+".width",item.width,"number",'min="64" max="8192" step="64"')}${field("高度（像素）",path+".height",item.height,"number",'min="64" max="8192" step="64"')}</div><div class="output-endpoint-address">${field("API 根地址",path+".base_url",item.base_url,"url",'placeholder="https://api.example.com/v1"',"填写服务根地址；页面会按所选协议补上生图路径。")}${keyField(path,item)}</div><div class="output-endpoint-extra">${field("端点名称",path+".name",item.name,"text",'placeholder="例如：主用 API"')}${field("超时秒数",path+".timeout_seconds",item.timeout_seconds,"number",'min="1" max="1800" step="1"')}</div></div>
         ${test?`<div class="output-endpoint-result${test.status==="succeeded"?" is-ready":""}" role="status">${test.status==="succeeded"?"最近测试通过":test.status==="unknown"?"测试结果尚未确认":"测试未通过"} · ${Math.round(test.elapsed_ms||0)/1000} 秒${test.status!=="succeeded"?` · ${esc(test.error||"请核对接口配置")}`:""}</div>`:""}</article>`;
       }).join("")||'<div class="output-endpoint-empty">尚未添加在线生图端点</div>'}</div>${actions()}</section>`;
   }
@@ -153,7 +155,7 @@ window.CompanionOutputPage=(()=>{
     if(!draft)return "";
     return `<section class="output-capability-card"><header><h2>本地与工具后端</h2></header>${["comfyui","sd_webui"].map(name=>{
       const item=draft[name]||{};
-      return `<section class="output-local-editor"><header><h3>${BACKENDS[name]}</h3></header><div class="output-endpoint-address">${field("API 地址",name+".base_url",item.base_url||"","url")}${keyField(name,item)}</div><div class="output-local-grid">${field("等待秒数",name+".timeout_seconds",item.timeout_seconds||300,"number",'min="1" max="1800"')}</div><label class="output-native-field"><span>${name==="comfyui"?"文生图 / 改图工作流（JSON）":"生成参数（JSON）"}</span><textarea rows="3" spellcheck="false" data-output-native-field="${name}.${name==="comfyui"?"workflows":"parameters"}"${busy?" disabled":""}>${esc(typeof item[name==="comfyui"?"workflows":"parameters"]==="string"?item[name==="comfyui"?"workflows":"parameters"]:JSON.stringify(item[name==="comfyui"?"workflows":"parameters"]||{},null,2))}</textarea></label></section>`;
+      return `<section class="output-local-editor"><header><h3>${BACKENDS[name]}</h3></header><div class="output-endpoint-address">${field("API 地址",name+".base_url",item.base_url||"","url")}${keyField(name,item)}</div><div class="output-local-grid">${field("等待秒数",name+".timeout_seconds",item.timeout_seconds||300,"number",'min="1" max="1800"')}</div><label class="output-native-field"><span>${name==="comfyui"?"文生图、普通改图与蒙版局部改图工作流（JSON）":"通用参数（JSON）"}</span><textarea rows="3" spellcheck="false" data-output-native-field="${name}.${name==="comfyui"?"workflows":"parameters"}"${busy?" disabled":""}>${esc(typeof item[name==="comfyui"?"workflows":"parameters"]==="string"?item[name==="comfyui"?"workflows":"parameters"]:JSON.stringify(item[name==="comfyui"?"workflows":"parameters"]||{},null,2))}</textarea>${name==="sd_webui"?'<small class="output-native-help">通用参数可在这里维护；文生图和改图的专属参数可在模型页分别覆盖。</small>':""}</label></section>`;
     }).join("")}${actions()}</section>`;
   }
   function render(){
@@ -277,7 +279,11 @@ window.CompanionOutputPage=(()=>{
     if(path.at(-1)==="enabled")render();
     root.querySelectorAll('[data-output-native-action="save"]').forEach(button=>{button.disabled=!dirty();});
     root.querySelectorAll('[data-output-native-action="test"]').forEach(button=>{button.disabled=dirty()||!draft.endpoints.find(item=>item.id===button.dataset.outputEndpoint)?.enabled;});
-    if(target.dataset.outputNativeField==="backend"||target.dataset.outputNativeField==="enabled")render();
+    if(path.at(-1)==="platform"){
+      const help=target.closest(".output-native-field")?.querySelector(".output-native-help");
+      if(help)help.textContent=platformGuide(target.value);
+    }
+    if(target.dataset.outputNativeField==="enabled")render();
   }
   function click(event){
     const target=event.target.closest("[data-output-native-action]");
@@ -320,15 +326,13 @@ window.CompanionOutputPage=(()=>{
     const index=draft.endpoints.findIndex(item=>item.id===identifier);
     if(action==="expand"){expanded.has(identifier)?expanded.delete(identifier):expanded.add(identifier);}
     if(action==="add"){
-      const item={id:crypto.randomUUID(),name:draft.endpoints.length?"备用端点":"主用端点",enabled:false,
+      const item={id:crypto.randomUUID(),name:draft.endpoints.length?"备用模型":"主用模型",enabled:false,
         platform:"auto",base_url:"",api_key:"",model:"",width:1024,height:1024,timeout_seconds:180};
       draft.endpoints.push(item);expanded.add(item.id);
+      draft.operation_routes??={generate:[],edit:[]};
+      for(const operation of ["generate","edit"]){draft.operation_routes[operation]??=[];if(!draft.operation_routes[operation].includes(`online:${item.id}`))draft.operation_routes[operation].push(`online:${item.id}`);}
     }
-    if(action==="remove"&&index>=0)draft.endpoints.splice(index,1);
-    if((action==="up"||action==="down")&&index>=0){
-      const next=index+(action==="up"?-1:1);
-      if(next>=0&&next<draft.endpoints.length)[draft.endpoints[index],draft.endpoints[next]]=[draft.endpoints[next],draft.endpoints[index]];
-    }
+    if(action==="remove"&&index>=0){draft.endpoints.splice(index,1);for(const operation of ["generate","edit"])if(Array.isArray(draft.operation_routes?.[operation]))draft.operation_routes[operation]=draft.operation_routes[operation].filter(route=>route!==`online:${identifier}`);}
     render();
   }
   function unmount(){ticket++;abort?.abort();abort=null;root=null;draft=base=null;busy="";scope="";observation=null;observationBusy=false;sceneEditorOpen=false;sceneDraft=null;sceneSaving=false;}

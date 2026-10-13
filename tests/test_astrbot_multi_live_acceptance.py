@@ -39,7 +39,7 @@ class MultiLiveAcceptanceTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     def _routes(native):
         return {route: handler for route, handler, _, _ in native.registered_web_apis}
 
-    async def test_message_ingress_delivery_and_restart_with_bound_routes(self):
+    async def test_configured_private_targets_deliver_and_restart_with_bound_routes(self):
         self.controller.register_routes()
         routes = self._routes(self.native)
         request = NS(username="synthetic-dashboard-admin", query=_Query())

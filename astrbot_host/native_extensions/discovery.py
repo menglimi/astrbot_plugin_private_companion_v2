@@ -8,7 +8,7 @@ from companion_v2.adapters.astrbot.tools import AstrBotToolDeclaration
 from companion_v2.capabilities.native import NativeManifest, parse_manifest
 from companion_v2.conversation.external_tools import ExtensionToolDescriptor
 from companion_v2.execution.models import ProviderBinding, SideEffect, encode
-from companion_v2.model_gateway.models import MAX_TOOL_CATALOG, ToolSpec
+from companion_v2.model_gateway.models import ToolSpec
 
 
 def synchronous(method):
@@ -87,6 +87,11 @@ def discover(context, *, excluded_extensions=()):
     candidates, issues = [], []
     excluded_extensions = frozenset(excluded_extensions)
     for identifier, matches in sorted(stars_by_id(context).items()):
+        # These are V2 modules now. Never acquire execution from their legacy
+        # companion Stars, even when the user keeps a V1 installation enabled.
+        if identifier in {"astrbot_plugin_" + name + "_companion" for name in
+                          ("content", "image", "screen", "reality", "together", "game", "live_stream")}:
+            continue
         if len(matches) != 1:
             issues.append((identifier, "native_instance_conflict"))
             continue
@@ -113,9 +118,8 @@ def discover(context, *, excluded_extensions=()):
             issues.append((lease.manifest.plugin_id, "native_action_conflict"))
             continue
         entries.update({declaration.host_tool_id: (declaration, lease) for declaration in declarations})
-    if len(entries) > MAX_TOOL_CATALOG:
-        issues.append(("native", "native_catalog_capacity"))
-        entries = {}
+    # Keep all attested owners. Per-request availability and model budgets are
+    # decided after assembly, rather than disabling the installed directory.
     return entries, tuple(issues)
 
 

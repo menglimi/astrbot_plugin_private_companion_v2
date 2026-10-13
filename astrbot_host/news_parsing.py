@@ -53,6 +53,9 @@ def parse_rss_news(raw, *, source_label):
     items = []
     for entry in entries[:100]:
         values = {local(child): (child.text or "").strip() for child in entry if local(child) != "link"}
+        category = next((plain_text(child.attrib.get("term") or child.text or "")[:48]
+                         for child in entry if local(child) == "category"
+                         and plain_text(child.attrib.get("term") or child.text or "")), "")
         link = next((child.attrib.get("href", "") for child in entry
                      if local(child) == "link" and child.attrib.get("href")), "")
         if not link:
@@ -76,7 +79,8 @@ def parse_rss_news(raw, *, source_label):
                       "title": plain_text(values.get("title", ""))[:240],
                       "summary": plain_text(values.get("description", "") or values.get("summary", "") or values.get("content", ""))[:1000],
                       "url": link, "published_at": timestamp,
-                      "source": plain_text(feed_title)[:100] or source_label})
+                      "source": plain_text(feed_title)[:100] or source_label,
+                      "category": category})
     return parse_news_response({"items": items})
 
 

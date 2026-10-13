@@ -75,7 +75,7 @@ class ProactiveTextPresentationTests(ContactFixture, unittest.IsolatedAsyncioTes
         task = (await self.contact(app)).unwrap().task
         self.assertEqual(task.state, "succeeded")
         await self.delivery_state(app, task.task_id, "delivered")
-        self.assertEqual(self.sent[0].text, "在的，刚刚在忙。\n")
+        self.assertEqual(self.sent[0].text, "在的，刚刚在忙。")
         self.assertNotIn("pc_reaction_expression", self.sent[0].text)
         self.assertNotIn("pc_tts", self.sent[0].text)
         self.assertIn("pc_reaction_expression", self.called[0].original.instruction)

@@ -3,6 +3,7 @@
 import asyncio
 from datetime import timedelta
 import importlib.util
+import json
 import logging
 import os
 from pathlib import Path
@@ -17,15 +18,16 @@ with tempfile.TemporaryDirectory(prefix="v2-native-recall-entry-") as temporary:
     os.environ["ASTRBOT_ROOT"] = temporary
 
     from aiocqhttp import Event
+    from astrbot.core import sp as astrbot_preferences
     from astrbot.core.pipeline.waking_check.stage import build_unique_session_id
     from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
     from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter import AiocqhttpAdapter
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
     from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
     from companion_v2.foundation.clock import DeterministicClock
+    from companion_v2.memory.codec import source as decode_source
     from tests.group_host_support import GroupContext, group_config
     from tests.native_adapter_support import FakeProvider, FakeReverseApi
-    from tests.staging_bootstrap_support import wait_for_batch
     from tests.test_management_access import NOW
 
     logging.disable(logging.WARNING)
@@ -39,8 +41,12 @@ with tempfile.TemporaryDirectory(prefix="v2-native-recall-entry-") as temporary:
     spec.loader.exec_module(plugin_module)
 
     native, clock = GroupContext(), DeterministicClock.at(NOW)
+    async def window_persona(_umo):
+        return "original"
+
     sdk = NativeAdapterTypes("4.27.2", AiocqhttpMessageEvent, FakeProvider,
-                             types.SimpleNamespace, types.SimpleNamespace, FakeReverseApi)
+                             types.SimpleNamespace, types.SimpleNamespace, FakeReverseApi,
+                             session_persona_override_lookup=window_persona)
     controller_type = plugin_module.AstrBotMultiController
 
     def make_controller(context, config, root):
@@ -91,49 +97,60 @@ with tempfile.TemporaryDirectory(prefix="v2-native-recall-entry-") as temporary:
         try:
             await plugin.initialize()
             controller = plugin.staging
-            (await controller.initialize_profile()).unwrap()
-            (await controller.start()).unwrap()
+            assert controller._accepting
             app = controller.session.application
             for identifier, group in (("5011", False), ("5012", True)):
                 original = await event_for(identifier, group=group)
+                assert controller.claims(original), controller.status()
                 await plugin.observe_companion_recall(original)
-                await plugin.receive_companion_message(original)
-                assert original.is_stopped()
-                batch = app.runtime.read_all("SELECT batch_id FROM conversation_batches ORDER BY rowid", ())[-1][0]
-                await wait_for_batch(controller.session, batch)
+                target = controller.target_for_event(original)
+                prepared = await controller.prepare_core_reply(original, target)
+                assert prepared.is_success, prepared.failure
+                await asyncio.wait_for(prepared.unwrap()["native_source_future"], timeout=5)
+                native_input = app.runtime.read_one(
+                    "SELECT source_json FROM conversation_native_observations WHERE event_id = ? AND kind = 'input'",
+                    (str(original.message_obj.message_id),))
+                assert native_input is not None
                 notice = await event_for(identifier, group=group, recall=True)
                 assert not controller.claims(notice)
                 await plugin.observe_companion_recall(notice)
                 await plugin.receive_companion_message(notice)
                 assert not notice.is_stopped(), "observation keeps notices available to other plugins"
-                assert app.runtime.read_one("SELECT withdrawn FROM conversation_inputs WHERE batch_id = ?", (batch,))[0] == 1
+                reference = decode_source(json.loads(native_input["source_json"]))
+                assert app.messages.sources.validate_reference(reference, observed_at=clock.now()).failure.code == "source_revoked"
                 await plugin.observe_companion_recall(await event_for(identifier, group=group, recall=True))
             calls = len(native.provider.client.state.calls)
             notice = await event_for("5999", group=True, recall=True)
             await plugin.observe_companion_recall(notice)
-            before = app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0]
+            before = app.runtime.read_one(
+                "SELECT COUNT(*) FROM conversation_native_observations WHERE kind = 'input'", ())[0]
             late = await event_for("5999", group=True)
-            await plugin.receive_companion_message(late)
-            assert app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0] == before
+            target = controller.target_for_event(late)
+            prepared = await controller.prepare_core_reply(late, target)
+            assert prepared.is_success, prepared.failure
+            await asyncio.wait_for(prepared.unwrap()["native_source_future"], timeout=5)
+            assert app.runtime.read_one(
+                "SELECT COUNT(*) FROM conversation_native_observations WHERE kind = 'input'", ())[0] == before
             poke = await event_for("6000", group=True, poke=True)
             await plugin.observe_companion_recall(poke)
             await plugin.receive_companion_message(poke)
             assert not poke.is_stopped()
-            assert not native.platform.client._api._wsr_api.calls
-            (await controller.authorize_group_delivery("group-a")).unwrap()
+            assert [action for action, _ in native.platform.client._api._wsr_api.calls] == [
+                "send_group_msg", "group_poke"]
             clock.advance(timedelta(seconds=1))
             poke = await event_for("6001", group=True, poke=True)
             await plugin.observe_companion_recall(poke)
             await plugin.receive_companion_message(poke)
             assert not poke.is_stopped()
             assert [action for action, _ in native.platform.client._api._wsr_api.calls] == [
-                "send_group_msg", "group_poke"]
+                "send_group_msg", "group_poke", "send_group_msg", "group_poke"]
             assert app.runtime.read_one("SELECT COUNT(*) FROM inbox WHERE consumer = ?",
                 ("conversation.platform_recall.v1",))[0] == 3
             assert len(native.provider.client.state.calls) == calls
             assert not native.platforms["qq-second"].client._api._wsr_api.calls
         finally:
             await plugin.terminate()
+            await astrbot_preferences.db_helper.engine.dispose()
         assert plugin.staging._terminated and plugin.staging.runtime is None
         assert not native.registered_web_apis
         assert not any(name == "companion_v2" or name.startswith("companion_v2.") for name in sys.modules)

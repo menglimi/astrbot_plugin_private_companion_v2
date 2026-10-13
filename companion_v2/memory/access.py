@@ -59,6 +59,12 @@ class MemoryAccess:
             if self.sent_sources is None:
                 raise TaskError("memory_source_unavailable", "confirmed reply owner is unavailable")
             self.sent_sources.validate(context, reference)
+        from companion_v2.conversation.native_observations import NATIVE_OWNERS, source_row, validate_observation
+        if reference.owner in NATIVE_OWNERS:
+            observation = source_row(self.runtime, reference)
+            if observation is None:
+                raise TaskError("memory_source_unavailable", "native observation is unavailable")
+            validate_observation(self.runtime, observation, context, reference)
         record = require(self.sources.read(reference, resolved=context.actor, capability=action,
             observed_at=at, authorizer=self))
         if not set(context.audience.recipients).issubset(record.audience.recipients):
@@ -73,6 +79,13 @@ class MemoryAccess:
         speaker, kind = None, "source"
         if reference.owner == "conversation.confirmed_reply":
             speaker, kind = context.role_binding.role.subject_id, "bot_message"
+        from companion_v2.conversation.native_observations import NATIVE_OWNERS, source_row, validate_observation
+        if reference.owner in NATIVE_OWNERS:
+            observation = source_row(self.runtime, reference)
+            if observation is None:
+                raise TaskError("memory_source_unavailable", "native observation is unavailable")
+            speaker, kind = validate_observation(self.runtime, observation, context, reference)
+            return Evidence(reference, record.content_hash, start, end, digest(record.payload[start:end]), speaker, kind)
         # Attribution comes from the captured host event, never a model-supplied name.
         for row in self.runtime.read_all("""SELECT i.event_json, b.context_json FROM conversation_inputs i
             JOIN conversation_batches b ON b.batch_id = i.batch_id

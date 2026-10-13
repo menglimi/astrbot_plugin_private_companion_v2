@@ -31,7 +31,8 @@ class RecallObjects:
         if kind in ("experiences", "all"):
             feeds.append((owner_key(context), "experience"))
         if kind in ("sources", "all"):
-            feeds.extend((conversation_key(context), value) for value in ("human", "reply"))
+            feeds.extend((conversation_key(context), value)
+                         for value in ("human", "reply", "native_human", "native_reply"))
         return feeds
 
     def _forgotten(self, context, reference):
@@ -40,6 +41,8 @@ class RecallObjects:
             (owner_key(context), digest(reference))) is not None
 
     def source(self, context, kind, identifier, *, authoritative=False):
+        if kind in ("native_human", "native_reply"):
+            return self._native_source(context, kind, identifier, authoritative=authoritative)
         if kind == "human":
             row = self.runtime.read_one("""SELECT i.batch_id, i.event_json, b.context_json FROM conversation_inputs i
                 JOIN conversation_batches b ON b.batch_id = i.batch_id
@@ -89,6 +92,33 @@ class RecallObjects:
                 payload, content_hash = json.loads(raw["payload_json"]), raw["content_hash"]
         return reference, payload, content_hash, message_time, speaker, source_kind
 
+    def _native_source(self, context, kind, identifier, *, authoritative):
+        from companion_v2.conversation.native_observations import observation_row, validate_observation
+
+        row = observation_row(self.runtime, identifier)
+        if row is None or row["delivery_state"] not in ("input_observed", "send_returned"):
+            return None
+        if (kind == "native_human") != (row["kind"] == "input"):
+            raise TaskError("memory_source_unavailable", "native source feed changed its attribution")
+        reference = codec.source(json.loads(row["source_json"]))
+        if self._forgotten(context, reference):
+            return None
+        try:
+            speaker, source_kind = validate_observation(self.runtime, row, context, reference)
+        except TaskError:
+            return None
+        if authoritative:
+            record = self.query.access.source(context, reference)
+            payload, content_hash = record.payload, record.content_hash
+        else:
+            raw = self.runtime.read_one("""SELECT payload_json, content_hash, state FROM sources
+                WHERE source_id = ? AND lineage_id = ? AND source_revision = ?""",
+                (reference.source_id, reference.version.lineage_id, reference.version.revision))
+            if raw is None or raw["state"] != "active" or raw["content_hash"] != row["content_hash"]:
+                raise TaskError("memory_source_unavailable", "native source is unavailable for indexing")
+            payload, content_hash = json.loads(raw["payload_json"]), raw["content_hash"]
+        return reference, payload, content_hash, row["observed_at"], speaker, source_kind
+
     @staticmethod
     def span(source, start, identifier):
         reference, payload, content_hash, message_time, speaker, source_kind = source
@@ -105,7 +135,7 @@ class RecallObjects:
 
     def project(self, context, namespace, kind, identifier, *, offset=0):
         """Yield chunks from one changed object, without scanning its neighbours."""
-        if kind in ("human", "reply"):
+        if kind in ("human", "reply", "native_human", "native_reply"):
             source = self.source(context, kind, identifier)
             if source:
                 for start in range(offset * 1900, len(source[1]), 1900):
@@ -125,7 +155,8 @@ class RecallObjects:
                    "text": " ".join((proposal["predicate"], proposal["object"], proposal["representation"], encode(proposal["qualifiers"])))}, metadata
         else:
             row = self.runtime.read_one("""SELECT * FROM memory_views
-                WHERE view_id = ? AND owner_key = ? AND state = 'active'""", (identifier, owner_key(context)))
+                WHERE view_id = ? AND owner_key = ? AND kind = 'experience' AND state = 'active'""",
+                (identifier, owner_key(context)))
             if row is None or offset:
                 return
             value = json.loads(row["document_json"])
@@ -194,7 +225,14 @@ class RecallObjects:
                 visible["statements"].append({"text": statement["text"], "sources": list(dict.fromkeys(handles))})
             return visible
         evidence = value["evidence"]
-        return {"kind": "source", "handle": query.offer(context, session_id, evidence),
+        result = {"kind": "source", "handle": query.offer(context, session_id, evidence),
                 "message_time": value["message_time"], "start": evidence.start, "end": evidence.end,
                 "speaker_id": evidence.speaker_id, "source_kind": evidence.source_kind,
                 "excerpt": query.access.evidence(context, evidence)}
+        if candidate["producer"] in ("native_human", "native_reply"):
+            from companion_v2.conversation.native_observations import observation_row
+            row = observation_row(self.runtime, candidate["object_id"])
+            if row is not None:
+                result["delivery_state"] = row["delivery_state"]
+                result["delivery_basis"] = "native_observation_without_platform_delivery_receipt"
+        return result

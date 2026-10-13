@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .configuration import FIELD_LIMITS, WORLD_ADAPTATION_MODES
+from .configuration import CONTROL_FIELDS, FIELD_LIMITS, WORLD_ADAPTATION_MODES
 
 
 MAX_SOURCE_CHARS = 30000
@@ -63,6 +63,8 @@ FIELD_GUIDANCE = {
     "world_adaptation": "外部平台、设备和插件功能如何自然转写成符合角色世界观的表达",
 }
 
+DRAFT_FIELD_LIMITS = {name: limit for name, limit in FIELD_LIMITS.items() if name not in CONTROL_FIELDS}
+
 
 def normalize_knowledge_references(values) -> list[dict[str, str]]:
     """Bound the selected world knowledge before it reaches the model or page."""
@@ -97,7 +99,7 @@ def normalize_current_profile(values) -> dict[str, str]:
     if type(values) is not dict:
         return {}
     result = {}
-    for name, limit in FIELD_LIMITS.items():
+    for name, limit in DRAFT_FIELD_LIMITS.items():
         value = values.get(name)
         if type(value) is str and value.strip():
             result[name] = value.strip()[:limit]
@@ -112,9 +114,9 @@ def build_role_profile_prompt(persona_text: str, supplement: str = "", *,
     if type(supplement) is not str or len(supplement) > MAX_SUPPLEMENT_CHARS:
         raise ValueError("role supplement is too large")
     field_map = {name: {"meaning": FIELD_GUIDANCE[name], "maximum_chars": limit}
-                 for name, limit in FIELD_LIMITS.items()}
+                 for name, limit in DRAFT_FIELD_LIMITS.items()}
     saved_profile = normalize_current_profile(current_profile)
-    output = {"fields": {name: "" for name in FIELD_LIMITS}, "inferred_fields": [], "notes": []}
+    output = {"fields": {name: "" for name in DRAFT_FIELD_LIMITS}, "inferred_fields": [], "notes": []}
     output["fields"]["world_adaptation_mode"] = saved_profile.get("world_adaptation_mode", "auto")
     references = normalize_knowledge_references(knowledge_references)
     source = json.dumps({"persona_text": persona_text, "confirmed_supplement": supplement,
@@ -169,11 +171,11 @@ def parse_role_profile_draft(raw_text: object, *, world_adaptation_mode=None) ->
                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid JSON number")))
     if type(payload) is not dict or type(payload.get("fields")) is not dict:
         raise ValueError("model result has no fields object")
-    fields = {name: "" for name in FIELD_LIMITS}
+    fields = {name: "" for name in DRAFT_FIELD_LIMITS}
     fields["world_adaptation_mode"] = world_adaptation_mode or "auto"
     invalid_adaptation_mode = False
     for name, value in payload["fields"].items():
-        if name not in FIELD_LIMITS:
+        if name not in DRAFT_FIELD_LIMITS:
             continue
         if type(value) is not str or len(value) > MAX_FIELD_RESULT_CHARS:
             raise ValueError("model field value is invalid")
@@ -189,18 +191,18 @@ def parse_role_profile_draft(raw_text: object, *, world_adaptation_mode=None) ->
     if type(inferred_raw) is not list or type(notes_raw) is not list:
         raise ValueError("model uncertainty notes are invalid")
     inferred = list(dict.fromkeys(name for name in inferred_raw
-                                  if type(name) is str and name in FIELD_LIMITS
+                                  if type(name) is str and name in DRAFT_FIELD_LIMITS
                                   and name != "world_adaptation_mode" and fields[name]))
     notes = [item.strip()[:500] for item in notes_raw if type(item) is str and item.strip()][:24]
     if invalid_adaptation_mode:
         notes.append("模型返回了无效的世界观适配模式，已使用自动模式；请按需调整。")
-    ignored_count = sum(1 for name in payload["fields"] if name not in FIELD_LIMITS)
+    ignored_count = sum(1 for name in payload["fields"] if name not in DRAFT_FIELD_LIMITS)
     if ignored_count:
         notes.append(f"模型使用了 {ignored_count} 个档案外字段；这些内容没有写入角色正本，请在对应工作区核对。")
     return {"fields": fields, "inferred_fields": inferred, "notes": notes}
 
 
-__all__ = ["FIELD_GUIDANCE", "MAX_FIELD_RESULT_CHARS", "MAX_RESULT_CHARS", "MAX_SOURCE_CHARS",
+__all__ = ["DRAFT_FIELD_LIMITS", "FIELD_GUIDANCE", "MAX_FIELD_RESULT_CHARS", "MAX_RESULT_CHARS", "MAX_SOURCE_CHARS",
            "MAX_KNOWLEDGE_CHARS", "MAX_KNOWLEDGE_ITEMS", "MAX_SUPPLEMENT_CHARS",
            "build_role_profile_prompt", "normalize_current_profile", "normalize_knowledge_references",
            "parse_role_profile_draft"]

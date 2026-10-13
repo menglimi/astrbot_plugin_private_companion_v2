@@ -77,7 +77,7 @@ window.CompanionLearningOverviewPage = (() => {
         rules: Number.isInteger(settings?.rules_per_turn) ? settings.rules_per_turn : null,
       };
     });
-    const selection=semantic?.target&&semantic?.role
+    const selection=semantic?.global===true?{global:true}:semantic?.target&&semantic?.role
       ?{target_id:semantic.target.target_id,role_id:semantic.role.role_id}:null;
     const semanticTask=selection?api("GET","semantic",selection).then(value=>{
       const interval=value?.settings?.learning_interval_seconds;
@@ -137,7 +137,7 @@ window.CompanionLearningOverviewPage = (() => {
       return `<section class="lh-overview-lane" data-state="${state}"><header><span class="lh-lane-dot" style="--lane:${color}"></span><strong>${label}</strong><span>${items.length}</span></header>
         <div class="lh-lane-items">${items.length?items.slice(0,4).map(growthCard).join(""):`<p class="lh-lane-empty">—</p>`}</div></section>`;
     }).join("");
-    root.innerHTML=`<div class="lh-overview-toolbar"><span>${data.errors?"部分数据暂不可用":`${sources.length} 个角色范围`}</span>
+    root.innerHTML=`<div class="lh-overview-toolbar"><span>${data.errors?"部分记录归属暂不可用":`汇总 ${sources.length} 个记录归属`}</span>
       <button type="button" class="lh-refresh" data-lh-refresh aria-label="重新读取" title="重新读取" ${data.loading||data.writing?"disabled":""}><i data-lucide="refresh-cw"></i></button></div>
       ${data.notice?`<p class="lh-inline-status${data.error?" is-error":""}" role="status">${e(data.notice)}</p>`:""}
       <section class="lh-kpis" aria-label="学习数据">${cards.map(([label,value,detail,icon])=>`<article class="lh-kpi">

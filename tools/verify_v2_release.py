@@ -1,4 +1,4 @@
-"""Verify and extract a built release; optionally run isolated install checks."""
+"""Verify one self-contained V2 release and optionally check its isolated host."""
 
 from __future__ import annotations
 
@@ -14,15 +14,12 @@ import sys
 from tempfile import TemporaryDirectory
 import zipfile
 
-NATIVE_PROVIDER_FILES = {
-    "astrbot_plugin_content_companion": ("companion/content_v2/assembly.py", "companion/content_v2/provider.py"),
-    "astrbot_plugin_image_companion": ("image_companion/native_v2/bootstrap.py", "image_companion/native_v2/owner.py"),
-    "astrbot_plugin_reality_companion": ("native_v2/provider.py",),
-    "astrbot_plugin_screen_companion": ("native_v2/provider.py",),
-    "astrbot_plugin_together_companion": ("native_v2/provider.py",),
-    "astrbot_plugin_game_companion": ("native_v2/provider.py",),
-    "astrbot_plugin_live_stream_companion": ("native_v2/provider.py",),
-}
+if __package__:
+    from .build_v2_release import (CORE_ID, NATIVE_CAPABILITY_BASELINE, NATIVE_EXTENSION_FILES,
+        RELEASE_SCHEMA, VERSION, native_artifact_hashes, verify_native_baseline, verify_runtime_sources)
+else:
+    from build_v2_release import (CORE_ID, NATIVE_CAPABILITY_BASELINE, NATIVE_EXTENSION_FILES,
+        RELEASE_SCHEMA, VERSION, native_artifact_hashes, verify_native_baseline, verify_runtime_sources)
 
 MIGRATION_ACCEPTANCE_MODULES = (
     "tests.test_configuration_migration",
@@ -111,17 +108,18 @@ def _verify_v2_contracts(core: Path) -> dict[str, object]:
         sys.path.remove(str(core))
 
 
-def _host_check_environment(temporary_root: str) -> dict[str, str]:
+def _host_check_environment(temporary_root: str, core: str) -> dict[str, str]:
     environment = os.environ.copy()
     environment["ASTRBOT_ROOT"] = temporary_root
 
     # AstrBot's bundled Python keeps the backend application beside its venv.
     app_path = Path(sys.prefix).resolve().parent / "app"
-    if app_path.is_dir():
-        search_paths = [item for item in environment.get("PYTHONPATH", "").split(os.pathsep) if item]
-        resolved_app_path = app_path.resolve()
-        if not any(Path(item).resolve() == resolved_app_path for item in search_paths):
-            environment["PYTHONPATH"] = os.pathsep.join([str(app_path), *search_paths])
+    if not (app_path / "astrbot").is_dir():
+        raise ValueError("--host-check requires AstrBot's bundled Python with backend/app beside it")
+    # Do not let a developer's PYTHONPATH satisfy missing candidate modules.
+    environment["PYTHONPATH"] = os.pathsep.join([str(Path(core).resolve()), str(app_path)])
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 
 
@@ -158,8 +156,18 @@ def verify(release, destination):
         raise ValueError("verification destination must be new or empty")
     destination.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((release / "release-manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("schema") != RELEASE_SCHEMA or manifest.get("version") != VERSION:
+        raise ValueError("not a current self-contained V2 release manifest")
+    packages = manifest.get("packages", [])
+    if len(packages) != 1 or packages[0].get("plugin_id") != CORE_ID:
+        raise ValueError("a V2 release must contain exactly one installable V2 plugin")
+    if manifest.get("native_extensions") != sorted(NATIVE_EXTENSION_FILES) or manifest.get("external_plugin_dependencies") != []:
+        raise ValueError("release must bundle seven internal extensions without companion plugin dependencies")
     reports = []
-    for package in manifest["packages"]:
+    runtime_contract = None
+    for package in packages:
+        if package.get("version") != VERSION or package.get("execution_owner") != CORE_ID or package.get("integration") != "native-bundled":
+            raise ValueError("invalid single-plugin execution owner or version")
         filename = package["filename"]
         if Path(filename).name != filename:
             raise ValueError("invalid archive filename")
@@ -179,17 +187,14 @@ def verify(release, destination):
             if archive.testzip() is not None:
                 raise ValueError("invalid archive CRC")
             content = json.loads(archive.read(prefix + "RELEASE_FILES.json"))
+            if content.get("product_version") != VERSION or any(content.get("plugin", {}).get(key) != package.get(key)
+                                                               for key in ("plugin_id", "version", "astrbot_version")):
+                raise ValueError("package metadata and release manifest disagree")
             expected = {prefix + name for name in content["files"]} | {prefix + "RELEASE_FILES.json"}
             if set(names) != expected:
                 raise ValueError("file inventory mismatch")
-            required_native = {prefix + name for name in NATIVE_PROVIDER_FILES.get(package["plugin_id"], ())}
-            if not required_native.issubset(expected):
-                raise ValueError("native provider source missing: " + package["plugin_id"])
-            integration = ("native-core" if package["plugin_id"] == "astrbot_plugin_private_companion_v2"
-                           else "native-provider" if required_native else "provider-metadata")
-            if package["integration"] != integration:
-                raise ValueError("provider integration mismatch: " + package["plugin_id"])
             python_count = 0
+            relative_files = {}
             for name, digest in content["files"].items():
                 payload = archive.read(prefix + name)
                 if hashlib.sha256(payload).hexdigest() != digest:
@@ -197,18 +202,25 @@ def verify(release, destination):
                 if name.endswith(".py"):
                     ast.parse(payload.decode("utf-8"), filename=name)
                     python_count += 1
+                relative_files[name] = payload
+            runtime_contract = verify_runtime_sources(relative_files)
+            verify_native_baseline(VERSION, native_artifact_hashes(relative_files),
+                                   json.loads(relative_files[NATIVE_CAPABILITY_BASELINE]))
+            if any(content.get(key) != value or package.get(key) != value for key, value in runtime_contract.items()):
+                raise ValueError("bundled native extension or unique registration contract mismatch")
             # Paths have been validated above; destination contains no user data.
             archive.extractall(destination)
             reports.append({"plugin_id": package["plugin_id"], "files": len(names), "python_files": python_count})
-    core = destination / "astrbot_plugin_private_companion_v2"
+    core = destination / CORE_ID
     schema = json.loads((core / "_conf_schema.json").read_text(encoding="utf-8"))
-    assert schema["staging"]["items"]["enabled"]["default"] is False
-    assert schema["multi_host"]["items"]["enabled"]["default"] is False
-    assert [p.name for p in (core / "pages").iterdir() if (p / "index.html").is_file()] == ["陪伴小屋"]
+    if schema["staging"]["items"]["enabled"]["default"] is not False or schema["multi_host"]["items"]["enabled"]["default"] is not False:
+        raise ValueError("default host configuration must remain disabled")
+    if [p.name for p in (core / "pages").iterdir() if (p / "index.html").is_file()] != ["陪伴小屋"]:
+        raise ValueError("V2 must expose exactly one Dashboard page: 陪伴小屋")
     contracts = _verify_v2_contracts(core)
     return {"packages": reports, "core": str(core), "default_enabled": False,
             "public_pages": ["陪伴小屋"], "hashes_and_syntax": "passed",
-            "contracts": contracts}
+            "contracts": contracts, **runtime_contract}
 
 
 def main():
@@ -221,7 +233,7 @@ def main():
     if args.host_check:
         # These checks run only from the extracted candidate package and use local doubles.
         with TemporaryDirectory(prefix="companion-v2-release-host-check-") as temporary:
-            environment = _host_check_environment(temporary)
+            environment = _host_check_environment(temporary, report["core"])
             output = _run_host_process(report["core"], environment,
                 ["-m", "tests.multi_life_entry_process"],
                 "candidate host lifecycle check", timeout=90)

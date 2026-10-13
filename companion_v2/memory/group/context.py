@@ -84,6 +84,9 @@ class GroupMemoryContext:
         return tuple(materials)
 
     def after_write(self, context, batch_id, receipt):
+        from companion_v2.conversation.native_tool_sources import native_turn
+        if native_turn(batch_id):
+            return
         row = self.memory.messages.batch(batch_id)
         saved = json.loads(row["contributions_json"])
         snapshot = saved.get("group_memory")

@@ -6,8 +6,8 @@ import json
 import logging
 import time
 
-from companion_v2.execution.models import TaskError, digest, encode, require
-from companion_v2.foundation.refs import ScopeKind
+from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require
+from companion_v2.foundation.refs import RoleOwnerRef, ScopeKind
 from companion_v2.model_gateway.embedding import EmbeddingGateway
 from companion_v2.model_gateway.semantic_search import CatalogSearch
 from companion_v2.model_gateway.models import ToolSpec
@@ -35,8 +35,11 @@ REACTION_CAPTURE_KEY = "reaction-capture:"
 class SemanticService:
     actions = frozenset(FIELDS)
 
-    def __init__(self, app, port):
+    def __init__(self, app, port, *, reaction_role_count=0):
+        if type(reaction_role_count) is not int or not 0 <= reaction_role_count <= 10000:
+            raise ValueError("reaction role count must be a bounded non-negative integer")
         self.app = app
+        self.reaction_role_count = reaction_role_count
         self.store = SemanticStore(app.runtime.data_root)
         self.gateway = EmbeddingGateway(port, timeout=self.store.settings()["timeout_seconds"])
         self.memory = MemorySemanticRecall(app.memory, self.gateway, self.store.settings)
@@ -48,6 +51,7 @@ class SemanticService:
         self.locks, self.background, self.errors = {}, {}, {}
         self.backfill_runs = {}
         self.reaction_capture_runs = {}
+        self._reaction_catalog_ready = set()
         self.prepared = set()
         self.closed = False
         descriptions = {"reaction.search": "按角色想怎样回应检索表情原图，可提供安慰、吐槽等用途及否定语境；找不到可不发。",
@@ -62,6 +66,42 @@ class SemanticService:
         s = context.scope
         return digest(["semantic-owner.v1", s.installation_id, s.platform, s.bot_id, s.account_id,
                        s.kind, s.native_scope_id, s.session_id if s.kind is ScopeKind.GROUP else "", context.role_binding.role])
+
+    @staticmethod
+    def reaction_owner(context):
+        scope = context.scope
+        owner = RoleOwnerRef(scope.installation_id, scope.bot_id,
+                             context.role_binding.role.subject_id)
+        return digest(["semantic-reaction-role.v1", owner])
+
+    def ensure_reaction_catalog(self, context):
+        """Promote old window catalogs for this role, preserving every source row."""
+        target_owner = self.reaction_owner(context)
+        if target_owner in self._reaction_catalog_ready:
+            return target_owner
+        scope, role_id = context.scope, context.role_binding.role.subject_id
+        rows = self.app.runtime.read_all("""SELECT DISTINCT context_json FROM conversation_batches
+            WHERE json_extract(context_json,'$.role_binding.scope.installation_id')=?
+            AND json_extract(context_json,'$.role_binding.scope.bot_id')=?
+            AND json_extract(context_json,'$.role_binding.role.subject_id')=?""",
+            (scope.installation_id, scope.bot_id, role_id))
+        for row in rows:
+            try:
+                candidate = TaskContext.restore(json.loads(row["context_json"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            candidate_scope = candidate.scope
+            if (candidate_scope.installation_id != scope.installation_id
+                    or candidate_scope.bot_id != scope.bot_id
+                    or candidate.role_binding.role.subject_id != role_id):
+                continue
+            self.store.promote_reaction_owner(self.owner(candidate), target_owner)
+        self.store.promote_reaction_owner(self.owner(context), target_owner)
+        if self.reaction_role_count == 1:
+            for source_owner in self.store.unclaimed_legacy_reaction_owners(target_owner):
+                self.store.promote_reaction_owner(source_owner, target_owner)
+        self._reaction_catalog_ready.add(target_owner)
+        return target_owner
 
     def check(self, context, *, action="conversation.reply"):
         if self.closed:
@@ -92,7 +132,9 @@ class SemanticService:
             return False
         if context is not None:
             self.check(context, action=action)
-            if item["owner"] != self.owner(context):
+            expected_owner = (self.ensure_reaction_catalog(context) if item["kind"] == "reaction"
+                              else self.owner(context))
+            if item["owner"] != expected_owner:
                 return False
             if item["kind"] == "reaction" and not self.reaction_enabled(context, cfg):
                 return False
@@ -169,17 +211,40 @@ class SemanticService:
         run.validate()
         return {"state": "succeeded", "effect": "committed" if call.action == "slang.learn" else "none", "payload": payload}
 
+    async def execute_native(self, context, turn_id, call_id, action, args):
+        if action not in {tool.action for tool in self.catalog_for(context, turn_id)}:
+            raise TaskError("semantic_action_unavailable", "semantic action is disabled or unauthorized")
+        self.validate_arguments(action, args)
+        if action == "reaction.search":
+            payload = await self.reactions.search_native(context, turn_id, call_id, args["intent"])
+        elif action == "slang.search":
+            payload = {"kind": "slang", **await self.slang.search(context, args["query"])}
+            self.store.offer(turn_id, call_id, self.owner(context), payload)
+        else:
+            item = self.slang.learn(context, turn_id, **args)
+            payload = {"kind": "slang", "items": [{key: item[key] for key in ("id", "revision", "payload")}]}
+            self.store.offer(turn_id, call_id, self.owner(context), payload)
+        self.check(context)
+        return {"state": "succeeded", "effect": "committed" if action == "slang.learn" else "none", "payload": payload}
+
+    def validate_native(self, context, turn_id, call_id, action, result):
+        validated, _ = self.validate({"state": result["state"], "action": action,
+            "batch_id": turn_id, "tool_call_id": call_id}, context, result)
+        return validated
+
     def validate(self, row, context, result):
         self.check(context)
         if row["state"] != "succeeded":
             return result, None
-        saved = dict(self.store.offers(row["batch_id"], self.owner(context))).get(row["tool_call_id"])
+        offer_owner = (self.ensure_reaction_catalog(context) if row["action"] == "reaction.search"
+                       else self.owner(context))
+        saved = dict(self.store.offers(row["batch_id"], offer_owner)).get(row["tool_call_id"])
         if saved != result.get("payload"):
             raise TaskError("semantic_result_changed", "original semantic result is unavailable")
         kind = saved["kind"]
         changed = self.changed_slang(row["batch_id"])
         for offered in saved.get("items", []):
-            item = self.store.get(self.owner(context), kind, offered["id"])
+            item = self.store.get(offer_owner, kind, offered["id"])
             if kind == "slang" and item["revision"] != offered["revision"] and offered["id"] in changed:
                 if not self.validate_item(item, context):
                     raise TaskError("semantic_result_changed", "updated vocabulary evidence is unavailable")
@@ -189,6 +254,13 @@ class SemanticService:
         return result, None
 
     def changed_slang(self, batch_id):
+        from companion_v2.conversation.native_tool_sources import native_turn
+        if native_turn(batch_id):
+            rows = self.app.runtime.read_all("""SELECT value FROM runtime_metadata WHERE key LIKE ?
+                AND json_extract(value,'$.turn_id')=? AND json_extract(value,'$.action')='slang.learn'
+                AND json_extract(value,'$.state')='succeeded'""", ("astrbot.core-tool.%", batch_id))
+            return {item["id"] for row in rows
+                    for item in json.loads(row["value"])["result"]["payload"]["items"]}
         rows = self.app.runtime.read_all("SELECT result_json FROM conversation_tool_calls WHERE batch_id=? AND action='slang.learn' AND state='succeeded'", (batch_id,))
         return {item["id"] for row in rows for item in json.loads(row["result_json"])["payload"]["items"]}
 
@@ -301,6 +373,35 @@ class SemanticService:
                 self.background.pop(key, None)
         self.background[key] = asyncio.create_task(fill(), name="v2-semantic-backfill")
 
+    def schedule_native_input(self, context, turn_id):
+        """Learn/index core input in the background, outside its native model turn."""
+        cfg = self.store.settings()
+        if self.closed or not cfg["enabled"]:
+            return
+        if context.scope.kind is ScopeKind.PRIVATE:
+            if cfg["memory_enabled"]:
+                self.schedule_memory(context)
+            return
+        if context.scope.kind is not ScopeKind.GROUP or not cfg["slang_enabled"] or not cfg["slang_learning"]:
+            return
+        key = "native-slang:" + self.owner(context)
+        if key in self.background:
+            return
+
+        async def learn():
+            try:
+                async with self.locks.setdefault(self.owner(context), asyncio.Lock()):
+                    self.check(context)
+                    await self.slang.observe(context, turn_id)
+                    self.errors.pop("slang_learning", None)
+            except Exception as error:
+                if not self.closed:
+                    self.errors["slang_learning"] = getattr(error, "code", type(error).__name__)
+            finally:
+                self.background.pop(key, None)
+
+        self.background[key] = asyncio.create_task(learn(), name="v2-native-slang-learning")
+
     def reaction_settings(self, context):
         """Window-scoped reaction bounds and their revision; never blocks a turn."""
         return read_reaction_configuration(self.app.runtime, context)
@@ -321,7 +422,7 @@ class SemanticService:
             settings = read_reaction_settings(self.app.runtime, context)
         if self.closed or not cfg["enabled"] or not settings.embedding_backfill_enabled:
             return
-        owner = self.owner(context)
+        owner = self.ensure_reaction_catalog(context)
         key = REACTION_BACKFILL_KEY + owner
         if key in self.background:
             return
@@ -390,7 +491,33 @@ class SemanticService:
             return "reactions_collection_group_enabled", "reactions_collection_group_probability", "group_capture"
         return None
 
-    def schedule_reaction_collection(self, batch_id, context, request):
+    def schedule_native_reaction_collection(self, context, turn_id, event):
+        """Read captured originals on a worker before the existing collection flow."""
+        fields = self._reaction_collection_fields(context)
+        cfg = self.store.settings()
+        if fields is None or self.closed or not cfg["enabled"] or not cfg[fields[0]]:
+            return
+        key = "native-reaction-prepare:" + digest(turn_id)
+        if key in self.background:
+            return
+
+        async def prepare():
+            try:
+                def read():
+                    self.app.messages.recalls.check(context.scope, event.event_id, event.principal.native_account_id)
+                    return self.app.messages.images.read(context, (event,), self.app.now())
+                images = await asyncio.to_thread(read)
+                if not self.closed:
+                    self.schedule_reaction_collection(turn_id, context, native_images=images, native_event=event)
+            except Exception as error:
+                if not self.closed:
+                    self.errors["reaction_collection"] = getattr(error, "code", type(error).__name__)
+            finally:
+                self.background.pop(key, None)
+
+        self.background[key] = asyncio.create_task(prepare(), name="v2-native-reaction-prepare")
+
+    def schedule_reaction_collection(self, batch_id, context, request=None, *, native_images=None, native_event=None):
         fields = self._reaction_collection_fields(context)
         if fields is None:
             return
@@ -398,11 +525,13 @@ class SemanticService:
         settings = self.store.settings()
         if self.closed or not settings["enabled"] or not settings[enabled_field]:
             return
-        direct_sources = {material.source for material in request.context.materials
-                          if material.purpose.startswith("input_image:") and material.source is not None}
-        if not direct_sources or not getattr(request.event, "images", ()):
+        direct_sources = ({image.source for image in native_images} if native_images is not None else
+            {material.source for material in request.context.materials
+             if material.purpose.startswith("input_image:") and material.source is not None})
+        original_event = native_event if native_event is not None else request.event
+        if not direct_sources or not getattr(original_event, "images", ()):
             return
-        owner = self.owner(context)
+        owner = self.ensure_reaction_catalog(context)
         run_key = digest(["reaction-capture.v1", owner, batch_id])
         key = REACTION_CAPTURE_KEY + run_key
         now = time.monotonic()
@@ -414,7 +543,8 @@ class SemanticService:
         if sample >= settings[probability_field]:
             return
         try:
-            images = self.app.messages.images.read(context, (request.event,), self.app.now())
+            images = (native_images if native_images is not None else
+                      self.app.messages.images.read(context, (original_event,), self.app.now()))
         except Exception as error:
             self.errors["reaction_collection"] = getattr(error, "code", type(error).__name__)
             self._record_reaction_collection(owner, run_key, source, "failed",
@@ -441,6 +571,9 @@ class SemanticService:
             current = self.store.settings()
             if self.closed or not current["enabled"] or not current[enabled_field]:
                 raise TaskError("reaction_capture_disabled", "automatic reaction collection was disabled")
+            if native_event is not None:
+                from companion_v2.conversation.native_tool_sources import native_input_images
+                native_input_images(self.app.messages, context, batch_id)
 
         async def collect():
             try:

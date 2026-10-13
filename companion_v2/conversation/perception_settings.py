@@ -1,9 +1,9 @@
-"""Private conversation perception preferences fixed at input sealing."""
+"""Role perception defaults with private-window overrides, fixed at input sealing."""
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError
-from companion_v2.configuration.owners import SparseConfigurationOwner
+from companion_v2.configuration.role_settings import RoleSharedSettingsOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
 from companion_v2.execution.models import require
 
@@ -28,6 +28,11 @@ DEFAULTS = {
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
                         context.role_binding.role, context.scope)
+
+
+def role_target_for(context):
+    return ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE,
+                        context.role_binding.role, bot_id=context.scope.bot_id)
 
 
 def validate(values):
@@ -63,12 +68,21 @@ def validate_snapshot(values):
 def configuration_fields():
     return tuple(FieldDefinition(GROUP + "." + name, GROUP, GROUP,
         ValueKind.BOOLEAN if type(value) is bool else ValueKind.TEXT, value,
-        layers=(ConfigLayer.WINDOW,), owner_id=OWNER)
+        layers=(ConfigLayer.ROLE, ConfigLayer.WINDOW), owner_id=OWNER)
         for name, value in DEFAULTS.items())
 
 
-class PerceptionConfigurationOwner(SparseConfigurationOwner):
+class PerceptionConfigurationOwner(RoleSharedSettingsOwner):
     owner_id = OWNER
+
+    def is_shared(self, field):
+        return field.group_id == GROUP
+
+    def window_write_role_default(self, field):
+        return False
+
+    def adopt_window_value_on_write(self, field, changed_fields):
+        return False
 
     def preview_set(self, target, fields, *, changes):
         result = super().preview_set(target, fields, changes=changes)
@@ -88,8 +102,8 @@ class PerceptionSettings:
     def __init__(self, configuration):
         self.configuration = configuration
 
-    def snapshot(self, actor, context, at):
-        return require(self.configuration.read(actor, target=target_for(context), group_id=GROUP,
+    def snapshot(self, actor, context, at, *, target=None):
+        return require(self.configuration.read(actor, target=target or target_for(context), group_id=GROUP,
                                                observed_at=at))
 
     def capture(self, context, at):

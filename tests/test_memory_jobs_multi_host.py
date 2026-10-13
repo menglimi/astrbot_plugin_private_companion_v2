@@ -27,7 +27,9 @@ class MemoryJobsMultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.controller.register_routes()
         self.routes = {(path, methods[0]): handler for path, handler, methods, _ in self.native.registered_web_apis}
         app = await self.start_host()
-        context, _ = await self.accepted()
+        prepared = (await self.controller.prepare_core_reply(self.event())).unwrap()
+        await prepared["native_source_future"]
+        context = prepared["context"]
         for action in ("memory.reflect", "memory.read", "memory.propose", "memory.subscribe"):
             app.tasks.identity.issue_grant(grant_id="memory-jobs-" + action, subject=context.actor.subject,
                 scope=context.scope, capability=action, tier=AuthorizationTier.STANDARD,

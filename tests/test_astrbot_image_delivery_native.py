@@ -82,8 +82,18 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         event.created_at = self.clock.now().timestamp()
         return event
 
-    async def reply(self, target="first", identifier="451", *, components=None):
+    async def reply(self, target="first", identifier="451", *, components=None, advance_part_clock=False):
         batch = (await self.controller.receive_claimed(self.event_for(target, identifier, components=components))).unwrap()
+        if advance_part_clock:
+            async def advance_spacing():
+                flow = self.controller.session.application.flow
+                while flow.row(batch)["state"] not in ("complete", "blocked", "closed"):
+                    await asyncio.sleep(0.05)
+                    row = flow.row(batch)
+                    if row["reason"] == "part_spacing":
+                        self.clock.advance(timedelta(seconds=0.05))
+            await asyncio.wait_for(advance_spacing(), timeout=20)
+            return self.controller.preview(target, batch).unwrap()
         await wait_for_batch(self.controller.session, batch)
         return self.controller.preview(target, batch).unwrap()
 
@@ -157,14 +167,14 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             await self.start_host()
             for target, identifier in (("first", "851"), ("second", "852")):
                 (await self.controller.authorize_delivery(target)).unwrap()
-                report = await self.reply(target, identifier=identifier)
+                report = await self.reply(target, identifier=identifier, advance_part_clock=True)
                 self.assertTrue(report["sent"])
                 self.assertEqual([part["state"] for part in report["parts"]], ["delivered", "delivered"])
                 messages = [frame["params"]["message"] for frame in self.sends(target)]
                 self.assertEqual([[segment["type"] for segment in message] for message in messages],
                     [["text", "record"], ["text", "image", "record"]])
                 self.assertEqual([message[0]["data"]["text"] for message in messages],
-                    ["先看看这张图。\n", "再补一句。"])
+                    ["先看看这张图。", "再补一句。"])
                 self.assertEqual([message[-1]["data"]["file"] for message in messages],
                     ["base64://" + base64.b64encode(audio_file.read_bytes()).decode("ascii")] * 2)
         self.assertEqual(selected, ["qq-main:FriendMessage:200"] * 2 + ["qq-second:FriendMessage:200"] * 2)
@@ -204,11 +214,11 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         with patch("astrbot_host.voice.get_astrbot_temp_path", return_value=str(audio_root)):
             app = await self.start_host()
             (await self.controller.authorize_delivery("first")).unwrap()
-            report = await self.reply(identifier="855")
+            report = await self.reply(identifier="855", advance_part_clock=True)
 
         self.assertTrue(report["sent"], report)
         self.assertEqual([part["state"] for part in report["parts"]], ["delivered", "delivered"])
-        self.assertEqual([part["text"] for part in report["parts"]], ["你好。\n", "再见。"])
+        self.assertEqual([part["text"] for part in report["parts"]], ["你好。", "再见。"])
         plans = app.runtime.read_all("""SELECT p.sequence, v.speech, v.provider_id, v.position
             FROM conversation_parts p JOIN conversation_voice_parts v ON v.part_id = p.part_id
             WHERE p.batch_id = ? ORDER BY p.sequence""", (report["batch_id"],))
@@ -218,7 +228,7 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         messages = [frame["params"]["message"] for frame in self.sends()]
         self.assertEqual([[part["type"] for part in message] for message in messages],
                          [["record", "text"], ["record", "text", "image"]])
-        self.assertEqual([message[1]["data"]["text"] for message in messages], ["你好。\n", "再见。"])
+        self.assertEqual([message[1]["data"]["text"] for message in messages], ["你好。", "再见。"])
         self.assertEqual(spoken, ["Hello there.", "See you."])
         self.assertEqual(ResultStore._futures, {})
 
@@ -306,20 +316,20 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         app = self.controller.session.application
         self.assertEqual(app.runtime.read_one("SELECT COUNT(*) n FROM conversation_sent_history", ())["n"], 0)
 
-    async def test_finite_grants_are_target_specific_and_expiry_never_replays_old_images(self):
+    async def test_configured_private_targets_send_images_on_their_exact_accounts(self):
         await self.start_host()
-        (await self.controller.authorize_delivery("first")).unwrap()
-        self.assertTrue((await self.reply())["sent"])
-        self.assertFalse((await self.reply("second"))["sent"])
-        self.assertEqual(self.sends("second"), [])
+        first = await self.reply("first", identifier="901")
+        second = await self.reply("second", identifier="902")
+        self.assertTrue(first["sent"])
+        self.assertTrue(second["sent"])
+        self.assertEqual(len(self.sends("first")), 1)
+        self.assertEqual(len(self.sends("second")), 1)
+        self.assertEqual(self.sends("first")[0]["params"]["self_id"], "100")
+        self.assertEqual(self.sends("second")[0]["params"]["self_id"], "101")
         self.clock.advance(timedelta(minutes=16))
-        expired = await self.reply(identifier="902")
-        self.assertFalse(expired["sent"])
-        (await self.controller.authorize_delivery("first")).unwrap()
-        replay = await self.reply(identifier="902")
-        self.assertEqual(replay["batch_id"], expired["batch_id"])
-        self.assertFalse(replay["sent"])
-        self.assertEqual(len(self.sends()), 1)
+        after_legacy_grant_ttl = await self.reply(identifier="903")
+        self.assertTrue(after_legacy_grant_ttl["sent"])
+        self.assertEqual(len(self.sends("first")), 2)
 
     async def test_role_switch_while_preparing_images_cannot_send_as_another_persona(self):
         app = await self.start_host()
@@ -336,7 +346,7 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report["sent"])
         self.assertEqual(self.sends(), [])
 
-    async def test_revocation_while_preparing_images_prevents_whole_dispatch(self):
+    async def test_legacy_delivery_revocation_does_not_disable_configured_private_target(self):
         app = await self.start_host()
         (await self.controller.authorize_delivery("first")).unwrap()
         revoked = False
@@ -348,8 +358,9 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.native.before_resolve = change
         report = await self.reply()
         self.assertTrue(revoked)
-        self.assertFalse(report["sent"])
-        self.assertEqual(self.sends(), [])
+        self.assertTrue(report["sent"])
+        self.assertEqual(len(self.sends("first")), 1)
+        self.assertEqual(self.sends("second"), [])
 
     async def test_disconnected_original_account_never_uses_another_socket_for_images(self):
         app = await self.start_host()
@@ -366,7 +377,7 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report["sent"])
         self.assertTrue(all(not socket.frames for clients in self.sockets.values() for socket in clients.values()))
 
-    async def test_shared_preview_retains_image_metadata_across_restart_without_sending(self):
+    async def test_private_delivery_retains_image_receipt_metadata_across_restart(self):
         self.config = multi_config()
         self.controller = self.make_controller(self.config)
         await self.start_host()
@@ -379,7 +390,7 @@ class NativeImageDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             current = self.controller.preview(target, prior["batch_id"]).unwrap()
             self.assertEqual(current, prior)
             self.assertEqual(len(current["parts"][0]["images"]), 1)
-            self.assertFalse(current["sent"])
+            self.assertTrue(current["sent"])
             self.assertNotIn("base64", str(current))
-            self.assertEqual(self.sends(target), [])
+            self.assertEqual(len(self.sends(target)), 1)
         self.assertEqual(len(self.native.provider.client.state.calls), 2)

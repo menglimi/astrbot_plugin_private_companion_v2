@@ -14,10 +14,12 @@ batch limit bounds how many prior summaries one pass may see.
 
 from __future__ import annotations
 
+import json
+
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
-from companion_v2.execution.models import TaskError, digest
+from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.identity_policy.group_audience import group_audience
 from companion_v2.conversation.reset import batch_current
@@ -98,11 +100,11 @@ def settings_for(runtime, context):
 
 
 def recent_group_lines(runtime, context, manifest, *, limit=MAX_SOURCE_LINES):
-    """The group's confirmed replies inside this reflection window, oldest first.
+    """The group's observable replies inside this reflection window, oldest first.
 
-    Read from the same delivery receipts the rest of the memory chain trusts, so a
-    withdrawn or unconfirmed reply is never part of a summary. Only the group's own
-    audience is sampled, and the speaker is kept for attribution.
+    Legacy replies retain their receipt proof; native replies require an actual
+    send-return callback. Only this group's own current, authorized sources are
+    sampled. A native send return never becomes a platform delivery receipt.
     """
     if context.scope.kind is not ScopeKind.GROUP:
         raise TaskError("episode_group_required", "group episode material needs a group conversation")
@@ -132,8 +134,57 @@ def recent_group_lines(runtime, context, manifest, *, limit=MAX_SOURCE_LINES):
             continue
         text = " ".join(str(row["text"] or "").split())
         if text:
-            lines.append(text[:200])
-    return tuple(lines)
+            lines.append((row["delivered_at"], text[:200]))
+    from companion_v2.conversation.native_observations import observations_available, validate_observation
+    from companion_v2.conversation.messages import source_from_document
+    from companion_v2.execution.models import TaskContext
+    from companion_v2.identity_policy.personas import PersonaDirectory
+    from companion_v2.identity_policy.repository import PersistentIdentityDirectory
+    from companion_v2.sources.repositories import SourceRepository
+    from companion_v2.storage.codec import decode_timestamp
+    from companion_v2.conversation.native_turns import turns_available
+    if observations_available(runtime):
+        time_column = "COALESCE(t.sent_at, n.observed_at)" if turns_available(runtime) else "n.observed_at"
+        native = runtime.read_all("SELECT n.*, " + time_column + " AS sent_at FROM conversation_native_observations n "
+            + ("LEFT JOIN conversation_native_sends t USING(observation_id) " if turns_available(runtime) else "") + """
+            WHERE n.kind='assistant' AND n.delivery_state='send_returned'
+              AND """ + time_column + " >= ? AND " + time_column + """ < ?
+              AND json_extract(n.context_json, '$.audience.scope.installation_id') = ?
+              AND json_extract(n.context_json, '$.audience.scope.platform') = ?
+              AND json_extract(n.context_json, '$.audience.scope.bot_id') = ?
+              AND json_extract(n.context_json, '$.audience.scope.account_id') = ?
+              AND json_extract(n.context_json, '$.audience.scope.kind') = 'group'
+              AND json_extract(n.context_json, '$.audience.scope.native_scope_id') = ?
+              AND json_extract(n.context_json, '$.audience.scope.session_id') = ?
+              AND json_extract(n.context_json, '$.role_binding.role.subject_id') = ?
+            ORDER BY sent_at DESC LIMIT ?""", (manifest["start"], manifest["end"],
+            context.scope.installation_id, context.scope.platform, context.scope.bot_id, context.scope.account_id,
+            context.scope.native_scope_id, context.scope.session_id,
+            context.role_binding.role.subject_id, limit))
+        sources, identity = SourceRepository(runtime), PersistentIdentityDirectory(runtime)
+        at = decode_timestamp(manifest["end"])
+        for row in reversed(native):
+            try:
+                original = TaskContext.restore(json.loads(row["context_json"]))
+                source = source_from_document(json.loads(row["source_json"]))
+                if (group_owner_key(original) != group_owner_key(context)
+                        or original.audience != group_audience(original.scope, original.actor.subject)):
+                    continue
+                validate_observation(runtime, row, original, source)
+                role = require(PersonaDirectory(runtime).resolve(original.scope, observed_at=at))
+                if role.binding.role != original.role_binding.role:
+                    continue
+                record = require(sources.read(source, resolved=original.actor, capability="text",
+                                              observed_at=at, authorizer=identity))
+                if (record.audience != original.audience or record.content_hash != row["content_hash"]
+                        or digest(record.payload) != record.content_hash or not isinstance(record.payload, str)):
+                    continue
+                text = " ".join(record.payload.split())
+            except (TaskError, ValueError, KeyError, TypeError):
+                continue
+            if text:
+                lines.append((row["sent_at"], text[:200]))
+    return tuple(text for _, text in sorted(lines, key=lambda item: item[0])[-limit:])
 
 
 def episode_material(runtime, context, manifest):

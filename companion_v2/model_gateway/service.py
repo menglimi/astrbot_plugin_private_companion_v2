@@ -15,9 +15,10 @@ from companion_v2.execution.runner import TaskRun
 from companion_v2.execution.service import TaskSupervisor, outcome
 from companion_v2.sources.repositories import SourceRepository
 
-from .budget import BudgetLedger
+from .budget import BudgetDeferral, BudgetLedger
 from .failures import ModelFailure
 from .models import MAX_TOOL_CATALOG, Amount, ModelCompletion, ProviderResponse, ToolSpec
+from .refusal import matches_refusal_text
 from .routing import ModelRouter
 from .response_diagnostics import checked_response_diagnostics
 
@@ -94,10 +95,14 @@ class LocalModelGateway:
             if amount.tokens < envelope.max_output_tokens:
                 raise TaskError("model_estimation_failed", "reservation must cover the declared output ceiling")
             call_id = "model-call-" + uuid4().hex
-            with self.runtime.transaction():
-                self.router.validate_plan(plan)
-                self.ledger.reserve(run, call_id=call_id, position=position, provider=provider.binding, amount=amount)
-                self.ledger.dispatch(run, call_id)
+            try:
+                with self.runtime.transaction():
+                    self.router.validate_plan(plan)
+                    self.ledger.reserve(run, call_id=call_id, position=position, provider=provider.binding, amount=amount)
+                    self.ledger.dispatch(run, call_id)
+            except BudgetDeferral as error:
+                self.ledger.record_deferral(run, error)
+                raise
 
             def record_cache_signature(signature):
                 self.ledger.record_cache_signature(run, call_id, provider.binding, signature)
@@ -166,10 +171,12 @@ class LocalModelGateway:
                 self.ledger.discard(call_id, failure=ModelFailure.GATEWAY_RECHECK, observed_at=self.tasks.now())
                 raise
             if response.status == "generated":
-                if (response.captured_output is not None
-                        and response.captured_output.finish_reason == "refusal"
-                        and (envelope.original.output_format != "memory_reflection"
-                             or plan.audit["fallback_on_refusal"])):
+                provider_refusal = (response.captured_output is not None
+                                    and response.captured_output.finish_reason == "refusal")
+                text_refusal = (plan.audit["fallback_on_refusal"] and response.draft is not None
+                                and matches_refusal_text(response.draft.text, envelope.refusal_terms))
+                if ((provider_refusal and (envelope.original.output_format != "memory_reflection"
+                                           or plan.audit["fallback_on_refusal"])) or text_refusal):
                     self.ledger.discard(call_id, failure=ModelFailure.REFUSAL, observed_at=self.tasks.now())
                     if not prefix_committed and plan.audit["fallback_on_refusal"] and provider_position + 1 < len(plan.providers):
                         continue

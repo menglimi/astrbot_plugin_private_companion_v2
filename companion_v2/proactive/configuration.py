@@ -14,6 +14,10 @@ from companion_v2.foundation.refs import ScopeKind, normalize_utc
 
 from .news_sources import NewsSource, SOURCE_KINDS, news_uid, news_url
 from .prompt_templates import PROMPT_DEFAULTS, checked_template
+from .rhythm_configuration import (
+    SHARED_RHYTHM_NAMES, global_contact_snapshot, personal_contact_snapshot,
+    private_contact_operations,
+)
 
 
 GROUP = "proactive.contact"
@@ -386,7 +390,7 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
                     or not target.scope.is_resolved or target.scope.kind is not ScopeKind.PRIVATE))):
             raise ConfigurationError("configuration_relationship_required", "contact preferences require a bot and the window's human relationship")
 
-    def _pauses(self, target, fields, result, *, changes=None):
+    def _pauses(self, target, fields, result, *, changes=None, old_public_revisions=()):
         # A later expiry at any ancestor still applies when a descendant clears its own pause.
         # Keeping expired timestamps is deliberate: expiration needs no write or cleanup job.
         pause_fields = tuple(field for field in fields if field.field_id.endswith(".pause_until"))
@@ -396,13 +400,18 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
             f"SELECT field_id, value_json, revision FROM configuration_values WHERE target_key = ? AND field_id IN ({placeholders})",
             (layer.key, *(field.field_id for field in pause_fields)))} for layer in layers}
         for field in pause_fields:
-            chosen = None
+            effective = result[field.field_id]
+            until = pause_time(effective.value)
+            chosen = (until, effective) if until is not None else None
             for layer in layers:
                 if layer == target and changes is not None and field.field_id in changes:
                     value, revision = changes[field.field_id], result[field.field_id].source_revision
                 else:
                     row = stored[layer.key].get(field.field_id)
                     if row is None:
+                        continue
+                    if (layer.layer is ConfigLayer.WINDOW and row["revision"] in old_public_revisions
+                            and effective.source is not None and effective.source.layer is not ConfigLayer.WINDOW):
                         continue
                     value, revision = field.validate(json.loads(row["value_json"])), row["revision"]
                 until = pause_time(value)
@@ -415,7 +424,58 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
     def read(self, target, fields):
         self._target(target)
         current = super().read(target, fields)
-        return replace(current, fields=self._pauses(target, fields, dict(current.fields)))
+        shared = global_contact_snapshot(self.runtime, target, fields)
+        public_revisions = set()
+        if target.layer is ConfigLayer.INSTALLATION:
+            current = shared
+        else:
+            stable_target = (target.chain()[-2] if target.layer is ConfigLayer.WINDOW else target)
+            stable = super().read(stable_target, fields)
+            stable = personal_contact_snapshot(self.runtime, stable_target, fields, stable)
+            if target.layer is ConfigLayer.WINDOW:
+                rows = self.runtime.read_all("""SELECT operation_id,
+                        json_extract(CASE WHEN json_valid(result_json) THEN result_json ELSE '{}' END,
+                                     '$.revision') AS revision
+                    FROM configuration_changes WHERE target_key = ? AND group_id = ? AND changed = 1""",
+                    (target.key, GROUP))
+                personal_operations = private_contact_operations(self.runtime, {target.key})
+                public_revisions = {row["revision"] for row in rows
+                    if row["operation_id"].startswith("proactive.contact-config:")
+                    and row["operation_id"] not in personal_operations}
+                personal_window_revisions = {row["revision"] for row in rows
+                    if row["operation_id"] in personal_operations}
+            values = dict(current.fields)
+            for field in fields:
+                key = field.field_id
+                item = stable.fields[key]
+                global_value = shared.fields[key]
+                # Installation values include exact legacy public-window fallbacks.
+                # They take precedence over old role defaults; relationship values
+                # remain this participant's explicit overrides.
+                if (item.source is not None and item.source.layer is ConfigLayer.ROLE
+                        and global_value.source is not None):
+                    item = global_value
+                local = current.fields[key]
+                old_window = local.source is not None and local.source.layer is ConfigLayer.WINDOW
+                old_public = old_window and local.source_revision in public_revisions
+                private_window = old_window and local.source_revision in personal_window_revisions
+                # Preserve direct WINDOW API writes for non-legacy fields. Only
+                # a row proven to be an old public editor save may be replaced
+                # by the stable global/personal address.
+                shared_field = key.removeprefix(GROUP + ".") in SHARED_RHYTHM_NAMES
+                if private_window:
+                    values[key] = replace(local, explicit=local.explicit and local.source == target)
+                elif old_window and not old_public and not shared_field:
+                    values[key] = replace(local, explicit=local.explicit and local.source == target)
+                elif item.source is not None and (shared_field or old_public or not old_window):
+                    values[key] = replace(item, explicit=item.explicit and item.source == target)
+                elif shared_field and (current.fields[key].source is None or old_public):
+                    item = shared.fields[key]
+                    values[key] = replace(item, explicit=False)
+            current = replace(current, fields=values,
+                dependencies=tuple(dict((*current.dependencies, *stable.dependencies, *shared.dependencies)).items()))
+        return replace(current, fields=self._pauses(target, fields, dict(current.fields),
+            old_public_revisions=public_revisions))
 
     def preview_set(self, target, fields, *, changes):
         self._relationship_budget_layer(target, changes)

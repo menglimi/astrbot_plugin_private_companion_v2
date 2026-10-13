@@ -6,10 +6,10 @@ window.CompanionExpressionSamplesPage = (() => {
   const ERRORS = {
     bridge_unavailable: "页面连接暂不可用，请重新读取。",
     bridge_timeout: "读取超时，请重试。",
-    expression_sample_unavailable: "当前窗口暂无可读取的消息素材。",
+    expression_sample_unavailable: "该来源暂无可读取的消息素材。",
     expression_sample_changed: "素材已变化，请重新读取后再操作。",
     expression_view_stale: "素材状态已更新，请重新读取。",
-    expression_binding_changed: "当前角色关联已变化，请重新选择范围。",
+    expression_binding_changed: "表达记录归属已变化，请重新读取。",
     expression_sample_review_invalid: "素材审核记录异常，请重新读取。",
     model_task_unregistered: "表达学习模型暂不可用，请检查模型连接。",
     staging_not_initialized: "角色数据尚未加载，请重新读取。",
@@ -19,11 +19,35 @@ window.CompanionExpressionSamplesPage = (() => {
   const e = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
   const time = value => Number.isFinite(Date.parse(value))
     ? new Date(value).toLocaleString("zh-CN", {hour12:false, month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "时间未知";
-  let root, apiBase = "", scopeKey = "", ticket = 0, readTicket = 0, timer;
-  let items = [], counts = {}, runtime = {}, filter = "all", cursor = null, reviewEnabled = false;
+  let root, apiBase = "", scopeKey = "", sources = [], rowsBySource = {}, ticket = 0, readTicket = 0, timer;
+  let items = [], counts = {}, runtime = {}, filter = "all", reviewEnabled = false;
   let busy = false, writing = false, loaded = false, notice = "", error = false;
   const mounted = current => !!root?.isConnected && ticket === current;
   const message = code => ERRORS[code] || "操作未完成，请重新读取后核对。";
+  const sourceLabel = source => source?.label || "未知记录归属";
+  const canLearnSource = row => {
+    const value=row?.runtime||{};
+    const minimum=Number(value.minimum_samples);
+    return row?.loaded&&!value.running&&value.learning_enabled&&Number.isFinite(minimum)&&minimum>0
+      &&Number(value.eligible_samples||0)>=minimum
+      &&(value.new_messages==null||Number(value.new_messages||0)>=Number(value.required_new_messages||0)
+        &&Number(value.group_batches_today||0)<Number(value.group_daily_batch_limit||0));
+  };
+  function project(){
+    const rows=Object.values(rowsBySource);
+    items=rows.flatMap(row=>row.items);
+    counts=rows.reduce((total,row)=>{for(const [key,value] of Object.entries(row.counts||{}))total[key]=(total[key]||0)+Number(value||0);return total;},{});
+    const runtimes=rows.map(row=>row.runtime||{});
+    runtime={running:runtimes.some(value=>value.running),learning_enabled:runtimes.some(value=>value.learning_enabled),
+      application_enabled:runtimes.some(value=>value.application_enabled),eligible_samples:runtimes.reduce((sum,value)=>sum+Number(value.eligible_samples||0),0),
+      minimum_samples:runtimes.reduce((sum,value)=>sum+Number(value.minimum_samples||0),0),
+      new_messages:runtimes.some(value=>value.new_messages!=null)?runtimes.reduce((sum,value)=>sum+Number(value.new_messages||0),0):null,
+      required_new_messages:runtimes.reduce((sum,value)=>sum+Number(value.required_new_messages||0),0),
+      group_batches_today:runtimes.reduce((maximum,value)=>Math.max(maximum,Number(value.group_batches_today||0)),0),
+      group_daily_batch_limit:runtimes.reduce((maximum,value)=>Math.max(maximum,Number(value.group_daily_batch_limit||0)),0)};
+    loaded=rows.some(row=>row.loaded);
+    reviewEnabled=rows.some(row=>row.reviewEnabled);
+  }
   async function api(method, route, body) {
     let timeout;
     try {
@@ -48,15 +72,12 @@ window.CompanionExpressionSamplesPage = (() => {
     const state = value?.state;
     if (state === "waiting_for_new_messages") return `新增消息 ${value.new_messages || 0} / ${value.required || runtime.required_new_messages}`;
     if (state === "waiting_for_sample_review" || state === "insufficient_samples") return `可用素材 ${value.available || 0} / ${value.required || runtime.minimum_samples}`;
-    return {succeeded:"学习完成 · 候选已进入审阅中心", already_attempted:"本批素材已学习", learning_disabled:"当前窗口学习已关闭",
+    return {succeeded:"学习完成 · 候选已进入审阅中心", already_attempted:"本批素材已学习", learning_disabled:"该来源的学习已关闭",
       capacity_reached:"规则容量已满", daily_budget_reached:"今日学习批次已用完", failed:"学习失败", blocked:"学习暂不可用",
       cancelled:"学习已取消", timed_out:"学习超时"}[state] || (runtime.learning_enabled === false ? "学习已关闭" : "尚未学习");
   }
   function canLearn() {
-    return loaded && !busy && !writing && !runtime.running && runtime.learning_enabled
-      && runtime.eligible_samples >= runtime.minimum_samples
-      && (runtime.new_messages == null || runtime.new_messages >= runtime.required_new_messages
-        && runtime.group_batches_today < runtime.group_daily_batch_limit);
+    return loaded && !busy && !writing && !runtime.running&&Object.values(rowsBySource).some(canLearnSource);
   }
   function render() {
     if (!root) return;
@@ -71,52 +92,63 @@ window.CompanionExpressionSamplesPage = (() => {
       <nav class="lh-review-filters" aria-label="素材审核状态">${FILTERS.map(([key, label]) => `<button data-sample-filter="${key}" aria-pressed="${filter === key}"${disabled}>${label}<span>${key === "all" ? Object.values(counts).reduce((a,b) => a + Number(b), 0) : Number(counts[key] || 0)}</span></button>`).join("")}</nav>
       ${notice ? `<p class="lh-inline-status${error ? " is-error" : ""}" role="status">${e(notice)}</p>` : ""}
       <div class="lh-samples-list" aria-busy="${busy || writing}">${items.length ? items.map(item => `<article class="lh-sample" data-state="${e(item.state)}">
-        <details><summary><span class="lh-sample-sender">${e(item.sender_id || "当前对象")}</span><time>${e(time(item.received_at))}</time><span class="lh-sample-state">${STATES[item.state] || "不可用"}${item.eligible ? " · 可学习" : ""}</span><span class="lh-sample-preview">${e(item.text)}</span></summary><p>${e(item.text)}</p></details>
-        <footer>${(item.actions || []).filter(action => ["approve", "reject"].includes(action)).map(action => `<button class="lh-command${action === "approve" ? " is-primary" : ""}" data-sample-action="${action}" data-handle="${e(item.handle)}"${disabled}>${action === "approve" ? item.state === "rejected" ? "重新允许" : "允许学习" : "排除素材"}</button>`).join("")}</footer></article>`).join("")
+        <details><summary><span class="lh-sample-sender">${e(item.sender_id || "消息来源")}</span><time>${e(time(item.received_at))}</time><span class="lh-sample-state">${STATES[item.state] || "不可用"}${item.eligible ? " · 可学习" : ""}</span><span class="lh-sample-preview">${e(item.text)}</span></summary><p>${e(item.text)}</p><small class="lh-sample-scope">记录归属 · ${e(sourceLabel(item._source))}</small></details>
+        <footer>${(item.actions || []).filter(action => ["approve", "reject"].includes(action)).map(action => `<button class="lh-command${action === "approve" ? " is-primary" : ""}" data-sample-action="${action}" data-row-key="${e(item._key)}"${disabled}>${action === "approve" ? item.state === "rejected" ? "重新允许" : "允许学习" : "排除素材"}</button>`).join("")}</footer></article>`).join("")
         : `<div class="lh-review-empty">${busy ? "正在读取素材…" : loaded ? "当前筛选下暂无素材" : "尚未读取素材"}</div>`}</div>
-      ${cursor ? `<button class="lh-command" data-sample-more${disabled}>加载更多</button>` : ""}</div>`;
+      ${Object.values(rowsBySource).some(row=>row.cursor) ? `<button class="lh-command" data-sample-more${disabled}>加载更多</button>` : ""}</div>`;
   }
-  function updated(current) {
-    if (mounted(current)) window.dispatchEvent?.(new CustomEvent("companion-expression-updated", {detail:{scopeKey}}));
+  function updated(current, source) {
+    if (mounted(current)) window.dispatchEvent?.(new CustomEvent("companion-expression-updated", {detail:{scopeKey:source?.scopeKey||scopeKey}}));
   }
   function poll(current) {
     clearTimeout(timer);
     if (mounted(current) && runtime.running) timer = setTimeout(() => { if (mounted(current)) void read(current); }, 4000);
   }
   async function read(current = ticket, append = false, keepNotice = false) {
-    if (!mounted(current) || !apiBase || writing || busy) return;
+    if (!mounted(current) || !sources.length || writing || busy) return;
     clearTimeout(timer);
-    const request = ++readTicket, wasRunning = runtime.running;
+    const request = ++readTicket;
     const query = {state:filter, limit:24};
-    if (append && cursor) query.after_id = cursor;
+    const pending=sources.filter(source=>!append||rowsBySource[source.key]?.cursor)
+      .map(source=>({source,after_id:append?rowsBySource[source.key]?.cursor:null}));
     busy = true; render();
-    try {
-      const data = await api("GET", apiBase + "/style/samples", query);
-      if (!mounted(current) || request !== readTicket) return;
-      if (!Array.isArray(data.items) || !data.runtime) throw {code:"invalid_response"};
-      items = append ? [...items, ...data.items.filter(item => !items.some(old => old.handle === item.handle))] : data.items;
-      counts = data.counts || {}; cursor = data.next_cursor || null; runtime = data.runtime;
-      reviewEnabled = data.sample_review_enabled === true; loaded = true;
-      if (error && !keepNotice) {notice = ""; error = false;}
-      if (wasRunning && !runtime.running) updated(current);
-    } catch (problem) {
-      if (!mounted(current) || request !== readTicket) return;
-      notice = message(problem?.code); error = true; loaded = false;
-    }
+    const results=await Promise.allSettled(pending.map(async ({source,after_id})=>{
+      const data=await api("GET",source.apiBase+"/style/samples",{...query,...(after_id?{after_id}:{})});
+      if(!Array.isArray(data.items)||!data.runtime)throw {code:"invalid_response"};
+      return {source,data};
+    }));
+    if (!mounted(current) || request !== readTicket) return;
+    let succeeded=0,failed=0,finishedRunning=false;
+    results.forEach((result,index)=>{
+      const source=pending[index].source;
+      if(result.status!=="fulfilled"){failed++;return;}
+      succeeded++;
+      const {data}=result.value,previous=rowsBySource[source.key]||{items:[],runtime:{}};
+      finishedRunning=finishedRunning||previous.runtime.running&&!data.runtime.running;
+      const incoming=data.items.map(item=>({...item,_source:source,_key:source.key+"::"+item.handle}));
+      const merged=append?[...previous.items,...incoming.filter(item=>!previous.items.some(old=>old._key===item._key))]:incoming;
+      rowsBySource[source.key]={source,items:merged,counts:data.counts||{},runtime:{...data.runtime,
+        minimum_samples:Number(data.runtime.minimum_samples||0),last_result:data.runtime.last_result},
+        cursor:data.next_cursor||null,reviewEnabled:data.sample_review_enabled===true,loaded:true};
+    });
+    project();
+    if(failed){notice=succeeded?"部分记录归属暂不可读，已汇总其余记录。":"读取失败，请重新读取。";error=true;}
+    else if(error&&!keepNotice){notice="";error=false;}
+    if(finishedRunning)sources.forEach(source=>updated(current,source));
     if (!mounted(current) || request !== readTicket) return;
     busy = false; render(); poll(current);
   }
-  async function command(handle, action) {
-    const item = items.find(item => item.handle === handle);
+  async function command(key, action) {
+    const item = items.find(item => item._key === key);
     if (!item?.view_token || !item.actions?.includes(action) || busy || writing) return;
     const current = ticket;
     writing = true; notice = ""; error = false; clearTimeout(timer); render();
     try {
-      await api("POST", apiBase + "/style/samples/command", {handle, action, view_token:item.view_token,
+      await api("POST", item._source.apiBase + "/style/samples/command", {handle:item.handle, action, view_token:item.view_token,
         operation_key:`sample-${action}-${Date.now()}-${Math.random().toString(36).slice(2,10)}`});
       if (!mounted(current)) return;
       notice = action === "approve" ? "素材已允许学习。" : "素材已排除，相关规则已停止应用。";
-      updated(current);
+      updated(current,item._source);
     } catch (problem) {
       if (!mounted(current)) return;
       notice = message(problem?.code); error = true;
@@ -128,43 +160,47 @@ window.CompanionExpressionSamplesPage = (() => {
     if (!canLearn()) return;
     const current = ticket;
     writing = true; notice = ""; error = false; render();
-    try {
-      const result = await api("POST", apiBase + "/style/learn", {});
-      if (!mounted(current)) return;
-      runtime.last_result = result; notice = statusText(result);
-    } catch (problem) {
-      if (!mounted(current)) return;
-      notice = message(problem?.code); error = true;
+    let started=0,failed=0;
+    for(const row of Object.values(rowsBySource)){
+      if(!canLearnSource(row))continue;
+      try{await api("POST",row.source.apiBase+"/style/learn",{});started++;updated(current,row.source);}
+      catch(problem){failed++;if(!started)notice=message(problem?.code);}
+      if(!mounted(current))return;
     }
+    if(!failed||started)notice=`已为 ${started} 个记录归属启动学习${failed?`，${failed} 个暂未启动`:""}。`;
+    error=failed>0&&started===0;
     if (!mounted(current)) return;
     writing = false; await read(current, false, true);
   }
   function click(event) {
     if (busy || writing) return;
     const action = event.target.closest("[data-sample-action]");
-    if (action) {void command(action.dataset.handle, action.dataset.sampleAction); return;}
+    if (action) {void command(action.dataset.rowKey, action.dataset.sampleAction); return;}
     const choice = event.target.closest("[data-sample-filter]");
     if (choice && FILTERS.some(([key]) => key === choice.dataset.sampleFilter)) {
-      filter = choice.dataset.sampleFilter; items = []; cursor = null; void read(); return;
+      filter = choice.dataset.sampleFilter; items = []; Object.values(rowsBySource).forEach(row=>{row.items=[];row.cursor=null;row.loaded=false;}); void read(); return;
     }
     if (event.target.closest("[data-sample-refresh]")) {notice = ""; void read();}
     if (event.target.closest("[data-sample-more]")) void read(ticket, true);
     if (event.target.closest("[data-sample-learn]")) void learn();
   }
-  function saved(event) {if (event.detail?.group === "expression.learning" && event.detail?.scopeKey === scopeKey) void read();}
+  function saved(event) {if (event.detail?.group === "expression.learning") void read();}
   function mount(host, options = {}) {
     unmount(); root = host;
-    apiBase = typeof options.replyApi === "string" && options.replyApi.startsWith(PREFIX) && options.replyApi.endsWith("/reply") ? options.replyApi.slice(PREFIX.length) : "";
-    scopeKey = options.scopeKey || "";
-    items = []; counts = {}; runtime = {}; filter = "all"; cursor = null; loaded = false; notice = ""; error = false;
+    const candidates=Array.isArray(options.sources)?options.sources:options.replyApi?[{replyApi:options.replyApi,scopeKey:options.scopeKey,label:"当前来源"}]:[];
+    sources=candidates.map((source,index)=>{const route=typeof source.replyApi==="string"&&source.replyApi.startsWith(PREFIX)&&source.replyApi.endsWith("/reply")?source.replyApi.slice(PREFIX.length):"";
+      return route?{...source,key:String(source.key||source.scopeKey||route||index),scopeKey:source.scopeKey||source.key||"",apiBase:route}:null;}).filter(Boolean);
+    apiBase=sources[0]?.apiBase||"";scopeKey=sources[0]?.scopeKey||"";
+    rowsBySource=Object.fromEntries(sources.map(source=>[source.key,{source,items:[],counts:{},runtime:{},cursor:null,reviewEnabled:false,loaded:false}]));
+    items = []; counts = {}; runtime = {}; filter = "all"; loaded = false; notice = ""; error = false;
     const current = ++ticket;
     root?.addEventListener("click", click); window.addEventListener?.("companion-workbench-saved", saved);
-    if (apiBase) void read(current); else {notice = "当前角色没有表达学习入口。"; error = true; render();}
+    if (sources.length) void read(current); else {notice = "没有可读取的表达素材。"; error = true; render();}
   }
   function unmount() {
     ticket++; readTicket++; clearTimeout(timer); root?.removeEventListener("click", click);
     window.removeEventListener?.("companion-workbench-saved", saved);
-    root = null; apiBase = ""; scopeKey = ""; busy = false; writing = false;
+    root = null; apiBase = ""; scopeKey = ""; sources=[];rowsBySource={};busy = false; writing = false;
   }
-  return {mount, unmount, get state() {return {items, counts, runtime, busy, writing, scopeKey};}};
+  return {mount, unmount, get state() {return {items, counts, runtime, busy, writing, scopeKey,sources};}};
 })();

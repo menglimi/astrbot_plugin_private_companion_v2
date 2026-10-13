@@ -45,6 +45,9 @@ class PrivateConversationHistory:
     def reference_key(ref):
         if type(ref) is not dict:
             raise TaskError("private_history_invalid", "dialogue references must be explicit")
+        if ref.get("kind") in ("native_input", "native_reply"):
+            from .native_history import reference_key
+            return reference_key(ref)
         fields = ({"kind", "event_key", "event_hash"} if ref.get("kind") == "input" else
                   {"kind", "part_id", "payload_hash", "receipt_ref", "delivered_at"}
                   if ref.get("kind") == "reply" else set())
@@ -60,6 +63,9 @@ class PrivateConversationHistory:
 
     def _body(self, ref, context, at, *, historical=False):
         self.reference_key(ref)
+        if ref["kind"] in ("native_input", "native_reply"):
+            from .native_history import body
+            return body(self.messages, ref, context, at, historical=historical)
         if ref["kind"] == "reply":
             original = {key: value for key, value in ref.items() if key != "kind"}
             item = self.confirmed.verify_reply(original, context, at, historical=historical)
@@ -100,8 +106,9 @@ class PrivateConversationHistory:
             raise TaskError("private_history_invalid", "dialogue exceeds its bounded context budget")
         return items
 
-    def capture(self, context, at, *, limit=MAX_ITEMS, max_chars=MAX_CHARS, exclude_reply_part_id=None):
-        self.authorize(context, at, "proactive.contact")
+    def capture(self, context, at, *, limit=MAX_ITEMS, max_chars=MAX_CHARS, exclude_reply_part_id=None,
+                exclude_event_id=None, action="proactive.contact"):
+        self.authorize(context, at, action)
         item_cap, char_cap = max(0, min(limit, MAX_ITEMS)), max(0, min(max_chars, MAX_CHARS))
         snapshot = {"version": VERSION, "context_key": context.key, "references": []}
         if not item_cap or not char_cap:
@@ -118,13 +125,23 @@ class PrivateConversationHistory:
             JOIN conversation_parts p ON p.part_id = h.part_id
             WHERE h.origin_key = ? AND b.rowid > ? AND h.delivered_at <= ?
             ORDER BY h.history_sequence DESC LIMIT ?""", (context.key, sequence, stamp(at), SCAN_LIMIT))
-        candidates = [(json.loads(row["event_json"])["received_at"], 0, index, self.input_ref(row))
-                      for index, row in enumerate(reversed(inputs))]
+        candidates = []
+        for index, row in enumerate(reversed(inputs)):
+            event = json.loads(row["event_json"])
+            if exclude_event_id and event.get("event_id") == exclude_event_id:
+                continue
+            candidates.append((event["received_at"], 0, index, self.input_ref(row)))
         candidates.extend((row["delivered_at"], 1, row["history_sequence"], self.reply_ref(row)) for row in replies)
+        from .native_history import rows as native_rows, reference as native_reference
+        for index, row in enumerate(native_rows(self.runtime, context, end=stamp(at), limit=SCAN_LIMIT)):
+            if exclude_event_id and row["kind"] == "input" and row["event_id"] == exclude_event_id:
+                continue
+            candidates.append((row["sent_at"] or row["observed_at"], 2, index, native_reference(row)))
         candidates.sort(key=lambda item: item[:3], reverse=True)
         used = 0
         for *_, ref in candidates:
-            if ref.get("kind") == "reply" and ref.get("part_id") == exclude_reply_part_id:
+            if (ref.get("kind") in ("reply", "native_reply")
+                    and ref.get("part_id", ref.get("observation_id")) == exclude_reply_part_id):
                 continue
             try:
                 item = self._body(ref, context, at)

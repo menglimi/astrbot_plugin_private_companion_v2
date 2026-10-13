@@ -15,6 +15,7 @@ from companion_v2.model_gateway.models import ToolSpec
 
 from . import authoring, authoring_service
 from .authoring_tasks import DRAFT_KIND
+from .authoring_execution import AuthoringParent, LegacyAuthoringOperations
 
 
 CREATE_ACTION = "content.authoring.create"
@@ -57,6 +58,7 @@ class _Job:
     materials: dict[str, str]
     work_type: str = ""
     result: authoring.ContentDraft | None = None
+    revalidate: object = None
 
 
 class ContentAuthoringWorkflow:
@@ -108,18 +110,33 @@ class ContentAuthoringWorkflow:
             raise TaskError("content_authoring_request_unavailable", "the original writing request is unavailable")
         if self._closed or self.tasks is None:
             raise TaskError("content_authoring_unavailable", "the writing service has closed")
+        if job.revalidate is not None:
+            job.revalidate()
         return True
 
     async def execute(self, run, call, model_call_id, request, external):
-        if self._closed or self.gateway is None or self.runner is None or external is None:
+        if external is None:
+            raise TaskError("content_authoring_unavailable", "the Content operation owner is unavailable")
+        parent = AuthoringParent(run.task.spec.context, run.task.task_id, run.task.spec.deadline_at, run.validate)
+        operations = LegacyAuthoringOperations(external, run, call, model_call_id)
+        return await self._execute(parent, call, request, operations)
+
+    async def execute_native(self, parent, call, request, operations):
+        if not isinstance(parent, AuthoringParent) or not callable(parent.revalidate):
+            raise TaskError("content_authoring_request_mismatch", "native writing requires its original operation")
+        return await self._execute(parent, call, request, operations)
+
+    async def _execute(self, parent, call, request, operations):
+        parent.revalidate()
+        if self._closed or self.gateway is None or self.runner is None or operations is None:
             raise TaskError("content_authoring_unavailable", "the writing service is not running")
-        if run.task.spec.context.scope.kind is not ScopeKind.PRIVATE:
+        if parent.context.scope.kind is not ScopeKind.PRIVATE:
             raise TaskError("content_scope_unavailable", "native authoring is private-scope only")
-        settings = authoring_service.effective_settings(self.runtime, run.task.spec.context)
+        settings = authoring_service.effective_settings(self.runtime, parent.context)
         if not settings.enabled:
             raise TaskError("content_authoring_disabled", "native authoring is turned off for this role")
         arguments = json.loads(call.arguments_json)
-        native = set(external.actions)
+        native = set(operations.actions)
         if call.action == CREATE_ACTION:
             if "content.work.create" not in native:
                 raise TaskError("content_provider_unavailable", "the native Content create action is unavailable")
@@ -127,7 +144,7 @@ class ContentAuthoringWorkflow:
             if type(work_type) is not str:
                 raise TaskError("content_authoring_work_type", "the requested work type must be text")
             authoring_request = authoring_service.prepare(action="draft", brief=arguments["brief"])
-            return await self._create(run, call, model_call_id, request, external, settings,
+            return await self._create(parent, call, request, operations, settings,
                                       authoring_request, arguments, work_type)
         if call.action == CONTINUE_ACTION:
             required = {"content.work.describe", "content.work.read", "content.work.save_candidate"}
@@ -141,32 +158,31 @@ class ContentAuthoringWorkflow:
                 raise TaskError("content_authoring_target", "choose exactly one Content work identifier or title")
             if work_title and "content.work.list" not in native:
                 raise TaskError("content_work_lookup_unavailable", "Content title lookup is not authorized")
-            return await self._continue(run, call, model_call_id, request, external, settings, arguments)
+            return await self._continue(parent, call, request, operations, settings, arguments)
         raise TaskError("tool_not_available", "native authoring action is unavailable")
 
-    async def _create(self, run, call, model_call_id, request, external, settings, authoring_request, arguments,
+    async def _create(self, parent, call, request, operations, settings, authoring_request, arguments,
                       work_type):
-        job = self._job(run, call, request, settings, authoring_request, {}, work_type=work_type)
-        draft = await self._draft(run, call, model_call_id, job)
-        self._require_enabled(run.task.spec.context)
+        job = self._job(parent, call, request, settings, authoring_request, {}, work_type=work_type)
+        draft = await self._draft(parent, job)
+        parent.revalidate()
+        self._require_enabled(parent.context)
         title = (arguments.get("title") or "").strip() or draft.title
         work_type = (arguments.get("work_type") or "").strip() or draft.work_type
-        summary, material = await external.execute_internal(run, call, model_call_id,
-            "content.work.create", {"title": title, "work_type": work_type,
+        summary, material = await operations.execute("content.work.create", {"title": title, "work_type": work_type,
              "chapters": [{"chapter_id": "chapter-1", "title": title, "text": draft.body}]}, step=1)
         receipt = self._receipt(summary, material, "create")
         return {"state": "succeeded", "effect": "committed", "action": "create",
                 "work_id": receipt["work_id"], "version_id": receipt["version_id"],
                 "title": title}
 
-    async def _continue(self, run, call, model_call_id, request, external, settings, arguments):
+    async def _continue(self, parent, call, request, operations, settings, arguments):
         work_id = arguments.get("work_id", "").strip()
         next_step = 1
         if not work_id:
             work_id, next_step = await self._find_work_by_title(
-                run, call, model_call_id, external, arguments["work_title"].strip(), start_step=1)
-        summary, material = await external.execute_internal(run, call, model_call_id,
-            "content.work.describe", {"work_id": work_id}, step=next_step)
+                operations, arguments["work_title"].strip(), start_step=1)
+        summary, material = await operations.execute("content.work.describe", {"work_id": work_id}, step=next_step)
         description = self._result(summary, material)
         if description.get("state") != "active":
             raise TaskError("content_work_unavailable", "the requested Content work is unavailable")
@@ -174,19 +190,19 @@ class ContentAuthoringWorkflow:
         work_type = description.get("work_type", "")
         if type(work_type) is not str:
             raise TaskError("content_work_invalid", "Content returned an invalid work type")
-        chapters, _pages, save_step = await self._read_version(run, call, model_call_id, external,
+        chapters, _pages, save_step = await self._read_version(operations,
             work_id, base_version, start_step=next_step + 1)
         base_text = "\n\n".join(chapter["text"] for chapter in chapters)
         authoring_request = authoring_service.prepare(action="continue", brief=arguments["brief"],
                                                       base_version=base_version)
         materials = {"base-version": base_text}
-        job = self._job(run, call, request, settings, authoring_request, materials, work_type=work_type)
-        draft = await self._draft(run, call, model_call_id, job)
-        self._require_enabled(run.task.spec.context)
-        chapter_id = "continuation-" + digest([run.task.task_id, call.call_id, base_version])[:20]
+        job = self._job(parent, call, request, settings, authoring_request, materials, work_type=work_type)
+        draft = await self._draft(parent, job)
+        parent.revalidate()
+        self._require_enabled(parent.context)
+        chapter_id = "continuation-" + digest([parent.task_id, call.call_id, base_version])[:20]
         candidate_chapters = chapters + ({"chapter_id": chapter_id, "title": "续写", "text": draft.body},)
-        summary, material = await external.execute_internal(run, call, model_call_id,
-            "content.work.save_candidate", {"work_id": work_id,
+        summary, material = await operations.execute("content.work.save_candidate", {"work_id": work_id,
              "base_revision": base_revision, "base_version": base_version,
              "chapters": candidate_chapters}, step=save_step)
         receipt = self._receipt(summary, material, "save_candidate", work_id=work_id)
@@ -195,11 +211,10 @@ class ContentAuthoringWorkflow:
                 "base_version": base_version, "adopted": False,
                 "title": description.get("title", "")}
 
-    async def _find_work_by_title(self, run, call, model_call_id, external, title, *, start_step):
+    async def _find_work_by_title(self, operations, title, *, start_step):
         after_id, step, matches, seen_cursors = "", start_step, {}, set()
         while True:
-            summary, material = await external.execute_internal(run, call, model_call_id,
-                "content.work.list", {"after_id": after_id, "limit": 50}, step=step)
+            summary, material = await operations.execute("content.work.list", {"after_id": after_id, "limit": 50}, step=step)
             page = self._result(summary, material)
             items = page.get("items")
             if type(items) is not list or len(items) > 50:
@@ -221,13 +236,12 @@ class ContentAuthoringWorkflow:
             seen_cursors.add(next_after)
             after_id, step = next_after, step + 1
 
-    async def _read_version(self, run, call, model_call_id, external, work_id, version_id, *, start_step):
+    async def _read_version(self, operations, work_id, version_id, *, start_step):
         offset, step, total, chapters, pages = 0, start_step, None, [], []
         parts: dict[str, str] = {}
         chapter_titles: dict[str, str] = {}
         while True:
-            summary, material = await external.execute_internal(run, call, model_call_id,
-                "content.work.read", {"work_id": work_id, "version_id": version_id,
+            summary, material = await operations.execute("content.work.read", {"work_id": work_id, "version_id": version_id,
                  "offset": offset, "limit": 4096}, step=step)
             page = self._result(summary, material)
             if ((page.get("work_id"), page.get("version_id"), page.get("offset"))
@@ -275,24 +289,26 @@ class ContentAuthoringWorkflow:
         return (tuple({**chapter, "text": parts[chapter["chapter_id"]]} for chapter in chapters),
                 tuple(pages), step + 1)
 
-    def _job(self, run, call, request, settings, authoring_request, materials, *, work_type=""):
-        task_id = "content-authoring-" + digest([run.task.task_id, call.call_id])
+    def _job(self, parent, call, request, settings, authoring_request, materials, *, work_type=""):
+        parent.revalidate()
+        task_id = "content-authoring-" + digest([parent.task_id, call.call_id])
         offered = {}
         for material in request.context.materials:
             if material.source is not None:
                 offered.setdefault("source-" + str(len(offered) + 1), material.payload)
         offered.update(materials)
-        job = _Job(run.task.spec.context, request, settings, authoring_request, offered, work_type.strip())
+        job = _Job(parent.context, request, settings, authoring_request, offered, work_type.strip(),
+                   revalidate=parent.revalidate)
         self._jobs[task_id] = job
         return task_id
 
-    async def _draft(self, run, call, model_call_id, job_id):
+    async def _draft(self, parent, job_id):
         job = self._jobs[job_id]
         task_id = job_id
         if DRAFT_KIND not in self.gateway.router.profiles:
             raise TaskError("model_task_unregistered", "the dedicated Content writing model route is unavailable")
         now = self.tasks.now()
-        deadline = min(run.task.spec.deadline_at, now + timedelta(seconds=180))
+        deadline = min(parent.deadline_at, now + timedelta(seconds=180))
         if deadline <= now:
             raise TaskError("content_authoring_expired", "the original conversation has expired")
         action = job.authoring_request["action"]
@@ -301,11 +317,14 @@ class ContentAuthoringWorkflow:
                                                  work_type=job.work_type),
             output_format="content_authoring", response_format="json_schema",
             response_schema_json=encode(authoring.schema_for(action)), images=(), reply_images=False,
+            reply_actions=("text",),
             audios=(), videos=(), streaming=None)
         spec = TaskSpec(task_id, job.context, DRAFT_KIND, task_id, task_id, now, deadline)
         require(self.tasks.submit(spec))
         try:
             execution = await self.runner.run(job.context, task_id)
+            parent.revalidate()
+            self._require_enabled(parent.context)
             if not execution.is_success:
                 raise TaskError(execution.failure.code, execution.failure.reason)
             task = execution.unwrap().task
@@ -330,7 +349,9 @@ class ContentAuthoringWorkflow:
                                                  work_type=job.work_type),
             output_format="content_authoring", response_format="json_schema",
             response_schema_json=encode(authoring.schema_for(action)), images=(), reply_images=False,
+            reply_actions=("text",),
             audios=(), videos=(), streaming=None))
+        run.validate()
         if completion.draft is None:
             raise TaskError("content_authoring_output", "the writing model did not return a complete draft")
         job.result = authoring_service.parse_draft(completion.draft.text, action=action)
@@ -345,21 +366,24 @@ class ContentAuthoringWorkflow:
             raise TaskError("content_authoring_receipt", "the original Content authoring receipt is unavailable")
         try:
             arguments = json.loads(row["arguments_json"])
-            batch = self.runtime.read_one("SELECT * FROM conversation_batches WHERE batch_id=?", (row["batch_id"],))
-            plan = self.runtime.read_one("SELECT plan_json FROM model_requests WHERE task_id=?", (row["task_id"],))
-            if (batch is None or plan is None or batch["origin_key"] != context.key
-                    or batch["generation_task_id"] != row["task_id"]
-                    or row["action"] not in json.loads(plan["plan_json"]).get("tool_actions", ())):
-                raise ValueError("authoring parent changed")
+            if isinstance(row, dict) and row.get("execution_path") == "astrbot_core":
+                children = self._native_children(row, context, result)
+            else:
+                batch = self.runtime.read_one("SELECT * FROM conversation_batches WHERE batch_id=?", (row["batch_id"],))
+                plan = self.runtime.read_one("SELECT plan_json FROM model_requests WHERE task_id=?", (row["task_id"],))
+                if (batch is None or plan is None or batch["origin_key"] != context.key
+                        or batch["generation_task_id"] != row["task_id"]
+                        or row["action"] not in json.loads(plan["plan_json"]).get("tool_actions", ())):
+                    raise ValueError("authoring parent changed")
+                children = self.runtime.read_all("""SELECT * FROM extension_tool_invocations
+                    WHERE parent_task_id=? AND batch_id=? AND tool_call_id LIKE 'content-authoring-subcall:%'
+                    ORDER BY created_at, invocation_id""", (row["task_id"], row["batch_id"]))
             fields = {"state", "effect", "action", "work_id", "version_id", "title"}
             if row["action"] == CONTINUE_ACTION:
                 fields |= {"base_version", "adopted"}
             if set(result) != fields or result["action"] != (
                     "create" if row["action"] == CREATE_ACTION else "save_candidate"):
                 raise ValueError("invalid authoring result shape")
-            children = self.runtime.read_all("""SELECT * FROM extension_tool_invocations
-                WHERE parent_task_id=? AND batch_id=? AND tool_call_id LIKE 'content-authoring-subcall:%'
-                ORDER BY created_at, invocation_id""", (row["task_id"], row["batch_id"]))
             if not children:
                 raise ValueError("Content has no original subcalls")
             child_results = []
@@ -408,6 +432,45 @@ class ContentAuthoringWorkflow:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise TaskError("content_authoring_receipt", "the original Content authoring receipt changed") from error
         return result, None
+
+    def _native_children(self, row, context, result):
+        from companion_v2.conversation.native_tool_results import PREFIX, operation_row
+
+        identifier = "native-tool-" + digest([row["task_id"], row["tool_call_id"]])
+        saved = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key=?", (PREFIX + identifier,))
+        original = json.loads(saved["value"]) if saved else None
+        if (original is None or original["origin_key"] != context.key
+                or original["turn_id"] != row["task_id"] or original["call_id"] != row["tool_call_id"]
+                or original["action"] != row["action"] or original["arguments_json"] != row["arguments_json"]
+                or original["state"] != "succeeded" or original["effect"] != "committed"
+                or original["result"] != result):
+            raise ValueError("native authoring parent changed")
+        links = self.runtime.read_all("""SELECT value FROM runtime_metadata WHERE substr(key, 1, ?) = ?
+            AND json_extract(value, '$.origin_key') = ? AND json_extract(value, '$.turn_id') = ?
+            AND json_extract(value, '$.call_id') LIKE 'content-authoring-subcall:%'
+            AND json_extract(value, '$.task_id') IS NOT NULL ORDER BY rowid""",
+            (len(PREFIX), PREFIX, context.key, row["task_id"]))
+        children = []
+        for saved_link in links:
+            link = json.loads(saved_link["value"])
+            try:
+                _, step_text, _ = link["call_id"].split(":", 2)
+                step = int(step_text)
+            except (TypeError, ValueError):
+                continue
+            call_id = self._subcall_id(row, step)
+            if link["call_id"] != call_id:
+                continue
+            if step < 1:
+                raise ValueError("native authoring child changed its original step")
+            child_id = "native-tool-" + digest([row["task_id"], call_id])
+            if link.get("invocation_id") != child_id:
+                raise ValueError("native authoring child changed its original call")
+            child = operation_row(self.runtime, child_id)
+            if child is None or child["tool_call_id"] != call_id or child["parent_task_id"] != row["task_id"]:
+                raise ValueError("native authoring child operation is unavailable")
+            children.append(child)
+        return tuple(children)
 
     @staticmethod
     def _subcall_id(row, step):

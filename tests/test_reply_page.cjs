@@ -24,8 +24,8 @@ const DEFAULTS = {
   part_gap_mode: 'fixed', part_gap_ms: 0, part_gap_min_ms: 1500, part_gap_max_ms: 3500,
   part_gap_log_base: 1.8, image_position: 'after_text', voice_enabled: false,
   group_wakeup_enabled: true, group_wakeup_direct_words: '[]',
-  group_wakeup_context_words: '["机器人", "bot"]', group_wakeup_interest_keywords: '[]',
-  group_wakeup_question_enabled: true, group_wakeup_bot_name: '',
+  group_wakeup_context_words: '[]', group_wakeup_interest_keywords: '[]',
+  group_wakeup_question_enabled: false, group_wakeup_bot_name: '',
   group_wakeup_primary_member_ids: '[]', group_wakeup_owner_direct_words: '[]',
   group_wakeup_interest_probability: 0.18, group_wakeup_question_threshold: 65,
   group_wakeup_cold_group_enabled: false, group_wakeup_cold_group_threshold: 65,
@@ -87,6 +87,7 @@ const LIMITS = {
   file_understanding_timeout_seconds: [1, 30],
   reply_diagnostic_limit: [10, 300],
 };
+const GROUP_SCOPE_FIELDS = new Set(['group_wakeup_primary_member_ids', 'group_wakeup_owner_direct_words']);
 const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) => {
   const kind = name === 'part_gap_log_base' ? 'weight'
     : ['voice_probability', 'group_wakeup_interest_probability', 'group_wakeup_image_weight'].includes(name)
@@ -96,9 +97,12 @@ const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) =
     'image_understanding_private_enabled', 'image_understanding_group_enabled',
     'video_understanding_private_enabled', 'video_understanding_group_enabled',
     'file_understanding_private_enabled', 'file_understanding_group_enabled',
+    ...Object.keys(DEFAULTS).filter(name => name.startsWith('group_wakeup_') && !GROUP_SCOPE_FIELDS.has(name)),
   ]);
   const entry = {kind, default: value, apply_mode: 'immediate',
-    editable_layers: roleShared.has(name) ? ['role', 'window'] : ['window']};
+    editable_layers: GROUP_SCOPE_FIELDS.has(name) ? ['window']
+      : roleShared.has(name) ? ['role', 'window'] : ['window']};
+  entry.write_layer = 'window';
   if (LIMITS[name]) [entry.minimum, entry.maximum] = LIMITS[name];
   if (kind === 'probability') Object.assign(entry, {minimum: 0, maximum: 1, decimal_places: 2});
   if (kind === 'weight') entry.decimal_places = 1;
@@ -166,7 +170,7 @@ function harness() {
 /* Holders are created by the adapter's innerHTML, and the preview section
    resolves through root.querySelector('[data-reply-part="..."]'). */
   const syncSlots = () => {
-    for (const part of ['settings', 'preview', 'diagnostics']) {
+    for (const part of ['scope', 'settings', 'preview', 'diagnostics']) {
       if (!slots[part]) slots[part] = make(part);
     }
     slots.preview.querySelector = selector => {
@@ -231,13 +235,16 @@ test('the settings section reads and saves through the reply route family', asyn
   const harnessed = harness();
   await loaded(harnessed);
   assert.equal(harnessed.requests[0].route, 'group/reply');
+  assert.match(harnessed.root.innerHTML, /日常聊天的表达设置/);
+  assert.match(harnessed.root.innerHTML, /语音朗读与消息组件/);
+  assert.doesNotMatch(harnessed.root.innerHTML, /普通聊天已使用 AstrBot 核心回复/);
   const instance = live(harnessed);
   instance.state.draft.max_segments = 6;
   const saving = instance.save(false);
   await drains();
   assert.equal(harnessed.requests[1].route, 'group/reply/configure');
   assert.deepEqual(plain(harnessed.requests[1].body), {
-    operation_key: 'save-key', edit_token: TOKEN, changes: {max_segments: 6},
+    operation_key: 'save-key', edit_token: TOKEN, changes: {max_segments: 6}, reset_to_inherit: [],
   });
   harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
     status: status({max_segments: 6}, 'b'.repeat(64))});
@@ -245,6 +252,39 @@ test('the settings section reads and saves through the reply route family', asyn
   await drains();
   assert.equal(instance.state.base.max_segments, 6);
   assert.equal(harnessed.store.size, 0);
+});
+
+test('group wakeup controls keep the selected group override', async () => {
+  const harnessed = await loaded(harness(), 'decision');
+  assert.match(harnessed.root.innerHTML, /群唤醒设置跟随角色/);
+  const instance = live(harnessed);
+  assert.deepEqual(instance.state.container.fields.group_wakeup_enabled.editable, ['role', 'window']);
+  assert.equal(instance.state.container.fields.group_wakeup_enabled.writeLayer, 'window');
+  assert.match(harnessed.slots.settings.innerHTML,
+    /data-rail="group_wakeup_enabled"[\s\S]*data-layer="window"/);
+});
+
+test('a window override can be cleared through the role inheritance control', async () => {
+  const inherited = status({style_prompt: '角色默认表达'});
+  inherited.provenance.style_prompt = {layer: 'role', explicit: false, revision: 1};
+  const harnessed = harness();
+  harnessed.page.mount(harnessed.root, {view: 'expression'});
+  await drains();
+  harnessed.requests[0].resolve(inherited);
+  await drains();
+  assert.match(harnessed.slots.settings.innerHTML, /data-wb-reset="style_prompt"/);
+  const reset = {dataset: {wbReset: 'style_prompt'}};
+  harnessed.listeners['settings:click']({target: {closest: selector =>
+    selector === '[data-wb-reset]' ? reset : null}});
+  const saving = live(harnessed).save(false);
+  await drains();
+  assert.equal(harnessed.requests[1].route, 'group/reply/configure');
+  assert.deepEqual(plain(harnessed.requests[1].body), {
+    operation_key: 'save-key', edit_token: TOKEN, changes: {}, reset_to_inherit: ['style_prompt'],
+  });
+  harnessed.requests[1].resolve({result: {operation_id: 'reset-op', replayed: false},
+    status: status({style_prompt: '角色默认表达'}, 'b'.repeat(64))});
+  await saving;
 });
 
 test('the card is split into labelled groups but keeps one save', async () => {
@@ -379,31 +419,49 @@ test('segmentation words use editable chips and save the existing JSON list', as
   const harnessed = await loaded(harness());
   const instance = live(harnessed);
   assert.equal(instance.state.container.fields.split_words.input, 'word-list');
-  assert.match(instance.state.container.fields.split_words.help, /回车添加/);
+  assert.match(instance.state.container.fields.split_words.help, /回车添加.*换行和空格/);
   assert.match(harnessed.slots.settings.innerHTML, /data-wb-word-list="split_words"/);
-  assert.match(harnessed.slots.settings.innerHTML, /data-wb-word-special="newline"/);
+  const initialHtml = harnessed.slots.settings.innerHTML;
+  const quickLabelIndex = initialHtml.indexOf('class="wb-word-tools-label">常用分段词');
+  const quickNewlineIndex = initialHtml.indexOf('data-wb-word-special="newline"');
+  assert.ok(quickLabelIndex >= 0 && quickNewlineIndex > quickLabelIndex,
+    'newline is grouped under common split words');
+  assert.ok(initialHtml.indexOf('data-wb-word-special="space"') > quickLabelIndex,
+    'space is grouped under common split words');
   assert.match(harnessed.slots.settings.innerHTML, /data-wb-word-value="。"/);
+  const removeNewline = {dataset: {wbWordRemove: 'split_words', wbWordIndex: '6'},
+    closest: selector => selector === '[data-wb-word-remove]' ? removeNewline : null};
+  harnessed.listeners['settings:click']({target: removeNewline});
+  const clickSpecial = special => {
+    const button = {dataset: {wbWordSpecial: special, wbWordField: 'split_words'}};
+    const target = {closest: selector => selector === '[data-wb-word-special]' ? button : null};
+    harnessed.listeners['settings:click']({target});
+  };
+  clickSpecial('newline');
+  clickSpecial('space');
   const input = {value: '，', dataset: {wbWordInput: 'split_words'}, focus() {}};
   const addButton = {dataset: {wbWordAdd: 'split_words'},
     closest: selector => selector === '.wb-field' ? {querySelector: () => input} : null};
   const addTarget = {closest: selector => selector === '[data-wb-word-add]' ? addButton : null};
   harnessed.listeners['settings:click']({target: addTarget});
-  assert.deepEqual(plain(JSON.parse(instance.state.draft.split_words)), ['。', '？', '！', '~', '…', '“', '\n', '，']);
+  assert.deepEqual(plain(JSON.parse(instance.state.draft.split_words)), ['。', '？', '！', '~', '…', '“', '\n', ' ', '，']);
 
   const saving = instance.save(false);
   await drains();
-  assert.equal(harnessed.requests[1].body.changes.split_words, JSON.stringify(['。', '？', '！', '~', '…', '“', '\n', '，']));
+  assert.equal(harnessed.requests[1].body.changes.split_words, JSON.stringify(['。', '？', '！', '~', '…', '“', '\n', ' ', '，']));
   harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
-    status: status({split_words: JSON.stringify(['。', '？', '！', '~', '…', '“', '\n', '，'])}, 'd'.repeat(64))});
+    status: status({split_words: JSON.stringify(['。', '？', '！', '~', '…', '“', '\n', ' ', '，'])}, 'd'.repeat(64))});
   await saving;
   await drains();
   assert.match(harnessed.slots.settings.innerHTML, /<span>换行<\/span>/);
+  assert.match(harnessed.slots.settings.innerHTML, /<span>空格<\/span>/);
 });
 
 test('expression modules render only their own navigation and panels after every switch', async () => {
   const h = await loaded(harness());
   const instance = live(h);
   h.page.setExpressionModule('expression-text');
+  assert.match(h.slots.scope.innerHTML, /文字表达设置/);
   let html = h.slots.settings.innerHTML;
   assert.match(html, /data-wb-section="segment"/);
   assert.match(html, /data-wb-section="style"/);
@@ -413,6 +471,7 @@ test('expression modules render only their own navigation and panels after every
   assert.equal(h.page.selectSection('voice'), false, 'hidden modules cannot be selected by a stale jump');
 
   h.page.setExpressionModule('expression-platform');
+  assert.match(h.slots.scope.innerHTML, /消息组件与发送检查/);
   html = h.slots.settings.innerHTML;
   assert.match(html, /data-wb-section="components"/);
   assert.match(html, /data-wb-section="checks"/);
@@ -422,10 +481,26 @@ test('expression modules render only their own navigation and panels after every
   assert.equal(instance.state.activeGroupId, 'checks');
 
   h.page.setExpressionModule('expression-voice');
+  assert.match(h.slots.scope.innerHTML, /语音朗读设置/);
+  assert.match(h.slots.scope.innerHTML, /音色与 TTS 合成后端在「模型与连接」中配置/);
+  assert.doesNotMatch(h.slots.scope.innerHTML, /核心回复|历史兼容|群唤醒/);
   html = h.slots.settings.innerHTML;
   assert.doesNotMatch(html, /data-wb-section=|data-wb-section-panel=/);
   assert.match(html, /data-wb-row="voice_enabled"/);
   assert.doesNotMatch(html, /data-wb-row="reply_quote_enabled"|data-wb-row="enabled"/);
+  h.page.unmount();
+});
+
+test('expression voice hides segmentation preview and cancels its pending refresh', async () => {
+  const h = await loaded(harness());
+  h.page.setExpressionModule('expression-voice');
+  assert.equal(h.slots.preview.hidden, true);
+  await wait(300);
+  assert.equal(h.requests.length, 1, 'the voice tab does not request a segmentation preview');
+
+  h.page.setExpressionModule('expression-text');
+  assert.equal(h.slots.preview.hidden, false);
+  assert.match(h.slots.preview.innerHTML, /分段效果预览/);
   h.page.unmount();
 });
 
@@ -603,6 +678,7 @@ test('the perception view edits image, native video and file understanding witho
   const harnessed = await loaded(harness(), 'perception');
   assert.equal(harnessed.requests[0].route, 'group/reply');
   assert.match(harnessed.root.innerHTML, /data-reply-part="settings"/);
+  assert.match(harnessed.root.innerHTML, /普通聊天的媒体理解在 AstrBot 中配置/);
   assert.doesNotMatch(harnessed.root.innerHTML, /data-reply-part="preview"|data-reply-part="diagnostics"/);
   const instance = live(harnessed);
   assert.deepEqual(plain(instance.state.container.order),
@@ -652,6 +728,7 @@ test('expression voice tab hosts the shared reply editor with only TTS settings 
   assert.ok(appPage.includes('activateExpressionModule(module)'));
   assert.ok(adapter.includes('setVisibleGroups'));
   assert.ok(expressionCss.includes('expression-platform-focus .wb-section-sidebar{display:block}'));
+  assert.ok(expressionCss.includes('#replyWorkspace.expression-voice-focus>[data-reply-part="preview"]{display:none}'));
   for (const field of ['voice_trigger_mode', 'voice_provider_id', 'voice_delivery_mode']) {
     assert.ok(adapter.includes(field), `missing TTS setting ${field}`);
   }

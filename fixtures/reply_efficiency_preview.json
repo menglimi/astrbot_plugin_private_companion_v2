@@ -17,8 +17,8 @@
       "generated_at": "2026-10-10T14:00:00+08:00",
       "window_days": 7,
       "summary": {
-        "samples": 126,
-        "completed": 112,
+        "samples": 127,
+        "completed": 113,
         "partial": 8,
         "median_end_to_end_ms": 5120,
         "p95_end_to_end_ms": 18400,
@@ -27,26 +27,310 @@
         "median_last_input_to_model_ms": 670,
         "median_model_ms": 2180,
         "median_post_model_ms": 510,
-        "median_delivery_ms": 620
+        "median_delivery_ms": 620,
+        "send_returned_samples": 1,
+        "median_first_send_returned_ms": 4950,
+        "median_end_to_end_send_returned_ms": 4950,
+        "p95_end_to_end_send_returned_ms": 4950,
+        "median_ttft_ms": 500,
+        "median_plugin_preparation_ms": 713,
+        "median_model_request_ms": 2800,
+        "median_tool_ms": 450,
+        "median_agent_ms": 3450,
+        "median_send_ms": 300
       },
       "coverage": {
-        "received": 126,
-        "model_started": 124,
-        "model_finished": 120,
-        "first_dispatched": 118,
+        "received": 127,
+        "model_started": 125,
+        "model_finished": 121,
+        "first_dispatched": 119,
         "first_delivered": 116,
-        "final_delivered": 112
+        "final_delivered": 112,
+        "core_samples": 1,
+        "core_send_returned": 1,
+        "core_request_observation": 1,
+        "core_preparation": 1
       },
       "daily": [
-        {"day": "2026-10-04", "samples": 14, "completed": 13, "median_end_to_end_ms": 5680},
-        {"day": "2026-10-05", "samples": 17, "completed": 16, "median_end_to_end_ms": 4930},
-        {"day": "2026-10-06", "samples": 19, "completed": 18, "median_end_to_end_ms": 5310},
-        {"day": "2026-10-07", "samples": 16, "completed": 14, "median_end_to_end_ms": 6240},
-        {"day": "2026-10-08", "samples": 21, "completed": 19, "median_end_to_end_ms": 4760},
-        {"day": "2026-10-09", "samples": 20, "completed": 18, "median_end_to_end_ms": 4480},
-        {"day": "2026-10-10", "samples": 19, "completed": 14, "median_end_to_end_ms": 5120}
+        {
+          "day": "2026-10-04",
+          "samples": 14,
+          "completed": 13,
+          "median_end_to_end_ms": 5680
+        },
+        {
+          "day": "2026-10-05",
+          "samples": 17,
+          "completed": 16,
+          "median_end_to_end_ms": 4930
+        },
+        {
+          "day": "2026-10-06",
+          "samples": 19,
+          "completed": 18,
+          "median_end_to_end_ms": 5310
+        },
+        {
+          "day": "2026-10-07",
+          "samples": 16,
+          "completed": 14,
+          "median_end_to_end_ms": 6240
+        },
+        {
+          "day": "2026-10-08",
+          "samples": 21,
+          "completed": 19,
+          "median_end_to_end_ms": 4760
+        },
+        {
+          "day": "2026-10-09",
+          "samples": 20,
+          "completed": 18,
+          "median_end_to_end_ms": 4480
+        },
+        {
+          "day": "2026-10-10",
+          "samples": 20,
+          "completed": 15,
+          "median_end_to_end_ms": 5120,
+          "core_samples": 1,
+          "send_returned_samples": 1,
+          "median_end_to_end_send_returned_ms": 4950
+        }
       ],
       "recent": [
+        {
+          "batch_id": "core-reply:synthetic-efficiency-preview",
+          "turn_id": "core-reply:synthetic-efficiency-preview",
+          "batch_state": "completed",
+          "execution_path": "astrbot_core",
+          "measurement_basis": {
+            "usage": "provider_responses",
+            "delivery": "native_send_return",
+            "first_reply": "unavailable_without_platform_receipt",
+            "request_signature": "runner_pre_provider"
+          },
+          "delivery": {
+            "state": "returned",
+            "attempts": 1,
+            "returned": 1,
+            "unknown": 0,
+            "failed": 0,
+            "first_started_at": "2026-10-10T13:59:56.650000+08:00",
+            "first_returned_at": "2026-10-10T13:59:56.950000+08:00",
+            "last_returned_at": "2026-10-10T13:59:56.950000+08:00",
+            "platform_confirmed": false
+          },
+          "received_at": "2026-10-10T13:59:52+08:00",
+          "received_time_source": "native_input",
+          "flow_state": "completed",
+          "flow_reason": "astrbot_core",
+          "outcome": "completed",
+          "input_count": 1,
+          "part_count": 1,
+          "delivered_parts": 0,
+          "send_returned_parts": 1,
+          "failed_parts": 0,
+          "unknown_parts": 0,
+          "pending_parts": 0,
+          "model_calls": 2,
+          "usage_observation_count": 2,
+          "model_call_count_available": true,
+          "model_call_count_complete": true,
+          "active_model_calls": 0,
+          "timestamps": {
+            "received_at": "2026-10-10T13:59:52+08:00",
+            "last_input_received_at": "2026-10-10T13:59:52+08:00",
+            "flow_due_at": null,
+            "generation_started_at": "2026-10-10T13:59:53.115000+08:00",
+            "first_model_started_at": "2026-10-10T13:59:53.200000+08:00",
+            "last_model_finished_at": "2026-10-10T13:59:56.500000+08:00",
+            "agent_started_at": "2026-10-10T13:59:53.150000+08:00",
+            "agent_finished_at": "2026-10-10T13:59:56.600000+08:00",
+            "first_dispatched_at": "2026-10-10T13:59:56.650000+08:00",
+            "first_delivered_at": null,
+            "last_delivered_at": null,
+            "first_send_returned_at": "2026-10-10T13:59:56.950000+08:00",
+            "last_send_returned_at": "2026-10-10T13:59:56.950000+08:00"
+          },
+          "stages": {
+            "pre_model_ms": 1200,
+            "last_input_to_model_ms": 1200,
+            "model_ms": 3300,
+            "model_request_ms": 2800,
+            "agent_ms": 3450,
+            "tool_ms": 450,
+            "plugin_preparation_ms": 713,
+            "send_ms": 300,
+            "post_model_ms": 50,
+            "first_reply_ms": null,
+            "delivery_ms": null,
+            "end_to_end_ms": null,
+            "first_send_returned_ms": 4950,
+            "end_to_end_send_returned_ms": 4950,
+            "ttft_ms": 500
+          },
+          "trace": {
+            "input_wait_ms": null,
+            "queue_wait_ms": null,
+            "preparation_ms": 713,
+            "preparation_steps": [
+              {
+                "name": "context_build",
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:52.400000+08:00",
+                "finished_at": "2026-10-10T13:59:53.050000+08:00",
+                "elapsed_ms": 650
+              },
+              {
+                "name": "request_authorization",
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:53.050000+08:00",
+                "finished_at": "2026-10-10T13:59:53.090000+08:00",
+                "elapsed_ms": 40
+              },
+              {
+                "name": "prompt_injection",
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:53.090000+08:00",
+                "finished_at": "2026-10-10T13:59:53.091000+08:00",
+                "elapsed_ms": 1
+              },
+              {
+                "name": "tool_injection",
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:53.091000+08:00",
+                "finished_at": "2026-10-10T13:59:53.111000+08:00",
+                "elapsed_ms": 20
+              },
+              {
+                "name": "send_tool_injection",
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:53.111000+08:00",
+                "finished_at": "2026-10-10T13:59:53.113000+08:00",
+                "elapsed_ms": 2
+              }
+            ],
+            "materials": [
+              {
+                "owner": "private_companion.v2",
+                "purpose": "role_profile",
+                "state": "ready",
+                "elapsed_ms": 25,
+                "chars": 1800
+              },
+              {
+                "owner": "private_companion.v2",
+                "purpose": "memory",
+                "state": "ready",
+                "elapsed_ms": 570,
+                "chars": 4200
+              },
+              {
+                "owner": "private_companion.v2",
+                "purpose": "role_state",
+                "state": "ready",
+                "elapsed_ms": 3,
+                "chars": 800
+              },
+              {
+                "owner": "private_companion.v2",
+                "purpose": "expression_style",
+                "state": "ready",
+                "elapsed_ms": 40,
+                "chars": 300
+              },
+              {
+                "owner": "private_companion.v2",
+                "purpose": "perception",
+                "state": "ready",
+                "elapsed_ms": 7,
+                "chars": 400
+              },
+              {
+                "owner": "private_companion.v2",
+                "purpose": "self_review",
+                "state": "empty",
+                "elapsed_ms": 5,
+                "chars": 0
+              }
+            ],
+            "offered_tool_count": 3,
+            "offered_tools": [
+              "companion_v2_memory_query",
+              "companion_v2_calendar_query",
+              "send_message_to_user"
+            ],
+            "model_calls": [
+              {
+                "position": 1,
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:53.200000+08:00",
+                "finished_at": "2026-10-10T13:59:54.800000+08:00",
+                "elapsed_ms": 1600,
+                "ttft_ms": 500,
+                "provider": "preview-main-model",
+                "tokens": 2400,
+                "input_tokens": 2300,
+                "output_tokens": 100,
+                "cached_input_tokens": 1600,
+                "failure_code": null,
+                "response_diagnostics": null,
+                "measurement_basis": "provider_response",
+                "usage_availability": "reported",
+                "cache_availability": "provider_report"
+              },
+              {
+                "position": 2,
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:55.300000+08:00",
+                "finished_at": "2026-10-10T13:59:56.500000+08:00",
+                "elapsed_ms": 1200,
+                "ttft_ms": 420,
+                "provider": "preview-main-model",
+                "tokens": 2650,
+                "input_tokens": 2450,
+                "output_tokens": 200,
+                "cached_input_tokens": 2200,
+                "failure_code": null,
+                "response_diagnostics": null,
+                "measurement_basis": "provider_response",
+                "usage_availability": "reported",
+                "cache_availability": "provider_report"
+              }
+            ],
+            "tool_calls": [
+              {
+                "sequence": 1,
+                "action": "companion_v2_memory_query",
+                "state": "returned",
+                "started_at": "2026-10-10T13:59:54.800000+08:00",
+                "finished_at": "2026-10-10T13:59:55.250000+08:00",
+                "kind": "astrbot_core",
+                "elapsed_ms": 450
+              }
+            ],
+            "laya": {
+              "calls": 0,
+              "succeeded": 0,
+              "skipped": 0,
+              "failed": 0,
+              "elapsed_ms": null,
+              "events": [],
+              "availability": "unavailable"
+            }
+          },
+          "observed": {
+            "received": true,
+            "model_started": true,
+            "model_finished": true,
+            "first_dispatched": true,
+            "first_delivered": false,
+            "final_delivered": false,
+            "send_returned": true,
+            "platform_confirmed": false
+          }
+        },
         {
           "received_at": "2026-10-10T13:42:15+08:00",
           "received_time_source": "input_event",
@@ -80,23 +364,57 @@
             "queue_wait_ms": 200,
             "preparation_ms": 620,
             "materials": [
-              {"owner": "memory.recall", "purpose": "long_term_memory", "state": "ready"},
-              {"owner": "relationship.context", "purpose": "recent_relation_state", "state": "ready"},
-              {"owner": "agenda", "purpose": "daily_agenda", "state": "deferred"}
+              {
+                "owner": "memory.recall",
+                "purpose": "long_term_memory",
+                "state": "ready"
+              },
+              {
+                "owner": "relationship.context",
+                "purpose": "recent_relation_state",
+                "state": "ready"
+              },
+              {
+                "owner": "agenda",
+                "purpose": "daily_agenda",
+                "state": "deferred"
+              }
             ],
             "offered_tool_count": 3,
-            "offered_tools": ["calendar.query", "memory.search", "weather.current"],
+            "offered_tools": [
+              "calendar.query",
+              "memory.search",
+              "weather.current"
+            ],
             "model_calls": [
-              {"position": 0, "state": "generated", "started_at": "2026-10-10T13:42:16.120+08:00",
-                "finished_at": "2026-10-10T13:42:17.050+08:00", "elapsed_ms": 930},
-              {"position": 1, "state": "generated", "started_at": "2026-10-10T13:42:18.000+08:00",
-                "finished_at": "2026-10-10T13:42:18.305+08:00", "elapsed_ms": 305}
+              {
+                "position": 0,
+                "state": "generated",
+                "started_at": "2026-10-10T13:42:16.120+08:00",
+                "finished_at": "2026-10-10T13:42:17.050+08:00",
+                "elapsed_ms": 930
+              },
+              {
+                "position": 1,
+                "state": "generated",
+                "started_at": "2026-10-10T13:42:18.000+08:00",
+                "finished_at": "2026-10-10T13:42:18.305+08:00",
+                "elapsed_ms": 305
+              }
             ],
             "tool_calls": [
-              {"sequence": 1, "action": "calendar.query", "kind": "extension", "state": "succeeded",
-                "started_at": "2026-10-10T13:42:17.300+08:00", "finished_at": "2026-10-10T13:42:18.000+08:00",
-                "elapsed_ms": 700, "extension_started_at": "2026-10-10T13:42:17.400+08:00",
-                "extension_finished_at": "2026-10-10T13:42:17.980+08:00", "extension_elapsed_ms": 580}
+              {
+                "sequence": 1,
+                "action": "calendar.query",
+                "kind": "extension",
+                "state": "succeeded",
+                "started_at": "2026-10-10T13:42:17.300+08:00",
+                "finished_at": "2026-10-10T13:42:18.000+08:00",
+                "elapsed_ms": 700,
+                "extension_started_at": "2026-10-10T13:42:17.400+08:00",
+                "extension_finished_at": "2026-10-10T13:42:17.980+08:00",
+                "extension_elapsed_ms": 580
+              }
             ]
           }
         },
@@ -175,12 +493,100 @@
             "first_reply_ms": null,
             "end_to_end_ms": null
           }
+        },
+        {
+          "received_at": "2026-10-10T12:12:05+08:00",
+          "received_time_source": "input_event",
+          "outcome": "no_reply",
+          "input_count": 1,
+          "part_count": 0,
+          "delivered_parts": 0,
+          "model_calls": 1,
+          "timestamps": {
+            "received_at": "2026-10-10T12:12:05+08:00",
+            "last_input_received_at": "2026-10-10T12:12:05+08:00",
+            "flow_due_at": "2026-10-10T12:12:05.300+08:00",
+            "generation_started_at": "2026-10-10T12:12:05.520+08:00",
+            "first_model_started_at": "2026-10-10T12:12:06.100+08:00",
+            "last_model_finished_at": "2026-10-10T12:12:09.420+08:00"
+          },
+          "stages": {
+            "pre_model_ms": 4100,
+            "last_input_to_model_ms": 4100,
+            "model_ms": 3320,
+            "post_model_ms": null,
+            "delivery_ms": null,
+            "first_reply_ms": null,
+            "end_to_end_ms": null
+          },
+          "trace": {
+            "input_wait_ms": 300,
+            "queue_wait_ms": 220,
+            "preparation_ms": 580,
+            "materials": [],
+            "offered_tool_count": 0,
+            "offered_tools": [],
+            "model_calls": [
+              {
+                "position": 0,
+                "state": "unknown",
+                "started_at": "2026-10-10T12:12:06.100+08:00",
+                "finished_at": "2026-10-10T12:12:09.420+08:00",
+                "elapsed_ms": 3320,
+                "provider": "sensenova",
+                "tokens": null,
+                "input_tokens": null,
+                "output_tokens": null,
+                "failure_code": "provider_request_failed",
+                "response_diagnostics": {
+                  "version": 2,
+                  "completion_present": false,
+                  "finish_reason": "missing",
+                  "parse_state": "not_received",
+                  "raw": null,
+                  "parsed": null,
+                  "visible": null,
+                  "failure_code": "provider_request_failed",
+                  "error_type": "APIConnectionError",
+                  "error_code": null,
+                  "status_code": null
+                }
+              }
+            ],
+            "tool_calls": []
+          }
         }
-      ]
+      ],
+      "by_source": {
+        "astrbot_core": {
+          "samples": 1,
+          "completed": 1
+        },
+        "legacy_v2_conversation": {
+          "samples": 126,
+          "completed": 112
+        }
+      }
     }
   },
-  "voice": {"providers": []},
-  "image": {"actions": []},
-  "model": {"providers": [], "tasks": [], "summary": {}, "totals": {}, "daily": [], "history": [], "recent": []},
-  "balance": {"configured": false, "available": false, "state": "unavailable"}
+  "voice": {
+    "providers": []
+  },
+  "image": {
+    "actions": []
+  },
+  "model": {
+    "providers": [],
+    "tasks": [],
+    "summary": {},
+    "totals": {},
+    "daily": [],
+    "history": [],
+    "recent": []
+  },
+  "balance": {
+    "configured": false,
+    "available": false,
+    "state": "unavailable"
+  }
 }

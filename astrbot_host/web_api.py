@@ -32,6 +32,7 @@ from .configuration_api import ConfigurationWebAPI
 from .persona_workshop_api import PersonaWorkshopWebAPI
 from .reality_access_api import RealityAccessWebAPI
 from .screen_access_api import ScreenAccessWebAPI
+from .native_extension_api import NativeExtensionWebAPI
 from .account_session_api import AccountSessionWebAPI
 from .image_material_api import ImageMaterialsWebAPI
 from .qzone_api import QzoneWebAPI
@@ -114,6 +115,7 @@ class StagingWebAPI:
                           for suffix, handler, methods, description in routes] + self.relationships.routes() + self.backup.routes() + self.memory.routes() + self.life.routes() + self.growth.routes() + self.state.routes() + self.reply.routes() + self.model.routes() + PageWebAPI(self.controller).routes() + self.integration.routes() + AcquaintanceWebAPI(self.controller).routes()
             all_routes += SemanticWebAPI(self.controller).routes()
             all_routes += PerceptionWebAPI(self.controller).routes()
+            all_routes += NativeExtensionWebAPI(self.controller).routes()
             all_routes += NativePerceptionWebAPI(self.controller).routes()
             all_routes += ConfigurationWebAPI(self.controller).routes()
             all_routes += SetupWebAPI(self.controller).routes()

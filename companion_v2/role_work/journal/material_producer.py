@@ -1,6 +1,8 @@
 """Conservative, source-bound journal material from trusted role and conversation records."""
 
 from dataclasses import dataclass
+from datetime import datetime
+import json
 from zoneinfo import ZoneInfo
 
 from companion_v2.execution.models import TaskContext, TaskError, digest, require
@@ -102,6 +104,9 @@ class RoleConversationJournalMaterialProducer:
         if (task_context.scope != target.scope or task_context.role_binding.scope != target.scope
                 or target.key.owner != owner):
             raise ReferenceValidationError("conversation material must retain its exact role and scope")
+        native_prefix = "native-observation:"
+        if isinstance(after_id, str) and after_id.startswith(native_prefix):
+            return self._native_page(task_context, target, limit=limit, after_id=after_id[len(native_prefix):])
         page = self.conversations.journal_inputs(task_context, limit=limit, after_id=after_id)
         zone = ZoneInfo(target.timezone)
         materials = []
@@ -124,7 +129,57 @@ class RoleConversationJournalMaterialProducer:
                 local_date=local_date,
                 source=event.source,
             ))
+        if page.next_cursor is None and len(page.items) < limit:
+            native = self._native_page(task_context, target, limit=limit - len(page.items))
+            return JournalMaterialPage(tuple(materials) + native.materials, native.next_cursor)
         return JournalMaterialPage(tuple(materials), page.next_cursor)
+
+    def _native_page(self, context, target, *, limit, after_id=None):
+        from companion_v2.conversation.native_observations import observations_available, validate_observation
+        from companion_v2.memory.codec import source
+
+        runtime = self.conversations.runtime
+        self.conversations.authorize(context)
+        if not observations_available(runtime):
+            return JournalMaterialPage((), None)
+        values = [context.key]
+        condition = ""
+        if after_id is not None:
+            cursor = runtime.read_one("""SELECT observed_at FROM conversation_native_observations
+                WHERE context_key = ? AND kind = 'input' AND observation_id = ?""", (context.key, after_id))
+            if cursor is None:
+                raise TaskError("message_cursor_invalid", "native writing cursor belongs to another conversation")
+            condition = " AND (observed_at > ? OR (observed_at = ? AND observation_id > ?))"
+            values.extend((cursor["observed_at"], cursor["observed_at"], after_id))
+        values.append(limit)
+        rows = runtime.read_all("""SELECT * FROM conversation_native_observations
+            WHERE context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'""" + condition
+            + " ORDER BY observed_at, observation_id LIMIT ?", tuple(values))
+        zone, materials = ZoneInfo(target.timezone), []
+        for row in rows:
+            try:
+                reference = source(json.loads(row["source_json"]))
+                validate_observation(runtime, row, context, reference)
+                if reference.scope != target.scope:
+                    continue
+                local_date = datetime.fromisoformat(row["observed_at"]).astimezone(zone).date().isoformat()
+                if local_date != target.key.local_date:
+                    continue
+                record = self.conversations._read_source(reference, context, "text", self.conversations.tasks.now())
+                if record.content_hash != row["content_hash"]:
+                    raise TaskError("message_input_changed", "native journal input no longer matches its source")
+            except TaskError:
+                continue
+            detail = record.payload.strip()
+            if len(detail) > 8192:
+                detail = detail[:8192] + "……（消息较长，仅保留开头）"
+            materials.append(JournalMaterial(
+                material_id="conversation-message-" + digest(row["observation_id"]),
+                kind=MaterialKind.CONVERSATION, text="对方当时表达：" + detail,
+                origin="native-conversation-input-" + digest(row["observation_id"]),
+                local_date=local_date, source=reference))
+        cursor = "native-observation:" + rows[-1]["observation_id"] if len(rows) == limit else None
+        return JournalMaterialPage(tuple(materials), cursor)
 
 
 class RoleTextArtifactJournalMaterialProducer:

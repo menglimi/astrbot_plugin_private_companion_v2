@@ -168,12 +168,13 @@ class HostSettings:
                 _integer(model.get("cached_input_microusd_per_million", 0), minimum=0, maximum=10**12),
                 _integer(model.get("output_microusd_per_million", 0), minimum=0, maximum=10**12),
             ),
-            budget=BudgetPolicy(amount, amount, amount, amount, amount),
+            budget=BudgetPolicy(amount, amount, amount, amount, amount,
+                                enabled=_boolean(runtime.get("enable_daily_model_hard_limit", False))),
             budget_soft=soft,
             policy=ConversationPolicy(
                 _integer(runtime.get("quiet_seconds", 0), minimum=0, maximum=300),
                 _integer(runtime.get("maximum_wait_seconds", 0), minimum=0, maximum=600),
-                _integer(runtime.get("turn_timeout_seconds", 180), minimum=1, maximum=600),
+                _integer(runtime.get("turn_timeout_seconds", 300), minimum=1, maximum=600),
                 _integer(runtime.get("part_gap_seconds", 0), minimum=0, maximum=60),
             ),
             forward_intake=ForwardIntakePolicy(
@@ -185,7 +186,7 @@ class HostSettings:
                 _integer(runtime.get("foreground_slots", 2), minimum=1, maximum=32),
                 _integer(runtime.get("background_slots", 1), minimum=1, maximum=32),
                 _integer(runtime.get("queued_per_lane", 64), minimum=1, maximum=10_000),
-                _integer(runtime.get("retained_tasks", 2_048), minimum=1, maximum=100_000),
+                _integer(runtime.get("retained_tasks", 10_000), minimum=1, maximum=100_000),
             ),
         )
 

@@ -56,6 +56,16 @@ test("contact form uses backend purpose directory and writes one minimal guarded
     "chat.enabled":false,"life.weight":2.5});assert.equal(h.refreshes,1);
 });
 
+test("private contact status explains the most recent automatic scheduler gate",()=>{
+  const status=fixture();status.contact.schedule_diagnostic={
+    scheduler:{state:"running",reason_code:"contact_schedule_running",last_seen_at:"2026-10-12T10:00:00+00:00"},
+    evaluation:{outcome:"skipped",stage:"settings",reason_code:"automatic_contact_disabled",purpose:null,
+      observed_at:"2026-10-12T09:59:00+00:00",next_at:null}};
+  const h=harness({status});const markup=h.markup();
+  assert.match(markup,/最近自动调度/);assert.match(markup,/正常运行/);
+  assert.match(markup,/后台自动联系已关闭/);assert.match(markup,/打开此窗口的后台自动联系开关/);
+});
+
 test("silence planning fields render as bounded numbers and save like any other preference",async()=>{
   const h=harness();h.click("contact");
   const markup=h.markup();assert.match(markup,/行为规划与沉默/);

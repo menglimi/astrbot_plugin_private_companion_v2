@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-
-from astrbot.core import sp
+import logging
 
 from companion_v2.adapters.astrbot.group import group_event_route
-from companion_v2.adapters.astrbot.native import account_number, bounded_native_lookup
+from companion_v2.adapters.astrbot.native import (
+    account_number,
+    bounded_native_lookup,
+)
 from companion_v2.execution.models import TaskError, digest
 from .identity_derivation import derive_bot_id, derive_role_id, role_display_name
+from .native import SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS, load_session_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def session_route(umo):
@@ -37,6 +43,31 @@ class SessionTopology:
     def __init__(self, controller):
         self.controller = controller
         self.path = controller.data_root / "setup" / "session_directory.json"
+        self._pending = set()
+        self._closed = False
+        self._write_lock = asyncio.Lock()
+
+    def schedule_observe(self, event):
+        """Keep optional directory IO outside native reply hooks."""
+        if self._closed or self.controller._terminated:
+            return None
+
+        async def record():
+            try:
+                await self.observe(event)
+            except Exception as error:
+                logger.warning("[CompanionV2] 会话目录后台更新失败 error_type=%s", type(error).__name__)
+
+        task = asyncio.create_task(record(), name="companion-v2-session-observation")
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+        return task
+
+    async def close(self):
+        """Drain started writes; a cancelled to_thread call could outlive shutdown."""
+        self._closed = True
+        if self._pending:
+            await asyncio.gather(*tuple(self._pending), return_exceptions=True)
 
     def configured(self, settings=None):
         controller = self.controller
@@ -93,11 +124,16 @@ class SessionTopology:
         return rows
 
     async def services(self, umo):
-        return await sp.get_async(scope="umo", scope_id=umo, key="session_service_config", default={}) or {}
+        return await load_session_settings(umo)
 
     async def reply_enabled(self, event):
-        services = await self.services(event.unified_msg_origin)
-        return services.get("llm_enabled", True) and services.get("session_enabled", True)
+        try:
+            services = await asyncio.wait_for(
+                self.services(event.unified_msg_origin), timeout=SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS)
+        except TimeoutError:
+            logger.warning("[CompanionV2] 会话回复开关读取超时，继续 AstrBot 核心回复")
+            return True
+        return services.get("session_enabled", True)
 
     async def observe(self, event):
         controller = self.controller
@@ -124,13 +160,19 @@ class SessionTopology:
               or session.platform_name != platform_id or meta.id != platform_id):
             return
         manager = controller.context.conversation_manager
-        cid = await manager.get_curr_conversation_id(event.unified_msg_origin)
+        cid = await bounded_native_lookup(manager.get_curr_conversation_id(event.unified_msg_origin),
+                                          operation="conversation_id")
         if controller._terminated:
             return
         key = digest([platform_id, login, event.unified_msg_origin])
+        row = {"unified_msg_origin": event.unified_msg_origin, "account_id": login,
+               "conversation_id": cid, "last_seen_at": controller.now().isoformat()}
+        async with self._write_lock:
+            await asyncio.to_thread(self._store_observation, key, row)
+
+    def _store_observation(self, key, row):
         rows = self._observed()
-        rows[key] = {"unified_msg_origin": event.unified_msg_origin, "account_id": login,
-                     "conversation_id": cid, "last_seen_at": controller.now().isoformat()}
+        rows[key] = row
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(rows, ensure_ascii=False, sort_keys=True) + "\n",
@@ -312,18 +354,30 @@ class SessionTopology:
         if cid != item.get("conversation_id") or cid is None and umo not in observed:
             return result
         services = await bounded_native_lookup(self.services(umo), operation="session_settings")
-        provider = self.controller.context.get_config(umo=umo).get("provider_settings", {})
-        resolver = getattr(getattr(self.controller.context, "persona_manager", None), "resolve_selected_persona", None)
-        selected = services.get("persona_id") or item.get("persona_id") or provider.get("default_personality") or "[%None]"
-        if callable(resolver):
-            selected, _, _, _ = await bounded_native_lookup(
-                resolver(umo=umo, conversation_persona_id=item.get("persona_id"),
-                         platform_name="aiocqhttp", provider_settings=provider), operation="persona")
-            selected = selected or "[%None]"
+        override = services.get("persona_id")
+        if override == "":
+            override = None
+        if override is not None:
+            if (type(override) is not str or not override.strip() or len(override) > 120
+                    or any(ord(char) < 32 for char in override)):
+                raise TaskError("host_persona_invalid", "the V2 window persona override is invalid")
         for account in candidates:
             matches = [row for row in account_matches if row["account_id"] == account["account_id"]]
             binding = next((row for row in matches if row.get(peer_field) == peer), None)
             binding = binding or next((row for row in matches if row.get(peer_field) == "*"), None)
+            if override is not None:
+                selected = override
+            else:
+                mapped_ids = {row.get("persona_id") for row in mappings
+                              if row.get("bot_id") == account["bot_id"]}
+                if len(mapped_ids) == 1:
+                    selected = next(iter(mapped_ids))
+                elif not self.controller._multi_host:
+                    configured_ids = {persona_id for row in matches for role_row in row.get("roles", [])
+                                      for persona_id in role_row.get("persona_ids", []) if persona_id}
+                    selected = next(iter(configured_ids)) if len(configured_ids) == 1 else ""
+                else:
+                    selected = ""
             role = next((row["role_id"] for row in mappings if row.get("bot_id") == account["bot_id"]
                          and row.get("persona_id") == selected), None)
             if binding and not self.controller._multi_host:

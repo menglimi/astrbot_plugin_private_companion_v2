@@ -110,8 +110,35 @@ class ConversationRecalls:
             ORDER BY b.created_at DESC, i.position DESC LIMIT 64""",
             (context.key, context.scope.platform, context.scope.bot_id, context.scope.account_id,
              context.scope.kind.value, context.scope.native_scope_id))
+        from .native_observations import observations_available
+        if observations_available(self.runtime):
+            native = self.runtime.read_all("""SELECT n.event_id, n.context_json, n.observed_at AS created_at,
+                    n.content_hash, s.payload_json, s.content_hash AS source_hash
+                FROM conversation_native_observations n JOIN sources s
+                  ON s.source_id = json_extract(n.source_json, '$.source_id')
+                 AND s.lineage_id = json_extract(n.source_json, '$.version.lineage_id')
+                 AND s.source_revision = json_extract(n.source_json, '$.version.revision')
+                WHERE n.kind = 'input' AND n.context_key = ?
+                ORDER BY n.observed_at DESC, n.rowid DESC LIMIT 64""", (context.key,))
+            projected = []
+            for row in native:
+                try:
+                    from companion_v2.execution.models import TaskContext
+                    original = TaskContext.restore(json.loads(row["context_json"]))
+                    sender = original.actor.principal.native_account_id
+                    if (original.scope != context.scope or original.key != context.key
+                            or row["source_hash"] != row["content_hash"]
+                            or not self.recalled(original.scope, row["event_id"], sender)):
+                        continue
+                    data = {"scope": json.loads(row["context_json"])["audience"]["scope"],
+                            "principal": {"native_account_id": sender}}
+                    projected.append({"event_key": digest([original.scope, sender, row["event_id"]]),
+                                      "event_json": json.dumps(data), **dict(row)})
+                except (ValueError, KeyError, TypeError):
+                    continue
+            rows = (*rows, *projected)
         entries, seen = [], set()
-        for row in rows:
+        for row in sorted(rows, key=lambda item: item["created_at"], reverse=True):
             if len(entries) >= limit:
                 break
             created = decode_timestamp(row["created_at"])
@@ -213,6 +240,24 @@ class ConversationRecalls:
                         quoted += changed
                         if changed:
                             self._invalidate(connection, row["batch_id"])
+            from .native_observations import observations_available
+            if observations_available(self.runtime):
+                for row in self.runtime.read_all("""SELECT source_json, context_json
+                    FROM conversation_native_observations WHERE kind = 'input' AND event_id = ?
+                    AND json_extract(context_json, '$.actor.principal.native_account_id') = ?
+                    AND json_extract(context_json, '$.audience.scope.installation_id') = ?
+                    AND json_extract(context_json, '$.audience.scope.platform') = ?
+                    AND json_extract(context_json, '$.audience.scope.bot_id') = ?
+                    AND json_extract(context_json, '$.audience.scope.account_id') = ?
+                    AND json_extract(context_json, '$.audience.scope.kind') = ?
+                    AND json_extract(context_json, '$.audience.scope.native_scope_id') = ?""",
+                    (notice.message_id, notice.sender_id, notice.installation_id, notice.platform,
+                     notice.bot_id, notice.account_id, notice.kind.value, notice.native_scope_id)):
+                    from companion_v2.execution.models import TaskContext
+                    original = TaskContext.restore(json.loads(row["context_json"]))
+                    if not notice.matches(original.scope):
+                        raise TaskError("recall_route_mismatch", "stored native observation route changed")
+                    withdrawn += self._revoke(source_from_document(json.loads(row["source_json"])))
             if notice.sender_id == notice.account_id:
                 platform_ref = "onebot-message:" + digest([notice.platform, notice.account_id])[:24] + ":" + notice.message_id
                 for row in self.runtime.read_all("""SELECT p.*, b.context_json FROM conversation_parts p

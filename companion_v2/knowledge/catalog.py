@@ -28,6 +28,7 @@ from companion_v2.execution.models import digest, encode, stamp
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 
 from .retrieval import KnowledgeCandidate
+from .member_profiles import member_memories
 
 
 KIND = "knowledge.source.v1"
@@ -193,7 +194,7 @@ class EntryDocument:
 
 
 class MemberEntry:
-    """One member-related entry, kept only as a display attribution clue.
+    """One recorded social profile, without identity or permission authority.
 
     ``declared_account_ids`` are written in the imported file by whoever wrote
     it.  They are operator material, not an authenticated binding, so nothing
@@ -201,10 +202,11 @@ class MemberEntry:
     """
 
     __slots__ = ("entry_id", "name", "aliases", "declared_account_ids", "gender", "content",
-                 "priority", "group_ids")
+                 "priority", "group_ids", "identity_note", "boundary_note", "important_memories")
 
     def __init__(self, entry_id, *, name="", aliases=(), declared_account_ids=(), gender="",
-                 content="", priority=100, group_ids=()):
+                 content="", priority=100, group_ids=(), identity_note="", boundary_note="",
+                 important_memories=()):
         self.entry_id = _text(entry_id, "entry_id", limit=256)
         self.name = (name or "").strip()[:120]
         self.aliases = _strings(aliases, "aliases", limit=120)
@@ -215,12 +217,17 @@ class MemberEntry:
             raise ValueError("priority must be an integer")
         self.priority = priority
         self.group_ids = _strings(group_ids, "group_ids", limit=256)
+        self.identity_note = (identity_note or "").strip()[:20000]
+        self.boundary_note = (boundary_note or "").strip()[:20000]
+        self.important_memories = member_memories(important_memories)
 
     @property
     def document(self) -> dict:
         return {"entry_id": self.entry_id, "name": self.name, "aliases": list(self.aliases),
                 "declared_account_ids": list(self.declared_account_ids), "gender": self.gender,
-                "content": self.content, "priority": self.priority, "group_ids": list(self.group_ids)}
+                "content": self.content, "priority": self.priority, "group_ids": list(self.group_ids),
+                "identity_note": self.identity_note, "boundary_note": self.boundary_note,
+                "important_memories": [item.document for item in self.important_memories]}
 
     @classmethod
     def restore(cls, document) -> "MemberEntry":
@@ -230,7 +237,10 @@ class MemberEntry:
                    aliases=document.get("aliases") or (),
                    declared_account_ids=document.get("declared_account_ids") or (),
                    gender=document.get("gender", ""), content=document.get("content", ""),
-                   priority=document.get("priority", 100), group_ids=document.get("group_ids") or ())
+                   priority=document.get("priority", 100), group_ids=document.get("group_ids") or (),
+                   identity_note=document.get("identity_note", ""),
+                   boundary_note=document.get("boundary_note", ""),
+                   important_memories=document.get("important_memories") or ())
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -392,6 +402,8 @@ class KnowledgeCatalog:
             return False
         if role_id is not None and binding.role_id is not None and binding.role_id != role_id:
             return False
+        if scope_kind is not None and binding.scope_kind is not None and binding.scope_kind is not scope_kind:
+            return False
         if scope_ids and binding.native_scope_ids:
             if binding.scope_kind is not scope_kind:
                 return False
@@ -435,7 +447,9 @@ class KnowledgeCatalog:
             if not version.active or not self._matching(version, role_id=role_id, scope_ids=scope_ids,
                                                          scope_kind=scope_kind, scope=scope):
                 continue
-            entries.extend(version.members)
+            entries.extend(entry for entry in version.members
+                           if not entry.group_ids or not scope_ids
+                           or scope_kind is ScopeKind.GROUP and set(entry.group_ids) & set(scope_ids))
         return tuple(entries)
 
     @staticmethod

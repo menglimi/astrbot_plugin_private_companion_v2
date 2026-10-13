@@ -322,7 +322,7 @@ class RelationshipContextHostTests(HostFixture, unittest.IsolatedAsyncioTestCase
         self.assertEqual([json.loads(m.payload)["interpretation"] for m in original.context.materials
                           if m.owner == "relationship.memory"], [memory.interpretation])
         self.assertEqual(original.role_instruction, "原角色人格提示")
-        self.assertEqual([e.text for e in self.sent], ["第一段\n", "第二段"])
+        self.assertEqual([e.text for e in self.sent], ["第一段", "第二段"])
         self.assertEqual(len(app.messages.history(context).unwrap()["items"]), 2)
 
 

@@ -1,0 +1,136 @@
+"""The single cottage page manages internal services with Dashboard authority."""
+
+import asyncio
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace as NS
+import unittest
+from unittest.mock import AsyncMock
+
+from tests import test_astrbot_staging_host as support
+from astrbot.api.web import PluginRequest, bind_request_context
+from starlette.requests import Request
+from astrbot_host.native_extension_api import PREFIX
+from companion_v2.capabilities import CapabilityRepository
+
+
+class NativeExtensionAPITests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temporary = TemporaryDirectory(prefix="v2-native-api-")
+        self.native = support.WebContext()
+        types = support.NativeAdapterTypes("4.27.2", support.FakeEvent, support.FakeProvider,
+                                          NS, NS, support.FakeReverseApi)
+        self.controller = support.AstrBotStagingController(self.native, support.host_config(),
+            Path(self.temporary.name), native_types=types, now=lambda: support.NOW)
+        self.controller.register_routes()
+        self.routes = {(path, methods[0]): handler for path, handler, methods, _ in self.native.registered_web_apis}
+        (await self.controller.initialize_profile()).unwrap()
+
+    async def asyncTearDown(self):
+        await self.controller.terminate()
+        self.temporary.cleanup()
+
+    async def call(self, path=PREFIX, *, body=None, username="admin", query=""):
+        method = "GET" if body is None else "POST"
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else b""
+        async def receive():
+            return {"type": "http.request", "body": payload, "more_body": False}
+        req = Request({"type": "http", "method": method, "path": path,
+                       "headers": [], "query_string": query.encode()}, receive=receive)
+        with bind_request_context(PluginRequest(req, username=username)):
+            return await self.routes[(path, method)]()
+
+    async def enable(self, name):
+        (await self.controller.start()).unwrap()
+        registry = self.controller.native_extensions
+        package = registry._lease(name).manifest.package
+        CapabilityRepository(self.controller.runtime).acquire(extension_id=name,
+            package_id=package.package_id, package_version=package.package_version,
+            expected_revision=0, observed_at=support.NOW).unwrap()
+        await registry.reconcile_service(name)
+        await registry._lease(name).start()
+        return registry.service(name)
+
+    async def test_status_reads_offline_metadata_and_only_dashboard_can_save(self):
+        reality = self.controller.native_extensions.service('reality')
+        reality._reality_touch_query_audio_devices = lambda: self.fail('status must not scan devices')
+        result = await self.call()
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(set(result["data"]["extensions"]), {"reality", "together", "game", "live"})
+        self.assertIn("management", result["data"]["extensions"]["reality"])
+        live = result["data"]["extensions"]["live"]
+        self.assertFalse(live["management"]["connected"])
+        for username in (None, "", "api_key:synthetic"):
+            denied = await self.call(PREFIX + "/configure", body={"extension_id": "live",
+                "updates": {"vts_port": 8002}, "revision": live["revision"]}, username=username)
+            self.assertEqual(denied["data"]["code"], "dashboard_identity_required")
+        saved = await self.call(PREFIX + "/configure", body={"extension_id": "live",
+            "updates": {"vts_port": 8002}, "revision": live["revision"]})
+        self.assertEqual(saved["status"], "ok", saved)
+        self.assertEqual(saved["data"]["runtime"]["state"], "inactive")
+
+    async def test_device_action_rejects_inactive_service(self):
+        result = await self.call(PREFIX + "/action", body={"extension_id": "live",
+            "action": "request_auth", "payload": {}})
+        self.assertEqual(result["data"]["code"], "native_service_not_running")
+
+    async def test_vts_authorization_and_hotkeys_use_internal_service_without_holding_reply_lock(self):
+        service = await self.enable("live")
+        async def request_token():
+            self.assertFalse(self.controller._control_lock.locked())
+            return "synthetic-private-token"
+        service.vts.request_auth_token = request_token
+        service.vts.authenticate = AsyncMock(return_value=True)
+        service.vts.get_hotkeys = AsyncMock(return_value=[{"hotkeyID": "key-1", "name": "开心"}])
+        authorized = await self.call(PREFIX + "/action", body={"extension_id": "live",
+            "action": "request_auth", "payload": {}})
+        self.assertEqual(authorized["status"], "ok", authorized)
+        self.assertNotIn("synthetic-private-token", json.dumps(authorized))
+        self.assertEqual(await service._load_token(), "synthetic-private-token")
+        keys = await self.call(PREFIX + "/action", body={"extension_id": "live",
+            "action": "list_hotkeys", "payload": {}})
+        self.assertEqual(keys["data"]["management"]["hotkeys"][0]["name"], "开心")
+
+    async def test_camera_confirmation_persists_for_only_the_selected_eligible_user(self):
+        service = await self.enable("reality")
+        service.authorized_user_ids.add("200")
+        for user_id, confirmed in (("200", True), ("200", False)):
+            result = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+                "action": "consent_camera", "payload": {"user_id": user_id, "confirmed": confirmed}})
+            self.assertEqual(result["status"], "ok", result)
+            self.assertEqual(service._reality_touch_camera_consented(service._user(user_id)), confirmed)
+        refused = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+            "action": "consent_camera", "payload": {"user_id": "999", "confirmed": True}})
+        self.assertEqual(refused["status"], "error")
+        self.assertIsNone(service._user("999", create=False))
+
+    async def test_shutdown_removes_new_routes_and_retained_handlers_reject_requests(self):
+        await self.controller.terminate()
+        self.assertEqual(self.native.registered_web_apis, [])
+        self.assertEqual((await self.call())["data"]["code"], "staging_host_terminated")
+
+    async def test_audio_playback_reports_failure_and_device_io_releases_reply_lock(self):
+        service = await self.enable("reality")
+
+        async def play(volume):
+            self.assertFalse(self.controller._control_lock.locked())
+            return volume == 25
+
+        service._play_reality_touch_test_audio = play
+        for volume, status in ((24, "error"), (25, "ok")):
+            result = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+                "action": "test_audio", "payload": {"playback_volume": volume}})
+            self.assertEqual(result["status"], status, result)
+            if status == "error":
+                self.assertEqual(result["data"]["code"], "native_reality_playback_failed")
+            else:
+                self.assertTrue(result["data"]["result"]["played"])
+
+    async def test_failed_reminder_cancel_does_not_report_completion(self):
+        service = await self.enable("reality")
+        service._cancel_reality_touch_official_reminder = AsyncMock(return_value=False)
+        result = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+            "action": "cancel_reminder", "payload": {"user_id": "200", "reminder_id": "missing"}})
+        self.assertEqual(result["status"], "error", result)
+        self.assertEqual(result["data"]["code"], "native_reality_reminder_not_cancelled")

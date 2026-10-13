@@ -572,6 +572,16 @@ select:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in s
 .member-section-heading h4 { margin: 0; font-size: 13px; }
 .member-section-heading small { color: var(--quiet); font-size: 11px; overflow-wrap: anywhere; }
 .member-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px 18px; }
+.member-reply-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; }
+.member-reply-field { min-width: 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+.member-reply-field[data-explicit="true"] { border-left: 3px solid var(--teal); }
+.member-reply-field .member-field { gap: 6px; }
+.member-reply-field .member-field:has(textarea) { grid-column: 1 / -1; }
+.member-reply-source { justify-self: end; color: var(--quiet); font-size: 10px; }
+.member-reply-field[data-explicit="true"] .member-reply-source { color: var(--teal); }
+.member-reply-reset { display: block; min-height: 30px; margin: 6px 0 0 auto; padding: 4px 9px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.member-reply-reset:hover:not(:disabled) { border-color: var(--teal); color: var(--teal); }
+.member-reply-reset:disabled { opacity: .55; cursor: default; }
 .member-field { min-width: 0; display: grid; gap: 6px; align-content: start; color: var(--muted); font-size: 12px; }
 .member-field:has(textarea) { grid-column: 1 / -1; }
 .member-field-caption { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -701,6 +711,7 @@ select:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in s
   .member-view-stat { padding: 7px 8px; }
   .member-view-stat b { font-size: 12.5px; }
   .member-fields { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .member-reply-fields { grid-template-columns: minmax(0, 1fr); gap: 9px; }
   .member-tier-cards { grid-template-columns: minmax(0, 1fr); }
   .member-tier-actions { flex-wrap: wrap; }
   .member-hero-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -887,9 +898,26 @@ select:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in s
 .member-dialog .member-field-caption { flex: 1; color: var(--ink); }
 .member-dialog .member-field input { width: min(140px, 42%); min-height: 38px; padding: 7px 10px; background: var(--surface); }
 .member-dialog .member-switch-row { color: var(--ink); }
+.member-reset-field { justify-self: end; min-height: 30px; padding: 4px 9px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.member-reset-field:hover:not(:disabled) { border-color: var(--teal); color: var(--teal); }
+.member-reset-field:disabled { opacity: .55; cursor: default; }
+.member-reset-placeholder { display: none; }
+.member-override-state { justify-self: end; color: var(--quiet); font-size: 10px; }
+.member-dialog .member-override-state { margin-top: -4px; }
 .member-dialog-foot { flex: none; padding: 12px 22px 18px; border-top: 1px solid var(--line); background: var(--surface-soft); }
 .member-dialog-foot .member-savebar { padding: 0; border: 0; border-radius: 0; background: transparent; }
 .member-dialog .member-primary { border-color: var(--t-accent-solid, var(--blue)); background: var(--t-accent-solid, var(--blue)); color: var(--t-on-solid, #fff); }
+.member-schedule-diagnostic { min-width: 0; padding: 13px 15px; border: 1px solid var(--line-strong); border-left: 4px solid var(--coral); border-radius: 8px; background: var(--surface); }
+.member-schedule-diagnostic[data-outcome="queued"], .member-schedule-diagnostic[data-outcome="candidate"] { border-left-color: var(--teal); }
+.member-schedule-diagnostic[data-outcome="failed"] { border-left-color: var(--danger); }
+.member-schedule-diagnostic h4 { margin: 0 0 9px; font-size: 13px; }
+.member-schedule-facts { display: grid; gap: 5px; margin: 0; }
+.member-schedule-facts > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; line-height: 1.55; }
+.member-schedule-facts dt, .member-schedule-code { color: var(--quiet); }
+.member-schedule-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.member-schedule-issue { margin: 10px 0 0; font-weight: 700; }
+.member-schedule-next, .member-schedule-empty { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.member-schedule-code { display: inline-block; margin-top: 8px; font-size: 10px; overflow-wrap: anywhere; }
 @media (max-width: 880px) {
   .scope-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .network-group-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -922,4 +950,5 @@ select:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in s
   .member-dialog-foot { padding: 10px 16px max(14px, env(safe-area-inset-bottom)); }
   .member-dialog .member-savebar { flex-wrap: wrap; }
   .member-dialog .member-draft-state { flex-basis: 100%; }
+  .member-schedule-facts > div { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }

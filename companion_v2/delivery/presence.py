@@ -54,6 +54,13 @@ class PresenceCoordinator:
 
     def active_turn(self, context):
         """Presentation follows this recipient's turn, not the role's shared body."""
+        from companion_v2.conversation.native_turns import latest_scope
+        native = latest_scope(self.runtime, context.scope)
+        if native is not None:
+            if native["context_key"] == context.key and native["generation_state"] in ("prepared", "running"):
+                return {"batch_id": native["turn_id"], "state": native["generation_state"],
+                        "execution_path": "astrbot_core"}
+            return None
         return self.runtime.read_one("""SELECT f.batch_id, f.state FROM conversation_flows f
             JOIN conversation_batches b USING(batch_id)
             WHERE b.origin_key = ? AND f.state IN ('collecting','generating','delivering')
@@ -92,12 +99,18 @@ class PresenceCoordinator:
         rows = self.runtime.read_all("""SELECT b.context_json, f.batch_id, f.sequence FROM conversation_flows f
             JOIN conversation_batches b USING(batch_id)
             WHERE f.state IN ('collecting','generating','delivering') ORDER BY f.sequence LIMIT 64""", ())
+        from companion_v2.conversation.native_turns import context_rows
+        native = context_rows(self.runtime, kind="private")
+        rows = (*rows, *({"context_json": row["context_json"], "batch_id": row["turn_id"]}
+                        for row in native if row["generation_state"] in ("prepared", "running")))
         active = {}
         for row in rows:
             context = TaskContext.restore(json.loads(row["context_json"]))
             self.bind(context)
             try:
                 self._allowed(context, "typing_enabled", "platform.typing")
+                if self.active_turn(context) is None:
+                    continue
             except TaskError:
                 continue
             route = self.route(context)

@@ -120,10 +120,22 @@ def confirm_delivery(connection, *, batch_id, owner_key, scope_key, delivered_at
     )
     if valid_candidate:
         identifiers = tuple(candidate["signal_ids"])
-        rotation_record(connection, owner_key, scope_key, identifiers, delivered_at)
-        _write(connection, key, {"batch_id": batch_id, "owner_key": owner_key,
-            "scope_key": scope_key, "signal_ids": list(identifiers),
-            "delivered_at": stamp(delivered_at), "seen_after": 0})
+        by_source_scope = {}
+        for signal_id in identifiers:
+            signal = connection.execute("""SELECT scope_key FROM expression_style_signals
+                WHERE signal_id = ? AND owner_key = ? AND state = 'adopted'""",
+                (signal_id, owner_key)).fetchone()
+            if signal is not None:
+                by_source_scope.setdefault(signal["scope_key"], []).append(signal_id)
+        for source_scope, source_ids in by_source_scope.items():
+            rotation_record(connection, owner_key, source_scope, tuple(source_ids), delivered_at)
+        local_identifiers = by_source_scope.get(scope_key, ())
+        if local_identifiers:
+            _write(connection, key, {"batch_id": batch_id, "owner_key": owner_key,
+                "scope_key": scope_key, "signal_ids": list(local_identifiers),
+                "delivered_at": stamp(delivered_at), "seen_after": 0})
+        else:
+            connection.execute("DELETE FROM runtime_metadata WHERE key = ?", (key,))
     else:
         connection.execute("DELETE FROM runtime_metadata WHERE key = ?", (key,))
     connection.execute("DELETE FROM runtime_metadata WHERE key = ?", (injection_key(batch_id),))

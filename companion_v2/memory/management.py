@@ -6,6 +6,7 @@ import json
 from companion_v2.execution.models import TaskError, digest, encode, require, stamp
 from companion_v2.execution.service import outcome
 from companion_v2.configuration.contract import contract_of, layers_of, provenance_of
+from companion_v2.configuration.models import ConfigLayer
 from companion_v2.foundation.refs import OperationRef, SourceRef, VersionRef
 from companion_v2.sources.models import SourceRecord
 from companion_v2.sources.privacy import redact_text, redact_fields
@@ -13,7 +14,7 @@ from companion_v2.sources.privacy import redact_text, redact_fields
 from . import codec
 from .models import AtomRef, Evidence, owner_key, text
 from .writer import MemoryWriter
-from .configuration import GROUP, target_for, validate_schedule
+from .configuration import GROUP, role_target_for, target_for, validate_schedule
 
 
 class MemoryManagement:
@@ -25,13 +26,22 @@ class MemoryManagement:
     def token(self, context, reference):
         return digest([context.key, self.operator, reference, self.writer.access.access.revision])
 
+    @staticmethod
+    def _settings_target(context, layer):
+        if layer == ConfigLayer.ROLE.value:
+            return role_target_for(context)
+        if layer == ConfigLayer.WINDOW.value:
+            return target_for(context)
+        raise TaskError("memory_configuration_scope_invalid", "choose role defaults or this private window")
+
     @outcome
-    def settings(self, context):
-        self.writer.access.check(context)
+    def settings(self, context, *, layer=ConfigLayer.ROLE.value):
+        target = self._settings_target(context, layer)
+        if target.layer is ConfigLayer.WINDOW:
+            self.writer.access.check(context)
         if self.memory.settings is None:
             raise TaskError("memory_configuration_unavailable", "memory configuration was not registered by this host")
         configuration = self.memory.settings.configuration
-        target = target_for(context)
         snapshot = require(configuration.read(self.operator, target=target, group_id=GROUP, observed_at=self.writer.tasks.now()))
         # ``layers``/``provenance``/``fields`` are the same read contract every other
         # config section publishes, so the shared workbench can draw its layer rail
@@ -50,18 +60,20 @@ class MemoryManagement:
                 "layers": layers_of(target),
                 "provenance": provenance_of(snapshot, GROUP),
                 "fields": contract_of(configuration.registry, GROUP),
-                "scope": "window",
+                "scope": target.layer.value,
                 "application": "read_on_use", "reflection": "scheduled_after_authenticated_conversation"}
 
     @outcome
-    def patch_settings(self, context, *, operation_key, expected_edit_token, changes, reset_to_inherit=()):
-        self.writer.access.check(context)
+    def patch_settings(self, context, *, operation_key, expected_edit_token, changes,
+                       reset_to_inherit=(), layer=ConfigLayer.ROLE.value):
+        target = self._settings_target(context, layer)
+        if target.layer is ConfigLayer.WINDOW:
+            self.writer.access.check(context)
         text(operation_key, "operation_key", 512)
         if type(changes) is not dict or not isinstance(reset_to_inherit, (tuple, list)):
             raise ValueError("settings require explicit changes and inherited-field resets")
-        require(self.settings(context))
+        require(self.settings(context, layer=layer))
         configuration = self.memory.settings.configuration
-        target = target_for(context)
         identifier = "memory-config-" + digest([target.key, self.operator.subject, operation_key])
         operation = OperationRef(identifier, "configuration", target.authorization_scope, VersionRef(identifier, 1), identifier)
         # ``changes``/``reset_to_inherit`` stay fully qualified here, matching the
@@ -97,6 +109,43 @@ class MemoryManagement:
         return {"items": items[:limit], "next_cursor": items[limit - 1]["atom_id"] if len(items) > limit else None,
             "operator_id": self.operator.subject.subject_id, "subject_id": context.actor.subject.subject_id,
             "supported_visibility": ["private"], "physical_erasure": "not_supported"}
+
+    @outcome
+    def overview(self, context):
+        """Return counts for this authorized relationship without exposing memory text."""
+        self.writer.access.check(context)
+        owner = owner_key(context)
+        facts = {row["state"]: row["count"] for row in self.writer.runtime.read_all(
+            "SELECT state, COUNT(*) AS count FROM memory_atoms WHERE owner_key = ? GROUP BY state", (owner,))}
+        experiences = {row["state"]: row["count"] for row in self.writer.runtime.read_all(
+            "SELECT state, COUNT(*) AS count FROM memory_views WHERE owner_key = ? AND kind = 'experience' GROUP BY state",
+            (owner,))}
+        reflections = {row["state"]: row["count"] for row in self.writer.runtime.read_all(
+            """SELECT state, COUNT(*) AS count FROM memory_reflections WHERE owner_key = ?
+                AND json_remove(context_json, '$.actor.policy_revision') = json_remove(?, '$.actor.policy_revision')
+                GROUP BY state""", (owner, encode(context)))}
+        scope = context.scope
+        sources = self.writer.runtime.read_one(
+            """SELECT COUNT(*) AS count FROM sources s
+                WHERE s.owner = 'conversation.host_input' AND s.state = 'active'
+                AND (s.expires_at IS NULL OR s.expires_at > ?)
+                AND s.installation_id = ? AND s.platform = ? AND s.scope_kind = ? AND s.native_scope_id = ?
+                AND s.bot_id IS ? AND s.account_id IS ? AND s.conversation_id IS ? AND s.session_id IS ?
+                AND EXISTS (SELECT 1 FROM json_each(s.recipients_json) recipient
+                    WHERE json_extract(recipient.value, '$.kind') = ?
+                    AND json_extract(recipient.value, '$.subject_id') = ?)""",
+            (stamp(self.writer.tasks.now()), scope.installation_id, scope.platform, scope.kind.value,
+             scope.native_scope_id, scope.bot_id, scope.account_id, scope.conversation_id, scope.session_id,
+             context.actor.subject.kind.value, context.actor.subject.subject_id))
+        return {
+            "facts": {"total": sum(facts.values()), "active": facts.get("active", 0),
+                      "archived": facts.get("archived", 0), "by_state": facts, "other": sum(
+                          count for state, count in facts.items() if state not in {"active", "archived"})},
+            "experiences": {"total": sum(experiences.values()), "active": experiences.get("active", 0),
+                            "by_state": experiences},
+            "sources": {"available_messages": sources["count"]},
+            "reflections": {"total": sum(reflections.values()), "by_state": reflections},
+        }
 
     def _clear_token(self, context, rows):
         return digest([

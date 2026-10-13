@@ -237,12 +237,14 @@ class NativeContentFlowTests(NativeContentFixture, HostFixture, unittest.Isolate
         self.assertEqual(len(events), 1)
         self.assertFalse(app.messages.history(context).unwrap()["items"][0]["body_available"])
 
-    async def test_instance_replacement_and_missing_owner_guard_never_expose_saved_body(self):
+    async def test_closed_internal_lease_and_missing_owner_guard_never_expose_saved_body(self):
         host, _, _ = await self.create_and_read()
         reference = self.result_reference()
-        self.content_star.star_cls = replace_namespace(self.content_star.star_cls)
+        await self.content_lease.aclose()
+        self.assertIsNone(self.native_registry.current_declaration(
+            "native:astrbot_plugin_private_companion_v2.content:content.work.read"))
         self.assertFalse(host.application.messages.sources.validate_reference(reference, observed_at=NOW).is_success)
-        self.native_registry.close()
+        await self.native_registry.aclose()
         self.assertEqual(SourceRepository(self.open_runtime()).validate_reference(reference, observed_at=NOW).failure.code,
                          "source_owner_unavailable")
 
@@ -331,11 +333,6 @@ class NativeContentFlowTests(NativeContentFixture, HostFixture, unittest.Isolate
         self.assertEqual(restored.read_one("SELECT state FROM sources WHERE source_id=?", (reference.source_id,))[0], "revoked")
         self.assertEqual(self.native_registry.content.sources.synchronize(), 0)
         self.assertEqual(len(restored.read_all("SELECT * FROM inbox WHERE consumer LIKE 'content.governance:%'", ())), 1)
-
-
-def replace_namespace(value):
-    from types import SimpleNamespace
-    return SimpleNamespace(**vars(value))
 
 
 class NativeContentContinuationTests(NativeContentFixture, HostFixture, unittest.IsolatedAsyncioTestCase):

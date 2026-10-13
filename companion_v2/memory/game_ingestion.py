@@ -5,6 +5,7 @@ import json
 from companion_v2.execution.models import TaskError, digest, encode, require
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import ScopeKind
+from companion_v2.conversation.native_tool_results import operation_rows
 
 from .models import Evidence, owner_key
 
@@ -125,41 +126,44 @@ class MemoryGameIngestion:
         with self.runtime.transaction() as connection:
             self._active()
             self.memory.writer.access.check(context, "memory.propose")
-            key = CURSOR_PREFIX + context.key
-            saved = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (key,)).fetchone()
-            cursor = json.loads(saved["value"]) if saved else 0
-            if type(cursor) is not int or cursor < 0:
-                raise TaskError("memory_game_cursor_invalid", "game receipt cursor is invalid")
             actions = tuple(GAME_ACTIONS)
             placeholders = ", ".join("?" for _ in actions)
-            rows = connection.execute(f"""SELECT i.rowid AS scan_id, i.invocation_id, i.state
-                FROM extension_tool_invocations i JOIN conversation_batches b ON b.batch_id = i.batch_id
-                WHERE i.rowid > ? AND i.action IN ({placeholders}) AND b.origin_key = ?
-                ORDER BY i.rowid LIMIT ?""", (cursor, *actions, context.key, self.page_size + 1)).fetchall()
             report = {"state": "ready", "examined": 0, "saved": 0, "skipped": 0,
-                      "more": len(rows) > self.page_size, "blocked": []}
-            for row in rows[:self.page_size]:
-                report["examined"] += 1
-                if row["state"] in {"queued", "running"}:
-                    report["state"], report["more"] = "blocked", True
-                    report["blocked"].append({"invocation_id": row["invocation_id"], "code": "external_task_unresolved"})
-                    break
-                if row["state"] == "succeeded":
-                    result = self.record(context, row["invocation_id"])
-                    if result.is_success:
-                        report["saved" if result.unwrap()["view_id"] else "skipped"] += 1
-                    elif result.failure.code in TERMINAL_UNAVAILABLE:
-                        report["skipped"] += 1
-                    else:
+                      "more": False, "blocked": []}
+            for native in (False, True):
+                key = CURSOR_PREFIX + ("native:" if native else "") + context.key
+                saved = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (key,)).fetchone()
+                cursor = json.loads(saved["value"]) if saved else 0
+                if type(cursor) is not int or cursor < 0:
+                    raise TaskError("memory_game_cursor_invalid", "game receipt cursor is invalid")
+                rows = operation_rows(self.runtime, context, actions, after=cursor, limit=self.page_size + 1) if native else (
+                    connection.execute(f"""SELECT i.rowid AS scan_id, i.invocation_id, i.state
+                        FROM extension_tool_invocations i JOIN conversation_batches b ON b.batch_id = i.batch_id
+                        WHERE i.rowid > ? AND i.action IN ({placeholders}) AND b.origin_key = ?
+                        ORDER BY i.rowid LIMIT ?""", (cursor, *actions, context.key, self.page_size + 1)).fetchall())
+                report["more"] = report["more"] or len(rows) > self.page_size
+                for row in rows[:self.page_size]:
+                    report["examined"] += 1
+                    if row["state"] in {"queued", "running"}:
                         report["state"], report["more"] = "blocked", True
-                        report["blocked"].append({"invocation_id": row["invocation_id"],
-                                                  "code": result.failure.code})
+                        report["blocked"].append({"invocation_id": row["invocation_id"], "code": "external_task_unresolved"})
                         break
-                else:
-                    report["skipped"] += 1
-                cursor = row["scan_id"]
-            connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value""", (key, encode(cursor)))
+                    if row["state"] == "succeeded":
+                        result = self.record(context, row["invocation_id"])
+                        if result.is_success:
+                            report["saved" if result.unwrap()["view_id"] else "skipped"] += 1
+                        elif result.failure.code in TERMINAL_UNAVAILABLE:
+                            report["skipped"] += 1
+                        else:
+                            report["state"], report["more"] = "blocked", True
+                            report["blocked"].append({"invocation_id": row["invocation_id"],
+                                                      "code": result.failure.code})
+                            break
+                    else:
+                        report["skipped"] += 1
+                    cursor = row["scan_id"]
+                connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value""", (key, encode(cursor)))
             return report
 
     @outcome

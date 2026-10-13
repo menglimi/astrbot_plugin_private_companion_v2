@@ -64,6 +64,13 @@ def migrate_single_target_config(config: object) -> tuple[dict, bool]:
     if legacy.get("enabled") is not False:
         legacy["enabled"] = False
         changed = True
+
+    for rows, template_key in ((targets, "private_target"), (personas, "persona_mapping"),
+                               (groups, "group_target")):
+        for row in rows:
+            if type(row) is dict and "__template_key" not in row:
+                row["__template_key"] = template_key
+                changed = True
     return candidate, changed
 
 
@@ -105,7 +112,8 @@ def recover_repeated_single_target(config: object, pinned_binding: object) -> tu
     shared["targets"] = [row for row in targets if row is not extra]
     try:
         if MultiHostSettings.parse(candidate).binding_contract == pinned_binding:
-            return candidate, True
+            normalized, _ = migrate_single_target_config(candidate)
+            return normalized, True
     except (HostControlError, ValueError, TypeError):
         pass
     return deepcopy(dict(config)), False

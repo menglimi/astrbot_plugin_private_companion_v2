@@ -39,7 +39,7 @@ class RoleGrowthToolsHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         records = app.role_growth.for_role(app.role_growth_context.reader.owner(context))
         self.assertEqual(len(records), 1)
         self.assertEqual((records[0].revision, records[0].state.value, records[0].confirmed_by), (2, "proposed", None))
-        self.assertEqual([e.text for e in self.sent], ["已整理好提案。\n", "等你确认后再继续。"])
+        self.assertEqual([e.text for e in self.sent], ["已整理好提案。", "等你确认后再继续。"])
         self.assertEqual(len(app.messages.history(context).unwrap()["items"]), 2)
 
     async def test_confirmed_reply_source_retains_growth_evidence_dependency(self):

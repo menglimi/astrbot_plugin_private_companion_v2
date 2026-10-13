@@ -99,7 +99,7 @@ class ReplyWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["apply_mode"], "next_sealed_reply")
         self.assertEqual(status["settings"]["rotation_decay_hours"], 336)
         self.assertFalse(status["settings"]["group_learning_enabled"])
-        self.assertEqual(status["settings"]["rules_per_turn"], 8)
+        self.assertEqual(status["settings"]["rules_per_turn"], 2)
         command = {"operation_key": "learn-bounds", "edit_token": status["edit_token"],
                    "changes": {"group_learning_enabled": True, "rotation_decay_hours": 48,
                                "sample_limit": 32, "min_samples": 6}}

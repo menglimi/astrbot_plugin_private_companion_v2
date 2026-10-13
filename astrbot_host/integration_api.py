@@ -126,15 +126,9 @@ class IntegrationWebAPI:
                 )
 
                 if action in ("assemble", "update"):
-                    packages = {}
-                    for declaration in registry.declarations():
-                        package = declaration.descriptor.package
-                        if (package.extension_id == extension_id
-                                and registry.current_declaration(declaration.host_tool_id) == declaration):
-                            packages[(package.package_id, package.package_version, package.artifact_hash)] = package
-                    if len(packages) != 1:
+                    package = registry.current_package(extension_id)
+                    if package is None:
                         raise TaskError("integration_extension_unavailable", "the bundled extension package is not ready")
-                    package = next(iter(packages.values()))
                     policy = ObjectAccessPolicy(runtime)
                     require(policy.feature_access(
                         operator, scope=scope,
@@ -157,8 +151,10 @@ class IntegrationWebAPI:
                         expected_revision=revision, operation=operation, observed_at=observed_at)
 
                 receipt = require(result)
+                await registry.reconcile_service(extension_id)
                 installation = require(CapabilityRepository(runtime).installation(extension_id=extension_id))
-                return outcome_response(Outcome.success({"receipt": receipt, "installation": installation}))
+                return outcome_response(Outcome.success({"receipt": receipt, "installation": installation,
+                    "runtime": registry.status(extension_id)}))
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):

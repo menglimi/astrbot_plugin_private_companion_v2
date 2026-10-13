@@ -374,7 +374,7 @@ class ActivityMemoryConversationTests(HostFixture, unittest.IsolatedAsyncioTestC
             state=State.COMPLETED, operation_id="driver-complete", observed_at=app.now())
         calls, sends = len(self.called), len(self.sent)
         self.advance(app, 31)
-        await self.until(lambda: app.runtime.read_one("SELECT 1 FROM memory_views", ()) is not None)
+        await self.until(lambda: bool(app.memory.experiences.list(context).unwrap()["items"]))
         view = app.memory.experiences.list(context).unwrap()["items"][0]
         self.assertEqual((len(self.called), len(self.sent)), (calls, sends))
         await app.close()

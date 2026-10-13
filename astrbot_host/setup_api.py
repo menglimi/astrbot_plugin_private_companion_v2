@@ -55,6 +55,7 @@ PROACTIVE_TEST_SUGGESTIONS = {
     "persona_review_denied": "检查 proactive.judge 的 Provider、角色设定和拒绝理由；调整后重新验收，不能绕过人格复核。",
     "delivery_result_unknown": "投递结果未知；核对核心管理员私聊与平台消息记录。确认是否收到前不要重试本次测试。",
     "delivery_failed": "检查 OneBot 私聊连接、机器人在线状态和平台返回错误；确认没有收到后，再用新的验收尝试重测。",
+    "setup_core_window_ambiguous": "检查已配置私聊目标的核心用户身份；主动测试只会发送到唯一且当前有效的核心管理员私聊窗口。",
 }
 
 PROACTIVE_TEST_FAILURE_LABELS = {
@@ -84,7 +85,7 @@ PROACTIVE_TEST_FAILURE_LABELS = {
 
 PROACTIVE_TEST_STAGE_SUGGESTIONS = {
     "authorization": "使用已登录的 Dashboard 管理员身份，并确认当前账号仍有插件管理权限。",
-    "binding": "重新确认核心管理员的私聊窗口、机器人账号和当前角色绑定。",
+    "binding": "确认首次绑定，或确保共享配置中只有一个精确私聊目标对应当前核心管理员身份。",
     "runtime": "在宿主管理页检查 V2 运行实例、角色载入和路由注册状态。",
     "settings": "检查主动联系总开关、目的开关及角色/关系/窗口各层的有效配置。",
     "purpose": "检查该用途是否启用、暂停时间是否结束，以及当前权限是否覆盖该私聊。",
@@ -110,6 +111,7 @@ PROACTIVE_TEST_STAGE_BY_CODE = {
     "dashboard_identity_required": "authorization",
     "setup_binding_confirmation_required": "binding",
     "setup_core_window_not_configured": "binding",
+    "setup_core_window_ambiguous": "binding",
     "setup_private_window_required": "binding",
     "staging_not_initialized": "runtime",
     "proactive_diagnostic_unavailable": "runtime",
@@ -490,54 +492,96 @@ class SetupWebAPI:
             return self._error("setup_request_invalid", "finish or skip the current setup section")
 
     async def _test_context(self):
+        session, context, instruction = await self._setup_context()
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            raise TaskError("setup_private_window_required", "the active test requires the confirmed private window")
+        return session, context, instruction
+
+    async def _setup_context_with_target(self):
         binding = self._binding()
         if not binding.get("bound") or binding.get("pending"):
+            code = binding.get("error") if type(binding.get("error")) is str else None
+            if code == "setup_core_window_ambiguous":
+                raise TaskError(code, "more than one configured private target belongs to a core administrator")
             raise TaskError("setup_binding_confirmation_required", "confirm the core administrator private window first")
         session = self.controller.session or self.controller.last_session
         if session is None:
             raise TaskError("staging_not_initialized", "initialize the selected V2 role first")
         if getattr(self.controller, "_multi_host", False):
-            targets = getattr(getattr(self.controller, "settings", None), "targets", ())
-            target = next((item for item in targets if
-                (item.platform_id, item.account_id, item.participant_id) ==
-                (binding.get("platform_id"), binding.get("account_id"), binding.get("participant_id"))), None)
+            parked = self.controller._parked_binding()
+            if parked is not None:
+                target = self.controller._core_target(parked)
+            elif binding.get("recovered"):
+                resolver = getattr(self.controller, "proactive_diagnostic_target", None)
+                target = await resolver() if callable(resolver) else None
+            else:
+                target = None
             if target is None:
                 raise TaskError("setup_core_window_not_configured",
-                                "add this private window to the shared host before testing active delivery")
+                                "add the confirmed administrator private window to the shared host first")
+            if (target.platform_id, target.account_id, target.participant_id) != (
+                    binding.get("platform_id"), binding.get("account_id"), binding.get("participant_id")):
+                raise TaskError("setup_binding_confirmation_required", "the confirmed administrator private window changed")
             context, instruction = await session.synchronize(target)
+            current = self._binding()
+            if (not current.get("bound") or current.get("pending")
+                    or (target.platform_id, target.account_id, target.participant_id) != (
+                        current.get("platform_id"), current.get("account_id"), current.get("participant_id"))):
+                raise TaskError("setup_binding_confirmation_required", "the administrator private window changed during setup")
+            if current.get("role_id") and context.role_binding.role.subject_id != current["role_id"]:
+                raise TaskError("host_persona_binding_changed", "the administrator role changed; confirm the window again")
+            return session, context, instruction, target
         else:
             context = session.profile.target
             instruction = await session.bridge.verify_role(context.scope, context.role_binding)
-        if context.scope.kind is not ScopeKind.PRIVATE:
-            raise TaskError("setup_private_window_required", "the active test requires the confirmed private window")
-        return session, context, instruction
+            return session, context, instruction, None
 
     async def _setup_context(self):
+        session, context, instruction, _target = await self._setup_context_with_target()
+        return session, context, instruction
+
+    async def _proactive_diagnostic_target(self):
         binding = self._binding()
+        if binding.get("bound") and not binding.get("pending"):
+            return None
+        if binding.get("pending"):
+            raise TaskError("setup_binding_confirmation_required",
+                            "finish confirming the pending core administrator window first")
+        resolver = getattr(self.controller, "proactive_diagnostic_target", None)
+        if not getattr(self.controller, "_multi_host", False) or not callable(resolver):
+            raise TaskError("setup_binding_confirmation_required",
+                            "confirm the core administrator private window first")
+        return await resolver()
+
+    async def _proactive_diagnostic_context(self, fallback_target=None):
+        if fallback_target is None:
+            return await self._setup_context()
         session = self.controller.session or self.controller.last_session
         if session is None:
             raise TaskError("staging_not_initialized", "initialize the selected V2 role first")
-        if getattr(self.controller, "_multi_host", False):
-            target = self.controller._core_target(self.controller._parked_binding())
-            if target is None:
-                raise TaskError("setup_core_window_not_configured", "add the administrator private window to the shared host first")
-            context, instruction = await session.synchronize(target)
-            if binding.get("role_id") and context.role_binding.role.subject_id != binding["role_id"]:
-                raise TaskError("host_persona_binding_changed", "the administrator role changed; confirm the window again")
-            return session, context, instruction
-        context = session.profile.target
-        instruction = await session.bridge.verify_role(context.scope, context.role_binding)
+        context, instruction = await session.synchronize(fallback_target)
+        binding = self._binding()
+        if (not binding.get("bound") or binding.get("pending")
+                or (binding.get("platform_id"), binding.get("account_id"), binding.get("participant_id")) !=
+                (fallback_target.platform_id, fallback_target.account_id, fallback_target.participant_id)):
+            raise TaskError("setup_binding_confirmation_required",
+                            "the core administrator binding changed during the diagnostic")
+        if binding.get("role_id") and context.role_binding.role.subject_id != binding["role_id"]:
+            raise TaskError("host_persona_binding_changed", "the administrator role changed during the diagnostic")
+        resolver = getattr(self.controller, "proactive_diagnostic_target", None)
+        if not callable(resolver) or await resolver() != fallback_target:
+            raise TaskError("setup_binding_confirmation_required",
+                            "the core administrator private target changed during the diagnostic")
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            raise TaskError("setup_private_window_required", "the core administrator target must be private")
         return session, context, instruction
 
     async def _role_view(self):
-        binding = self._binding()
         if not getattr(self.controller, "_multi_host", False):
             return self.controller
-        target = self.controller._core_target(self.controller._parked_binding())
-        if target is None or not binding.get("role_id"):
-            raise TaskError("setup_core_window_not_configured", "confirm and configure the administrator private window first")
+        _session, context, _instruction, target = await self._setup_context_with_target()
         from .multi_api import TargetControllerView
-        return TargetControllerView(self.controller, target.target_id, binding["role_id"])
+        return TargetControllerView(self.controller, target.target_id, context.role_binding.role.subject_id)
 
     @staticmethod
     def _operator(controller, username):
@@ -549,7 +593,7 @@ class SetupWebAPI:
             _session, context, _instruction = await self._setup_context()
             from companion_v2.model_gateway.management import ModelManagement
             manager = ModelManagement(_session.application, context)
-            result = require(manager.status(self._operator(self.controller, username)))
+            result = require(manager.status(self._operator(self.controller, username), layer="role"))
             names = {item["id"]: item["name"] for item in self._model_providers()}
             for provider in result["providers"]:
                 provider["name"] = names.get(provider["id"], provider["id"])
@@ -566,7 +610,7 @@ class SetupWebAPI:
             _session, context, _instruction = await self._setup_context()
             from companion_v2.model_gateway.management import ModelManagement
             manager = ModelManagement(_session.application, context)
-            saved = require(manager.configure(self._operator(self.controller, username), data))
+            saved = require(manager.configure(self._operator(self.controller, username), {**data, "layer": "role"}))
             return self._response(Outcome.success(saved))
         except TaskError as error:
             return self._error(error.code, str(error))
@@ -689,10 +733,7 @@ class SetupWebAPI:
                                             or variant not in DIAGNOSTIC_ENVIRONMENT_VARIANTS):
                     raise TaskError("contact_diagnostic_variant_invalid",
                                     "choose a supported environment source for this proactive purpose")
-                binding = self._binding()
-                if not binding.get("bound") or binding.get("pending"):
-                    raise TaskError("setup_binding_confirmation_required",
-                                    "confirm the core administrator private window first")
+                fallback_target = await self._proactive_diagnostic_target()
                 started = datetime.now(timezone.utc).isoformat()
                 attempt_id = uuid4().hex
                 existing = self.controller.session or self.controller.last_session
@@ -700,7 +741,7 @@ class SetupWebAPI:
                     active = await self.controller.start()
                     if active.failure is not None and active.failure.code != "host_already_started":
                         raise TaskError(active.failure.code, active.failure.reason)
-                session, context, instruction = await self._setup_context()
+                session, context, instruction = await self._proactive_diagnostic_context(fallback_target)
                 if context.scope.kind is not ScopeKind.PRIVATE:
                     raise TaskError("setup_private_window_required", "the core administrator target must be private")
 
@@ -708,11 +749,10 @@ class SetupWebAPI:
                 manager = ContactManagement(session.application, context)
                 status = require(manager.status(operator))
                 purpose_status = status["purposes"].get(purpose)
-                test_time_override = bool(purpose_status and purpose_status.get("reason") in
-                    ("proactive_paused", "proactive_quiet_hours")
-                    and status.get("settings", {}).get("enabled") is True
+                test_policy_override = bool(purpose_status and purpose_status.get("reason") in
+                    ("proactive_disabled", "proactive_paused", "proactive_quiet_hours")
                     and status.get("settings", {}).get(purpose + ".enabled") is True)
-                if not purpose_status or (not purpose_status["allowed"] and not test_time_override):
+                if not purpose_status or (not purpose_status["allowed"] and not test_policy_override):
                     code = purpose_status["reason"] if purpose_status else "contact_purpose_unavailable"
                     raise TaskError(code, "the selected proactive purpose is not currently authorized")
 
@@ -1085,7 +1125,10 @@ class SetupWebAPI:
         operator = dashboard_operator(self.controller.runtime, username, at=self.controller.now())
         manager = ContactManagement(app, context)
         current = require(manager.status(operator))
-        if current["settings"]["enabled"] and not enabled_before:
+        # The global switch may still be off while this test's old window
+        # row/grant is on. Always clear the temporary window permission when the
+        # test enabled it; its effective public value cannot prove cleanup.
+        if not enabled_before:
             data = {
                 "operation_key": "setup-test-restore-" + attempt_id,
                 "edit_token": current["edit_token"],

@@ -21,9 +21,19 @@ TURN_STATES = frozenset({"complete", "unfinished", "uncertain"})
 ACTIONS = frozenset({"reply", "wait", "silent", "interject", "clarify"})
 REPLY_INTENTS = frozenset({"answer", "acknowledge", "ask", "comfort", "explain", "summarize"})
 REPLY_STYLES = frozenset({"brief", "normal", "detailed", "serious", "playful"})
-REPLY_FORMS = frozenset({"text", "voice", "text_voice", "image", "none"})
+REPLY_FORMS = frozenset({"text", "voice", "text_voice", "image"})
 SEGMENT_MODES = frozenset({"single", "natural", "keep_together"})
 TOOL_NEEDS = frozenset({"none", "memory", "vision", "tts", "image", "external"})
+DECISION_DEFAULTS = {
+    "turn_state": "complete",
+    "action": "reply",
+    "reply_intent": "answer",
+    "reply_style": "normal",
+    "reply_form": "text",
+    "segment_mode": "natural",
+    "tool_need": "none",
+}
+CONFIGURABLE_DECISION_FIELDS = tuple(DECISION_DEFAULTS)
 
 
 class DecisionContractError(ValueError):

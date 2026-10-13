@@ -78,6 +78,9 @@ class RealityAccessWebAPI:
                           access_type(session.application, session.profile.target, descriptor.package, capability=action))
                 at = controller.now()
                 result = access.status(operator, at) if command is None else access.configure(operator, command, at)
+                if command is not None:
+                    await registry.reconcile_service("reality")
+                result["runtime"] = registry.status("reality")
                 return outcome_response(Outcome.success(result))
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))

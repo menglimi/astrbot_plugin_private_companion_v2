@@ -141,15 +141,15 @@ window.CompanionReplyPage = (() => {
       part_gap_log_base: "按长度调节的曲线基数；数值越接近 1，长段与短段的间隔差异越明显。",
       prompt: "模型自主决定边界时使用。最多 4000 字；可用 {{split_marker}} 表示边界。预览不调用模型，可用“模型边界示例”检查标记后的最终分段。",
       rule_mode: "选择分段词、分段正则或句子/段落规则；规则补充分段始终生效。",
-      split_words: "输入标点或其他分隔词，回车添加；需要按换行切分时使用快捷项。",
+      split_words: "输入标点或其他分隔词，回车添加；换行和空格可从常用分段词直接添加。",
       match_width_variants: "词列表模式下，把常见全角、半角标点视为同一分段标记。",
       rule_regex: "分段方式选择“正则表达式”时使用；支持服务端正则语法，最多 512 字。",
       style_prompt: "补充此对象的日常表达偏好；留空时不增加额外风格要求。",
       enable_humanized_expression: "开启后注入日常说话方式与多样表达提示。合适时可只发已提供的表情图、在群聊中安静旁听或只用已启用的语音；戳一戳只在当前流程开放时考虑。只作自然选择，不改事实与授权。",
       humanized_expression_prompt: "最多 4000 字。留空使用内置默认文本；自定义内容会替换默认文本。开关关闭时不注入。本对象与群聊各自保存。",
-      content_cleanup_enabled: "关闭时不执行清理。开启后在发送前按所选方式整理文字；需要调整说法时优先补充上方提示词。",
-      content_cleanup_scope: "默认只清理每段消息末尾的词条，保留句中标点；选择整段回复时才会清理整段的匹配项。",
-      content_cleanup_words: "按所选范围逐字清理词条。默认在每段句尾清理“。”和“，”，保留句中的标点；可添加空格、换行或制表符。",
+      content_cleanup_enabled: "用于主动消息和普通私聊、群聊的文字回复。开启后在发送前按所选方式整理文字；关闭时不执行清理。需要调整说法时优先补充上方提示词。",
+      content_cleanup_scope: "选择“仅句尾”时只清理每段消息末尾的匹配项，保留句中标点；选择“整段回复”时清理整段的匹配项。",
+      content_cleanup_words: "按所选范围逐字清理词条。例如填入“。”和“，”并选择“仅句尾”，即可保留句中标点、清理每段末尾；也可添加空格、换行或制表符。",
       content_cleanup_rule: "仅在清理方式选为正则时使用；最多 512 字。",
       content_replacements: "逐项填写原词和替换文本。",
       framework_error_guard_enabled: "清理插件与框架内部标记，避免把内部格式带入回复。",
@@ -171,17 +171,17 @@ window.CompanionReplyPage = (() => {
       voice_probability: "按百分比编辑，后端按 0–1 的小数保存。",
       voice_trigger_keywords: "留空使用默认关键词。",
       voice_extra_prompt: "只补充朗读语气，不改变朗读内容。",
-      group_wakeup_enabled: "关闭后群聊不使用这组参与判断。此设置只影响群聊。",
-      group_wakeup_direct_words: "直呼词会作为明确参与信号。",
-      group_wakeup_context_words: "用于识别与角色有关的上下文。",
-      group_wakeup_interest_keywords: "作为兴趣话题的补充线索。",
-      group_wakeup_question_enabled: "开启后会把明确提问和求助作为参与判断材料。",
+      group_wakeup_enabled: "关闭后群聊不使用这组参与判断。此设置跟随角色，同一角色的群聊共用。",
+      group_wakeup_direct_words: "在同一角色的群聊中，直呼词作为明确参与信号。",
+      group_wakeup_context_words: "在同一角色的群聊中，用于识别与角色有关的上下文。",
+      group_wakeup_interest_keywords: "在同一角色的群聊中，作为兴趣话题的补充线索。",
+      group_wakeup_question_enabled: "默认关闭；明确开启后，未点名的实质问题或求助才可进入答疑候选。问号、反问和吐槽不自动唤醒。设置跟随角色，同一角色的群窗口共用。",
       group_wakeup_bot_name_enabled: "开启后，角色名称会并入直呼词。",
-      group_wakeup_bot_name: "填写角色在当前群里使用的名称，最多 40 字。",
-      group_wakeup_primary_member_ids: "只接受平台账号数字 ID，用于区分主要成员。",
+      group_wakeup_bot_name: "填写角色在群聊中使用的名称；同一角色的群聊共用，最多 40 字。",
+      group_wakeup_primary_member_ids: "只接受平台账号数字 ID；同一角色的群聊共用这份主要成员名单。",
       group_wakeup_owner_direct_words: "只对上方主要成员账号生效。",
       group_wakeup_interest_probability: "兴趣话题通过相关性判断后的参与概率。",
-      group_wakeup_question_threshold: "问题或求助的参与强度参考值，范围 0–100。",
+      group_wakeup_question_threshold: "答疑开启时，问题与求助候选评分需达到此值才进入决策。其他成员正在交流、已有回答及近期已接话会降权；达到阈值仍可旁听。范围 0–100。",
       group_wakeup_cold_group_enabled: "开启后，群聊长时间安静时可把重新开场作为判断材料。",
       group_wakeup_cold_group_threshold: "冷群重新开场所需的参与强度参考值，范围 0–100。",
       group_wakeup_cold_group_idle_minutes: "群聊至少静默多久才算冷群。",
@@ -326,7 +326,7 @@ window.CompanionReplyPage = (() => {
     },
     listFields: {
       split_words: {maxItems: 80, maxLength: 40, unique: "exact", trim: true,
-        specials: ["newline"], quickAdd: ["。", "！", "？", "…"]},
+        quickAdd: ["。", "！", "？", "…", {special: "newline"}, {special: "space"}]},
       content_cleanup_words: {maxItems: 80, maxLength: 200, specials: ["space", "newline", "tab"]},
       recall_forbidden_words: {maxItems: 80, maxLength: 200},
       group_wakeup_direct_words: {maxItems: 24, maxLength: 40, unique: "casefold", trim: true},
@@ -426,6 +426,16 @@ window.CompanionReplyPage = (() => {
     "expression-voice": "voice",
     "expression-platform": "components",
   };
+  const expressionScopeNotes = {
+    "expression-text": ["文字表达设置", "说话风格、拟人表达、分段和文字整理用于日常私聊与群聊。启用私聊分段时，会收齐本轮回复后再分段发送。"],
+    "expression-voice": ["语音朗读设置", "在这里设置朗读开关、触发方式、语种和发送形式；音色与 TTS 合成后端在「模型与连接」中配置。语音总开关和当前对象的朗读开关都需开启。"],
+    "expression-platform": ["消息组件与发送检查", "引用、@、消息组件顺序和发送前检查用于日常私聊与群聊；可发送的组件取决于当前平台支持的能力。"],
+    default: ["日常聊天的表达设置", "这里可以设置说话风格、分段、文字整理、语音朗读与消息组件。语音需要可用的 TTS 合成后端，可在「模型与连接」中配置。"],
+  };
+  function expressionScopeNote(module) {
+    const [title, detail] = expressionScopeNotes[module] || expressionScopeNotes.default;
+    return `<strong>${e(title)}</strong><p>${e(detail)}</p>`;
+  }
   let root = null, instance = null, version = 0, route = null, activeSections = spec.sections;
   let activeDecisionView = "overview";
   let previewTimer = null, previewTicket = 0;
@@ -436,6 +446,7 @@ window.CompanionReplyPage = (() => {
 
   const live = ticket => ticket === version && root?.isConnected;
   const anchor = name => root?.querySelector(`[data-reply-part="${name}"]`);
+  const previewEnabled = () => root?.dataset?.expressionModule !== "expression-voice";
 
   /* 设置卡片的挂载点，以及它下方的离线预览。 */
   const parts = () => ({
@@ -449,8 +460,9 @@ window.CompanionReplyPage = (() => {
     if (!host) return;
     const recent = Array.isArray(state.status?.recent) ? state.status.recent : [];
     const stateLabels = {complete: "已完成", blocked: "受阻", closed: "已关闭", ready: "待投递",
-      sealed: "已封存", collecting: "收集中", generating: "生成中", delivering: "投递中"};
-    const responseLabels = {no_reply: "未发送", image_only: "仅图片", text_or_mixed: "文字或混合内容"};
+      sealed: "已封存", collecting: "收集中", generating: "生成中", delivering: "投递中",
+      failed: "未完成", completed: "生成完成", awaiting_request: "等待宿主请求"};
+    const responseLabels = {no_reply: "未发送", image_only: "仅图片", text_or_mixed: "文字或混合内容", native_reply: "宿主回应"};
     const parseLabels = {not_received: "未收到完整响应", raw_observed: "已收到原始响应",
       native_parsed: "宿主已解析", native_rejected: "宿主解析失败", stream_rejected: "流式校验失败",
       contract_rejected: "回复格式校验失败", validated: "回复已通过校验", tools: "工具请求已通过校验",
@@ -488,7 +500,9 @@ window.CompanionReplyPage = (() => {
             + `<p>${textSummary("原始", diagnostic.raw)} → ${textSummary("宿主解析", diagnostic.parsed)} → ${textSummary("待呈现", diagnostic.visible)}</p>`
             + (hashes.length ? `<details><summary>内容指纹</summary><p>${hashes.join("<br>")}</p></details>` : "") + "</li>";
         }).join("")}</ul>` : "")
-        + `<p>分段 ${Array.isArray(item.parts) ? item.parts.length : 0} 条 · 不含提示词正文与消息原文</p></details>`;
+        + (item.execution_path === "astrbot_core"
+          ? `<p>宿主发送返回 ${Number(item.send_returns) || 0} 次 · ${e(item.delivery_state || "未观察发送")} · 不含提示词正文与消息原文</p></details>`
+          : `<p>分段 ${Array.isArray(item.parts) ? item.parts.length : 0} 条 · 不含提示词正文与消息原文</p></details>`);
     }).join("") : '<p class="reply-empty">暂无近期回复记录。</p>';
     host.innerHTML = `<section class="reply-diagnostics"><header><h3>回复诊断</h3><span>${recent.length} 轮</span></header>${html}</section>`;
   }
@@ -737,7 +751,7 @@ window.CompanionReplyPage = (() => {
       + `<header><h3 id="reply-preview-modal-title">预览配置</h3><button type="button" class="icon-button" data-reply-action="preview-modal-close" aria-label="关闭预览配置">${icon("x")}</button></header>`
       + `<div class="reply-preview-modal-body"><fieldset><legend>示例预设</legend><div class="reply-preview-modal-segmented">${["simple","complex","custom"].map(key => `<button type="button" class="${state.examplePreset === key ? "is-selected" : ""}" data-reply-example="${key}">${key === "simple" ? "简单示例" : key === "complex" ? "复杂示例" : "自定义"}</button>`).join("")}</div></fieldset>`
       + `<fieldset><legend>预览会话</legend><div class="reply-preview-modal-segmented"><button type="button" class="${state.previewSession === "private" ? "is-selected" : ""}" data-reply-preview-session="private">私聊</button><button type="button" class="${state.previewSession === "group" ? "is-selected" : ""}" data-reply-preview-session="group">群聊</button></div></fieldset>`
-      + `<fieldset><legend>组件位置策略</legend>${option("voice","语音位置",state.previewPositions.voice,[["before","文字前"],["request","按请求插入"],["after","文字后"],["last","所有组件后"]])}${option("image","图片位置",state.previewPositions.image,[["first","跟随首段"],["last","跟随末段"],["before","文字前"],["after","文字后"]])}${option("mention","@ 位置",state.previewPositions.mention,[["first","跟随第一段"],["last","跟随末段"],["each","每一段"]])}${option("reaction","平台表情位置",state.previewPositions.reaction,[["first","跟随第一段"],["last","跟随末段"],["each","每一段"]])}${option("media","表情包与附件位置",state.previewPositions.media,[["single","单独一条"],["first","跟随首段"],["last","跟随末段"]])}</fieldset><small class="reply-preview-modal-note">位置选项只影响预览模拟；实际发送仍使用已保存的设置。</small>`
+      + `<fieldset><legend>组件位置策略</legend>${option("voice","语音位置",state.previewPositions.voice,[["before","文字前"],["request","按请求插入"],["after","文字后"],["last","所有组件后"]])}${option("image","图片位置",state.previewPositions.image,[["first","跟随首段"],["last","跟随末段"],["before","文字前"],["after","文字后"]])}${option("mention","@ 位置",state.previewPositions.mention,[["first","跟随第一段"],["last","跟随末段"],["each","每一段"]])}${option("reaction","平台表情位置",state.previewPositions.reaction,[["first","跟随第一段"],["last","跟随末段"],["each","每一段"]])}${option("media","表情包与附件位置",state.previewPositions.media,[["single","单独一条"],["first","跟随首段"],["last","跟随末段"]])}</fieldset><small class="reply-preview-modal-note">位置选项只影响预览模拟；V2 独立任务使用已保存的设置，普通聊天使用 AstrBot 设置。</small>`
       + `<p class="reply-preview-modal-lock">${icon("lock-keyhole")} 引用位置由回复分段设置决定</p><label class="reply-preview-modal-switch"><input type="checkbox" data-reply-preview-protection ${state.previewProtection ? "checked" : ""}><span>高亮保护范围</span></label>`
       + `</div></div></div>`;
   }
@@ -745,6 +759,11 @@ window.CompanionReplyPage = (() => {
   function renderPreview() {
     const host = anchor("preview");
     if (!host) return;
+    if (!previewEnabled()) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
     const locked = state.loading || state.denied || !state.status;
     const module = root?.dataset?.expressionModule || "expression-text";
     const title = module === "expression-voice" ? "朗读位置预览" : module === "expression-platform" ? "组件顺序预览" : "分段效果预览";
@@ -797,7 +816,7 @@ window.CompanionReplyPage = (() => {
     clearTimeout(previewTimer);
     previewTimer = null;
     const ticket = ++previewTicket;
-    if (!anchor("preview")) return;
+    if (!anchor("preview") || !previewEnabled()) return;
     state.busy = false;
     state.previewError = "";
     previewBusy(false);
@@ -817,6 +836,7 @@ window.CompanionReplyPage = (() => {
       previewTimer = null;
       ticket = ++previewTicket;
     }
+    if (!previewEnabled()) return;
     const pageTicket = version;
     if (state.loading || state.denied || !state.status) return;
     if (instance?.state?.pending) {
@@ -990,9 +1010,25 @@ window.CompanionReplyPage = (() => {
      但只把当前模块所属的分区交给用户看，避免「文字页里又有语音页」的双重入口。 */
   function setExpressionModule(module) {
     if (!root || !instance) return false;
+    const wasVoice = root.dataset.expressionModule === "expression-voice";
     const allowed = expressionModuleSections[module] || activeSections.map(section => section.id);
     instance.setVisibleGroups?.(allowed, expressionModuleDefaults[module] || allowed[0] || "");
     root.dataset.expressionModule = module || "";
+    const scopeNote = anchor("scope");
+    if (scopeNote) scopeNote.innerHTML = expressionScopeNote(module);
+    const voice = module === "expression-voice";
+    const preview = anchor("preview");
+    if (preview) preview.hidden = voice;
+    if (voice) {
+      clearTimeout(previewTimer);
+      previewTimer = null;
+      previewTicket++;
+      state.busy = false;
+      previewBusy(false);
+      return true;
+    }
+    renderPreview();
+    if (wasVoice) schedulePreview(220);
     return true;
   }
 
@@ -1065,7 +1101,13 @@ window.CompanionReplyPage = (() => {
     else if (root.dataset) delete root.dataset.replyView;
     const diagnostics = [undefined, "expression", "decision"].includes(options.view)
       ? '<div data-reply-part="diagnostics"></div>' : "";
-    root.innerHTML = '<div data-reply-part="settings"></div>'
+    const scopeNote = options.view === "decision"
+      ? '<aside class="reply-scope-note" role="note"><strong>基础唤醒后才进行决策</strong><p>答疑默认关闭，弱相关词默认留空。群唤醒设置跟随角色，同一角色的群窗口共用；在私聊窗口调整也会更新该角色的群设置。明确 @、引用或直接呼唤优先，其他候选由 Laya 结合有效开关与近期群历史判断是否旁听。</p></aside>' : options.view === "perception"
+      ? '<aside class="reply-scope-note" role="note"><strong>普通聊天的媒体理解在 AstrBot 中配置</strong>' +
+        '<p>普通聊天的图片、视频和文件由 AstrBot 及已启用的扩展处理。本页的转述和文件读取设置用于 V2 独立任务及历史兼容。</p></aside>'
+      : '<aside class="reply-scope-note" role="note" data-reply-part="scope">' +
+        expressionScopeNote(options.expressionModule) + '</aside>';
+    root.innerHTML = scopeNote + '<div data-reply-part="settings"></div>'
       + (options.view === "expression" || !options.view
         ? '<div data-reply-part="preview"></div>' : "") + diagnostics;
     root.addEventListener("input", onInput);
@@ -1087,6 +1129,7 @@ window.CompanionReplyPage = (() => {
       listFields: spec.listFields,
       order: pageSpec.order,
       endpoint: PREFIX + route,
+      resetKey: "reset_to_inherit",
       /* TTS 扩展目录要等读取之后才知道，所以选项由函数现取。 */
       catalogs: {
         voice_provider_id: () => providerOptions("跟随 AstrBot"),

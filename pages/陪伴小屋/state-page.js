@@ -256,13 +256,23 @@ window.CompanionStatePage = (() => {
     const result=status.maintenance?.result;
     const failed={expired:"上次维护已过期",failed:"上次维护失败",dead_letter:"上次维护失败",cancelled:"上次维护已取消",uncertain:"上次维护结果未确认"};
     const code=result?.code||result?.reason;
+    if(result?.state==="waiting"&&["state_role_context_unavailable","state_context_unbound"].includes(code))return {
+      label:"角色状态计划已保留，等待可信运行上下文",tone:"is-pending",scheduled:true};
+    if(result?.state==="blocked") {
+      const stage=({binding:"等待角色绑定",authorization:"权限检查",settings:"设置检查",schedule_refresh:"计划检查",budget:"预算检查"})[result.stage];
+      const detail=CODE.test(code||"")?`（${code}）`:"";
+      return {label:`状态维护预检未通过${stage?` · ${stage}`:""}${detail}`,tone:"is-warning",scheduled:true};
+    }
+    if(result?.state==="deferred")return {
+      label:"状态维护等待本地预算"+(result.retry_at?` · ${when(result.retry_at)} 自动检查恢复`:" · 本地限制解除后自动恢复"),
+      tone:"is-pending",scheduled:true};
     if(result?.state==="expired"&&code==="deadline_before_start")return {
       label:"上次维护未开始：等待后台执行席位超时",tone:"is-warning",scheduled:true};
     if(failed[result?.state]) {
       const detail=({timeout:"执行超时",worker_error:"执行出错",worker_lost:"执行任务失联",
         owner_unavailable:"原任务材料已不可用",state_foreground_active:"对话正在使用当前状态",
-        model_budget_exhausted:"模型预算不足，请查看模型与连接中的今日用量",
-        model_budget_soft_deferred:"后台任务达到每日软额度，等待下一轮维护"})[code];
+        model_budget_exhausted:"插件本地硬预算已触发，请查看治理与维护中的预算设置",
+        model_budget_soft_deferred:"插件本地软限额已触发，等待下一轮维护"})[code];
       return {label:failed[result.state]+(detail?`：${detail}`:CODE.test(code||"")?`（${code}）`:""),tone:"is-warning",scheduled:true};
     }
     return {label:statusLabel(status.state?.state),tone:status.state?.state==="unknown"?"is-pending":"",scheduled:true};
@@ -271,7 +281,7 @@ window.CompanionStatePage = (() => {
     const values=status.state?.values||{},settings=status.settings||{};
     const maintenance=maintenanceFeedback(status);
     const energy=settings.energy_enabled===false?"未启用":typeof values.energy==="number"&&Number.isFinite(values.energy)?values.energy:valueLabel(values.energy);
-    const sleep=settings.sleep_enabled===false?"未启用":status.body_sleep?.state==="sleeping"?"睡眠中":valueLabel(values.sleep);
+    const sleep=status.body_sleep?.state==="sleeping"?"睡眠中":settings.enabled===false?"维护已关闭":settings.sleep_enabled===false?"未启用":valueLabel(values.sleep);
     const health=!settings.enabled?"维护已关闭":settings.health_enabled===false?"已关闭":valueLabel(values.health);
     const hunger=!settings.enabled?"维护已关闭":settings.hunger_enabled===false?"已关闭":valueLabel(values.hunger);
     const rawMood=values.mood;
@@ -284,7 +294,7 @@ window.CompanionStatePage = (() => {
         ${dashboardItem("energy","能量",energy,"battery-medium",`表达强度 ${settings.humanized_state_intensity??50} / 100`,"tone-energy")}
         ${dashboardItem("health","健康",health,"heart-pulse","人格共享模拟","tone-health")}
         ${dashboardItem("hunger","饥饿",hunger,"utensils","人格共享模拟","tone-hunger")}
-        ${dashboardItem("sleep","睡眠",sleep,"moon-star",status.sleep_schedule?.enabled?`${status.sleep_schedule.time||""} · ${status.sleep_schedule.duration_minutes||""} 分钟`:"睡眠感受与作息计划","tone-sleep")}
+        ${dashboardItem("sleep","睡眠",sleep,"moon-star",`${settings.enabled===false||settings.sleep_enabled===false?"状态模拟未运行":"状态模拟已启用"} · ${status.sleep_schedule?.enabled?"自动作息已启用":"自动作息未启用"}`,"tone-sleep")}
         ${dashboardItem("cycle","生理期",phaseLabel(status),"calendar-heart",settings.cycle_enabled?"人格共享模拟":"周期模拟未开启","tone-cycle")}
         ${dashboardItem("mood","心情",mood,"smile","心情模拟设置","tone-mood")}
         ${dashboardItem("busy","忙碌",valueLabel(values.busy,settings.busy_enabled!==false),"briefcase-business","日程状态与忙碌处理","tone-busy")}
@@ -316,9 +326,11 @@ window.CompanionStatePage = (() => {
     else if(feature==="sleep") {
       const plan=status.sleep_schedule||{},execution=status.body_sleep;
       const rhythmNames={awake:"清醒",sleepy:"逐渐困倦",winding_down:"准备休息",sleeping:"睡眠中",recovering:"醒来恢复"};
-      const current=execution?.state==="sleeping"?"睡眠中":execution?.state==="interrupted"?"最近一次睡眠已中断":valueLabel(values.sleep,settings.sleep_enabled!==false);
-      const details=execution?.state==="sleeping"?`计划醒来 ${when(execution.planned_wake_at)}；作息计划来自「日记与生活」。`:"角色的睡眠感受与执行回执；作息在「日记与生活」编辑。";
-      body=overviewMarkup(feature,"当前睡眠",current,details,[["日程",plan.enabled?`${plan.time||"未设时刻"} 入睡 · ${plan.duration_minutes??"未提供"} 分钟`:"自动睡眠日程未启用"],["时区与浮动",`${plan.timezone||"未提供"} · 自然浮动 ±${plan.variation_minutes??0} 分钟`],["执行窗口",plan.executor_state==="available"?`${window.CompanionProduct?.executorLabel?.(plan)||"已选定私聊窗口"}${plan.executor_is_current?"（当前窗口）":""}`:"暂无有效授权窗口"],["节律阶段",plan.rhythm?.phase?`${rhythmNames[plan.rhythm.phase]||"节律观察中"} · ${plan.rhythm.basis==="execution_receipt"?"执行回执":"作息参考"}`:"尚无节律参考"]]);
+      const current=execution?.state==="sleeping"?"睡眠中":execution?.state==="interrupted"?"最近一次睡眠已中断":valueLabel(values.sleep,settings.enabled!==false&&settings.sleep_enabled!==false);
+      const details=execution?.state==="sleeping"?`计划醒来 ${when(execution.planned_wake_at)}；这是实际睡眠回执。`:"状态模拟负责更新困意与主观睡眠感受；自动入睡按单独的角色作息执行，并记录睡眠回执。";
+      const simulation=settings.enabled===false?"后台状态维护已关闭":settings.sleep_enabled===false?"未启用":"已启用";
+      const schedule=plan.enabled?`${plan.time||"未设时刻"} 入睡 · ${plan.duration_minutes??"未提供"} 分钟`:"未启用";
+      body=overviewMarkup(feature,"当前睡眠",current,details,[["睡眠状态模拟",simulation],["按角色作息自动入睡",schedule],["执行窗口",plan.executor_state==="available"?`${window.CompanionProduct?.executorLabel?.(plan)||"已选定私聊窗口"}${plan.executor_is_current?"（当前窗口）":""}`:plan.enabled?"暂无有效授权窗口":"自动作息未启用"],["时区与自然浮动",`${plan.timezone||"未提供"} · ±${plan.variation_minutes??0} 分钟`],["节律阶段",plan.rhythm?.phase?`${rhythmNames[plan.rhythm.phase]||"节律观察中"} · ${plan.rhythm.basis==="execution_receipt"?"执行回执":"作息参考"}`:"尚无节律参考"]]);
       body+=`<section class="state-config-group"><header><span class="state-config-index">01</span><div><h4>作息概览</h4><p>以下是当前生效的作息参数；就寝时刻与时长在「日记与生活」编辑。</p></div></header><dl class="state-config-readonly">${[["就寝时刻",plan.time||"尚未配置"],["睡眠时长",plan.duration_minutes!=null?`${plan.duration_minutes} 分钟`:"尚未配置"],["自然浮动",plan.variation_minutes!=null?`±${plan.variation_minutes} 分钟`:"尚未配置"],["作息时区",plan.timezone||"尚未配置"]].map(([label,value])=>`<div><dt>${label}</dt><dd>${e(value)}</dd></div>`).join("")}</dl><details class="state-config-sleep-timing"><summary>查看下次入睡与执行详情</summary>${sleepMarkup(status)}</details></section>`;
       body+=relatedSettings([["日记与生活 · 睡眠与休息","编辑就寝时刻、睡眠时长与自然浮动。","book-open","data-state-open-life-sleep"],["开口闸门 · 休息时的回复阀门","睡眠中是否回复、如何回复，在「主动联系」里设置。","message-square",'data-state-gate="sleep"']]);
     } else if(feature==="busy")body=overviewMarkup(feature,"当前状态",valueLabel(values.busy,settings.busy_enabled!==false),"忙碌状态参考已接受的日程；忙碌时如何回复单独设置。")
@@ -502,7 +514,7 @@ window.CompanionStatePage = (() => {
       if(data.pendingMaintenance){
         const pending=data.pendingMaintenance,revision=result.state?.revision;
         const currentResult=JSON.stringify(result.maintenance?.result??null);
-        const failedStates=["failed","cancelled","expired","dead_letter","uncertain","rejected"];
+        const failedStates=["failed","cancelled","expired","dead_letter","uncertain","rejected","blocked"];
         const completedStates=["succeeded","completed","saved"];
         if(Number.isInteger(revision)&&revision>pending.expected_revision){
           data.pendingMaintenance=null;notice("状态已更新。");

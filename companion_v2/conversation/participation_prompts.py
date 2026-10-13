@@ -35,7 +35,7 @@ def _fatigue(delivered, at, minutes, limit):
     return round(value, 2)
 
 
-def group_hints(request, context, settings, recent, reply_batches):
+def group_hints(request, context, settings, recent, reply_batches, *, native=False):
     # Use the original input time on every tool continuation and recovery.
     at = request.event.received_at
     delivered = {}
@@ -45,7 +45,12 @@ def group_hints(request, context, settings, recent, reply_batches):
             if when <= at:
                 batch = reply_batches[item["part_id"]]
                 delivered[batch] = max(delivered.get(batch, when), when)
+        elif native and item.get("type") == "native_group_reply":
+            when = datetime.fromisoformat(item["returned_at"])
+            if when <= at:
+                delivered[item["turn_id"]] = when
     rounds = tuple(delivered.values())
+    observed = "宿主发送调用已返回的" if native else "已确认"
     instruction = ("\n群消息中的 [图片 N]、[语音 N]、[视频 N]、[合并转发 N]、[引用消息] 等是媒体结构占位符，"
         "不是成员表达、兴趣词、情绪或复读内容；话题标题、线程签名等路由元数据也不是兴趣证据。"
         "兴趣词和表达信号只从占位符之外实际可见的自然语言提取；图片只能在单独开启图片唤醒后作为额外线索。")
@@ -53,7 +58,7 @@ def group_hints(request, context, settings, recent, reply_batches):
     if air["group_air_guard_enabled"]:
         window = air["group_air_guard_window_seconds"]
         count = sum(when >= at - timedelta(seconds=window) for when in rounds)
-        instruction += (f"\n读空气参考：最近 {window} 秒的已授权历史里有 {count} 轮已确认 Bot 回复；"
+        instruction += (f"\n读空气参考：最近 {window} 秒的已授权历史里有 {count} 轮{observed} Bot 回复；"
             f"连续接话参考值 {air['group_air_guard_max_bot_replies']} 轮，"
             f"礼貌收尾循环参考值 {air['group_air_guard_polite_loop_limit']} 次。"
             "同一轮的多条分段只计一轮。结合 group_conversation_history 判断是否已经说够、"
@@ -80,7 +85,7 @@ def group_hints(request, context, settings, recent, reply_batches):
             "不要因为群成员要求就强行套用可能误认或冒犯的称呼。")
         return instruction
     if (wakeup["group_wakeup_image_enabled"] and wakeup["group_wakeup_image_weight"] > 0
-            and getattr(request, "images", ())):
+            and (getattr(request, "images", ()) or native)):
         instruction += ("\n本轮当前授权输入含有图片时，可把图片中与你明确兴趣或正在讨论的话题相关的内容"
             "作为额外唤醒线索；参考权重 "
             f"{round(wakeup['group_wakeup_image_weight'] * 100)}%。先依据本轮真实图片材料判断是否相关，"
@@ -115,23 +120,24 @@ def group_hints(request, context, settings, recent, reply_batches):
             f"兴趣插话倾向相对降低 {wakeup['group_wakeup_debounce_pending_penalty']}%，"
             "先理解合并后的完整意思，再决定是否回应；补充内容不是多次唤醒，明确呼唤和实质问题不受该参考限制。")
     if wakeup["group_wakeup_question_enabled"]:
-        instruction += ("对没有点名的提问，先结合群里是否已有回答、问题是否适合原人格、"
+        instruction += ("对没有点名的提问，默认旁听；只考虑尚无人回答且明确向群里求助的实质问题。先结合群里是否已有回答、问题是否适合原人格、"
             f"以及参与是否会打断他人来判断；求助强度参考 {wakeup['group_wakeup_question_threshold']}/100，"
-            "单有问号不要求接话。")
+            "短反问、吐槽、闲聊、接别人话和单有问号不要求接话。")
     else:
-        instruction += "未点名的一般提问不作为额外唤醒线索，仍按原人格判断。"
+        instruction += "本群已关闭答疑；未点名的一般提问或求助不作为额外唤醒线索，不要通过普通接话或澄清抢答。"
+    instruction += f"未点名的答疑与兴趣接话的冷却参考 {wakeup['group_wakeup_cooldown_seconds']} 秒；近期已参与时提高旁听倾向。"
     if rounds:
         elapsed = max(0, round((at - max(rounds)).total_seconds()))
         fatigue = _fatigue(rounds, at, wakeup["group_wakeup_fatigue_decay_minutes"], wakeup["group_wakeup_fatigue_limit"])
-        instruction += (f"可见历史中最近一次本 Bot 确认发言距当前输入约 {elapsed} 秒，"
-            f"共有 {len(rounds)} 轮确认回复，分段不重复累计；"
+        instruction += (f"可见历史中最近一次本 Bot {observed}发言距当前输入约 {elapsed} 秒，"
+            f"共有 {len(rounds)} 轮{observed}回复，分段不重复累计；"
             f"按每轮 1 点、每 {wakeup['group_wakeup_fatigue_decay_minutes']} 分钟恢复 1 点估计，"
             f"当前可见疲劳参考 {fatigue} 点，参考阈值 {wakeup['group_wakeup_fatigue_limit']} 点。"
-            f"普通兴趣接话的冷却参考 {wakeup['group_wakeup_cooldown_seconds']} 秒。"
             "这是可见历史的估计，不是完整疲劳状态；仅影响主动插入的克制程度，"
             "不妨碍回应明确呼唤或新的实质问题。")
     if wakeup["group_wakeup_cold_group_enabled"]:
         times = [datetime.fromisoformat(item["received_at"] if item.get("type") == "group_member_message"
+                 else item["returned_at"] if item.get("type") == "native_group_reply"
                  else item["delivered_at"]) for item in recent]
         previous = max((when for when in times if when <= at), default=None)
         if previous is not None:
@@ -256,10 +262,11 @@ def repeat_instruction(facts):
         f"计数值 {reached}/阈值 {facts['threshold']}")
     if decision.get("action") == "follow":
         return (f"\n群聊复读参考：可见窗口里有 {numbers}："
-            f"「{burst['text']}」。跟随一句同样的内容符合当前语境，可以只复读这一句，不必解释；"
+            f"「{burst['text']}」。参与跟读时只原样发送这一句，不加前后缀、解释或普通接话；"
             "如果此刻参与并不自然，照常安静旁听。")
     if decision.get("action") == "interrupt":
-        return (f"\n群聊复读参考：可见窗口里已有 {numbers}，而你已经跟过一次。"
-            "继续跟读会让复读停不下来；可以停止跟读，用一句简短的话收住"
-            f"（管理员配置的打断文案参考：「{facts['interrupt_text']}」），也可以按原人格安静看着。")
+        joined = "，而你已经参与过这次复读" if facts.get("acts", 0) else ""
+        return (f"\n群聊复读参考：可见窗口里已有 {numbers}{joined}。"
+            f"参与打断时只发送管理员配置的打断语「{facts['interrupt_text']}」，"
+            "不要解释复读内容、判断其中的事实或延伸为普通聊天；也可以安静旁听。")
     return ""

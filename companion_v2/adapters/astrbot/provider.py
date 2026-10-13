@@ -23,6 +23,7 @@ from .native import check_version, native_id
 from .memory_output import capture, explicit_refusal, response_format
 from .streaming import StreamTranscript
 from .response_diagnostics import observe_completion
+from .provider_transport import definitely_not_sent
 
 
 RESERVED_EXTRA = frozenset({"model", "messages", "tools", "functions", "function_call", "tool_choice",
@@ -247,6 +248,8 @@ class AstrBotTextProvider:
             prompt = read(usage, "prompt_tokens")
             completion = read(usage, "completion_tokens")
             total = read(usage, "total_tokens")
+            if total is None and type(prompt) is int and type(completion) is int:
+                total = prompt + completion
             values = (prompt, completion, total)
             if any(type(v) is not int or not 0 <= v <= 10**12 for v in values) or prompt + completion != total:
                 return None
@@ -274,7 +277,6 @@ class AstrBotTextProvider:
                                                        or not 0 <= cache_creation <= prompt
                                                        or cache_read + cache_creation > prompt)):
                 return None
-            native_id(read(raw, "id"))
             return self.tariff.amount(prompt - cache_read, cache_read, completion, input_tokens=prompt,
                                       cached_input_tokens=cache_read if cached is not None else None,
                                       cache_creation_tokens=cache_creation)
@@ -414,11 +416,26 @@ class AstrBotTextProvider:
                 except Exception:
                     logger.debug("cache signature collection failed", exc_info=True)
         except Exception as error:
-            logger.debug("[CompanionV2][开发者追踪] 模型请求准备失败 provider=%s error_type=%s",
-                         self.provider_id, type(error).__name__, exc_info=True)
+            task_error_code = error.code if isinstance(error, TaskError) else None
+            if (not isinstance(task_error_code, str)
+                    or re.fullmatch(r"[a-z0-9_.-]{1,80}", task_error_code) is None):
+                task_error_code = None
+            status_code = getattr(error, "status_code", None)
+            if type(status_code) is not int or not 100 <= status_code <= 599:
+                status_code = None
+            error_type = type(error).__name__
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", error_type) is None:
+                error_type = None
+            diagnostics = replace(diagnostics, failure=ModelFailure.PREPARATION,
+                error_type=error_type, error_code=task_error_code, status_code=status_code)
+            logger.warning("[CompanionV2] 模型请求准备失败 provider=%s failure=%s error_type=%s "
+                           "task_error_code=%s status_code=%s",
+                           self.provider_id, ModelFailure.PREPARATION.value,
+                           error_type or "unavailable", task_error_code or "unavailable",
+                           status_code if status_code is not None else "unavailable")
             return ProviderResponse("not_started", usage=Amount(0, 0), receipt_ref=receipt,
                                     failure=ModelFailure.PREPARATION,
-                                    diagnostics=replace(diagnostics, failure=ModelFailure.PREPARATION))
+                                    diagnostics=diagnostics)
         failure = ModelFailure.TRANSPORT
         try:
             response = (await transcript.query(native, payload, tools) if transcript is not None
@@ -487,6 +504,18 @@ class AstrBotTextProvider:
             status_code = getattr(error, "status_code", None)
             if type(status_code) is not int or not 100 <= status_code <= 599:
                 status_code = "unavailable"
+            error_type = type(error).__name__
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", error_type) is None:
+                error_type = None
+            diagnostics = replace(diagnostics, error_type=error_type,
+                error_code=task_error_code if task_error_code != "unavailable" else None,
+                status_code=status_code if type(status_code) is int else None)
+            if (final_failure is ModelFailure.TRANSPORT and raw is None
+                    and transcript is None and definitely_not_sent(error)):
+                logger.warning("[CompanionV2] 模型连接未建立，请求未发送 provider=%s error_type=%s",
+                               self.provider_id, error_type)
+                return ProviderResponse("not_started", usage=Amount(0, 0), receipt_ref=receipt,
+                                        failure=final_failure, diagnostics=diagnostics)
             logger.warning(
                 "[CompanionV2] 模型适配器结果未知 provider=%s phase=%s failure=%s "
                 "error_type=%s task_error_code=%s status_code=%s completion_present=%s "

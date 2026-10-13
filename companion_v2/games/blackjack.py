@@ -1,28 +1,21 @@
 from __future__ import annotations
-
 import random
 from dataclasses import dataclass, field
 from typing import Any, Literal
-
 from .common import Difficulty
-
-RANKS: tuple[str, ...] = (
-    "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K",
-)
-SUITS: tuple[str, ...] = ("♠", "♥", "♦", "♣")
-TEN_RANKS = frozenset({"10", "J", "Q", "K"})
-
-HandStatus = Literal["playing", "stand", "bust", "blackjack", "surrendered"]
-HandResult = Literal["", "blackjack_win", "win", "push", "loss"]
-GamePhase = Literal["player_turns", "dealer_turn", "settled"]
-
+RANKS: tuple[str, ...] = ('A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K')
+SUITS: tuple[str, ...] = ('♠', '♥', '♦', '♣')
+TEN_RANKS = frozenset({'10', 'J', 'Q', 'K'})
+HandStatus = Literal['playing', 'stand', 'bust', 'blackjack', 'surrendered']
+HandResult = Literal['', 'blackjack_win', 'win', 'push', 'loss']
+GamePhase = Literal['player_turns', 'dealer_turn', 'settled']
 
 def _best_value(cards: list[BlackjackCard]) -> tuple[int, bool]:
     """Return (best total, whether an ace is counted as 11)."""
     total = 0
     aces = 0
     for card in cards:
-        if card.rank == "A":
+        if card.rank == 'A':
             aces += 1
             total += 1
         elif card.rank in TEN_RANKS:
@@ -34,32 +27,28 @@ def _best_value(cards: list[BlackjackCard]) -> tuple[int, bool]:
         if total + 10 <= 21:
             total += 10
             soft = True
-    return total, soft
-
+    return (total, soft)
 
 @dataclass(frozen=True, slots=True)
 class BlackjackCard:
     """One immutable playing card. Suits are cosmetic; ranks drive the score."""
-
     rank: str
     suit: str
 
     def __post_init__(self) -> None:
         if self.rank not in RANKS or self.suit not in SUITS:
-            raise ValueError("无效的扑克牌")
+            raise ValueError('无效的扑克牌')
 
     def as_dict(self) -> dict[str, str]:
-        return {"rank": self.rank, "suit": self.suit}
-
+        return {'rank': self.rank, 'suit': self.suit}
 
 @dataclass(slots=True)
 class BlackjackHand:
     """One player hand identified by its game-local number."""
-
     number: int
     cards: list[BlackjackCard] = field(default_factory=list)
-    status: HandStatus = "playing"
-    result: HandResult = ""
+    status: HandStatus = 'playing'
+    result: HandResult = ''
 
     def add(self, card: BlackjackCard) -> None:
         self.cards.append(card)
@@ -81,29 +70,13 @@ class BlackjackHand:
         return len(self.cards) == 2 and self.value == 21
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "number": self.number,
-            "cards": [card.as_dict() for card in self.cards],
-            "value": self.value,
-            "soft": self.soft,
-            "status": self.status,
-            "result": self.result,
-            "blackjack": self.blackjack,
-            "bust": self.busted,
-        }
+        return {'number': self.number, 'cards': [card.as_dict() for card in self.cards], 'value': self.value, 'soft': self.soft, 'status': self.status, 'result': self.result, 'blackjack': self.blackjack, 'bust': self.busted}
 
-
-def fresh_shoe(decks: int = 6) -> list[BlackjackCard]:
+def fresh_shoe(decks: int=6) -> list[BlackjackCard]:
     """Build one freshly shuffled multi-deck shoe."""
-    shoe = [
-        BlackjackCard(rank=rank, suit=suit)
-        for _deck in range(decks)
-        for suit in SUITS
-        for rank in RANKS
-    ]
+    shoe = [BlackjackCard(rank=rank, suit=suit) for _deck in range(decks) for suit in SUITS for rank in RANKS]
     random.shuffle(shoe)
     return shoe
-
 
 @dataclass(slots=True)
 class BlackjackGame:
@@ -118,38 +91,31 @@ class BlackjackGame:
     - After all hands finish, the dealer reveals its hole card and draws to 17.
     - easy/normal stand on soft 17; hard hits soft 17 (a slightly stronger house).
     """
-
-    difficulty: Difficulty = "normal"
+    difficulty: Difficulty = 'normal'
     shoe: list[BlackjackCard] = field(default_factory=fresh_shoe)
     hands: dict[int, BlackjackHand] = field(default_factory=dict)
     dealer_cards: list[BlackjackCard] = field(default_factory=list)
     dealer_hole: BlackjackCard | None = None
-    phase: GamePhase = "player_turns"
+    phase: GamePhase = 'player_turns'
     dealer_blackjack: bool = False
     finished: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
-    def deal(
-        cls,
-        *,
-        difficulty: Difficulty = "normal",
-        player_numbers: list[int],
-        shoe: list[BlackjackCard] | None = None,
-    ) -> BlackjackGame:
+    def deal(cls, *, difficulty: Difficulty='normal', player_numbers: list[int], shoe: list[BlackjackCard] | None=None) -> BlackjackGame:
         """Deal a complete round; deterministic tests may inject a shoe."""
         deck = list(shoe) if shoe is not None else fresh_shoe()
         numbers = [int(number) for number in player_numbers]
         if not numbers or len(set(numbers)) != len(numbers):
-            raise ValueError("玩家编号不能为空或重复")
+            raise ValueError('玩家编号不能为空或重复')
         if len(deck) < len(numbers) * 2 + 2:
-            raise ValueError("牌堆不足，无法完成开局")
+            raise ValueError('牌堆不足，无法完成开局')
         game = cls(difficulty=difficulty, shoe=deck)
         for number in numbers:
             hand = BlackjackHand(number=number)
             hand.add(game._draw())
             hand.add(game._draw())
-            hand.status = "blackjack" if hand.blackjack else "playing"
+            hand.status = 'blackjack' if hand.blackjack else 'playing'
             game.hands[number] = hand
         game.dealer_cards.append(game._draw())
         game.dealer_hole = game._draw()
@@ -179,13 +145,13 @@ class BlackjackGame:
 
     @property
     def dealer_must_hit(self) -> bool:
-        if self.finished or self.phase != "dealer_turn":
+        if self.finished or self.phase != 'dealer_turn':
             return False
-        total, soft = self.dealer_total, self.dealer_soft
+        total, soft = (self.dealer_total, self.dealer_soft)
         if total > 17:
             return False
         if total == 17:
-            return soft and self.difficulty == "hard"
+            return soft and self.difficulty == 'hard'
         return True
 
     @property
@@ -193,14 +159,11 @@ class BlackjackGame:
         return {number: hand.result for number, hand in self.hands.items()}
 
     def all_players_done(self) -> bool:
-        return all(hand.status != "playing" for hand in self.hands.values())
+        return all((hand.status != 'playing' for hand in self.hands.values()))
 
     def has_pending_hands(self) -> bool:
         """Return whether the dealer still needs to play for any comparison."""
-        return any(
-            not hand.result and hand.status in {"stand", "blackjack"}
-            for hand in self.hands.values()
-        )
+        return any((not hand.result and hand.status in {'stand', 'blackjack'} for hand in self.hands.values()))
 
     def reveal_dealer(self) -> None:
         if self.dealer_hole is None:
@@ -215,43 +178,37 @@ class BlackjackGame:
 
     def hit(self, number: int) -> dict[str, Any]:
         hand = self._hand(number)
-        if hand.status != "playing":
-            raise ValueError("这手牌已经不需要再要牌")
+        if hand.status != 'playing':
+            raise ValueError('这手牌已经不需要再要牌')
         card = self._draw()
         hand.add(card)
-        event: dict[str, Any] = {
-            "action": "hit",
-            "number": number,
-            "card": card.as_dict(),
-            "value": hand.value,
-            "soft": hand.soft,
-        }
+        event: dict[str, Any] = {'action': 'hit', 'number': number, 'card': card.as_dict(), 'value': hand.value, 'soft': hand.soft}
         if hand.busted:
-            hand.status = "bust"
-            hand.result = "loss"
-            event["bust"] = True
+            hand.status = 'bust'
+            hand.result = 'loss'
+            event['bust'] = True
         elif hand.value == 21:
-            hand.status = "stand"
-            event["at_21"] = True
+            hand.status = 'stand'
+            event['at_21'] = True
         self._append_event(event)
         return event
 
     def stand(self, number: int) -> dict[str, Any]:
         hand = self._hand(number)
-        if hand.status != "playing":
-            raise ValueError("这手牌已经停牌")
-        hand.status = "stand"
-        event = {"action": "stand", "number": number, "value": hand.value}
+        if hand.status != 'playing':
+            raise ValueError('这手牌已经停牌')
+        hand.status = 'stand'
+        event = {'action': 'stand', 'number': number, 'value': hand.value}
         self._append_event(event)
         return event
 
     def surrender(self, number: int) -> dict[str, Any]:
         hand = self._hand(number)
-        if hand.status not in {"playing", "stand", "blackjack"}:
-            raise ValueError("这手牌已经结算")
-        hand.status = "surrendered"
-        hand.result = "loss"
-        event = {"action": "surrender", "number": number, "value": hand.value}
+        if hand.status not in {'playing', 'stand', 'blackjack'}:
+            raise ValueError('这手牌已经结算')
+        hand.status = 'surrendered'
+        hand.result = 'loss'
+        event = {'action': 'surrender', 'number': number, 'value': hand.value}
         self._append_event(event)
         return event
 
@@ -265,77 +222,47 @@ class BlackjackGame:
             if hand.result:
                 continue
             if self.dealer_blackjack:
-                hand.result = "push" if hand.blackjack else "loss"
+                hand.result = 'push' if hand.blackjack else 'loss'
             elif hand.blackjack:
-                hand.result = "blackjack_win"
+                hand.result = 'blackjack_win'
             elif dealer_total > 21 or hand.value > dealer_total:
-                hand.result = "win"
+                hand.result = 'win'
             elif hand.value == dealer_total:
-                hand.result = "push"
+                hand.result = 'push'
             else:
-                hand.result = "loss"
+                hand.result = 'loss'
         for hand in self.hands.values():
-            if hand.status == "playing":
-                hand.status = "stand"
-        self.phase = "settled"
+            if hand.status == 'playing':
+                hand.status = 'stand'
+        self.phase = 'settled'
         self.finished = True
-        self._append_event(
-            {
-                "action": "settle",
-                "dealer_total": dealer_total,
-                "dealer_soft": self.dealer_soft,
-                "results": {str(key): value for key, value in self.results.items()},
-            }
-        )
+        self._append_event({'action': 'settle', 'dealer_total': dealer_total, 'dealer_soft': self.dealer_soft, 'results': {str(key): value for key, value in self.results.items()}})
         return self.results
 
     def snapshot(self) -> dict[str, Any]:
-        hidden = self.phase == "player_turns" and not self.finished
+        hidden = self.phase == 'player_turns' and (not self.finished)
         dealer_cards = [card.as_dict() for card in self.dealer_cards]
         if hidden:
             visible = dealer_cards[:1]
-            dealer_total, dealer_soft = (
-                _best_value(self.dealer_cards[:1])
-                if self.dealer_cards
-                else (0, False)
-            )
+            dealer_total, dealer_soft = _best_value(self.dealer_cards[:1]) if self.dealer_cards else (0, False)
         else:
             visible = dealer_cards
-            dealer_total, dealer_soft = self.dealer_total, self.dealer_soft
-        return {
-            "kind": "blackjack",
-            "phase": self.phase,
-            "finished": self.finished,
-            "dealer_blackjack": self.dealer_blackjack,
-            "dealer_cards": visible,
-            "dealer_hidden": hidden,
-            "dealer_total": dealer_total,
-            "dealer_soft": dealer_soft,
-            "hands": {
-                str(number): hand.as_dict() for number, hand in self.hands.items()
-            },
-            "results": {str(key): value for key, value in self.results.items()},
-            "history": self.history[-24:],
-        }
+            dealer_total, dealer_soft = (self.dealer_total, self.dealer_soft)
+        return {'kind': 'blackjack', 'phase': self.phase, 'finished': self.finished, 'dealer_blackjack': self.dealer_blackjack, 'dealer_cards': visible, 'dealer_hidden': hidden, 'dealer_total': dealer_total, 'dealer_soft': dealer_soft, 'hands': {str(number): hand.as_dict() for number, hand in self.hands.items()}, 'results': {str(key): value for key, value in self.results.items()}, 'history': self.history[-24:]}
 
     def _dealer_peeks_blackjack(self) -> bool:
         upcard = self.dealer_upcard
-        return bool(
-            upcard
-            and upcard.rank in {"A", *TEN_RANKS}
-            and self.dealer_hole is not None
-            and _best_value([upcard, self.dealer_hole])[0] == 21
-        )
+        return bool(upcard and upcard.rank in {'A', *TEN_RANKS} and (self.dealer_hole is not None) and (_best_value([upcard, self.dealer_hole])[0] == 21))
 
     def _draw(self) -> BlackjackCard:
         if not self.shoe:
-            raise ValueError("牌堆已经用完")
+            raise ValueError('牌堆已经用完')
         return self.shoe.pop()
 
     def _hand(self, number: int) -> BlackjackHand:
         hand = self.hands.get(int(number))
         if hand is None:
-            raise ValueError("这手牌不属于本局玩家")
+            raise ValueError('这手牌不属于本局玩家')
         return hand
 
     def _append_event(self, event: dict[str, Any]) -> None:

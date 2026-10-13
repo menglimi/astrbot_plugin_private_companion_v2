@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import inspect
 import json
 from typing import Awaitable, Callable
@@ -12,6 +12,7 @@ from companion_v2.execution.models import Lane, ProviderBinding, digest, encode
 from companion_v2.identity_policy.models import _opaque
 
 from .failures import ModelFailure
+from .refusal import DEFAULT_REFUSAL_TERMS_TEXT, parse_refusal_terms
 from .response_diagnostics import ResponseDiagnostics
 
 
@@ -50,14 +51,25 @@ class BudgetPolicy:
     role: Amount
     window: Amount
     background: Amount
+    enabled: bool = True
 
     def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError("hard budget admission needs an explicit switch")
         if not all(isinstance(value, Amount) for value in (
                 self.installation, self.bot, self.role, self.window, self.background)):
             raise ValueError("all daily budget ceilings must be explicit")
         if (self.background.tokens > self.installation.tokens
                 or self.background.cost_microusd > self.installation.cost_microusd):
             raise ValueError("background ceiling cannot exceed the installation ceiling")
+
+    def document(self) -> dict:
+        # Existing explicit policies keep their original serialized shape and hash.
+        # Host defaults opt out explicitly; their amounts remain useful for settings.
+        result = asdict(self)
+        if self.enabled:
+            result.pop("enabled")
+        return result
 
 
 @dataclass(frozen=True)
@@ -100,6 +112,7 @@ class ModelTaskProfile:
     timeout_seconds: int = 60
     replacement_scope: str = "all"
     prompt_sections: tuple[PromptSection, ...] = ()
+    refusal_terms: str = DEFAULT_REFUSAL_TERMS_TEXT
 
     def __post_init__(self):
         for name in ("kind", "default_provider", "version"):
@@ -121,6 +134,7 @@ class ModelTaskProfile:
         checked_rules(self.replacement_rules)
         if type(self.fallback_on_refusal) is not bool:
             raise ValueError("refusal replacement must be an explicit boolean")
+        parse_refusal_terms(self.refusal_terms)
         if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 600:
             raise ValueError("model timeout must be between 1 and 600 seconds")
         if self.replacement_scope not in ("all", "plugin", "conversation"):
@@ -284,6 +298,7 @@ class ModelEnvelope:
     provider_capabilities: tuple[str, ...] = ()
     on_reply_prefix: Callable[[ModelDraft], Awaitable[bool]] | None = field(default=None, compare=False, repr=False)
     reply_prefix_ready: Callable[[ModelDraft], bool] | None = field(default=None, compare=False, repr=False)
+    refusal_terms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,8 @@
 """Integration metadata and scoped workspaces; never touches live plugin stores."""
-import ast
 import json
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock, patch
@@ -13,19 +13,26 @@ from astrbot.api.web import PluginRequest, bind_request_context
 from starlette.requests import Request
 from astrbot_host.integration_registry import IntegrationRegistry, STATUS_SCHEMA
 from astrbot_host.integration_catalog import OPTIONAL_PROVIDERS
+from astrbot_host.native_extensions import NativeExtensionRegistry
+from astrbot_host.native_extensions.builtins import create_bundled_extensions, MANAGED_EXTENSIONS
 from astrbot_host.management_identity import dashboard_operator
 from companion_v2.capabilities import CapabilityRepository
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.product import PRODUCT_VERSION
 
-ROOT = Path(__file__).resolve().parents[1]
 PREFIX = "/astrbot_plugin_private_companion_v2"
 
 
-class RegistryTests(unittest.TestCase):
+class RegistryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.spec = OPTIONAL_PROVIDERS[1]
+        self.spec = {"plugin_id": "synthetic.third_party", "capability_id": "third_party",
+            "label": "Synthetic third-party provider", "description": "Metadata contract fixture",
+            "furniture": {"id": "third-party", "name": "Third-party fixture", "panel_id": "third-party"}}
+        providers = (self.spec, *(item for item in OPTIONAL_PROVIDERS if item.get("owner") == "companion_v2"))
+        catalog_patch = patch("astrbot_host.integration_registry.OPTIONAL_PROVIDERS", providers)
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
         self.provider = Mock(return_value={"schema": STATUS_SCHEMA, "plugin_id": self.spec["plugin_id"],
             "enabled": True, "runtime_ready": None, "private_record": "must-not-escape", "token": "secret"})
         self.api = NS(companion_v2_status=self.provider, status=Mock(side_effect=AssertionError("private API")))
@@ -83,7 +90,7 @@ class RegistryTests(unittest.TestCase):
         self.native.get_all_stars = Mock(side_effect=RuntimeError("private path"))
         value = self.registry.snapshot()
         external = [item for item in value["providers"] if item["owner"] == "external"]
-        bundled = [item for item in value["providers"] if item["owner"] == "companion_v2"]
+        bundled = value["extensions"]
         self.assertTrue(external)
         self.assertTrue(all(item["integration_state"] == "unknown" for item in external))
         self.assertTrue(bundled)
@@ -98,57 +105,38 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(value["status_connected"])
         self.assertEqual(value["pages"], [])
 
-    def test_distributed_provider_wrappers_are_metadata_only(self):
-        checked = 0
-        for spec in OPTIONAL_PROVIDERS:
-            path = ROOT.parent / spec["plugin_id"] / "main.py"
-            if not path.is_file():
-                continue  # A core-only install does not ship optional providers or V1.
-            checked += 1
-            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
-            methods = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "companion_v2_status"]
-            self.assertEqual(len(methods), 1, spec["plugin_id"])
-            # Keep the real metadata helper bound to the real status method;
-            # extracting status alone broke when providers added native readiness.
-            helpers = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-                       and node.name == "companion_v2_native"]
-            probe_class = ast.ClassDef(name="StatusProbe", bases=[], keywords=[],
-                                       body=[methods[0], *helpers], decorator_list=[])
-            module = ast.Module(body=[ast.ImportFrom(module="__future__",names=[ast.alias(name="annotations")],level=0),
-                                      probe_class], type_ignores=[])
-            namespace = {"PLUGIN_NAME":spec["plugin_id"]}
-            exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
-            probe = namespace["StatusProbe"]()
-            port = NS(_closed=False)
-            probe._plugin = NS(enabled=True, server_enabled=True, _cfg_bool=lambda key,default:True,
-                               room_server=NS(running=True), _native_provider=port,
-                               _native_v2_provider=port, _native_v2_mode=True, native_v2_enabled=True,
-                               native_v2_tictactoe_enabled=True, native_v2_gomoku_enabled=False,
-                               native_v2_pig_dice_enabled=False, native_v2_blackjack_enabled=False,
-                               native_v2_xiangqi_enabled=False)
-            probe._management_preparation_closed = False
-            probe.bridge_lifecycle_status = lambda:{"active":True}
-            status = probe.companion_v2_status()
-            self.assertEqual(set(status), {"schema", "plugin_id", "enabled", "runtime_ready"})
-            self.assertEqual(status["plugin_id"], spec["plugin_id"])
-            self.assertEqual(status["schema"], STATUS_SCHEMA)
-            self.assertIs(status["enabled"], True, spec["plugin_id"])
-            self.assertIn(status["runtime_ready"], (None, True), spec["plugin_id"])
-            # No port means no execution readiness, including after reloading;
-            # Together and Reality retain their separately reported readiness.
-            probe._plugin._native_provider = None
-            probe._plugin._native_v2_provider = None
-            waiting = probe.companion_v2_status()
-            if spec["capability_id"] in {"content", "image", "screen", "game", "live"}:
-                self.assertIs(waiting["enabled"], True, spec["plugin_id"])
-                self.assertIs(waiting["runtime_ready"], False, spec["plugin_id"])
-            if spec["capability_id"] in {"image", "screen"}:
-                probe._plugin._native_v2_mode = False
-                legacy = probe.companion_v2_status()
-                self.assertIs(legacy["enabled"], False, spec["plugin_id"])
-                self.assertIs(legacy["runtime_ready"], False, spec["plugin_id"])
-        if not checked:
-            self.skipTest("optional provider sources are not installed")
+    async def test_seven_bundled_providers_report_owned_metadata_without_starting_services(self):
+        with TemporaryDirectory(prefix="companion-integration-bundled-") as temporary:
+            context = NS(get_all_stars=Mock(return_value=()))
+            leases, issues = create_bundled_extensions(Path(temporary), context=context,
+                controller=NS(), now=lambda: support.NOW)
+            self.assertEqual(issues, ())
+            registry = NativeExtensionRegistry(context, bundled_extensions=leases,
+                managed_extensions=MANAGED_EXTENSIONS)
+            self.addAsyncCleanup(registry.aclose)
+            self.assertEqual(len(leases), 7)
+            self.assertTrue(all(lease.star is None for lease in leases))
+            declarations = registry.declarations()
+            self.assertEqual({item.descriptor.package.extension_id for item in declarations},
+                {"content", "image", "companion.screen.native", "reality", "together", "game", "live"})
+            self.assertTrue(all(item.descriptor.package.package_version == PRODUCT_VERSION
+                                for item in declarations))
+            value = IntegrationRegistry(context).snapshot(native_extensions=registry)
+            bundled = value["extensions"]
+            self.assertEqual({item["capability_id"] for item in bundled},
+                {"content", "image", "screen", "reality", "together", "game", "live"})
+            for item in bundled:
+                self.assertEqual(item["kind"], "native_extension")
+                self.assertEqual(item["owner"], "companion_v2")
+                self.assertEqual(item["version"], PRODUCT_VERSION)
+                self.assertTrue(item["status_connected"])
+                self.assertFalse(item["assembled"])
+                self.assertFalse(item["runtime_ready"])
+                self.assertEqual(item["runtime"]["state"], "inactive")
+                self.assertEqual(item["pages"], [])
+            self.assertTrue(all(lease.state == "inactive" and lease._start_task is None
+                                for lease in leases))
+            await registry.aclose()
 
 
 class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
@@ -177,6 +165,7 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         result = await self.request(path)
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(result["data"]["product"]["version"], PRODUCT_VERSION)
+        self.assertEqual(PRODUCT_VERSION, "2.1.1")
         self.assertIsNone(self.controller.runtime)
         self.assertEqual((await self.request(path,query="target_id=other"))["data"]["code"], "integration_request_invalid")
         await self.controller.terminate()
@@ -211,7 +200,7 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request(PREFIX + "/integration/manifest"))["data"]["code"], "core_access_required")
 
     async def test_v2_image_and_screen_furniture_lifecycle_retains_data_and_reassembles(self):
-        await self.controller.initialize_profile()
+        await self.start_host()
         path = PREFIX + "/integration/lifecycle"
         manifest_path = PREFIX + "/integration/manifest"
 
@@ -222,13 +211,14 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             })
 
         before = (await self.request(manifest_path))["data"]
-        by_capability = {item["capability_id"]:item for item in before["providers"]}
+        by_capability = {item["capability_id"]:item for item in before["extensions"]}
         for capability, extension_id in (("image", "image"), ("screen", "companion.screen.native")):
             item = by_capability[capability]
             self.assertEqual(item["owner"], "companion_v2")
             self.assertEqual(item["extension_id"], extension_id)
-            self.assertFalse(item["installed"])
-            self.assertTrue(item["runtime_ready"])
+            self.assertFalse(item["assembled"])
+            self.assertFalse(item["runtime_ready"])
+            self.assertEqual(item["runtime"]["state"], "inactive")
 
         for capability, extension_id in (("image", "image"), ("screen", "companion.screen.native")):
             assembled = await command(extension_id, "assemble", 0, capability + ".assemble")
@@ -236,6 +226,11 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             installation = assembled["data"]["installation"]
             self.assertEqual(installation["desired_state"], "active")
             self.assertEqual(installation["revision"], 1)
+            await self.controller.native_extensions._lease(extension_id).start()
+            running = next(item for item in (await self.request(manifest_path))["data"]["extensions"]
+                           if item["capability_id"] == capability)
+            self.assertTrue(running["runtime_ready"])
+            self.assertEqual(running["runtime"]["state"], "running")
             replay = await command(extension_id, "assemble", 0, capability + ".assemble")
             self.assertTrue(replay["data"]["receipt"]["replayed"])
 
@@ -255,10 +250,10 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             retained_owner = "image.native" if capability == "image" else "screen"
             self.assertIn(retained_owner, retained["retained_dataset_owners"])
 
-            provider = next(item for item in (await self.request(manifest_path))["data"]["providers"]
+            provider = next(item for item in (await self.request(manifest_path))["data"]["extensions"]
                             if item["capability_id"] == capability)
-            self.assertFalse(provider["installed"])
-            self.assertEqual(provider["integration_state"], "missing")
+            self.assertFalse(provider["assembled"])
+            self.assertEqual(provider["integration_state"], "unassembled")
             self.assertIn("数据保留", provider["reason"])
 
             reassembled = await command(extension_id, "assemble", retained["revision"], capability + ".reassemble")
@@ -268,7 +263,7 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                              retained["retained_dataset_owners"])
 
     async def test_bundled_package_drift_updates_without_uninstalling_or_losing_data(self):
-        await self.controller.initialize_profile()
+        await self.start_host()
         registry = self.controller.native_extensions
         declaration = next(item for item in registry.declarations()
                            if item.descriptor.package.extension_id == "companion.screen.native")
@@ -280,8 +275,8 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             package_version=legacy.package_version, expected_revision=0, observed_at=support.NOW).unwrap()
 
         manifest = (await self.request(PREFIX + "/integration/manifest"))["data"]
-        provider = next(item for item in manifest["providers"] if item["capability_id"] == "screen")
-        self.assertTrue(provider["runtime_ready"])
+        provider = next(item for item in manifest["extensions"] if item["capability_id"] == "screen")
+        self.assertFalse(provider["runtime_ready"])
         self.assertTrue(provider["update_available"])
         self.assertEqual(provider["version"], current_package.package_version)
         self.assertEqual(provider["installed_package_version"], "1.9.9")
@@ -295,10 +290,12 @@ class MultiIntegrationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["package_version"], current_package.package_version)
         self.assertIn("screen", updated["retained_dataset_owners"])
         self.assertEqual(updated["revision"], installed.revision + 1)
+        await self.controller.native_extensions._lease("companion.screen.native").start()
 
         refreshed = (await self.request(PREFIX + "/integration/manifest"))["data"]
-        provider = next(item for item in refreshed["providers"] if item["capability_id"] == "screen")
+        provider = next(item for item in refreshed["extensions"] if item["capability_id"] == "screen")
         self.assertEqual(provider["integration_state"], "connected")
+        self.assertTrue(provider["runtime_ready"])
         self.assertFalse(provider["update_available"])
         self.assertEqual(provider["installed_package_version"], current_package.package_version)
 

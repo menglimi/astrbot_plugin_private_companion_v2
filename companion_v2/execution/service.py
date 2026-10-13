@@ -57,8 +57,11 @@ class TaskSupervisor:
         self.identity = PersistentIdentityDirectory(runtime)
         self.policy = ObjectAccessPolicy(runtime)
         entries = {entry.definition.kind: entry for entry in registrations}
-        if not 1 <= len(entries) == len(registrations) <= 64:
-            raise ValueError("register 1..64 unique task kinds")
+        # This is a trusted startup catalog, not the number of running tasks.
+        # Optional domains can legitimately bring the catalog above 64 kinds;
+        # execution capacity remains governed by SupervisorLimits.
+        if not entries or len(entries) != len(registrations):
+            raise ValueError("register nonempty unique task kinds")
         self.registrations = MappingProxyType(entries)
         self.limits = limits
         self.now = now or (lambda: datetime.now(timezone.utc))
@@ -118,10 +121,20 @@ class TaskSupervisor:
             if (row["generation"] if row else 0) != expected_generation:
                 raise TaskError("supervisor_generation_conflict", "another supervisor already started")
             if row and row["limits_json"] != encode(self.limits):
-                raise TaskError("supervisor_limits_changed", "quota changes require a separate reviewed configuration path")
+                previous = json.loads(row["limits_json"])
+                current = asdict(self.limits)
+                retained_only_increase = (
+                    set(previous) == set(current)
+                    and previous.get("retained_tasks", 0) < current["retained_tasks"]
+                    and all(previous[key] == value for key, value in current.items() if key != "retained_tasks")
+                )
+                retained = connection.execute("SELECT COUNT(*) FROM execution_tasks").fetchone()[0]
+                if not retained_only_increase or retained > current["retained_tasks"]:
+                    raise TaskError("supervisor_limits_changed", "only a safe retained-task capacity increase can be adopted at startup")
             generation = expected_generation + 1
             connection.execute("""INSERT INTO task_supervisor VALUES (1, ?, ?, ?)
                 ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation,
+                limits_json = excluded.limits_json,
                 started_at = excluded.started_at""", (generation, encode(self.limits), stamp(self._now())))
         self.generation = generation
         return generation

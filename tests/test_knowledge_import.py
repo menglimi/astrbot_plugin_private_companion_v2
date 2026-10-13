@@ -9,7 +9,7 @@ import unittest
 
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.foundation.refs import AudienceRef, ScopeKind, ScopeRef, SubjectKind, SubjectRef
-from companion_v2.knowledge.catalog import CatalogKnowledgeProvider, EntryDocument, KnowledgeCatalog, SourceBinding
+from companion_v2.knowledge.catalog import CatalogKnowledgeProvider, EntryDocument, KnowledgeCatalog, MemberEntry, SourceBinding
 from companion_v2.knowledge.configuration import KnowledgeSettings, read_settings
 from companion_v2.knowledge.context import (
     MEMBER_CLUE_INSTRUCTION,
@@ -257,6 +257,23 @@ class MemberClueTests(Fixture):
     def import_members(self, *entries):
         self.importer().import_source(self.spec(), lambda item: worldbook(*entries), at=NOW)
         return self.catalog.member_entries(installation_id=INSTALLATION, source_limit=8)
+
+    def test_member_scope_kind_and_individual_group_boundary_are_enforced(self):
+        group_binding = SourceBinding(INSTALLATION, scope_kind=ScopeKind.GROUP)
+        group_member = MemberEntry("all-groups", content="只能在群里参考的描述")
+        local_member = MemberEntry("group-a", content="一群的成员描述", group_ids=("111",))
+        for binding, member in ((group_binding, group_member), (self.binding, local_member)):
+            self.catalog.save(binding, source_id=member.entry_id, locator="synthetic", format="worldbook",
+                              content_digest=member.entry_id, entries=(), members=(member,), issues=(), at=NOW)
+
+        def members(scope):
+            return {entry.entry_id for entry in self.catalog.member_entries(
+                installation_id=INSTALLATION, source_limit=8, role_id=ROLE_ID,
+                scope_ids=(scope.native_scope_id,), scope_kind=scope.kind, scope=scope)}
+
+        self.assertEqual(members(GROUP_A), {"all-groups", "group-a"})
+        self.assertEqual(members(GROUP_B), {"all-groups"})
+        self.assertEqual(members(SCOPE), set())
 
     def test_declared_account_matches_only_the_authenticated_speaker(self):
         entries = self.import_members(

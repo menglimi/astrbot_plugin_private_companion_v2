@@ -38,7 +38,7 @@ function harness(group = false) {
       apiPost: (route, values) => new Promise((resolve, reject) => requests.push({method: 'POST', route, values, resolve, reject})),
     },
     lucide: {createIcons() {}},
-    confirm: () => true,
+    CompanionConfirm: () => Promise.resolve(true),
   };
   /* FormData 的替身：page 用 new FormData(form) 读表单，而这里的 form 是
      提交时构造的桩，所以直接用它的 values 映射。 */
@@ -59,7 +59,7 @@ function harness(group = false) {
       querySelectorAll() { return []; },
       querySelector() { return null; },
       click(selector, dataset) {
-        handlers.click({target: {closest: candidate => candidate === selector ? {dataset} : null}});
+        return handlers.click({target: {closest: candidate => candidate === selector ? {dataset} : null}});
       },
       change(id, files) { handlers.change({target: {id, files}}); },
       /* 设置表单的提交：values 是 FormData 的替身内容。
@@ -154,7 +154,7 @@ function settingsCatalog(revision = 3, overrides = {}) {
       slang_enabled: true, slang_learning: true, slang_web_search_enabled: false,
       vision_review: true,
       embedding_provider: '', rerank_provider: '', analysis_provider: '',
-      timeout_seconds: 8, batch_size: 24, learning_interval_seconds: 900,
+      timeout_seconds: 8, batch_size: 24, learning_interval_seconds: 21600,
       slang_web_search_candidates: 4, slang_web_search_results: 2, ...overrides},
     catalog: {reaction: {enabled: 1}, slang: {enabled: 1}},
     sessions: [], session_id: null, items: [], next_after: null,
@@ -171,7 +171,7 @@ const FORM = {enabled: true, memory_enabled: true, reactions_enabled: true,
   slang_enabled: true, slang_learning: true, slang_web_search_enabled: false,
   vision_review: true,
   embedding_provider: '', rerank_provider: '', analysis_provider: '',
-  timeout_seconds: 12, batch_size: 24, learning_interval_seconds: 900,
+  timeout_seconds: 12, batch_size: 24, learning_interval_seconds: 360,
   slang_web_search_candidates: 6, slang_web_search_results: 3};
 
 test('a revision conflict re-reads and keeps the values the user just entered', async () => {
@@ -185,6 +185,9 @@ test('a revision conflict re-reads and keeps the values the user just entered', 
   assert.equal(requests[1].values.action, 'configure');
   assert.equal(requests[1].values.revision, 3);
   assert.equal(requests[1].values.changes.timeout_seconds, 12, 'the submitted numbers must be numbers');
+  assert.equal(requests[1].values.changes.learning_interval_seconds, 21600,
+    'the minute control must store seconds');
+  assert.match(node.innerHTML, /群词义整理间隔 \/ 分钟[\s\S]*value="360"/);
   /* 联网参考的三项：开关必须是布尔，两个计数必须是数字。夹具缺字段时
      values.get() 返回 null，Number(null) 会得到 0，而后端拒绝 0。 */
   assert.equal(requests[1].values.changes.slang_web_search_enabled, false,
@@ -346,7 +349,7 @@ test('reaction editor can delete the current revision and then reload the catalo
     payload: {name: 'auto-collected sticker', description: 'a wave'}}});
   await flush();
   assert.match(node.innerHTML, /data-semantic="delete"/);
-  node.click('[data-semantic]', {semantic: 'delete'});
+  await node.click('[data-semantic]', {semantic: 'delete'});
   assert.equal(requests[2].values.action, 'delete');
   assert.equal(requests[2].values.id, 'reaction-1');
   assert.equal(requests[2].values.revision, 4);
@@ -410,12 +413,14 @@ test('learning semantic catalog loads group slang and reaction entries and saves
     enabled: true, vector_ready: true, source_valid: true,
     payload: {term: '小灯', meaning: '提醒喝水', usage: '群内昵称', collection_source: 'group_capture'}}]};
   const reactions = {...settingsCatalog(), items: [{id: 'reaction-1', kind: 'reaction', revision: 3,
-    enabled: false, vector_ready: false, payload: {name: '挥手', description: '挥手告别'}}]};
+    enabled: false, vector_ready: false, thumbnail_url: 'data:image/jpeg;base64,AA==',
+    payload: {name: '挥手', description: '挥手告别'}}]};
   requests[0].resolve(slang);
   requests[1].resolve(reactions);
   await flush();
   assert.match(node.innerHTML, /小灯/);
   assert.match(node.innerHTML, /挥手/);
+  assert.match(node.innerHTML, /<img src="data:image\/jpeg;base64,AA==" alt="" loading="lazy">/);
   assert.match(node.innerHTML, /语义目录与提供方/);
   assert.match(node.innerHTML, /语义记忆与群聊黑话/);
   assert.match(node.innerHTML, /语义反应素材/);
@@ -425,7 +430,7 @@ test('learning semantic catalog loads group slang and reaction entries and saves
   node.submit('semanticSettings', {enabled: true, vision_review: false, memory_enabled: false,
     slang_enabled: true, slang_learning: false, slang_web_search_enabled: true,
     embedding_provider: 'embed-a', rerank_provider: '', analysis_provider: '',
-    timeout_seconds: 12, batch_size: 32, learning_interval_seconds: 1800,
+    timeout_seconds: 12, batch_size: 32, learning_interval_seconds: 30,
     slang_web_search_candidates: 6, slang_web_search_results: 3});
   assert.equal(requests[2].method, 'POST');
   assert.equal(requests[2].values.action, 'configure');
@@ -433,8 +438,33 @@ test('learning semantic catalog loads group slang and reaction entries and saves
   assert.equal(requests[2].values.changes.slang_learning, false);
   assert.equal(requests[2].values.changes.embedding_provider, 'embed-a');
   assert.equal(requests[2].values.changes.timeout_seconds, 12);
+  assert.equal(requests[2].values.changes.learning_interval_seconds, 1800);
   assert.equal(requests[2].values.changes.reactions_trigger_probability, 0.2,
     'settings hidden in this view remain preserved in the full configuration patch');
+});
+
+test('global learning settings read and save without a chat target', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node, {view:'learning', globalSettingsOnly:true, scopeKey:'global-semantic-settings'});
+  assert.equal(requests[0].method, 'GET');
+  assert.equal(requests[0].values.global, true);
+  assert.equal(requests[0].values.target_id, undefined);
+  assert.equal(requests[0].values.role_id, undefined);
+  requests[0].resolve({...settingsCatalog(), selection_ready:false, scope_kind:'global'});
+  await flush();
+  assert.match(node.innerHTML, /全局语义策略/);
+  assert.doesNotMatch(node.innerHTML, /semantic-learning-catalog|重建当前索引/);
+  node.submit('semanticSettings', {...FORM, learning_interval_seconds:30});
+  assert.equal(requests[1].method, 'POST');
+  assert.equal(requests[1].values.global, true);
+  assert.equal(requests[1].values.target_id, undefined);
+  assert.equal(requests[1].values.role_id, undefined);
+  requests[1].resolve({});
+  await flush();
+  assert.equal(requests[2].method, 'GET');
+  assert.equal(requests[2].values.global, true);
+  page.unmount();
 });
 
 test('learning semantic layout uses theme tokens and collapses cleanly on narrow screens', () => {

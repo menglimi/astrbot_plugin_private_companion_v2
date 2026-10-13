@@ -5,13 +5,13 @@ operator-editable settings. The tests pin the two scope shapes (role ceiling vs
 conversation window), the per-section edit token, replay safety and the
 authorization gate.
 
-主动联系偏好（proactive.contact）是其中最特殊的一个：它是唯一一个四层组
-（安装 → 角色 → 关系 → 窗口），两个关系级额度按窗口写入会被所有者拒绝，
-所以它的字段契约里没有窗口层。
+主动联系的公共编辑器固定在全局层，不再随着对话窗口改变地址；
+运行期继续维护对象授权、个人资料和暂缓规则。
 """
 
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 from tests import test_astrbot_staging_host as support
@@ -19,7 +19,16 @@ from tests.multi_host_support import MultiFixture, multi_config
 from tests.native_adapter_support import FakeEvent, FakeProvider, FakeReverseApi
 from astrbot_host.controller import AstrBotStagingController
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
+from companion_v2.configuration.management import DiaryAndRestManagement, ProactiveContactManagement
+from companion_v2.identity_policy.grants import PERSON_PERMISSION_GRANT_PREFIX
+from companion_v2.identity_policy.models import AuthorizationTier, GrantState
+from companion_v2.proactive.management import GRANT_PREFIX as PROACTIVE_GRANT_PREFIX
+from companion_v2.proactive.configuration import GROUP as CONTACT_GROUP
+from companion_v2.expression.configuration import read_settings as expression_read_settings
+from companion_v2.role_work.growth.configuration import skill_settings
 from companion_v2.role_profile.configuration import FIELD_LIMITS
+from companion_v2.screen.configuration import (ScreenSettings, ScreenConfigurationOwner,
+    configuration_fields as screen_configuration_fields, target_for as screen_target_for)
 from types import SimpleNamespace as NS
 
 
@@ -93,20 +102,21 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             status = (await call(handlers[first]))["data"]["sections"]
             expected_sections = {"budget", "busy_gate", "group_participation", "image_review",
                                  "knowledge", "library", "life", "person", "photo.reference",
-                                 "private_access", "proactive.contact", "quota", "reaction", "recall",
+                                 "private_access", "quota", "reaction", "recall",
                                  "content.authoring",
+                                 "expression.learning", "role.growth.skills",
                                  # qzone 是真实配置分区（companion_v2/qzone/configuration.py:18
                                  # 的 GROUP = "qzone"）。它加入注册表时这份硬编码清单没跟上，
                                  # 于是 assertEqual 把"多了一个真分区"报成失败——这正是本会话
                                  # 反复出现的模式：新增能力却不更新按字面枚举的名单。
                                  "qzone",
-                                 "relationship_profile", "role.growth.skills", "role_growth",
+                                 "relationship_profile",
                                  "role_profile", "screen", "wardrobe"}
             expected_sections.add("image.output")
             self.assertTrue(expected_sections.issubset(status))
             self.assertEqual(set(status), expected_sections)
             self.assertEqual(status["quota"]["scope"], "role")
-            self.assertEqual(status["budget"]["scope"], "role")
+            self.assertEqual(status["budget"]["scope"], "installation")
             self.assertEqual(status["library"]["scope"], "role")
             self.assertEqual(status["role_profile"]["scope"], "role")
             self.assertEqual(status["role_profile"]["layers"], ["installation", "role"])
@@ -123,28 +133,30 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             # 参考图与衣柜同样按角色生效：单个会话不能收窄整个角色的设置。
             self.assertEqual(status["wardrobe"]["scope"], "role")
             self.assertEqual(status["photo.reference"]["scope"], "role")
-            self.assertEqual(status["image_review"]["scope"], "window")
-            self.assertEqual(status["busy_gate"]["scope"], "window")
-            self.assertEqual(status["reaction"]["scope"], "window")
-            # 2026-09-28 新增的各组都是窗口级；主动联系偏好同样是窗口级，
-            # 但它的继承链上多了关系层（安装 → 角色 → 关系 → 窗口）。
-            for name in ("recall", "screen", "person", "role_growth", "knowledge", "life",
-                         "group_participation", "proactive.contact"):
+            self.assertEqual(status["image_review"]["scope"], "role")
+            self.assertEqual(status["busy_gate"]["scope"], "role")
+            self.assertEqual(status["reaction"]["scope"], "installation")
+            # 原文回溯和屏幕材料保留私有窗口范围。
+            for name in ("recall", "screen"):
                 self.assertEqual(status[name]["scope"], "window", name)
-            self.assertEqual(status["proactive.contact"]["layers"],
-                             ["installation", "role", "relationship", "window"])
+            self.assertEqual(status["person"]["scope"], "role")
+            self.assertEqual(status["person"]["layers"], ["installation", "role"])
+            self.assertEqual(status["person"]["fields"]["acquaintance_enabled"]["editable_layers"], ["role"])
+            self.assertEqual(status["person"]["fields"]["acquaintance_card_chars"]["editable_layers"], ["role"])
+            for name in ("knowledge", "group_participation"):
+                self.assertEqual(status[name]["scope"], "role", name)
+            self.assertEqual(status["life"]["scope"], "window")
+            self.assertEqual(status["life"]["fields"]["sleep_enabled"]["editable_layers"],
+                             ["role"])
+            self.assertEqual(status["life"]["fields"]["sleep_enabled"]["write_layer"], "role")
+            self.assertEqual(status["life"]["fields"]["diary_enabled"]["editable_layers"], ["window"])
+            self.assertEqual(status["life"]["fields"]["diary_enabled"]["write_layer"], "window")
             self.assertEqual(status["quota"]["settings"]["private_owner_max_daily"], -1)
             self.assertEqual(status["reaction"]["settings"]["candidate_limit"], 6)
-            self.assertTrue(status["budget"]["settings"]["enable_daily_token_soft_limit"])
+            self.assertFalse(status["budget"]["settings"]["enable_daily_token_soft_limit"])
             self.assertFalse(status["recall"]["settings"]["transcribe_enabled"])
             self.assertFalse(status["screen"]["settings"]["interpretation_enabled"])
             self.assertTrue(status["person"]["settings"]["acquaintance_enabled"])
-            # 技能领域已独立成组：权限留在 role_growth，内容落在 role.growth.skills。
-            self.assertNotIn("custom_skills", status["role_growth"]["settings"])
-            self.assertEqual(status["role.growth.skills"]["settings"]["custom_skills"], "[]")
-            self.assertEqual(status["role.growth.skills"]["settings"]["schedule_influence_strength"], 0)
-            # 技能组是双层：默认落窗口，但可写到角色级，因此链上必须出现 role。
-            self.assertIn("role", status["role.growth.skills"]["layers"])
             # 群聊参与：V1 的默认行为——跟读默认开、主动插话默认关。
             self.assertTrue(status["group_participation"]["settings"]["enable_group_repeat_follow"])
             self.assertFalse(status["group_participation"]["settings"]["enable_group_interjection"])
@@ -174,7 +186,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             # The workbench renders its layer rail from these, so every section
             # must publish the chain and a per-field source, not just its values.
             for name, section in status.items():
-                self.assertIn(section["scope"], ("role", "relationship", "window"), name)
+                self.assertIn(section["scope"], ("installation", "role", "relationship", "window"), name)
                 self.assertTrue(section["layers"], name)
                 self.assertEqual(section["layers"][-1], section["scope"], name)
                 self.assertTrue(section["provenance"], name)
@@ -187,6 +199,79 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sorted(restricted["data"]["sections"]), ["quota"])
             self.assertEqual((await call(handlers[first], query={"sections": "nope"}))["data"]["code"],
                              "configuration_request_invalid")
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_global_contact_and_role_learning_settings_use_distinct_targets(self):
+        handlers, first, second = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
+        try:
+            self.assertIn(global_route, handlers)
+            status = await call(handlers[global_route], query={"sections": "proactive.contact"})
+            contact = status["data"]["sections"]["proactive.contact"]
+            self.assertEqual(contact["scope"], "installation")
+            for name in ("role.growth.skills", "expression.learning"):
+                denied = await call(handlers[global_route], query={"sections": name})
+                self.assertEqual(denied["data"]["code"], "configuration_request_invalid")
+
+            role_sections = (await call(handlers[first], query={
+                "sections": "role.growth.skills,expression.learning"}))["data"]["sections"]
+            for name in ("role.growth.skills", "expression.learning"):
+                self.assertEqual(role_sections[name]["scope"], "role", name)
+                self.assertEqual(role_sections[name]["layers"], ["installation", "role"], name)
+            self.assertEqual(role_sections["role.growth.skills"]["fields"]["enabled"]["editable_layers"],
+                             ["role"])
+
+            denied = await call(handlers[global_route], query={"sections": "screen"})
+            self.assertEqual(denied["status"], "error")
+            self.assertEqual(denied["data"]["code"], "configuration_request_invalid")
+
+            saved = await call(handlers[global_route + "/configure"], {
+                "section": "proactive.contact", "operation_key": "installation-contact-route",
+                "edit_token": contact["edit_token"], "changes": {"interval_seconds": 1234},
+            })
+            self.assertEqual(saved["status"], "ok", saved)
+            role_sections = (await call(handlers[first], query={
+                "sections": "role.growth.skills,expression.learning"}))["data"]["sections"]
+            role_saved = await call(handlers[first + "/configure"], {
+                "section": "expression.learning", "operation_key": "role-learning-default",
+                "edit_token": role_sections["expression.learning"]["edit_token"],
+                "changes": {"window_hours": 96},
+            })
+            self.assertEqual(role_saved["status"], "ok", role_saved)
+            from companion_v2.expression.configuration import read_settings
+            app = self.controller.session.application
+            first_context = self.controller.authority.context("first", "role-a")
+            another_role = self.controller.authority.context("second", "role-b")
+            self.assertEqual(read_settings(app.runtime, first_context).window_hours, 96)
+            self.assertEqual(read_settings(app.runtime, another_role).window_hours, 720)
+            for route in (first, second):
+                scoped = await call(handlers[route], query={"sections": "proactive.contact"})
+                self.assertEqual(scoped["data"]["code"], "configuration_request_invalid")
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_reaction_retrieval_settings_are_shared_across_windows(self):
+        handlers, first, second = await self.routes()
+        try:
+            first_status = (await call(handlers[first], query={"sections": "reaction"}))[
+                "data"]["sections"]["reaction"]
+            second_status = (await call(handlers[second], query={"sections": "reaction"}))[
+                "data"]["sections"]["reaction"]
+            self.assertEqual(first_status["scope"], "installation")
+            self.assertEqual(second_status["scope"], "installation")
+            self.assertEqual(first_status["layers"], ["installation"])
+            self.assertEqual(first_status["edit_token"], second_status["edit_token"])
+
+            saved = await call(handlers[first + "/configure"], {
+                "section": "reaction", "operation_key": "reaction-installation-setting",
+                "edit_token": first_status["edit_token"], "changes": {"candidate_limit": 9}})
+            self.assertEqual(saved["status"], "ok", saved)
+
+            reread = (await call(handlers[second], query={"sections": "reaction"}))[
+                "data"]["sections"]["reaction"]
+            self.assertEqual(reread["settings"]["candidate_limit"], 9)
+            self.assertEqual(reread["revision"], first_status["revision"] + 1)
         finally:
             self.controller.unregister_routes()
 
@@ -205,9 +290,10 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             # Another target keeps its own ceiling.
             other = (await call(handlers[second]))["data"]["sections"]["quota"]["settings"]
             self.assertEqual(other["group_max_daily"], -1)
-            # A window section saves with its own token and leaves the role
-            # ceiling untouched.
+            # Behavior defaults are role-scoped and reach every conversation for
+            # that role unless a window stores an explicit override.
             review_status = (await call(handlers[first], query={"sections": "image_review"}))
+            self.assertEqual(review_status["data"]["sections"]["image_review"]["scope"], "role")
             review = {"section": "image_review", "operation_key": "review-1",
                       "edit_token": review_status["data"]["sections"]["image_review"]["edit_token"],
                       "changes": {"enable_group_nsfw_private_fallback": True,
@@ -217,6 +303,59 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             sections = (await call(handlers[first], query={"sections": "image_review"}))["data"]["sections"]
             self.assertTrue(sections["image_review"]["settings"]["enable_group_nsfw_private_fallback"])
             self.assertEqual(sections["image_review"]["settings"]["group_nsfw_image_review_mode"], "dual")
+            other_review = (await call(handlers[second], query={"sections": "image_review"}))[
+                "data"]["sections"]["image_review"]
+            self.assertEqual(other_review["settings"]["group_nsfw_image_review_mode"], "single")
+            self.assertIsNone(other_review["provenance"]["group_nsfw_image_review_mode"]["layer"])
+            self.assertFalse(other_review["provenance"]["group_nsfw_image_review_mode"]["explicit"])
+            from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+            from companion_v2.conversation.media.review import GROUP as REVIEW_GROUP, configuration_fields as review_fields
+            app = self.controller.session.application
+            first_context = self.controller.authority.context("first", "role-a")
+            second_context = self.controller.authority.context("second", "role-a")
+            definitions = review_fields()
+            owner = app.configuration._owners[definitions[0].owner_id]
+            first_window = ConfigTarget(first_context.scope.installation_id, ConfigLayer.WINDOW,
+                first_context.role_binding.role, first_context.scope)
+            first_local = owner.read(first_window, definitions)
+            owner.write(first_window, definitions,
+                changes={REVIEW_GROUP + ".group_nsfw_image_review_sensitivity": "strict"},
+                reset=(), expected_revision=first_local.revision, observed_at=app.now())
+            first_override = owner.read(first_window, definitions).fields[
+                REVIEW_GROUP + ".group_nsfw_image_review_sensitivity"]
+            second_window = ConfigTarget(second_context.scope.installation_id, ConfigLayer.WINDOW,
+                second_context.role_binding.role, second_context.scope)
+            second_default = owner.read(second_window, definitions).fields[
+                REVIEW_GROUP + ".group_nsfw_image_review_sensitivity"]
+            self.assertEqual((first_override.value, first_override.source, first_override.explicit),
+                             ("strict", first_window, True))
+            self.assertEqual((second_default.value, second_default.source, second_default.explicit),
+                             ("balanced", None, False))
+
+            busy_status = (await call(handlers[first], query={"sections": "busy_gate"}))[
+                "data"]["sections"]["busy_gate"]
+            self.assertEqual(busy_status["scope"], "role")
+            busy_saved = await call(handlers[first + "/configure"], {
+                "section": "busy_gate", "operation_key": "role-busy-gate",
+                "edit_token": busy_status["edit_token"],
+                "changes": {"busy_reply_gate_enabled": True},
+            })
+            self.assertEqual(busy_saved["status"], "ok", busy_saved)
+            from companion_v2.conversation.busy_gate import SettingsReader
+            another_scope = replace(first_context.scope, native_scope_id="another-private-user",
+                conversation_id="another-conversation", session_id="another-session")
+            same_role_window = replace(first_context,
+                role_binding=replace(first_context.role_binding, scope=another_scope),
+                audience=replace(first_context.audience, scope=another_scope))
+            self.assertTrue(SettingsReader(app.runtime).read(same_role_window).busy_reply_gate_enabled)
+
+            life = (await call(handlers[first], query={"sections": "life"}))[
+                "data"]["sections"]["life"]
+            self.assertEqual(life["scope"], "window")
+            self.assertEqual(life["fields"]["sleep_enabled"]["editable_layers"], ["role"])
+            self.assertEqual(life["fields"]["sleep_enabled"]["write_layer"], "role")
+            self.assertEqual(life["fields"]["diary_enabled"]["editable_layers"], ["window"])
+            self.assertEqual(life["fields"]["diary_enabled"]["write_layer"], "window")
             quota_after = (await call(handlers[first], query={"sections": "quota"}))
             self.assertEqual(quota_after["data"]["sections"]["quota"]["settings"]["group_max_daily"], 5)
             # Using one section's token for another section's target is rejected.
@@ -225,6 +364,45 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                                     {"section": "reaction", "operation_key": "cross",
                                      "edit_token": quota_token, "changes": {"candidate_limit": 3}})
             self.assertIn(crossed["data"]["code"], ("configuration_revision_conflict", "invalid_configuration_value"))
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_budget_editor_saves_global_controls_and_disables_legacy_role_limits(self):
+        from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+        from companion_v2.configuration.owners import SparseConfigurationOwner
+        from companion_v2.model_gateway.budget import GROUP, SOFT_FIELDS, effective_soft
+
+        handlers, first, second = await self.routes()
+        try:
+            status = (await call(handlers[first], query={"sections": "budget"}))["data"]["sections"]["budget"]
+            self.assertEqual((status["scope"], status["layers"]), ("installation", ["installation"]))
+            enabled = await call(handlers[first + "/configure"], {
+                "section": "budget", "operation_key": "global-budget-enable",
+                "edit_token": status["edit_token"],
+                "changes": {"enable_daily_token_soft_limit": True, "daily_token_soft_limit": 1000},
+            })
+            self.assertEqual(enabled["status"], "ok", enabled)
+            app = self.controller.session.application
+            context = self.controller.authority.context("first", "role-a")
+            self.assertTrue(effective_soft(app.runtime, context, app.gateway.ledger.soft).enabled)
+
+            role = ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE,
+                                context.role_binding.role, bot_id=context.scope.bot_id)
+            owner = SparseConfigurationOwner(app.runtime)
+            owner.write(role, SOFT_FIELDS, changes={GROUP + ".enable_daily_token_soft_limit": True},
+                reset=(), expected_revision=owner.read(role, SOFT_FIELDS).revision, observed_at=self.clock.now())
+            other = (await call(handlers[second], query={"sections": "budget"}))["data"]["sections"]["budget"]
+            self.assertTrue(other["settings"]["enable_daily_token_soft_limit"])
+            self.assertEqual(other["settings"]["daily_token_soft_limit"], 1000)
+            disabled = await call(handlers[second + "/configure"], {
+                "section": "budget", "operation_key": "global-budget-disable",
+                "edit_token": other["edit_token"], "changes": {"enable_daily_token_soft_limit": False},
+            })
+            self.assertEqual(disabled["status"], "ok", disabled)
+            reread = (await call(handlers[first], query={"sections": "budget"}))["data"]["sections"]["budget"]
+            self.assertFalse(reread["settings"]["enable_daily_token_soft_limit"])
+            resolved = effective_soft(app.runtime, context, app.gateway.ledger.soft)
+            self.assertEqual((resolved.enabled, resolved.tokens), (False, 1000))
         finally:
             self.controller.unregister_routes()
 
@@ -281,19 +459,15 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         finally:
             self.controller.unregister_routes()
 
-    async def test_the_contact_section_publishes_four_layers_and_locks_the_relationship_budget(self):
-        """主动联系偏好是唯一一个四层组，也是最长的一个分区（160 项）。
-
-        两个「同一关系」的额度按窗口写入会被所有者拒绝，所以字段契约里不能出现
-        窗口层——否则页面会渲染一个存不下去的控件。其余字段仍然四层可写。
-        """
+    async def test_the_contact_section_edits_global_defaults_including_relationship_ceilings(self):
         handlers, first, _ = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
         try:
-            status = (await call(handlers[first]))["data"]["sections"]
-            contact = status["proactive.contact"]
+            contact = (await call(handlers[global_route], query={"sections": "proactive.contact"}))[
+                "data"]["sections"]["proactive.contact"]
             self.assertEqual(contact["group_id"], "proactive.contact")
-            self.assertEqual(contact["scope"], "window")
-            self.assertEqual(contact["layers"], ["installation", "role", "relationship", "window"])
+            self.assertEqual(contact["scope"], "installation")
+            self.assertEqual(contact["layers"], ["installation"])
             self.assertEqual(len(contact["settings"]), 164)
             self.assertEqual(len(contact["provenance"]), 164)
             self.assertFalse(contact["settings"]["enabled"])
@@ -305,20 +479,23 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                     self.assertIn("relationship", editable)
                     self.assertNotIn("window", editable)
             self.assertIn("window", contact["fields"]["interval_seconds"]["editable_layers"])
-            refused = await call(handlers[first + "/configure"],
+            budget = await call(handlers[global_route + "/configure"],
                 {"section": "proactive.contact", "operation_key": "contact-budget",
                  "edit_token": contact["edit_token"],
                  "changes": {"max_relationship_contacts_24h": 12}})
-            self.assertEqual(refused["data"]["code"], "contact_relationship_budget_scope")
-            saved = await call(handlers[first + "/configure"],
+            self.assertEqual(budget["status"], "ok", budget)
+            contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
+                "data"]["sections"][CONTACT_GROUP]
+            saved = await call(handlers[global_route + "/configure"],
                 {"section": "proactive.contact", "operation_key": "contact-rhythm",
                  "edit_token": contact["edit_token"],
                  "changes": {"interval_seconds": 900, "quiet_enabled": True}})
             self.assertEqual(saved["status"], "ok", saved)
-            after = (await call(handlers[first], query={"sections": "proactive.contact"}))[
+            after = (await call(handlers[global_route], query={"sections": "proactive.contact"}))[
                 "data"]["sections"]["proactive.contact"]
             self.assertEqual(after["settings"]["interval_seconds"], 900)
             self.assertTrue(after["settings"]["quiet_enabled"])
+            self.assertEqual(after["settings"]["max_relationship_contacts_24h"], 12)
             # 保存后编辑令牌必然更新，否则两次保存会互相覆盖。
             self.assertNotEqual(after["edit_token"], contact["edit_token"])
         finally:
@@ -328,16 +505,17 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         from astrbot_host.configuration_api import ConfigurationWebAPI
 
         handlers, first, _ = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
         try:
-            initial = (await call(handlers[first], query={"sections": "proactive.contact"}))
+            initial = (await call(handlers[global_route], query={"sections": "proactive.contact"}))
             contact = initial["data"]["sections"]["proactive.contact"]
             body = {"section": "proactive.contact", "operation_key": "contact-save-isolated",
                     "edit_token": contact["edit_token"], "changes": {"interval_seconds": 1200}}
             with patch.object(ConfigurationWebAPI, "_status", new_callable=AsyncMock) as api_status, \
                     patch("companion_v2.configuration.management.GroupEditor.status",
                           side_effect=AssertionError("a write must not read its post-save status")) as editor_status:
-                saved = await call(handlers[first + "/configure"], body)
-                replayed = await call(handlers[first + "/configure"], body)
+                saved = await call(handlers[global_route + "/configure"], body)
+                replayed = await call(handlers[global_route + "/configure"], body)
 
             api_status.assert_not_awaited()
             editor_status.assert_not_called()
@@ -347,9 +525,311 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertTrue(replayed["data"]["result"]["replayed"])
             self.assertEqual(saved["data"]["result"]["operation_id"],
                              replayed["data"]["result"]["operation_id"])
-            refreshed = (await call(handlers[first], query={"sections": "proactive.contact"}))[
+            refreshed = (await call(handlers[global_route], query={"sections": "proactive.contact"}))[
                 "data"]["sections"]["proactive.contact"]
             self.assertEqual(refreshed["settings"]["interval_seconds"], 1200)
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_contact_global_switch_saves_without_changing_any_participant_grant(self):
+        handlers, first, _ = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
+        try:
+            identity = self.controller.session.application.tasks.identity
+            contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
+                "data"]["sections"][CONTACT_GROUP]
+            before = identity.snapshot()
+            body = {"section": CONTACT_GROUP, "operation_key": "contact-enable-first",
+                    "edit_token": contact["edit_token"], "changes": {"enabled": True}}
+            saved = await call(handlers[global_route + "/configure"], body)
+            self.assertEqual(saved["status"], "ok", saved)
+            self.assertFalse(saved["data"]["result"]["replayed"])
+
+            contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
+                "data"]["sections"][CONTACT_GROUP]
+            self.assertTrue(contact["settings"]["enabled"])
+            disabled = await call(handlers[global_route + "/configure"], {
+                "section": CONTACT_GROUP, "operation_key": "contact-disable",
+                "edit_token": contact["edit_token"], "changes": {"enabled": False}})
+            self.assertEqual(disabled["status"], "ok", disabled)
+            contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
+                "data"]["sections"][CONTACT_GROUP]
+            self.assertFalse(contact["settings"]["enabled"])
+            enabled_again = await call(handlers[global_route + "/configure"], {
+                "section": CONTACT_GROUP, "operation_key": "contact-enable-again",
+                "edit_token": contact["edit_token"], "changes": {"enabled": True}})
+            self.assertEqual(enabled_again["status"], "ok", enabled_again)
+            self.assertEqual(identity.snapshot(), before)
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_contact_global_settings_survive_participant_role_account_changes_and_host_restart(self):
+        config = multi_config(delivery_mode="onebot_private")
+        config["multi_host"]["targets"].append({"target_id": "third", "platform_id": "qq-main",
+            "account_id": "100", "bot_id": "bot-a", "participant_id": "201"})
+        self.controller = self.make_controller(config)
+        await self.start_host()
+
+        global_route = "/astrbot_plugin_private_companion_v2/config"
+
+        def registered_paths():
+            self.controller.register_routes()
+            handlers = {route: handler for route, handler, _, _ in self.native.registered_web_apis}
+            return handlers
+
+        handlers = registered_paths()
+        read = lambda: call(handlers[global_route], query={"sections": CONTACT_GROUP})
+        try:
+            before = (await read())["data"]["sections"][CONTACT_GROUP]
+            identity = self.controller.session.application.tasks.identity
+            identity_before = identity.snapshot()
+            saved = await call(handlers[global_route + "/configure"], {"section": CONTACT_GROUP,
+                "operation_key": "stable-global-rhythm", "edit_token": before["edit_token"],
+                "changes": {"enabled": True, "automatic_enabled": True, "quiet_start": "21:15",
+                            "proactive_hour_activity_enabled": True}})
+            self.assertEqual(saved["status"], "ok", saved)
+            self.assertEqual(identity.snapshot(), identity_before)
+            reread = (await read())["data"]["sections"][CONTACT_GROUP]
+            self.assertTrue(reread["settings"]["enabled"])
+            self.assertTrue(reread["settings"]["automatic_enabled"])
+            self.assertEqual(reread["settings"]["quiet_start"], "21:15")
+            stale = await call(handlers[global_route + "/configure"], {"section": CONTACT_GROUP,
+                "operation_key": "stale-other-participant", "edit_token": before["edit_token"],
+                "changes": {"enabled": False}})
+            self.assertEqual(stale["data"]["code"], "configuration_revision_conflict")
+            other = (await read())["data"]["sections"][CONTACT_GROUP]
+            self.assertTrue(other["settings"]["enabled"])
+            self.assertEqual(other["edit_token"], reread["edit_token"])
+
+            self.controller.unregister_routes()
+            await self.controller.terminate()
+            self.controller = self.make_controller(config)
+            (await self.controller.load_existing()).unwrap()
+            (await self.controller.start()).unwrap()
+            handlers = registered_paths()
+            after_restart = (await read())["data"]["sections"][CONTACT_GROUP]
+            self.assertEqual(after_restart["settings"], reread["settings"])
+            self.assertEqual(after_restart["revision"], reread["revision"])
+            self.assertEqual(self.native.provider.client.state.calls, [])
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_contact_replayed_global_save_never_reauthorizes_a_revoked_participant(self):
+        handlers, first, _ = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
+        try:
+            app = self.controller.session.application
+            context = self.controller.authority.context("first", "role-a")
+            identity = app.tasks.identity
+            grant = identity.issue_grant(grant_id=PROACTIVE_GRANT_PREFIX + "existing-contact",
+                subject=context.actor.subject, scope=context.scope, capability=CONTACT_GROUP,
+                tier=AuthorizationTier.STANDARD, valid_from=self.clock.now(), expected_revision=identity.revision)
+            contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
+                "data"]["sections"][CONTACT_GROUP]
+            body = {"section": CONTACT_GROUP, "operation_key": "contact-legacy-save",
+                    "edit_token": contact["edit_token"], "changes": {"enabled": True}}
+            with patch.object(ProactiveContactManagement, "_after_configure"):
+                first_save = await call(handlers[global_route + "/configure"], body)
+            self.assertEqual(first_save["status"], "ok", first_save)
+
+            recovered = await call(handlers[global_route + "/configure"], body)
+            self.assertEqual(recovered["status"], "ok", recovered)
+            self.assertTrue(recovered["data"]["result"]["replayed"])
+            access = lambda: identity.authorize(context.actor, scope=context.scope,
+                capability=CONTACT_GROUP, observed_at=self.clock.now())
+            self.assertTrue(access().is_success)
+            identity.revoke_grant(grant.grant_id, revoked_at=self.clock.now(),
+                                  expected_revision=identity.revision)
+            revision = identity.revision
+
+            replay_after_revoke = await call(handlers[global_route + "/configure"], body)
+            self.assertEqual(replay_after_revoke["status"], "ok", replay_after_revoke)
+            self.assertTrue(replay_after_revoke["data"]["result"]["replayed"])
+            self.assertFalse(access().is_success)
+            self.assertEqual(identity.revision, revision)
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_contact_switch_does_not_override_an_explicit_person_revocation(self):
+        handlers, first, _ = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
+        try:
+            contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
+                "data"]["sections"][CONTACT_GROUP]
+            app = self.controller.session.application
+            context = self.controller.authority.context("first", "role-a")
+            identity = app.tasks.identity
+            grant_id = PERSON_PERMISSION_GRANT_PREFIX + "explicit-contact-revocation"
+            identity.issue_grant(grant_id=grant_id, subject=context.actor.subject, scope=context.scope,
+                capability=CONTACT_GROUP, tier=AuthorizationTier.STANDARD, valid_from=self.clock.now(),
+                expected_revision=identity.revision)
+            identity.revoke_grant(grant_id, revoked_at=self.clock.now(), expected_revision=identity.revision)
+            contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
+                "data"]["sections"][CONTACT_GROUP]
+
+            saved = await call(handlers[global_route + "/configure"], {
+                "section": CONTACT_GROUP, "operation_key": "contact-after-explicit-revoke",
+                "edit_token": contact["edit_token"], "changes": {"enabled": True}})
+            self.assertEqual(saved["status"], "ok", saved)
+            self.assertEqual([grant for grant in identity.snapshot().grants
+                              if grant.grant_id.startswith(PROACTIVE_GRANT_PREFIX)], [])
+            denied = identity.authorize(context.actor, scope=context.scope,
+                capability=CONTACT_GROUP, observed_at=self.clock.now())
+            self.assertEqual(denied.failure.code, "authorization_revoked")
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_life_enabled_editor_keeps_its_window_grants_in_sync(self):
+        handlers, first, _ = await self.routes()
+        try:
+            life = (await call(handlers[first], query={"sections": "life"}))["data"]["sections"]["life"]
+            app = self.controller.session.application
+            with patch.object(app, "notify") as notify:
+                enabled = await call(handlers[first + "/configure"], {
+                    "section": "life", "operation_key": "life-enable-first",
+                    "edit_token": life["edit_token"], "changes": {"enabled": True}})
+            self.assertEqual(enabled["status"], "ok", enabled)
+            self.assertFalse(enabled["data"]["result"]["replayed"])
+            notify.assert_called_once()
+            context = self.controller.authority.context("first", "role-a")
+            identity = app.tasks.identity
+            actions = ("role.life.run", "role.life.read", "role.journal.write", "role.reading.record")
+            access = lambda action: identity.authorize(context.actor, scope=context.scope,
+                capability=action, observed_at=self.clock.now())
+            self.assertTrue(all(access(action).is_success for action in actions),
+                [(action, access(action).failure.code if access(action).failure else None)
+                 for action in actions] + [grant.grant_id for grant in identity.snapshot().grants
+                                           if grant.grant_id.startswith("life-grant-")])
+
+            life = (await call(handlers[first], query={"sections": "life"}))["data"]["sections"]["life"]
+            disabled = await call(handlers[first + "/configure"], {
+                "section": "life", "operation_key": "life-disable",
+                "edit_token": life["edit_token"], "changes": {"enabled": False}})
+            self.assertEqual(disabled["status"], "ok", disabled)
+            self.assertTrue(all(not access(action).is_success for action in actions))
+
+            life = (await call(handlers[first], query={"sections": "life"}))["data"]["sections"]["life"]
+            enabled_again = await call(handlers[first + "/configure"], {
+                "section": "life", "operation_key": "life-enable-again",
+                "edit_token": life["edit_token"], "changes": {"enabled": True}})
+            self.assertEqual(enabled_again["status"], "ok", enabled_again)
+            self.assertTrue(all(access(action).is_success for action in actions))
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_life_replayed_save_recovers_missing_grants_but_not_revoked_lineages(self):
+        handlers, first, _ = await self.routes()
+        try:
+            life = (await call(handlers[first], query={"sections": "life"}))["data"]["sections"]["life"]
+            body = {"section": "life", "operation_key": "life-legacy-save",
+                    "edit_token": life["edit_token"], "changes": {"enabled": True}}
+            with patch.object(DiaryAndRestManagement, "_after_configure"):
+                first_save = await call(handlers[first + "/configure"], body)
+            self.assertEqual(first_save["status"], "ok", first_save)
+
+            recovered = await call(handlers[first + "/configure"], body)
+            self.assertEqual(recovered["status"], "ok", recovered)
+            self.assertTrue(recovered["data"]["result"]["replayed"])
+            app = self.controller.session.application
+            context = self.controller.authority.context("first", "role-a")
+            identity = app.tasks.identity
+            actions = ("role.life.run", "role.life.read", "role.journal.write", "role.reading.record")
+            grants = [grant for grant in identity.snapshot().grants
+                      if grant.grant_id.startswith("life-grant-") and grant.scope == context.scope
+                      and grant.subject == context.actor.subject]
+            self.assertEqual({grant.capability for grant in grants}, set(actions))
+            for grant in grants:
+                identity.revoke_grant(grant.grant_id, revoked_at=self.clock.now(),
+                                      expected_revision=identity.revision)
+
+            replay_after_revoke = await call(handlers[first + "/configure"], body)
+            self.assertEqual(replay_after_revoke["status"], "ok", replay_after_revoke)
+            self.assertTrue(replay_after_revoke["data"]["result"]["replayed"])
+            self.assertTrue(all(not identity.authorize(context.actor, scope=context.scope, capability=action,
+                observed_at=self.clock.now()).is_success for action in actions))
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_window_and_role_configuration_editors_use_runtime_targets(self):
+        handlers, first, _ = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
+        try:
+            screen = (await call(handlers[first], query={"sections": "screen"}))[
+                "data"]["sections"]["screen"]
+            saved = await call(handlers[first + "/configure"], {
+                "section": "screen", "operation_key": "screen-window-settings",
+                "edit_token": screen["edit_token"],
+                "changes": {"interpretation_enabled": True, "journal_material_enabled": True,
+                            "journal_material_max_chars": 840}})
+            self.assertEqual(saved["status"], "ok", saved)
+
+            app = self.controller.session.application
+            context = self.controller.authority.context("first", "role-a")
+            settings = ScreenSettings(app.configuration).read(context, self.clock.now())
+            self.assertEqual(settings, {"interpretation_enabled": True,
+                "journal_material_enabled": True, "journal_material_max_chars": 840})
+            other_scope = replace(context.scope, native_scope_id="another-person-window",
+                conversation_id="another-person-conversation", session_id="another-person-session")
+            other_window = replace(context,
+                role_binding=replace(context.role_binding, scope=other_scope),
+                audience=replace(context.audience, scope=other_scope))
+            # This other person is intentionally not registered as a dashboard
+            # target. Inspect the owner directly so the assertion tests storage
+            # isolation instead of failing on the configuration-read grant.
+            other_settings = ScreenConfigurationOwner(app.runtime).read(
+                screen_target_for(other_window), screen_configuration_fields()).fields
+            self.assertFalse(other_settings["screen.interpretation_enabled"].value)
+            self.assertEqual(screen["fields"]["interpretation_enabled"]["editable_layers"], ["window"])
+
+            global_skills = await call(handlers[global_route], query={"sections": "role.growth.skills"})
+            self.assertEqual(global_skills["data"]["code"], "configuration_request_invalid")
+            skills = (await call(handlers[first], query={"sections": "role.growth.skills"}))[
+                "data"]["sections"]["role.growth.skills"]
+            expression = (await call(handlers[first], query={"sections": "expression.learning"}))[
+                "data"]["sections"]["expression.learning"]
+            self.assertEqual(skills["scope"], "role")
+            self.assertEqual(skills["layers"], ["installation", "role"])
+            self.assertEqual(skills["fields"]["enabled"]["editable_layers"], ["role"])
+            self.assertEqual(expression["scope"], "role")
+            self.assertEqual(expression["layers"], ["installation", "role"])
+            first_skills = await call(handlers[first + "/configure"], {
+                "section": "role.growth.skills", "operation_key": "skills-role-value",
+                "edit_token": skills["edit_token"],
+                "changes": {"enabled": True, "custom_skills": '["摄影"]',
+                            "schedule_influence_strength": 1}})
+            self.assertEqual(first_skills["status"], "ok", first_skills)
+            expression = (await call(handlers[first], query={"sections": "expression.learning"}))[
+                "data"]["sections"]["expression.learning"]
+            expression_save = await call(handlers[first + "/configure"], {
+                "section": "expression.learning", "operation_key": "expression-role-value",
+                "edit_token": expression["edit_token"], "changes": {"window_hours": 96}})
+            self.assertEqual(expression_save["status"], "ok", expression_save)
+            skills = (await call(handlers[first], query={"sections": "role.growth.skills"}))[
+                "data"]["sections"]["role.growth.skills"]
+            updated_skills = await call(handlers[first + "/configure"], {
+                "section": "role.growth.skills", "operation_key": "skills-role-update",
+                "edit_token": skills["edit_token"], "changes": {"custom_skills": '["天文"]'}})
+            self.assertEqual(updated_skills["status"], "ok", updated_skills)
+            self.assertEqual(skill_settings(app.runtime, context), (("天文",), 1))
+            second_context = self.controller.authority.context("second", "role-b")
+            self.assertEqual(skill_settings(app.runtime, second_context), ((), 0))
+            self.assertEqual(expression_read_settings(app.runtime, context).window_hours, 96)
+            self.assertEqual(expression_read_settings(app.runtime, second_context).window_hours, 720)
+
+            private_status = (await call(handlers[first], query={"sections": "role.growth.skills"}))
+            self.assertEqual(private_status["status"], "ok")
+            self.assertEqual(private_status["data"]["sections"]["role.growth.skills"]["scope"], "role")
+        finally:
+            self.controller.unregister_routes()
+
+    async def test_growth_permissions_are_not_exposed_by_the_generic_config_route(self):
+        handlers, first, _ = await self.routes()
+        try:
+            response = await call(handlers[first], query={"sections": "role_growth"})
+            self.assertEqual(response["status"], "error")
+            self.assertEqual(response["data"]["code"], "configuration_request_invalid")
+            sections = (await call(handlers[first]))["data"]["sections"]
+            self.assertNotIn("role_growth", sections)
         finally:
             self.controller.unregister_routes()
 

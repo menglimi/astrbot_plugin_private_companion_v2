@@ -41,7 +41,8 @@ class RoleTimelineTools:
     def execute(self, context, batch_id, call_id, action, arguments):
         if type(arguments) is not dict or set(arguments) - {"kinds", "time_start", "time_end", "limit", "cursor"}:
             raise ValueError("timeline query accepts only filters and a cursor")
-        self.messages.owned(context, batch_id)
+        from companion_v2.conversation.native_tool_sources import validate_tool_turn
+        validate_tool_turn(self.messages, context, batch_id, evidence=False)
         return {"state": "succeeded", "effect": "none", "payload": self.timeline.query(context, **arguments)}, None
 
     def validate(self, row, context, result):

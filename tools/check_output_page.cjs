@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix="output-page-qa-") as data_root:
   function api(method,endpoint,body,query){
     if(method==="GET"){
       if(endpoint==="page/targets")return ok({installation_id:"synthetic-installation",targets:[{target_id:"first",scope_kind:"private",participant_id:"200",platform_id:"qq-main",account_id:"100",bot_id:"bot-a",roles:[{role_id:"role-a",role_name:"澄汐",config_api:"/"+HOST+"/"+ROLE+"/config",model_api:"/"+HOST+"/"+ROLE+"/model",image_material_api:"/"+HOST+"/"+ROLE+"/image-materials"}]}]});
-      if(endpoint==="integration/manifest")return ok({providers:["image","content"].map(id=>({capability_id:id,label:id,integration_state:"connected",integration_label:"可用"})),summary:{connected_count:2}});
+      if(endpoint==="integration/manifest")return ok({extensions:["image","content"].map(id=>({capability_id:id,extension_id:id,owner:"companion_v2",label:id,integration_state:"connected",assembled:true,enabled:true,runtime_ready:true,integration_label:"可用"})),providers:[],summary:{connected_count:2,extension_ready_count:2,provider_count:0}});
       if(endpoint===ROLE+"/config")return ok({sections:Object.fromEntries(Object.entries(sections).filter(([kind])=>!query.sections||query.sections.split(",").includes(kind)).map(([kind,value])=>[kind,structuredClone(value)]))});
       if(endpoint===ROLE+"/model/image/output")return ok(snapshot());
       if(endpoint===ROLE+"/model/image/review/providers")return ok({providers:[{id:"vision-a",name:"视觉审核"}]});
@@ -187,6 +187,15 @@ with tempfile.TemporaryDirectory(prefix="output-page-qa-") as data_root:
     await frame.locator('.output-preview-action[data-output-open="creation"]').click();await assertTitle();
     await frame.locator('[data-wb-field="direction_prompt"]').fill("窗边雨夜，短篇随笔");await saveCard("content.authoring");assert.equal(sections["content.authoring"].settings.direction_prompt,"窗边雨夜，短篇随笔");
     await open("capabilities");
+    await frame.getByText("端点按列表顺序排列",{exact:false}).waitFor();
+    await frame.getByText("会真实提交一张图片生成请求",{exact:false}).waitFor();
+    await frame.locator('[data-output-native-field="endpoints.0.platform"]').waitFor();
+    assert.equal(await frame.locator('[data-output-native-field="endpoints.0.base_url"]').getAttribute("placeholder"),"https://api.example.com/v1");
+    assert.match(await frame.locator('[data-output-native-action="test"][data-output-endpoint="endpoint-a"]').getAttribute("title"),/可能产生费用/);
+    await frame.locator('[data-output-native-action="test"][data-output-endpoint="endpoint-a"]').filter({hasText:"生成测试图"}).waitFor();
+    const platform=frame.locator('[data-output-native-field="endpoints.0.platform"]');
+    await platform.focus();await platform.selectOption("minimax");assert.equal(await platform.evaluate(node=>document.activeElement===node),true);
+    await frame.getByText("MiniMax 使用 /image_generation",{exact:false}).waitFor();await platform.selectOption("openai");
     await frame.locator('[data-output-native-field="endpoints.0.name"]').fill("真实保存主端点");await frame.locator('[data-output-native-action="add"]').click();
     await frame.locator('[data-output-native-field="endpoints.1.name"]').fill("备用端点");await frame.locator('[data-output-native-action="up"]').last().click();await saveBackend();assert.equal(backend.endpoints[0].name,"备用端点");
     await frame.locator('[data-output-native-action="test"][data-output-endpoint="endpoint-a"]').click();await frame.locator(".output-endpoint-result").filter({hasText:"最近测试通过"}).waitFor();

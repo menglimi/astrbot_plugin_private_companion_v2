@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="avatar-title">
+  <title id="avatar-title">默认陪伴头像</title>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#eceaff"/>
+      <stop offset="1" stop-color="#d9e8f5"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="72" fill="url(#background)"/>
+  <path d="M58 232c6-35 31-57 70-57s64 22 70 57" fill="#8586bd"/>
+  <circle cx="128" cy="116" r="68" fill="#fffaf5"/>
+  <path d="M61 113c-3-46 23-76 66-76 41 0 69 27 69 70-23-2-42-14-51-33-18 24-47 38-84 39" fill="#6c6eaa"/>
+  <circle cx="105" cy="121" r="6" fill="#55567d"/>
+  <circle cx="151" cy="121" r="6" fill="#55567d"/>
+  <ellipse cx="87" cy="139" rx="10" ry="5" fill="#efbfc4"/>
+  <ellipse cx="169" cy="139" rx="10" ry="5" fill="#efbfc4"/>
+  <path d="M111 146q17 17 34 0" fill="none" stroke="#8c687d" stroke-width="6" stroke-linecap="round"/>
+</svg>

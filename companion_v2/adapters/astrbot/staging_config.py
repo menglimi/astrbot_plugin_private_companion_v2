@@ -290,7 +290,7 @@ class StagingConfiguration:
                 "tariff": asdict(self.tariff), "task_prompt": self.task_prompt, "max_output_tokens": self.max_output_tokens,
                 "maximum_input_estimate": self.maximum_input_estimate, "output_parameter": self.output_parameter,
                 **({"streaming": True} if self.streaming else {})},
-            "budget": asdict(self.budget),
+            "budget": self.budget.document(),
             "budget_soft": {"enabled": self.budget_soft.enabled, "tokens": self.budget_soft.tokens,
                             "kinds": list(self.budget_soft.kinds)},
             "policy": self._policy_document(), "limits": asdict(self.limits),
@@ -361,7 +361,8 @@ class StagingConfiguration:
             current = current if isinstance(current, dict) else {}
             if name == "budget":
                 document[name] = {
-                    scope: {key: current.get(scope, {}).get(key) for key in amount}
+                    scope: (current.get(scope, True) if scope == "enabled" else
+                            {key: current.get(scope, {}).get(key) for key in amount})
                     for scope, amount in stored_block.items()
                 }
                 continue
@@ -408,7 +409,8 @@ class StagingConfiguration:
             model = _fields(data["model"],
                 "provider_id provider_fingerprint tariff task_prompt max_output_tokens maximum_input_estimate output_parameter", "model")
             tariff = UsageTariff(**_fields(model["tariff"], "input cached_input output", "model.tariff"))
-            budget = _fields(data["budget"], "installation bot role window background", "budget")
+            budget = _fields(data["budget"], "installation bot role window background", "budget", optional=("enabled",))
+            budget_enabled = budget.pop("enabled", True)
             amounts = {name: Amount(**_fields(
                 value, "tokens cost_microusd", "budget.amount",
                 optional=("input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens"),
@@ -431,7 +433,7 @@ class StagingConfiguration:
                     SubjectRef(scope.installation_id, SubjectKind.BOT, persona["role_id"]), persona["instruction_hash"]),
                 authority_ref=access["authority_ref"], valid_from=datetime.fromisoformat(access["valid_from"]),
                 expires_at=datetime.fromisoformat(access["expires_at"]) if access["expires_at"] is not None else None,
-                capabilities=tuple(access["capabilities"]), tariff=tariff, budget=BudgetPolicy(**amounts),
+                capabilities=tuple(access["capabilities"]), tariff=tariff, budget=BudgetPolicy(**amounts, enabled=budget_enabled),
                 budget_soft=BudgetSoftPolicy(enabled=soft["enabled"], tokens=soft["tokens"], kinds=tuple(soft["kinds"])),
                 streaming=streaming, segmentation=SegmentationPolicy(**segmentation),
                 forward_intake=ForwardIntakePolicy(**forward_intake),

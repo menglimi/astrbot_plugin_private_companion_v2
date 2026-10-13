@@ -20,7 +20,8 @@ def maintenance(*, reference, allowed, baseline, half_life_minutes, interest_lev
     return (f"程序按时间算出本轮的回落参考：{numbers}；baseline={baseline}，兴趣分档 {level}，"
             f"回归半衰期 {half_life_minutes} 分钟，中性带 ≤{neutral_band}。"
             "参考值是没有任何新互动时的回落位置；本轮有值得记录的变化时可在允许区间内选择："
-            f"{spans}。区间已经包含一个自然的小步和向基线的回落，超出会被拒绝。"
+            f"{spans}。baseline 和四轴必须输出 1 到 10 的 JSON 整数；区间端点若有小数，从区间内选择整数。"
+            "区间已经包含一个自然的小步和向基线的回落，超出会被拒绝。"
             + ("该角色为跨窗口共享本体，其他窗口可能读到这组数值。" if cross_window else ""))
 
 

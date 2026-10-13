@@ -50,7 +50,8 @@ class NativeImageFlowTests(NativeImageFixture, HostFixture, unittest.IsolatedAsy
         return self.image_answer(envelope)
 
     def image_answer(self, envelope, text="这是本次生成的图片。"):
-        return ProviderResponse("generated", ImageReplyDraft(text, (), (envelope.original.images[-1].source,)),
+        return ProviderResponse("generated", ImageReplyDraft(
+            text, (), images=(envelope.original.images[-1].source,)),
                                 Amount(30, 30), "model-image-answer")
 
     async def image_host(self, **options):

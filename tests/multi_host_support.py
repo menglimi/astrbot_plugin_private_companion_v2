@@ -59,7 +59,16 @@ class MultiFixture:
         self.root = Path(temporary.name)
         self.native = MultiNativeContext()
         self.clock = DeterministicClock.at(NOW)
-        self.types = NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider, NS, NS, FakeReverseApi)
+        self.window_personas = {
+            "qq-main:FriendMessage:200": "original",
+            "qq-second:FriendMessage:200": "original",
+        }
+
+        async def session_persona_override(umo):
+            return self.window_personas.get(umo)
+
+        self.types = NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider, NS, NS, FakeReverseApi,
+                                        session_persona_override_lookup=session_persona_override)
         self.controller = self.make_controller()
 
     def make_controller(self, config=None):
@@ -79,6 +88,7 @@ class MultiFixture:
         configured = self.controller.settings.target(target)
         event = FakeEvent(NS(platform=self.native.platforms[configured.platform_id]), event_id=identifier,
                           sender=configured.participant_id, login=configured.account_id, text=text, **changes)
+        self.window_personas.setdefault(event.unified_msg_origin, "original")
         event.created_at = self.clock.now().timestamp()
         return event
 

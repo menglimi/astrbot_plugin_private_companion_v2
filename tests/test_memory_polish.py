@@ -270,6 +270,8 @@ class SourcePrivacyTests(unittest.TestCase):
         for secret in secrets:
             with self.subTest(secret_prefix=secret[:8]):
                 self.assertNotIn(secret, redact_text("凭据 " + secret))
+        astrbot_token = "abk_" + "C" * 32
+        self.assertNotIn(astrbot_token, redact_text(astrbot_token))
         url = "postgresql://alice:synthetic-db-password@db.local/app"
         cleaned = redact_text(url)
         self.assertNotIn("synthetic-db-password", cleaned)

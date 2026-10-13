@@ -12,6 +12,9 @@ class RelationshipToolSources:
         self.messages = messages
 
     def offers(self, context, batch_id):
+        from companion_v2.conversation.native_tool_sources import native_offers, native_turn
+        if native_turn(batch_id):
+            return native_offers(self.messages, context, batch_id)
         batch = self.messages.owned(context, batch_id)
         saved = json.loads(batch["contributions_json"])
         keys = saved.get("inputs", []) if isinstance(saved, dict) else []

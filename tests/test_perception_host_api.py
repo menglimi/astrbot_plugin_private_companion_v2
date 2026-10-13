@@ -76,13 +76,14 @@ class PerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         with bind_request_context(PluginRequest(native, username=username)):
             return await self.routes[(PREFIX, method)]()
 
-    async def test_screen_is_v2_native_and_only_reality_uses_the_external_perception_bridge(self):
+    async def test_screen_and_reality_use_v2_even_when_legacy_stars_are_present(self):
         self.assertEqual((await self.call())["data"]["code"], "staging_not_initialized")
         (await self.controller.initialize_profile()).unwrap()
         data = (await self.call())["data"]["providers"]
         self.assertEqual(set(data), {"reality"})
         self.assertEqual(self.screen.reads, 0)
-        self.assertTrue(data["reality"]["settings"]["secrets"]["pairing_token_configured"])
+        self.assertFalse(data["reality"]["settings"]["secrets"]["pairing_token_configured"])
+        self.assertEqual(self.reality.updates, [])
 
         screen = await self.call(body={"provider": "screen", "section": "settings",
                                        "updates": {"enabled": True}})
@@ -92,11 +93,12 @@ class PerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         reality = await self.call(body={"provider": "reality", "section": "camera",
                                         "updates": {"camera_enabled": True}})
         self.assertEqual(reality["status"], "ok", reality)
-        self.assertEqual(self.reality.updates, [("camera", {"camera_enabled": True})])
+        self.assertEqual(self.reality.updates, [])
+        self.assertTrue(self.controller.native_extensions.service("reality").config["camera"]["enabled"])
 
         bad = await self.call(body={"provider": "reality", "section": "home", "updates": {"enabled": True}})
         self.assertEqual(bad["data"]["code"], "perception_request_invalid")
-        self.assertEqual(len(self.reality.updates), 1)
+        self.assertEqual(len(self.reality.updates), 0)
 
     async def test_missing_legacy_screen_plugin_does_not_disable_native_screen_and_auth_blocks_external_writes(self):
         (await self.controller.initialize_profile()).unwrap()

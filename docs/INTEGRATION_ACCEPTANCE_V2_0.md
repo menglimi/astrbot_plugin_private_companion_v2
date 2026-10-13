@@ -1,6 +1,41 @@
 # V2.0 整合验收
 
-日期：2026-09-25。产品范围见 [发行说明](RELEASE_V2_0.md)。
+当前版本：2.1.1。改造日期：2026-10-13。产品范围见 [发行说明](RELEASE_V2_0.md)，实际归属见 [原生拓展改造](NATIVE_EXTENSIONS_REWORK_20261011.md)。
+
+## 当前单包改造
+
+普通私聊和获准群聊使用 AstrBot 核心回复管线。Content、Image、Screen、Reality、Together、Game、Live 迁入同一个 V2 插件的原生内部模块，配置、网页及运行资产随唯一安装包交付，由 V2 管理生命周期。AstrBot 只注册 `astrbot_plugin_private_companion_v2` 的一个 Star，唯一公开 Dashboard Page 为「陪伴小屋」。
+
+| 内部模块 | 随包领域/宿主目录 | 必须包含的资源 |
+| --- | --- | --- |
+| Content | `companion_v2/content/`、`astrbot_host/native_extensions/content.py` | 作品及版本服务、内部提供方 |
+| Image | `astrbot_host/native_extensions/image_native/` | 后端、编辑、图片 API 及内部设置 |
+| Screen | `astrbot_host/native_extensions/screen_provider.py`、`screens.py` | 单次采集及 V2 原件消费 |
+| Reality | `companion_v2/reality/`、`astrbot_host/native_extensions/reality/` | 默认设置/schema、设备测试音频 |
+| Together | `companion_v2/together/`、`astrbot_host/native_extensions/together/` | 默认设置/schema、房间网页、默认头像和图标库 |
+| Game | `companion_v2/games/`、`astrbot_host/native_extensions/game/` | 原生规则、默认设置/schema、游戏网页和图标库 |
+| Live | `companion_v2/live/`、`astrbot_host/native_extensions/live/` | 默认设置/schema、blivedm、SoulLink 桥接脚本、引擎及许可证 |
+
+构建脚本只读取当前 V2 源码，默认发布 `astrbot_plugin_private_companion_v2-2.1.1.zip` 和清单。验包检查一个安装包、七项模块及资源、一个 Star、唯一插件身份和唯一公开页；运行代码不导入七个旧同级伴侣插件。模型、平台、设备和直播等真实外部服务的连接效果另按使用环境验收。
+
+2.1.0 的自动升级范围为已有 V2 能力目录：旧提供方身份转换为内部模块身份，已有生命周期、授权、角色选择及历史保留。2.1.1 为七项原生能力增加了与发行版本绑定的运行时工件基线，防止同一版本的原生能力内容发生漂移。上述 V2 升级不读取 V1 数据；明确请求的 V1 正式迁移仍沿原流程验证。
+
+本轮从最终源码统一构建新包，并从解包副本验收。对应包的哈希、通过项目及实际验证范围记录在交付目录的 `ACCEPTANCE_20261011.md` 和验收目录的 `package-verification.json`；历史核心回复包和 2026-09-25 八包套件的结果保留在下方历史记录中。
+
+统一验收入口：
+
+```powershell
+python -X utf8 tools/sync_framework_page.py
+python -X utf8 tools/sync_framework_page.py --check
+python -X utf8 tools/build_v2_release.py --output <新的交付目录>
+& '<AstrBot>/backend/python/python.exe' -X utf8 tools/verify_v2_release.py --release <新的交付目录> --extract-to <新的验收目录> --host-check
+```
+
+`--host-check` 使用 AstrBot 自带 Python，从解包副本执行真实 SDK 入口的加载、启停、路由注销及迁移合同检查；进程的 `ASTRBOT_ROOT` 指向临时目录，`PYTHONPATH` 仅使用候选包和 `backend/app`，模型与平台使用本地替身。更多领域测试由本轮新包统一验收覆盖。`package-verification.json` 保存在新的验收目录，`RELEASE_FILES.json` 在包内保存实际内容。
+
+## 历史记录：2026-09-25 八包整合
+
+以下为当时的源码和交付套件验收记录。七个独立伴侣的状态接口与八个 ZIP 均属于历史架构，保留原始验证范围供追溯。
 
 ## 本次变更
 

@@ -134,7 +134,7 @@ window.CompanionDecisionPage = (() => {
     if (view === "overview") return overviewMarkup();
     if (view === "response") {
       return `<div class="decision-stats decision-stats-four">
-        ${stat("专属直呼词", listCount(s, "group_wakeup_direct_words"), "仅在当前群聊窗口生效")}
+        ${stat("专属直呼词", listCount(s, "group_wakeup_direct_words"), "同一角色的群聊共用")}
         ${stat("兴趣参与概率", shown(s.group_wakeup_interest_probability), "命中兴趣话题后的参与概率")}
         ${stat("提问识别阈值", shown(s.group_wakeup_question_threshold), "0–100 · 越低越敏感")}
         ${stat("图片相关性", flag(s, "group_wakeup_image_enabled"), `权重 ${shown(s.group_wakeup_image_weight)}`)}

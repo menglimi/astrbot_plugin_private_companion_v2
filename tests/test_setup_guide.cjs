@@ -125,6 +125,7 @@ async function plannedMultiDestinationPage(firstApplyResponse) {
   const plan = (token, personaId) => ({plan_token: token, source_persona_id: personaId,
     source_fingerprint: 'source-fingerprint', archive: {fingerprint: 'archive-fingerprint'},
     reaction_assets: {batch_count: 1}, journals: {batch_count: 0},
+    reference_images: {batch_count: 1}, wardrobe_items: {batch_count: 1, image_count: 1},
     worldbook: {general_count: 0, member_count: 0, base_entries_matches: false, base_members_matches: false}});
   const basePlan = {plan_token: 'base-plan', archive: {fingerprint: 'archive-fingerprint'},
     persona_sources: [{persona_id: 'persona-a', label: 'V1 人格：persona-a', state: 'ready'}],
@@ -299,7 +300,9 @@ test('V1 is not inspected until a target and persona are selected', async () => 
 
   assert.equal(page.calls.some(item => item.route === 'setup/status'), false,
     'the standalone migration workspace must not depend on first-run state');
-  assert.match(page.html, /选择迁移目标/);
+  assert.match(page.html, /选择来源、写入目标和配置范围/);
+  assert.match(page.html, /setup-migration-context/);
+  assert.match(page.html, /V1 只读/);
   assert.equal(page.calls.some(item => item.route === 'legacy'), false);
   assert.equal(page.calls.some(item => item.route === route), false);
   page.change('', 't-first', {setupLegacy: 'target'});
@@ -646,6 +649,73 @@ test('data migration does not present an unplanned memory database as empty', as
   assert.doesNotMatch(page.html, /独立记忆库并迁入已映射的历史资料（0 条 \/ 0 MB）/);
 });
 
+test('single-target migration exposes references and can import wardrobe text without gallery images', async () => {
+  const route = 'host/targets/t-first/roles/r-first/legacy';
+  const targets = [{target_id: 't-first', roles: [{role_id: 'r-first', role_name: '星缘',
+    legacy_api: '/astrbot_plugin_private_companion_v2/' + route}]}];
+  const plan = {plan_token: 'reference-plan', source_persona_id: '',
+    reaction_assets: {batch_count: 0}, journals: {batch_count: 0}, worldbook: {general_count: 0, member_count: 0},
+    reference_images: {ready: 1, batch_count: 1, rejected: []},
+    wardrobe_items: {ready: 1, batch_count: 1, image_count: 0, rejected: []},
+    persona_sources: [{persona_id: '', label: '主角色（companions.json）', state: 'ready'}],
+    archive: {state: 'absent'}, memory_database: {state: 'absent'},
+    target_private_available: true, group_target_available: false, group_networks: []};
+  const page = harness({status: readyStatus(), targets, responses: {
+    ['GET ' + route + '/data-plan']: [plan, plan],
+    ['POST ' + route + '/data-apply']: {source_persona_id: '', errors: [],
+      reference_images: {reference_created: 0, reference_remaining: 0,
+        wardrobe_created: 1, wardrobe_remaining: 0, wardrobe_images_skipped: 0}},
+  }});
+  page.mountMigration();
+  await settle();
+  assert.match(page.html, /V1 数据迁移/);
+  page.change('', 't-first', {setupLegacy: 'target'});
+  page.change('', 'r-first', {setupLegacy: 'role'});
+  page.click('legacy-data-plan');
+  await settle();
+  page.change('', '', {setupLegacy: 'import-wardrobe-items'}, {checked: true});
+  page.change('', '', {setupLegacy: 'confirm-reference-persona-mapping'}, {checked: true});
+  page.click('legacy-data-apply');
+  await settle();
+
+  const applied = page.calls.find(item => item.method === 'POST' && item.route === route + '/data-apply');
+  assert.equal(applied.body.import_reference_images, false);
+  assert.equal(applied.body.import_wardrobe_items, true);
+  assert.equal(applied.body.confirm_reference_persona_mapping, true);
+  assert.match(page.html, /衣柜新增 1 件/);
+});
+
+test('learning relationship profiles are counted and can be selected without original worldbook entries', async () => {
+  const route = 'host/targets/t-first/roles/r-first/legacy';
+  const targets = [{target_id: 't-first', roles: [{role_id: 'r-first', role_name: '星缘',
+    legacy_api: '/astrbot_plugin_private_companion_v2/' + route}]}];
+  const plan = {plan_token: 'learning-social-plan', reaction_assets: {}, journals: {},
+    worldbook: {general_count: 0, member_entry_count: 0, member_count: 2, member_profile_count: 2,
+      available_count: 2, requires_id_confirmation: true, base_members_matches: false},
+    persona_sources: [], group_networks: [], memory_database: {state: 'absent'},
+    target_private_available: true, group_target_available: false};
+  const page = harness({status: readyStatus(), targets, responses: {
+    ['GET ' + route + '/data-plan']: plan,
+    ['POST ' + route + '/data-apply']: {errors: [], worldbook: {members_imported: 2}}}});
+  page.mountMigration();
+  await settle();
+  page.change('', 't-first', {setupLegacy: 'target'});
+  page.change('', 'r-first', {setupLegacy: 'role'});
+  page.click('legacy-data-plan');
+  await settle();
+  assert.match(page.html, /2 个学习关系网节点/);
+  assert.match(page.html, /人物描述、身份备注、相处边界与重要印象一起迁移/);
+  assert.doesNotMatch(page.html, /data-setup-legacy="import-worldbook"[^>]*disabled/);
+  page.change('', '', {setupLegacy: 'import-worldbook'}, {checked: true});
+  page.change('', '', {setupLegacy: 'confirm-member-ids'}, {checked: true});
+  assert.doesNotMatch(page.html, /data-setup-legacy-action="legacy-data-apply"[^>]*disabled/);
+  page.click('legacy-data-apply');
+  await settle();
+  const applied = page.calls.find(item => item.method === 'POST' && item.route === route + '/data-apply');
+  assert.equal(applied.body.import_worldbook, true);
+  assert.equal(applied.body.confirm_member_ids, true);
+});
+
 test('data migration previews the independent memory database and sends its explicit selection', async () => {
   const route = 'host/targets/t-first/roles/r-first/legacy';
   const targets = [{target_id: 't-first', roles: [{role_id: 'r-first', role_name: '星缘',
@@ -676,10 +746,10 @@ test('data migration previews the independent memory database and sends its expl
   page.click('legacy-data-plan');
   await settle();
 
-  assert.match(page.html, /为每个人格明确添加一个或多个 V2 私聊目标和角色，或明确跳过/);
+  assert.match(page.html, /逐个人格添加 V2 私聊目标与角色，或明确跳过/);
   assert.match(page.html, /V1 人格：persona-b/);
-  assert.match(page.html, /群成员互动图和群范围资料需要明确选择 V2 群目标/);
-  assert.match(page.html, /个人关系账户保存在独立关系库中，此处不会把它写入群/);
+  assert.match(page.html, /群资料需另选 V2 群目标/);
+  assert.match(page.html, /个人关系账户不在此处迁移/);
   assert.match(page.html, /独立记忆库表清单（2）/);
   assert.match(page.html, /data-setup-legacy="import-memory-database"[^>]*checked/);
   assert.doesNotMatch(page.html.match(/<input[^>]*data-setup-legacy="import-memory-database"[^>]*>/)?.[0] || '', /disabled/);
@@ -748,6 +818,33 @@ test('a V1 persona can map to multiple explicitly selected V2 destinations and e
     assert.equal(call.body.import_reactions, true);
   }
   assert.match(page.html, /各目标结果已分别保留/);
+});
+
+test('multi-destination migration sends wardrobe selection and keeps remaining materials resumable', async () => {
+  const result = {source_persona_id: 'persona-a', errors: [], reaction_created: 1,
+    reaction_remaining: 0, journal_created: 0, journal_remaining: 0,
+    journal_derivatives_remaining: 0,
+    reference_images: {reference_created: 0, reference_remaining: 0,
+      wardrobe_created: 1, wardrobe_remaining: 1, wardrobe_images_skipped: 0}};
+  const {page, firstRoute} = await plannedMultiDestinationPage(result);
+  page.clickLegacyDestination('add', 'persona-a');
+  page.change('', 't-first', {setupLegacyBatchTarget: '', personaId: 'persona-a', destinationId: 'destination-1'});
+  page.change('', 'r-first', {setupLegacyBatchRole: '', personaId: 'persona-a', destinationId: 'destination-1'});
+  page.click('legacy-data-batch-plan');
+  await settle();
+  page.change('', '', {setupLegacyBatchOption: 'wardrobe-items', personaId: 'persona-a',
+    destinationId: 'destination-1'}, {checked: true});
+  page.change('', '', {setupLegacyBatchOption: 'confirm-reference-persona', personaId: 'persona-a',
+    destinationId: 'destination-1'}, {checked: true});
+  page.click('legacy-data-batch-apply');
+  await settle();
+
+  const applied = page.calls.find(item => item.method === 'POST' && item.route === firstRoute + '/data-apply');
+  assert.equal(applied.body.import_reference_images, false);
+  assert.equal(applied.body.import_wardrobe_items, true);
+  assert.equal(applied.body.confirm_reference_persona_mapping, true);
+  assert.match(page.html, /仍有后续批次或未导入项/);
+  assert.match(page.html, /衣物 1 条待继续/);
 });
 
 test('a failed or unknown destination apply stops before later destinations', async t => {

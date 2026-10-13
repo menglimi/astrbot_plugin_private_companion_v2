@@ -47,7 +47,8 @@ class CalendarCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
         session = SimpleNamespace(plan_calendar=AsyncMock(return_value={"state": "succeeded", "saved": 2,
                                                                           "replaced": 1, "rejected": []}))
         with (patch("astrbot_host.calendar_command.authenticate_notice_route", return_value=route),
-              patch("astrbot_host.calendar_command.send_private_notice", new_callable=AsyncMock) as send):
+              patch("astrbot_host.calendar_command.send_private_notice", new_callable=AsyncMock,
+                    return_value={"state": "delivered"}) as send):
             result = await receive_calendar_command(SimpleNamespace(), event, session)
 
         self.assertTrue(result.is_success)

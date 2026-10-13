@@ -26,6 +26,12 @@ class StateEvidence:
                 continue
             seen.add(key(reference))
             require(repository.validate_reference(reference, observed_at=at))
+            from companion_v2.conversation.native_observations import NATIVE_OWNERS, source_row, validate_observation
+            if reference.owner in NATIVE_OWNERS:
+                original = source_row(self.service.runtime, reference)
+                if original is None:
+                    raise TaskError("state_source_unavailable", "the native input observation is unavailable")
+                validate_observation(self.service.runtime, original, context, reference)
             if control or self.service.records.shared_source(context, reference):
                 continue
             if reference.scope != context.scope:

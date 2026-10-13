@@ -12,7 +12,9 @@ from companion_v2.storage.repositories import OperationRepository
 from companion_v2.delivery.presence_diagnostics import describe_presentation
 from companion_v2.role_work.life.management import RoleLifeManagement
 from .ownership import role_schedule_key
-from .configuration import DEFAULTS, GROUP, OWNER, PERMISSIONS, target_for
+from .configuration import (DEFAULTS, GROUP, OWNER, PERMISSIONS, role_target_for,
+    sync_window_grants, target_for)
+from .settings_scope import role_preference
 
 
 class StateManagement:
@@ -42,14 +44,17 @@ class StateManagement:
         with self.app.runtime.read_snapshot():
             now = self.app.now()
             access = self.life.authorize(operator)
-            snapshot = require(self.app.configuration.read(operator, target=target_for(self.context),
-                               group_id=GROUP, observed_at=now))
+            role_snapshot = require(self.app.configuration.read(operator, target=role_target_for(self.context),
+                                    group_id=GROUP, observed_at=now))
+            window_snapshot = require(self.app.configuration.read(operator, target=target_for(self.context),
+                                      group_id=GROUP, observed_at=now))
+            settings = {name: window_snapshot.values[GROUP + "." + name] for name in DEFAULTS}
             effective = {}
             for option, actions in PERMISSIONS.items():
                 try:
                     for action in actions:
                         self.app.role_state.access.check(self.context, action)
-                    effective[option] = {"allowed": bool(snapshot.values[GROUP + "." + option]), "reason": None}
+                    effective[option] = {"allowed": bool(settings[option]), "reason": None}
                 except TaskError as error:
                     effective[option] = {"allowed": False, "reason": error.code}
             try:
@@ -65,7 +70,6 @@ class StateManagement:
             schedule = self.app.runtime.read_one("SELECT next_at, enabled, result_json FROM role_state_schedules WHERE context_key = ?",
                                                  (role_schedule_key(self.context),))
             sleep = self.life.sleep_status(operator, access=access)
-            settings = {name: snapshot.values[GROUP + "." + name] for name in DEFAULTS}
             settings["mood_cross_window"] = True
             local_day = now.astimezone(ZoneInfo(settings["planning_timezone"]))
             day_start = local_day.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -74,13 +78,14 @@ class StateManagement:
                 "body_scope": {"installation_id": self.context.scope.installation_id,
                     "bot_id": self.context.scope.bot_id, "role_id": self.context.role_binding.role.subject_id,
                     "settings": [name for name in DEFAULTS if name in ("hunger_enabled", "health_enabled") or name.startswith("cycle_")]},
-                "edit_token": snapshot.edit_token, "cycle_settings_token": self.app.role_state.cycle_settings_token(settings),
+                "edit_token": window_snapshot.edit_token, "role_edit_token": role_snapshot.edit_token,
+                "cycle_settings_token": self.app.role_state.cycle_settings_token(settings),
                 "effective": effective, "state": state, "calendar": calendar,
                 "planning": self.app.calendar_planning.status(self.context),
                 "create_token": self.token(operator, access, "calendar:new", 0),
                 "occurrences": self.app.calendar.occurrences(self.context,
                     start=day_start.astimezone(timezone.utc), end=day_end.astimezone(timezone.utc),
-                    operator=operator),
+                    operator=operator, diagnostics=True),
                 **sleep,
                 "maintenance": {"next_at": schedule["next_at"], "enabled": bool(schedule["enabled"]),
                     "result": json.loads(schedule["result_json"]) if schedule["result_json"] else None} if schedule else None,
@@ -92,25 +97,84 @@ class StateManagement:
         changes = data["changes"]
         if (type(changes) is not dict or not changes or set(changes) - set(DEFAULTS)
                 or any(type(value) is not type(DEFAULTS[name]) for name, value in changes.items())
-                or type(data["edit_token"]) is not str):
+                or type(data.get("edit_token", "")) is not str
+                or type(data.get("role_edit_token", "")) is not str):
             raise TaskError("state_configuration_invalid", "use explicit state settings with the declared types")
+        observed_at = self.app.now()
+        role_changes = {key: value for key, value in changes.items() if role_preference(key)}
+        window_changes = {key: value for key, value in changes.items() if not role_preference(key)}
+        if data["action"] == "configure_window":
+            role_changes, window_changes = {}, dict(changes)
+        if data["action"] == "configure_role" and (window_changes or not data.get("role_edit_token")):
+            raise TaskError("state_configuration_invalid", "role defaults cannot include window-only settings")
+        if data["action"] in ("configure", "configure_window") and (
+                (data["action"] == "configure" and role_changes and not data.get("role_edit_token"))
+                or (window_changes and not data.get("edit_token"))):
+            raise TaskError("state_configuration_invalid", "provide the edit token for each configuration layer")
+
+        role_target = role_target_for(self.context)
+        window_target = target_for(self.context)
+        role_token = data.get("role_edit_token", "")
+        window_token = data.get("edit_token", "")
         op_id = "state-config:" + digest([operator.subject, self.context.key, data["operation_key"]])
-        receipt = require(self.app.configuration.patch(operator, target=target_for(self.context), group_id=GROUP,
-            operation=OperationRef(op_id, OWNER, self.context.scope, VersionRef(op_id, 1), op_id),
-            expected_edit_token=data["edit_token"], changes={GROUP + "." + k: v for k, v in changes.items()},
-            observed_at=self.app.now()))
+        operation = OperationRef(op_id, OWNER, self.context.scope, VersionRef(op_id, 1), op_id)
+        reserved = require(OperationRepository(self.app.runtime).reserve(operation,
+            parameter_hash=digest({"action": data["action"], "changes": changes,
+                "role_edit_token": role_token if role_changes else None,
+                "edit_token": window_token if window_changes else None}), observed_at=observed_at))
+        if reserved.replayed:
+            if reserved.state is not OperationState.COMPLETED:
+                raise TaskError("configuration_operation_incomplete", "the original settings save is not complete")
+            return {"operation_id": op_id, "replayed": True}
+
+        if role_changes:
+            role_before = require(self.app.configuration.read(operator, target=role_target,
+                group_id=GROUP, observed_at=observed_at))
+            if role_before.edit_token != role_token:
+                raise TaskError("configuration_revision_conflict", "role settings changed before this save")
+        if window_changes:
+            window_before = require(self.app.configuration.read(operator, target=window_target,
+                group_id=GROUP, observed_at=observed_at))
+            if window_before.edit_token != window_token:
+                raise TaskError("configuration_revision_conflict", "window settings changed before this save")
+
+        if role_changes:
+            layer_id = "state-role-config:" + digest([operator.subject, role_target.key, data["operation_key"]])
+            require(self.app.configuration.patch(operator, target=role_target, group_id=GROUP,
+                operation=OperationRef(layer_id, OWNER, role_target.authorization_scope,
+                    VersionRef(layer_id, 1), layer_id), expected_edit_token=role_token,
+                changes={GROUP + "." + key: value for key, value in role_changes.items()},
+                observed_at=observed_at))
+        if window_changes:
+            # The role write changes this target's inherited values and edit token.
+            # The aggregate operation above already checked the caller's original token.
+            window_current = require(self.app.configuration.read(operator, target=window_target,
+                group_id=GROUP, observed_at=observed_at))
+            layer_id = "state-window-config:" + digest([operator.subject, window_target.key, data["operation_key"]])
+            require(self.app.configuration.patch(operator, target=window_target, group_id=GROUP,
+                operation=OperationRef(layer_id, OWNER, window_target.authorization_scope,
+                    VersionRef(layer_id, 1), layer_id), expected_edit_token=window_current.edit_token,
+                changes={GROUP + "." + key: value for key, value in window_changes.items()},
+                observed_at=observed_at))
+        if "enabled" in role_changes:
+            effective = require(self.app.configuration.read(operator, target=window_target,
+                group_id=GROUP, observed_at=observed_at))
+            current_settings = {name: effective.values[GROUP + "." + name] for name in DEFAULTS}
+            sync_window_grants(self.app.runtime, window_target, self.context.actor.subject,
+                current_settings, frozenset({"enabled"}), observed_at)
         from .ownership import role_owner
         for bound in tuple(self.app.state_maintenance.bindings.values()):
             if role_owner(bound[0]) == role_owner(self.context):
                 try:
                     self.app.state_maintenance.bind(*bound[:2], guard=bound[2])
-                    self.app.calendar_planning.next_checks.pop(bound[0].key, None)
                 except TaskError:
                     continue  # A retired window cannot invalidate the current configuration.
+        self.app.calendar_planning.invalidate(self.context)
         if self.app.presence is not None:
             self.app.presence.bind(self.context)
-        self.app.calendar_planning.next_checks.pop(self.context.key, None)
-        return {"operation_id": op_id, "replayed": receipt.replayed}
+        require(OperationRepository(self.app.runtime).transition(op_id,
+            expected_state=OperationState.ACCEPTED, next_state=OperationState.COMPLETED, observed_at=observed_at))
+        return {"operation_id": op_id, "replayed": False}
 
     def _maintain(self, operator, data):
         self.app.require_running()
@@ -154,7 +218,7 @@ class StateManagement:
         with self.app.runtime.transaction():
             access = self.life.authorize(operator)
             action = data["action"]
-            if action == "configure":
+            if action in ("configure", "configure_role", "configure_window"):
                 result = self._configure(operator, data)
             else:
                 revision = data["expected_revision"]

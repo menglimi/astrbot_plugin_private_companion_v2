@@ -1,10 +1,9 @@
-"""Operator-visible bounds for reaction lookup, its cache and its vector upkeep.
+"""Installation-wide bounds for reaction lookup, its cache and vector upkeep.
 
-V1 exposed nine flat ``reaction_expression_*`` keys read through a runtime
-settings shim (``plugin_bootstrap.py:946-979``).  V2 registers them as one
-window-scoped group so a single relationship can tune its own catalog without a
-code change, and so reading them never touches the global semantic settings the
-memory and vocabulary paths share.
+V1 exposed flat ``reaction_expression_*`` keys through plugin configuration.
+These settings affect the shared search path, not one conversation, so V2 stores
+them at installation scope. The catalog itself is role-owned; group vocabulary
+and speaker preferences retain their narrower boundaries.
 
 Every field below has exactly one consumer:
 
@@ -33,6 +32,7 @@ magnitude to start from.
 """
 
 from dataclasses import dataclass
+import json
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.configuration.owners import SparseConfigurationOwner
@@ -41,7 +41,7 @@ from companion_v2.configuration.registry import FieldDefinition, ValueKind
 
 GROUP = "expression.reaction"
 OWNER = "expression.reaction"
-LAYERS = (ConfigLayer.WINDOW,)
+LAYERS = (ConfigLayer.INSTALLATION,)
 VISION_MODES = ("off", "embedding", "always")
 DEFAULTS = {
     "low_latency_enabled": True,
@@ -90,8 +90,7 @@ def field_names():
 
 
 def target_for(context):
-    return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role,
-                        context.scope)
+    return ConfigTarget(context.scope.installation_id, ConfigLayer.INSTALLATION)
 
 
 @dataclass(frozen=True)
@@ -128,11 +127,12 @@ class ReactionSettings:
 
 
 def read_snapshot(runtime, context, *, override=None):
-    """Read one window's effective reaction bounds together with their revision.
+    """Read installation-wide reaction bounds together with their revision.
 
     The revision is what reaction caches key on, so directory and configuration
-    changes invalidate them without a second read.  A malformed stored value never
-    blocks a turn: the defaults are returned instead.
+    changes invalidate them without a second read. Legacy window overrides are
+    copied into the installation layer during host preparation. A malformed
+    stored value never blocks a turn: the defaults are returned instead.
     """
     snapshot = SparseConfigurationOwner(runtime).read(target_for(context), field_names())
     values = {key.removeprefix(GROUP + "."): field.value for key, field in snapshot.fields.items()}
@@ -148,12 +148,62 @@ def read_settings(runtime, context, *, override=None):
     return read_snapshot(runtime, context, override=override)[0]
 
 
+def migrate_window_values(runtime):
+    """Prepare legacy reaction settings before read-only host assembly.
+
+    Existing installation values win. Window rows are retained, and repeating
+    preparation does not change the installation's configuration revision.
+    """
+    from companion_v2.configuration.models import encode
+
+    installation = ConfigTarget(runtime.installation_id, ConfigLayer.INSTALLATION)
+    prefix = GROUP + "."
+    definitions = {field.field_id: field for field in configuration_fields()}
+    with runtime.transaction() as connection:
+        current = {row["field_id"] for row in connection.execute(
+            "SELECT field_id FROM configuration_values WHERE target_key=? AND field_id LIKE ?",
+            (installation.key, prefix + "%"))}
+        candidates = {}
+        rows = connection.execute("""SELECT t.target_json,t.updated_at,v.field_id,v.value_json
+            FROM configuration_targets t JOIN configuration_values v ON v.target_key=t.target_key
+            WHERE v.field_id LIKE ? ORDER BY t.updated_at DESC,t.target_key""",
+            (prefix + "%",)).fetchall()
+        for row in rows:
+            if row["field_id"] in current or row["field_id"] in candidates:
+                continue
+            try:
+                target = json.loads(row["target_json"])
+            except (TypeError, ValueError):
+                continue
+            if (target.get("installation_id") != runtime.installation_id
+                    or target.get("layer") != ConfigLayer.WINDOW.value):
+                continue
+            try:
+                definitions[row["field_id"]].validate(json.loads(row["value_json"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            candidates[row["field_id"]] = row
+        if not candidates:
+            return
+        target_row = connection.execute(
+            "SELECT revision FROM configuration_targets WHERE target_key=?", (installation.key,)).fetchone()
+        revision = (target_row["revision"] if target_row else 0) + 1
+        updated_at = max(row["updated_at"] for row in candidates.values())
+        connection.execute("INSERT OR IGNORE INTO configuration_targets VALUES (?,?,0,?)",
+                           (installation.key, encode(installation.document()), updated_at))
+        connection.executemany("INSERT INTO configuration_values VALUES (?,?,?,?)",
+            ((installation.key, field_id, row["value_json"], revision)
+             for field_id, row in candidates.items()))
+        connection.execute("UPDATE configuration_targets SET revision=?,updated_at=? WHERE target_key=?",
+                           (revision, updated_at, installation.key))
+
+
 class ReactionConfigurationOwner(SparseConfigurationOwner):
     """Reject what the registry cannot range-check.
 
     Individual ranges are already enforced by each ``FieldDefinition``; a TEXT
     field only checks its type there, so an operator typo such as ``alwayss``
-    would be stored and would silently switch the review gate.  The enum and the
+    would be stored and would silently switch the review gate. The enum and the
     numeric bounds are re-validated through the same dataclass the read path uses.
     """
 

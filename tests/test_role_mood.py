@@ -32,6 +32,7 @@ class MoodModelTests(unittest.TestCase):
         self.assertIsNone(mood.validate(None))
         self.assertEqual(mood.validate("平静"), "平静")
         for payload in ({"baseline": 6, **axes(), "intensity": "strong"},
+                        mood_data(intensity=None),
                         {**mood_data(), "description": None}):
             self.assertEqual(mood.validate(payload)["joy"], 6)
         for payload in ({"baseline": 6, **axes()}, mood_data(joy=0), mood_data(fear=11), mood_data(joy=6.0),
@@ -220,6 +221,8 @@ class MoodMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "succeeded", result)
         instruction = self.called[0].original.instruction
         self.assertIn("回落参考", instruction)
+        self.assertIn("JSON 整数，禁止小数", instruction)
+        self.assertIn("区间内选择整数", instruction)
         self.assertIn("超出会被拒绝", instruction)
         stored = app.role_state.read(context)["values"]["mood"]
         self.assertEqual(stored["joy"], 10)
@@ -236,16 +239,19 @@ class MoodMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.role_state.read(context)["values"]["mood"]["fear"], 8)
         # A later round cannot jump past the bounded window even though the gate is open.
         self.clock.advance(timedelta(minutes=10))
+        before = app.role_state.read(context)
         self.model_behavior = lambda env: asyncio.sleep(0, result=answered(encode(
-            state_data(mood=mood_data(joy=2, fear=1, anger=6, sorrow=6, intensity="strong")))))
-        refused = await app.state_maintenance.run(context, "原角色人格提示", "jump")
-        self.assertNotEqual(refused["state"], "succeeded")
-        # The refused round changed nothing: the recorded axes and adjectives are intact,
-        # and the role body has not advanced past the first confirmed round.
+            state_data(mood=mood_data(joy=2, fear=1, anger=6, sorrow=6, intensity="strong"),
+                       energy=63, location="小屋里"))))
+        result = await app.state_maintenance.run(context, "原角色人格提示", "jump")
+        self.assertEqual(result["state"], "succeeded", result)
+        # The invalid mood is isolated, while the rest of this maintenance round is saved.
         stored = app.role_state.read(context)
         self.assertEqual((stored["values"]["mood"]["joy"], stored["values"]["mood"]["fear"]), (2, 8))
         self.assertEqual(stored["values"]["mood"]["description"], "有点不安")
-        self.assertEqual(stored["revision"], 2)
+        self.assertEqual(stored["mood_dynamics"]["updated_at"], before["mood_dynamics"]["updated_at"])
+        self.assertEqual((stored["values"]["energy"], stored["values"]["location"]), (63, "小屋里"))
+        self.assertEqual(stored["revision"], 3)
 
     async def test_reply_gets_the_tone_block_only_for_structured_mood(self):
         host, app, context, _ = await self.ready(mood_update_probability=0.0)

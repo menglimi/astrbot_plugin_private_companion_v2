@@ -3,6 +3,7 @@
 import json
 
 from astrbot.api.web import request
+from companion_v2.configuration.models import ConfigLayer
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.conversation.recall_management import RecallManagement
 from companion_v2.conversation.reply_management import ReplyManagement
@@ -84,8 +85,9 @@ class ReplyWebAPI:
                     raise ValueError("nonfinite value")
                 data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=finite)
                 expected = {"settings", "text"} if action == "preview" else {"operation_key", "edit_token", "changes"}
+                optional = {"image_count"} if action == "preview" else {"reset_to_inherit"} if action == "configure" else set()
                 if (type(data) is not dict or not expected <= set(data)
-                        or set(data) - expected - ({"image_count"} if action == "preview" else set())):
+                        or set(data) - expected - optional):
                     raise ValueError("unexpected or missing reply fields")
             async with self.controller._control_lock:
                 controller = self.controller
@@ -95,7 +97,7 @@ class ReplyWebAPI:
                 if session is None or controller.runtime is None:
                     raise TaskError("staging_not_initialized", "load the V2 profile first")
                 operator = dashboard_operator(controller.runtime, username, at=controller.now())
-                manager = ReplyManagement(session.application, session.profile.target)
+                manager = ReplyManagement(session.application, session.profile.target, layer=ConfigLayer.ROLE)
                 if action == "status":
                     result = manager.status(operator)
                 elif action == "preview":

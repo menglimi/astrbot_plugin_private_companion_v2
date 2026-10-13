@@ -6,8 +6,8 @@ object, which adds two things without moving any boundary:
 
 * the turn's bounds come from the registered ``knowledge`` configuration group
   instead of the four constants that used to sit in the call site;
-* member entries are offered as bounded display attribution clues, each with its
-  own governed source reference and an explicit "not an identity" instruction.
+* member entries offer bounded, attributed background for natural conversation,
+  each with its own governed source reference and no identity or access authority.
 
 A failure inside the optional clue path drops the clues and never the turn.  The
 background-material path keeps the existing behaviour: a source that cannot be
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
 from companion_v2.execution.models import digest
+from companion_v2.foundation.refs import ScopeKind
 from companion_v2.sources.repositories import SourceRepository
 
 from .catalog import CatalogKnowledgeProvider, KnowledgeCatalog
@@ -83,12 +84,24 @@ class KnowledgeContext:
             materials.append(clue)
         return tuple(materials)
 
-    def _background(self, context, settings, *, text, at, batch_id, sources, audience):
+    def background_contributions(self, context, *, text, at, batch_id, sources, audience,
+                                 include_official=True):
+        """Select knowledge separately from members; native turns keep official KB in AstrBot."""
+        return self._background(context, self.settings(context), text=text, at=at, batch_id=batch_id,
+                                sources=sources, audience=audience, include_official=include_official)
+
+    def member_contribution(self, context, *, text, at, batch_id, sources, audience):
+        """Select attributed member background independently of optional knowledge retrieval."""
+        return self._clues(context, self.settings(context), text=text, at=at, batch_id=batch_id,
+                           sources=sources, audience=audience)
+
+    def _background(self, context, settings, *, text, at, batch_id, sources, audience,
+                    include_official=True):
         if not settings.inject_enabled:
             return ()
         self._apply_provider_limits(settings)
         retriever = self.retriever
-        if self.official_candidate_reader is not None and settings.source_ids:
+        if include_official and self.official_candidate_reader is not None and settings.source_ids:
             try:
                 base_candidates = retriever.candidates() if retriever is not None else ()
                 used_chars = sum(len(item.text) for item in base_candidates)
@@ -153,7 +166,8 @@ class KnowledgeContext:
             )
             if selection.empty:
                 return None
-            payload = selection.prompt(char_limit=settings.member_clue_chars)
+            payload = selection.prompt(char_limit=settings.member_clue_chars,
+                                       private_chat=context.scope.kind is ScopeKind.PRIVATE)
             if not payload:
                 return None
             reference = publish_material(

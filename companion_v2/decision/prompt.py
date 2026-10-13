@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from .contract import DECISION_FIELDS
@@ -11,29 +12,29 @@ from .contract import DECISION_FIELDS
 DECISION_QUESTIONS = {
     "turn_state": {
         "type": "choice",
-        "instructions": "结合当前用户消息判断这轮表达状态。",
+        "instructions": "判断这条消息是否说完，不判断能否回答。例：“什么是日食？”选 complete；“我还没说完，等我补充后再答”选 unfinished。",
         "criteria": {
-            "complete": "用户当前想表达的事情已经说完整，可以回应。",
-            "unfinished": "用户明显还在补充、列举或续说，适合先等后续消息。",
-            "uncertain": "信息不足以判断用户是否说完，先谨慎等待或澄清。",
+            "complete": "当前消息已表达完整，包括明确表示不需要回复的完整陈述。",
+            "unfinished": "用户明确说还要补充或要求听完再答，例如“我还没说完”。",
+            "uncertain": "消息像被截断，但看不出是否会继续。",
         },
     },
     "action": {
         "type": "choice",
-        "instructions": "选择当前最合适的对话行为；这是语义分类，不是具体发送或等待参数。",
+        "instructions": "按消息意图分类：正常完整请求选 reply；等用户补充完再回答选 wait；明确不需要回复选 silent；信息缺失才 clarify。群聊未被点名时才可能 interject。",
         "criteria": {
-            "reply": "自然地回应用户当前表达。",
-            "wait": "用户很可能还会继续表达，暂不回复当前消息。",
-            "silent": "无需对当前消息发送可见回应。",
-            "interject": "适合在群聊中简短加入当前话题。",
-            "clarify": "关键意思不明确，先提出澄清问题。",
+            "reply": "回应目标清楚的完整问题或请求，包括需要语音或图片能力的请求。",
+            "wait": "用户明确还要补充或希望听完再答，例如“先别回复，我马上补上”。",
+            "silent": "用户明确不需要回复，例如“这条只记一下，不用回复”；稍后再答属于 wait。",
+            "interject": "仅群聊可用；用户没有向机器人提问，此时自然加入当前讨论。",
+            "clarify": "仅在关键对象或目标缺失时使用，例如上下文不明时说“帮我把那个发给他”。",
         },
     },
     "reply_intent": {
         "type": "choice",
         "instructions": "如果需要回应，选择主要沟通意图。",
         "criteria": {
-            "answer": "回答问题或提供所需信息。",
+            "answer": "直接回答问题；例如回答“什么是日食？”。",
             "acknowledge": "确认收到、接住情绪或简短回应。",
             "ask": "通过自然追问推动对话。",
             "comfort": "给予安慰、支持或陪伴。",
@@ -54,37 +55,71 @@ DECISION_QUESTIONS = {
     },
     "reply_form": {
         "type": "choice",
-        "instructions": "选择语义上适合的回复形式；可用能力仍由插件配置决定。",
+        "instructions": "按用户要求选择文字、语音、文字加语音或图片；能力是否可用由插件配置决定。",
         "criteria": {
             "text": "使用文字回复。",
-            "voice": "语音更适合当前回应。",
-            "text_voice": "文字与语音都适合。",
+            "voice": "用户明确只要求语音朗读或发送语音。",
+            "text_voice": "用户明确要求文字和语音都发送。",
             "image": "图片表达更适合当前回应。",
-            "none": "当前不发送可见回复。",
         },
     },
     "segment_mode": {
         "type": "choice",
-        "instructions": "判断回复是否适合自然分成多个连续消息；不要决定具体段数。",
+        "instructions": "判断回复是否适合分成连续消息；不要决定段数。",
         "criteria": {
-            "single": "内容紧凑，适合放在一条消息里。",
-            "natural": "表达中有自然停顿或话题层次，可以顺势分段。",
-            "keep_together": "步骤、引用、代码、列表或紧密语义应保持完整。",
+            "single": "一个简短回应，放在一条消息里自然。",
+            "natural": "需要分别回答多个独立问题时，可自然分开表达。",
+            "keep_together": "同一组步骤、列表、引用或代码应保持完整。",
         },
     },
     "tool_need": {
         "type": "choice",
-        "instructions": "判断理解或回答可能需要哪类能力；这只是提示，不授权或触发工具。",
+        "instructions": "判断是否需要额外能力；只是提示，不授权或触发工具。",
         "criteria": {
             "none": "仅凭当前对话即可回应。",
             "memory": "可能需要查阅已授权的对话记忆。",
             "vision": "可能需要理解用户提供的图片或视频。",
-            "tts": "可能需要语音合成能力。",
-            "image": "可能需要生成或编辑图片能力。",
-            "external": "可能需要其他已注册能力。",
+            "tts": "用户明确要求合成、朗读或发送语音。",
+            "image": "用户明确要求生成或编辑图片。",
+            "external": "确实需要已接入外部工具；普通知识问答不选此项。",
         },
     },
 }
+
+
+def decision_questions(facts, enabled_fields):
+    questions = {name: deepcopy(question) for name, question in DECISION_QUESTIONS.items()
+                 if enabled_fields.get(name, True)}
+    for question in questions.values():
+        question["instructions"] = "当前消息是唯一待判断发言；历史只用于理解指代和话题是否延续，不要重答旧问题。" + question["instructions"]
+    action = questions.get("action")
+    if action is None:
+        return questions
+    if facts.get("scope_kind") != "group":
+        action["criteria"].pop("interject", None)
+        return questions
+    # Laya has a small question budget and caps each option at 48 tokens.
+    # Keep the actual distinction at the start of each short option.
+    action["instructions"] = "根据群聊背景和当前发言选择机器人下一步；候选不是必答，未向机器人说话的成员闲聊不用回复。"
+    action["criteria"] = {
+        "reply": "回复：已向机器人提问，或确在补充双方任务；开启答疑时也可回答实质公共求助。",
+        "wait": "等待：用户还没说完，等下一条补充后再答。",
+        "silent": "沉默：用户明确不需要回复，例如“这条只记一下，不用回复”；未叫机器人时旁听。",
+        "interject": "插话：已开启自主插话，且有不打断他人的自然参与机会。",
+        "clarify": "澄清：用户向机器人提出请求但没说清关键对象。",
+    }
+    policy = facts.get("group_participation_policy") or {}
+    if policy.get("question_enabled") is False:
+        action["instructions"] += "本群已关闭答疑。"
+        action["criteria"]["reply"] = "回复：已向机器人提问，或确在补充双方任务，机器人现在应回答。"
+    if policy.get("interjection_enabled") is False:
+        action["criteria"].pop("interject", None)
+        action["instructions"] += "自主插话关闭。"
+    if facts.get("candidate_reason") in {"active_follow_up", "reply_follow_up"}:
+        action["instructions"] = "判断当前发言是否接续机器人上轮追问；历史仅用于辨认上下文，不是新请求。"
+        action["criteria"]["reply"] = "接续：当前在回答机器人追问、补充原请求，或明确要求继续处理。"
+        action["criteria"]["silent"] = "旁听：当前换话题、未求助或仅发图；不得重答历史问题。明确不用回复也沉默。"
+    return questions
 
 
 def _clean(value: Any, *, depth: int = 0) -> Any:
@@ -98,7 +133,7 @@ def _clean(value: Any, *, depth: int = 0) -> Any:
         return [_clean(item, depth=depth + 1) for item in value[:32]]
     if isinstance(value, dict):
         return {str(key)[:80]: _clean(item, depth=depth + 1)
-                for key, item in list(value.items())[:64]}
+                for key, item in sorted(value.items(), key=lambda item: str(item[0]))[:64]}
     return str(value)[:4000]
 
 
@@ -106,7 +141,83 @@ def facts_document(facts: dict[str, Any]) -> dict[str, Any]:
     return _clean(facts)
 
 
-def build_state(facts: dict[str, Any]) -> str:
+def build_state(facts: dict[str, Any], enabled_fields=None) -> str:
     """Laya accepts a textual state, so keep structured facts as readable JSON."""
-    document = {"facts": facts_document(facts), "decision_fields": list(DECISION_FIELDS)}
+    fields = (name for name in DECISION_FIELDS if name == "reason_codes" or enabled_fields is None
+              or enabled_fields.get(name, True))
+    # Small decision models can truncate state tokens. Put the current text and
+    # trusted address facts before identifiers and historical context.
+    address = {"scope_kind": facts.get("scope_kind"), "mentioned": facts.get("mentioned", False),
+               "native_wakeup": facts.get("native_wakeup", False),
+               "mentions_others": facts.get("mentions_others", False)}
+    address_context = ("This is a group chat. The bot is directly mentioned."
+                       if facts.get("mentioned") else "This is a group chat. The bot is not directly mentioned.") if facts.get("scope_kind") == "group" else "This is a direct conversation with the bot."
+    document = {"current_message": str(facts.get("user_text", ""))[:12000], "address_context": address_context,
+                "conversation_address": address,
+                "facts": facts_document(facts), "decision_fields": list(fields)}
     return json.dumps(document, ensure_ascii=False, separators=(",", ":"))
+
+
+def render_model_state(state: str) -> str:
+    """Keep the trained facts envelope, with current text before bounded context."""
+    document = json.loads(state)
+    facts = document["facts"]
+    text = str(document.get("current_message", facts.get("user_text", "")))
+    model = {"message_kind": facts.get("message_kind", "text"),
+             "scope_kind": facts.get("scope_kind", "private"), "user_text": text}
+    if facts.get("scope_kind") == "group":
+        policy = facts.get("group_participation_policy") or {}
+        called_directly = facts.get("candidate_reason") in {"direct_word", "native_wakeup", "mention_all", "quoted_reply", "native_quote"}
+        address = ("此消息@了机器人。用户向机器人说话，仍须尊重不用回复或等待补充的意图。"
+                   if facts.get("mentioned") else "此消息明确呼唤了机器人。用户向机器人说话，仍须尊重不用回复或等待补充的意图。"
+                   if called_directly else "此消息没有@机器人，机器人未被点名，群成员之间的交流默认旁听。")
+        if facts.get("mentions_others"):
+            address += "此消息@了其他群成员。"
+        reason = facts.get("candidate_reason")
+        if reason in {"active_follow_up", "reply_follow_up"}:
+            address += "同一成员近期与机器人聊过，须判断本句是否仍在补充双方任务；换话题或只发图片不代表继续求助。"
+        if not facts.get("mentioned") and not called_directly and policy:
+            if policy.get("question_enabled") is False and policy.get("interjection_enabled") is False:
+                address += "本群不开启未点名答疑和自主插话。"
+            elif policy.get("question_enabled") is False:
+                address += "本群未点名答疑关闭。"
+        model["address_context"] = address
+        if reason:
+            model["candidate_reason"] = str(reason)
+        if policy:
+            model["group_participation_policy"] = {key: policy[key] for key in (
+                "question_enabled", "interjection_enabled", "question_threshold", "cooldown_seconds") if key in policy}
+        reference = facts.get("question_reference") or {}
+        if reference:
+            model["question_reference"] = f"求助评分 {reference.get('score', 0)}，阈值 {policy.get('question_threshold', 65)}；达到阈值仍非必答。"
+        sends = facts.get("recent_bot_send_returns") or []
+        if sends:
+            model["recent_bot_send_returns"] = [{"seconds_ago": item["seconds_ago"]}
+                for item in sends[-3:] if item.get("seconds_ago") is not None]
+        history = []
+        for item in facts.get("recent_group_messages") or []:
+            if not isinstance(item, dict):
+                continue
+            history.append((str(item.get("received_at", "")),
+                "当前发言者" if item.get("speaker_id") == facts.get("speaker_id") else "其他群成员",
+                str(item.get("text", ""))))
+        for item in facts.get("recent_group_bot_messages") or []:
+            if isinstance(item, dict):
+                history.append((str(item.get("returned_at", "")), "机器人", str(item.get("text", ""))))
+        if history:
+            history.sort(key=lambda item: item[0])
+            model["past_group_context"] = [
+                {"speaker": speaker, "message": text[:320]}
+                for _, speaker, text in history[-4:] if text.strip()]
+    elif facts.get("recent_private_messages"):
+        model["past_private_context"] = [
+            {"speaker": "用户" if item.get("role") == "user" else "机器人",
+             "message": str(item.get("text", ""))[:360]}
+            for item in facts["recent_private_messages"][-4:]
+            if isinstance(item, dict) and str(item.get("text", "")).strip()]
+    media = [label for name, label in (("has_image", "图片"), ("has_audio", "语音"), ("has_video", "视频"))
+             if facts.get(name)]
+    if media:
+        model["attachments"] = "附有：" + "、".join(media)
+    return json.dumps({"facts": model, "decision_fields": document.get("decision_fields", [])},
+                      ensure_ascii=False, separators=(",", ":"))

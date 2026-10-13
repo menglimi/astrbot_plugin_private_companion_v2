@@ -1829,6 +1829,138 @@ MIGRATION_V53_TO_V54_FINGERPRINT = hashlib.sha256(
     "\n".join(V54_MIGRATION_STATEMENTS).encode("utf-8")
 ).hexdigest()
 
+V55_MIGRATION_STATEMENTS = (
+    """CREATE TABLE model_call_failures_v55 (
+        call_id TEXT PRIMARY KEY NOT NULL REFERENCES model_calls(call_id),
+        code TEXT NOT NULL CHECK(code IN (
+            'request_preparation_failed', 'provider_request_failed', 'native_response_parse_failed',
+            'provider_recheck_failed', 'role_recheck_failed', 'response_contract_rejected',
+            'adapter_failed', 'provider_wait_interrupted', 'provider_wait_timed_out',
+            'request_recheck_failed', 'runtime_interrupted', 'provider_refused'
+        )),
+        observed_at TEXT NOT NULL
+    )""",
+    """INSERT INTO model_call_failures_v55(call_id, code, observed_at)
+        SELECT call_id, code, observed_at FROM model_call_failures""",
+    "DROP TABLE model_call_failures",
+    "ALTER TABLE model_call_failures_v55 RENAME TO model_call_failures",
+)
+V55_REQUIRED_TABLES = V54_REQUIRED_TABLES
+V55_SCHEMA_STATEMENTS = V54_SCHEMA_STATEMENTS + V55_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V55_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V55_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V55 = "companion-v2.storage.v55"
+SCHEMA_VERSION = SCHEMA_VERSION_V55
+MIGRATION_V54_TO_V55_ID = "companion-v2.storage.v54-to-v55"
+MIGRATION_V54_TO_V55_FINGERPRINT = hashlib.sha256(
+    "\n".join(V55_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V56_MIGRATION_STATEMENTS = (
+    """CREATE TABLE laya_decision_events (
+        event_id TEXT PRIMARY KEY NOT NULL CHECK(length(event_id) = 32),
+        origin_key TEXT NOT NULL CHECK(length(origin_key) BETWEEN 1 AND 256),
+        batch_id TEXT CHECK(batch_id IS NULL OR length(batch_id) BETWEEN 1 AND 128),
+        source TEXT NOT NULL CHECK(source IN ('conversation', 'dashboard_preview', 'probe')),
+        status TEXT NOT NULL CHECK(status IN ('ok', 'skipped', 'failed')),
+        mode TEXT NOT NULL CHECK(mode IN ('local', 'remote')),
+        reason_code TEXT CHECK(reason_code IS NULL OR length(reason_code) BETWEEN 1 AND 96),
+        reason TEXT CHECK(reason IS NULL OR length(reason) <= 1000),
+        elapsed_ms INTEGER CHECK(elapsed_ms IS NULL OR elapsed_ms >= 0),
+        decision_json TEXT CHECK(decision_json IS NULL OR (json_valid(decision_json) AND length(decision_json) <= 4096)),
+        enabled_fields_json TEXT NOT NULL CHECK(json_valid(enabled_fields_json) AND length(enabled_fields_json) <= 2048),
+        observed_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX laya_decision_events_role_recent_idx ON laya_decision_events(origin_key, observed_at DESC)",
+    "CREATE INDEX laya_decision_events_batch_idx ON laya_decision_events(origin_key, batch_id, observed_at)",
+)
+V56_REQUIRED_TABLES = V55_REQUIRED_TABLES.union({"laya_decision_events"})
+V56_SCHEMA_STATEMENTS = V55_SCHEMA_STATEMENTS + V56_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V56_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V56_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V56 = "companion-v2.storage.v56"
+SCHEMA_VERSION = SCHEMA_VERSION_V56
+MIGRATION_V55_TO_V56_ID = "companion-v2.storage.v55-to-v56"
+MIGRATION_V55_TO_V56_FINGERPRINT = hashlib.sha256(
+    "\n".join(V56_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V57_MIGRATION_STATEMENTS = (
+    """CREATE TABLE proactive_platform_circuits (
+        account_key TEXT PRIMARY KEY NOT NULL CHECK(length(account_key) = 64),
+        failures_json TEXT NOT NULL CHECK(json_valid(failures_json) AND length(failures_json) <= 2048),
+        cooldown_until TEXT,
+        updated_at TEXT NOT NULL
+    )""",
+)
+V57_REQUIRED_TABLES = V56_REQUIRED_TABLES.union({"proactive_platform_circuits"})
+V57_SCHEMA_STATEMENTS = V56_SCHEMA_STATEMENTS + V57_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V57_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V57_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V57 = "companion-v2.storage.v57"
+SCHEMA_VERSION = SCHEMA_VERSION_V57
+MIGRATION_V56_TO_V57_ID = "companion-v2.storage.v56-to-v57"
+MIGRATION_V56_TO_V57_FINGERPRINT = hashlib.sha256(
+    "\n".join(V57_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V58_MIGRATION_STATEMENTS = (
+    "ALTER TABLE expression_style_signals ADD COLUMN applicability_json TEXT NOT NULL DEFAULT "
+    "'{\"channels\":[\"private\",\"group\",\"proactive\",\"qzone\",\"tts\"],"
+    "\"relationship_stages\":[\"any\"],\"emotion_gates\":[\"any\"],\"intent\":\"any\",\"keywords\":[]}' "
+    "CHECK(json_valid(applicability_json) AND length(applicability_json) <= 4096)",
+)
+V58_REQUIRED_TABLES = V57_REQUIRED_TABLES
+V58_SCHEMA_STATEMENTS = V57_SCHEMA_STATEMENTS + V58_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V58_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V58_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V58 = "companion-v2.storage.v58"
+SCHEMA_VERSION = SCHEMA_VERSION_V58
+MIGRATION_V57_TO_V58_ID = "companion-v2.storage.v57-to-v58"
+MIGRATION_V57_TO_V58_FINGERPRINT = hashlib.sha256(
+    "\n".join(V58_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V59_MIGRATION_STATEMENTS = (
+    "ALTER TABLE laya_decision_events ADD COLUMN request_json TEXT CHECK(request_json IS NULL OR (json_valid(request_json) AND length(request_json) <= 131072))",
+    "ALTER TABLE laya_decision_events ADD COLUMN response_json TEXT CHECK(response_json IS NULL OR (json_valid(response_json) AND length(response_json) <= 65536))",
+    "ALTER TABLE laya_decision_events ADD COLUMN processing_json TEXT CHECK(processing_json IS NULL OR (json_valid(processing_json) AND length(processing_json) <= 16384))",
+)
+V59_REQUIRED_TABLES = V58_REQUIRED_TABLES
+V59_SCHEMA_STATEMENTS = V58_SCHEMA_STATEMENTS + V59_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V59_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V59_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V59 = "companion-v2.storage.v59"
+SCHEMA_VERSION = SCHEMA_VERSION_V59
+MIGRATION_V58_TO_V59_ID = "companion-v2.storage.v58-to-v59"
+MIGRATION_V58_TO_V59_FINGERPRINT = hashlib.sha256(
+    "\n".join(V59_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V60_MIGRATION_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS proactive_schedule_diagnostics (
+        diagnostic_key TEXT PRIMARY KEY NOT NULL CHECK(length(diagnostic_key) = 64),
+        conversation_ref TEXT CHECK(conversation_ref IS NULL OR length(conversation_ref) = 64),
+        observed_at TEXT NOT NULL,
+        stage TEXT NOT NULL CHECK(length(stage) BETWEEN 1 AND 48),
+        outcome TEXT NOT NULL CHECK(outcome IN ('running', 'blocked', 'candidate', 'queued', 'pending', 'skipped', 'failed')),
+        reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 96),
+        purpose TEXT CHECK(purpose IS NULL OR length(purpose) BETWEEN 1 AND 48),
+        next_at TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS proactive_schedule_diagnostics_recent_idx ON proactive_schedule_diagnostics(observed_at)",
+)
+V60_REQUIRED_TABLES = V59_REQUIRED_TABLES.union({"proactive_schedule_diagnostics"})
+V60_SCHEMA_STATEMENTS = V59_SCHEMA_STATEMENTS + V60_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V60_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V60_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V60 = "companion-v2.storage.v60"
+SCHEMA_VERSION = SCHEMA_VERSION_V60
+MIGRATION_V59_TO_V60_ID = "companion-v2.storage.v59-to-v60"
+MIGRATION_V59_TO_V60_FINGERPRINT = hashlib.sha256(
+    "\n".join(V60_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
 
 def migration_count() -> int:
     """How many ordered migrations a fully upgraded data root records.

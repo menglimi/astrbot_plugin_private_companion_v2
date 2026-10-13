@@ -61,8 +61,9 @@ class MainNoReplyTests(unittest.IsolatedAsyncioTestCase):
             _accepting=False,
             _terminated=False,
             session=NS(profile=NS(target=self.target)),
-            session_topology=NS(reply_enabled=AsyncMock(return_value=True), observe=AsyncMock()),
+            session_topology=NS(reply_enabled=AsyncMock(return_value=True), schedule_observe=lambda event: None),
             persona_mapping_for_event=AsyncMock(return_value=NS(role_id="registered-role")),
+            prepare_core_reply=AsyncMock(return_value=Outcome.failed("host_persona_unmapped", "persona not registered")),
             group_reply_candidate=AsyncMock(),
             receive_claimed=AsyncMock(side_effect=RuntimeError("synthetic processing failure")),
             terminate=AsyncMock(),
@@ -98,20 +99,18 @@ class MainNoReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("expected=true reason=staging_not_accepting", captured.output[0])
         self.assertFalse(event.stopped)
 
-    async def test_exception_after_v2_claims_private_message_is_recorded(self):
+    async def test_optional_preparation_failure_leaves_astrbot_core_reply_available(self):
         self.staging.claims = lambda _event: True
         self.staging.target_for_event = lambda _event: self.target
         event = private_event()
 
         await self.plugin.receive_companion_message(event)
 
-        row = self.runtime.read_one("SELECT * FROM inbound_no_replies", ())
-        self.assertEqual(row["reason_code"], "inbound_processing_failed")
-        self.assertEqual(row["origin_key"], self.target.key)
+        self.assertEqual(self.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
         self.assertFalse(event.stopped)
-        self.assertTrue(event.call_llm)
+        self.assertFalse(getattr(event, "call_llm", False))
 
-    async def test_unregistered_persona_passes_through_without_stopping_or_logging(self):
+    async def test_unregistered_persona_leaves_astrbot_core_reply_available(self):
         self.staging.claims = lambda _event: True
         self.staging.target_for_event = lambda _event: self.target
         self.staging.persona_mapping_for_event = AsyncMock(return_value=None)
@@ -120,7 +119,37 @@ class MainNoReplyTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.receive_companion_message(event)
 
         self.assertFalse(event.stopped)
+        self.staging.persona_mapping_for_event.assert_not_awaited()
+        self.staging.prepare_core_reply.assert_awaited_once()
         self.staging.receive_claimed.assert_not_awaited()
+        self.assertFalse(getattr(event, "call_llm", False))
+        self.assertEqual(self.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
+
+    async def test_persona_lookup_timeout_leaves_astrbot_core_reply_available(self):
+        self.staging.claims = lambda _event: True
+        self.staging.target_for_event = lambda _event: self.target
+        self.staging.prepare_core_reply = AsyncMock(return_value=Outcome.failed(
+            "host_native_lookup_timeout__conversation", "conversation lookup timed out"))
+        event = private_event()
+
+        await self.plugin.receive_companion_message(event)
+
+        self.assertFalse(event.stopped)
+        self.staging.prepare_core_reply.assert_awaited_once()
+        self.assertFalse(getattr(event, "call_llm", False))
+        self.assertEqual(self.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
+
+    async def test_unmapped_group_persona_leaves_astrbot_core_reply_available(self):
+        self.staging.claims = lambda _event: True
+        self.staging.target_for_event = lambda _event: self.target
+        self.staging.group_reply_candidate = AsyncMock(return_value=NS(
+            failure=NS(code="host_persona_unmapped")))
+        event = group_event()
+
+        await self.plugin.receive_companion_message(event)
+
+        self.assertFalse(event.stopped)
+        self.assertFalse(getattr(event, "call_llm", False))
         self.assertEqual(self.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
 
     async def test_competing_astrbot_command_passes_through_a_claimed_route(self):
@@ -176,6 +205,7 @@ class StartupRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_retries_startup_until_onebot_account_is_ready(self):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         plugin._host_start_task = None
+        plugin._session_settings_warm_task = None
         plugin.staging = NS(
             settings=NS(enabled=True),
             _terminated=False,
@@ -187,14 +217,42 @@ class StartupRetryTests(unittest.IsolatedAsyncioTestCase):
             start=AsyncMock(return_value=Outcome.success({"state": "running"})),
         )
 
-        await plugin.initialize()
-        task = plugin._host_start_task
-        self.assertIsNotNone(task)
-        await asyncio.wait_for(task, timeout=3)
+        with patch.object(ENTRY, "warm_session_settings", new=AsyncMock()):
+            await plugin.initialize()
+            task = plugin._host_start_task
+            self.assertIsNotNone(task)
+            await asyncio.wait_for(task, timeout=3)
 
         self.assertEqual(plugin.staging.startup_readiness.call_count, 3)
         plugin.staging.load_existing.assert_awaited_once()
         plugin.staging.start.assert_awaited_once()
+
+    async def test_plugin_retries_a_failed_startup_until_the_shared_host_accepts(self):
+        plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
+        plugin._host_start_task = None
+        plugin._session_settings_warm_task = None
+        plugin._startup_failure_key = None
+        plugin._startup_failure_at = 0.0
+        staging = NS(
+            settings=NS(enabled=True),
+            _terminated=False,
+            _accepting=False,
+            session=None,
+            startup_readiness=Mock(return_value=None),
+            load_existing=AsyncMock(return_value=Outcome.success({"loaded": True})),
+            start=AsyncMock(side_effect=(
+                Outcome.failed("host_persona_window_unbound", "window persona is not configured"),
+                Outcome.success({"state": "running"}),
+            )),
+        )
+        plugin.staging = staging
+
+        with patch.object(ENTRY, "warm_session_settings", new=AsyncMock()):
+            await plugin.initialize()
+            await asyncio.wait_for(plugin._host_start_task, timeout=3)
+
+        self.assertEqual(staging.start.await_count, 2)
+        self.assertIsNone(plugin._startup_failure_key)
 
 
 if __name__ == "__main__":

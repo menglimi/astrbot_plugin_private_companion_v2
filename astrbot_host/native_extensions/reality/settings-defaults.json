@@ -1,0 +1,69 @@
+{
+  "enabled": true,
+  "authorized_user_ids": [],
+  "vision_provider_id": "",
+  "audio": {
+    "default_playback_volume": 35
+  },
+  "home": {
+    "enabled": false,
+    "provider": "home_assistant",
+    "base_url": "",
+    "access_token": "",
+    "default_area": "",
+    "request_timeout_seconds": 5
+  },
+  "health": {
+    "enabled": false,
+    "ttl_seconds": 3600
+  },
+  "camera": {
+    "enabled": false,
+    "index": 0,
+    "min_interval_seconds": 60,
+    "capture_timeout_seconds": 5,
+    "analysis_timeout_seconds": 25,
+    "proactive_curiosity_enabled": false,
+    "proactive_min_tier": 4,
+    "proactive_max_daily": 1,
+    "proactive_cooldown_minutes": 240
+  },
+  "mihome": {
+    "enabled": true,
+    "device_map": "{}",
+    "device_category_map": "{}",
+    "control_tool": {
+      "enable": true,
+      "admin_only": true,
+      "allowed_devices": []
+    },
+    "enable_readonly_tool": true,
+    "enable_scene_tool": false,
+    "scene_tool_admin_only": true,
+    "scene_tool": {
+      "enable": false,
+      "admin_only": true
+    }
+  },
+  "timezone": "Asia/Shanghai",
+  "mobile": {
+    "enabled": false,
+    "pairing_token": "",
+    "host": "0.0.0.0",
+    "port": 6322,
+    "public_base_url": "",
+    "allowed_user_id": "",
+    "session_ttl_hours": 168,
+    "location_ttl_seconds": 900,
+    "amap_reverse_geocode_enabled": false,
+    "amap_api_key": "",
+    "amap_cache_ttl_seconds": 1800,
+    "amap_request_timeout_seconds": 5,
+    "telemetry_enabled": false,
+    "telemetry_ttl_seconds": 3600,
+    "activity_enabled": false,
+    "activity_ttl_seconds": 900,
+    "proxy_rooms": true,
+    "screen_upload_enabled": true
+  }
+}

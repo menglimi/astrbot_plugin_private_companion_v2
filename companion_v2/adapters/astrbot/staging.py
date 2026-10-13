@@ -21,6 +21,7 @@ from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.conversation.forwards.models import ForwardIntakePolicy
 from companion_v2.conversation.segmentation import SegmentationPolicy
+from companion_v2.conversation.reply_settings import expression_prompt_sections
 from companion_v2.conversation.voice_reply import VoiceReplyDelivery
 from companion_v2.conversation.messages import REPLY_ACTION, REPLY_KIND
 from companion_v2.execution.models import Lane, ProviderBinding, SupervisorLimits, TaskContext, TaskError, digest, require
@@ -85,6 +86,8 @@ class NativeAdapterTypes:
     file_loader: object | None = None
     video_provider_type: type | None = None
     video_provider_factory: object | None = None
+    session_persona_override_lookup: object | None = None
+    persona_snapshot_lookup: object | None = None
 
     def __post_init__(self):
         check_version(self.version)
@@ -95,6 +98,10 @@ class NativeAdapterTypes:
                 or self.video_provider_type is not None and (
                     not isinstance(self.video_provider_type, type) or not callable(self.video_provider_factory))):
             raise ValueError("native video provider requires an explicit type and adapter factory")
+        if self.session_persona_override_lookup is not None and not callable(self.session_persona_override_lookup):
+            raise ValueError("session persona override lookup must be supplied by trusted host assembly")
+        if self.persona_snapshot_lookup is not None and not callable(self.persona_snapshot_lookup):
+            raise ValueError("persona snapshot lookup must be supplied by trusted host assembly")
         if (self.video is None) != (self.video_loader is None) or (self.video is not None and (
                 not isinstance(self.video, type) or not callable(self.video_loader))):
             raise ValueError("video intake requires an explicit native type and loader")
@@ -229,6 +236,8 @@ class AstrBotStagingSession:
             video_type=native_types.video, video_loader=native_types.video_loader,
             forward_intake=profile.forward_intake,
             file_type=native_types.file, file_loader=native_types.file_loader,
+            session_persona_override_lookup=native_types.session_persona_override_lookup,
+            persona_snapshot_lookup=native_types.persona_snapshot_lookup,
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
         self.identity = PersistentIdentityDirectory(runtime)
         # These identities are stable across a restart of the same native config.
@@ -259,7 +268,8 @@ class AstrBotStagingSession:
         self.model_profile = ModelTaskProfile(REPLY_KIND, Lane.FOREGROUND, profile.provider_id,
             profile.task_prompt, default_fallback=fallback_provider_id, replacement_rules=replacement_rules,
             fallback_on_refusal=fallback_on_refusal,
-            max_output_tokens=profile.max_output_tokens, capabilities=("text", "tools"))
+            max_output_tokens=profile.max_output_tokens, capabilities=("text", "tools"),
+            prompt_sections=expression_prompt_sections())
         self.writing_profiles = writing_profiles(profile.provider_id, max_output_tokens=profile.max_output_tokens)
         self.reading_profile = reading_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens)
         profiles = (self.model_profile, contact_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
@@ -447,8 +457,11 @@ class AstrBotStagingSession:
                 self._pin()
                 if callable(getattr(self.native_tool_port, "register_catalog", None)):
                     require(self.native_tool_port.register_catalog(observed_at=self.application.now()))
-                return await self.application.start(expected_task_generation=expected_task_generation,
-                                                    expected_model_generation=expected_model_generation)
+                result = await self.application.start(expected_task_generation=expected_task_generation,
+                                                       expected_model_generation=expected_model_generation)
+                if result.is_success and callable(getattr(self.native_tool_port, "begin_start", None)):
+                    self.native_tool_port.begin_start()
+                return result
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
         except asyncio.CancelledError:
@@ -573,7 +586,9 @@ class AstrBotStagingSession:
 
     async def close(self, *, grace_seconds=0.1):
         async with self._lifecycle:
-            if callable(getattr(self.native_tool_port, "close", None)):
+            if callable(getattr(self.native_tool_port, "aclose", None)):
+                await self.native_tool_port.aclose()
+            elif callable(getattr(self.native_tool_port, "close", None)):
                 self.native_tool_port.close()
             # The owner must keep the borrowed store open while late handles remain.
             return await self.application.close(grace_seconds=grace_seconds)

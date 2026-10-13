@@ -6,13 +6,13 @@ window.CompanionStateEditor = (() => {
   const configKinds=new Set(["settings","home","intensity","maintenance","health","hunger","cycle","planning","weather","datetime","mood","patrol"]);
   const configFields=kind=>kind==="settings"?fields:maintenance?.fields(kind)||[];
   const categoryOf=kind=>kind==="home"?"home":kind==="contact"?"contact":kind==="planning"||kind==="wording"?"planning":kind==="weather"?"weather":kind==="datetime"?"datetime":kind==="settings"?"presentation":"maintenance";
-  const isHomeCommand=command=>command?.action==="configure"&&Object.keys(command.changes).some(key=>
+  const isHomeCommand=command=>["configure","configure_role"].includes(command?.action)&&Object.keys(command.changes).some(key=>
     key.startsWith("home_")||["enabled","maintenance_minutes","energy_enabled","sleep_enabled","busy_enabled","location_enabled"].includes(key));
   const categoryFor=command=>command?.action==="contact.configure"?"contact":command?.action==="calendar.presence"?"planning"
     :isHomeCommand(command)?"home"
-    :command?.action==="configure"&&Object.keys(command.changes).length>0&&Object.keys(command.changes).every(key=>maintenance?.fields("weather").includes(key))?"weather"
-      :command?.action==="configure"&&Object.keys(command.changes).some(key=>maintenance?.fields("planning").includes(key))?"planning"
-        :command?.action==="cycle.align"||command?.action==="configure"&&Object.keys(command.changes).some(key=>!fields.includes(key))?"maintenance":"presentation";
+    :["configure","configure_role"].includes(command?.action)&&Object.keys(command.changes).length>0&&Object.keys(command.changes).every(key=>maintenance?.fields("weather").includes(key))?"weather"
+      :["configure","configure_role"].includes(command?.action)&&Object.keys(command.changes).some(key=>maintenance?.fields("planning").includes(key))?"planning"
+        :command?.action==="cycle.align"||["configure","configure_role"].includes(command?.action)&&Object.keys(command.changes).some(key=>!fields.includes(key))?"maintenance":"presentation";
   const cache=new Map();
   const origins=new Map();
   const e=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -47,10 +47,15 @@ window.CompanionStateEditor = (() => {
     if(command.action==="contact.configure")return sameKeys(command,["action","operation_key","edit_token","changes"])
       &&typeof command.edit_token==="string"&&command.changes&&Object.keys(command.changes).length>0
       &&Object.entries(command.changes).every(([key,value])=>contact?.validField(key,value));
-    if(command.action==="configure")return sameKeys(command,["action","operation_key","edit_token","changes"])
+    if(command.action==="configure")return (sameKeys(command,["action","operation_key","edit_token","changes"])
+      ||sameKeys(command,["action","operation_key","edit_token","role_edit_token","changes"]))
       &&typeof command.edit_token==="string"&&command.changes&&Object.keys(command.changes).length>0
+      &&(command.role_edit_token===undefined||typeof command.role_edit_token==="string")
       &&Object.entries(command.changes).every(([key,value])=>fields.includes(key)?(key==="typing_refresh_seconds"
         ?Number.isInteger(value)&&value>=1&&value<=10:typeof value==="boolean"):maintenance?.validField(key,value));
+    if(command.action==="configure_role")return sameKeys(command,["action","operation_key","role_edit_token","changes"])
+      &&typeof command.role_edit_token==="string"&&command.changes&&Object.keys(command.changes).length>0
+      &&Object.entries(command.changes).every(([key,value])=>!fields.includes(key)&&maintenance?.validField(key,value));
     if(command.action==="cycle.align")return sameKeys(command,["action","operation_key","expected_revision","view_token","settings_token","data"])
       &&Number.isInteger(command.expected_revision)&&command.expected_revision>=0&&typeof command.view_token==="string"&&typeof command.settings_token==="string"
       &&sameKeys(command.data,["applicability","day"])&&["applicable","not_applicable","unknown","auto"].includes(command.data.applicability)
@@ -69,7 +74,7 @@ window.CompanionStateEditor = (() => {
     if(!command)return null;
     let origin=origins.get(key);
     if(!origin)try{origin=JSON.parse(sessionStorage.getItem(key+":origin"));}catch{}
-    if(origin?.operation_key!==command.operation_key||!configKinds.has(origin.kind)||command.action!=="configure"
+    if(origin?.operation_key!==command.operation_key||!configKinds.has(origin.kind)||!["configure","configure_role"].includes(command.action)
       ||!Object.keys(command.changes).every(name=>configFields(origin.kind).includes(name)))return null;
     return origin.kind;
   }
@@ -138,10 +143,13 @@ window.CompanionStateEditor = (() => {
         const base=Object.fromEntries(contact.fields(status.contact).map(key=>[key,status.contact.settings[key]]));
         draft={kind,base,token:status.contact.edit_token,values:{...base},purposes:structuredClone(contact.purposes(status.contact)),stale:false};
       } else if(configKinds.has(kind)) {
-        if(typeof status.edit_token!=="string")return;
+        const token=kind==="settings"?status.edit_token:status.role_edit_token;
+        if(typeof token!=="string")return;
+        if(kind==="home"&&typeof status.edit_token!=="string")return;
         if(kind!=="settings"&&!maintenance?.fields(kind).every(key=>maintenance.validField(key,status.settings?.[key])))return;
         const base=Object.fromEntries(configFields(kind).map(key=>[key,status.settings[key]]));
-        draft={kind,base,token:status.edit_token,values:{...base},implicit:!notify,currentPhase:status.state?.cycle_timeline?.phase,
+        draft={kind,base,token,windowToken:status.edit_token,roleToken:status.role_edit_token,
+          values:{...base},implicit:!notify,currentPhase:status.state?.cycle_timeline?.phase,
           ...(kind==="weather"?{weatherLocationParts:maintenance.weatherLocationParts(base.planning_weather_location)}:{}),stale:false};
       } else if(kind==="align") {
         if(!maintenance?.canAlign(status))return;
@@ -218,7 +226,14 @@ window.CompanionStateEditor = (() => {
           &&!values.planning_weather_location)
           throw new Error("请先在本页填写角色天气地点，再启用天气感知。");
         const changes=Object.fromEntries(configFields(draft.kind).filter(key=>values[key]!==draft.base[key]).map(key=>[key,values[key]]));
-        return Object.keys(changes).length?{action:"configure",edit_token:draft.token,changes}:null;
+        if(!Object.keys(changes).length)return null;
+        const windowOnly=new Set(fields);
+        const hasRole=Object.keys(changes).some(key=>!windowOnly.has(key));
+        const hasWindow=Object.keys(changes).some(key=>windowOnly.has(key));
+        if(hasRole&&hasWindow)return {action:"configure",edit_token:draft.windowToken,
+          role_edit_token:draft.roleToken,changes};
+        return hasRole?{action:"configure_role",role_edit_token:draft.roleToken,changes}
+          :{action:"configure",edit_token:draft.windowToken,changes};
       }
       if(draft.kind==="align")return maintenance.alignment(draft);
       const presence=draft.values.presence.trim();
@@ -272,7 +287,9 @@ window.CompanionStateEditor = (() => {
         const base=Object.fromEntries(names.map(key=>[key,fresh.settings[key]]));
         const weatherLocationChanged=previous.kind==="weather"&&JSON.stringify(previous.weatherLocationParts)
           !==JSON.stringify(maintenance.weatherLocationParts(previous.base.planning_weather_location));
-        draft={kind:previous.kind,base,token:fresh.edit_token,values:{...base,...Object.fromEntries(touched.map(key=>[key,previous.values[key]]))},currentPhase:fresh.state?.cycle_timeline?.phase,
+        draft={kind:previous.kind,base,token:previous.kind==="settings"?fresh.edit_token:fresh.role_edit_token,
+          windowToken:fresh.edit_token,roleToken:fresh.role_edit_token,
+          values:{...base,...Object.fromEntries(touched.map(key=>[key,previous.values[key]]))},currentPhase:fresh.state?.cycle_timeline?.phase,
           ...(previous.kind==="weather"?{weatherLocationParts:weatherLocationChanged?{...previous.weatherLocationParts}
             :maintenance.weatherLocationParts(base.planning_weather_location)}:{}),stale:false};
       } else if(previous.kind==="align") {
@@ -347,7 +364,9 @@ window.CompanionStateEditor = (() => {
       const kind=kinds[feature];
       if(!kind)return "";
       const title=maintenance?.titles[kind]||"QQ 展示设置";
-      const unavailable=typeof status.edit_token!=="string"||(kind==="settings"?!fields.every(key=>key==="typing_refresh_seconds"?Number.isInteger(status.settings?.[key])&&status.settings[key]>=1&&status.settings[key]<=10:typeof status.settings?.[key]==="boolean")
+      const tokenReady=kind==="settings"?typeof status.edit_token==="string":typeof status.role_edit_token==="string"
+        &&(kind!=="home"||typeof status.edit_token==="string");
+      const unavailable=!tokenReady||(kind==="settings"?!fields.every(key=>key==="typing_refresh_seconds"?Number.isInteger(status.settings?.[key])&&status.settings[key]>=1&&status.settings[key]<=10:typeof status.settings?.[key]==="boolean")
         :kind==="align"?!maintenance.canAlign(status):!maintenance?.fields(kind)?.length
           ||!maintenance.fields(kind).every(key=>maintenance.validField(key,status.settings?.[key])));
       const editing=draft&&(draft.kind===kind||feature==="cycle"&&draft.kind==="align"||feature==="planning"&&draft.kind==="wording");
@@ -382,12 +401,12 @@ window.CompanionStateEditor = (() => {
     }
     function feedbackMarkup() {
       return `${message?`<p class="memory-notice ${error?"error":""}" role="status" aria-live="polite">${e(message)}</p>`:""}
-        ${pending?`<div class="state-pending" role="status"><strong>${busy?"请求处理中":"有一笔保存尚待核对"}</strong><p>${e(pending.action==="configure"?Object.entries(pending.changes).map(([key,value])=>`${maintenance?.label(key)||key}：${typeof value==="boolean"?(value?"开启":"关闭"):String(value).slice(0,100)}`).join("；"):maintenance?.pendingText(pending)||"状态设置" )}</p><div class="state-edit-actions">
+        ${pending?`<div class="state-pending" role="status"><strong>${busy?"请求处理中":"有一笔保存尚待核对"}</strong><p>${["configure","configure_role"].includes(pending.action)?Object.entries(pending.changes).map(([key,value])=>`${maintenance?.label(key)||key}：${typeof value==="boolean"?(value?"开启":"关闭"):String(value).slice(0,100)}`).join("；"):maintenance?.pendingText(pending)||"状态设置"}</p><div class="state-edit-actions">
           <button type="button" class="memory-button" data-state-edit="recover" ${busy||loading?"disabled":""}>用原请求核对</button>
           <button type="button" class="memory-button" data-state-edit="dismiss" ${busy?"disabled":""}>结束核对</button></div></div>`:""}`;
     }
     function weatherMarkup() {
-      const unavailable=typeof status.edit_token!=="string"
+      const unavailable=typeof status.role_edit_token!=="string"
         ||!maintenance?.fields("weather")?.every(key=>maintenance.validField(key,status.settings?.[key]));
       return `<section class="state-weather-config" aria-label="角色天气设置">${category==="weather"?feedbackMarkup():""}
         ${draft?.kind==="weather"?form():`<div class="state-weather-config-summary"><div><span>角色天气</span><strong>${e(maintenance.actionSummary("weather",status,e))}</strong>
@@ -405,7 +424,7 @@ window.CompanionStateEditor = (() => {
       const showPlanning=configPanel===null||configPanel==="planning";
       const items=status.calendar?.items||[],plans=items.map((item,index)=>({item,index})).filter(({item})=>item.kind==="role_plan");
       const pendingText=pending?.action==="contact.configure"?Object.entries(pending.changes).map(([key,value])=>contact.label(key,status.contact)+"："+(typeof value==="boolean"?(value?"开启":"关闭"):String(value).slice(0,100))).join("；")
-        :pending?.action==="configure"?Object.entries(pending.changes).map(([key,value])=>`${({typing_enabled:"输入提示",typing_refresh_seconds:"刷新秒数",presence_enabled:"自定义短状态"})[key]||maintenance?.label(key)}：${typeof value==="boolean"?(value?"开启":"关闭"):String(value).slice(0,100)}`).join("；")
+        :["configure","configure_role"].includes(pending?.action)?Object.entries(pending.changes).map(([key,value])=>`${({typing_enabled:"输入提示",typing_refresh_seconds:"刷新秒数",presence_enabled:"自定义短状态"})[key]||maintenance?.label(key)}：${typeof value==="boolean"?(value?"开启":"关闭"):String(value).slice(0,100)}`).join("；")
         :pending?maintenance?.pendingText(pending)||`日程 ${pending.id} · 公开文案：${pending.data.presence||"留空"}`:"";
       const feedback=`${message?`<p class="memory-notice ${error?"error":""}" role="status" aria-live="polite">${e(message)}</p>`:""}
         ${pending?`<div class="state-pending" role="status"><strong>${busy?"请求处理中":"有一笔保存尚待核对"}</strong><p>${e(pendingText)}</p><div class="state-edit-actions">
@@ -416,9 +435,9 @@ window.CompanionStateEditor = (() => {
         ${pending&&category!=="contact"?`<section class="panel state-edit-panel"><h3>原设置请求待核对</h3>${feedback}</section>`:""}`;
       const body=showBody&&maintenance?`<section id="state-maintenance" class="panel state-edit-panel state-maintenance-panel">${maintenance.summary(status,e)}${category==="maintenance"?feedback:""}
         ${draft&&category==="maintenance"?form():`<div class="state-setting-list" aria-label="状态配置专题">${["maintenance","cycle","align","mood","patrol"].map((kind,index)=>{
-          const scopes={maintenance:"当前会话",cycle:"共享模拟",align:"当前角色",mood:"当前会话",patrol:"当前会话"};
+          const scopes={maintenance:"当前角色",cycle:"当前角色",align:"当前角色",mood:"当前角色",patrol:"当前角色"};
           const actions={maintenance:"调整频率",cycle:"配置周期",align:"校准位置",mood:"调整心情",patrol:"设置巡视"};
-          const unavailable=kind==="align"?!maintenance.canAlign(status):typeof status.edit_token!=="string"||!maintenance.fields(kind).every(key=>maintenance.validField(key,status.settings[key]));
+          const unavailable=kind==="align"?!maintenance.canAlign(status):typeof status.role_edit_token!=="string"||!maintenance.fields(kind).every(key=>maintenance.validField(key,status.settings[key]));
           const disabled=locked||unavailable;
           return `<article class="state-setting-row" data-setting-kind="${kind}"><span class="state-setting-index" aria-hidden="true">0${index+1}</span><div class="state-setting-copy"><div class="state-setting-meta"><span>${scopes[kind]}</span>${kind==="cycle"?`<span class="state-setting-scope">按 Bot 共享</span>`:""}</div><h4>${maintenance.titles[kind]}</h4><p>${maintenance.actionSummary(kind,status,e)}</p></div><button type="button" class="state-setting-action" data-state-edit="${kind}" aria-label="${actions[kind]} ${maintenance.titles[kind]}" ${disabled?`disabled title="${kind==="align"&&!maintenance.canAlign(status)?"请先启用周期模拟并读取角色状态":"当前配置暂不可编辑"}`:""}>${actions[kind]}</button></article>`;
         }).join("")}</div>`}
@@ -430,7 +449,7 @@ window.CompanionStateEditor = (() => {
         </section>`:"";
       const calendarMarkup=showPlanning?calendarEditor?.markup({items:plans,locked,escape:e})||"":"";
       const planningMarkup=showPlanning&&maintenance?.planningSummary?`<section id="state-planning" class="panel state-edit-panel state-planning-panel">${maintenance.planningSummary(status,e)}${category==="planning"&&draft?.kind!=="wording"?feedback:""}
-        ${draft&&category==="planning"&&draft.kind==="planning"?form():`<button type="button" class="memory-button" data-state-edit="planning" ${locked||typeof status.edit_token!=="string"||!maintenance.fields("planning").every(key=>maintenance.validField(key,status.settings?.[key]))?"disabled":""}>编辑日程与规划设置</button>`}</section>`:"";
+        ${draft&&category==="planning"&&draft.kind==="planning"?form():`<button type="button" class="memory-button" data-state-edit="planning" ${locked||typeof status.role_edit_token!=="string"||!maintenance.fields("planning").every(key=>maintenance.validField(key,status.settings?.[key]))?"disabled":""}>编辑日程与规划设置</button>`}</section>`:"";
       const wordingMarkup=showPlanning&&draft?.kind==="wording"&&category==="planning"?`<section class="panel state-edit-panel state-wording-panel">${category==="planning"?feedback:""}${form()}</section>`:"";
       return body+presentationMarkup+planningMarkup+calendarMarkup+wordingMarkup+(pending&&category==="contact"?`<section class="panel state-edit-panel"><h3>联系安排请求待核对</h3>${feedback}</section>`:"");
     }
@@ -444,7 +463,7 @@ window.CompanionStateEditor = (() => {
         const kind=draft?.kind|| (pending?pendingKind:null)|| (pending?.action==="cycle.align"?"align":pending?.action==="calendar.presence"?"wording":null);
         if(kind)return ({home:"home",intensity:"energy",maintenance:"health",health:"health",hunger:"hunger",cycle:"cycle",align:"cycle",mood:"mood",patrol:"patrol",
           planning:"planning",weather:"weather",datetime:"datetime",wording:"planning",settings:"presentation"})[kind]||null;
-        if(pending?.action==="configure"){
+        if(["configure","configure_role"].includes(pending?.action)){
           const keys=Object.keys(pending.changes||{});
           if(isHomeCommand(pending))return "home";
           if(keys.length&&keys.every(key=>maintenance?.fields("weather").includes(key)))return "weather";

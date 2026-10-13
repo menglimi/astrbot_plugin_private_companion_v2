@@ -43,6 +43,9 @@ class GroupMemoryAccess:
         """Internal evidence reader after member or control-plane authorization."""
         from companion_v2.conversation.messages import event_from_document
         at = at or self.tasks.now()
+        if isinstance(reference, dict) and reference.get("kind") == "native_input":
+            from companion_v2.conversation.native_tool_sources import group_input
+            return group_input(self.messages, owner, reference, at=at)
         if self.messages.group_context.reference_key(reference)[0] != "input":
             raise TaskError("group_memory_evidence_required", "group memory requires an authenticated member input")
         row = self.runtime.read_one("SELECT * FROM conversation_inputs WHERE event_key = ?", (reference["event_key"],))
@@ -75,6 +78,9 @@ class GroupMemoryAccess:
         return record, original, event
 
     def offered(self, context, batch_id):
+        from companion_v2.conversation.native_tool_sources import group_reference, input_row, native_turn
+        if native_turn(batch_id):
+            return {"group-input-native": group_reference(input_row(self.messages, context, batch_id))}
         batch = self.messages.batch(batch_id)
         if batch["origin_key"] != context.key:
             raise TaskError("group_memory_batch_unavailable", "input handles belong to the original speaker and batch")
@@ -87,6 +93,15 @@ class GroupMemoryAccess:
                 and not any(json.loads(row["event_json"]).get(name) for name in ("images", "quotes", "forwards", "audios", "videos"))}
 
     def current_input(self, context, batch_id, handle):
+        from companion_v2.conversation.native_tool_sources import native_turn
+        if native_turn(batch_id):
+            reference = self.offered(context, batch_id).get(handle)
+            if reference is None:
+                raise TaskError("group_memory_handle_unavailable", "use the current native member input handle")
+            record, original, event = self.input(context, reference)
+            if original.actor.subject != context.actor.subject:
+                raise TaskError("group_memory_speaker_changed", "a member can only author their own statement")
+            return reference, record, original, event
         batch = self.messages.batch(batch_id)
         if batch["state"] != "sealed":
             raise TaskError("group_memory_batch_closed", "new group memory writes require an active sealed reply")

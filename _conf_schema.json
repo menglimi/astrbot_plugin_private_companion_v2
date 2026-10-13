@@ -377,9 +377,9 @@
       },
       "split_words": {
         "description": "分段标记列表",
-        "hint": "默认沿用 V1 的分段标点列表并去除重复项；匹配到的分隔符保留在上一段，之后按清理词处理。",
+        "hint": "默认按句末标点分段，不在逗号处拆开连贯表达；匹配到的分隔符保留在上一段，之后按清理词处理。",
         "type": "text",
-        "default": "[\"。\", \"？\", \"！\", \"~\", \"～\", \"?\", \".\", \"!\", \";\", \"；\", \"……\", \"）\", \"“\", \"，\", \"…\"]"
+        "default": "[\"。\", \"？\", \"！\", \"~\", \"～\", \"?\", \".\", \"!\", \";\", \"；\", \"……\", \"）\", \"“\", \"…\"]"
       },
       "match_width_variants": {
         "description": "分段词匹配全角/半角变体",
@@ -609,25 +609,33 @@
     "hint": "单目标和多目标共用。依次设置模型调用预算、输入等待和超时、分段间隔、前后台并发及排队保留上限。",
     "type": "object",
     "items": {
+      "enable_daily_model_hard_limit": {
+        "description": "启用插件每日硬预算",
+        "hint": "默认关闭。启用后才按下方 Token 和费用上限限制插件附加模型任务。普通回复走 AstrBot 主链，不计入插件预算；统计和待确认记录始终保留。",
+        "type": "bool",
+        "default": false
+      },
       "budget_tokens": {
-        "description": "各层 Token 预算",
+        "description": "插件每日硬预算 Token 上限",
+        "hint": "仅在启用插件每日硬预算时生效。",
         "type": "int",
         "default": 1000000
       },
       "budget_cost_microusd": {
-        "description": "各层费用预算（microUSD）",
+        "description": "插件每日硬预算费用上限（microUSD）",
+        "hint": "仅在启用插件每日硬预算时生效；这不是模型服务商的账户余额。",
         "type": "int",
         "default": 100000000
       },
       "enable_daily_token_soft_limit": {
         "description": "每日 Token 软限额默认开关",
-        "hint": "沿用 V1 默认开启。软限额只延后可选的低优先级后台任务（内置清单：日程规划、成长进展、群记忆批次），私聊回复、记忆反思、日记与角色状态维护始终可用。保存后可在陪伴小屋的治理设置里按安装/角色实时修改；这里的默认值只用于尚未写过该设置的数据根。",
+        "hint": "默认关闭。只延后可选后台任务，普通回复不受影响。可在陪伴小屋治理设置里修改全局开关；全局关闭后，旧角色开关不能重新开启限额。这里的值用于未保存全局设置的数据根。",
         "type": "bool",
-        "default": true
+        "default": false
       },
       "daily_token_soft_limit": {
         "description": "每日 Token 软限额默认阈值",
-        "hint": "沿用 V1 默认 800000；0 表示不设软限额。按当日已结算与已预留的 Token 合计判断，与每日硬额度（budget_tokens）互相独立。",
+        "hint": "仅在全局软限额开启时生效；0 表示不设软限额。按插件已结算量与待确认预留合计判断，预留不等于真实消耗。硬预算由独立开关控制，默认关闭。",
         "type": "int",
         "default": 800000
       },
@@ -650,7 +658,7 @@
       "turn_timeout_seconds": {
         "description": "单轮超时秒数",
         "type": "int",
-        "default": 180
+        "default": 300
       },
       "part_gap_seconds": {
         "description": "分段间隔秒数",
@@ -675,7 +683,7 @@
       "retained_tasks": {
         "description": "保留任务上限",
         "type": "int",
-        "default": 2048
+        "default": 10000
       },
       "forward_max_nodes": {
         "description": "单次合并转发最多读取节点数",

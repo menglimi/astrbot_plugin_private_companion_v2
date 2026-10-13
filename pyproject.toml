@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astrbot-plugin-private-companion-v2"
-version = "2.0.0"
+version = "2.1.4"
 description = "我会永远陪着你 V2.0 integrated companion host"
 requires-python = ">=3.10"
 dependencies = ["tzdata>=2025.2; sys_platform == 'win32'", "cryptography>=42", "lunarcalendar>=0.0.9", "regex>=2024.11.6"]

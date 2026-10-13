@@ -97,6 +97,17 @@ class RuleTableTests(unittest.TestCase):
         self.assertEqual({item["source"] for item in sources}, ledger)
         self.assertEqual(len({item["source"] for item in sources}), len(sources))
 
+    def test_native_image_api_queue_is_audited_as_v2_owned(self):
+        by_source = {item["source"]: item for item in configuration_audit_sources()}
+        endpoints = by_source["photo_action_config.external_image_api_endpoints"]
+        self.assertEqual(endpoints["resolved_kind"], "external")
+        self.assertEqual(endpoints["target"], "image.output.endpoints")
+        self.assertEqual(endpoints["verdict"], "implemented-elsewhere")
+        self.assertIn("V2 原生 Image 拓展", endpoints["summary"])
+
+        headers = by_source["photo_action_config.external_image_api_custom_headers"]
+        self.assertEqual(headers["verdict"], "not-migrated-by-design")
+
     def test_new_image_and_mood_fields_have_audited_targets(self):
         by_source = {item["source"]: item for item in configuration_rules()}
         self.assertEqual(by_source["message_debounce_config.enable_private_image_self_recognition"]["target"],
@@ -484,7 +495,7 @@ class SemanticStoreMigrationTests(unittest.TestCase):
             self.assertEqual(snapshot["values"]["timeout_seconds"], 12)
             self.assertEqual(snapshot["explicit"], {"reactions_enabled", "timeout_seconds"})
             with store.db() as db:
-                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 8)
 
     def test_newly_configured_settings_are_marked_explicit(self):
         from tempfile import TemporaryDirectory

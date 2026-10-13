@@ -169,7 +169,7 @@ class GroupMemoryTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         current, batch = await self.receive()
         self.assertEqual(self.app.messages.batch(batch)["state"], "ready")
         self.assertEqual({t.action for t in self.app.tools.catalog_for(current)},
-                         {"group.memory.query", "group.memory.operation", "reaction.search", "slang.search"}
+                         {"group.memory.query", "group.memory.legacy.query", "group.memory.operation", "reaction.search", "slang.search"}
                          | self.app.tools.group_participation.actions
                          | self.app.tools.acquaintance.actions)
         b, _ = await self.receive(sender="201")

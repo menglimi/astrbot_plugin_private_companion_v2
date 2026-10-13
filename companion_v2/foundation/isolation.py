@@ -78,9 +78,8 @@ LEGACY_DATA_MARKERS = (
     "reality_companion.json",
 )
 
-# G0 allows only the scanner's read-only source inspection and the helper's private
-# temporary SQLite connection. G2 adds one V2-owned runtime that may create its
-# dedicated data root and SQLite file. Any later exception needs a named policy.
+# Data owners have explicit local I/O policies. Host SDK and network calls stay
+# in adapters; legacy sources are read only and destinations belong to V2.
 APPROVED_IO_BY_MODULE = {
     "companion_v2.foundation.isolation": frozenset({"read_text", "rglob"}),
     "companion_v2.foundation.sqlite": frozenset({"connect"}),
@@ -109,6 +108,18 @@ APPROVED_IO_BY_MODULE = {
     # V1 reads are confined to the explicitly invoked, read-only migration planner.
     # Migration writes still pass through the authenticated V2 configuration API.
     "companion_v2.legacy.migration": frozenset({"connect", "read_text", "rglob"}),
+    # Installation-wide Laya settings and read-only local model-cache inventory.
+    "companion_v2.decision.store": frozenset(
+        {"glob", "read_text", "iterdir", "mkdir", "open", "unlink"}),
+    # Explicit migration copies originals into V2 archives, leaving V1 intact.
+    "companion_v2.legacy.archive": frozenset(
+        {"read_text", "read_bytes", "open", "mkdir", "rglob"}),
+    "companion_v2.legacy.data_migration": frozenset({"read_bytes", "iterdir", "connect"}),
+    "companion_v2.legacy.memory_archive": frozenset(
+        {"connect", "open", "mkdir", "read_text", "read_bytes"}),
+    "companion_v2.legacy.profile_source": frozenset({"read_bytes", "connect"}),
+    # Read-only source SQLite plus the separate V2 imported-materials projection.
+    "companion_v2.memory.legacy_materials": frozenset({"connect", "open"}),
 }
 
 # Reference uploads and stored generated images are decoded from bounded bytes,
@@ -129,6 +140,9 @@ APPROVED_PACKAGE_RESOURCES_BY_MODULE = {
 APPROVED_IMPORTS_BY_MODULE = {
     "companion_v2.proactive.external_materials": frozenset({"urllib.parse"}),
     "companion_v2.proactive.news_sources": frozenset({"urllib.parse"}),
+    "companion_v2.legacy.data_migration": frozenset({"urllib.parse"}),
+    # Typed transport exceptions only; this adapter does not send HTTP requests.
+    "companion_v2.adapters.astrbot.provider_transport": frozenset({"httpx"}),
 }
 
 # Named call policies for otherwise forbidden roots, limited to exact terminals.
@@ -136,6 +150,10 @@ APPROVED_CALLS_BY_MODULE = {
     # Local durability for the content-addressed screen original write above.
     "companion_v2.screen.originals": frozenset({"fsync", "link"}),
     "companion_v2.storage.management": frozenset({"replace"}),
+    "companion_v2.decision.store": frozenset({"os.environ.get", "fsync", "replace"}),
+    "companion_v2.legacy.archive": frozenset({"stat", "scandir", "fsync"}),
+    "companion_v2.legacy.data_migration": frozenset({"scandir"}),
+    "companion_v2.legacy.memory_archive": frozenset({"scandir", "fsync"}),
 }
 
 
@@ -195,7 +213,8 @@ class _IsolationVisitor(ast.NodeVisitor):
             root = dotted_name.split(".", 1)[0]
             terminal = dotted_name.rsplit(".", 1)[-1]
             if root in FORBIDDEN_CALL_ROOTS:
-                if terminal not in APPROVED_CALLS_BY_MODULE.get(self._module_name, frozenset()):
+                approved = APPROVED_CALLS_BY_MODULE.get(self._module_name, frozenset())
+                if terminal not in approved and dotted_name not in approved:
                     self._add("forbidden_platform_or_network_call", node, dotted_name)
             elif terminal in {"__import__", "import_module"}:
                 self._add("forbidden_dynamic_import", node, dotted_name)

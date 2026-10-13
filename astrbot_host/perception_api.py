@@ -16,7 +16,7 @@ from .management_identity import dashboard_operator
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/perception"
-PROVIDERS = {"reality": "astrbot_plugin_reality_companion"}
+PROVIDERS = {"reality": "astrbot_plugin_private_companion_v2.reality"}
 
 
 class PerceptionWebAPI:
@@ -47,11 +47,10 @@ class PerceptionWebAPI:
         plugin_id = PROVIDERS.get(provider_id)
         if plugin_id is None:
             raise ValueError("unknown perception provider")
-        stars = [star for star in self.controller.context.get_all_stars()
-                 if (getattr(star, "root_dir_name", None) or getattr(star, "name", None)) == plugin_id]
-        if len(stars) != 1 or getattr(stars[0], "activated", False) is not True:
+        registry = getattr(self.controller, "native_extensions", None)
+        api = registry.api(provider_id) if registry is not None else None
+        if api is None:
             raise TaskError("perception_provider_unavailable", "感知提供方尚未加载")
-        api = getattr(getattr(stars[0], "star_cls", None), "extension_api", None)
         if api is None or not callable(getattr(api, "companion_v2_perception_settings", None)):
             raise TaskError("perception_provider_unavailable", "感知提供方需要更新后才能在此配置")
         return api

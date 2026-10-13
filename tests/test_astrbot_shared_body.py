@@ -35,7 +35,7 @@ class SharedBodyHostTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase):
         operator = dashboard_operator(self.controller.runtime, "admin", at=self.clock.now())
         status = manager.status(operator).unwrap()
         manager.command(operator, dict(action="configure", operation_key="state-enabled",
-            edit_token=status["edit_token"], changes={"enabled": True})).unwrap()
+            edit_token=status["edit_token"], changes={"enabled": True, "mood_enabled": True})).unwrap()
         with self.app.runtime.transaction() as connection:
             connection.execute("UPDATE role_state_schedules SET next_at = ?", ((self.clock.now() + timedelta(days=5)).isoformat(),))
         return context
@@ -138,7 +138,7 @@ class SharedBodyHostTests(MultiLifeFixture, unittest.IsolatedAsyncioTestCase):
         due = (self.clock.now() + timedelta(minutes=1)).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M")
         for target in ("first", "same"):
             await self.command("configure", target, key="daily", changes={"sleep_enabled": True,
-                "sleep_time": due, "sleep_minutes": 1})
+                "sleep_time": due, "sleep_minutes": 1, "sleep_variation_minutes": 0})
         self.app.life_runtime.advance()
         self.clock.advance(timedelta(minutes=1))
         self.app.life_runtime.advance()

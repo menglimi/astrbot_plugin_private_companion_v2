@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import replace
 import unittest
 
-from companion_v2.execution.models import Lane, TaskError, TaskRegistration, TaskResult
+from companion_v2.execution.models import Lane, TaskDeferred, TaskError, TaskRegistration, TaskResult
 from companion_v2.execution.runner import LocalTaskRunner
 from tests.test_execution import ExecutionFixture
 from tests.test_management_access import NOW
@@ -183,6 +183,20 @@ class ExecutionRunnerTests(ExecutionFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_result.failure_code, "model_usage_unknown")
         self.assertIn("model_usage_unknown", "\n".join(captured.output))
         self.assertNotIn("private exception payload", "\n".join(captured.output))
+
+    async def test_admission_deferral_releases_the_worker_and_logs_wait_instead_of_error(self):
+        async def handler(_run):
+            raise TaskDeferred("model_budget_exhausted", "private budget detail", retry_at=NOW)
+
+        runner = self.runner(handler, kind="fixture.background")
+        self.submit(kind="fixture.background")
+        with self.assertLogs("companion_v2.execution.runner", level="INFO") as captured:
+            result = (await runner.run_once(Lane.BACKGROUND)).unwrap()
+        self.assertEqual(result.retry_at, NOW)
+        self.assertEqual(result.failure_code, "model_budget_exhausted")
+        self.assertTrue(all(item.levelname == "INFO" for item in captured.records))
+        self.assertNotIn("private budget detail", "\n".join(captured.output))
+        self.assertEqual(runner.active_handles, ())
 
     async def test_close_stops_active_effect_worker_without_claiming_it_was_not_committed(self):
         entered = asyncio.Event()

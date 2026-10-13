@@ -2,8 +2,10 @@
 
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+import logging
 
 from companion_v2.conversation.external_tools import ExternalToolResponse
+from companion_v2.conversation.native_tool_sources import native_turn
 from companion_v2.execution.models import TaskError, digest, encode, require
 from companion_v2.foundation.refs import AssetRef, ScopeKind, SourceRef, VersionRef
 from companion_v2.screen.models import (
@@ -16,6 +18,7 @@ from companion_v2.sources.models import SourceRecord
 
 ACTION = "screen.capture"
 CAPTURE_TTL = timedelta(minutes=30)
+logger = logging.getLogger(__name__)
 
 
 class ScreenAdopter:
@@ -81,13 +84,15 @@ class ScreenAdopter:
         require(self.screens.publish_image(capture, image, audience=invocation.context.audience,
             window_title=result["window_title"], role=invocation.context.role_binding.role,
             resolved=invocation.context.actor, observed_at=now, expected_admission_stamp=stamp))
-        # The adopted original is the only input of the bounded interpretation chain.
-        # Queueing it here keeps the model answer a separate supervised task; a window
-        # that has not enabled interpretation is skipped inside the service.
+        # Core vision receives the original immediately. Interpretation is an
+        # optional background consumer and cannot invalidate a captured image.
         interpretation = getattr(self.application, "screen_interpretation", None)
         if interpretation is not None:
-            interpretation.submit(invocation.context, bound, purpose="reply",
-                                  parent_task_id=invocation.parent_task_id)
+            try:
+                interpretation.submit(invocation.context, bound, purpose="reply",
+                                      parent_task_id=invocation.parent_task_id)
+            except Exception as error:
+                logger.warning("[CompanionV2] 屏幕后台解读调度降级 error_type=%s", type(error).__name__)
         payload = encode({"native": native.metadata(invocation.descriptor.binding),
                           "screen_capture": {"reference": asdict(bound),
                                              "content_hash": image.content_hash}})
@@ -95,7 +100,9 @@ class ScreenAdopter:
         source = SourceRecord(SourceRef(source_id, "screen", invocation.context.scope,
             VersionRef(invocation.invocation_id, 1), now), invocation.context.audience,
             digest(payload), payload)
+        from ..media import inspect_image
         return ExternalToolResponse(invocation.invocation_id, invocation.context.key,
             invocation.arguments_hash, invocation.descriptor.binding, native.state, native.effect,
             source=source, operation_id=native.operation_id, receipt_ref=native.receipt_ref,
+            images=(inspect_image(image.content, 0),) if native_turn(invocation.parent_task_id) else (),
             dependencies=(bound.source,))

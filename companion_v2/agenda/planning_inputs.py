@@ -53,11 +53,22 @@ def planning_calendar_context(at, end, zone, annual_calendars=()):
     return {"today": project_local_date(at, zone.key),
             "fixed_gregorian_holidays_in_window": holidays,
             "configured_annual_calendar": {"basis": "operator_configured_annual_calendar",
-                "years": sorted(item.year for item in annual_calendars), "days": days, "partial": partial}}
+             "years": sorted(item.year for item in annual_calendars), "days": days, "partial": partial}}
+
+
+def calendar_inventory(app, context, *, role_global=False):
+    if not role_global:
+        inventory = app.calendar.inventory(context, limit=100)
+        return inventory, digest(inventory)
+    app.calendar.access.check(context, "calendar.read")
+    records, partial = app.calendar.records.shared_role_plans(context, limit=100)
+    items = tuple(item for item in records if not item["sources"])
+    return {"items": items, "next_cursor": None, "skipped": 0, "partial": partial}, \
+        digest({"items": items, "partial": partial})
 
 
 def capture(planner, context, instruction, mode, slot, occurrence=None, *, weather=None, weather_location=None,
-            manual=False, refresh=False):
+            manual=False, refresh=False, role_global=False):
     app, at = planner.app, planner.tasks.now()
     app.calendar.access.check(context, "calendar.write", at=at)
     settings = planning_values(app.role_state.settings(context)[0])
@@ -72,10 +83,11 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
            if mode == "daily" else at + timedelta(days=settings["planning_horizon_days"]))
     calendar_context = planning_calendar_context(at, end, zone,
                                                  configured_annual_calendars(settings["planning_annual_calendars"]))
-    inventory = app.calendar.inventory(context, limit=100)
+    inventory, calendar_snapshot = calendar_inventory(app, context, role_global=role_global)
     sources, calendar, goals, memories, inputs = [], [], [], [], []
     goal_refs, calendar_refs, memory_refs, growth_refs, experience_refs = {}, {}, [], [], []
-    coverage = {"calendar_partial": bool(inventory["next_cursor"] or inventory["skipped"])}
+    coverage = {"calendar_partial": bool(inventory.get("partial", False)
+                                           or inventory["next_cursor"] or inventory["skipped"])}
     used_chars = len(settings["planning_prompt"]) + 2048 + len(json.dumps(calendar_context, ensure_ascii=False))
     current_weather = None
     if settings["planning_weather_enabled"]:
@@ -119,11 +131,11 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
             raise TaskError("planning_target_changed", "the selected role plan changed")
         include(original["sources"])
 
-    # Current input is material, never an instruction to impersonate its author.
-    rows = app.runtime.read_all("""SELECT i.event_json FROM conversation_inputs i
+    # Window material remains available for explicit conversation-scoped planning only.
+    rows = (() if role_global else app.runtime.read_all("""SELECT i.event_json FROM conversation_inputs i
         JOIN conversation_batches b USING(batch_id) JOIN conversation_flows f USING(batch_id)
         WHERE b.origin_key = ? AND i.withdrawn = 0 AND f.state = 'complete'
-        ORDER BY f.sequence DESC, i.position DESC LIMIT 2""", (context.key,))
+        ORDER BY f.sequence DESC, i.position DESC LIMIT 2""", (context.key,)))
     for row in reversed(rows):
         event = event_from_document(json.loads(row["event_json"]), context)
         try:
@@ -134,7 +146,21 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
         except TaskError:
             coverage["inputs_unavailable"] = True
 
-    for item in inventory["items"]:
+    from companion_v2.conversation.native_history import body, reference, rows as native_rows
+    current_native_rows = (() if role_global else
+        native_rows(app.runtime, context, end=at.isoformat(timespec="microseconds"), kind="input", limit=2))
+    for row in reversed(current_native_rows):
+        try:
+            item = body(app.messages, reference(row), context, at)
+            original = source_ref(json.loads(row["source_json"]))
+            offer(inputs, item["text"][:2048], (original,))
+            if len(item["text"]) > 2048:
+                coverage["inputs_partial"] = True
+        except TaskError:
+            coverage["inputs_unavailable"] = True
+
+    calendar_items = inventory["items"]
+    for item in calendar_items:
         if item["state"] == "cancelled":
             continue
         projected = {name: item[name] for name in ("id", "revision", "kind", "state", "title", "schedule", "duration_minutes")}
@@ -146,10 +172,11 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
             calendar_refs[item["id"]] = {"id": item["id"], "revision": item["revision"]}
     try:
         reader = app.role_growth_context.reader
-        candidates = reader.candidates(context, at)
-        coverage["goals_partial"] = candidates.truncated or bool(candidates.skipped)
-        use_skills = skills_enabled(app.runtime, context)
-        for candidate in candidates.items[:8]:
+        candidates = () if role_global else reader.candidates(context, at)
+        coverage["goals_partial"] = (False if role_global else
+                                      candidates.truncated or bool(candidates.skipped))
+        use_skills = False if role_global else skills_enabled(app.runtime, context)
+        for candidate in (() if role_global else candidates.items[:8]):
             record = reader.ledger.record(candidate.reference["growth_id"], owner=reader.owner(context))
             if record.kind.value == "skill" and not use_skills:
                 continue
@@ -162,17 +189,20 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
                 growth_refs.append(candidate.reference)
                 if value["kind"] == "goal" and value["state"] == "active":
                     goal_refs[record.growth_id] = candidate.reference
-        coverage["goals_partial"] |= len(candidates.items) > 8
+        if not role_global:
+            coverage["goals_partial"] |= len(candidates.items) > 8
     except TaskError:
         coverage["goals_unavailable"] = True
     if growth_refs:
         _, strength = skill_settings(app.runtime, context)
         if strength:
             instruction = instruction + "\n" + INFLUENCE_NOTES[strength]
-    snapshot = app.memory.context.capture(context, "planning-" + digest([context.key, slot]), tuple(sources),
-                                          at + timedelta(minutes=3))
-    coverage["memory_partial"] = snapshot.get("state") != "ready" or any(snapshot.get(k) for k in
-        ("recall_pending", "core_omitted", "recall_unavailable")) or len(snapshot["references"]) > 4
+    snapshot = ({"references": [], "experience_references": []} if role_global else
+        app.memory.context.capture(context, "planning-" + digest([context.key, slot]), tuple(sources),
+                                   at + timedelta(minutes=3)))
+    coverage["memory_partial"] = (False if role_global else
+        snapshot.get("state") != "ready" or any(snapshot.get(k) for k in
+            ("recall_pending", "core_omitted", "recall_unavailable")) or len(snapshot["references"]) > 4)
     for reference in snapshot["references"][:4]:
         try:
             item = require(app.memory.writer.read(context, AtomRef(**reference)))
@@ -204,6 +234,7 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
     material = {"mode": mode, "now": at.isoformat(), "end": end.isoformat(),
         "timezone": settings["planning_timezone"], "max_items": settings["planning_max_items"],
         "planning_preferences": settings["planning_prompt"], "calendar_context": calendar_context,
+        "planning_scope": "role" if role_global else "conversation",
         "current_reports": inputs,
         "calendar": calendar, "confirmed_goals_and_skills": goals, "memories": memories,
         "coverage": coverage, "occurrence_to_refine": ({key: occurrence[key] for key in
@@ -211,10 +242,11 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
     if current_weather is not None:
         material["current_weather"] = current_weather
     return {"context": context, "instruction": instruction, "mode": mode, "slot": slot, "at": at, "end": end,
-        "settings": settings, "sources": tuple(sources), "calendar_snapshot": digest(inventory),
+        "settings": settings, "sources": tuple(sources),
         "goal_refs": goal_refs, "calendar_refs": calendar_refs, "memory_refs": memory_refs, "growth_refs": growth_refs,
         "experience_refs": experience_refs, "existing": existing, "refresh_plans": refresh_plans,
-        "occurrence": occurrence, "material": material}
+        "occurrence": occurrence, "role_global": role_global, "material": material,
+        "calendar_snapshot": calendar_snapshot}
 
 
 def validate(planner, job, at, *, committed=False):
@@ -228,7 +260,8 @@ def validate(planner, job, at, *, committed=False):
     app.calendar.access.evidence(context, job["sources"], at=at)
     if committed:
         return
-    if digest(app.calendar.inventory(context, limit=100)) != job["calendar_snapshot"]:
+    _, current_calendar_snapshot = calendar_inventory(app, context, role_global=job.get("role_global", False))
+    if current_calendar_snapshot != job["calendar_snapshot"]:
         raise TaskError("planning_calendar_changed", "calendar changed while planning")
     if job["growth_refs"]:
         app.role_growth_context.reader.read(tuple(job["growth_refs"]), context, at)

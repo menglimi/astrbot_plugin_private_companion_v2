@@ -59,9 +59,13 @@ class BackgroundHistory:
             raise TaskError("delivery_history_invalid", "original history references must be unique")
 
     def _body(self, reference, context, at, *, historical=False):
+        return self._body_with_request(reference, context, at, historical=historical)[0]
+
+    def _body_with_request(self, reference, context, at, *, historical=False):
         # Iterative traversal also checks inherited evidence without a recursive
         # history chain or copying an ancestor's private text into another table.
         pending, seen, root = [reference], {}, None
+        root_request = None
         while pending:
             ref = pending.pop()
             self._references((ref,))
@@ -105,7 +109,8 @@ class BackgroundHistory:
             if root is None:
                 root = {"owner": request.owner, "delivered_at": row["delivered_at"],
                         "recipient_read": "unknown", "text": body.text}
-        return root
+                root_request = request
+        return root, root_request
 
     def capture(self, context, at, *, action="conversation.reply", limit=None, max_chars=None):
         require(self.tasks.authorize_context(context, action=action, observed_at=at))
@@ -160,6 +165,14 @@ class BackgroundHistory:
             AND b.rowid > ? ORDER BY i.rowid DESC LIMIT 1""",
             (context.key, reset["batch_sequence"] if reset is not None else 0))
         last_at = max(json.loads(latest["event_json"])["received_at"], latest["created_at"]) if latest else None
+        input_reference = {"event_key": latest["event_key"], "event_hash": latest["event_hash"]} if latest else None
+        if self.messages is not None:
+            from companion_v2.conversation.native_history import latest_input
+            native = latest_input(self.messages, context, at)
+            if native is not None and (last_at is None or native[1]["received_at"] >= last_at):
+                row, item = native
+                last_at = item["received_at"]
+                input_reference = {"event_key": row["observation_id"], "event_hash": row["content_hash"]}
         counts = self.runtime.read_one("""SELECT
             COUNT(DISTINCT CASE WHEN state = 'delivered' AND delivered_at > ? AND delivered_at <= ? AND rowid > ?
                 THEN json_extract(request_json, '$.source_ref') END) AS unanswered,
@@ -167,7 +180,7 @@ class BackgroundHistory:
                 THEN json_extract(request_json, '$.source_ref') END) AS unresolved
             FROM background_deliveries WHERE origin_key = ? AND owner = 'proactive.contact'""",
             (last_at or "", stamp(at), reset["background_sequence"] if reset is not None else 0, context.key))
-        return {"latest_input": {"event_key": latest["event_key"], "event_hash": latest["event_hash"]} if latest else None,
+        return {"latest_input": input_reference,
                 "last_input_at": last_at, "contacts_since_last_input": counts["unanswered"],
                 "unresolved_contacts": counts["unresolved"], "recipient_read": "unknown"}
 
@@ -190,6 +203,20 @@ class BackgroundHistory:
         query += " ORDER BY h.history_sequence DESC"
         rows = self.runtime.read_all(query, (context.key, cutoff, stamp(at),
             reset["batch_sequence"] if reset is not None else 0, *((part_id,) if part_id is not None else ())))
+        native_reply = None
+        if self.messages is not None:
+            from companion_v2.conversation.native_history import body, reference, rows as native_rows
+            for observed in native_rows(self.runtime, context, end=stamp(at), kind="assistant"):
+                if part_id is not None and observed["observation_id"] != part_id:
+                    continue
+                try:
+                    ref = reference(observed)
+                    item = body(self.messages, ref, context, at, historical=historical)
+                except (TaskError, ValueError, KeyError, TypeError):
+                    continue
+                if item["delivered_at"] >= cutoff:
+                    native_reply = {"owner": "conversation.native_assistant", **item, "reference": ref}
+                    break
         for row in rows:
             try:
                 if (row["state"] != "delivered" or row["part_receipt_ref"] != row["receipt_ref"]
@@ -228,12 +255,21 @@ class BackgroundHistory:
                     continue
             except (TaskError, ValueError, KeyError, TypeError):
                 continue
+            if native_reply is not None and native_reply["delivered_at"] >= row["delivered_at"]:
+                return native_reply
             return {"owner": "conversation.confirmed_reply", "delivered_at": row["delivered_at"],
                     "recipient_read": "unknown", "text": row["text"],
                     "reference": {key: row[key] for key in ("part_id", "payload_hash", "receipt_ref", "delivered_at")}}
-        return None
+        return native_reply
 
     def verify_reply(self, reference, context, at, *, historical=False):
+        if isinstance(reference, dict) and reference.get("kind") == "native_reply":
+            from companion_v2.conversation.native_history import body
+            require(self.tasks.authorize_context(context, action="proactive.contact", observed_at=at))
+            if self.messages is None:
+                raise TaskError("native_history_unavailable", "native reply owner is unavailable")
+            return {"owner": "conversation.native_assistant",
+                    **body(self.messages, reference, context, at, historical=historical), "reference": reference}
         if (type(reference) is not dict or set(reference) != {"part_id", "payload_hash", "receipt_ref", "delivered_at"}
                 or any(type(value) is not str or not value or len(value) > 1024 for value in reference.values())):
             raise TaskError("delivery_history_invalid", "last reply reference is invalid")

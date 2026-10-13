@@ -7,9 +7,10 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from astrbot_host.native_extensions import NativeExtensionRegistry
 from companion_v2.capabilities.native import parse_manifest
-from astrbot_plugin_game_companion.native_v2 import provider as game_provider
+from companion_v2.games.native import provider as game_provider
+from companion_v2.product import PRODUCT_VERSION
+from tests.native_internal_support import internal_registry
 from tests.test_game_native_pig_dice import request
 
 
@@ -45,7 +46,7 @@ class NativeXiangqiTests(unittest.IsolatedAsyncioTestCase):
         self.provider = self.reopen()
 
     def reopen(self):
-        return game_provider.NativeGameProvider(self.plugin, self.root, version="0.2.8")
+        return game_provider.NativeGameProvider(self.plugin, self.root, version=PRODUCT_VERSION)
 
     def opening(self, invocation_id="create", **changes):
         return request(self.provider, game_provider.XIANGQI_CREATE,
@@ -61,14 +62,14 @@ class NativeXiangqiTests(unittest.IsolatedAsyncioTestCase):
         return await self.provider.execute(value, before_dispatch=guard)
 
     async def test_manifest_restart_replay_scope_and_terminal_result(self):
-        manifest = parse_manifest(self.provider.manifest(), plugin_id=game_provider.PLUGIN_ID, version="0.2.8")
-        self.assertEqual({tool["action"] for tool in manifest.tools}, game_provider.XIANGQI_ACTIONS)
-        star = SimpleNamespace(root_dir_name=game_provider.PLUGIN_ID, version="0.2.8", activated=True,
-            star_cls=SimpleNamespace(extension_api=SimpleNamespace(companion_v2_native=lambda: self.provider)))
-        registry = NativeExtensionRegistry(SimpleNamespace(get_all_stars=lambda: [star]))
-        self.addCleanup(registry.close)
+        manifest = parse_manifest(self.provider.manifest(), plugin_id=game_provider.PLUGIN_ID, version=PRODUCT_VERSION)
+        self.assertEqual(len(manifest.tools), 35)
+        self.assertEqual({tool["action"] for tool in manifest.tools if tool["action"].startswith("game.xiangqi.")},
+                         game_provider.XIANGQI_ACTIONS)
+        registry = internal_registry(self.provider)
+        self.addAsyncCleanup(registry.aclose)
         self.assertEqual(registry.issues, ())
-        self.assertEqual(len(registry.declarations()), 4)
+        self.assertEqual(len(registry.declarations()), 35)
         opened = await self.execute(self.opening())
         game_id = opened["result"]["game"]["game_id"]
         played = await self.execute(self.move(game_id))
@@ -103,8 +104,9 @@ class NativeXiangqiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["state"]["turn"], "black")
         resumed = await self.execute(self.opening("resume", difficulty="hard"))
         self.assertEqual(resumed["result"]["game"], game)
+        manifest = self.provider.manifest()
         self.plugin.native_v2_xiangqi_enabled = False
-        self.assertEqual(self.provider.manifest()["tools"], [])
+        self.assertEqual(self.provider.manifest(), manifest)
         with self.assertRaisesRegex(game_provider.NativeGameError, "game_xiangqi_disabled"):
             await self.execute(request(self.provider, game_provider.XIANGQI_READ, {}, "disabled"))
         closed = await self.execute(request(self.provider, game_provider.XIANGQI_CLOSE,

@@ -54,6 +54,8 @@ class HumanizedExpressionTests(unittest.TestCase):
         self.assertIn("可以选择不接话", policy.instruction)
         self.assertIn("可以只用语音", policy.instruction)
         self.assertIn("戳一戳只在当前流程明确提供该能力并允许时考虑", policy.instruction)
+        self.assertIn("不必为了简短压成几个字或一句话", policy.instruction)
+        self.assertIn("来源和原文只在被追问", policy.instruction)
         self.assertIn(DEFAULT_PROMPT, policy.instruction)
 
     def test_custom_body_replaces_the_default_and_blank_falls_back(self):

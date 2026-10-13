@@ -12,9 +12,10 @@ import unicodedata
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from companion_v2.knowledge.parsing import parse_worldbook
+from companion_v2.knowledge.member_profiles import MemberMemory, member_memories
 from companion_v2.legacy.profile_source import (
     MAX_PROFILE_DB_BYTES,
     MAX_PROFILE_JSON_BYTES,
@@ -35,10 +36,17 @@ MAX_WORLDBOOK_ENTRY_BYTES = 20 * 1024
 MAX_WORLDBOOK_BATCH_BYTES = 16 * 1024 * 1024
 MAX_GROUP_NETWORK_MEMBERS = 512
 MAX_GROUP_NETWORK_EDGES = 512
+MAX_REFERENCE_IMAGE_ITEMS = 160
+MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_REFERENCE_IMAGE_BATCH_BYTES = 48 * 1024 * 1024
+MAX_WARDROBE_ITEMS = 40
 SUPPORTED_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 OWNED_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+REFERENCE_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 REACTION_SOURCE = "private.reaction_assets"
 OWNED_REACTION_SOURCE = "private.owned_reaction_assets"
+REFERENCE_IMAGE_SOURCE = "private.photo_references"
+WARDROBE_SOURCE = "private.wardrobe_items"
 
 
 @dataclass(frozen=True)
@@ -124,11 +132,45 @@ class LegacyMemberProfile:
     group_ids: tuple[str, ...]
     enabled: bool
     sha256: str
+    identity_note: str = ""
+    boundary_note: str = ""
+    important_memories: tuple[MemberMemory, ...] = ()
 
     def document(self) -> dict:
         return {"profile_id": self.profile_id, "scope_count": len(self.group_ids),
                 "content_chars": len(self.content), "enabled": self.enabled,
                 "source_id": "private.core_profiles.worldbook_member_profiles"}
+
+
+@dataclass(frozen=True)
+class LegacyReferenceImage:
+    source_key: str
+    source_path: str
+    filename: str
+    sha256: str
+    size: int
+    label: str
+    roles: tuple[str, ...]
+
+    def document(self) -> dict:
+        return {"filename": self.filename, "sha256": self.sha256, "size": self.size,
+                "label": self.label, "roles": list(self.roles), "source_id": REFERENCE_IMAGE_SOURCE}
+
+
+@dataclass(frozen=True)
+class LegacyWardrobeItem:
+    item_id: str
+    source_key: str
+    name: str
+    description: str
+    tags: tuple[str, ...]
+    image: LegacyReferenceImage | None = None
+    image_reason: str = ""
+
+    def document(self) -> dict:
+        return {"item_id": self.item_id, "name": self.name, "description": self.description,
+                "tags": list(self.tags), "has_image": self.image is not None,
+                "image_reason": self.image_reason, "source_id": WARDROBE_SOURCE}
 
 
 @dataclass(frozen=True)
@@ -149,9 +191,15 @@ class LegacyDataPlan:
     world_assets: dict
     source_fingerprint: str
     warnings: tuple[str, ...]
+    reference_images: tuple[LegacyReferenceImage, ...] = ()
+    reference_image_rejected: tuple[dict, ...] = ()
+    wardrobe_items: tuple[LegacyWardrobeItem, ...] = ()
+    wardrobe_rejected: tuple[dict, ...] = ()
 
     def document(self, *, source_group_id="", existing_reaction_ids=(),
-                 existing_journal_heads=None) -> dict:
+                 existing_journal_heads=None, existing_reference_hashes=(),
+                 existing_wardrobe_ids=(), reference_slots_available=0,
+                 wardrobe_slots_available=0, reference_bytes_available=MAX_REFERENCE_IMAGE_BYTES * 24) -> dict:
         existing = set(existing_reaction_ids)
         ready_reactions = [item for item in self.reaction_assets if item.sha256 not in existing]
         reaction_batch = next_reaction_batch(self, existing)
@@ -175,6 +223,7 @@ class LegacyDataPlan:
                             if item.member_ids and item.enabled]
         base_member_profiles = [item for item in self.member_profiles
                                 if item.enabled and not item.group_ids]
+        mapped_members = map_legacy_worldbook(self, confirm_member_ids=True)[1]
         selected_group_member_profiles = [item for item in self.member_profiles
                                           if item.enabled and str(source_group_id) in item.group_ids]
         disabled_member_count = sum(bool(item.member_ids) and not item.enabled
@@ -198,6 +247,23 @@ class LegacyDataPlan:
                            "state": heads[item.key].get("state", "unknown"),
                            "imported": bool(heads[item.key].get("imported"))}
                           for item in journal_conflicts[:30]]
+        reference_hashes = set(existing_reference_hashes)
+        wardrobe_ids = set(existing_wardrobe_ids)
+        reference_sources = {item.sha256: item for item in self.reference_images}
+        for wardrobe in self.wardrobe_items:
+            if wardrobe.image is not None:
+                previous = reference_sources.get(wardrobe.image.sha256)
+                reference_sources[wardrobe.image.sha256] = (wardrobe.image if previous is None else
+                    replace(previous, roles=tuple(dict.fromkeys((*previous.roles, *wardrobe.image.roles)))))
+        ready_references = [item for item in reference_sources.values()
+                            if item.sha256 not in reference_hashes]
+        ready_wardrobe = [item for item in self.wardrobe_items if item.item_id not in wardrobe_ids]
+        wardrobe_batch = ready_wardrobe[:max(0, min(len(ready_wardrobe), int(wardrobe_slots_available)))]
+        wardrobe_image_hashes = {item.image.sha256 for item in wardrobe_batch if item.image is not None}
+        reference_batch = next_reference_image_batch(
+            ready_references, slots_available=reference_slots_available,
+            bytes_available=reference_bytes_available, priority_hashes=wardrobe_image_hashes)
+        usable_image_hashes = reference_hashes | {item.sha256 for item in reference_batch}
         return {
             "source_fingerprint": self.source_fingerprint,
             "source_persona_id": self.source_persona_id,
@@ -229,8 +295,11 @@ class LegacyDataPlan:
             "worldbook": {
                 "total": len(self.worldbook_items) + len(self.worldbook_rejected),
                 "general_count": len(general_worldbook),
-                "member_count": len(member_worldbook),
+                "member_count": len(mapped_members),
+                "member_entry_count": len(member_worldbook),
                 "member_profile_count": len(base_member_profiles),
+                "important_memory_count": sum(len(item.important_memories)
+                    for item in (*base_member_profiles, *selected_group_member_profiles)),
                 "selected_group_member_profile_count": len(selected_group_member_profiles),
                 "group_profile_count": sum(item.source_kind == "group_profile" for item in self.worldbook_items),
                 "group_member_profile_count": group_member_profile_count,
@@ -238,15 +307,14 @@ class LegacyDataPlan:
                 "disabled_member_count": disabled_member_count,
                 "group_count": sum(worldbook_groups.values()),
                 "selected_group_entry_count": len(group_worldbook),
-                "available_count": len(general_worldbook) + len(member_worldbook)
-                    + len(base_member_profiles) + len(group_worldbook)
+                "available_count": len(general_worldbook) + len(mapped_members) + len(group_worldbook)
                     + len(selected_group_member_profiles),
                 "selected_group_id": str(source_group_id),
                 "groups": [{"source_group_id": group_id, "entry_count": count}
                            for group_id, count in sorted(worldbook_groups.items())],
                 "member_profile_groups": [{"source_group_id": group_id, "member_count": count}
                     for group_id, count in sorted(group_member_profile_scopes.items())],
-                "requires_id_confirmation": bool(member_worldbook or group_worldbook
+                "requires_id_confirmation": bool(mapped_members or group_worldbook
                                                   or selected_group_member_profiles),
                 "rejected": list(self.worldbook_rejected[:100]),
                 "member_profiles_rejected": list(self.member_profile_rejected[:100]),
@@ -258,6 +326,30 @@ class LegacyDataPlan:
                 "selected_group_ready": len(selected_group_member_profiles),
                 "rejected": list(self.member_profile_rejected[:100]),
                 "samples": [item.document() for item in self.member_profiles[:12]]},
+            "reference_images": {
+                "total": len(reference_sources) + len(self.reference_image_rejected),
+                "ready": len(ready_references),
+                "already_present": sum(item.sha256 in reference_hashes for item in reference_sources.values()),
+                "batch_count": len(reference_batch),
+                "batch_bytes": sum(item.size for item in reference_batch),
+                "remaining_after_batch": max(0, len(ready_references) - len(reference_batch)),
+                "rejected": list(self.reference_image_rejected[:100]),
+                "samples": [item.document() for item in ready_references[:12]],
+            },
+            "wardrobe_items": {
+                "total": len(self.wardrobe_items) + len(self.wardrobe_rejected),
+                "ready": len(ready_wardrobe),
+                "already_present": sum(item.item_id in wardrobe_ids for item in self.wardrobe_items),
+                "batch_count": len(wardrobe_batch),
+                "remaining_after_batch": max(0, len(ready_wardrobe) - len(wardrobe_batch)),
+                "image_count": sum(item.image is not None and item.image.sha256 in usable_image_hashes
+                                    for item in wardrobe_batch),
+                "image_skipped_count": sum(bool(item.image_reason)
+                    or (item.image is not None and item.image.sha256 not in usable_image_hashes)
+                    for item in wardrobe_batch),
+                "rejected": list(self.wardrobe_rejected[:100]),
+                "samples": [item.document() for item in ready_wardrobe[:12]],
+            },
             "profile_data": dict(self.profile_summary),
             "work_delivery": dict(self.work_delivery),
             "world_assets": dict(self.world_assets),
@@ -306,6 +398,23 @@ def next_journal_batch(plan: LegacyDataPlan, existing_keys=()) -> tuple[JournalI
     return tuple(selected)
 
 
+def next_reference_image_batch(items, *, slots_available,
+                               bytes_available=MAX_REFERENCE_IMAGE_BYTES * 24,
+                               priority_hashes=()):
+    priorities = set(priority_hashes)
+    items = sorted(items, key=lambda item: (item.sha256 not in priorities,))
+    selected, size = [], 0
+    for item in items:
+        if len(selected) >= max(0, min(MAX_REFERENCE_IMAGE_ITEMS, int(slots_available))):
+            break
+        if (size + item.size > MAX_REFERENCE_IMAGE_BATCH_BYTES
+                or size + item.size > max(0, int(bytes_available))):
+            break
+        selected.append(item)
+        size += item.size
+    return tuple(selected)
+
+
 def map_legacy_worldbook(plan: LegacyDataPlan, *, source_group_id="", confirm_member_ids=False,
                          include_group=False):
     """Map reviewed V1 worldbook rows into V2 knowledge documents without identity inference."""
@@ -341,12 +450,41 @@ def map_legacy_worldbook(plan: LegacyDataPlan, *, source_group_id="", confirm_me
                 group_members.append(MemberEntry("v1-member-profile-" + item.profile_id,
                     name=item.name, aliases=item.aliases, declared_account_ids=item.account_ids,
                     gender=item.gender, content=item.content, priority=item.priority,
-                    group_ids=(str(source_group_id),)))
+                    group_ids=(str(source_group_id),), identity_note=item.identity_note,
+                    boundary_note=item.boundary_note, important_memories=item.important_memories))
             else:
                 members.append(MemberEntry("v1-member-profile-" + item.profile_id,
                     name=item.name, aliases=item.aliases, declared_account_ids=item.account_ids,
-                    gender=item.gender, content=item.content, priority=item.priority))
-    return tuple(entries), tuple(members), tuple(group_entries), tuple(group_members)
+                    gender=item.gender, content=item.content, priority=item.priority,
+                    identity_note=item.identity_note, boundary_note=item.boundary_note,
+                    important_memories=item.important_memories))
+    return tuple(entries), _merge_worldbook_members(members), tuple(group_entries), tuple(group_members)
+
+
+def _merge_worldbook_members(members):
+    """Several V1 source entries for one account are one relationship node."""
+    from companion_v2.knowledge.catalog import MemberEntry
+
+    by_account, without_account = {}, []
+    for member in members:
+        if not member.declared_account_ids:
+            without_account.append(member)
+        for account in member.declared_account_ids:
+            by_account.setdefault(account, []).append(member)
+    result = list(without_account)
+    for account, rows in by_account.items():
+        if len(rows) == 1 and len(rows[0].declared_account_ids) == 1:
+            result.append(rows[0])
+            continue
+        rows.sort(key=lambda row: (-row.priority, row.entry_id))
+        chosen = rows[0]
+        result.append(MemberEntry("v1-member-account-" + hashlib.sha256(account.encode("utf-8")).hexdigest()[:24],
+            name=chosen.name, aliases=tuple(dict.fromkeys(label for row in rows for label in row.labels)),
+            declared_account_ids=(account,), gender=chosen.gender,
+            content="\n".join(dict.fromkeys(row.content for row in rows if row.content)),
+            priority=chosen.priority, identity_note=chosen.identity_note, boundary_note=chosen.boundary_note,
+            important_memories=tuple(memory for row in rows for memory in row.important_memories)))
+    return tuple(result)
 
 
 def _clean(value, limit):
@@ -710,6 +848,12 @@ def _legacy_group_id(value):
 def _worldbook_items(payload):
     data = _profile_data(payload)
     raw_items = data.get("worldbook_entries") if isinstance(data.get("worldbook_entries"), list) else []
+    profiles = data.get("worldbook_member_profiles")
+    profiles = profiles if isinstance(profiles, dict) else {}
+    represented = {str(value).strip() for key, raw in profiles.items() if isinstance(raw, dict)
+                   for value in (key, raw.get("user_id") or key)}
+    raw_deleted = data.get("worldbook_deleted_member_ids")
+    deleted = {str(value).strip() for value in raw_deleted} if isinstance(raw_deleted, list) else set()
     accepted, rejected = [], []
     total_bytes = 0
     for index, raw in enumerate(raw_items[:MAX_WORLDBOOK_ITEMS]):
@@ -733,6 +877,10 @@ def _worldbook_items(payload):
                 rejected.append({"index": index, "reason": "member_scope_unmapped"})
                 continue
             member_ids = tuple(dict.fromkeys(item.scope))
+            member_ids = tuple(value for value in member_ids if value not in represented and value not in deleted)
+            if not member_ids:
+                rejected.append({"index": index, "reason": "member_profile_preferred_or_deleted"})
+                continue
         elif item.template == "group":
             if not item.scope:
                 rejected.append({"index": index, "reason": "group_scope_missing"})
@@ -858,13 +1006,17 @@ def _member_profiles(payload):
         observed_names = raw.get("observed_names") if isinstance(raw.get("observed_names"), list) else []
         aliases = tuple(dict.fromkeys(text for text in
             (_clean(value, 120) for value in (*raw_aliases, *observed_names)) if text))[:32]
-        identity = _clean(raw.get("content") or raw.get("identity_note") or raw.get("note"), 1000)
-        boundary = _clean(raw.get("boundary_note"), 600)
-        content = "\n".join(value for value in (
-            identity,
-            "旧档边界参考（需结合当前对话确认）:" + boundary if boundary else "",
-        ) if value)
-        size = len(content.encode("utf-8"))
+        content = raw.get("content").strip() if isinstance(raw.get("content"), str) else ""
+        identity = raw.get("identity_note") or raw.get("note") or ""
+        identity = identity.strip() if isinstance(identity, str) else ""
+        note = raw.get("note")
+        if isinstance(note, str) and note.strip() and note.strip() not in (content, identity):
+            identity = "\n".join(value for value in (identity, "补充备注：" + note.strip()) if value)
+        boundary = raw.get("boundary_note")
+        boundary = boundary.strip() if isinstance(boundary, str) else ""
+        memories = member_memories(raw.get("important_memories"))
+        size = len(json.dumps([content, identity, boundary, [m.document for m in memories]],
+                              ensure_ascii=False, allow_nan=False).encode("utf-8"))
         if size > MAX_WORLDBOOK_ENTRY_BYTES:
             rejected.append({"index": index, "reason": "member_profile_too_large"})
             continue
@@ -878,40 +1030,341 @@ def _member_profiles(payload):
             priority = 100
         normalized = {"user_id": user_id, "name": name, "aliases": aliases,
             "account_ids": account_ids, "gender": gender, "content": content,
-            "priority": priority, "group_ids": group_ids, "enabled": enabled}
+            "priority": priority, "group_ids": group_ids, "enabled": enabled,
+            "identity_note": identity, "boundary_note": boundary,
+            "important_memories": [memory.document for memory in memories]}
         encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True,
                              separators=(",", ":"), allow_nan=False).encode("utf-8")
         profile_id = hashlib.sha256(encoded).hexdigest()[:24]
         accepted.append(LegacyMemberProfile(profile_id, name, aliases, account_ids, gender,
-            content, priority, group_ids, enabled, hashlib.sha256(encoded).hexdigest()))
+            content, priority, group_ids, enabled, hashlib.sha256(encoded).hexdigest(),
+            identity, boundary, memories))
         total_bytes += size
     return tuple(accepted), tuple(rejected)
 
 
 def _setting(configuration, profile, persona_id, name, default=None):
+    def configured_value(container):
+        if not isinstance(container, dict):
+            return None, False
+        if name in container:
+            return container[name], True
+        for group_name in ("photo_action_config", "wardrobe_config", "config"):
+            section = container.get(group_name)
+            if not isinstance(section, dict):
+                continue
+            if name in section:
+                return section[name], True
+            items = section.get("items")
+            if isinstance(items, dict) and name in items:
+                return items[name], True
+        return None, False
+
     candidates = []
     if isinstance(profile, dict):
         settings = profile.get("persona_settings")
-        if isinstance(settings, dict) and name in settings:
-            candidates.append(settings[name])
+        value, found = configured_value(settings)
+        if found:
+            candidates.append(value)
     if isinstance(configuration, dict):
         persona_settings = configuration.get("persona_settings")
         if isinstance(persona_settings, dict):
             overlay = persona_settings.get(persona_id) if persona_id else persona_settings.get("primary")
-            if isinstance(overlay, dict) and name in overlay:
-                candidates.append(overlay[name])
-        if name in configuration:
-            candidates.append(configuration[name])
-        for key in ("photo_action_config", "config"):
-            section = configuration.get(key)
-            if isinstance(section, dict) and name in section:
-                candidates.append(section[name])
+            value, found = configured_value(overlay)
+            if found:
+                candidates.append(value)
+        value, found = configured_value(configuration)
+        if found:
+            candidates.append(value)
         settings = configuration.get("persona_settings")
         if isinstance(settings, dict):
             primary = settings.get("primary")
-            if isinstance(primary, dict) and name in primary:
-                candidates.append(primary[name])
+            value, found = configured_value(primary)
+            if found:
+                candidates.append(value)
     return candidates[0] if candidates else default
+
+
+def _reference_roles(value, *, fallback=("identity",)):
+    aliases = {"source": "edit_source", "background": "background"}
+    allowed = {"identity", "outfit", "pose", "scene", "style", "background",
+               "continuity", "edit_source", "edit_mask"}
+    roles = []
+    for role in _clean_list(value, 9):
+        normalized = aliases.get(role.lower(), role.lower())
+        if normalized in allowed and normalized not in roles:
+            roles.append(normalized)
+    if not roles:
+        roles.extend(role for role in fallback if role in allowed)
+    return tuple(roles)
+
+
+def _reference_file(root: Path, source, *, expected_hash=""):
+    text = str(source or "").strip()
+    if not text or len(text) > 1600:
+        return None, "invalid_filename"
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return None, "invalid_filename"
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute() and parsed.scheme.lower() in ("http", "https"):
+        return None, "remote_url_not_downloaded"
+    if (not candidate.is_absolute() and parsed.scheme) or "\x00" in text:
+        return None, "invalid_filename"
+
+    path, reason = None, "image_missing"
+    if candidate.is_absolute():
+        try:
+            resolved = candidate.resolve(strict=True)
+            try:
+                relative = candidate.absolute().relative_to(root.resolve())
+            except ValueError:
+                relative = None
+            if relative is not None:
+                path, reason = _safe_relative(root, root, relative.as_posix(), allow_subdirs=True)
+            else:
+                path, reason = _safe_absolute_file(candidate)
+        except FileNotFoundError:
+            reason = "image_missing"
+        except (OSError, ValueError):
+            reason = "image_path_outside_library"
+    else:
+        attempts = [text]
+        if "/" not in text and "\\" not in text:
+            attempts.extend((f"photo_reference_images/{text}", f"photo_reference_assets/{text}"))
+        for relative_name in attempts:
+            path, reason = _safe_relative(root, root, relative_name, allow_subdirs=True)
+            if not reason:
+                break
+            if reason not in ("image_missing",):
+                break
+    if reason:
+        return None, reason
+    if path.suffix.lower() not in REFERENCE_IMAGE_EXTENSIONS:
+        return None, "unsupported_image_type"
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > MAX_REFERENCE_IMAGE_BYTES:
+            return None, "target_image_limit"
+        content = path.read_bytes()
+        if len(content) != size:
+            return None, "image_changed_during_read"
+    except OSError:
+        return None, "image_unreadable"
+    actual_hash = hashlib.sha256(content).hexdigest()
+    expected = str(expected_hash or "").strip().lower()
+    if expected and (not re.fullmatch(r"[0-9a-f]{64}", expected) or expected != actual_hash):
+        return None, "catalog_hash_mismatch"
+    try:
+        display_path = path.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        display_path = path.name
+    return {"source_path": str(path), "filename": path.name[:160], "sha256": actual_hash,
+            "size": len(content), "relative_path": display_path, "content": content}, ""
+
+
+def _safe_absolute_file(candidate: Path):
+    try:
+        resolved = candidate.resolve(strict=True)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        for current in (candidate, *candidate.parents):
+            info = current.lstat()
+            if (stat.S_ISLNK(info.st_mode)
+                    or int(getattr(info, "st_file_attributes", 0)) & reparse):
+                return None, "image_path_outside_library"
+        info = resolved.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return None, "image_unreadable"
+        return resolved, ""
+    except FileNotFoundError:
+        return None, "image_missing"
+    except (OSError, ValueError):
+        return None, "image_path_outside_library"
+
+
+def _reference_image(root, *, source, source_key, label, roles, expected_hash=""):
+    loaded, reason = _reference_file(root, source, expected_hash=expected_hash)
+    if reason:
+        return None, reason
+    return LegacyReferenceImage(source_key=str(source_key)[:160], source_path=loaded["source_path"],
+        filename=loaded["filename"], sha256=loaded["sha256"], size=loaded["size"],
+        label=_clean(label, 120) or loaded["filename"], roles=_reference_roles(roles)), ""
+
+
+def _photo_reference_rows(configuration, profile, persona_id):
+    raw_catalog = _setting(configuration, profile, persona_id, "photo_reference_catalog", None)
+    cleared = _setting(configuration, profile, persona_id,
+                       "photo_reference_catalog_user_cleared", False) is True
+    catalog_rows = raw_catalog
+    if isinstance(raw_catalog, str):
+        try:
+            catalog_rows = json.loads(raw_catalog)
+        except (ValueError, json.JSONDecodeError):
+            catalog_rows = None
+    if isinstance(catalog_rows, list) and catalog_rows:
+        return [(item, f"catalog:{item.get('id') or index}")
+                for index, item in enumerate(catalog_rows)], []
+    if raw_catalog not in (None, [], "") and catalog_rows is None:
+        return [], [{"source_id": REFERENCE_IMAGE_SOURCE, "reason": "catalog_invalid"}]
+    if cleared:
+        return [], []
+    rows = []
+    persona_path = _setting(configuration, profile, persona_id, "photo_persona_reference_image_path", "")
+    if persona_path:
+        rows.append(({"kind": "persona", "source": persona_path, "note": "默认人设参考图",
+                      "reference_roles": ["identity"]}, "legacy:persona"))
+    library = _setting(configuration, profile, persona_id, "photo_reference_library", [])
+    if isinstance(library, str):
+        text = library.strip()
+        try:
+            parsed = json.loads(text) if text.startswith("[") else None
+        except (ValueError, json.JSONDecodeError):
+            parsed = None
+        library = parsed if isinstance(parsed, list) else text.splitlines()
+    if isinstance(library, dict):
+        library = [library]
+    if isinstance(library, (list, tuple)):
+        for index, raw in enumerate(library[:MAX_REFERENCE_IMAGE_ITEMS]):
+            if isinstance(raw, dict):
+                item = dict(raw)
+            else:
+                text = str(raw or "").strip()
+                parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=2)
+                item = {"source": parts[0] if parts else "",
+                        "note": parts[1] if len(parts) > 1 else ""}
+                if len(parts) > 2:
+                    try:
+                        metadata = json.loads(parts[2])
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        metadata = None
+                    if isinstance(metadata, dict):
+                        item.update(metadata)
+            rows.append((item, f"legacy:library:{index}"))
+    return rows, []
+
+
+def _reference_assets(root, profile, configuration, persona_id):
+    accepted, rejected, seen = [], [], set()
+    rows, catalog_rejected = _photo_reference_rows(configuration, profile, persona_id)
+    rejected.extend(catalog_rejected)
+    for index, (raw, source_key) in enumerate(rows):
+        if not isinstance(raw, dict):
+            rejected.append({"index": index, "reason": "item_invalid"})
+            continue
+        if raw.get("selection_eligibility") == "disabled":
+            rejected.append({"source_id": source_key, "reason": "reference_disabled"})
+            continue
+        source = raw.get("source") or raw.get("path") or raw.get("url")
+        note = raw.get("note") or raw.get("description") or ""
+        category = raw.get("outfit_category") or raw.get("wardrobe_category") or ""
+        label_parts = [note]
+        if category:
+            label_parts.append(f"服装：{category}")
+        for field, title in (("scene_categories", "场景"), ("time_categories", "时间")):
+            values = _clean_list(raw.get(field), 4)
+            if values:
+                label_parts.append(f"{title}：{'、'.join(values)}")
+        if raw.get("preferred_preset"):
+            label_parts.append(f"预设：{_clean(raw.get('preferred_preset'), 40)}")
+        label = "；".join(part for part in label_parts if part)
+        fallback = ("identity",) if raw.get("kind") == "persona" else ("identity",)
+        roles = _reference_roles(raw.get("reference_roles") or raw.get("reference_role"), fallback=fallback)
+        if raw.get("outfit_lock_default") is True and "outfit" not in roles:
+            roles = (*roles, "outfit")
+        image, reason = _reference_image(root, source=source, source_key=source_key,
+            label=label or ("人设参考图" if raw.get("kind") == "persona" else "V1 参考图"),
+            roles=roles, expected_hash=raw.get("sha256") or raw.get("content_hash") or "")
+        if reason:
+            rejected.append({"source_id": source_key, "filename": Path(str(source or "")).name[:120],
+                             "reason": reason})
+            continue
+        if image.sha256 in seen:
+            continue
+        seen.add(image.sha256)
+        accepted.append(image)
+        if len(accepted) >= MAX_REFERENCE_IMAGE_ITEMS:
+            break
+
+    records = profile.get("photo_reference_assets") if isinstance(profile, dict) else None
+    if records is not None and not isinstance(records, list):
+        rejected.append({"source_id": REFERENCE_IMAGE_SOURCE, "reason": "catalog_invalid"})
+    elif isinstance(records, list):
+        for index, raw in enumerate(records[:MAX_REFERENCE_IMAGE_ITEMS]):
+            if not isinstance(raw, dict):
+                rejected.append({"index": index, "reason": "item_invalid"})
+                continue
+            acl = raw.get("image_access")
+            if raw.get("scope") != "relation_role":
+                rejected.append({"source_id": str(raw.get("id") or index)[:120],
+                                 "reason": "identity_scope_unmapped"})
+                continue
+            if (not isinstance(acl, dict)
+                    or set(acl) != {"subject_ref", "allow_generation", "readers", "audiences", "routes"}
+                    or acl.get("allow_generation") is not True or acl.get("subject_ref") is not None
+                    or any(not isinstance(acl.get(key), list)
+                           or any(type(value) is not str for value in acl.get(key, []))
+                           or "*" not in acl.get(key, []) for key in ("readers", "audiences", "routes"))):
+                rejected.append({"source_id": str(raw.get("id") or index)[:120],
+                                 "reason": "image_access_not_role_wide"})
+                continue
+            source_key = "asset:" + str(raw.get("id") or index)[:120]
+            image, reason = _reference_image(root, source=raw.get("path"), source_key=source_key,
+                label=raw.get("title") or raw.get("note") or raw.get("id") or "V1 角色参考图",
+                roles=raw.get("reference_roles") or raw.get("roles") or ["identity"],
+                expected_hash=raw.get("sha256") or raw.get("content_hash") or "")
+            if reason:
+                rejected.append({"source_id": source_key, "filename": Path(str(raw.get("path") or "")).name[:120],
+                                 "reason": reason})
+                continue
+            if image.sha256 not in seen:
+                seen.add(image.sha256)
+                accepted.append(image)
+    if len(rows) > MAX_REFERENCE_IMAGE_ITEMS:
+        rejected.append({"source_id": REFERENCE_IMAGE_SOURCE, "reason": "asset_count_limit"})
+    if isinstance(records, list) and len(records) > MAX_REFERENCE_IMAGE_ITEMS:
+        rejected.append({"source_id": REFERENCE_IMAGE_SOURCE, "reason": "asset_count_limit"})
+    return tuple(accepted), tuple(rejected)
+
+
+def _wardrobe_items(root, profile, configuration, persona_id):
+    raw_items = _setting(configuration, profile, persona_id, "wardrobe_items", [])
+    if isinstance(raw_items, str):
+        try:
+            parsed = json.loads(raw_items)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        raw_items = parsed if isinstance(parsed, list) else []
+    if not isinstance(raw_items, list):
+        return (), ({"source_id": WARDROBE_SOURCE, "reason": "catalog_invalid"},)
+    accepted, rejected = [], []
+    for index, raw in enumerate(raw_items[:MAX_WARDROBE_ITEMS]):
+        if not isinstance(raw, dict):
+            rejected.append({"index": index, "reason": "item_invalid"})
+            continue
+        name = _clean(raw.get("name") or raw.get("title"), 120)
+        description = _clean(raw.get("description") or raw.get("note") or raw.get("desc"), 2000)
+        if not name and not description:
+            rejected.append({"index": index, "reason": "entry_content_missing"})
+            continue
+        name = name or description[:12] or "未命名衣物"
+        tags = tuple(_clean_list(raw.get("tags"), 16))
+        source_id = _clean(raw.get("id"), 80) or str(index)
+        source_key = f"wardrobe:{source_id}:{index}"
+        item_id = "v1_wardrobe_" + hashlib.sha256(
+            json.dumps([persona_id, source_key], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:32]
+        source = raw.get("source") or raw.get("path") or raw.get("url")
+        image, image_reason = (None, "")
+        if source:
+            image, image_reason = _reference_image(root, source=source, source_key=source_key,
+                label=name, roles=("outfit",), expected_hash=raw.get("sha256") or "")
+        accepted.append(LegacyWardrobeItem(item_id, source_key, name[:120], description[:2000],
+                                            tags, image, image_reason))
+    if len(raw_items) > MAX_WARDROBE_ITEMS:
+        rejected.append({"source_id": WARDROBE_SOURCE, "reason": "asset_count_limit",
+                         "count": len(raw_items) - MAX_WARDROBE_ITEMS})
+    return tuple(accepted), tuple(rejected)
 
 
 def _owned_reaction_assets(root: Path, profile, configuration, persona_id):
@@ -1202,6 +1655,11 @@ def build_data_plan(v1_root: str | Path, *, source_persona_id="", v1_configurati
     worldbook_items = tuple((*worldbook_items, *group_profile_items))
     worldbook_rejected = tuple((*worldbook_rejected, *group_profile_rejected))
     member_profiles, member_profile_rejected = _member_profiles(profile)
+    profile_data = _profile_data(profile)
+    reference_images, reference_image_rejected = _reference_assets(
+        root, profile_data, v1_configuration, source_persona_id)
+    wardrobe_items, wardrobe_rejected = _wardrobe_items(
+        root, profile_data, v1_configuration, source_persona_id)
     work_delivery = _work_delivery_inventory(root)
     world_assets = _world_inventory(root)
     profile_summary = _profile_summary(profile)
@@ -1227,6 +1685,14 @@ def build_data_plan(v1_root: str | Path, *, source_persona_id="", v1_configurati
         "member_profiles": [{"profile_id": item.profile_id, "sha256": item.sha256,
             "group_ids": item.group_ids, "enabled": item.enabled} for item in member_profiles],
         "member_profile_rejected": list(member_profile_rejected),
+        "reference_images": [{"source_key": item.source_key, "sha256": item.sha256,
+            "size": item.size, "label": item.label, "roles": item.roles}
+            for item in reference_images],
+        "reference_image_rejected": list(reference_image_rejected),
+        "wardrobe_items": [{"item": item.document(),
+            "image_sha256": item.image.sha256 if item.image else ""}
+            for item in wardrobe_items],
+        "wardrobe_rejected": list(wardrobe_rejected),
         "groups": [{"source_group_id": item["source_group_id"], "members": item["members"],
                     "edges": item["edges"],
                     "rejected_member_count": item["rejected_member_count"],
@@ -1244,7 +1710,8 @@ def build_data_plan(v1_root: str | Path, *, source_persona_id="", v1_configurati
     return LegacyDataPlan(tuple(all_reactions), all_rejected, tuple(group_networks), journals,
         journal_rejected, worldbook_items, worldbook_rejected, member_profiles,
         member_profile_rejected, persona_sources, source_persona_id, profile_summary,
-        work_delivery, world_assets, fingerprint, tuple(warnings + group_warnings))
+        work_delivery, world_assets, fingerprint, tuple(warnings + group_warnings),
+        reference_images, reference_image_rejected, wardrobe_items, wardrobe_rejected)
 
 
 def load_reaction_asset(v1_root: str | Path, item: ReactionAsset) -> bytes:
@@ -1266,3 +1733,13 @@ def load_reaction_asset(v1_root: str | Path, item: ReactionAsset) -> bytes:
     if hashlib.sha256(content).hexdigest() != item.sha256:
         raise ValueError("image_changed_after_preview")
     return content
+
+
+def load_reference_image(v1_root: str | Path, item: LegacyReferenceImage) -> bytes:
+    root = Path(v1_root).resolve()
+    loaded, reason = _reference_file(root, item.source_path, expected_hash=item.sha256)
+    if reason:
+        raise ValueError("image_changed_after_preview" if reason == "catalog_hash_mismatch" else reason)
+    if loaded["size"] != item.size:
+        raise ValueError("image_changed_after_preview")
+    return loaded["content"]

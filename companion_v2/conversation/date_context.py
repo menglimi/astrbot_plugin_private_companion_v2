@@ -14,7 +14,7 @@ from .solar_terms import lookup_solar_terms, names_on
 
 try:
     import chinese_calendar as _chinese_calendar
-except ImportError:
+except (ImportError, OSError):
     _chinese_calendar = None
 
 
@@ -76,17 +76,18 @@ def lunar_date_parts(day: date) -> tuple[int, int, int, bool] | None:
         result = parts(lunar.year, lunar.month, lunar.day, getattr(lunar, "isLeapMonth", False))
         if result is not None:
             return result
-    except (ImportError, AttributeError, IndexError, OverflowError, TypeError, ValueError):
+    except (ImportError, OSError, AttributeError, IndexError, OverflowError, TypeError, ValueError):
         pass
 
     # V1 uses lunarcalendar. Keep this optional: a missing or out-of-range
-    # calendar library must never make the Gregorian projection unavailable.
+    # calendar library, including unreadable package files, must never make
+    # the Gregorian projection unavailable.
     try:
         from lunarcalendar import Converter, Solar
 
         lunar = Converter.Solar2Lunar(Solar(day.year, day.month, day.day))
         return parts(lunar.year, lunar.month, lunar.day, getattr(lunar, "isleap", False))
-    except (ImportError, AttributeError, IndexError, OverflowError, TypeError, ValueError):
+    except (ImportError, OSError, AttributeError, IndexError, OverflowError, TypeError, ValueError):
         return None
 
 
@@ -119,7 +120,7 @@ def _holiday_projection(day: date, country: str, configured_day=None) -> dict[st
                 return {"kind": "holiday", "label": name or "节假日", "source": "chinese_calendar"}
             if _chinese_calendar.is_workday(day):
                 return {"kind": "workday", "label": "工作日", "source": "chinese_calendar"}
-        except (AttributeError, IndexError, NotImplementedError, TypeError, ValueError):
+        except (OSError, AttributeError, IndexError, NotImplementedError, TypeError, ValueError):
             pass
     if day.weekday() >= 5:
         return {"kind": "weekend", "label": "周末", "source": "weekday_fallback"}

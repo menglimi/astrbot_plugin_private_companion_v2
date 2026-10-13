@@ -8,7 +8,7 @@ from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.execution.models import encode
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.memory.management import MemoryManagement
-from companion_v2.memory.models import AtomRef
+from companion_v2.memory.models import AtomRef, owner_key
 from companion_v2.memory.reflection import KIND, reflection_profile
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.model_gateway.routing import configuration_fields
@@ -156,6 +156,21 @@ class MemoryReflectionTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.disable_reflection(app, context)
         app.memory_schedule.sync_configuration(context, "原角色人格提示")
         self.assertIsNone(app.memory_schedule.next_wake())
+
+    async def test_schedule_configuration_token_is_written_in_the_schedule_commit(self):
+        host, context, _ = await self.setup_reflection(prepare=False)
+        app = host.application
+        self.enable_reflection(app, context)
+
+        with patch.object(app.runtime, "transaction", wraps=app.runtime.transaction) as transaction:
+            app.memory_schedule.sync_configuration(context, "角色提示")
+
+        self.assertEqual(transaction.call_count, 1)
+        row = app.runtime.read_one("SELECT settings_json FROM memory_schedules WHERE schedule_id = ?",
+                                   ("memory-daily-" + owner_key(context),))
+        self.assertIsNotNone(row)
+        saved = json.loads(row["settings_json"])
+        self.assertEqual(saved["configuration_token"], app.memory.settings.read(context)[1])
 
     async def test_schedule_pause_during_provider_response_fences_commit(self):
         host, context, _ = await self.setup_reflection(prepare=False)

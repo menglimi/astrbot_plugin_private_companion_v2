@@ -1,5 +1,7 @@
 """Role-owned canon fields used by the dashboard and conversation runtime."""
 
+import json
+
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
@@ -55,8 +57,22 @@ FIELD_LIMITS = {
     "platform_names": 1200,
     "world_adaptation_mode": 20,
     "world_adaptation": 1200,
+    "main_companion_subject": 256,
+    "expression_private_source_mode": 16,
+    "expression_private_source_subject_ids": 4000,
+    "expression_private_application_mode": 16,
+    "expression_private_application_subject_ids": 4000,
 }
-FIELD_DEFAULTS = {"world_adaptation_mode": "auto"}
+FIELD_DEFAULTS = {
+    "world_adaptation_mode": "auto",
+    "expression_private_source_mode": "owner",
+    "expression_private_source_subject_ids": "[]",
+    "expression_private_application_mode": "all",
+    "expression_private_application_subject_ids": "[]",
+}
+CONTROL_FIELDS = frozenset({"main_companion_subject", "expression_private_source_mode",
+    "expression_private_source_subject_ids", "expression_private_application_mode",
+    "expression_private_application_subject_ids"})
 TOTAL_CHAR_LIMIT = 30000
 
 
@@ -95,6 +111,18 @@ def validate_values(values):
     if values["world_adaptation_mode"] not in WORLD_ADAPTATION_MODES:
         raise ConfigurationError("role_profile_configuration_invalid",
                                   "world_adaptation_mode must be a supported mode")
+    for name in ("expression_private_source_mode", "expression_private_application_mode"):
+        if values[name] not in ("owner", "selected", "all"):
+            raise ConfigurationError("role_profile_configuration_invalid", f"{name} is unsupported")
+    for name in ("expression_private_source_subject_ids", "expression_private_application_subject_ids"):
+        try:
+            ids = json.loads(values[name])
+        except (TypeError, ValueError):
+            raise ConfigurationError("role_profile_configuration_invalid", f"{name} must be a JSON array") from None
+        if (type(ids) is not list or len(ids) > 100
+                or any(type(item) is not str or not item or item != item.strip() or len(item) > 256 for item in ids)
+                or len(set(ids)) != len(ids)):
+            raise ConfigurationError("role_profile_configuration_invalid", f"{name} contains invalid IDs")
     if total > TOTAL_CHAR_LIMIT:
         raise ConfigurationError(
             "role_profile_configuration_invalid",

@@ -1,6 +1,14 @@
 # 文件组织与依赖规则
 
-更新时间：2026-09-26。V2 根目录只提供 AstrBot 插件入口和工程导航，功能代码按宿主边界和领域归属组织。
+更新时间：2026-10-10。V2 根目录只提供 AstrBot 插件入口和工程导航，功能代码按宿主边界和领域归属组织。
+
+普通聊天的 AstrBot 核心接入集中在 `astrbot_host/core_reply*.py`：背景、原生工具和媒体、真实发送复核、后台观察及统计分别维护。原生消息和领域工具的数据适配归 `companion_v2/conversation/native_*.py`，核心用量与效率投影归 `companion_v2/model_gateway/`，新增持久表归 `companion_v2/storage/`。核心领域不反向导入 SDK；具体执行归属见 [核心回复路径](V2_CORE_REPLY_PATH_DESIGN.md)。
+
+Content、Image、Screen、Reality、Together、Game、Live 是同一 V2 插件内的七项原生拓展。`astrbot_host/native_extensions/builtins.py` 组装这些模块，`__init__.py` 管理能力注册及生命周期；`settings.py`、`image_settings.py` 管理 V2 内部配置，`service.py` 提供宿主服务接线。运行代码、默认设置、schema、网页和供应商运行资产全部随单个 V2 ZIP 交付；`main.py` 保持唯一 Star 及插件注册入口。新单包构建和验收状态见 [整合验收](INTEGRATION_ACCEPTANCE_V2_0.md)。
+
+群复读的两个固定动作由 `conversation/repeat_actions.py` 保存决策、每日额度及发送状态，由 `astrbot_host/group_repeat.py` 复核授权并通过原生群事件发送原句、打断语或本地打断图。复读入口不调用模型，不产生普通接话窗口；其配置与观察仍由 `conversation/participation.py` 和唯一「陪伴小屋」页面管理。
+
+群基础唤醒由 `conversation/group_admission.py` 管理，未点名求助评分归 `conversation/group_questions.py`；Laya 问题与紧凑输入归 `decision/prompt.py`，宿主事实捕获归 `astrbot_host/core_reply_decision.py`。群核心发送补充分段归 `astrbot_host/core_reply_segmentation.py`，无 SDK 的增量文本边界归 `conversation/stream_segments.py`。定向测试与真实权重合成检查分别归 `tests/test_group_wakeup_boundaries.py`、`tests/test_core_group_segmentation.py` 和 `tools/check_group_laya_live.py`；日志诊断见 [群高频回复修复](GROUP_REPLY_WAKEUP_20261010.md)。
 
 ```text
 astrbot_plugin_private_companion_v2/
@@ -21,6 +29,14 @@ astrbot_plugin_private_companion_v2/
 │   ├── multi_api.py        # 多 target Dashboard 控制、记忆、状态与生活路由
 │   ├── settings.py         # 宿主配置解析与共享配置错误
 │   ├── native.py           # 原生类型装配、账号/人格/provider 探测
+│   ├── native_extensions/  # 七项内部拓展的 SDK 接线、配置与生命周期
+│   │   ├── builtins.py    # 唯一 V2 宿主内组装 Content/Image/Screen/Reality/Together/Game/Live
+│   │   ├── image_native/ # 生图及编辑后端、运行配置和内部图片 API
+│   │   ├── screen_provider.py # 本地单次截图与原件回执
+│   │   ├── reality/      # 设备/手机服务、配置及设备测试资产
+│   │   ├── together/     # 共读/观影/通话服务及内部房间网页
+│   │   ├── game/         # 游戏房间服务、配置和网页
+│   │   └── live/         # 直播/VTS 服务及 blivedm、SoulLink 运行资产
 │   ├── media.py            # 原生图片验证及公共附件下载边界
 │   ├── media_components.py # 私聊/群聊原始音视频组件恢复，隔离宿主预处理文字
 │   ├── audio/              # Record 原件恢复、音频加载、可取消解码进程
@@ -63,6 +79,10 @@ astrbot_plugin_private_companion_v2/
 │   │   ├── growth/        # 技能/目标正本、版本回执、授权配置、角色工具及管理服务
 │   │   └── timeline/      # 原领域历史读取、分页、角色时间线工具与来源复核
 │   ├── capabilities/       # 能力目录、管理与进程内 provider discovery/binding
+│   ├── content/            # 内部作品提供方、版本与采用/撤回领域服务
+│   ├── reality/            # 现实设备能力合同
+│   ├── together/           # 共处能力合同及共读书库
+│   ├── live/               # 直播及呈现能力合同
 │   ├── diagnostics/        # 诊断与修改建议
 │   ├── host/               # 与具体宿主无关的运行时装配
 │   └── adapters/astrbot/   # 注入原生对象的窄适配合同
@@ -83,7 +103,7 @@ astrbot_plugin_private_companion_v2/
 
 [同一角色共享自动睡眠排程](CORE_SHARED_ROLE_SLEEP_SCHEDULE_20260924.md)沿用 `role_work/life/configuration.py` 的角色共享 owner，`coordinator.py` 负责稳定选择唯一执行窗口并投影执行窗口标识/下一次入睡时间；`management.py` 继续持有旧 owner 回执兼容。`pages/日记与生活/` 只负责展示共享范围、执行窗口与排程，不复制配置正本；共享睡眠、重启恢复和页面隔离验证分别归 `tests/test_role_sleep_configuration.py` 与 `tools/check_life_page.cjs`。
 
-[角色状态总览](CORE_ROLE_STATE_PAGE_20260925.md)位于 `pages/陪伴小屋/state-page.js` 和 `state-page.css`，经管理页路由挂载，采用 `astrbot_host/page_api.py` 给出的当前授权目标及对应 `state_api`；睡眠计划/执行投影和角色模拟状态继续归 `role_work/life/management.py`、`role_work/state/management.py`。[QQ 展示编辑](CORE_QQ_PRESENTATION_EDITING_20260925.md)归 `state-editor.js`，管理草稿、CAS 冲突与原请求核对；保留来源、例外和提醒的公开文案窄命令归 `agenda/calendar.py`，认证字段白名单归 `astrbot_host/state_api.py`。V2 `pages/陪伴小屋/` 为规范页面源，修改后用 `tools/sync_framework_page.py` 构建并以 `--check` 验证；Content 是可选预览。合成目标、权限撤销、对象隔离、XSS 与窄屏浏览器验收归 `tools/check_state_page.cjs`，编辑场景归其调用的 `tools/check_state_editor.cjs`。
+[角色状态总览](CORE_ROLE_STATE_PAGE_20260925.md)位于 `pages/陪伴小屋/state-page.js` 和 `state-page.css`，经管理页路由挂载，采用 `astrbot_host/page_api.py` 给出的当前授权目标及对应 `state_api`；睡眠计划/执行投影和角色模拟状态继续归 `role_work/life/management.py`、`role_work/state/management.py`。[QQ 展示编辑](CORE_QQ_PRESENTATION_EDITING_20260925.md)归 `state-editor.js`，管理草稿、CAS 冲突与原请求核对；保留来源、例外和提醒的公开文案窄命令归 `agenda/calendar.py`，认证字段白名单归 `astrbot_host/state_api.py`。V2 `pages/陪伴小屋/` 为规范页面源，修改后用 `tools/sync_framework_page.py` 构建并以 `--check` 验证；Content 作品模块通过小屋内部入口管理，历史设计预览单独保留。合成目标、权限撤销、对象隔离、XSS 与窄屏浏览器验收归 `tools/check_state_page.cjs`，编辑场景归其调用的 `tools/check_state_editor.cjs`。
 
 [多目标生活管理](CORE_MULTI_TARGET_LIFE_20260924.md)复用 `astrbot_host/life_api.py` 和 `role_work/life/management.py`；`role_work/life/coordinator.py` 管理按可信上下文分开的执行器、共享配置 generation 及统一停机，`runtime.py` 保留每个窗口的阅读/睡眠和日记排程。集成与恢复测试归 `tests/test_astrbot_multi_life*.py`，SDK 独立进程入口验收归 `tests/multi_life_entry_process.py`。
 

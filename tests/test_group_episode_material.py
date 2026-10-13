@@ -11,7 +11,7 @@ import unittest
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer
 from companion_v2.configuration.registry import FieldRegistry, ValueKind
-from companion_v2.execution.models import TaskContext, TaskError, digest, stamp
+from companion_v2.execution.models import TaskContext, TaskError, digest, encode, stamp
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.identity_policy.group_audience import group_audience
 from companion_v2.memory.episode_settings import (DEFAULTS, GROUP, GUIDANCE, LIMITS, MAX_SOURCE_LINES,
@@ -75,10 +75,7 @@ class EpisodeMaterialTests(MessageFixture, unittest.TestCase):
             connection.execute("""INSERT INTO conversation_batches
                 (batch_id, origin_key, context_json, role_instruction, state, revision, created_at,
                  contributions_json) VALUES (?, ?, ?, '', 'ready', 1, ?, '{}')""",
-                (batch_id, context.key, __import__("json").dumps({
-                    "role_binding": {"role": {"subject_id": context.role_binding.role.subject_id}},
-                    "audience": {"scope": {"account_id": context.scope.account_id,
-                                           "bot_id": context.scope.bot_id}}}), stamp(at)))
+                (batch_id, context.key, encode(context), stamp(at)))
             connection.execute("""INSERT INTO conversation_parts
                 (part_id, batch_id, sequence, text, payload_hash, state, receipt_ref, delivered_at)
                 VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?)""",

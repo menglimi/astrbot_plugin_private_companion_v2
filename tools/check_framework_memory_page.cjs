@@ -55,8 +55,9 @@ async function run({browser, outputDir, bridgePath}) {
       assert.equal(action,"api:get");
       assert.deepEqual(params,{});
       return ok({product:{id:"private_companion.v2",version:"2.0.0"},discovery:"available",
-        providers:[{capability_id:"image",integration_state:"connected",installed:true,status_connected:true}],
-        summary:{core_count:1,provider_count:1,connected_count:1,installed_count:1,missing_count:0}});
+        extensions:[{capability_id:"image",extension_id:"image",owner:"companion_v2",integration_state:"connected",assembled:true,enabled:true,runtime_ready:true}],
+        providers:[],
+        summary:{core_count:1,extension_count:1,extension_ready_count:1,provider_count:0,connected_count:1}});
     }
     const base = [A,B,C].find(p=>endpoint===p || endpoint.startsWith(p+"/"));
     assert(base,"unexpected bridge endpoint "+endpoint);

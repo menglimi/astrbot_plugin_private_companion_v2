@@ -121,7 +121,7 @@ class SelfReviewEvidenceCatalog:
             return ReviewWindow(opened_at, at, tuple(evidence[:MAX_EVIDENCE]))
 
     def _reply_rows(self, context, opened_at, at):
-        return self.runtime.read_all("""SELECT h.part_id, h.history_sequence, b.context_json
+        rows = self.runtime.read_all("""SELECT h.part_id, h.history_sequence, b.context_json
             FROM conversation_sent_history h
             JOIN conversation_parts p ON p.part_id = h.part_id
             JOIN conversation_batches b ON b.batch_id = h.batch_id
@@ -135,6 +135,11 @@ class SelfReviewEvidenceCatalog:
             (stamp(opened_at), stamp(at), context.actor.subject.subject_id,
              context.role_binding.role.subject_id, context.scope.bot_id,
              context.scope.account_id, REPLY_LIMIT))
+        from companion_v2.conversation.native_history import rows as native_rows
+        native = tuple({**dict(row), "part_id": row["observation_id"], "native": True}
+                       for row in native_rows(self.runtime, context, start=stamp(opened_at), end=stamp(at),
+                                              kind="assistant", limit=REPLY_LIMIT))
+        return (*rows, *native)
 
     @staticmethod
     def reply_handle(context, part_id):
@@ -159,6 +164,11 @@ class SelfReviewEvidenceCatalog:
         return owner.materialize(original, reference).payload
 
     def _reply(self, context, row, at):
+        if isinstance(row, dict) and row.get("native"):
+            from companion_v2.conversation.native_history import body, reference
+            item = body(self._owner(), reference(row), context, at)
+            return ReviewEvidence(self.reply_handle(context, row["part_id"]), "reply",
+                _trim("角色在本会话经 AstrBot 发送返回的一段回复（未获平台送达确认）：" + item["text"]))
         original = self._original(row)
         text = self._confirmed_text(row, original, at)
         return ReviewEvidence(self.reply_handle(context, row["part_id"]), "reply",

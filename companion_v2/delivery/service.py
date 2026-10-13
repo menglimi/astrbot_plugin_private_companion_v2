@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import logging
 from types import MappingProxyType
 
 from companion_v2.execution.models import (
@@ -25,6 +26,9 @@ from companion_v2.storage.repositories import OperationRepository
 from .models import DeliveryEnvelope, DeliveryReceipt
 from .media import ImageDeliveryContent, ImageDeliveryEnvelope, payload_hash
 from .plan import DeliveryContent
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,7 @@ class OutboundDelivery:
         self.runtime, self.sender = runtime, sender
         self.owners = MappingProxyType({o.name: o for o in owners})
         self.on_delivered = None
+        self.on_receipt = None
         self.tasks = None
         self.operations = OperationRepository(runtime)
         self.registrations = tuple(TaskRegistration(TaskDefinition(o.kind, "delivery", o.action,
@@ -229,7 +234,9 @@ class OutboundDelivery:
         except asyncio.CancelledError:
             self._unknown(envelope.part_id)
             raise
-        except Exception:
+        except Exception as error:
+            logger.warning("V2 outbound receipt could not be recorded delivery=%s error_type=%s code=%s",
+                           envelope.part_id, type(error).__name__, getattr(error, "code", "delivery_receipt_failed"))
             self._unknown(envelope.part_id)
         return self._result(self._row(envelope.part_id))
 
@@ -249,7 +256,9 @@ class OutboundDelivery:
                 if prior["receipt_json"] != encode(receipt):
                     raise TaskError("delivery_receipt_conflict", "receipt identity cannot change its original outcome")
                 state = row["state"]
+                request = None
             else:
+                request = DeliveryRequest.restore(row["request_json"])
                 state = "failed" if receipt.status == "not_sent" else receipt.status
                 if (row["state"] == "failed" and state not in ("failed", "unknown")
                         or row["state"] == "delivered" and state == "failed"
@@ -267,6 +276,8 @@ class OutboundDelivery:
                          stamp(receipt.delivered_at) if receipt.delivered_at else None, receipt.part_id))
                     self._operation_state(row, OperationState.COMPLETED if state in ("delivered", "failed") else
                         OperationState.UNKNOWN if state == "unknown" else OperationState.ACCEPTED)
+                if self.on_receipt is not None:
+                    self.on_receipt(request, receipt)
         if state == "delivered" and self.on_delivered is not None:
             self.on_delivered(receipt.part_id)
         return state

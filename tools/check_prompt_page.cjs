@@ -60,7 +60,7 @@ async function run({output, bridgePath, python, sourceRoot}) {
         platform_id: "qq", account_id: "qa-bot", bot_id: "qa-bot", roles: [{role_id: "合成角色",
           model_api: "/" + HOST + "/" + model, ...Object.fromEntries(["state", "life", "memory", "reply", "growth", "relationships"].map(name =>
             [name + "_api", "/" + HOST + "/host/targets/qa/roles/qa/" + name]))}]}]};
-    if (endpoint === "integration/manifest") return {providers: [], core: [], summary: {}};
+    if (endpoint === "integration/manifest") return {extensions: [], providers: [], core: [], summary: {}};
     if (endpoint === "page/ownership") return {owner: "self", reason: "owner_module_absent"};
     if (endpoint.endsWith("/state")) return {state: {state: "ready", revision: 1, values: {energy: 75, sleep: "清醒"}},
       settings: {}, sleep_schedule: {enabled: false}, calendar: {items: []}, occurrences: {items: []}, presentation: {state: "preview"}};

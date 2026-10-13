@@ -432,7 +432,9 @@ class AstrBotStagingBootstrap:
         # account/persona through the same adapter used for later dispatch.
         bridge = NativePrivateBridge(self.context, version=types.version, event_type=types.event,
             installation_id=s.installation_id, host_id=config.host_id, identities=self.identity,
-            accounts=(HostAccount(s.platform, s.account_id, s.bot_id),), personas=(config.persona,))
+            accounts=(HostAccount(s.platform, s.account_id, s.bot_id),), personas=(config.persona,),
+            session_persona_override_lookup=types.session_persona_override_lookup,
+            persona_snapshot_lookup=types.persona_snapshot_lookup)
         native = self.context.get_provider_by_id(config.provider_id)
         if type(native) is not types.provider or provider_fingerprint(native) != config.provider_fingerprint:
             raise TaskError("staging_provider_mismatch", "configured native provider fingerprint does not match")

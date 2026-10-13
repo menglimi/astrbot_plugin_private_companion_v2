@@ -8,7 +8,7 @@ adding a second save mechanism: every write goes through
 idempotency rules as the rest of the cottage.
 """
 
-from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
+from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError, fingerprint
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import OperationRef, ScopeKind, VersionRef
@@ -29,8 +29,17 @@ from ..conversation.recall_settings import (GROUP as RECALL_GROUP, OWNER as RECA
     configuration_fields as recall_fields)
 from ..expression.reaction_configuration import (GROUP as REACTION_GROUP, OWNER as REACTION_OWNER,
     configuration_fields as reaction_fields)
-from ..memory.person.configuration import (GROUP as PERSON_GROUP,
-    configuration_fields as person_fields, target_for as person_target_for)
+from ..expression.configuration import (GROUP as EXPRESSION_GROUP, OWNER as EXPRESSION_OWNER,
+    PRIVATE_GROUP as EXPRESSION_PRIVATE_GROUP, PRIVATE_OWNER as EXPRESSION_PRIVATE_OWNER,
+    configuration_fields as expression_fields,
+    private_configuration_fields as expression_private_fields,
+    private_target_for as expression_private_target_for)
+from ..memory.person.configuration import (GROUP as PERSON_GROUP, LEARNING_GROUP as PERSON_LEARNING_GROUP,
+    configuration_fields as person_fields,
+    legacy_window_snapshot as legacy_person_window_snapshot,
+    legacy_window_fields as legacy_person_window_fields,
+    legacy_window_target_for as legacy_person_window_target_for,
+    relationship_target_for as person_relationship_target_for)
 from ..relationships.private_access import (GROUP as PRIVATE_ACCESS_GROUP,
     configuration_fields as private_access_fields)
 from ..knowledge.configuration import (GROUP as KNOWLEDGE_GROUP, OWNER as KNOWLEDGE_OWNER,
@@ -46,7 +55,7 @@ from ..relationships.profile import (FIELD_LIMITS as RELATIONSHIP_PROFILE_FIELD_
     GROUP as RELATIONSHIP_PROFILE_GROUP, OWNER as RELATIONSHIP_PROFILE_OWNER,
     configuration_fields as relationship_profile_fields,
     target_for as relationship_profile_target_for)
-from ..role_work.life.configuration import (GROUP as LIFE_GROUP, OWNER as LIFE_OWNER,
+from ..role_work.life.configuration import (GROUP as LIFE_GROUP, OWNER as LIFE_OWNER, SLEEP_FIELDS,
     configuration_fields as life_fields)
 from ..screen.configuration import (GROUP as SCREEN_GROUP, OWNER as SCREEN_OWNER,
     configuration_fields as screen_fields)
@@ -69,14 +78,16 @@ from .service import ConfigurationService
 class GroupEditor:
     """One configuration group's dashboard contract.
 
-    ``layers`` is deliberately the group's own layer tuple. A group without a
-    window layer is edited at role level, because a single conversation must not
-    be able to change an installation-wide ceiling.
+    ``layers`` is deliberately the group's own layer tuple. Single-layer groups
+    are edited at that layer; inherited groups prefer role defaults unless they
+    name an explicit target. Object pages keep their own window-level overrides.
     """
 
     group = ""
     owner = ""
     layers = (ConfigLayer.WINDOW,)
+    target_layer = None
+    operation_prefix = None
     error_prefix = "configuration"
 
     def __init__(self, app, context):
@@ -89,19 +100,37 @@ class GroupEditor:
                 if field.field_id.startswith(self.group + ".")}
 
     def _target(self):
-        if ConfigLayer.WINDOW in self.layers:
+        layer = self._target_layer()
+        if layer is ConfigLayer.INSTALLATION:
+            return ConfigTarget(self.context.scope.installation_id, ConfigLayer.INSTALLATION)
+        if layer is ConfigLayer.WINDOW:
+            # A registered private scope already identifies its participant. Keep
+            # ordinary window settings on the same key their runtime readers use;
+            # relationship-aware groups override this with an explicit subject.
             return ConfigTarget(self.context.scope.installation_id, ConfigLayer.WINDOW,
-                                self.context.role_binding.role, self.context.scope,
-                                subject=self.context.actor.subject)
+                                self.context.role_binding.role, self.context.scope)
+        if layer is ConfigLayer.RELATIONSHIP:
+            raise RuntimeError(f"{self.group} must provide a relationship target")
         return ConfigTarget(self.context.scope.installation_id, ConfigLayer.ROLE,
                             self.context.role_binding.role, bot_id=self.context.scope.bot_id)
+
+    def _target_layer(self):
+        layer = self.target_layer
+        if layer is None:
+            layer = (self.layers[0] if len(self.layers) == 1 else
+                     ConfigLayer.ROLE if ConfigLayer.ROLE in self.layers else
+                     ConfigLayer.WINDOW if ConfigLayer.WINDOW in self.layers else self.layers[0])
+        if layer not in self.layers:
+            raise RuntimeError(f"{self.group} target layer is not writable")
+        return layer
 
     def _code(self, suffix):
         return f"{self.error_prefix}_{suffix}"
 
     def _authorize(self, operator, action):
         now, context = self.app.now(), self.context
-        if ConfigLayer.WINDOW in self.layers:
+        target_layer = self._target_layer()
+        if target_layer is ConfigLayer.WINDOW:
             # A window-scoped group belongs to one original participant; the
             # binding is re-read here so a stale page cannot write to a new role.
             if context.scope.kind is not ScopeKind.PRIVATE or context.audience.recipients != (context.actor.subject,):
@@ -111,8 +140,10 @@ class GroupEditor:
             if (current.subject != context.actor.subject or current.binding_id != context.actor.binding_id
                     or current.binding_revision != context.actor.binding_revision or binding != context.role_binding):
                 raise TaskError(self._code("target_changed"), "the selected participant or role binding changed")
+            self.app.tasks._context(context, now)
         target = self._target()
-        scope = target.scope if target.scope is not None else context.scope
+        scope = (target.authorization_scope if target_layer is ConfigLayer.INSTALLATION else
+                 target.scope if target.scope is not None else context.scope)
         require(self.policy.scope_access(operator, scope=scope, action=action, observed_at=now, core_only=True))
         return target
 
@@ -144,6 +175,9 @@ class GroupEditor:
         """Bounds and kinds the workbench renders controls from."""
         return contract_of(self.app.configuration.registry, self.group)
 
+    def _after_configure(self, operator, data, result):
+        """Apply group-owned side effects inside the configuration transaction."""
+
     @outcome
     def status(self, operator):
         with self.runtime.read_snapshot():
@@ -155,8 +189,7 @@ class GroupEditor:
             return {"settings": self._settings(snapshot), "edit_token": snapshot.edit_token,
                     "revision": snapshot.revision, "configuration_token": snapshot.resolution_token,
                     "group_id": self.group,
-                    "scope": ("window" if ConfigLayer.WINDOW in self.layers else
-                              "relationship" if ConfigLayer.RELATIONSHIP in self.layers else "role"),
+                    "scope": target.layer.value,
                     "apply_mode": "next_task" if ApplyMode.NEXT_TASK in modes else "immediate",
                     # Layer provenance: which node of the chain each value came from.
                     "layers": self._layers(), "provenance": self._provenance(snapshot),
@@ -164,28 +197,39 @@ class GroupEditor:
 
     @outcome
     def configure(self, operator, data):
-        if (type(data) is not dict or set(data) != {"operation_key", "edit_token", "changes"}
+        if (type(data) is not dict or not {"operation_key", "edit_token", "changes"} <= set(data)
+                or set(data) - {"operation_key", "edit_token", "changes", "reset_to_inherit"}
                 or type(data["operation_key"]) is not str or not data["operation_key"].strip()
                 or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
-                or len(data["edit_token"]) != 64 or type(data["changes"]) is not dict or not data["changes"]
+                or len(data["edit_token"]) != 64 or type(data["changes"]) is not dict
+                or (not data["changes"] and not data.get("reset_to_inherit"))
+                or ("reset_to_inherit" in data and (type(data["reset_to_inherit"]) is not list
+                    or any(type(name) is not str for name in data["reset_to_inherit"])))
                 or any(type(key) is not str for key in data["changes"])):
             raise TaskError(self._code("configuration_invalid"), "provide explicit setting changes and an edit token")
-        if set(data["changes"]) - self.short_names:
+        resets = data.get("reset_to_inherit", [])
+        if (set(data["changes"]).union(resets) - self.short_names
+                or set(data["changes"]).intersection(resets) or len(set(resets)) != len(resets)):
             raise TaskError(self._code("configuration_invalid"), "unknown setting for this group")
         with self.runtime.transaction():
             target = self._authorize(operator, "configuration.write")
             require(self.app.tasks.check_generation())
-            op_id = f"{self.group}-config:" + digest([operator.subject, target.key, data["operation_key"]])
+            op_id = (self.operation_prefix or f"{self.group}-config:") + digest(
+                [operator.subject, target.key, data["operation_key"]])
             try:
                 receipt = require(self.app.configuration.patch(operator, target=target, group_id=self.group,
                     operation=OperationRef(op_id, self.owner, target.authorization_scope,
                                            VersionRef(op_id, 1), op_id),
                     expected_edit_token=data["edit_token"],
                     changes={self.group + "." + name: value for name, value in data["changes"].items()},
+                    reset_to_inherit=tuple(self.group + "." + name for name in resets),
                     observed_at=self.app.now()))
             except ConfigurationError as error:
                 raise TaskError(error.code, str(error)) from error
-            return {"replayed": receipt.replayed, "operation_id": op_id}
+            result = {"replayed": receipt.replayed, "operation_id": op_id}
+            self._after_configure(operator, data, result)
+        self.app.notify()
+        return result
 
 
 class ImageOutputManagement(GroupEditor):
@@ -204,7 +248,7 @@ class ImageQuotaManagement(GroupEditor):
 
 
 class ImageReviewManagement(GroupEditor):
-    """Group-image review and private fallback, scoped to one conversation window."""
+    """Role defaults for image review, with exact window overrides on object pages."""
 
     group, owner = REVIEW_GROUP, REVIEW_OWNER
     layers = review_fields()[0].layers
@@ -214,8 +258,8 @@ class ImageReviewManagement(GroupEditor):
 class BusyGateManagement(GroupEditor):
     """The busy reply gate: whether a reply waits for a quiet window, and how long.
 
-    Window-scoped like image review, because "is this role busy right now" is a
-    property of one conversation rather than of the installation.
+    Role defaults apply across its conversations; object pages can adjust their
+    own wait behavior independently.
     """
 
     group, owner = BUSY_GROUP, BUSY_OWNER
@@ -224,18 +268,20 @@ class BusyGateManagement(GroupEditor):
 
 
 class ReactionRetrievalManagement(GroupEditor):
-    """Reaction material retrieval: latency, candidate pool and embedding weight."""
+    """Installation-wide reaction retrieval settings for the shared role catalogs."""
 
     group, owner = REACTION_GROUP, REACTION_OWNER
     layers = reaction_fields()[0].layers
+    target_layer = ConfigLayer.INSTALLATION
     error_prefix = "reaction_configuration"
 
 
 class ModelBudgetManagement(GroupEditor):
-    """The daily soft ceiling for optional background work, at role level."""
+    """Installation-wide optional-work controls; role limits cannot enable the master."""
 
     group, owner = BUDGET_GROUP, BUDGET_OWNER
     layers = SOFT_FIELDS[0].layers
+    target_layer = ConfigLayer.INSTALLATION
     error_prefix = "model_budget"
 
 
@@ -278,20 +324,134 @@ class ContentAuthoringManagement(GroupEditor):
 
 
 class AcquaintanceManagement(GroupEditor):
-    """Person cards for already-known participants.
-
-    Unlike the other groups here this one registers no owner of its own: its
-    fields carry the default ``configuration`` owner, which
-    ``ConfigurationService`` always installs.
-    """
+    """Role defaults for acquaintance cards, shared by that role's contacts."""
 
     group = PERSON_GROUP
     owner = ConfigurationService.OWNER
-    layers = person_fields()[0].layers
+    layers = (ConfigLayer.ROLE,)
     error_prefix = "person"
 
+    def _field_contract(self):
+        contract = super()._field_contract()
+        for definition in contract.values():
+            definition["editable_layers"] = [ConfigLayer.ROLE.value]
+        return contract
+
+
+class PrivateAcquaintanceSettingsMixin:
+    """Stable per-person overrides, with read-only compatibility for old window rows."""
+
+    legacy_fields = {}
+
     def _target(self):
-        return person_target_for(self.context)
+        return person_relationship_target_for(self.context)
+
+    def _authorize(self, operator, action):
+        now, context = self.app.now(), self.context
+        if (context.scope.kind is not ScopeKind.PRIVATE
+                or context.audience.recipients != (context.actor.subject,)
+                or context.actor.subject.kind.value != "human"):
+            raise TaskError(self._code("scope_invalid"), "select one resolved private person")
+        current = require(self.app.tasks.identity.resolve_authenticated(
+            context.actor.principal, observed_at=now))
+        binding = require(self.app.tasks.identity.resolve_role(context.scope, observed_at=now))
+        if (current.subject != context.actor.subject
+                or current.binding_id != context.actor.binding_id
+                or current.binding_revision != context.actor.binding_revision
+                or binding != context.role_binding):
+            raise TaskError(self._code("target_changed"),
+                            "the selected person or role binding changed")
+        target = self._target()
+        require(self.policy.scope_access(operator, scope=target.authorization_scope,
+            action=action, observed_at=now, owner=context.actor.subject, core_only=True))
+        return target
+
+    @outcome
+    def status(self, operator):
+        result = require(super().status(operator))
+        legacy = legacy_person_window_snapshot(self.runtime, self.context)
+        if self.group == PERSON_GROUP:
+            role_target = ConfigTarget(self.context.scope.installation_id, ConfigLayer.ROLE,
+                self.context.role_binding.role, bot_id=self.context.scope.bot_id)
+            inherited = require(self.app.configuration.read(operator, target=role_target,
+                group_id=PERSON_GROUP, observed_at=self.app.now()))
+            result["inherited_settings"] = {
+                key.removeprefix(PERSON_GROUP + "."): value
+                for key, value in inherited.values.items()
+            }
+        legacy_values = {}
+        for name, legacy_id in self.legacy_fields.items():
+            value = legacy.fields[legacy_id]
+            if not result["provenance"][name]["explicit"] and value.explicit:
+                result["settings"][name] = value.value
+                result["provenance"][name] = {
+                    "layer": ConfigLayer.WINDOW.value, "explicit": True,
+                    "revision": value.source_revision, "legacy": True,
+                }
+            if value.explicit:
+                legacy_values[legacy_id] = [value.value, value.source_revision]
+        result["configuration_edit_token"] = result["edit_token"]
+        result["edit_token"] = fingerprint([result["configuration_edit_token"], legacy.revision, legacy_values])
+        return result
+
+    @outcome
+    def configure(self, operator, data):
+        with self.runtime.transaction():
+            status = require(self.status(operator))
+            if type(data) is not dict or data.get("edit_token") != status["edit_token"]:
+                raise TaskError("configuration_revision_conflict",
+                                "configuration, inheritance, binding, or legacy settings changed")
+            result = require(super().configure(operator,
+                {**data, "edit_token": status["configuration_edit_token"]}))
+            reset_names = data.get("reset_to_inherit", [])
+            legacy_reset = tuple(self.legacy_fields[name] for name in reset_names
+                                 if name in self.legacy_fields)
+            if legacy_reset:
+                from companion_v2.configuration.owners import SparseConfigurationOwner
+                legacy = legacy_person_window_snapshot(self.runtime, self.context)
+                SparseConfigurationOwner(self.runtime).write(
+                    legacy_person_window_target_for(self.context), legacy_person_window_fields(),
+                    changes={}, reset=legacy_reset, expected_revision=legacy.revision,
+                    observed_at=self.app.now())
+            return result
+
+    def _field_contract(self):
+        contract = super()._field_contract()
+        for definition in contract.values():
+            definition["editable_layers"] = [ConfigLayer.RELATIONSHIP.value]
+        return contract
+
+
+class PrivateAcquaintanceManagement(PrivateAcquaintanceSettingsMixin, AcquaintanceManagement):
+    """Per-person card overrides, inherited from the role's acquaintance defaults."""
+
+    layers = person_fields()[0].layers
+    target_layer = ConfigLayer.RELATIONSHIP
+    operation_prefix = "person-relationship-config:"
+    legacy_fields = {
+        "acquaintance_enabled": "person.acquaintance_enabled",
+        "acquaintance_card_chars": "person.acquaintance_card_chars",
+    }
+
+
+class PrivateAcquaintanceLearningManagement(PrivateAcquaintanceSettingsMixin, GroupEditor):
+    """Per-person learning consent, independent of role-wide card defaults."""
+
+    group = PERSON_LEARNING_GROUP
+    owner = ConfigurationService.OWNER
+    layers = (ConfigLayer.RELATIONSHIP,)
+    target_layer = ConfigLayer.RELATIONSHIP
+    error_prefix = "person"
+    operation_prefix = "person-learning-relationship-config:"
+    legacy_fields = {
+        "acquaintance_learning_enabled": "person.acquaintance_learning_enabled",
+    }
+
+    def _field_contract(self):
+        contract = GroupEditor._field_contract(self)
+        for definition in contract.values():
+            definition["editable_layers"] = [ConfigLayer.RELATIONSHIP.value]
+        return contract
 
 
 class PrivateAccessManagement(GroupEditor):
@@ -344,17 +504,63 @@ class KnowledgeManagement(GroupEditor):
 
 
 class RoleGrowthSkillsManagement(GroupEditor):
-    """Skill domains and how strongly they steer plans.
-
-    Separate from ``RoleGrowthManagement`` because the two have different scopes:
-    the reading/proposal grants are window settings, while skill content belongs to
-    the role. ``RoleSharedSettingsOwner`` promotes the first value onto the role and
-    lets a later window override it, so the layer tuple is window-first.
-    """
+    """Role skill domains and how strongly they steer plans."""
 
     group, owner = SKILLS_GROUP, SKILLS_OWNER
-    layers = skill_configuration_fields()[0].layers
+    layers = (ConfigLayer.ROLE,)
     error_prefix = "role_growth_skills"
+
+    def _field_contract(self):
+        contract = super()._field_contract()
+        for definition in contract.values():
+            definition["editable_layers"] = [ConfigLayer.ROLE.value]
+        return contract
+
+
+class ExpressionLearningManagement(GroupEditor):
+    """Role-level learning policy; relationship and group exceptions stay separate."""
+
+    group, owner = EXPRESSION_GROUP, EXPRESSION_OWNER
+    layers = expression_fields()[0].layers
+    error_prefix = "expression_learning"
+
+
+class PrivateExpressionLearningManagement(GroupEditor):
+    """The learning opt-in belongs to a stable private relationship, not a window."""
+
+    group, owner = EXPRESSION_PRIVATE_GROUP, EXPRESSION_PRIVATE_OWNER
+    layers = expression_private_fields()[0].layers
+    error_prefix = "expression_learning_private"
+
+    def _target(self):
+        return expression_private_target_for(self.context)
+
+    def _authorize(self, operator, action):
+        now, context = self.app.now(), self.context
+        if (context.scope.kind is not ScopeKind.PRIVATE
+                or context.audience.recipients != (context.actor.subject,)
+                or context.actor.subject.kind.value != "human"):
+            raise TaskError(self._code("scope_invalid"), "select one resolved private person")
+        current = require(self.app.tasks.identity.resolve_authenticated(
+            context.actor.principal, observed_at=now))
+        binding = require(self.app.tasks.identity.resolve_role(context.scope, observed_at=now))
+        if (current.subject != context.actor.subject or current.binding_id != context.actor.binding_id
+                or current.binding_revision != context.actor.binding_revision
+                or binding != context.role_binding):
+            raise TaskError(self._code("target_changed"), "the selected person or role binding changed")
+        target = self._target()
+        require(self.policy.scope_access(operator, scope=context.scope, action=action,
+            observed_at=now, owner=context.actor.subject, core_only=True))
+        return target
+
+    @outcome
+    def status(self, operator):
+        result = require(super().status(operator))
+        field = EXPRESSION_PRIVATE_GROUP + ".private_learning_enabled"
+        if not result["provenance"]["private_learning_enabled"]["explicit"]:
+            shared = require(ExpressionLearningManagement(self.app, self.context).status(operator))
+            result["settings"]["private_learning_enabled"] = shared["settings"]["private_learning_enabled"]
+        return result
 
 
 class RoleProfileManagement(GroupEditor):
@@ -411,10 +617,9 @@ class RelationshipProfileManagement(GroupEditor):
 class DiaryAndRestManagement(GroupEditor):
     """Diary and dream writing preferences, plus the rest-reply gate.
 
-    This group mixes two scopes: the four sleep fields are role-shared while the
-    rest are window settings. ``RoleSharedSettingsOwner`` keeps them straight, so
-    the editor only has to name the group and let the workspace show per-field
-    provenance. Its layer tuple is window-first, unlike the other groups.
+    This group mixes two scopes: the five sleep fields are role-shared while the
+    rest are window settings. The private window remains the editor target because
+    enabling diary work synchronizes that participant's grants.
 
     Named ``DiaryAndRestManagement`` rather than ``RoleLifeManagement`` because
     ``role_work.life.management`` already exports a ``RoleLifeManagement`` that
@@ -424,7 +629,24 @@ class DiaryAndRestManagement(GroupEditor):
 
     group, owner = LIFE_GROUP, LIFE_OWNER
     layers = life_fields()[0].layers
+    target_layer = ConfigLayer.WINDOW
     error_prefix = "role_life"
+
+    def _field_contract(self):
+        contract = super()._field_contract()
+        for name, definition in contract.items():
+            definition["write_layer"] = (ConfigLayer.ROLE.value if name in SLEEP_FIELDS
+                                          else ConfigLayer.WINDOW.value)
+            definition["editable_layers"] = ([ConfigLayer.ROLE.value] if name in SLEEP_FIELDS
+                                              else [ConfigLayer.WINDOW.value])
+        return contract
+
+    def _after_configure(self, operator, data, result):
+        if "enabled" not in data["changes"]:
+            return
+        from companion_v2.role_work.life.management import RoleLifeManagement
+        RoleLifeManagement(self.app, self.context).sync_configuration_grant(
+            operator, data["changes"]["enabled"], result)
 
 
 class GroupParticipationManagement(GroupEditor):
@@ -484,34 +706,15 @@ class ReferenceManagement(GroupEditor):
 
 
 class ProactiveContactManagement(GroupEditor):
-    """Proactive contact preferences: the one group with a relationship layer.
+    """Global defaults, independent of any selected bot, role or participant.
 
-    Its chain is installation → role → relationship → window, and a save still
-    lands on the innermost window layer, so one conversation keeps its own rhythm
-    without changing what the role does elsewhere. The page therefore draws four
-    layer nodes, and inherited values can come from any of the three ancestors.
-
-    Two allowances are deliberately not window settings: the owner refuses a
-    window-layer write of ``max_relationship_contacts_24h`` and
-    ``max_relationship_attempts_24h`` with ``contact_relationship_budget_scope``
-    because they cap the whole relationship rather than one conversation. The
-    field contract drops the window node for exactly those two, so the layer rail
-    reads "not applicable on this layer" instead of offering an edit whose save
-    would be refused. The owner's ``configuration_relationship_required`` (a
-    target without a bot or without the window's human relationship) is published
-    unchanged, and the page maps it as well as this editor's own
-    ``proactive_contact_scope_invalid`` / ``proactive_contact_target_changed``.
-
-    Named ``ProactiveContactManagement`` rather than ``ContactManagement``:
-    ``proactive.management`` already exports a ``ContactManagement`` that the
-    state and perception routes use, and that one also issues and revokes the
-    ``proactive-managed:`` contact grant when ``enabled`` is written. This editor
-    writes the same ``enabled`` field without touching grants, so the page says
-    so in the field help instead of implying the switch alone authorizes contact.
+    The runtime still checks each participant's own contact permission;
+    saving a shared switch does not change any participant's authorization.
     """
 
     group, owner = CONTACT_GROUP, CONTACT_GROUP
     layers = contact_fields()[0].layers
+    target_layer = ConfigLayer.INSTALLATION
     error_prefix = "proactive_contact"
 
     def _field_contract(self):

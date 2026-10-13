@@ -1,7 +1,7 @@
-"""Image reply previews and finite single-target authorization through the SDK host."""
+"""Internal image rehearsals and live SDK delivery receipts on a local platform."""
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 import unittest
 
@@ -31,10 +31,7 @@ class AstrBotImageDeliveryHostTests(unittest.IsolatedAsyncioTestCase):
                 native_types=self.types, now=lambda: self.observed_at)
             self.addAsyncCleanup(self.controller.terminate)
         (await self.controller.initialize_profile()).unwrap()
-        if delivery:
-            self.assertEqual((await self.controller.start()).failure.code, "authorization_denied")
-            (await self.controller.authorize_delivery()).unwrap()
-        (await self.controller.start()).unwrap()
+        (await self.controller.start(review_only=not delivery)).unwrap()
 
     async def test_image_preview_has_original_metadata_without_delivery_or_history(self):
         await self.start_host()
@@ -52,11 +49,12 @@ class AstrBotImageDeliveryHostTests(unittest.IsolatedAsyncioTestCase):
         session.application.messages.sources.revoke(source, expected_governance_revision=1, observed_at=NOW).unwrap()
         self.assertEqual((await self.controller.preview(batch)).failure.code, "source_revoked")
 
-    async def test_image_delivery_requires_finite_grant_and_records_combined_ack(self):
+    async def test_image_delivery_records_combined_ack_without_global_grant(self):
         await self.start_host(delivery=True)
         grant = self.controller.status()["delivery_authorization"]
         self.assertTrue(grant["authorized"])
-        self.assertGreater(datetime.fromisoformat(grant["expires_at"]), NOW)
+        self.assertFalse(grant["required"])
+        self.assertIsNone(grant["expires_at"])
         batch = (await self.controller.receive_claimed(self.event())).unwrap()
         session = self.controller.session
         await wait_for_batch(session, batch)

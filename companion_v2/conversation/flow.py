@@ -51,7 +51,7 @@ def _elapsed_ms(now, created_at):
 class ConversationPolicy:
     quiet_seconds: float = 0.6
     maximum_wait_seconds: float = 2
-    turn_timeout_seconds: float = 180
+    turn_timeout_seconds: float = 300
     part_gap_seconds: float = 1.5
     # A busy-hour deferral is added to this first window only. Keeping it at the
     # end with a default leaves every existing positional construction valid.
@@ -346,7 +346,11 @@ class ConversationFlow:
                     # a bounded wait, not a failed reply.
                     self.defer(batch_id)
                 else:
-                    self.halt(batch_id, error.code, expected=error.code != "message_capacity")
+                    failed = (self.runtime.read_one("""SELECT part_id, state FROM conversation_parts
+                        WHERE batch_id = ? AND state = 'failed' ORDER BY sequence LIMIT 1""", (batch_id,))
+                        if error.code == "message_delivery_failed" else None)
+                    part = ("%s:%s" % (failed["part_id"], failed["state"])) if failed else None
+                    self.halt(batch_id, error.code, expected=error.code != "message_capacity", part=part)
         return tuple(work)
 
     def defer(self, batch_id):
@@ -450,6 +454,9 @@ class ConversationFlow:
                 previous_text = part["text"]
                 continue
             if part["state"] != "pending":
+                if part["state"] == "failed":
+                    raise TaskError("message_delivery_failed",
+                                    "the original part was confirmed not sent; later parts remain withheld")
                 raise TaskError("message_delivery_unresolved",
                                 "original dispatch needs an explicit receipt reconciliation")
             # A group image may not leave before its safety review is decided. The

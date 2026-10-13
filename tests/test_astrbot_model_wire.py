@@ -2,6 +2,8 @@ from dataclasses import replace
 import json
 from types import SimpleNamespace as NS
 import unittest
+import httpx
+from openai import APIConnectionError
 
 from companion_v2.adapters.astrbot.model_wire import (REPLY_CONTRACT, REPLY_CONTRACT_EXAMPLE,
     build_wire, decode_response, decode_text_response, tool_alias)
@@ -277,6 +279,29 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private endpoint information", message)
         self.assertNotIn("private", repr(response))
 
+    async def test_failed_connect_is_not_started_but_a_read_timeout_stays_unknown(self):
+        envelope = await self.envelope()
+        for transport, state in ((httpx.ConnectError, "not_started"),
+                                 (httpx.ReadTimeout, "unknown"), (httpx.WriteError, "unknown")):
+            with self.subTest(transport=transport.__name__):
+                async def fail(*_):
+                    error = APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+                    raise error from transport("private transport detail")
+
+                self.native.provider.client.state.behavior = fail
+                with self.assertLogs("companion_v2.adapters.astrbot.provider", level="WARNING") as captured:
+                    result = await self.native_model.generate(envelope)
+                self.assertEqual(result.status, state)
+                self.assertEqual(result.usage, Amount(0, 0) if state == "not_started" else None)
+                self.assertNotIn("private transport detail", "\n".join(captured.output))
+        self.assertEqual(len(self.native.provider.client.state.calls), 3)
+
+    async def test_usage_does_not_require_an_optional_total_or_completion_id(self):
+        usage = self.native_model._usage(NS(usage=NS(prompt_tokens=30, completion_tokens=10,
+            prompt_cache_hit_tokens=10, cache_creation_input_tokens=4)))
+        self.assertEqual(usage, Amount(40, 90, input_tokens=30, cached_input_tokens=10,
+                                      cache_creation_tokens=4, output_tokens=10))
+
     async def test_malformed_final_preserves_usage_without_sending_or_retry(self):
         envelope = await self.envelope()
         variants = ["普通文字", '{"text":"你好","claims":[]}', '{"text":"","claims":[]}',
@@ -370,6 +395,10 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         response = await self.native_model.generate(replace(envelope, before_dispatch=revoked))
         self.assertEqual(response.usage, Amount(0, 0))
         self.assertEqual(response.failure, ModelFailure.PREPARATION)
+        self.assertEqual(response.diagnostics.error_type, "TaskError")
+        self.assertEqual(response.diagnostics.error_code, "revoked")
+        self.assertIsNone(response.diagnostics.status_code)
+        self.assertNotIn("owner cancelled during preparation", repr(response.diagnostics))
         self.assertEqual(self.native.provider.client.state.calls, [])
 
     async def test_host_persona_switch_during_generation_discards_tools_and_keeps_usage(self):

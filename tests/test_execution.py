@@ -74,6 +74,41 @@ class ExecutionFixture(ManagementFixture):
 
 
 class ExecutionTests(ExecutionFixture):
+    def test_task_capacity_bounds_match_host_configuration_bounds(self):
+        limits = SupervisorLimits(queued_per_lane=10_000, retained_tasks=100_000)
+        self.assertEqual((limits.queued_per_lane, limits.retained_tasks), (10_000, 100_000))
+        for values in ({"queued_per_lane": 10_001}, {"retained_tasks": 100_001}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                replace(self.limits, **values)
+
+    def test_start_adopts_only_safe_retained_task_capacity_increases(self):
+        saved = self.tasks.submit(self.spec()).unwrap()
+        expanded = replace(self.limits, retained_tasks=self.limits.retained_tasks + 10)
+        next_supervisor = self.supervisor(limits=expanded)
+
+        self.assertEqual(next_supervisor.start(expected_generation=1).unwrap(), 2)
+        self.assertEqual(next_supervisor.read(self.context, saved.task_id).unwrap(), saved)
+        limits = json.loads(self.runtime.read_one("SELECT limits_json FROM task_supervisor", ())['limits_json'])
+        self.assertEqual(limits["retained_tasks"], expanded.retained_tasks)
+
+    def test_start_rejects_capacity_decrease_and_other_limit_changes(self):
+        for changed in (replace(self.limits, retained_tasks=self.limits.retained_tasks - 1),
+                        replace(self.limits, background_slots=self.limits.background_slots + 1)):
+            with self.subTest(changed=changed):
+                next_supervisor = self.supervisor(limits=changed)
+                self.assertEqual(next_supervisor.start(expected_generation=1).failure.code,
+                                 "supervisor_limits_changed")
+
+    def test_large_trusted_catalog_preserves_uniqueness_and_execution_limits(self):
+        registrations = tuple(TaskRegistration(replace(self.foreground, kind=f"fixture.domain-{index}"),
+                                                self.validate_inputs) for index in range(96))
+        tasks = TaskSupervisor(self.runtime, registrations, limits=self.limits, now=self.clock.now)
+        self.assertEqual(len(tasks.registrations), 96)
+        self.assertEqual(tasks.limits, self.limits)
+        for invalid in ((), registrations + (registrations[0],)):
+            with self.assertRaisesRegex(ValueError, "unique task kinds"):
+                TaskSupervisor(self.runtime, invalid)
+
     def test_submit_deduplicates_across_proposed_task_ids_without_inventing_an_operation(self):
         spec = self.spec()
         saved = self.tasks.submit(spec).unwrap()

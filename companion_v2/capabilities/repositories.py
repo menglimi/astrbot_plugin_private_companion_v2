@@ -59,12 +59,19 @@ class CapabilityRepository:
         registered_at: datetime,
     ) -> Outcome[CapabilityPackageDescriptor]:
         with self._runtime.transaction() as connection:
+            marker = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?",
+                ("capability.native_owner:" + descriptor.extension_id,)).fetchone()
+            migrated = json.loads(marker["value"]) if marker is not None else {}
             peers = connection.execute(
                 "SELECT * FROM capability_descriptors WHERE extension_id = ? OR package_id = ?",
                 (descriptor.extension_id, descriptor.package_id),
             ).fetchall()
             for row in peers:
                 peer = _descriptor_from_row(row)
+                if (migrated.get("package_id") == descriptor.package_id
+                        and migrated.get("previous_package_id") == peer.package_id
+                        and peer.extension_id == descriptor.extension_id):
+                    continue
                 if (
                     peer.extension_id != descriptor.extension_id
                     or peer.package_id != descriptor.package_id

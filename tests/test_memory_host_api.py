@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,6 +14,7 @@ from companion_v2.execution.models import encode, stamp
 from companion_v2.memory.models import Proposal, owner_key
 from companion_v2.memory.management import MemoryManagement
 from companion_v2.adapters.astrbot.native import persona_instruction
+from companion_v2.conversation.native_observations import NativeConversationObservations
 from companion_v2.identity_policy.models import AuthorizationTier
 from astrbot_host.management_identity import dashboard_operator
 from tests.native_adapter_support import FakeEvent, FakeProvider, FakeReverseApi, completion
@@ -69,6 +71,21 @@ class MemoryHostAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.request("/command", data=args), changed)
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_overview_returns_private_counts_without_memory_content(self):
+        await self.initialize()
+        denied = await self.request("/overview", username=None)
+        self.assertEqual(denied["data"]["code"], "dashboard_identity_required")
+
+        result = await self.request("/overview")
+        self.assertEqual(result["status"], "ok", result)
+        overview = result["data"]["local"]
+        self.assertEqual(overview["facts"]["active"], 1)
+        self.assertGreaterEqual(overview["sources"]["available_messages"], 1)
+        self.assertEqual(overview["reflections"]["total"], 0)
+        self.assertEqual(result["data"]["linkage"]["state"], "not_owner")
+        self.assertIsNone(result["data"]["linkage"]["counts"])
+        self.assertNotIn("实际管理员提供的测试记录", json.dumps(result, ensure_ascii=False))
 
     async def test_fact_detail_and_source_reads_are_bound_to_the_authorized_query_context(self):
         await self.initialize()
@@ -132,6 +149,35 @@ class MemoryHostAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate["data"]["code"], "memory_request_invalid")
         self.assertEqual((await self.request(query="limit=1&limit=2"))["data"]["code"], "memory_request_invalid")
 
+    async def test_memory_policy_defaults_to_role_and_keeps_explicit_window_overrides(self):
+        session = await self.initialize()
+        app, context = session.application, session.profile.target
+        status = (await self.request("/settings"))["data"]
+        self.assertEqual(status["scope"], "role")
+        self.assertEqual(status["layers"][-1], "role")
+        saved = await self.request("/settings/command", data={
+            "operation_key": "role-memory-policy", "expected_edit_token": status["edit_token"],
+            "changes": {"memory.enabled": False},
+        })
+        self.assertEqual(saved["status"], "ok", saved)
+        other_scope = replace(context.scope, native_scope_id="another-private-user",
+            conversation_id="another-conversation", session_id="another-session")
+        other_window = replace(context,
+            role_binding=replace(context.role_binding, scope=other_scope),
+            audience=replace(context.audience, scope=other_scope))
+        self.assertFalse(app.memory.settings.policy(context).enabled)
+        self.assertFalse(app.memory.settings.policy(other_window).enabled)
+
+        local = (await self.request("/settings", query="layer=window"))["data"]
+        self.assertEqual(local["scope"], "window")
+        override = await self.request("/settings/command", data={
+            "operation_key": "window-memory-policy", "expected_edit_token": local["edit_token"],
+            "layer": "window", "changes": {"memory.enabled": True},
+        })
+        self.assertEqual(override["status"], "ok", override)
+        self.assertTrue(app.memory.settings.policy(context).enabled)
+        self.assertFalse(app.memory.settings.policy(other_window).enabled)
+
     async def test_route_cleanup_after_stop_and_restart_does_not_leave_old_handlers(self):
         await self.initialize()
         self.assertTrue(any(path.startswith(PREFIX) for path, _ in self.routes))
@@ -181,11 +227,7 @@ class MemoryHostAPITests(unittest.IsolatedAsyncioTestCase):
                 capability=action, tier=AuthorizationTier.STANDARD, valid_from=NOW,
                 expected_revision=app.tasks.identity.revision)
         captured = (await session.bridge.capture(FakeEvent(self.native, event_id="reflection-input", text="我平时不喝咖啡"))).unwrap()
-        conversation = session.host.receive(captured).unwrap()
-        async def finished():
-            while app.flow.row(conversation)["state"] not in ("complete", "blocked", "closed"):
-                await asyncio.sleep(0.01)
-        await asyncio.wait_for(finished(), 3)
+        NativeConversationObservations(app.messages).capture_input(context, captured, turn_id="reflection-input")
         before = len(self.native.provider.client.state.calls)
         prepared = app.memory_reflection.prepare(context, request_id="http-format-failure", start=NOW - timedelta(hours=1),
             end=app.tasks.now(), role_instruction=persona_instruction(self.native.persona)).unwrap()
@@ -240,11 +282,7 @@ class MemoryHostAPITests(unittest.IsolatedAsyncioTestCase):
                 capability=action, tier=AuthorizationTier.STANDARD, valid_from=NOW,
                 expected_revision=app.tasks.identity.revision)
         captured = (await session.bridge.capture(FakeEvent(self.native, event_id="queue-input", text="我平时不喝咖啡"))).unwrap()
-        conversation = session.host.receive(captured).unwrap()
-        async def finished():
-            while app.flow.row(conversation)["state"] not in ("complete", "blocked", "closed"):
-                await asyncio.sleep(0.01)
-        await asyncio.wait_for(finished(), 3)
+        NativeConversationObservations(app.messages).capture_input(context, captured, turn_id="queue-input")
         calls = len(self.native.provider.client.state.calls)
         prepared = app.memory_reflection.prepare(context, request_id="http-queued", start=NOW - timedelta(hours=1),
             end=app.tasks.now(), role_instruction=persona_instruction(self.native.persona)).unwrap()
@@ -323,3 +361,25 @@ class MemoryHostAPITests(unittest.IsolatedAsyncioTestCase):
                          "dashboard_identity_required")
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_reflection_history_includes_completed_and_empty_batches(self):
+        session = await self.initialize()
+        context = session.profile.target
+        manifest = encode({"evidence": [], "facts": [], "remaining_sources": 0, "unavailable_sources": 0,
+                           "coverage": "captured_authorized_sources_only", "selection": {}})
+        with session.application.runtime.transaction() as connection:
+            for state in ("complete", "empty", "running"):
+                batch_id = "fixture-history-" + state
+                connection.execute("INSERT INTO memory_reflections VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)",
+                    (batch_id, owner_key(context), "fixture-hash", encode(context), manifest, state,
+                     encode({"items": {}, "sequence": 0}), stamp(NOW), stamp(NOW)))
+
+        pending = (await self.request("/reflections"))["data"]
+        history = (await self.request("/reflections", query="history=1"))["data"]
+        self.assertEqual([item["state"] for item in pending["items"]], ["running"])
+        self.assertEqual({item["state"] for item in history["items"]}, {"complete", "empty", "running"})
+        self.assertEqual(history["view"], "history")
+        self.assertEqual((await self.request("/reflections", query="history=2"))["data"]["code"],
+                         "memory_request_invalid")
+        self.assertEqual((await self.request("/reflections", query="history=1", username=None))["data"]["code"],
+                         "dashboard_identity_required")

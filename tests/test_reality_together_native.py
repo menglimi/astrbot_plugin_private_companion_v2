@@ -1,10 +1,9 @@
-"""Contract checks for the independently packaged Reality and Together ports."""
+"""Contract checks for V2's bundled Reality and Together ports."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import importlib.util
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -12,23 +11,12 @@ import unittest
 
 from companion_v2.capabilities.native import parse_manifest, parse_result
 from companion_v2.execution.models import SideEffect
-from astrbot_host.native_extensions import NativeExtensionRegistry, together_execution_binding
+from astrbot_host.native_extensions import together_execution_binding
 from companion_v2.conversation.voice_reply import VoiceReplyPolicy
-
-
-PLUGIN_ROOT = Path(__file__).resolve().parents[2]
-
-
-def load_provider(name):
-    path = PLUGIN_ROOT / f"astrbot_plugin_{name}_companion" / "native_v2" / "provider.py"
-    spec = importlib.util.spec_from_file_location(f"test_{name}_native_provider", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-REALITY = load_provider("reality")
-TOGETHER = load_provider("together")
+from companion_v2.product import PRODUCT_VERSION
+from companion_v2.reality import provider as REALITY
+from companion_v2.together import provider as TOGETHER
+from tests.native_internal_support import internal_registry
 
 
 def context(*, bot="bot-a", role="role-a", user="12345", policy=1):
@@ -142,10 +130,10 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manifest_and_read_receipts(self):
         reality_plugin = FakeReality()
-        reality = REALITY.NativeRealityProvider(reality_plugin, self.root / "reality")
-        together = TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together")
+        reality = REALITY.NativeRealityProvider(reality_plugin, self.root / "reality", version=PRODUCT_VERSION)
+        together = TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together", version=PRODUCT_VERSION)
         for module, provider in ((REALITY, reality), (TOGETHER, together)):
-            manifest = parse_manifest(provider.manifest(), plugin_id=module.PLUGIN_ID, version=module.VERSION)
+            manifest = parse_manifest(provider.manifest(), plugin_id=module.PLUGIN_ID, version=PRODUCT_VERSION)
             self.assertEqual(len(manifest.tools), len(module._ACTIONS))
         for provider, action in ((reality, "reality.snapshot.read"), (together, "together.room.snapshot")):
             req = request(provider, action, invocation=action)
@@ -156,18 +144,12 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(again, result)
         self.assertEqual(reality_plugin.users, ["12345"])
 
-    async def test_registry_discovers_exact_stars(self):
-        reality = REALITY.NativeRealityProvider(FakeReality(), self.root / "reality")
-        together = TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together")
+    async def test_registry_uses_exact_bundled_ports_and_rejects_closed_lease(self):
+        reality = REALITY.NativeRealityProvider(FakeReality(), self.root / "reality", version=PRODUCT_VERSION)
+        together = TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together", version=PRODUCT_VERSION)
 
-        def star(module, provider):
-            api = SimpleNamespace(companion_v2_native=lambda: provider)
-            return SimpleNamespace(root_dir_name=module.PLUGIN_ID, version=module.VERSION,
-                                   activated=True, star_cls=SimpleNamespace(extension_api=api))
-
-        stars = [star(REALITY, reality), star(TOGETHER, together)]
-        host = SimpleNamespace(get_all_stars=lambda: stars)
-        registry = NativeExtensionRegistry(host)
+        registry = internal_registry(reality, together)
+        self.addAsyncCleanup(registry.aclose)
         self.assertEqual(registry.issues, ())
         # Keep the published surface pinned: discovery silently drops every
         # native declaration once the aggregate passes MAX_TOOL_CATALOG, so a
@@ -186,8 +168,10 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
                          len(REALITY._ACTIONS) + len(TOGETHER._ACTIONS))
         tool_id = f"native:{REALITY.PLUGIN_ID}:reality.snapshot.read"
         self.assertIsNotNone(registry.current_declaration(tool_id))
-        stars[0] = star(REALITY, reality)
+        await registry._bundled_extensions[0].aclose()
         self.assertIsNone(registry.current_declaration(tool_id))
+        self.assertIsNotNone(registry.current_declaration(
+            f"native:{TOGETHER.PLUGIN_ID}:together.room.snapshot"))
 
     async def test_scope_isolation_and_original_invocation(self):
         for module, plugin, provider_class, action in (
@@ -211,14 +195,14 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reality_device_receipts_and_no_retry(self):
         plugin = FakeReality()
-        provider = REALITY.NativeRealityProvider(plugin, self.root)
+        provider = REALITY.NativeRealityProvider(plugin, self.root, version=PRODUCT_VERSION)
         req = request(provider, "reality.device.control", invocation="device-a",
                       arguments={"alias": "desk", "is_on": True})
         result = await provider.execute(req, before_dispatch=lambda: True)
         self.check_receipt(provider, req, result, SideEffect.EXTERNAL_NETWORK)
         self.assertEqual(result["effect"], "committed")
         self.assertEqual(plugin.calls, 1)
-        restarted = REALITY.NativeRealityProvider(plugin, self.root)
+        restarted = REALITY.NativeRealityProvider(plugin, self.root, version=PRODUCT_VERSION)
         self.assertEqual(await restarted.lookup(req, before_dispatch=lambda: True), result)
         self.assertEqual(await restarted.execute(req, before_dispatch=lambda: True), result)
         self.assertEqual(plugin.calls, 1)
@@ -248,7 +232,7 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_together_room_scope_close_order_and_restart(self):
         plugin = FakeTogether()
-        provider = TOGETHER.NativeTogetherProvider(plugin, self.root)
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
         creations = []
         for number in (1, 2):
             req = request(provider, "together.room.create", invocation=f"create-{number}",
@@ -289,14 +273,14 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin.closed, ["room-2", "room-1"])
         self.assertEqual(plugin.issued, 2)
         self.assertNotIn("V2 人格专用提示词", (self.root / "native_v2" / "operations.json").read_text(encoding="utf-8"))
-        restarted = TOGETHER.NativeTogetherProvider(plugin, self.root)
+        restarted = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
         self.assertEqual((await restarted.lookup(creations[0], before_dispatch=lambda: True))["state"], "succeeded")
         snap2 = request(restarted, "together.room.snapshot", invocation="snapshot-after")
         self.assertEqual((await restarted.execute(snap2, before_dispatch=lambda: True))["result"]["rooms"], [])
 
     async def test_together_create_rejects_missing_or_mismatched_persona(self):
         plugin = FakeTogether()
-        provider = TOGETHER.NativeTogetherProvider(plugin, self.root)
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
         original = request(provider, "together.room.create", invocation="persona-a",
                            arguments={"mode": "call"})
         for mutation in (lambda item: item.pop("host_persona"),
@@ -310,7 +294,7 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_together_create_rejects_unbound_or_missing_v2_model(self):
         plugin = FakeTogether()
-        provider = TOGETHER.NativeTogetherProvider(plugin, self.root)
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
         original = request(provider, "together.room.create", invocation="execution-a",
                            arguments={"mode": "call"})
         for mutation in (lambda item: item.pop("host_execution"),
@@ -328,7 +312,7 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invited_native_room_keeps_scope_in_snapshot_and_close(self):
         plugin = FakeTogether()
-        provider = TOGETHER.NativeTogetherProvider(plugin, self.root)
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
         created = request(provider, "together.room.create", invocation="create-invited",
                           arguments={"mode": "watch"})
         await provider.execute(created, before_dispatch=lambda: True)
@@ -349,12 +333,12 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_read_actions_are_declared_read_only(self):
         """The added query actions must stay read-only on the wire contract."""
-        reality = REALITY.NativeRealityProvider(FakeReality(), self.root / "reality-read")
-        together = TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together-read")
+        reality = REALITY.NativeRealityProvider(FakeReality(), self.root / "reality-read", version=PRODUCT_VERSION)
+        together = TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together-read", version=PRODUCT_VERSION)
         manifest_reality = parse_manifest(reality.manifest(), plugin_id=REALITY.PLUGIN_ID,
-                                          version=REALITY.VERSION)
+                                          version=PRODUCT_VERSION)
         manifest_together = parse_manifest(together.manifest(), plugin_id=TOGETHER.PLUGIN_ID,
-                                           version=TOGETHER.VERSION)
+                                           version=PRODUCT_VERSION)
         declared = {tool["action"]: tool for tool in manifest_reality.tools + manifest_together.tools}
         # Only journal reads are read-only.  A cancel still names an operation
         # and reports an effect, so it must not claim side_effect "none" (that
@@ -375,7 +359,7 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reality_operation_lookup_reads_the_ledger_without_dispatching(self):
         plugin = FakeReality()
-        provider = REALITY.NativeRealityProvider(plugin, self.root / "ledger")
+        provider = REALITY.NativeRealityProvider(plugin, self.root / "ledger", version=PRODUCT_VERSION)
         controlled = request(provider, "reality.device.control", invocation="device-ledger",
                              arguments={"alias": "desk", "is_on": True})
         written = await provider.execute(controlled, before_dispatch=lambda: True)
@@ -394,7 +378,7 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reality_operation_cancel_refuses_a_dispatched_operation(self):
         plugin = FakeReality()
-        provider = REALITY.NativeRealityProvider(plugin, self.root / "cancel")
+        provider = REALITY.NativeRealityProvider(plugin, self.root / "cancel", version=PRODUCT_VERSION)
         controlled = request(provider, "reality.device.control", invocation="device-cancel",
                              arguments={"alias": "desk", "is_on": False})
         written = await provider.execute(controlled, before_dispatch=lambda: True)
@@ -406,15 +390,15 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         self.check_receipt(provider, cancel, refused, SideEffect.LOCAL)
         self.assertEqual(refused["state"], "failed")
         # The original operation keeps its real, already-committed effect.
-        restarted = REALITY.NativeRealityProvider(plugin, self.root / "cancel")
+        restarted = REALITY.NativeRealityProvider(plugin, self.root / "cancel", version=PRODUCT_VERSION)
         original = await restarted.lookup(controlled, before_dispatch=lambda: True)
         self.assertEqual((original["state"], original["effect"]), ("succeeded", "committed"))
         self.assertEqual(plugin.calls, 1)
 
     async def test_closed_ports_reject_all_entries(self):
         for provider, action in (
-            (REALITY.NativeRealityProvider(FakeReality(), self.root / "reality"), "reality.snapshot.read"),
-            (TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together"), "together.room.snapshot"),
+            (REALITY.NativeRealityProvider(FakeReality(), self.root / "reality", version=PRODUCT_VERSION), "reality.snapshot.read"),
+            (TOGETHER.NativeTogetherProvider(FakeTogether(), self.root / "together", version=PRODUCT_VERSION), "together.room.snapshot"),
         ):
             req = request(provider, action, invocation=action)
             await provider.close()
@@ -428,7 +412,7 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
     async def test_unavailable_room_server_and_corrupt_journals(self):
         plugin = FakeTogether()
         plugin.room_server.running = False
-        provider = TOGETHER.NativeTogetherProvider(plugin, self.root / "unavailable")
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root / "unavailable", version=PRODUCT_VERSION)
         req = request(provider, "together.room.create", invocation="server-down", arguments={"mode": "call"})
         result = await provider.execute(req, before_dispatch=lambda: True)
         self.check_receipt(provider, req, result, SideEffect.LOCAL)

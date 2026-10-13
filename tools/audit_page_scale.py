@@ -58,7 +58,14 @@ MIGRATED = ("memory-page.css", "learning-page.css", "contact-page.css",
             "workbench.css", "config-editor.css",
             # 外壳最后一份：它本来就引用 --fs-*，只是从没进过名单，
             # 于是被【二之二】自发现抓了出来（半迁移）。迁干净后进来。
-            "shell.css")
+            "shell.css",
+            # 2026-10-10：小屋分区已经使用令牌，补齐名单与天气设置迁移。
+            "host-options.css", "learning-hub.css", "perception-subpages.css",
+            "state-config.css", "storage-page.css", "understanding-page.css",
+            "weather-source.css",
+            # 2026-10-11：原生扩展管理面板使用同一套尺度令牌，纳入阈值判定。
+            "native-extension-panel.css", "confirmation-dialog.css",
+            "workspace-loading.css")
 # 仍在使用自有尺度的页面：只统计，不判定（逐步迁移）。
 # 2026-10-02：`shell.css` 迁入后这里是空的——`pages/陪伴小屋/*.css` 全部走尺度令牌。
 #
@@ -338,6 +345,8 @@ def font_scale_gaps():
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()

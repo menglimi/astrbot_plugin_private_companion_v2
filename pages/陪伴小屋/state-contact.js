@@ -118,6 +118,63 @@ window.CompanionStateContact = (() => {
   }
   const reason=code=>reasons[code]||(code?"当前联系条件未满足，请重新读取或检查联系设置。":"尚未提供运行条件");
   const when=value=>value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString("zh-CN",{hour12:false}):"未设置";
+  const scheduleReasons={
+    never_evaluated:["此窗口还没有自动评估记录","确认最近一轮私聊已完成，并确认插件正在运行。"],
+    newer_conversation_not_evaluated:["记录属于上一轮私聊","等待最近一轮私聊完成后重新评估。"],
+    proactive_permission_denied:["此私聊没有主动联系授权","在关系权限中允许角色主动联系。"],
+    automatic_contact_disabled:["后台自动联系已关闭","打开此窗口的后台自动联系开关。"],
+    contact_settings_disabled:["主动联系总开关已关闭","在当前角色或窗口的主动联系设置中打开总开关。"],
+    contact_paused:["主动联系正处于暂缓期","等待暂停结束，或检查全局、窗口与联系目的的暂停时间。"],
+    quiet_hours:["当前处于免打扰时段","等待免打扰结束，或核对时区与起止时间。"],
+    contact_conditions_blocked:["当前联系条件未满足","核对联系总开关、目的开关、暂停和免打扰设置。"],
+    idle_period_not_elapsed:["仍在对话后的静默等待期","等待静默时长结束；下方会显示预计时间。"],
+    calendar_source_pending:["日历契机仍在准备","检查日历来源状态，来源完成后调度会继续。"],
+    activity_source_pending:["生活事件仍在准备","检查角色生活状态和事件来源。"],
+    journal_source_pending:["日记契机仍在准备","检查角色日记与生活工作区。"],
+    appointment_silence:["约定前后静默规则正在生效","按约定静默结束后再评估。"],
+    recent_attempt_cooldown:["主动尝试间隔尚未结束","等待最小联系间隔结束。"],
+    unanswered_pause:["未回复后的暂停规则正在生效","收到新的私聊消息后会重置这项暂停。"],
+    chat_purpose_disabled:["日常话题联系目的已关闭","启用日常话题，或等待其他已开启的契机。"],
+    closing_silence:["连续联系后的收尾静默正在生效","等待收尾静默结束或等对方回复。"],
+    slot_already_processed:["当前节律时段已处理","不会重放同一时段；等待下一时段。"],
+    outside_contact_slot:["当前不在节律评估窗口","等待下一个节律时段。"],
+    activity_curve_skipped:["当前时段被活跃度曲线跳过","检查本地时区和按小时活跃曲线，或等待下一时段。"],
+    screen_observation_pending:["正在等待屏幕观察结果","观察完成后再判断是否形成主动消息。"],
+    platform_circuit_open:["平台发送通道暂时冷却","检查 AstrBot 平台连接；冷却结束后会恢复评估。"],
+    conversation_busy:["角色当前处于忙碌时段","忙碌状态结束后会恢复联系评估。"],
+    opportunity_found:["已找到主动联系候选","继续查看后台任务与模型决策结果。"],
+    candidate_queued:["候选已进入后台执行","若没有发出，请查看任务执行和投递回执诊断。"],
+    contact_model_unregistered:["主动联系模型任务尚未登记","检查模型路由配置并重启插件。"],
+    background_capacity_exhausted:["后台执行槽位暂时占满","等待现有后台任务结束后会继续评估。"],
+    contact_attempt_budget:["此私聊的主动尝试额度已用完","等待滚动 24 小时额度释放，或调整本窗口的主动尝试上限。"],
+    contact_relationship_attempt_budget:["这段关系的主动尝试额度已用完","等待关系级滚动额度释放，或检查角色的关系级联系上限。"],
+    delivery_history_unavailable:["当前私聊历史无法完成核验","检查 AstrBot 会话历史是否可读取后再重新评估。"],
+    contact_conversation_changed:["原私聊已变化，旧候选被安全取消","等待当前私聊完成后重新评估。"],
+    scheduler_heartbeat_missing:["尚未收到主动调度心跳","确认插件已启动且主动联系模型已登记。"],
+    scheduler_heartbeat_stale:["主动调度心跳已中断","检查插件调度器是否异常或已停止。"],
+  };
+  const scheduleStages={permission:"权限",settings:"设置",conversation:"会话",sources:"来源",rhythm:"节律",
+    validation:"校验",candidate:"候选",delivery_admission:"发送准入",busy_gate:"忙碌门槛",task_queue:"任务队列",scheduler:"调度器"};
+  const scheduleOutcomes={not_evaluated:"尚未评估",stale:"等待新会话评估",running:"运行中",blocked:"暂时受阻",
+    candidate:"发现候选",queued:"已排队",pending:"等待来源",skipped:"按策略跳过",failed:"检查失败"};
+  function scheduleMarkup(value,e){
+    const diagnostic=value?.schedule_diagnostic;if(!diagnostic)return "";
+    const scheduler=diagnostic.scheduler||{},evaluation=diagnostic.evaluation||{};
+    const issue=scheduleReasons[evaluation.reason_code]||[
+      evaluation.reason_code?`调度校验未通过（${evaluation.reason_code}）`:"等待调度评估",
+      "查看联系开关、来源状态和后台任务记录。"];
+    const schedulerLabel=({running:"正常运行",blocked:"暂时受阻",stale:"心跳中断",not_seen:"尚未启动",stopped:"宿主未运行"})[scheduler.state]||"状态待核对";
+    const next=evaluation.next_at?` · 预计 ${e(when(evaluation.next_at))}`:"";
+    const purpose=evaluation.purpose?` · ${e(evaluation.purpose)}`:"";
+    const checked=evaluation.observed_at?e(when(evaluation.observed_at)):"无记录";
+    return `<section class="state-contact-diagnostic" aria-label="主动联系调度诊断">
+      <h4>最近自动调度</h4>
+      <dl><div><dt>调度器</dt><dd>${e(schedulerLabel)} · ${e(when(scheduler.last_seen_at))}</dd></div>
+        <div><dt>最近评估</dt><dd>${checked}</dd></div>
+        <div><dt>结果</dt><dd>${e(scheduleOutcomes[evaluation.outcome]||"状态待核对")} · ${e(scheduleStages[evaluation.stage]||evaluation.stage||"未知阶段")}${purpose}${next}</dd></div></dl>
+      <p><strong>${e(issue[0])}</strong></p><p class="state-contact-diagnostic-next">${e(issue[1])}</p>
+    </section>`;
+  }
   function summary(value,e) {
     if(!supported(value))return `<header><h3>主动联系偏好</h3><p>联系设置暂未完整读到，请重新读取状态后再查看。</p></header>`;
     const settings=value.settings,effective=value.effective||{};
@@ -132,7 +189,7 @@ window.CompanionStateContact = (() => {
       <div><dt>行为规划与沉默</dt><dd>开口门槛 ${e(settings.silence_min_confidence)} · 沉默降权 ${e(settings.silence_feedback_penalty)}</dd></div>
       <div><dt>免打扰</dt><dd>${settings.quiet_enabled?`${e(settings.quiet_start)}–${e(settings.quiet_end)} · ${e(settings.quiet_timezone)}`:"未启用"}</dd></div>
       <div><dt>暂停截止（本地时间）</dt><dd>${e(when(settings.pause_until))}</dd></div><div><dt>运行与模型</dt><dd>${e(({running:"运行中",new:"角色正在准备",stopped:"插件已停止",closed:"已关闭",faulted:"运行异常"})[value.host_state]||"运行状态待核对")} · ${effective.model_registered===true?"联系模型已登记":effective.model_registered===false?"联系模型尚未就绪":"模型状态待核对"}</dd></div></dl>${relation}
-      <details class="state-receipt-reference" data-receipt="contact-purposes"><summary id="state-contact-purpose-summary">查看各类联系的当前条件</summary><ul class="state-contact-status">${purposes(value).map(([key,item])=>`<li><strong>${e(item.label)}</strong><span>${item.allowed===true?"当前允许":item.allowed===false?e(reason(item.reason)):"条件待核对"} · 权重 ${e(settings[key+".weight"])}</span></li>`).join("")}</ul></details>`;
+      <details class="state-receipt-reference" data-receipt="contact-purposes"><summary id="state-contact-purpose-summary">查看各类联系的当前条件</summary><ul class="state-contact-status">${purposes(value).map(([key,item])=>`<li><strong>${e(item.label)}</strong><span>${item.allowed===true?"当前允许":item.allowed===false?e(reason(item.reason)):"条件待核对"} · 权重 ${e(settings[key+".weight"])}</span></li>`).join("")}</ul></details>${scheduleMarkup(value,e)}`;
   }
   return {fields,purposes,label,validField,supported,normalized,form,summary};
 })();

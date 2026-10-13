@@ -30,7 +30,7 @@ class ImageQuotaTests(MessageFixture):
         owner.write(target, QUOTA_FIELDS, changes={GROUP + "." + scope + "_max_daily": value}, reset=(),
                     expected_revision=owner.read(target, QUOTA_FIELDS).revision, observed_at=NOW)
 
-    def attempt(self, identifier, *, context=None, kind="conversation.reply", at=NOW, action="image.generate"):
+    def attempt(self, identifier, *, context=None, kind="conversation.reply", at=NOW, action="image.generate", native=False):
         context = context or self.context
         record = {"spec": {"context": {
             "role_binding": {"scope": {"installation_id": context.scope.installation_id,
@@ -47,6 +47,10 @@ class ImageQuotaTests(MessageFixture):
                 1, 'succeeded', 1, 0, NULL, ?, ?, ?, ?, ?)""",
                 (identifier, kind, "dedupe-" + identifier, stamp(at), stamp(at), stamp(at), stamp(at),
                  json.dumps(record)))
+            if native:
+                connection.execute("INSERT INTO runtime_metadata (key, value) VALUES (?, ?)",
+                    ("astrbot.core-tool." + identifier, json.dumps({"task_id": identifier, "action": action})))
+                return
             connection.execute("INSERT INTO model_requests (task_id, request_hash, plan_json, created_at) VALUES (?, 'hash', '{}', ?)",
                                (identifier, stamp(at)))
             connection.execute("""INSERT INTO conversation_batches (batch_id, origin_key, context_json, role_instruction,
@@ -94,6 +98,18 @@ class ImageQuotaTests(MessageFixture):
         self.set_limit("private_friend", 1)
         self.attempt("quota-old", at=NOW - timedelta(days=1))
         self.messages.image_quota.admit(self.parent(), NOW)
+
+    def test_native_and_legacy_user_attempts_share_daily_scope_limits(self):
+        self.set_limit("private_friend", 2)
+        self.attempt("quota-legacy")
+        self.attempt("quota-native-old", kind="astrbot.core-tool.image", at=NOW - timedelta(days=1), native=True)
+        self.attempt("quota-native", kind="astrbot.core-tool.image", native=True)
+        gate = self.messages.image_quota
+        self.assertEqual(gate._used(self.context, "private_friend", NOW), 2)
+        with self.assertRaises(TaskError) as caught:
+            gate.admit_native(self.context, NOW)
+        self.assertEqual(caught.exception.code, "image_quota_exhausted")
+        self.assertEqual(gate._used(self.context_for(self.core), "private_owner", NOW), 0)
 
     def test_day_boundary_follows_the_calendar_timezone(self):
         """A day must reset at the same midnight the role's calendar uses.

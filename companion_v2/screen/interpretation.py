@@ -177,8 +177,13 @@ class ScreenInterpretationService:
         """Reuse the original task's captured role instruction when it still exists."""
         if not parent_task_id:
             return ""
-        row = self.runtime.read_one("""SELECT b.role_instruction FROM execution_tasks t
-            JOIN conversation_batches b ON b.batch_id = t.request_ref WHERE t.task_id = ?""", (parent_task_id,))
+        from companion_v2.conversation.native_tool_sources import native_turn
+        if native_turn(parent_task_id):
+            row = self.runtime.read_one("SELECT role_instruction FROM conversation_native_turns WHERE turn_id = ?",
+                                        (parent_task_id,))
+            return row["role_instruction"] if row is not None else ""
+        row = self.runtime.read_one("SELECT role_instruction FROM conversation_batches WHERE generation_task_id = ?",
+                                    (parent_task_id,))
         return row["role_instruction"] if row is not None else ""
 
     def submit(self, context: TaskContext, capture: ScreenCaptureRef, *, purpose: str,

@@ -14,6 +14,7 @@ from companion_v2.adapters.astrbot.native import (
     NativeInputPorts,
     bounded_native_lookup,
     persona_instruction,
+    report_slow_native_lookup,
 )
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import SubjectKind, SubjectRef
@@ -23,6 +24,144 @@ from tests.test_management_access import INSTALLATION, NOW, ROLE
 
 
 class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_v2_window_persona_override_precedes_astrbot_selection(self):
+        prompt = "V2 窗口指定的人格提示词。"
+        selected_persona = {"name": "window-persona", "prompt": prompt}
+        role = SubjectRef(INSTALLATION, SubjectKind.BOT, "window-role")
+        self.native.persona_manager.get_persona_v3_by_id = lambda persona_id: (
+            selected_persona if persona_id == "window-persona" else None)
+        self.bridge.personas[("bot-a", "window-persona")] = HostPersona(
+            "bot-a", "window-persona", role, digest(prompt))
+
+        async def override(umo):
+            self.assertEqual(umo, "qq-main:FriendMessage:200")
+            return "window-persona"
+
+        async def should_not_resolve(**kwargs):
+            raise AssertionError("AstrBot's active persona must not override V2's window setting")
+
+        self.bridge.session_persona_override_lookup = override
+        with patch.object(self.native.persona_manager, "resolve_selected_persona", should_not_resolve), \
+                patch.object(self.native.conversation_manager, "get_conversation",
+                             side_effect=AssertionError("the V2 override needs no host persona lookup")):
+            cid, selected, persona, special = await self.bridge._selected_persona(
+                self.bridge.accounts[("qq-main", "100")], self.bridge._umo("qq-main", "200"))
+            resolved_cid, resolved_role, instruction = await self.bridge._role_for_umo(
+                self.bridge.accounts[("qq-main", "100")], self.bridge._umo("qq-main", "200"))
+
+        self.assertEqual((cid, selected, persona, special), ("conversation-1", "window-persona", selected_persona, False))
+        self.assertEqual((resolved_cid, resolved_role, instruction),
+                         ("astrbot-conversation:conversation-1", role, prompt))
+
+    async def test_preloaded_session_settings_avoid_a_second_persona_lookup(self):
+        self.native.persona_manager.personas_v3 = [self.native.persona]
+
+        async def no_override(_umo):
+            return None
+
+        async def should_not_resolve(**_kwargs):
+            raise AssertionError("session settings were already read for this lookup")
+
+        self.bridge.session_persona_override_lookup = no_override
+        with patch.object(self.native.persona_manager, "resolve_selected_persona", should_not_resolve):
+            result = await self.bridge._selected_persona(
+                self.bridge.accounts[("qq-main", "100")], self.bridge._umo("qq-main", "200"))
+
+        self.assertEqual(result[1:], ("original", self.native.persona, False))
+
+    async def test_verified_persona_uses_selected_conversation_with_shared_role(self):
+        self.bridge.personas[("bot-a", "group-persona")] = HostPersona(
+            "bot-a", "group-persona", ROLE, digest("群聊使用不同的表达"))
+        self.select_window_persona("original")
+        await self.envelope()
+        current = await self.bridge.verified_persona(self.native_context.scope, self.native_context.role_binding)
+        self.assertEqual(current["persona_id"], "original")
+        self.assertEqual(current["prompt"], persona_instruction(self.native.persona))
+        self.assertEqual(current["account_id"], "100")
+        self.assertEqual(self.native.provider.client.state.calls, [])
+
+    async def test_single_v2_persona_mapping_never_reads_host_conversation_persona(self):
+        account = self.bridge.accounts[("qq-main", "100")]
+        self.native.persona_manager.personas_v3 = [self.native.persona]
+        with patch.object(self.native.conversation_manager, "get_conversation",
+                           side_effect=AssertionError("the V2 persona map must not read the host conversation")):
+            result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
+
+        self.assertEqual(result[1:], ("original", self.native.persona, False))
+
+    async def test_multiple_v2_personas_follow_the_mapped_astrbot_conversation_persona(self):
+        account = self.bridge.accounts[("qq-main", "100")]
+        self.map_second_native_persona()
+        async def no_override(_umo):
+            return None
+
+        async def selected_persona(_context, umo, conversation_id):
+            self.assertEqual((umo, conversation_id), ("qq-main:FriendMessage:200", "conversation-1"))
+            return "second"
+
+        self.bridge.session_persona_override_lookup = no_override
+        self.bridge.persona_snapshot_lookup = selected_persona
+        with patch.object(self.native.conversation_manager, "get_conversation",
+                           side_effect=AssertionError("the projection query must not load conversation history")):
+            result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
+
+        self.assertEqual(result[1:], ("second", self.native.persona_manager.personas_v3[1], False))
+
+    async def test_multiple_v2_personas_reject_an_unmapped_astrbot_selection(self):
+        account = self.bridge.accounts[("qq-main", "100")]
+        self.bridge.personas[("bot-a", "second")] = HostPersona(
+            "bot-a", "second", ROLE, digest("第二个人格"))
+        async def no_override(_umo):
+            return None
+
+        async def unmapped(_context, _umo, _conversation_id):
+            return "unmapped"
+
+        self.bridge.session_persona_override_lookup = no_override
+        self.bridge.persona_snapshot_lookup = unmapped
+        with self.assertRaises(TaskError) as raised:
+            await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
+
+        self.assertEqual(raised.exception.code, "host_persona_window_unbound")
+
+    async def test_verified_persona_rechecks_conversation_during_selected_lookup(self):
+        self.map_second_native_persona()
+        await self.envelope()
+
+        async def switch_conversation(_umo):
+            self.native.cid = "replacement-conversation"
+            return "original"
+
+        self.bridge.session_persona_override_lookup = switch_conversation
+        with self.assertRaises(TaskError) as raised:
+            await self.bridge.verified_persona(self.native_context.scope, self.native_context.role_binding)
+        self.assertEqual(raised.exception.code, "host_conversation_changed")
+
+    async def test_verified_persona_uses_v2_binding_without_host_persona_lookup(self):
+        await self.envelope()
+        lookups = self.native.role_lookups
+        current = await self.bridge.verified_persona(self.native_context.scope, self.native_context.role_binding)
+        self.assertEqual(current["persona_id"], "original")
+        self.assertEqual(self.native.role_lookups - lookups, 0)
+
+    async def test_model_failure_persists_only_safe_provider_error_metadata(self):
+        class ProviderFailure(Exception):
+            status_code = 429
+
+        private = "private response and credential"
+
+        async def fail_request(_payload, _tools):
+            raise ProviderFailure(private)
+
+        self.native.provider.client.state.behavior = fail_request
+        response = await self.native_model.generate(await self.envelope())
+
+        self.assertEqual(response.status, "unknown")
+        self.assertEqual(response.diagnostics.error_type, "ProviderFailure")
+        self.assertEqual(response.diagnostics.status_code, 429)
+        self.assertEqual(response.diagnostics.error_code, None)
+        self.assertNotIn(private, str(response.diagnostics.to_record()))
+
     async def test_native_lookup_timeout_logs_elapsed_time_and_event_loop_overrun(self):
         release = asyncio.Event()
 
@@ -45,13 +184,26 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(int(line.rsplit("elapsed_ms=", 1)[1].split()[0]), 25)
         self.assertNotIn("private host details", line)
 
-    async def test_role_lookup_timeout_is_not_reported_as_an_image_failure(self):
-        async def timeout(_):
+    async def test_slow_lookup_warnings_are_aggregated_per_operation(self):
+        with patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_SLOW_LOG_INTERVAL_SECONDS", 60):
+            with self.assertLogs("companion_v2.adapters.astrbot.native", level="WARNING") as captured:
+                report_slow_native_lookup("conversation_aggregation_test", 2100, now=100)
+                report_slow_native_lookup("conversation_aggregation_test", 2300, now=101)
+                report_slow_native_lookup("conversation_aggregation_test", 2400, now=161)
+
+        self.assertEqual(len(captured.output), 2)
+        self.assertIn("occurrences=1", captured.output[0])
+        self.assertIn("occurrences=2", captured.output[1])
+        self.assertIn("suppressed_count=2", captured.output[1])
+
+    async def test_v2_window_binding_timeout_is_not_reported_as_an_image_failure(self):
+        self.map_second_native_persona()
+        async def timeout(_umo):
             raise asyncio.TimeoutError("synthetic private host details")
-        self.native.before_resolve = timeout
+        self.bridge.session_persona_override_lookup = timeout
         result = await self.bridge.capture(FakeEvent(self.native))
-        self.assertEqual(result.failure.code, "host_native_lookup_timeout__persona")
-        self.assertIn("会话生效人格", result.failure.reason)
+        self.assertEqual(result.failure.code, "host_native_lookup_timeout__session_settings")
+        self.assertIn("会话服务设置", result.failure.reason)
         self.assertNotIn("private host details", result.failure.reason)
 
     async def test_native_fields_keep_platform_login_sender_and_original_role(self):
@@ -98,19 +250,24 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.failure.code if result.failure else None, expected)
         self.assertFalse(NativeInputPorts().authenticated_principal(FakeEvent(self.native)).is_success)
 
-    async def test_host_switch_and_prompt_edits_require_explicit_projection(self):
+    async def test_v2_single_persona_binding_ignores_astrbot_selection_and_detects_prompt_edits(self):
         self.native.selected = "other"
-        self.assertEqual((await self.bridge.capture(FakeEvent(self.native))).failure.code, "host_persona_unmapped")
-        self.native.selected = "original"
+        captured = await self.bridge.capture(FakeEvent(self.native))
+        self.assertTrue(captured.is_success)
+        self.assertEqual(captured.unwrap().instruction, self.native.persona["prompt"])
         self.native.persona["prompt"] = "新人格"
         self.assertEqual((await self.bridge.capture(FakeEvent(self.native))).failure.code, "host_persona_changed")
 
     async def test_capture_has_no_open_sqlite_transaction_while_awaiting_host(self):
         entered, release = asyncio.Event(), asyncio.Event()
-        async def pause(_):
+
+        async def pause(_umo):
             entered.set()
             await release.wait()
-        self.native.before_resolve = pause
+            return "original"
+
+        self.map_second_native_persona()
+        self.bridge.session_persona_override_lookup = pause
         pending = asyncio.create_task(self.bridge.capture(FakeEvent(self.native)))
         await asyncio.wait_for(entered.wait(), 1)
         # A second connection can commit while host capture is suspended.
@@ -122,11 +279,15 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_route_mutation_and_replaced_client_during_capture_do_not_rebind_input(self):
         event = FakeEvent(self.native)
-        async def mutate(_):
+
+        async def mutate(_umo):
             event.message_obj.sender.user_id = "201"
             event.message_obj.message[0].text = "后来改掉的消息"
             self.native.platform.metadata.id = "qq-other"
-        self.native.before_resolve = mutate
+            return "original"
+
+        self.map_second_native_persona()
+        self.bridge.session_persona_override_lookup = mutate
         result = await self.bridge.capture(event)
         self.assertEqual(result.failure.code, "host_account_changed")
 
@@ -158,10 +319,14 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
     async def test_withdrawal_while_native_model_prepares_prevents_request(self):
         captured = await self.capture()
         entered, release = asyncio.Event(), asyncio.Event()
-        async def pause(_):
+
+        async def pause(_umo):
             entered.set()
             await release.wait()
-        self.native.before_resolve = pause
+            return "original"
+
+        self.map_second_native_persona()
+        self.bridge.session_persona_override_lookup = pause
         host = await self.setup_host()
         app = host.application
         batch = host.receive(captured).unwrap()
@@ -176,11 +341,19 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
     async def test_withdrawal_during_sender_preparation_prevents_platform_send(self):
         captured = await self.capture()
         entered, release = asyncio.Event(), asyncio.Event()
-        async def pause(count):
-            if count == 4:  # capture, model preflight, model postflight, sender preflight
+
+        calls = 0
+
+        async def pause(_umo):
+            nonlocal calls
+            calls += 1
+            if calls == 3:  # model preflight, model postflight, sender preflight
                 entered.set()
                 await release.wait()
-        self.native.before_resolve = pause
+            return "original"
+
+        self.map_second_native_persona()
+        self.bridge.session_persona_override_lookup = pause
         host = await self.setup_host()
         app = host.application
         batch = host.receive(captured).unwrap()

@@ -1,6 +1,7 @@
 """Dashboard group reply preferences use exact native group and role windows."""
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 import json
 import unittest
@@ -13,7 +14,11 @@ from astrbot_host.management_identity import dashboard_operator
 from companion_v2.execution.models import digest
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.conversation.participation import ACTION
+from companion_v2.expression.configuration import GROUP_SCOPE_GROUP
+from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from tests.group_host_support import GroupFixture, group_config
 from tests.native_adapter_support import completion
 from tests.test_group_participation import command
@@ -66,6 +71,23 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_directory_and_changes_affect_only_new_group_batches(self):
         await self.start_host()
+        selected = self.controller.settings.target("group-b")
+        bridge = self.controller.session.bridge.groups
+        account = bridge.accounts[(selected.platform_id, selected.account_id)]
+        conversation_id, role, _ = await bridge._role(account, selected.group_id)
+        scope = ScopeRef(self.controller.runtime.installation_id, selected.platform_id, ScopeKind.GROUP,
+                         selected.group_id, selected.bot_id, selected.account_id, conversation_id, selected.group_id)
+        legacy_target = ConfigTarget(scope.installation_id, ConfigLayer.WINDOW, role, scope)
+        application = self.controller.session.application
+        reply_group = "conversation.presentation"
+        reply_fields = application.configuration.registry.group(reply_group)
+        legacy_fields = tuple(replace(field, layers=(ConfigLayer.WINDOW,)) for field in reply_fields)
+        reply_owner = application.configuration._owners[reply_group]
+        legacy_snapshot = SparseConfigurationOwner.read(reply_owner, legacy_target, legacy_fields)
+        SparseConfigurationOwner.write(reply_owner, legacy_target, legacy_fields,
+            changes={reply_group + ".group_wakeup_direct_words": '["旧窗口词"]'}, reset=(),
+            expected_revision=legacy_snapshot.revision, observed_at=self.controller.now())
+
         directory = (await self.request(path=PREFIX + "/page/targets"))["data"]
         routes = {path for path, _ in self.routes}
         for target in directory["targets"]:
@@ -83,6 +105,9 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
             "group_wakeup_question_enabled": False})
         self.assertEqual(changed["status"], "ok", changed)
         self.assertEqual(changed["data"]["status"]["settings"]["group_wakeup_direct_words"], '["小星", "星星"]')
+        wakeup_field = changed["data"]["status"]["fields"]["group_wakeup_direct_words"]
+        self.assertEqual(wakeup_field["editable_layers"], ["role", "window"])
+        self.assertEqual(wakeup_field["write_layer"], "window")
         new = await self.receive_group()
         current = self.captured(new)
         self.assertEqual(self.captured(old), previous)
@@ -94,7 +119,9 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("小星", instruction)
         self.assertIn("观星", instruction)
         self.assertIn("天文", instruction)
-        self.assertIn("未点名的一般提问不作为额外唤醒线索", instruction)
+        self.assertIn("未点名的一般提问或求助不作为额外唤醒线索", instruction)
+        other_group = await self.receive_group(target="group-b")
+        self.assertEqual(self.captured(other_group)["group_wakeup_direct_words"], '["旧窗口词"]')
         self.assertTrue(self.captured(old)["group_air_guard_enabled"])
         disabled = await self.save({"group_wakeup_enabled": False}, key="disable-wakeup")
         self.assertEqual(disabled["status"], "ok", disabled)
@@ -152,23 +179,38 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.captured(member_batch)["group_air_guard_max_bot_replies"], 7)
         other_member = await self.receive_group(unique=True, sender="202")
         self.assertEqual(self.captured(other_member)["group_air_guard_max_bot_replies"], 3)
-        self.native.selections["qq-main:GroupMessage:300"] = "second"
+        self.window_personas["qq-main:GroupMessage:300"] = "second"
         self.assertEqual((await self.request(role="role-a"))["data"]["code"], "group_reply_role_changed")
         self.assertEqual((await self.request(role="role-b"))["data"]["settings"]["group_air_guard_max_bot_replies"], 3)
         self.assertEqual((await self.save({"group_air_guard_max_bot_replies": 9}, role="role-b"))["status"], "ok")
-        self.native.selections["qq-main:GroupMessage:300"] = "original"
+        self.window_personas["qq-main:GroupMessage:300"] = "original"
         self.assertEqual((await self.request())["data"]["settings"]["group_air_guard_max_bot_replies"], 5)
         self.assertEqual((await self.request(query="session_id=201_300"))["data"]["settings"]["group_air_guard_max_bot_replies"], 7)
+
+    async def test_group_override_can_be_reset_to_role_inheritance(self):
+        await self.start_host()
+        override = await self.save({"style_prompt": "本群临时采用更短的回应"}, key="group-style-override")
+        self.assertEqual(override["status"], "ok", override)
+        status = await self.request()
+        self.assertEqual(status["data"]["settings"]["style_prompt"], "本群临时采用更短的回应")
+        self.assertEqual(status["data"]["provenance"]["style_prompt"]["layer"], "window")
+        reset = await self.request("/configure", data={"operation_key": "group-style-reset",
+            "edit_token": status["data"]["edit_token"], "changes": {},
+            "reset_to_inherit": ["style_prompt"]})
+        self.assertEqual(reset["status"], "ok", reset)
+        self.assertEqual(reset["data"]["status"]["settings"]["style_prompt"], "")
+        self.assertIsNone(reset["data"]["status"]["provenance"]["style_prompt"]["layer"])
+        self.assertFalse(reset["data"]["status"]["provenance"]["style_prompt"]["explicit"])
 
     async def test_expression_learning_settings_use_the_same_group_session_scope(self):
         await self.start_host()
         status = await self.request("/expression")
         self.assertEqual(status["status"], "ok", status)
-        self.assertEqual(status["data"]["group_id"], "expression.learning")
+        self.assertEqual(status["data"]["group_id"], GROUP_SCOPE_GROUP)
         self.assertFalse(status["data"]["settings"]["group_learning_enabled"])
         member = await self.request("/expression", query="session_id=201_300")
         command = {"operation_key": "group-learning-bounds", "edit_token": member["data"]["edit_token"],
-                   "changes": {"group_learning_enabled": True, "rotation_decay_hours": 48}}
+                   "changes": {"group_learning_enabled": True}}
         saved = await self.request("/expression/configure", query="session_id=201_300", data=command)
         self.assertEqual(saved["status"], "ok", saved)
         self.assertTrue(saved["data"]["status"]["settings"]["group_learning_enabled"])
@@ -276,7 +318,7 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private diagnostic reason", json.dumps(recent))
         for target, query in (("group-b", ""), ("group-c", ""), ("group-a", "session_id=201_300")):
             self.assertEqual((await self.request(target=target, query=query))["data"]["participation_recent"], [])
-        self.native.selections["qq-main:GroupMessage:300"] = "second"
+        self.window_personas["qq-main:GroupMessage:300"] = "second"
         self.assertEqual((await self.request(role="role-b"))["data"]["participation_recent"], [])
         self.clock.advance(timedelta(seconds=15))
         self.controller.session.application.notify()
@@ -306,9 +348,9 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                 "changes": changes})
             self.assertNotEqual(result["status"], "ok", result)
         self.assertEqual((await self.request())["data"]["edit_token"], token)
-        self.native.selections["qq-main:GroupMessage:300"] = "second"
+        self.window_personas["qq-main:GroupMessage:300"] = "second"
         self.assertEqual((await self.request())["data"]["code"], "group_reply_role_changed")
-        self.native.selections["qq-main:GroupMessage:300"] = "original"
+        self.window_personas["qq-main:GroupMessage:300"] = "original"
         operator = dashboard_operator(self.controller.runtime, "admin", at=self.clock.now())
         policy = ObjectAccessPolicy(self.controller.runtime)
         policy.set_tier(operator.subject, AuthorizationTier.IMPORTANT,

@@ -70,7 +70,7 @@ def reply_efficiency_mock_script():
   const fixture = __FIXTURE__;
   const host = "astrbot_plugin_private_companion_v2";
   const responses = {
-    "integration/manifest": {providers: [], summary: {connected_count: 0}},
+    "integration/manifest": {extensions: [], providers: [], summary: {extension_ready_count: 0, connected_count: 0}},
     "page/targets": {
       installation_id: "preview-installation",
       operator_id: "preview-operator",

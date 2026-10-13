@@ -1,40 +1,79 @@
-"""Actual Game receipts traverse role tools and the private experience producer."""
+"""Core Game tools feed terminal receipts to the private experience producer."""
 
 from dataclasses import replace
+import asyncio
 import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from astrbot_host.native_extensions import NativeExtensionRegistry
-from astrbot_plugin_game_companion.native_v2 import provider as game_provider
+from tests import test_astrbot_staging_host as host_support
+from astrbot.core.agent.message import Message, ToolCall as NativeCall
+from astrbot_host.core_reply import prepare_core_reply_event
+from astrbot_host.core_reply_observations import CoreReplyObservations
+from astrbot_host.core_reply_tools import close_core_reply_tools, inject_core_reply_tools, native_tool_name
+from companion_v2.adapters.astrbot.native import NativeConversationInput
+from companion_v2.games.native import provider as game_provider
 from companion_v2.capabilities.models import CapabilityAuthorizationState
 from companion_v2.capabilities.repositories import CapabilityRepository
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.conversation.messages import source_from_document
-from companion_v2.execution.models import encode
-from companion_v2.model_gateway.models import ToolCall
+from companion_v2.execution.models import TaskContext, digest, encode, require
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import AudienceRef
+from companion_v2.identity_policy.personas import ConversationRoute
+from companion_v2.product import PRODUCT_VERSION
+from tests.native_internal_support import internal_registry
 from tests.test_game_native_blackjack import shoe_with_draws
 from tests.test_game_native_xiangqi import FakeEngine
 from tests.test_host_application import HostFixture
 from tests.test_management_access import SCOPE
-from tests.test_role_tool_loop import answered, requested
+from tests.test_astrbot_core_reply import FakeEvent
 
 
 class GameMemoryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_core_tool_terminal_receipt_reaches_background_experience_without_reply_batch(self):
+        from astrbot.core.agent.message import Message, ToolCall as NativeCall
+        from astrbot_host.core_reply import prepare_core_reply_event
+        from astrbot_host.core_reply_tools import close_core_reply_tools, inject_core_reply_tools, native_tool_name
+        from companion_v2.execution.models import TaskContext, require
+        from companion_v2.foundation.refs import AudienceRef
+        from tests.test_astrbot_core_reply import FakeEvent
+
+        host = await self.game_host()
+        app = host.application
+        self.addAsyncCleanup(close_core_reply_tools, app)
+        context = TaskContext(self.important, require(self.identity.resolve_role(SCOPE, observed_at=self.clock.now())),
+                              AudienceRef(SCOPE, (self.important.subject,)))
+        event = FakeEvent()
+        prepare_core_reply_event(event, {"context": context, "event_id": "native-game"},
+                                 authorize=lambda _: asyncio.sleep(0, result=Outcome.success(True)))
+        request = SimpleNamespace(func_tool=None, system_prompt="原人格")
+        inject_core_reply_tools(event, request, application=app)
+        name = native_tool_name(game_provider.BLACKJACK_CREATE)
+        call = NativeCall(id="native-natural", function=NativeCall.FunctionBody(name=name, arguments='{"difficulty":"normal"}'))
+        wrapper = SimpleNamespace(context=SimpleNamespace(event=event), messages=[Message(role="assistant", tool_calls=[call])])
+        with patch.object(game_provider, "fresh_shoe", return_value=shoe_with_draws(["A", "K", "9", "8"])):
+            result = json.loads(await request.func_tool.get_tool(name).call(wrapper, difficulty="normal"))
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(app.memory.game.advance(context).unwrap()["saved"], 1)
+        self.assertEqual(app.memory.game.advance(context).unwrap()["saved"], 0)
+        view = app.memory.experiences.list(context).unwrap()["items"][0]
+        self.assertIn("二十一点终局：玩家获胜", view["title"])
+        self.assertEqual(self.runtime.read_all("SELECT * FROM conversation_batches", ()), ())
+        self.assertEqual(self.called, [])
+        self.assertEqual(event.sent, [])
+
     def create_port(self):
         plugin = SimpleNamespace(native_v2_blackjack_enabled=True, native_v2_xiangqi_enabled=True,
             native_v2_turtle_soup_enabled=True, native_v2_turtle_soup_content_level="all_ages",
             native_v2_turtle_soup_max_hints=3, native_v2_draw_guess_enabled=True,
             native_v2_draw_guess_max_guesses=5, native_v2_draw_guess_duration_seconds=120,
             xiangqi_engine=FakeEngine())
-        self.game_port = game_provider.NativeGameProvider(plugin, self.root.parent / "game-provider", version="0.2.8")
+        self.game_port = game_provider.NativeGameProvider(plugin, self.root.parent / "game-provider", version=PRODUCT_VERSION)
         self.addAsyncCleanup(self.game_port.close)
-        self.game_star = SimpleNamespace(root_dir_name=game_provider.PLUGIN_ID, version="0.2.8", activated=True,
-            star_cls=SimpleNamespace(extension_api=SimpleNamespace(companion_v2_native=lambda: self.game_port)))
-        self.native_registry = NativeExtensionRegistry(SimpleNamespace(get_all_stars=lambda: [self.game_star]),
-                                                       now=self.clock.now)
-        self.addCleanup(self.native_registry.close)
+        self.native_registry = internal_registry(self.game_port, now=self.clock.now)
+        self.addAsyncCleanup(self.native_registry.aclose)
 
     async def game_host(self):
         self.create_port()
@@ -50,24 +89,54 @@ class GameMemoryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
             repository.set_authorization(extension_id="game", capability_id=capability,
                 subject=self.important.subject, scope=SCOPE, state=CapabilityAuthorizationState.ACTIVE,
                 expected_revision=0, observed_at=self.clock.now()).unwrap()
-        return await self.start(host)
+        started = await self.start(host)
+        self.addAsyncCleanup(close_core_reply_tools, started.application)
+        return started
 
     async def operate(self, host, action, arguments, identifier):
-        async def model(envelope):
-            self.assertIn("两人共享的桌边时光", envelope.original.instruction)
-            self.assertIn("通过掷法、碰杯沿、手势等操作悄悄影响结果", envelope.original.instruction)
-            if not envelope.tool_history:
-                return requested(ToolCall(identifier, action, encode(arguments)))
-            return answered("本次游戏操作已核对。")
-        self.model_behavior = model
-        batch = host.receive(self.event(identifier)).unwrap()
-        state = await self.done(host.application, batch)
-        self.assertEqual(state["state"], "complete", dict(state))
-        row = self.runtime.read_one("SELECT * FROM extension_tool_invocations WHERE batch_id=?", (batch,))
+        app = host.application
+        context = TaskContext(self.important, require(self.identity.resolve_role(SCOPE, observed_at=self.clock.now())),
+                              AudienceRef(SCOPE, (self.important.subject,)))
+
+        def check_context(current):
+            return app.tasks.check_context_access(current, action="conversation.reply", observed_at=self.clock.now())
+
+        observer = CoreReplyObservations(SimpleNamespace(application=app, runtime=app.runtime,
+            now=self.clock.now, authorize=lambda current: require(check_context(current))))
+        self.addAsyncCleanup(observer.close)
+        native_input = NativeConversationInput(identifier, context.actor.principal,
+            ConversationRoute(SCOPE, user=context.actor.subject), context.audience,
+            "本次游戏操作 " + identifier, self.clock.now(), context.role_binding.role, "原角色人格提示")
+        turn = "core-reply:" + digest([context.key, identifier])
+        pending = observer.input(context, native_input, turn_id=turn)
+        self.assertIsNotNone(await pending)
+        await app.state_maintenance.bind_async(context, native_input.instruction)
+        prepared = {"context": context, "event_id": identifier, "turn_id": turn,
+            "instruction": native_input.instruction, "native_input": native_input, "native_source_future": pending}
+        event = FakeEvent()
+        prepare_core_reply_event(event, prepared,
+            authorize=lambda _: asyncio.sleep(0, result=check_context(context)))
+        request = SimpleNamespace(func_tool=None, system_prompt=native_input.instruction)
+        offered = inject_core_reply_tools(event, request, application=app)
+        self.assertEqual({item for item in offered if item.startswith("game.")},
+                         set(self.game_port.manifest()["package"]["capabilities"]))
+        name = native_tool_name(action)
+        call = NativeCall(id=identifier, function=NativeCall.FunctionBody(name=name, arguments=encode(arguments)))
+        wrapper = SimpleNamespace(context=SimpleNamespace(event=event), messages=[Message(role="assistant", tool_calls=[call])])
+        await observer.phase(prepared, "running")
+        result = json.loads(await request.func_tool.get_tool(name).call(wrapper, **arguments))
+        self.assertEqual(result["state"], "succeeded", result)
+        await observer.phase(prepared, "completed")
+        row = app.tools.external._row(result["invocation_id"])
         self.assertEqual(row["state"], "succeeded", dict(row))
+        self.assertEqual(row["execution_path"], "astrbot_core")
         reference = source_from_document(json.loads(row["result_source_json"]))
-        source = host.application.memory.writer.access.source(self.context(host.application, batch), reference)
-        return batch, row, reference, json.loads(source.payload)["native"]["result"]["game"]
+        source = app.memory.writer.access.source(context, reference)
+        self.assertEqual(app.runtime.read_all("SELECT * FROM conversation_batches", ()), ())
+        self.assertEqual(self.called, [])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(event.sent, [])
+        return context, row, reference, json.loads(source.payload)["native"]["result"]["game"]
 
     async def experiences(self, app, context, count):
         self.advance(app, 31)
@@ -79,9 +148,8 @@ class GameMemoryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         app = host.application
         self.assertIsNotNone(app.memory.game)
         with patch.object(game_provider, "fresh_shoe", return_value=shoe_with_draws(["A", "K", "9", "8"])):
-            batch, row, source, game = await self.operate(host, game_provider.BLACKJACK_CREATE,
+            context, row, source, game = await self.operate(host, game_provider.BLACKJACK_CREATE,
                 {"difficulty": "normal"}, "natural")
-        context = self.context(app, batch)
         self.assertEqual((game["status"], game["outcome"]), ("finished", "player"))
         view = (await self.experiences(app, context, 1))[0]
         self.assertIn("二十一点终局", view["title"])
@@ -105,9 +173,8 @@ class GameMemoryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         host = await self.game_host()
         app = host.application
         with patch.object(game_provider, "fresh_shoe", return_value=shoe_with_draws(["10", "6", "9", "8", "4", "5"])):
-            batch, row, _, game = await self.operate(host, game_provider.BLACKJACK_CREATE,
+            context, row, _, game = await self.operate(host, game_provider.BLACKJACK_CREATE,
                 {"difficulty": "normal"}, "create")
-        context = self.context(app, batch)
         self.assertIsNone(app.memory.game.record(context, row["invocation_id"]).unwrap()["view_id"])
         _, _, _, closed = await self.operate(host, game_provider.BLACKJACK_CLOSE,
                                              {"game_id": game["game_id"]}, "close")
@@ -126,21 +193,21 @@ class GameMemoryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_xiangqi_terminal_receipt_survives_restart_with_same_ingestion_cursor(self):
         host = await self.game_host()
         app = host.application
-        batch, _, _, game = await self.operate(host, game_provider.XIANGQI_CREATE,
+        context, _, _, game = await self.operate(host, game_provider.XIANGQI_CREATE,
             {"difficulty": "normal", "human_side": "red"}, "create")
-        context = self.context(app, batch)
         _, _, source, game = await self.operate(host, game_provider.XIANGQI_MOVE,
             {"game_id": game["game_id"], "from_row": 9, "from_column": 1, "to_row": 7, "to_column": 2}, "win")
         self.assertEqual((game["status"], game["outcome"]), ("finished", "player"))
         view = (await self.experiences(app, context, 1))[0]
         self.assertIn("中国象棋终局", view["title"])
         await app.close()
-        self.native_registry.close()
+        await self.native_registry.aclose()
         await self.game_port.close()
         self.create_port()
         restarted = await self.start(self.host(runtime=self.open_runtime(), tool_port=self.native_registry,
             policy=ConversationPolicy(0, 0, 180, 0)), task_generation=1, model_generation=1)
         current = restarted.application
+        self.addAsyncCleanup(close_core_reply_tools, current)
         self.assertEqual(current.memory.experiences.read(context, view["view_id"]).unwrap()["view_id"], view["view_id"])
         self.assertEqual(current.memory.game.advance(context).unwrap()["examined"], 0)
         self.assertTrue(current.messages.sources.validate_reference(source, observed_at=self.clock.now()).is_success)
@@ -148,9 +215,8 @@ class GameMemoryTests(HostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_turtle_soup_and_draw_guess_save_only_confirmed_terminal_results(self):
         host = await self.game_host()
         app = host.application
-        batch, create_row, _, turtle = await self.operate(host, game_provider.TURTLE_CREATE,
+        context, create_row, _, turtle = await self.operate(host, game_provider.TURTLE_CREATE,
             {}, "turtle-create")
-        context = self.context(app, batch)
         self.assertIsNone(app.memory.game.record(context, create_row["invocation_id"]).unwrap()["view_id"])
         scope = next(iter(self.game_port.store.data["scopes"].values()))
         puzzle = next(room["puzzle"] for room in scope.values() if room["game_id"] == turtle["game_id"])

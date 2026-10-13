@@ -249,6 +249,44 @@ class RoleLifeManagement:
                     scope=self.context.scope, capability=action, tier=AuthorizationTier.STANDARD,
                     valid_from=self.app.now(), expected_revision=identity.revision)
 
+    def sync_configuration_grant(self, operator, enabled, receipt):
+        """Keep the generic settings editor on the same grant path as this manager."""
+        now = self.app.now()
+        require(self.policy.scope_access(operator, scope=self.context.scope, action="configuration.write",
+                                         observed_at=now, core_only=True))
+        self.app.tasks._context(self.context, now)
+        current = require(self.app.configuration.read(operator, target=target_for(self.context), group_id=GROUP,
+                                                      observed_at=now))
+        if current.values[GROUP + ".enabled"] is not enabled:
+            return
+
+        identity, context = self.app.tasks.identity, self.context
+        prefix = "life-grant-" + digest(context.key) + ":"
+        actions = ("role.life.run", "role.life.read", "role.journal.write", "role.reading.record")
+        if not receipt["replayed"]:
+            self._grants(enabled, receipt["operation_id"])
+            return
+
+        if not enabled:
+            for grant in identity.snapshot().grants:
+                if (grant.grant_id.startswith(prefix) and grant.scope == context.scope
+                        and grant.subject == context.actor.subject and grant.state is GrantState.ACTIVE):
+                    identity.revoke_grant(grant.grant_id, revoked_at=now, expected_revision=identity.revision)
+            return
+
+        grants = identity.snapshot().grants
+        for action in actions:
+            grant_id = prefix + digest([receipt["operation_id"], action])
+            if any(grant.grant_id == grant_id for grant in grants):
+                continue
+            if any(grant.grant_id.startswith(prefix) and grant.scope == context.scope
+                   and grant.subject == context.actor.subject and grant.capability == action
+                   and grant.state is GrantState.ACTIVE for grant in grants):
+                continue
+            identity.issue_grant(grant_id=grant_id, subject=context.actor.subject, scope=context.scope,
+                capability=action, tier=AuthorizationTier.STANDARD, valid_from=now,
+                expected_revision=identity.revision)
+
     def _add_text(self, data, op_id):
         text, title = data["text"], data["title"]
         if (type(text) is not str or not text.strip() or len(text) > 262144

@@ -7,13 +7,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from astrbot_host.native_extensions import NativeExtensionRegistry
 from companion_v2.capabilities.native import parse_manifest
 from companion_v2.memory.game_ingestion import GAME_ACTIONS
-from astrbot_plugin_game_companion.blackjack import BlackjackCard, RANKS, SUITS
-from astrbot_plugin_game_companion.native_v2 import provider as game_provider
+from companion_v2.games.blackjack import BlackjackCard, RANKS, SUITS
+from companion_v2.games.native import provider as game_provider
+from companion_v2.product import PRODUCT_VERSION
 
 from tests.test_game_native_pig_dice import request
+from tests.native_internal_support import internal_registry
 
 
 def shoe_with_draws(ranks):
@@ -29,15 +30,21 @@ class NativeBlackjackTests(unittest.IsolatedAsyncioTestCase):
     async def test_hidden_card_settlement_restart_and_scope(self):
         plugin = SimpleNamespace(native_v2_blackjack_enabled=True)
         with tempfile.TemporaryDirectory() as root:
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             manifest = parse_manifest(provider.manifest(), plugin_id=game_provider.PLUGIN_ID,
-                                      version="0.2.8")
-            self.assertEqual(len(manifest.tools), 5)
-            star = SimpleNamespace(root_dir_name=game_provider.PLUGIN_ID, version="0.2.8",
-                activated=True, star_cls=SimpleNamespace(extension_api=SimpleNamespace(
-                    companion_v2_native=lambda: provider)))
-            self.assertEqual(NativeExtensionRegistry(SimpleNamespace(
-                get_all_stars=lambda: [star])).issues, ())
+                                      version=PRODUCT_VERSION)
+            self.assertEqual(len(manifest.tools), 35)
+            self.assertEqual({tool["action"] for tool in manifest.tools} & {
+                game_provider.BLACKJACK_READ, game_provider.BLACKJACK_CREATE,
+                game_provider.BLACKJACK_HIT, game_provider.BLACKJACK_STAND,
+                game_provider.BLACKJACK_CLOSE}, {
+                game_provider.BLACKJACK_READ, game_provider.BLACKJACK_CREATE,
+                game_provider.BLACKJACK_HIT, game_provider.BLACKJACK_STAND,
+                game_provider.BLACKJACK_CLOSE})
+            registry = internal_registry(provider)
+            self.addAsyncCleanup(registry.aclose)
+            self.assertEqual(registry.issues, ())
+            self.assertEqual(len(registry.declarations()), 35)
             self.assertEqual(set(GAME_ACTIONS) & {game_provider.BLACKJACK_CREATE,
                 game_provider.BLACKJACK_HIT, game_provider.BLACKJACK_STAND},
                 {game_provider.BLACKJACK_CREATE, game_provider.BLACKJACK_HIT,
@@ -62,7 +69,7 @@ class NativeBlackjackTests(unittest.IsolatedAsyncioTestCase):
             dealt = await provider.execute(hit, before_dispatch=lambda: True)
             self.assertEqual(dealt["result"]["game"]["state"]["hands"]["1"]["value"], 20)
             self.assertTrue(dealt["result"]["game"]["state"]["dealer_hidden"])
-            restarted = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            restarted = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             repeated = await restarted.execute(hit, before_dispatch=lambda: True)
             self.assertEqual(repeated["operation_id"], dealt["operation_id"])
             self.assertEqual(repeated["result"], dealt["result"])
@@ -75,13 +82,17 @@ class NativeBlackjackTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(game_provider.NativeGameError, "game_original_invocation_mismatch"):
                 await restarted.execute(request(restarted, game_provider.BLACKJACK_HIT,
                     {"game_id": game_id}, "hit", subject="player-b"), before_dispatch=lambda: True)
+            declared = restarted.manifest()
             plugin.native_v2_blackjack_enabled = False
-            self.assertEqual(restarted.manifest()["tools"], [])
+            self.assertEqual(restarted.manifest(), declared)
+            with self.assertRaisesRegex(game_provider.NativeGameError, "game_blackjack_disabled"):
+                await restarted.execute(request(restarted, game_provider.BLACKJACK_READ,
+                    {}, "disabled-read"), before_dispatch=lambda: True)
 
     async def test_natural_result_and_corrupt_shoe(self):
         plugin = SimpleNamespace(native_v2_blackjack_enabled=True)
         with tempfile.TemporaryDirectory() as root:
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             with patch.object(game_provider, "fresh_shoe", return_value=shoe_with_draws(
                     ["A", "K", "9", "8"])):
                 opened = await provider.execute(request(provider, game_provider.BLACKJACK_CREATE,
@@ -94,7 +105,7 @@ class NativeBlackjackTests(unittest.IsolatedAsyncioTestCase):
             room["shoe"][0] = room["shoe"][1]
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaisesRegex(game_provider.NativeGameError, "game_store_invalid"):
-                game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+                game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
 
 
 if __name__ == "__main__":

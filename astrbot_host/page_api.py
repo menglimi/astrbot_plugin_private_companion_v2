@@ -1,5 +1,8 @@
 """Authenticated page directory; the host supplies every target and API path."""
 
+from urllib.parse import parse_qs, urlsplit
+
+from astrbot.api import logger
 from astrbot.api.web import request
 from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
@@ -21,8 +24,70 @@ class PageWebAPI:
 
     def routes(self):
         return [(PREFIX + "/page/targets", self.targets, ["GET"], "Read authorized Companion page targets"),
+                (PREFIX + "/page/workspace-entry", self.workspace_entry, ["GET"],
+                 "Refresh the authenticated Companion workspace asset entry"),
                 (PREFIX + "/page/ownership", self.ownership, ["GET"],
                  "Read which plugin currently provides model-facing memory")]
+
+    async def workspace_entry(self):
+        """Refresh the current page's short-lived resource token through AstrBot.
+
+        Plugin pages run in an opaque-origin iframe, so their own fetch calls cannot
+        read Dashboard endpoints. The registered plugin API bridge supplies the
+        authenticated request context needed by AstrBot's page service.
+        """
+
+        from .web_api import outcome_response
+
+        try:
+            username = request.username
+            if (
+                type(username) is not str
+                or not username.strip()
+                or username.startswith("api_key:")
+            ):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            plugin_name = PREFIX.lstrip("/")
+            if request.plugin_name != plugin_name:
+                raise TaskError("page_request_invalid", "the page entry is only available to this plugin")
+            if request.query:
+                raise TaskError("page_request_invalid", "the page entry does not accept query overrides")
+
+            current_request = request._get_current()
+            raw_request = getattr(current_request, "_request", None)
+            app_state = getattr(getattr(raw_request, "app", None), "state", None)
+            services = getattr(app_state, "services", None)
+            page_service = getattr(services, "plugin_pages", None)
+            get_entry = getattr(page_service, "get_plugin_page_entry_config", None)
+            if not callable(get_entry):
+                raise TaskError("page_entry_unavailable", "AstrBot page service is unavailable")
+
+            locale = request.headers.get("accept-language", "").split(",", 1)[0].split(";", 1)[0].strip()
+            if not locale or len(locale) > 32:
+                locale = "zh-CN"
+            entry = await get_entry(
+                plugin_name=plugin_name,
+                page_name="陪伴小屋",
+                username=username,
+                locale=locale,
+            )
+            content_path = entry.get("content_path") if isinstance(entry, dict) else None
+            token = (
+                parse_qs(urlsplit(content_path).query).get("asset_token", [""])[0]
+                if isinstance(content_path, str)
+                else ""
+            )
+            if not isinstance(content_path, str) or not content_path.strip() or not token:
+                raise TaskError("page_entry_unavailable", "AstrBot returned an invalid page entry")
+            return {"status": "ok", "message": "", "data": entry}
+        except TaskError as error:
+            if error.code == "page_entry_unavailable":
+                logger.warning("[CompanionV2] 工作区授权刷新失败 code=%s", error.code)
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except Exception as error:
+            logger.warning("[CompanionV2] 工作区授权刷新暂不可用 error_type=%s", type(error).__name__)
+            return outcome_response(Outcome.failed(
+                "page_entry_unavailable", "AstrBot could not refresh the workspace entry"))
 
     async def ownership(self):
         """这段时期记忆由谁对外提供，以及为什么不是 V2。

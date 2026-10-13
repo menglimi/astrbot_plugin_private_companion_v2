@@ -198,11 +198,12 @@ class ReadOriginalTests(PersonaWorkshopFixture):
         import re
         self.assertIsNone(re.search(r"\b[0-9a-f]{64}\b", payload), payload)
 
-    async def test_the_route_family_has_no_third_write_route(self):
+    async def test_role_profile_migration_has_a_separate_review_and_apply_pair(self):
         await self.initialize()
         paths = sorted(path for path in self.routes if path.startswith(PREFIX))
-        self.assertEqual(paths, [PREFIX, PREFIX + "/command", PREFIX + "/profile-draft", PREFIX + "/standardize",
-                                 PREFIX + "/style-rules", PREFIX + "/tryouts"])
+        self.assertEqual(paths, [PREFIX, PREFIX + "/command", PREFIX + "/profile-draft",
+                                 PREFIX + "/profile-migration-apply", PREFIX + "/profile-migration-plan",
+                                 PREFIX + "/standardize", PREFIX + "/style-rules", PREFIX + "/tryouts"])
         self.assertEqual(COMMANDS, {"save": {"text", "note", "expected_current"},
                                     "restore": {"version_id", "note", "expected_current"}})
 

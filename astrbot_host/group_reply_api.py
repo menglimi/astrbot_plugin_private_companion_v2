@@ -69,7 +69,7 @@ class GroupReplyWebAPI:
 
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=finite)
         expected = {"settings", "text"} if action == "preview" else {"operation_key", "edit_token", "changes"}
-        optional = {"image_count"} if action == "preview" else set()
+        optional = {"image_count"} if action == "preview" else {"reset_to_inherit"} if action == "configure" else set()
         if type(data) is not dict or not expected <= set(data) or set(data) - expected - optional:
             raise ValueError("unexpected or missing group reply fields")
         return data
@@ -145,12 +145,22 @@ class GroupReplyWebAPI:
 
     async def expression_configure(self):
         try:
-            data = await self._body("configure")
+            data = await self._body("expression_configure")
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             return outcome_response(Outcome.failed("group_reply_request_invalid", "invalid UTF-8 expression settings request"))
         return await self._run("expression_configure", data)
 
     def _style_context(self, controller, session_id, binding, scope):
+        from companion_v2.conversation.native_turns import latest_scope
+        native = latest_scope(controller.runtime, scope)
+        if native is not None:
+            try:
+                context = TaskContext.restore(json.loads(native["context_json"]))
+            except (TypeError, ValueError, KeyError):
+                context = None
+            if (context is not None and context.key == native["context_key"]
+                    and context.scope == scope and context.role_binding == binding):
+                return context
         rows = controller.runtime.read_all("""SELECT origin_key, context_json FROM conversation_batches b
             WHERE json_extract(b.context_json, '$.role_binding.scope.installation_id') = ?
               AND json_extract(b.context_json, '$.role_binding.scope.platform') = ?

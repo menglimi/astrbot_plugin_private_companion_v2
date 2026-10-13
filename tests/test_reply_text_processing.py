@@ -15,6 +15,12 @@ def policy(**changes):
 
 
 class ReplyTextProcessingTests(unittest.TestCase):
+    def test_default_word_segmentation_keeps_comma_linked_clauses_together(self):
+        text = "知道呀～就是机器人内部给这条申请生成的唯一编号，方便后台批准或驳回时对上号。你不用管它，看昵称和问答就行。"
+        self.assertEqual(SegmentationPolicy().parts(text), (
+            "知道呀～就是机器人内部给这条申请生成的唯一编号，方便后台批准或驳回时对上号。",
+            "你不用管它，看昵称和问答就行。"))
+
     def test_forbidden_word_guard_is_opt_in_scoped_and_case_aware(self):
         disabled = policy(recall_forbidden_words='["秘密"]')
         self.assertIsNone(disabled.forbidden_word_guard("这里有秘密"))
@@ -45,8 +51,15 @@ class ReplyTextProcessingTests(unittest.TestCase):
             validate({**asdict(SegmentationPolicy()), "streaming": True, "part_gap_ms": 0,
                       **fields, "recall_forbidden_scope": "invalid"})
 
-    def test_defaults_use_v1_enabled_punctuation_cleanup(self):
+    def test_cleanup_and_replacement_are_disabled_by_default(self):
         presentation = ReplyTextPolicy()
+        self.assertFalse(presentation.content_cleanup_enabled)
+        self.assertFalse(presentation.content_replacement_enabled)
+        self.assertEqual(presentation.clean_parts(("原文。\n",)), ("原文。\n",))
+
+    def test_configured_trailing_punctuation_cleanup_preserves_internal_punctuation(self):
+        presentation = ReplyTextPolicy(content_cleanup_enabled=True, content_cleanup_scope="trailing",
+                                       content_cleanup_words='["。", "，"]')
         self.assertEqual(presentation.content_cleanup_mode, "words")
         self.assertEqual(presentation.content_cleanup_scope, "trailing")
         self.assertEqual(json.loads(presentation.content_cleanup_words), ["。", "，"])

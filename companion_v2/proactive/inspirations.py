@@ -4,7 +4,6 @@ import json
 
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
 from companion_v2.delivery.history import BackgroundHistory
-from companion_v2.delivery.service import DeliveryRequest
 from companion_v2.execution.models import TaskError, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind
 
@@ -56,9 +55,7 @@ class ProactiveInspirations:
         # is never projected as something the character already said.
         parts, delivered_at = [], []
         for reference in entry["references"]:
-            historical = self.contacts.history._body(reference, context, at)
-            delivery = self.contacts.delivery._row(reference["delivery_id"])
-            request = DeliveryRequest.restore(delivery["request_json"])
+            historical, request = self.contacts.history._body_with_request(reference, context, at)
             if request.owner != "proactive.contact" or request.source_ref != row["contact_id"]:
                 raise TaskError("inspiration_snapshot_invalid", "inspiration receipt belongs to another contact")
             parts.append((request.sequence, historical["text"]))
@@ -70,10 +67,11 @@ class ProactiveInspirations:
                 "part_count": len(saved.get("parts") or (row["body"],)),
                 "provenance": saved.get("news_provenance")}
 
-    def capture(self, context, at):
-        """Seal references to recent confirmed inspirations in this exact window."""
+    def _capture(self, context, at):
+        """Seal recent references and resolve their receipt-backed display data once."""
         self._authorize(context, at)
         snapshot = {"version": VERSION, "context_key": context.key, "entries": []}
+        items = []
         rows = self.runtime.read_all("""SELECT c.contact_id, MAX(d.delivered_at) AS shared_at
             FROM proactive_contacts c JOIN background_deliveries d
               ON d.owner = ? AND json_extract(d.request_json, '$.source_ref') = c.contact_id
@@ -97,10 +95,15 @@ class ProactiveInspirations:
             if used + size > MAX_CHARS:
                 continue
             snapshot["entries"].append(entry)
+            items.append(item)
             used += size
             if len(snapshot["entries"]) >= MAX_ITEMS:
                 break
-        return snapshot
+        return snapshot, tuple(items)
+
+    def capture(self, context, at):
+        """Seal references to recent confirmed inspirations in this exact window."""
+        return self._capture(context, at)[0]
 
     def read(self, snapshot, context, at):
         """Recheck every receipt and source whenever a sealed list is used."""
@@ -117,5 +120,14 @@ class ProactiveInspirations:
         return items
 
     def contribution(self, snapshot, context, at):
+        return self._contribution(self.read(snapshot, context, at))
+
+    def capture_contribution(self, context, at):
+        """Prepare prompt data with one full receipt and provenance validation pass."""
+        _, items = self._capture(context, at)
+        return self._contribution(items) if items else None
+
+    @staticmethod
+    def _contribution(items):
         return ContextContribution("proactive:inspirations", OWNER, "shared_news_provenance",
-            ContributionState.READY, encode({"items": self.read(snapshot, context, at)}))
+            ContributionState.READY, encode({"items": items}))

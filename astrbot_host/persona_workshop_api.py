@@ -20,7 +20,7 @@ import asyncio
 import json
 
 from astrbot.api.web import request
-from companion_v2.execution.models import TaskError, require
+from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -33,8 +33,10 @@ from companion_v2.role_profile.configuration import (FIELD_LIMITS as ROLE_PROFIL
     configuration_fields as role_profile_configuration_fields,
     target_for as role_profile_target_for)
 from companion_v2.role_profile.drafts import (MAX_KNOWLEDGE_CHARS, MAX_KNOWLEDGE_ITEMS,
-    MAX_SOURCE_CHARS, MAX_SUPPLEMENT_CHARS, build_role_profile_prompt,
+    DRAFT_FIELD_LIMITS, MAX_SOURCE_CHARS, MAX_SUPPLEMENT_CHARS, build_role_profile_prompt,
     normalize_knowledge_references, parse_role_profile_draft)
+from companion_v2.role_profile.migration import (RoleProfileMigrationError,
+    map_persona_role_profile, map_v1_world_knowledge_role_profile)
 from companion_v2.relationships.profile import (FIELD_LIMITS as RELATIONSHIP_PROFILE_FIELD_LIMITS,
     GROUP as RELATIONSHIP_PROFILE_GROUP, TOTAL_CHAR_LIMIT as RELATIONSHIP_PROFILE_TOTAL_CHAR_LIMIT,
     RelationshipProfileConfigurationOwner,
@@ -44,6 +46,7 @@ from companion_v2.relationships.profile_drafts import (build_relationship_profil
     parse_relationship_profile_draft)
 
 from .management_identity import dashboard_operator
+from .legacy_config import read_v1_host_configuration
 from .persona_catalog import persona_choices
 
 
@@ -164,6 +167,10 @@ class PersonaWorkshopWebAPI:
                  "Append a persona draft version, or restore an earlier one"),
                 (PREFIX + "/profile-draft", self.profile_draft, ["POST"],
                  "Generate a reviewable role-profile draft from an AstrBot persona"),
+                (PREFIX + "/profile-migration-plan", self.profile_migration_plan, ["POST"],
+                 "Preview explicit role-canon fields from an AstrBot persona"),
+                (PREFIX + "/profile-migration-apply", self.profile_migration_apply, ["POST"],
+                 "Import the reviewed explicit role-canon fields into V2"),
                 (PREFIX + "/standardize", self.standardize, ["POST"],
                  "Generate a reviewable persona draft from a questionnaire"),
                 (PREFIX + "/tryouts", self.tryouts, ["POST"],
@@ -388,7 +395,7 @@ class PersonaWorkshopWebAPI:
                         prompt = build_role_profile_prompt(snapshot.text, supplement,
                                                           current_profile=existing_profile,
                                                           knowledge_references=knowledge)
-                        limits = ROLE_PROFILE_FIELD_LIMITS
+                        limits = DRAFT_FIELD_LIMITS
                         total_limit = 30000
                     else:
                         existing_profile = current_relationship_profile(controller.runtime, session)
@@ -461,6 +468,200 @@ class PersonaWorkshopWebAPI:
             return outcome_response(Outcome.failed("role_profile_draft_invalid", "the profile draft response was invalid"))
         except Exception:
             return outcome_response(Outcome.failed("role_profile_draft_failed", "the profile could not be drafted; check the selected model and try again"))
+
+    @staticmethod
+    def _profile_migration_request(data, *, applying=False):
+        expected = {"persona_id", "plan_token", "edit_token", "changes"} if applying else {"persona_id"}
+        if type(data) is not dict or set(data) != expected:
+            raise ValueError("invalid role-profile migration request")
+        persona_id = data["persona_id"]
+        if type(persona_id) is not str or not persona_id.strip() or len(persona_id) > 256:
+            raise ValueError("invalid persona selection")
+        if not applying:
+            return persona_id, "", "", {}
+        plan_token, edit_token, changes = data["plan_token"], data["edit_token"], data["changes"]
+        if (type(plan_token) is not str or len(plan_token) != 64
+                or any(char not in "0123456789abcdef" for char in plan_token)
+                or type(edit_token) is not str or len(edit_token) != 64
+                or any(char not in "0123456789abcdef" for char in edit_token)
+                or type(changes) is not dict or not changes
+                or len(changes) > len(ROLE_PROFILE_FIELD_LIMITS)
+                or any(type(key) is not str or key not in ROLE_PROFILE_FIELD_LIMITS
+                       or type(value) is not str or len(value) > ROLE_PROFILE_FIELD_LIMITS[key]
+                       for key, value in changes.items())):
+            raise ValueError("invalid role-profile migration plan")
+        return persona_id, plan_token, edit_token, dict(changes)
+
+    def _profile_migration_source(self, persona_id, persona):
+        try:
+            legacy_config, _, config_fingerprint = read_v1_host_configuration(self.controller.data_root)
+        except (OSError, ValueError, UnicodeError):
+            raise TaskError("role_profile_migration_source_invalid",
+                            "the V1 plugin settings could not be read safely")
+
+        if legacy_config is not None:
+            role_prompt = legacy_config.get("schedule_persona_prompt", "")
+            image_hint = legacy_config.get("private_image_self_recognition_hint", "")
+            if role_prompt or image_hint:
+                if legacy_config.get("enable_multi_persona_mode"):
+                    raise TaskError("role_profile_migration_source_ambiguous",
+                                    "select the V1 persona-specific role profile before importing")
+                source_persona_id = legacy_config.get("plugin_specific_persona_id")
+                if type(source_persona_id) is not str or not source_persona_id.strip():
+                    raise TaskError("role_profile_migration_source_unbound",
+                                    "the V1 role profile is not bound to a persona")
+                if source_persona_id != persona_id:
+                    raise TaskError("role_profile_migration_source_persona_mismatch",
+                                    "the V1 role profile belongs to another persona")
+                try:
+                    mapped = map_v1_world_knowledge_role_profile(
+                        role_prompt, image_hint,
+                        configuration_fingerprint=digest({
+                            "file": config_fingerprint,
+                            "persona_id": source_persona_id,
+                        }),
+                    )
+                except RoleProfileMigrationError as error:
+                    raise TaskError(str(error), "the V1 World Knowledge role profile has no safe fields") from error
+                return mapped, {
+                    "kind": "v1_world_knowledge",
+                    "persona_id": source_persona_id,
+                    "name": "V1 世界知识 / 角色设定",
+                }
+
+        try:
+            mapped = map_persona_role_profile(persona.text)
+        except RoleProfileMigrationError as error:
+            raise TaskError(str(error), "the current persona has no safely mappable role fields") from error
+        return mapped, {
+            "kind": "astrbot_persona",
+            "persona_id": persona.persona_id,
+            "name": persona.name,
+        }
+
+    @staticmethod
+    def _profile_migration_plan(session, mapped, source, operator):
+        from companion_v2.configuration.management import RoleProfileManagement
+
+        if session.profile.target.scope.kind is not ScopeKind.PRIVATE:
+            raise TaskError("role_profile_migration_scope_unsupported", "role canon migration requires a private role")
+        try:
+            manager = RoleProfileManagement(session.application, session.profile.target)
+            status = require(manager.status(operator))
+        except TaskError:
+            raise
+        except Exception as error:
+            raise TaskError("role_profile_context_unavailable", "the current V2 role profile could not be read") from error
+
+        current = status["settings"]
+        changes, matched, preserved = {}, [], []
+        for name, value in mapped["fields"].items():
+            existing = current.get(name, "")
+            if not str(existing or "").strip():
+                changes[name] = value
+            elif existing == value:
+                matched.append(name)
+            else:
+                preserved.append(name)
+        source_key = {"kind": source["kind"], "persona_id": source["persona_id"],
+                  "fingerprint": mapped["source_fingerprint"]}
+        target = {"scope_key": session.profile.target.key,
+                  "role_id": session.profile.target.role_binding.role.subject_id}
+        plan_token = digest({"source": source_key, "target": target,
+                             "edit_token": status["edit_token"], "changes": changes})
+        return {
+            "plan_token": plan_token,
+            "edit_token": status["edit_token"],
+            "source": {"kind": source["kind"], "persona_id": source["persona_id"],
+                       "name": source["name"],
+                       "source_chars": mapped["source_chars"], "block_chars": mapped["block_chars"]},
+            "target": {"role_id": target["role_id"]},
+            "changes": changes,
+            "field_names": sorted(mapped["fields"]),
+            "rejected_fields": mapped["rejected_fields"],
+            "counts": {"available": len(mapped["fields"]), "to_import": len(changes),
+                       "already_matches": len(matched), "preserved_existing": len(preserved),
+                       "over_limit": len(mapped["rejected_fields"]),
+                       "excluded_relationship_sections": mapped["excluded_relationship_sections"]},
+        }
+
+    async def profile_migration_plan(self):
+        from .web_api import outcome_response
+        try:
+            if request.query:
+                raise ValueError("migration planning does not accept query fields")
+            raw = await request.body()
+            if len(raw) > 8192:
+                raise ValueError("migration request too large")
+            persona_id, _, _, _ = self._profile_migration_request(self._document(raw))
+            async with self.controller._control_lock:
+                controller = self.controller
+                session, operator = self._authorized(controller)
+                persona = await self._read_persona(controller, session, persona_id=persona_id)
+                if not persona.resolved:
+                    raise TaskError("role_profile_source_unavailable", "the selected AstrBot persona is unavailable")
+                mapped, source = self._profile_migration_source(persona_id, persona)
+                return outcome_response(Outcome.success(self._profile_migration_plan(
+                    session, mapped, source, operator)))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("role_profile_migration_invalid", "invalid role-profile migration request"))
+
+    async def profile_migration_apply(self):
+        from .web_api import outcome_response
+        try:
+            if request.query:
+                raise ValueError("migration apply does not accept query fields")
+            raw = await request.body()
+            if len(raw) > 32768:
+                raise ValueError("migration request too large")
+            persona_id, plan_token, edit_token, changes = self._profile_migration_request(
+                self._document(raw), applying=True)
+            async with self.controller._control_lock:
+                controller = self.controller
+                session, operator = self._authorized(controller)
+                persona = await self._read_persona(controller, session, persona_id=persona_id)
+                if not persona.resolved or session.profile.target.scope.kind is not ScopeKind.PRIVATE:
+                    raise TaskError("role_profile_migration_source_changed", "the persona source or target changed")
+                fresh, source = self._profile_migration_source(persona_id, persona)
+                if not fresh["fields"] or any(fresh["fields"].get(name) != value for name, value in changes.items()):
+                    raise TaskError("role_profile_migration_source_changed", "the persona source changed after preview")
+                target = {"scope_key": session.profile.target.key,
+                          "role_id": session.profile.target.role_binding.role.subject_id}
+                expected_token = digest({"source": {"kind": source["kind"],
+                    "persona_id": source["persona_id"], "fingerprint": fresh["source_fingerprint"]}, "target": target,
+                    "edit_token": edit_token, "changes": changes})
+                if expected_token != plan_token:
+                    raise TaskError("role_profile_migration_stale", "the migration preview no longer matches its source")
+
+                from companion_v2.configuration.management import RoleProfileManagement
+                manager = RoleProfileManagement(session.application, session.profile.target)
+                current = require(manager.status(operator))
+                if current["edit_token"] == edit_token:
+                    conflicts = [name for name in changes if str(current["settings"].get(name, "") or "").strip()]
+                    if conflicts:
+                        raise TaskError("role_profile_migration_target_changed", "target fields changed after preview")
+                receipt = require(manager.configure(operator, {
+                    "operation_key": "role-profile-migration:" + plan_token,
+                    "edit_token": edit_token,
+                    "changes": changes,
+                }))
+                return outcome_response(Outcome.success({
+                    "operation_id": receipt["operation_id"],
+                    "replayed": receipt["replayed"],
+                    "imported_count": len(changes),
+                    "imported_fields": sorted(changes),
+                    "source_kind": source["kind"],
+                    "source_persona_id": source["persona_id"],
+                }))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except RoleProfileMigrationError as error:
+            code = str(error) if str(error).startswith("role_profile_") else "role_profile_migration_source_invalid"
+            return outcome_response(Outcome.failed(code, "the persona source changed or is no longer readable"))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("role_profile_migration_invalid", "invalid role-profile migration request"))
 
     async def standardize(self):
         """Turn questionnaire answers and a selected AstrBot persona into an editable draft."""

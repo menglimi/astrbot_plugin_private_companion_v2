@@ -18,7 +18,9 @@ window.CompanionWeatherSourcePage = (() => {
     invalid_response:"数据源配置未能读取，请重新读取。",
   };
   let root = null, status = null, draft = null, busy = false, pending = false, stale = false;
-  let generation = 0, abort = null, message = "";
+  let generation = 0, abort = null, message = "", leavePrompt = null;
+  const askConfirm = options => typeof window.CompanionConfirm === "function"
+    ? window.CompanionConfirm(options) : Promise.resolve(false);
   /* 只缓存不含凭据原文的读取状态。编辑中的 credential 永远不会进入这个
      Map；切换角色或会话时使用不同 scope，避免把天气配置串给别的对象。 */
   const statusByScope = new Map();
@@ -131,19 +133,27 @@ window.CompanionWeatherSourcePage = (() => {
       if (draft && Object.hasOwn(draft,event.target.name)) draft[event.target.name] = event.target.value;
     }, {signal:abort.signal});
     root.addEventListener("submit", event => {if (event.target.matches("[data-weather-source-form]")) {event.preventDefault(); save();}}, {signal:abort.signal});
-    root.addEventListener("click", event => {
+    root.addEventListener("click", async event => {
       const action = event.target.closest("[data-weather-source-action]")?.dataset.weatherSourceAction;
-      if (action === "reload" && (!dirty() || window.confirm("重新读取会清空未保存的数据源修改。继续吗？"))) load();
-      if (action === "clear" && window.confirm("清除页面保存的和风凭据？若存在环境变量凭据，将恢复使用它。")) save(true);
+      if (action === "reload") {
+        if (dirty() && !await askConfirm({title:"放弃天气数据源修改",message:"重新读取会清空未保存的数据源修改。",confirmText:"重新读取"})) return;
+        load();
+      }
+      if (action === "clear" && await askConfirm({title:"清除页面凭据",message:"清除页面保存的和风凭据？若存在环境变量凭据，将恢复使用它。",confirmText:"清除凭据",danger:true})) save(true);
     }, {signal:abort.signal});
     render(); load();
   }
   function canLeave() {
     if (busy) return false;
-    return !dirty() || window.confirm("天气数据源修改尚未保存，离开并丢弃修改吗？");
+    if (!dirty()) return true;
+    if (!leavePrompt) {
+      leavePrompt = askConfirm({title:"天气数据源尚未保存",message:"离开此页会丢弃未保存的数据源修改。",confirmText:"离开并丢弃",danger:true})
+        .finally(() => { leavePrompt = null; });
+    }
+    return leavePrompt;
   }
   function unmount() {
-    generation++; abort?.abort(); abort = null; root = status = draft = null;
+    generation++; abort?.abort(); abort = null; root = status = draft = null; leavePrompt = null;
     busy = pending = stale = false; message = "";
   }
   window.addEventListener("beforeunload", event => {if (dirty() || busy) {event.preventDefault(); event.returnValue = "";}});

@@ -271,10 +271,16 @@ class MemoryReflection:
             evidence = codec.evidence(raw)
             handle = "s" + str(index + 1)
             handles[handle] = raw
+            delivery = {}
+            from companion_v2.conversation.native_observations import source_row
+            observation = source_row(self.runtime, evidence.source)
+            if observation is not None:
+                delivery = {"delivery_state": observation["delivery_state"],
+                            "delivery_basis": "native_observation_without_platform_delivery_receipt"}
             materials.append(PromptMaterial("memory", "reflection_source", encode({"handle": handle,
                 "text": self.memory.writer.access.evidence(context, evidence), "speaker_id": evidence.speaker_id,
                 "source_kind": evidence.source_kind, "message_time": stamp(evidence.source.issued_at),
-                "start": evidence.start, "end": evidence.end}), evidence.source))
+                "start": evidence.start, "end": evidence.end, **delivery}), evidence.source))
         for ref in manifest["facts"]:
             value = require(self.memory.writer.read(context, AtomRef(**ref)))
             handle = next((alias for alias, existing in fact_handles.items() if existing == ref), "f" + str(len(fact_handles) + 1))

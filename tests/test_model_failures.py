@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from companion_v2.configuration.service import ConfigurationService
 from companion_v2.diagnostics.models import DiagnosticContext, DiagnosticQuery
@@ -15,6 +16,28 @@ from tests.test_model_gateway import ModelFixture
 
 
 class ModelFailureTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_every_model_failure_code_is_accepted_by_the_persistent_constraint(self):
+        completion = await self.gateway.generate(self.model_run(), self.request())
+
+        with self.runtime.transaction() as connection:
+            for failure in ModelFailure:
+                connection.execute("DELETE FROM model_call_failures WHERE call_id = ?", (completion.call_id,))
+                BudgetLedger._record_failure(connection, completion.call_id, failure, self.clock.now())
+
+    async def test_provider_timeout_is_settled_as_timeout_instead_of_sqlite_integrity_error(self):
+        async def timeout(awaitable, timeout):
+            await awaitable
+            raise TimeoutError
+
+        with patch("companion_v2.model_gateway.service.asyncio.wait_for", new=timeout):
+            with self.assertRaises(TaskError) as error:
+                await self.gateway.generate(self.model_run(), self.request())
+
+        self.assertEqual(error.exception.code, "model_timeout")
+        call = self.gateway.observe(self.context, "task-1").unwrap()["calls"][0]
+        self.assertEqual(call["state"], "unknown")
+        self.assertEqual(call["failure"]["code"], ModelFailure.TIMEOUT.value)
+
     async def test_unknown_result_logs_safe_provider_diagnostics(self):
         private = "private provider response text"
         summary = ResponseDiagnostics(True, "stop", "native_rejected",
@@ -89,6 +112,19 @@ class ModelFailureTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(private, json.dumps(report))
         self.assertNotIn(private, str(tuple(self.runtime.read_one("SELECT * FROM model_call_failures", ()))))
         self.assertEqual([name for name, _ in self.called], ["primary"])
+
+    async def test_response_diagnostics_accept_only_bounded_error_metadata(self):
+        summary = ResponseDiagnostics(False, failure=ModelFailure.TRANSPORT,
+            error_type="RateLimitError", error_code="provider_rate_limited", status_code=429)
+        self.assertEqual(summary.to_record()["version"], 2)
+        self.assertEqual(summary.to_record()["status_code"], 429)
+        for invalid in (
+            {"error_type": "ProviderError: private message"},
+            {"error_code": "credential=private"},
+            {"status_code": 999},
+        ):
+            with self.assertRaises(ValueError):
+                ResponseDiagnostics(False, **invalid)
 
 
 if __name__ == "__main__":

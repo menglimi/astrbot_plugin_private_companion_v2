@@ -33,6 +33,9 @@ class PreviewRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def make_controller(self):
         controller = AstrBotStagingController(self.native, support.host_config(), self.root,
                                               native_types=self.types, now=lambda: NOW)
+        # This suite exercises the internal rehearsal reader, not live chat.
+        load_session = controller._load_session
+        controller._load_session = lambda **_: load_session(review_only=True)
         self.addAsyncCleanup(controller.terminate)
         return controller
 
@@ -42,7 +45,7 @@ class PreviewRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.controller = self.make_controller()
             self.native.provider.client.state.behavior = attach_originals
         (await self.controller.initialize_profile()).unwrap()
-        (await self.controller.start()).unwrap()
+        (await self.controller.start(review_only=True)).unwrap()
         event = FakeEvent(self.native)
         if images:
             event.message_obj.message = [Plain("看看这张图片"), Image.fromBytes(image_bytes())]
@@ -112,7 +115,7 @@ class PreviewRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_replaced_running_generation_remains_fenced(self):
         await self.prepare()
-        (await self.controller.start()).unwrap()
+        (await self.controller.start(review_only=True)).unwrap()
         self.app = self.controller.session.application
         replacement = TaskSupervisor(self.app.runtime, tuple(self.app.tasks.registrations.values()),
                                      limits=self.app.tasks.limits, now=lambda: NOW)

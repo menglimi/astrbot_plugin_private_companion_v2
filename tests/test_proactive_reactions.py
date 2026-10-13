@@ -40,7 +40,7 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
 
     def import_reaction(self, image=None, *, label="安慰"):
         context = self.contact_context()
-        return self.semantic.reactions.import_image(self.semantic.owner(context), image or picture(),
+        return self.semantic.reactions.import_image(self.semantic.ensure_reaction_catalog(context), image or picture(),
             {"name": label, "description": label, "intents": label})
 
     def choose_reaction(self, intent="安慰"):

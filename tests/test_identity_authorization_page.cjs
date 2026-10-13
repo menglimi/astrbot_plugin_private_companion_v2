@@ -127,7 +127,8 @@ function element(tag) {
   return node;
 }
 
-function harness({ persons, groups = [], group_networks = [], group_access, authorizations = {}, memberSettings = {}, post } = {}) {
+function harness({ persons, groups = [], group_networks = [], group_access, authorizations = {}, memberSettings = {}, post,
+                   refreshPending = false } = {}) {
   const requests = [];
   const byId = new Map();
   const tabs = [element("button"), element("button"), element("button")];
@@ -185,6 +186,7 @@ function harness({ persons, groups = [], group_networks = [], group_access, auth
     ...Object.fromEntries(Object.entries(authorizations).map(([subject, value]) =>
       [authorization + "|" + subject, value])),
   };
+  answers[endpoint].directory_refresh_pending = refreshPending;
   const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
   const harness = {
     requests, document, byId, navigations,
@@ -283,6 +285,66 @@ test("关系图作为关系网默认视图，人物筛选保留", async () => {
   assert.equal(h.document.querySelectorAll(".tab")[0].getAttribute("aria-selected"), "true");
   assert.equal(h.document.querySelectorAll(".view-panel").find(item => item.id === "panel-network").hidden, false);
   assert.equal(h.document.querySelectorAll(".view-panel").find(item => item.id === "panel-people").hidden, true);
+});
+
+test("本地关系先显示，慢速补充请求保留正在编辑的成员详情", async () => {
+  const h = harness({persons: [person("subject-1", "已知成员")], refreshPending: true});
+  await h.send(request => request.route === endpoint && request.params.read_mode === "stored");
+  assert.equal(h.element("count-total").textContent, "1");
+  assert.match(h.element("sync-state").className, /is-ready/);
+  assert.equal(h.element("refresh").disabled, false);
+  const pending = h.requests.find(request => request.route === endpoint && !request.params.read_mode);
+  assert.ok(pending && !pending.answered);
+  const input = element("input");
+  input.value = "尚未保存的关系资料";
+  h.element("person-detail").append(input);
+  const group = {group_id: "300", display_name: "新发现的群", platform_id: "qq-main",
+    account_id: "account-a", bot_id: "bot-a", discovered: true};
+  pending.resolve(directory([person("subject-1", "最新备注")], [group]));
+  await h.settle();
+  assert.ok(h.card("最新备注"));
+  assert.match(flat(h.element("groups-list")), /新发现的群/);
+  assert.ok(h.element("person-detail").children.includes(input));
+  assert.equal(input.value, "尚未保存的关系资料");
+  assert.equal(h.element("sync-state").textContent, "V2 数据已同步");
+});
+
+test("补充资料读取失败后本地关系仍可查看", async () => {
+  const h = harness({persons: [person("subject-1", "已知成员")], refreshPending: true});
+  await h.send(request => request.route === endpoint && request.params.read_mode === "stored");
+  const pending = h.requests.find(request => request.route === endpoint && !request.params.read_mode);
+  pending.resolve({status: "error", data: {code: "acquaintance_native_directory_unavailable"}});
+  await h.settle();
+  assert.ok(h.card("已知成员"));
+  assert.equal(h.element("count-total").textContent, "1");
+  assert.match(h.element("sync-state").className, /is-ready/);
+  assert.match(h.element("sync-state").textContent, /补充资料暂未更新/);
+});
+
+test("旧补充请求不会覆盖重新读取后的关系网", async () => {
+  const h = harness({persons: [person("subject-1", "原成员")], refreshPending: true});
+  await h.send(request => request.route === endpoint && request.params.read_mode === "stored");
+  const pending = h.requests.find(request => request.route === endpoint && !request.params.read_mode);
+  h.element("refresh").handlers.click();
+  await h.settle();
+  h.requests.filter(request => request.route === endpoint && request.params.read_mode === "stored").at(-1)
+    .resolve(directory([person("subject-2", "新目录成员")]));
+  await h.settle();
+  pending.resolve(directory([person("subject-1", "过时名称")]));
+  await h.settle();
+  assert.ok(h.card("新目录成员"));
+  assert.equal(h.card("过时名称"), null);
+});
+
+test("补充读取发现管理授权失效时清空关系数据", async () => {
+  const h = harness({persons: [person("subject-1", "已知成员")], refreshPending: true});
+  await h.send(request => request.route === endpoint && request.params.read_mode === "stored");
+  const pending = h.requests.find(request => request.route === endpoint && !request.params.read_mode);
+  pending.resolve({status: "error", data: {code: "core_access_required"}});
+  await h.settle();
+  assert.equal(h.element("count-total").textContent, "—");
+  assert.equal(h.card("已知成员"), null);
+  assert.match(h.element("sync-state").className, /is-error/);
 });
 
 test("成员页的错误提示不会串到群聊视图", async () => {
@@ -536,9 +598,9 @@ test("面板为每一项能力画一行，状态取自服务端读回的那一�
   ]) } });
   const detail = await open(h, "阿澈");
   const html = markup(detail);
-  /* 目录里那一行仍然是同一次请求，参数原样：只加读取，不改契约。 */
+  /* 首屏按本地模式读取，身份与权限仍由受信路由提供。 */
   const directoryRequest = h.requests.find((item) => item.route === endpoint);
-  assert.deepEqual(Object.keys(directoryRequest.params), []);
+  assert.equal(directoryRequest.params.read_mode, "stored");
   assert.match(html, /data-capability="conversation\.reply"[^>]*data-state="active"[^>]*data-managed-by="configuration"/);
   /* 撤销过就说撤销过，不是「关」也不是空白：那是记录里的事实。 */
   assert.match(html, /data-capability="proactive\.contact"[^>]*data-state="revoked"/);
@@ -635,19 +697,103 @@ test("管理员称呼写入绑定目录路由与卡片 revision，空值清除�
   assert.match(flat(h.element("person-detail")), /平台昵称/);
 });
 
+test("联系偏好显示该私聊的自动调度原因与下一步建议", async () => {
+  const contact = {edit_token: "contact-edit-1", fields: {}, settings: {enabled: true, automatic_enabled: false},
+    schedule_diagnostic: {
+      scheduler: {state: "running", last_seen_at: "2026-10-12T09:58:00+08:00"},
+      evaluation: {outcome: "blocked", stage: "settings", reason_code: "automatic_contact_disabled",
+        observed_at: "2026-10-12T09:55:00+08:00", next_at: null, purpose: null},
+    }};
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])},
+    memberSettings: {"subject-1": {sections: {contact}}}});
+  const detail = await open(h, "阿澈", "联系偏好");
+  const diagnostic = findAll(detail, "member-schedule-diagnostic")[0];
+  assert.ok(diagnostic, "联系页应显示最近自动调度诊断");
+  assert.match(flat(diagnostic), /最近自动调度/);
+  assert.match(flat(diagnostic), /正常运行/);
+  assert.match(flat(diagnostic), /暂时受阻 · 设置/);
+  assert.match(flat(diagnostic), /后台自动联系已关闭/);
+  assert.match(flat(diagnostic), /打开此窗口的后台自动联系开关/);
+  assert.doesNotMatch(flat(diagnostic), /automatic_contact_disabled/);
+});
+
+test("私聊回复默认继承角色，字段可即时展开并单独覆盖或恢复", async () => {
+  const fields = {style_prompt: {kind: "text", maximum_chars: 4000},
+    streaming: {kind: "boolean"}, streaming_mode: {kind: "text"},
+    file_understanding_enabled: {kind: "boolean"}, file_understanding_format_groups: {kind: "text"}};
+  const reply = {edit_token: "reply-edit-1", scope: "window", fields,
+    editable_fields: ["style_prompt", "streaming", "streaming_mode"],
+    settings: {style_prompt: "这个用户尽量简短", streaming: false, streaming_mode: "buffered",
+      file_understanding_enabled: true, file_understanding_format_groups: "文本"},
+    inherited_settings: {style_prompt: "保持角色一贯的语气", streaming: false, streaming_mode: "buffered",
+      file_understanding_enabled: false, file_understanding_format_groups: "文本"},
+    provenance: {style_prompt: {layer: "window", explicit: true},
+      streaming: {layer: "role", explicit: false}, streaming_mode: {layer: "role", explicit: false}}};
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])},
+    memberSettings: {"subject-1": {sections: {reply}}}, post: request => ({sections: {reply: {
+      ...reply, edit_token: "reply-edit-2",
+      settings: {...reply.settings, ...request.body.sections.reply.changes,
+        ...(request.body.sections.reply.reset_to_inherit || []).includes("style_prompt")
+          ? {style_prompt: reply.inherited_settings.style_prompt} : {}},
+      provenance: {...reply.provenance, style_prompt: {layer: "role", explicit: false}},
+    }}})});
+  const detail = await open(h, "阿澈", "回复微调");
+  await h.settle();
+  assert.match(flat(detail), /此用户已覆盖/);
+  const streaming = findInput(detail, "启用模型流式传输");
+  assert.ok(streaming);
+  streaming.checked = true;
+  streaming.handlers.change();
+  const mode = findInput(detail, "流式发送方式");
+  assert.ok(mode, "打开流式传输后应立即显示其细项");
+  assert.ok(findInput(detail, "可读取文件格式"), "启用文件理解后可单独细调格式");
+  mode.value = "incremental";
+  mode.handlers.change();
+  findControl(detail, "恢复角色默认").handlers.click();
+  findControl(detail, "保存回复设置").handlers.click();
+  await h.send(request => request.method === "POST");
+  const written = h.requests.find(request => request.method === "POST");
+  assert.equal(written.route, "acquaintance/settings");
+  assert.deepEqual(JSON.parse(JSON.stringify(written.body.sections.reply.changes)),
+    {streaming: true, streaming_mode: "incremental"});
+  assert.deepEqual(JSON.parse(JSON.stringify(written.body.sections.reply.reset_to_inherit)), ["style_prompt"]);
+});
+
 test("熟人卡只管理互动记忆，人工关系资料独立呈现", async () => {
   const fields = {
     acquaintance_enabled: {kind: "boolean"},
-    acquaintance_learning_enabled: {kind: "boolean"},
     acquaintance_card_chars: {kind: "integer", minimum: 100, maximum: 4000},
   };
-  const memberSettings = {"subject-1": {sections: {person: {edit_token: "person-edit-1", fields,
-    settings: {acquaintance_enabled: true, acquaintance_learning_enabled: true, acquaintance_card_chars: 600}}}}};
+  const learningFields = {acquaintance_learning_enabled: {kind: "boolean"}};
+  const memberSettings = {"subject-1": {sections: {
+    person: {edit_token: "person-edit-1", fields, scope: "relationship", layers: ["installation", "role", "relationship"],
+      settings: {acquaintance_enabled: true, acquaintance_card_chars: 600},
+      inherited_settings: {acquaintance_enabled: true, acquaintance_card_chars: 800},
+      provenance: {acquaintance_enabled: {explicit: false}, acquaintance_card_chars: {explicit: false}}},
+    person_learning: {edit_token: "learning-edit-1", fields: learningFields,
+      settings: {acquaintance_learning_enabled: true},
+      provenance: {acquaintance_learning_enabled: {explicit: false}}},
+  }}};
   const h = harness({persons: [person("subject-1", "阿澈")], memberSettings,
-    authorizations: {"subject-1": status("subject-1", [])}, post: request => ({sections: {
-      person: {edit_token: "person-edit-2", fields, settings: {...memberSettings["subject-1"].sections.person.settings,
-        ...request.body.sections.person.changes}},
-    }})});
+    authorizations: {"subject-1": status("subject-1", [])}, post: request => {
+      const changes = request.body.sections;
+      const personChanges = changes.person?.changes || {};
+      const learningChanges = changes.person_learning?.changes || {};
+      const reset = changes.person?.reset_to_inherit || [];
+      return {sections: {
+        person: {edit_token: "person-edit-2", fields, scope: "relationship", layers: ["installation", "role", "relationship"],
+          settings: {...memberSettings["subject-1"].sections.person.settings, ...personChanges,
+            ...Object.fromEntries(reset.map(name => [name, memberSettings["subject-1"].sections.person.inherited_settings[name]]))},
+          inherited_settings: memberSettings["subject-1"].sections.person.inherited_settings,
+          provenance: Object.fromEntries(Object.keys(fields).map(name => [name, {explicit: !reset.includes(name)
+            && (name in personChanges || memberSettings["subject-1"].sections.person.provenance[name].explicit)}]))},
+        person_learning: {edit_token: "learning-edit-2", fields: learningFields,
+          settings: {...memberSettings["subject-1"].sections.person_learning.settings, ...learningChanges},
+          provenance: {acquaintance_learning_enabled: {explicit: "acquaintance_learning_enabled" in learningChanges}}},
+      }};
+    }});
   const detail = await open(h, "阿澈", "熟人卡");
   assert.ok(findInput(detail, "使用熟人卡"));
   assert.ok(findInput(detail, "持续更新熟人卡"));
@@ -660,11 +806,24 @@ test("熟人卡只管理互动记忆，人工关系资料独立呈现", async ()
   assert.equal(enabled.checked, true);
   enabled.checked = false;
   enabled.handlers.change();
+  const learning = findInput(detail, "持续更新熟人卡");
+  learning.checked = false;
+  learning.handlers.change();
   findControl(detail, "保存资料").handlers.click();
   await h.send(request => request.method === "POST");
   const saved = h.requests.find(request => request.method === "POST");
   assert.equal(saved.route, "acquaintance/settings");
   assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.person.changes)), {acquaintance_enabled: false});
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.person_learning.changes)),
+    {acquaintance_learning_enabled: false});
+
+  const restore = findControl(h.element("person-detail"), "恢复角色默认");
+  assert.ok(restore);
+  restore.handlers.click();
+  findControl(h.element("person-detail"), "保存资料").handlers.click();
+  await h.send(request => request.method === "POST");
+  const reset = h.requests.filter(request => request.method === "POST").at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(reset.body.sections.person.reset_to_inherit)), ["acquaintance_enabled"]);
 });
 
 test("核心用户的人工关系资料只读，普通成员在独立页签编辑", async () => {

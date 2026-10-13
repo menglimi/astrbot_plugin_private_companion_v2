@@ -78,6 +78,23 @@ main > *:nth-child(n+4) { animation-delay: .12s; }
   background: linear-gradient(90deg, var(--line), var(--accent-soft), var(--line));
   background-size: 200% 100%; animation: shimmer 1.5s linear infinite;
 }
+.gm-confirm-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-width: 440px;
+  margin: auto;
+  padding: 24px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 22px 70px rgba(25, 29, 37, .24);
+}
+.gm-confirm-dialog::backdrop { background: rgba(28, 31, 38, .4); backdrop-filter: blur(3px); }
+.gm-confirm-dialog h2 { font-size: 18px; line-height: 1.5; margin-bottom: 8px; }
+.gm-confirm-dialog p { color: var(--muted); font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.gm-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+.gm-confirm-dialog[open] { animation: rise .18s both; }
+@media (prefers-reduced-motion: reduce) { .gm-confirm-dialog[open] { animation: none; } }
 .detail > * { animation: rise .35s both; }
 .placeholder-mark { animation: float 3.2s ease-in-out infinite; }
 .availability-card { animation: rise .4s both; }

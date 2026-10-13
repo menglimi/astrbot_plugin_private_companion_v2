@@ -62,7 +62,15 @@ class NativeTransportBackend:
             if not isinstance(value, dict):
                 raise NativeImageError("native_configuration_invalid")
             self.config[name] = value
-        ImageInvocation("configuration", "configuration", "configuration", "configuration", "generate", "configuration", parameters=self.config["parameters"])
+        parameter_config = self.config["parameters"]
+        operation_parameters = {name: parameter_config.get(name, {}) for name in ("generate", "edit", "mask_edit")}
+        shared_parameters = {key: value for key, value in parameter_config.items()
+                             if key not in operation_parameters}
+        if any(not isinstance(value, dict) for value in operation_parameters.values()):
+            raise NativeImageError("native_configuration_invalid")
+        for operation, specific in operation_parameters.items():
+            ImageInvocation("configuration", "configuration", "configuration", "configuration", operation,
+                            "configuration", parameters={**shared_parameters, **specific})
         if (not isinstance(self.config.get("api_key", ""), str)
                 or type(self.config.get("timeout_seconds", 300)) is not int
                 or self.config.get("timeout_seconds", 300) < 1):
@@ -136,7 +144,12 @@ class NativeTransportBackend:
             mask = next(item for item in references if item.role == "edit_mask")
             validate_masked_inputs(source.data, mask.data)
         if self.backend == "sd_webui":
-            parameters.update(self.config.get("parameters", {}))
+            configured = self.config.get("parameters", {})
+            operation = "edit" if invocation.operation == "mask_edit" else invocation.operation
+            shared = {key: value for key, value in configured.items()
+                      if key not in {"generate", "edit", "mask_edit"}}
+            parameters.update(shared)
+            parameters.update(configured.get(operation, {}))
             parameters.update(invocation.parameters)
             if parameters.keys() - {"width", "height", "steps", "cfg_scale", "seed", "batch_size", "sampler_name", "scheduler", "denoising_strength"}:
                 raise NativeImageError("unsupported_image_parameter")

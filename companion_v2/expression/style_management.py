@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
+from companion_v2.execution.models import TaskError, digest, encode, require, stamp
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import RoleOwnerRef, ScopeKind
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -21,7 +21,7 @@ from ..role_work.growth.management import RoleGrowthManagement
 from . import feedback as style_feedback
 from . import style_rotation
 from .configuration import read_settings
-from .learning import DIMENSIONS, candidate_signature
+from .learning import DIMENSIONS, candidate_signature, normalize_applicability
 from .sharing import MAX_IMPORT_SIGNALS, build_pack, normalize_pack
 
 
@@ -107,23 +107,7 @@ class ExpressionStyleManagement:
         return owner, access.policy_revision
 
     def _evidence_context(self, window, context):
-        context_key = window.get("context_key")
-        if context_key is None:
-            if context.scope.kind is ScopeKind.GROUP:
-                raise TaskError("expression_sample_changed", "original group sample context is unavailable")
-            return context
-        row = self.runtime.read_one("""SELECT context_json FROM conversation_batches
-            WHERE origin_key = ? ORDER BY rowid DESC LIMIT 1""", (context_key,))
-        if row is None:
-            raise TaskError("expression_sample_changed", "original sample context is unavailable")
-        try:
-            original = TaskContext.restore(json.loads(row["context_json"]))
-        except (TypeError, ValueError, KeyError):
-            raise TaskError("expression_sample_changed", "original sample context is invalid") from None
-        if (original.key != context_key or original.scope != context.scope
-                or original.role_binding != context.role_binding):
-            raise TaskError("expression_sample_changed", "original sample belongs to another role or window")
-        return original
+        return self.samples.evidence_context(window, context)
 
     def _window(self, window, at):
         try:
@@ -151,7 +135,7 @@ class ExpressionStyleManagement:
             return self.samples.describe_handles(handles, opened_at, closed_at, sample_context, at,
                 source_kind=window.get("source_kind", "confirmed_reply"))
         except TaskError as error:
-            raise TaskError("expression_sample_changed", error.reason) from None
+            raise TaskError("expression_sample_changed", str(error)) from None
 
     @outcome
     def list(self, *, operator, context, state="pending", dimension=None, limit=20, after_id=None):
@@ -185,9 +169,11 @@ class ExpressionStyleManagement:
                         "limit": read_settings(self.runtime, context).active_signal_limit}
             for row in rows[:limit]:
                 unavailable, evidence = None, []
+                applicability = None
                 source_kind = "confirmed_reply"
                 if state in ("pending", "adopted", "retired", "rejected"):
                     try:
+                        applicability = normalize_applicability(json.loads(row["applicability_json"]))
                         run, window, handles = self._run(row, owner, context)
                         source_kind = window.get("source_kind", "confirmed_reply")
                         opened_at, closed_at = self._window(window, at)
@@ -199,6 +185,8 @@ class ExpressionStyleManagement:
                                 sample_context, at, source_kind=source_kind)
                     except TaskError as error:
                         unavailable = error.code
+                    except (TypeError, ValueError):
+                        unavailable = "expression_applicability_invalid"
                 if state == "pending":
                     actions = ["reject"] if unavailable is not None else ["adopt", "reject"]
                 elif state == "adopted":
@@ -214,6 +202,7 @@ class ExpressionStyleManagement:
                 feedback = feedback_map.get(row["signal_id"], {})
                 items.append({"signal_id": row["signal_id"], "run_id": row["run_id"],
                     "dimension": row["dimension"], "source_kind": source_kind,
+                    "applicability": applicability,
                     "observation": row["observation"] if unavailable is None else None,
                     "proposal": row["proposal"] if unavailable is None else None,
                     "evidence": evidence if unavailable is None else [],
@@ -276,17 +265,19 @@ class ExpressionStyleManagement:
             (owner_key, scope_key))
         active_count = int(active["count"]) if active is not None else 0
         limit = read_settings(self.runtime, context).active_signal_limit
-        rows = self.runtime.read_all("""SELECT dimension, observation, proposal FROM expression_style_signals
+        rows = self.runtime.read_all("""SELECT dimension, observation, proposal, applicability_json FROM expression_style_signals
             WHERE owner_key = ? AND scope_key = ? AND state IN ('pending', 'adopted')""",
             (owner_key, scope_key))
-        existing = {candidate_signature(row["dimension"], row["observation"], row["proposal"])
+        existing = {candidate_signature(row["dimension"], row["observation"], row["proposal"],
+                    normalize_applicability(json.loads(row["applicability_json"])))
                     for row in rows}
         rejected = list(pack["rejected"])
         in_pack_duplicates = sum(item["reason"] == "duplicate_in_pack" for item in rejected)
         candidates, duplicate_count, blocked_count = [], in_pack_duplicates, 0
         remaining = max(0, limit - active_count)
         for signal in pack["signals"]:
-            signature = candidate_signature(signal["dimension"], signal["observation"], signal["proposal"])
+            signature = candidate_signature(signal["dimension"], signal["observation"], signal["proposal"],
+                                            signal["applicability"])
             if signature in existing:
                 duplicate_count += 1
                 continue
@@ -337,7 +328,9 @@ class ExpressionStyleManagement:
                     excluded += 1
                     continue
                 signals.append({"dimension": row["dimension"], "observation": row["observation"],
-                                "proposal": row["proposal"], "confidence": row["confidence"]})
+                                "proposal": row["proposal"],
+                                "applicability": normalize_applicability(json.loads(row["applicability_json"])),
+                                "confidence": row["confidence"]})
         if not signals:
             raise TaskError("expression_export_empty", "there are no adopted rules with usable sources to export")
         package = build_pack(signals, title="陪伴表达分享", exported_at=stamp(at))
@@ -402,11 +395,12 @@ class ExpressionStyleManagement:
             for ordinal, signal in enumerate(candidates):
                 signal_id = "expression-share-signal:" + digest([run_id, ordinal])
                 connection.execute("""INSERT INTO expression_style_signals
-                    (signal_id, run_id, owner_key, scope_key, dimension, observation, proposal,
+                    (signal_id, run_id, owner_key, scope_key, dimension, observation, proposal, applicability_json,
                      confidence, evidence_json, state, created_at, decided_at, decided_by, decision_key, ordinal)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, ?)""",
                     (signal_id, run_id, digest(owner), digest(context.scope), signal["dimension"],
-                     signal["observation"], signal["proposal"], signal["confidence"], encode([]),
+                     signal["observation"], signal["proposal"], encode(signal["applicability"]),
+                     signal["confidence"], encode([]),
                      stamp(at), ordinal))
                 inserted += 1
         self.app.notify()

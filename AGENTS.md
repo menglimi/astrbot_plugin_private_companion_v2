@@ -13,4 +13,4 @@
 - V2 使用独立数据根。收到明确迁移请求时，可通过正式迁移流程读取 V1 并写入 V2；始终不要修改 V1 用户数据，也不要重置或清理已有工作树改动。
 - 唯一本体注册名为 `astrbot_plugin_private_companion_v2`，目录名、`metadata.name`、`PLUGIN_NAME` 与注册装饰器保持一致；领域产品 ID 仍为 `private_companion.v2`。
 - 唯一公开 Dashboard Page 为「陪伴小屋」。宿主管理、日记与生活、关系与记忆使用各目录的 `workspace.html`，通过构建脚本嵌入小屋；Content 的 `design-previews/companion-v2` 仅为开发预览。分工与验证见 `docs/REGISTRATION_UNIFICATION_20260925.md`。
-- 可加载的 Git worktree、备份和测试副本放在 AstrBot 一级插件扫描目录之外，避免重复注册。七个可选伴侣保留各自能力提供方身份，不为领域功能另建 V2 本体。
+- 可加载的 Git worktree、备份和测试副本放在 AstrBot 一级插件扫描目录之外，避免重复注册。七项伴侣能力在 V2 内原生实现，作为本体的内部功能拓展分别配置和启停；不得依赖另行安装七个伴侣插件或为领域功能注册新的 Star。

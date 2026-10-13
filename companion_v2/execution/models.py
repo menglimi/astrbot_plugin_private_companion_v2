@@ -21,6 +21,14 @@ class TaskError(ValueError):
         self.code = code
 
 
+class TaskDeferred(TaskError):
+    """Admission was refused before dispatch; a fresh owner task may run later."""
+
+    def __init__(self, code: str, reason: str, *, retry_at: datetime):
+        super().__init__(code, reason)
+        self.retry_at = normalize_utc(retry_at, field="task deferral")
+
+
 def require(result: Outcome):
     if result.failure:
         raise TaskError(result.failure.code, result.failure.reason)
@@ -186,11 +194,11 @@ class SupervisorLimits:
     foreground_slots: int = 2
     background_slots: int = 2
     queued_per_lane: int = 64
-    retained_tasks: int = 2048
+    retained_tasks: int = 10000
 
     def __post_init__(self):
         for name, maximum in (("foreground_slots", 32), ("background_slots", 32),
-                              ("queued_per_lane", 1024), ("retained_tasks", 10000)):
+                              ("queued_per_lane", 10_000), ("retained_tasks", 100_000)):
             if type(getattr(self, name)) is not int or not 1 <= getattr(self, name) <= maximum:
                 raise ValueError("supervisor limits must be positive and bounded")
 

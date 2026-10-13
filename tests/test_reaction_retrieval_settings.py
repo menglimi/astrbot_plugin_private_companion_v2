@@ -1,4 +1,4 @@
-"""Reaction retrieval performance and its window configuration (T48 / B1+B2+B4).
+"""Reaction retrieval performance and installation configuration (T48 / B1+B2+B4).
 
 One file covers the whole slice: the registered ``expression.reaction`` group,
 V1's two vector modes, the local synonym clusters, the post-use penalty with the
@@ -10,7 +10,7 @@ dictated instead of hoped for.
 
 import asyncio
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 import re
@@ -25,7 +25,8 @@ from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.conversation.media.models import ImageDescriptor
 from companion_v2.expression import reaction_lexicon
 from companion_v2.expression.reaction_configuration import (DEFAULTS, GROUP, OWNER as CONFIG_OWNER,
-    ReactionConfigurationOwner, ReactionSettings, configuration_fields, read_settings, read_snapshot)
+    ReactionConfigurationOwner, ReactionSettings, configuration_fields, migrate_window_values,
+    read_settings, read_snapshot)
 from companion_v2.expression.reactions import (DUPLICATE_WINDOW_FLOOR, MINIMUM_RELEVANCE,
     RELEVANCE_FLOOR_DELTA, ReactionLibrary)
 from companion_v2.expression.semantic_service import REACTION_BACKFILL_KEY, SemanticService
@@ -45,7 +46,7 @@ SCOPE = ScopeRef(INSTALLATION, "onebot", ScopeKind.PRIVATE, "native-a", "bot-a",
 ROLE = SubjectRef(INSTALLATION, SubjectKind.BOT, "persona-a")
 OWNER = "reaction-owner"
 CONTEXT = SimpleNamespace(scope=SCOPE, role_binding=SimpleNamespace(role=ROLE))
-TARGET = ConfigTarget(INSTALLATION, ConfigLayer.WINDOW, ROLE, SCOPE)
+TARGET = ConfigTarget(INSTALLATION, ConfigLayer.INSTALLATION)
 COSINE = re.compile(r"cos:([0-9.]+)")
 CONTENT = b"\x89PNG\r\n\x1a\nreaction-original"
 DESCRIPTOR = asdict(ImageDescriptor(0, "image/png", 1, 1, len(CONTENT),
@@ -121,7 +122,7 @@ class ReactionConfigurationTests(unittest.TestCase):
                           fields[GROUP + ".vision_verify_mode"].default), (1.0, 0.42, "embedding"))
         for field in fields.values():
             self.assertEqual((field.group_id, field.consumer_id, field.owner_id, field.layers),
-                             (GROUP, GROUP, GROUP, (ConfigLayer.WINDOW,)))
+                             (GROUP, GROUP, GROUP, (ConfigLayer.INSTALLATION,)))
         self.assertEqual(fields[GROUP + ".embedding_weight"].maximum, 3.0)
         registry = FieldRegistry(version="reaction.v1", fields=configuration_fields())
         self.assertEqual(len(registry.group(GROUP)), len(DEFAULTS))
@@ -137,7 +138,7 @@ class ReactionConfigurationTests(unittest.TestCase):
                 ReactionSettings.from_values({**DEFAULTS, name: value})
         self.assertEqual(ReactionSettings.from_values({}), ReactionSettings.from_values(DEFAULTS))
 
-    def test_window_roundtrip_and_enum_guard(self):
+    def test_installation_roundtrip_and_enum_guard(self):
         fields = configuration_fields()
         self.assertEqual(read_settings(self.runtime, CONTEXT), ReactionSettings.from_values(DEFAULTS))
         with self.assertRaises(ConfigurationError):
@@ -158,6 +159,59 @@ class ReactionConfigurationTests(unittest.TestCase):
             changes={GROUP + ".vision_verify_mode": "sometimes"}, reset=(),
             expected_revision=1, observed_at=NOW)
         self.assertEqual(read_settings(self.runtime, CONTEXT).vision_verify_mode, "embedding")
+
+    def test_legacy_window_values_are_copied_to_installation_scope(self):
+        legacy_fields = tuple(replace(field, layers=(ConfigLayer.WINDOW,))
+                              for field in configuration_fields())
+        other_scope = replace(SCOPE, native_scope_id="native-b", conversation_id="conversation-b",
+                              session_id="session-b")
+        targets = (ConfigTarget(INSTALLATION, ConfigLayer.WINDOW, ROLE, SCOPE),
+                   ConfigTarget(INSTALLATION, ConfigLayer.WINDOW, ROLE, other_scope))
+        legacy = SparseConfigurationOwner(self.runtime)
+        legacy.write(targets[0], legacy_fields,
+            changes={GROUP + ".candidate_limit": 8}, reset=(), expected_revision=0,
+            observed_at=NOW)
+        legacy.write(targets[1], legacy_fields,
+            changes={GROUP + ".candidate_limit": 11}, reset=(), expected_revision=0,
+            observed_at=NOW + timedelta(minutes=1))
+
+        with self.runtime.read_snapshot():
+            ReactionConfigurationOwner(self.runtime)
+            self.assertEqual(read_settings(self.runtime, CONTEXT).candidate_limit, DEFAULTS["candidate_limit"])
+        migrate_window_values(self.runtime)
+        settings, revision = read_snapshot(self.runtime, CONTEXT)
+        self.assertEqual(settings.candidate_limit, 11)
+        self.assertEqual(revision, 1)
+        legacy_rows = self.runtime.read_all("""SELECT v.target_key FROM configuration_values v
+            JOIN configuration_targets t ON t.target_key=v.target_key
+            WHERE v.field_id=? AND json_extract(t.target_json,'$.layer')='window'""",
+            (GROUP + ".candidate_limit",))
+        self.assertEqual(len(legacy_rows), 2)
+
+        before = tuple(tuple(row) for row in self.runtime.read_all(
+            "SELECT * FROM configuration_values ORDER BY target_key,field_id", ()))
+        migrate_window_values(self.runtime)
+        with self.runtime.read_snapshot():
+            ReactionConfigurationOwner(self.runtime)
+            self.assertEqual(read_snapshot(self.runtime, CONTEXT)[1], revision)
+        after = tuple(tuple(row) for row in self.runtime.read_all(
+            "SELECT * FROM configuration_values ORDER BY target_key,field_id", ()))
+        self.assertEqual(after, before)
+
+    def test_legacy_preparation_preserves_installation_overrides(self):
+        fields = configuration_fields()
+        legacy_fields = tuple(replace(field, layers=(ConfigLayer.WINDOW,)) for field in fields)
+        legacy_target = ConfigTarget(INSTALLATION, ConfigLayer.WINDOW, ROLE, SCOPE)
+        SparseConfigurationOwner(self.runtime).write(legacy_target, legacy_fields,
+            changes={GROUP + ".candidate_limit": 11, GROUP + ".vision_verify_mode": "always"},
+            reset=(), expected_revision=0, observed_at=NOW)
+        ReactionConfigurationOwner(self.runtime).write(TARGET, fields,
+            changes={GROUP + ".candidate_limit": 9}, reset=(), expected_revision=0, observed_at=NOW)
+
+        migrate_window_values(self.runtime)
+
+        settings, revision = read_snapshot(self.runtime, CONTEXT)
+        self.assertEqual((settings.candidate_limit, settings.vision_verify_mode, revision), (9, "always", 2))
 
 
 class LexiconTests(unittest.TestCase):
@@ -339,6 +393,7 @@ class Selection:
             app=SimpleNamespace(messages=None,
                 now=lambda: datetime.fromtimestamp(self.timestamp, timezone.utc)),
             owner=lambda context: OWNER,
+            ensure_reaction_catalog=lambda context: OWNER,
             reaction_preferences=SimpleNamespace(scores=lambda context: dict(self.affinity)),
             reaction_settings=lambda context: (self.settings, self.configuration_revision),
             schedule_reaction_backfill=lambda context, settings=None: self.scheduled.append(settings),
@@ -532,12 +587,16 @@ class AssembledRegistrationTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.reaction_settings(context),
                          (ReactionSettings.from_values(DEFAULTS), 0))
         app.configuration._owners[CONFIG_OWNER].write(
-            ConfigTarget(installation, ConfigLayer.WINDOW, role, scope), definitions,
+            ConfigTarget(installation, ConfigLayer.INSTALLATION), definitions,
             changes={GROUP + ".candidate_limit": 8, GROUP + ".vision_verify_mode": "always"},
             reset=(), expected_revision=0, observed_at=app.now())
         settings, revision = service.reaction_settings(context)
         self.assertEqual((settings.candidate_limit, settings.vision_verify_mode, revision),
                          (8, "always", 1))
+        another_scope = replace(scope, native_scope_id="native-other", conversation_id="conversation-other",
+                                session_id="session-other")
+        another_context = SimpleNamespace(scope=another_scope, role_binding=SimpleNamespace(role=role))
+        self.assertEqual(service.reaction_settings(another_context), (settings, revision))
 
 
 class BackfillTests(unittest.IsolatedAsyncioTestCase):
@@ -552,7 +611,7 @@ class BackfillTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(runtime=self.runtime, memory=None,
                             messages=SimpleNamespace(group_memory=None),
                             proactive=SimpleNamespace(sources=None)), self.port)
-        self.owner = self.service.owner(CONTEXT)
+        self.owner = self.service.reaction_owner(CONTEXT)
         for index in range(5):
             self.service.store.put(self.owner, "reaction", f"i{index}",
                                    payload(f"表情素材 {index}", name=str(index)))

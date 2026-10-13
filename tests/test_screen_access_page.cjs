@@ -11,7 +11,7 @@ const prefix = "/astrbot_plugin_private_companion_v2";
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 10; i += 1) await flush(); };
 
-function harness({kind = "private", route = true, request} = {}) {
+function harness({kind = "private", route = true, request, confirm = async () => true} = {}) {
   const calls = [];
   const target = {scope_kind: kind, target_id: "window-a", bot_id: "bot-a"};
   const node = {
@@ -40,7 +40,7 @@ function harness({kind = "private", route = true, request} = {}) {
         : {status: {invokable: body.enabled, consented: body.enabled, can_manage: true, edit_token: "edit-b"}};
     },
   };
-  const window = {CompanionProduct: product};
+  const window = {CompanionProduct: product, CompanionConfirm: confirm};
   const document = {};
   vm.runInNewContext(source, {window, document, Promise, Map, String, Math, Date, JSON, Object,
     crypto: {randomUUID: () => "operation-a"}});
@@ -97,6 +97,35 @@ test("授权和撤回沿用当前私聊的版本令牌", async () => {
   await settle();
   assert.equal(calls[2].body.enabled, false);
   assert.equal(calls[2].body.edit_token, "edit-b");
+});
+
+test("版本变化时仅通过确认后提交精确旧包信息升级", async () => {
+  const confirmations = [];
+  let upgraded = false;
+  const {node, calls} = harness({confirm: async options => { confirmations.push(options); return true; },
+    request: async (method) => {
+      if (method === "GET" && !upgraded) return {invokable: false, consented: true, can_manage: true,
+        edit_token: "edit-a", reason: "screen_package_changed", package_version: "3.3.1",
+        upgrade_available: true, installed_package_version: "3.3.0",
+        installed_artifact_hash: "old-hash", installed_revision: 2};
+      if (method === "POST") { upgraded = true; return {upgraded: true, package_version: "3.3.1"}; }
+      return {invokable: true, consented: true, can_manage: true, edit_token: "edit-b",
+        package_version: "3.3.1", upgrade_available: false, reason: ""};
+    }});
+  await settle();
+  assert.match(node.innerHTML, /升级屏幕陪伴/);
+  assert.match(node.innerHTML, /已装配版本 3\.3\.0，当前版本 3\.3\.1/);
+  node.fire("upgrade");
+  await settle();
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0].message, /当前私聊授权会保留/);
+  assert.equal(calls[1].method, "POST");
+  assert.equal(calls[1].path, "staging/upgrade-screen");
+  assert.equal(JSON.stringify(calls[1].body), JSON.stringify({
+    previous_version: "3.3.0", previous_hash: "old-hash", expected_revision: 2,
+  }));
+  assert.match(node.innerHTML, /屏幕陪伴已升级到 3\.3\.1/);
+  assert.doesNotMatch(node.innerHTML, /data-screen-access-action="upgrade"/);
 });
 
 test("已确认的屏幕授权在路由返回时先保留，再重新核对", async () => {

@@ -44,7 +44,7 @@ window.CompanionSemanticPage = (() => {
     ["slang_web_search_enabled","黑话联网参考"],["vision_review","识图复核"]];
   const providerFields = [["embedding_provider","嵌入模型","embedding"],["rerank_provider","候选重排","rerank"],["analysis_provider","视觉与词义分析","analysis"]];
   const semanticNumberFields = [["timeout_seconds","模型超时 / 秒",1,30],["batch_size","索引批次",1,64],
-    ["learning_interval_seconds","群词义整理间隔 / 秒",60,86400],
+    ["learning_interval_seconds","群词义整理间隔 / 分钟",1,1440],
     ["slang_web_search_candidates","联网检索词数 / 个",1,12],["slang_web_search_results","每词参考条数",1,5]];
   const reactionNumberFields = [["reactions_trigger_probability","自动发送概率 / %",0,100,1],
     ["reactions_cooldown_seconds","发送间隔 / 秒",0,3600,1],
@@ -60,7 +60,7 @@ window.CompanionSemanticPage = (() => {
   /* 这一页发送所有可编辑字段（不是只发改动），而 revision 冲突后必须重读
      才能拿到新版本号。重读会把 state 换成服务端的值，所以本地草稿要单独留一份，
      否则用户刚填的值会被服务端旧值覆盖。 */
-  let root,scope,abort,state,kind="reaction",view="all",after={},sessionId="",busy=false,editing=null,result=null,message="",generation=0,draft=null,conflict=false,selectedTarget=null,selectedSelection=null,selectedScopeKey="";
+  let root,scope,abort,state,kind="reaction",view="all",after={},sessionId="",busy=false,editing=null,result=null,message="",generation=0,draft=null,conflict=false,selectedTarget=null,selectedSelection=null,selectedScopeKey="",globalSettingsOnly=false;
   const visibleFlags = () => view === "expression"
     ? flags.filter(([id]) => reactionFlags.has(id))
     : view === "learning" ? flags.filter(([id]) => !reactionFlags.has(id) || id === "vision_review") : flags;
@@ -71,8 +71,8 @@ window.CompanionSemanticPage = (() => {
   const visibleKinds = group => view === "expression" ? ["reaction"]
     : view === "learning" ? (group ? ["slang","reaction"] : ["reaction"])
       : (group ? ["reaction","slang"] : ["reaction"]);
-  const selection = () => {const value=selectedSelection||product.selection();return {target_id:value.target_id,role_id:value.role_id,...(sessionId?{session_id:sessionId}:{})};};
-  const target = () => selectedTarget || product.target();
+  const selection = () => globalSettingsOnly?{global:true}:(()=>{const value=selectedSelection||product.selection();return {target_id:value.target_id,role_id:value.role_id,...(sessionId?{session_id:sessionId}:{})};})();
+  const target = () => globalSettingsOnly ? null : selectedTarget || product.target();
   const current = () => root?.isConnected && scope===(selectedScopeKey||product.scopeKey());
   const active = ticket => ticket===generation && current();
   async function api(method,values) {
@@ -104,8 +104,9 @@ window.CompanionSemanticPage = (() => {
     const current=shown=>draft?{...cfg,...draft}[shown]:cfg[shown];
     const catalog=state.catalog||{},slangCount=Number(catalog.slang?.total||0),reactionCount=Number(catalog.reaction?.total||0);
     const counts=group?`${slangCount} 条黑话 · ${reactionCount} 项素材`:`${reactionCount} 项素材`;
-    let html='<div class="settings-heading"><div><h2>语义目录</h2></div><span class="semantic-state '+escape(state.state)+'">'+escape({ready:"嵌入已就绪",lexical_fallback:"关键词回退",disabled:"已停用"}[state.state]||"状态待核对")+'</span></div>';
+    let html='<div class="settings-heading"><div><h2>'+(globalSettingsOnly?'全局语义策略':'语义目录')+'</h2></div><span class="semantic-state '+escape(state.state)+'">'+escape({ready:"嵌入已就绪",lexical_fallback:"关键词回退",disabled:"已停用"}[state.state]||"状态待核对")+'</span></div>';
     if(message)html+='<p class="semantic-feedback'+(conflict?" semantic-conflict":"")+'" role="status">'+escape(message)+'</p>';
+    if(!globalSettingsOnly){
     html+='<section class="semantic-learning-catalog" aria-label="语义条目"><header class="semantic-learning-heading"><h3>语义条目 · 阵列</h3><span>'+escape(counts)+'</span></header>';
     if(group&&state.sessions?.length)html+='<label class="semantic-session">群会话<select id="semanticSession" aria-label="群会话">'+state.sessions.map((id,index)=>'<option value="'+escape(id)+'" '+(id===state.session_id?'selected':'')+'>'+escape(id===target()?.group_id?'主群会话':'群会话 '+(index+1))+'</option>').join('')+'</select></label>';
     if(!state.selection_ready)html+='<p class="semantic-learning-empty" role="status">该群会话暂无语义条目</p>';
@@ -120,7 +121,7 @@ window.CompanionSemanticPage = (() => {
         const source={private_capture:"私聊归纳",group_capture:"群聊归纳"}[payload.collection_source]||"手工收录";
         const title=payload.name||payload.term||"未命名";
         const detail=payload.meaning||payload.description||payload.usage||"";
-        const sourceUrl=imageSource(item.image_url||payload.image_url||payload.url);
+        const sourceUrl=imageSource(item.thumbnail_url||item.image_url||payload.image_url||payload.url);
         const media=slang?'<span class="semantic-row-placeholder semantic-row-slang-mark" aria-hidden="true"><i data-lucide="messages-square"></i></span>':sourceUrl
           ?'<img src="'+escape(sourceUrl)+'" alt="" loading="lazy">'
           :'<span class="semantic-row-placeholder" aria-hidden="true"><i data-lucide="image"></i></span>';
@@ -134,6 +135,7 @@ window.CompanionSemanticPage = (() => {
       if(editing)html+=editor(editing);
     }
     html+='</section>';
+    }
     const currentFlags=visibleFlags();
     const coreFlags=currentFlags.filter(([id])=>["enabled","vision_review"].includes(id));
     const memoryFlags=currentFlags.filter(([id])=>["memory_enabled","slang_enabled","slang_learning","slang_web_search_enabled"].includes(id));
@@ -141,7 +143,10 @@ window.CompanionSemanticPage = (() => {
     const memoryNumbers=semanticNumberFields.filter(([id])=>!coreNumbers.some(([field])=>field===id));
     const flagMarkup=items=>'<div class="semantic-flags">'+items.map(([id,label])=>toggle(id,label,current(id))).join('')+'</div>';
     const providerMarkup='<div class="semantic-providers">'+providerFields.map(([id,label,type])=>'<label>'+label+'<select name="'+id+'">'+options(state.providers?.[type],current(id))+'</select></label>').join('')+'</div>';
-    const numberMarkup=items=>'<div class="semantic-providers">'+items.map(([id,label,min,max,step])=>'<label>'+label+'<input name="'+id+'" type="number" min="'+min+'" max="'+max+'" step="'+(step||1)+'" value="'+escape(current(id)??'')+'"></label>').join('')+'</div>';
+    const numberMarkup=items=>'<div class="semantic-providers">'+items.map(([id,label,min,max,step])=>{
+      const raw=current(id),value=id==="learning_interval_seconds"&&Number.isFinite(Number(raw))?Math.round(Number(raw)/60):raw;
+      return '<label>'+label+'<input name="'+id+'" type="number" min="'+min+'" max="'+max+'" step="'+(step||1)+'" value="'+escape(value??'')+'"></label>';
+    }).join('')+'</div>';
     html+='<form id="semanticSettings" class="semantic-learning-settings"><section class="semantic-config-panel"><header><h3>语义目录与提供方</h3></header>'+
       flagMarkup(coreFlags)+providerMarkup+numberMarkup(coreNumbers)+'</section>'+
       '<section class="semantic-config-panel"><header><h3>语义记忆与群聊黑话</h3></header>'+
@@ -151,7 +156,7 @@ window.CompanionSemanticPage = (() => {
       '<button type="button" data-go="memories"><span>每日反思与经历</span><i data-lucide="arrow-up-right"></i></button></nav></section>'+
       '<div class="semantic-learning-actions"><button class="button primary" type="submit" '+(busy?'disabled':'')+'>'+(draft?'保存草稿':'保存配置')+'</button>'+
       (draft?'<button class="button" type="button" data-semantic="discard">放弃草稿</button>':'')+
-      '<button class="button" type="button" data-semantic="reindex" '+(busy||!state.selection_ready?'disabled':'')+'>重建当前索引</button></div></form>';
+      (globalSettingsOnly?'':'<button class="button" type="button" data-semantic="reindex" '+(busy||!state.selection_ready?'disabled':'')+'>重建当前索引</button>')+'</div></form>';
     return html;
   }
   function render() {
@@ -183,7 +188,8 @@ window.CompanionSemanticPage = (() => {
     const currentViewSelects=visibleSelects();
     if(currentViewProviders.length||currentViewNumbers.length||currentViewSelects.length)html+='<div class="semantic-providers">';
     currentViewProviders.forEach(([id,label,type])=>html+='<label>'+label+'<select name="'+id+'">'+options(state.providers?.[type],shown[id])+'</select></label>');
-    currentViewNumbers.forEach(([id,label,min,max,step])=>{const value=percentageFields.has(id)?Number(shown[id]||0)*100:shown[id];
+    currentViewNumbers.forEach(([id,label,min,max,step])=>{const value=percentageFields.has(id)?Number(shown[id]||0)*100:
+      id==="learning_interval_seconds"?Math.round(Number(shown[id]||0)/60):shown[id];
       html+='<label>'+label+'<input name="'+id+'" type="number" min="'+min+'" max="'+max+'" step="'+(step||1)+'" value="'+value+'"></label>';});
     currentViewSelects.forEach(([id,label,choices])=>html+='<label>'+label+'<select name="'+id+'">'+choices.map(([value,text])=>'<option value="'+escape(value)+'" '+(shown[id]===value?'selected':'')+'>'+escape(text)+'</option>').join('')+'</select></label>');
     if(currentViewProviders.length||currentViewNumbers.length||currentViewSelects.length)html+='</div>';
@@ -212,7 +218,7 @@ window.CompanionSemanticPage = (() => {
       html+='<div class="semantic-list">'+(state.items||[]).map(item=>{const payload=item.payload||{};const source={private_capture:"私聊自动收录",group_capture:"群聊自动收录"}[payload.collection_source]||"手动收录";
         const analysis={auto_reviewed:"已通过视觉审核",analyzed:"已识别",pending:"待识别",manual:"手工标注"}[payload.analysis]||"待标注";
         const collectionState=payload.collection_state==="awaiting_confirmation"?"待人工确认":"";
-        const sourceUrl=imageSource(item.image_url||payload.image_url||payload.url);
+        const sourceUrl=imageSource(item.thumbnail_url||item.image_url||payload.image_url||payload.url);
         const media=sourceUrl?'<img src="'+escape(sourceUrl)+'" alt="" loading="lazy">':'<span class="semantic-row-placeholder" aria-hidden="true"><i data-lucide="image"></i></span>';
         const title=payload.name||payload.term||"未命名";
         const detail=payload.description||payload.meaning||"待标注";
@@ -314,10 +320,11 @@ window.CompanionSemanticPage = (() => {
   }
   function mount(node,options={}){
     unmount();root=node;selectedTarget=options.target||null;selectedSelection=options.selection||null;selectedScopeKey=typeof options.scopeKey==="string"?options.scopeKey:"";
+    globalSettingsOnly=options.globalSettingsOnly===true;
     scope=selectedScopeKey||product.scopeKey();state=null;result=null;after={};sessionId="";editing=null;message="";busy=false;
     view=["learning","expression"].includes(options?.view)?options.view:"all";
     kind=view==="learning"&&target()?.scope_kind==="group"?"slang":"reaction";abort=new AbortController();
-    node.addEventListener("click",event=>{
+    node.addEventListener("click",async event=>{
       const item=event.target.closest("[data-semantic-open]");if(item){kind=item.dataset.semanticKind||kind;open(item.dataset.semanticOpen);return;}
       const tab=event.target.closest("[data-semantic-kind]");if(tab){kind=tab.dataset.semanticKind;result=null;editing=null;after={};message="";load();return;}
       const command=event.target.closest("[data-semantic]")?.dataset.semantic;
@@ -327,8 +334,14 @@ window.CompanionSemanticPage = (() => {
       if(command==="reindex")run("reindex");
       if(command==="discard"){draft=null;conflict=false;message="已放弃草稿，显示当前已保存配置。";render();}
       if(command==="analyze"&&editing)run("analyze",{id:editing.id});
-      if(command==="delete"&&editing&&kind==="reaction"&&window.confirm("删除这条表情素材及其原图？"))
-        run("delete",{kind:"reaction",id:editing.id,revision:editing.revision});
+      if(command==="delete"&&editing&&kind==="reaction"){
+        const item=editing, selectedKind=kind;
+        const ticket=generation;
+        const accepted=typeof window.CompanionConfirm==="function"&&await window.CompanionConfirm({
+          title:"删除表情素材",message:"删除这条表情素材及其原图？",confirmText:"删除素材",danger:true,
+        });
+        if(accepted&&ticket===generation&&editing===item&&kind===selectedKind)run("delete",{kind:"reaction",id:item.id,revision:item.revision});
+      }
     },{signal:abort.signal});
     node.addEventListener("submit",event=>{
       event.preventDefault();const form=event.target,values=new FormData(form);
@@ -339,7 +352,8 @@ window.CompanionSemanticPage = (() => {
         providerFields.forEach(([id])=>changes[id]=visibleProviderIds.has(id)?values.get(id)||"":shownValue(id));
         const visibleNumberIds=new Set(visibleNumbers().map(([id])=>id));
         numberFields.forEach(([id])=>{const value=Number(values.get(id));
-          changes[id]=visibleNumberIds.has(id)?percentageFields.has(id)?value/100:value:shownValue(id);});
+          changes[id]=visibleNumberIds.has(id)?percentageFields.has(id)?value/100:
+            id==="learning_interval_seconds"?value*60:value:shownValue(id);});
         const visibleSelectIds=new Set(visibleSelects().map(([id])=>id));
         selectFields.forEach(([id])=>changes[id]=visibleSelectIds.has(id)?values.get(id):shownValue(id));
         /* 这份内容只在版本冲突时才当作草稿保留：普通失败（类型/范围不合法）
@@ -393,6 +407,6 @@ window.CompanionSemanticPage = (() => {
     });
   }
   function shownValue(id){return (draft?{...state.settings,...draft}:state.settings)[id];}
-  function unmount(){generation++;abort?.abort();abort=null;root=null;scope=null;state=null;editing=null;busy=false;selectedTarget=null;selectedSelection=null;selectedScopeKey="";}
+  function unmount(){generation++;abort?.abort();abort=null;root=null;scope=null;state=null;editing=null;busy=false;selectedTarget=null;selectedSelection=null;selectedScopeKey="";globalSettingsOnly=false;}
   return {mount,unmount};
 })();

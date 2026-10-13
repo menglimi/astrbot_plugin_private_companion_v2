@@ -8,7 +8,10 @@ import unittest
 from astrbot_host.native_extensions import NativeExtensionRegistry
 from astrbot_host.native_extensions.builtins import BundledNativeLease
 from astrbot_host.native_extensions.image_native.adapter import PLUGIN_ID
+from astrbot_host.native_extensions.image_native.backends import NativeTransportBackend
 from astrbot_host.native_extensions.image_native.extension import ImageExtensionAPI
+from astrbot_host.native_extensions.image_native.output_configuration import settings as image_settings
+from astrbot_host.native_extensions.image_native.types import ImageInvocation, NativeImageError, ReferenceImage
 from companion_v2.capabilities.models import FurnitureDescriptor
 from companion_v2.product import PRODUCT_VERSION
 
@@ -38,6 +41,71 @@ class NativeImageRoutingTests(unittest.TestCase):
                            "platform": platform, "model": "image-model", "width": 1024, "height": 1024,
                            "base_url": "https://api.example.test/v1", "timeout_seconds": 60}],
         })
+
+    @staticmethod
+    def endpoint(identifier, model):
+        return {"id": identifier, "name": identifier, "enabled": True,
+                "platform": "openai", "model": model, "width": 1024, "height": 1024,
+                "base_url": "https://api.example.test/v1", "timeout_seconds": 60}
+
+    def test_legacy_image_configuration_gets_independent_default_queues(self):
+        plugin = NS(config={"native_v2": {"output": {
+            "enabled": True, "backend": "auto", "endpoints": [{"id": "legacy"}],
+            "sd_webui": {}, "comfyui": {},
+        }}})
+        routes = image_settings(plugin)["operation_routes"]
+        self.assertEqual(routes["generate"], ["online:legacy", "comfyui", "sd_webui"])
+        self.assertEqual(routes["edit"], routes["generate"])
+
+        plugin.config["native_v2"]["output"]["operation_routes"] = {
+            "generate": ["online:missing", None, "sd_webui"], "edit": []}
+        routes = image_settings(plugin)["operation_routes"]
+        self.assertEqual(routes["generate"], ["sd_webui"])
+        self.assertEqual(routes["edit"], [])
+
+    def test_generation_and_edit_use_independent_priorities_and_mask_edit_shares_edit_queue(self):
+        current = self.api.output_configuration()
+        saved = self.api.save_output_configuration(current["revision"], {
+            "enabled": True,
+            "backend": "online_api",
+            "endpoints": [self.endpoint("primary", "image-v1"), self.endpoint("secondary", "image-v2")],
+            "operation_routes": {
+                "generate": ["online:primary", "online:secondary"],
+                "edit": ["online:secondary", "online:primary"],
+            },
+        })
+        self.assertEqual(saved["settings"]["operation_routes"]["generate"], ["online:primary", "online:secondary"])
+        self.assertEqual(saved["settings"]["operation_routes"]["edit"], ["online:secondary", "online:primary"])
+
+        backend = self.api.companion_v2_native().owner.backend
+        route_ids = lambda operation: [item.config["id"] for item in backend._routes(operation)]
+        self.assertEqual(route_ids("generate"), ["primary", "secondary"])
+        self.assertEqual(route_ids("edit"), ["secondary", "primary"])
+        self.assertEqual(route_ids("mask_edit"), route_ids("edit"))
+
+    def test_unknown_model_route_is_rejected_on_save(self):
+        current = self.api.output_configuration()
+        with self.assertRaises(NativeImageError):
+            self.api.save_output_configuration(current["revision"], {
+                "enabled": False,
+                "backend": "auto",
+                "operation_routes": {"generate": ["online:missing"], "edit": []},
+            })
+
+    def test_sd_webui_uses_generate_and_edit_parameter_overrides(self):
+        backend = NativeTransportBackend("sd_webui", {
+            "base_url": "http://127.0.0.1:7860", "timeout_seconds": 60,
+            "parameters": {"steps": 18, "generate": {"steps": 28},
+                           "edit": {"steps": 42, "cfg_scale": 5.5}},
+        }, Path(self.temporary.name))
+        generate = ImageInvocation("scope", "generate", "generate", "origin", "generate", "prompt")
+        reference = ReferenceImage("ref", b"test-reference", "test-source", "0" * 64)
+        edit = ImageInvocation("scope", "edit", "edit", "origin", "edit", "prompt", reference_ids=("ref",))
+
+        self.assertEqual(backend._plan(generate)["parameters"]["steps"], 28)
+        edit_parameters = backend._plan(edit, (reference,))["parameters"]
+        self.assertEqual(edit_parameters["steps"], 42)
+        self.assertEqual(edit_parameters["cfg_scale"], 5.5)
 
     def test_dormant_provider_keeps_management_api_but_exposes_no_unconfigured_action(self):
         self.assertEqual(self.api.companion_v2_native().manifest()["package"]["capabilities"], [

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 
-from .learning import DIMENSIONS, MAX_OBSERVATION_CHARS, MAX_PROPOSAL_CHARS
+from .learning import (APPLICABILITY_FIELDS, DIMENSIONS, MAX_OBSERVATION_CHARS,
+                       MAX_PROPOSAL_CHARS, candidate_signature, normalize_applicability)
 
 
 PACK_SCHEMA = "private-companion-expression-pack"
@@ -92,18 +93,25 @@ def normalize_pack(raw):
                 if (type(confidence) not in (int, float) or not math.isfinite(confidence)
                         or not 0 <= confidence <= 1):
                     raise ValueError("invalid_confidence")
+                supplied_applicability = rule.get("applicability")
+                if supplied_applicability is None:
+                    supplied_applicability = {field: rule[field] for field in APPLICABILITY_FIELDS if field in rule}
+                    if "keywords" not in supplied_applicability and type(rule.get("tags")) is list:
+                        supplied_applicability["keywords"] = rule["tags"]
+                applicability = normalize_applicability(supplied_applicability)
             except (TypeError, ValueError) as error:
                 rejected.append({"group_index": group_index, "rule_index": rule_index,
                                  "reason": str(error) or "invalid_rule"})
                 continue
-            signature = (dimension, observation.casefold(), proposal.casefold())
+            signature = candidate_signature(dimension, observation, proposal, applicability)
             if signature in seen:
                 rejected.append({"group_index": group_index, "rule_index": rule_index,
                                  "reason": "duplicate_in_pack"})
                 continue
             seen.add(signature)
             signals.append({"dimension": dimension, "observation": observation,
-                            "proposal": proposal, "confidence": float(confidence)})
+                            "proposal": proposal, "applicability": applicability,
+                            "confidence": float(confidence)})
             if len(signals) > MAX_IMPORT_SIGNALS:
                 raise ValueError("too_many_signals")
     if not signals:
@@ -118,6 +126,7 @@ def build_pack(signals, *, title="陪伴表达分享", exported_at=""):
     for index, signal in enumerate(signals, 1):
         dimension = signal["dimension"]
         proposal = signal["proposal"]
+        applicability = normalize_applicability(signal.get("applicability"))
         kind = "grammar" if dimension == "sentence_rhythm" else "style"
         groups.append({"id": f"group-{index:03d}", "label": signal["observation"], "rules": [{
             "kind": kind,
@@ -127,6 +136,7 @@ def build_pack(signals, *, title="陪伴表达分享", exported_at=""):
             "pattern": proposal,
             "instruction": proposal,
             "signals": [dimension],
+            **applicability,
         }]})
     return {"schema": PACK_SCHEMA, "version": PACK_VERSION, "title": title,
             "exported_at": exported_at,

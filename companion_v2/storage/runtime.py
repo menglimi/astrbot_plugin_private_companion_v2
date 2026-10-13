@@ -4,12 +4,27 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 import sqlite3
-from threading import RLock
+import sys
+from threading import RLock, local
+import time
 from typing import Iterator
 
 from .schema import (
+    SCHEMA_VERSION_V60, MIGRATION_V59_TO_V60_ID, MIGRATION_V59_TO_V60_FINGERPRINT,
+    V60_MIGRATION_STATEMENTS, V60_REQUIRED_TABLES, V60_SCHEMA_STATEMENTS,
+    SCHEMA_VERSION_V59, MIGRATION_V58_TO_V59_ID, MIGRATION_V58_TO_V59_FINGERPRINT,
+    V59_MIGRATION_STATEMENTS, V59_REQUIRED_TABLES, V59_SCHEMA_STATEMENTS,
+    SCHEMA_VERSION_V58, MIGRATION_V57_TO_V58_ID, MIGRATION_V57_TO_V58_FINGERPRINT,
+    V58_MIGRATION_STATEMENTS, V58_REQUIRED_TABLES, V58_SCHEMA_STATEMENTS,
+    SCHEMA_VERSION_V57, MIGRATION_V56_TO_V57_ID, MIGRATION_V56_TO_V57_FINGERPRINT,
+    V57_MIGRATION_STATEMENTS, V57_REQUIRED_TABLES, V57_SCHEMA_STATEMENTS,
+    SCHEMA_VERSION_V56, MIGRATION_V55_TO_V56_ID, MIGRATION_V55_TO_V56_FINGERPRINT,
+    V56_MIGRATION_STATEMENTS, V56_REQUIRED_TABLES, V56_SCHEMA_STATEMENTS,
+    SCHEMA_VERSION_V55, MIGRATION_V54_TO_V55_ID, MIGRATION_V54_TO_V55_FINGERPRINT,
+    V55_MIGRATION_STATEMENTS, V55_REQUIRED_TABLES, V55_SCHEMA_STATEMENTS,
     SCHEMA_VERSION_V54, MIGRATION_V53_TO_V54_ID, MIGRATION_V53_TO_V54_FINGERPRINT,
     V54_MIGRATION_STATEMENTS, V54_REQUIRED_TABLES, V54_SCHEMA_STATEMENTS,
     SCHEMA_VERSION_V53, MIGRATION_V52_TO_V53_ID, MIGRATION_V52_TO_V53_FINGERPRINT,
@@ -219,11 +234,14 @@ LEGACY_PLUGIN_DIRECTORY_NAMES = frozenset(
     }
 )
 
+logger = logging.getLogger(__name__)
+
 
 class StorageRuntime:
     """Own the V2 database connection; repositories never open their own connection."""
 
     DATABASE_FILENAME = "companion-v2.sqlite3"
+    SLOW_OPERATION_SECONDS = 1.0
 
     def __init__(self, *, data_root: Path, installation_id: str) -> None:
         if not installation_id or installation_id != installation_id.strip():
@@ -233,6 +251,7 @@ class StorageRuntime:
         self._database_path = self._data_root / self.DATABASE_FILENAME
         self._connection: sqlite3.Connection | None = None
         self._lock = RLock()
+        self._read_snapshot_diagnostics = local()
         self._savepoint_sequence = 0
         self._write_depth = 0
 
@@ -254,11 +273,36 @@ class StorageRuntime:
     def installation_id(self) -> str:
         return self._installation_id
 
+    def _report_slow_operation(self, operation: str, started: float, lock_acquired: float,
+                               finished: float, *, details: str = "") -> None:
+        elapsed_ms = round((finished - started) * 1000)
+        if elapsed_ms < self.SLOW_OPERATION_SECONDS * 1000:
+            return
+        caller = sys._getframe(1)
+        while caller is not None and Path(caller.f_code.co_filename).name in {"runtime.py", "contextlib.py"}:
+            caller = caller.f_back
+        if caller is None:
+            caller = sys._getframe(1)
+        caller_name = f"{Path(caller.f_code.co_filename).name}:{caller.f_lineno}"
+        detail_suffix = " " + details if details else ""
+        logger.warning(
+            "V2 SQLite slow operation=%s elapsed_ms=%d lock_wait_ms=%d held_ms=%d caller=%s%s",
+            operation, elapsed_ms, round((lock_acquired - started) * 1000),
+            round((finished - lock_acquired) * 1000), caller_name, detail_suffix,
+        )
+
     def close(self) -> None:
-        with self._lock:
+        started = time.perf_counter()
+        self._lock.acquire()
+        lock_acquired = time.perf_counter()
+        try:
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
+        finally:
+            finished = time.perf_counter()
+            self._lock.release()
+            self._report_slow_operation("close", started, lock_acquired, finished)
 
     def __enter__(self) -> "StorageRuntime":
         return self
@@ -266,11 +310,38 @@ class StorageRuntime:
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         self.close()
 
+    def checkpoint_passive(self) -> tuple[int, int, int]:
+        """Checkpoint committed WAL pages on a maintenance connection."""
+        started = time.perf_counter()
+        with self._lock:
+            self._require_connection()
+        checkpoint = None
+        result = None
+        try:
+            checkpoint = sqlite3.connect(str(self._database_path), timeout=0.0, isolation_level=None)
+            checkpoint.execute("PRAGMA synchronous = FULL")
+            row = checkpoint.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            result = tuple(int(value) for value in row)
+            return result
+        finally:
+            if checkpoint is not None:
+                checkpoint.close()
+            elapsed_ms = round((time.perf_counter() - started) * 1000)
+            if elapsed_ms >= self.SLOW_OPERATION_SECONDS * 1000:
+                details = "" if result is None else (
+                    f"busy={result[0]} wal_frames={result[1]} checkpointed_frames={result[2]}")
+                logger.warning("V2 SQLite WAL checkpoint slow elapsed_ms=%d mode=PASSIVE%s",
+                               elapsed_ms, " " + details if details else "")
+
     @contextmanager
     def transaction(self, *, require_outermost: bool = False) -> Iterator[sqlite3.Connection]:
         """Compose repository writes; nested success is not an outer commit."""
 
-        with self._lock:
+        started = time.perf_counter()
+        self._lock.acquire()
+        lock_acquired = time.perf_counter()
+        begin_ms = body_ms = commit_ms = rollback_ms = 0
+        try:
             connection = self._require_connection()
             nested = connection.in_transaction
             if nested and require_outermost:
@@ -279,21 +350,37 @@ class StorageRuntime:
                 raise StorageOpenError("a read snapshot cannot be promoted to a write transaction")
             self._savepoint_sequence += 1
             savepoint = f"v2_write_{self._savepoint_sequence}"
+            begin_started = time.perf_counter()
             connection.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
+            begin_ms = round((time.perf_counter() - begin_started) * 1000)
             self._write_depth += 1
             try:
+                body_started = time.perf_counter()
                 yield connection
+                body_ms = round((time.perf_counter() - body_started) * 1000)
+                commit_started = time.perf_counter()
                 connection.execute(f"RELEASE SAVEPOINT {savepoint}" if nested else "COMMIT")
+                commit_ms = round((time.perf_counter() - commit_started) * 1000)
             except BaseException:
+                body_ms = round((time.perf_counter() - body_started) * 1000)
                 if connection.in_transaction:
+                    rollback_started = time.perf_counter()
                     if nested:
                         connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                         connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                     else:
                         connection.execute("ROLLBACK")
+                    rollback_ms = round((time.perf_counter() - rollback_started) * 1000)
                 raise
             finally:
                 self._write_depth -= 1
+        finally:
+            finished = time.perf_counter()
+            self._lock.release()
+            self._report_slow_operation(
+                "transaction", started, lock_acquired, finished,
+                details=f"begin_ms={begin_ms} body_ms={body_ms} commit_ms={commit_ms} rollback_ms={rollback_ms}",
+            )
 
     @contextmanager
     def read_only_snapshot(self) -> Iterator[sqlite3.Connection]:
@@ -315,7 +402,15 @@ class StorageRuntime:
     def read_snapshot(self) -> Iterator[sqlite3.Connection]:
         """Keep related reads on one SQLite snapshot, also inside an owned write."""
 
-        with self._lock:
+        started = time.perf_counter()
+        self._lock.acquire()
+        lock_acquired = time.perf_counter()
+        diagnostic = getattr(self._read_snapshot_diagnostics, "current", None)
+        owns_diagnostic = diagnostic is None
+        if owns_diagnostic:
+            diagnostic = {"slow_child": False}
+            self._read_snapshot_diagnostics.current = diagnostic
+        try:
             connection = self._require_connection()
             if connection.in_transaction:
                 yield connection
@@ -328,14 +423,51 @@ class StorageRuntime:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+        finally:
+            finished = time.perf_counter()
+            self._lock.release()
+            if owns_diagnostic:
+                try:
+                    if not diagnostic["slow_child"]:
+                        self._report_slow_operation("read_snapshot", started, lock_acquired, finished)
+                finally:
+                    del self._read_snapshot_diagnostics.current
 
     def read_one(self, statement: str, parameters: tuple[object, ...]) -> sqlite3.Row | None:
-        with self._lock:
-            return self._require_connection().execute(statement, parameters).fetchone()
+        started = time.perf_counter()
+        self._lock.acquire()
+        lock_acquired = time.perf_counter()
+        finished = None
+        try:
+            result = self._require_connection().execute(statement, parameters).fetchone()
+            finished = time.perf_counter()
+            return result
+        finally:
+            if finished is None:
+                finished = time.perf_counter()
+            self._lock.release()
+            diagnostic = getattr(self._read_snapshot_diagnostics, "current", None)
+            if diagnostic is not None and finished - started >= self.SLOW_OPERATION_SECONDS:
+                diagnostic["slow_child"] = True
+            self._report_slow_operation("read_one", started, lock_acquired, finished)
 
     def read_all(self, statement: str, parameters: tuple[object, ...]) -> tuple[sqlite3.Row, ...]:
-        with self._lock:
-            return tuple(self._require_connection().execute(statement, parameters).fetchall())
+        started = time.perf_counter()
+        self._lock.acquire()
+        lock_acquired = time.perf_counter()
+        finished = None
+        try:
+            result = tuple(self._require_connection().execute(statement, parameters).fetchall())
+            finished = time.perf_counter()
+            return result
+        finally:
+            if finished is None:
+                finished = time.perf_counter()
+            self._lock.release()
+            diagnostic = getattr(self._read_snapshot_diagnostics, "current", None)
+            if diagnostic is not None and finished - started >= self.SLOW_OPERATION_SECONDS:
+                diagnostic["slow_child"] = True
+            self._report_slow_operation("read_all", started, lock_acquired, finished)
 
     def _open_connection(self) -> None:
         connection: sqlite3.Connection | None = None
@@ -352,6 +484,7 @@ class StorageRuntime:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA wal_autocheckpoint = 0")
         except (OSError, sqlite3.Error) as error:
             if connection is not None:
                 connection.close()
@@ -440,6 +573,12 @@ class StorageRuntime:
                 self._migrate_v51_to_v52(connection)
                 self._migrate_v52_to_v53(connection)
                 self._migrate_v53_to_v54(connection)
+                self._migrate_v54_to_v55(connection)
+                self._migrate_v55_to_v56(connection)
+                self._migrate_v56_to_v57(connection)
+                self._migrate_v57_to_v58(connection)
+                self._migrate_v58_to_v59(connection)
+                self._migrate_v59_to_v60(connection)
                 return
             if "runtime_metadata" not in existing_tables:
                 raise StorageOpenError("V2 data root is partially initialized")
@@ -458,6 +597,7 @@ class StorageRuntime:
             if stored_schema is None:
                 raise StorageOpenError("V2 data root is missing schema version")
             version = stored_schema["value"]
+            current_schema_on_open = version == SCHEMA_VERSION
             if version == SCHEMA_VERSION_V1:
                 missing = V1_REQUIRED_TABLES.difference(existing_tables)
                 v2_tables_present = V23_REQUIRED_TABLES.difference(V1_REQUIRED_TABLES).intersection(
@@ -1087,13 +1227,65 @@ class StorageRuntime:
                 self._migrate_v53_to_v54(connection)
                 version = SCHEMA_VERSION_V54
                 existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V54:
+                _validate_table_shapes(connection, V54_SCHEMA_STATEMENTS, V54_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 55):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v54_to_v55(connection)
+                version = SCHEMA_VERSION_V55
+                existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V55:
+                _validate_table_shapes(connection, V55_SCHEMA_STATEMENTS, V55_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 56):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v55_to_v56(connection)
+                version = SCHEMA_VERSION_V56
+                existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V56:
+                _validate_table_shapes(connection, V56_SCHEMA_STATEMENTS, V56_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 57):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v56_to_v57(connection)
+                version = SCHEMA_VERSION_V57
+                existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V57:
+                _validate_table_shapes(connection, V57_SCHEMA_STATEMENTS, V57_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 58):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v57_to_v58(connection)
+                version = SCHEMA_VERSION_V58
+                existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V58:
+                _validate_table_shapes(connection, V58_SCHEMA_STATEMENTS, V58_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 59):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v58_to_v59(connection)
+                version = SCHEMA_VERSION_V59
+                existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V59:
+                _validate_table_shapes(connection, V59_SCHEMA_STATEMENTS, V59_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 60):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v59_to_v60(connection)
+                version = SCHEMA_VERSION_V60
+                existing_tables = _existing_tables(connection)
             if version != SCHEMA_VERSION:
                 raise StorageOpenError("V2 data root has an incompatible schema version")
-            missing = V54_REQUIRED_TABLES.difference(existing_tables)
+            missing = V60_REQUIRED_TABLES.difference(existing_tables)
             if missing:
                 raise StorageOpenError("V2 data root is missing required schema objects")
-            _validate_table_shapes(connection, V54_SCHEMA_STATEMENTS, V54_REQUIRED_TABLES)
-            _validate_integrity(connection)
+            _validate_table_shapes(connection, V60_SCHEMA_STATEMENTS, V60_REQUIRED_TABLES)
+            # Each schema migration runs a full integrity check at its boundary.
+            # Rechecking every page and foreign key on every normal startup makes
+            # open time grow with the data store, even when the schema is current.
+            if not current_schema_on_open:
+                _validate_integrity(connection)
             self._validate_v2_migration_record(connection)
             self._validate_v3_migration_record(connection)
             self._validate_v4_migration_record(connection)
@@ -1147,6 +1339,12 @@ class StorageRuntime:
             self._validate_v52_migration_record(connection)
             self._validate_v53_migration_record(connection)
             self._validate_v54_migration_record(connection)
+            self._validate_v55_migration_record(connection)
+            self._validate_v56_migration_record(connection)
+            self._validate_v57_migration_record(connection)
+            self._validate_v58_migration_record(connection)
+            self._validate_v59_migration_record(connection)
+            self._validate_v60_migration_record(connection)
 
     def _migrate_v53_to_v54(self, connection):
         for statement in V54_MIGRATION_STATEMENTS:
@@ -1168,6 +1366,132 @@ class StorageRuntime:
         if row is None or (row["from_version"] != SCHEMA_VERSION_V53 or row["to_version"] != SCHEMA_VERSION_V54
                            or row["fingerprint"] != MIGRATION_V53_TO_V54_FINGERPRINT):
             raise StorageOpenError("V2 data root has an untrusted v54 migration record")
+
+    def _migrate_v54_to_v55(self, connection):
+        for statement in V55_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V55_SCHEMA_STATEMENTS, V55_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V54_TO_V55_ID, SCHEMA_VERSION_V54, SCHEMA_VERSION_V55,
+            MIGRATION_V54_TO_V55_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V55, "schema_version", SCHEMA_VERSION_V54))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v55 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v55_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V54_TO_V55_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V54 or row["to_version"] != SCHEMA_VERSION_V55
+                           or row["fingerprint"] != MIGRATION_V54_TO_V55_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v55 migration record")
+
+    def _migrate_v55_to_v56(self, connection):
+        for statement in V56_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V56_SCHEMA_STATEMENTS, V56_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V55_TO_V56_ID, SCHEMA_VERSION_V55, SCHEMA_VERSION_V56,
+            MIGRATION_V55_TO_V56_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V56, "schema_version", SCHEMA_VERSION_V55))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v56 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v56_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V55_TO_V56_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V55 or row["to_version"] != SCHEMA_VERSION_V56
+                           or row["fingerprint"] != MIGRATION_V55_TO_V56_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v56 migration record")
+
+    def _migrate_v56_to_v57(self, connection):
+        for statement in V57_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V57_SCHEMA_STATEMENTS, V57_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V56_TO_V57_ID, SCHEMA_VERSION_V56, SCHEMA_VERSION_V57,
+            MIGRATION_V56_TO_V57_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V57, "schema_version", SCHEMA_VERSION_V56))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v57 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v57_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V56_TO_V57_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V56 or row["to_version"] != SCHEMA_VERSION_V57
+                           or row["fingerprint"] != MIGRATION_V56_TO_V57_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v57 migration record")
+
+    def _migrate_v57_to_v58(self, connection):
+        for statement in V58_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V58_SCHEMA_STATEMENTS, V58_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V57_TO_V58_ID, SCHEMA_VERSION_V57, SCHEMA_VERSION_V58,
+            MIGRATION_V57_TO_V58_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V58, "schema_version", SCHEMA_VERSION_V57))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v58 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v58_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V57_TO_V58_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V57 or row["to_version"] != SCHEMA_VERSION_V58
+                           or row["fingerprint"] != MIGRATION_V57_TO_V58_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v58 migration record")
+
+    def _migrate_v58_to_v59(self, connection):
+        for statement in V59_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V59_SCHEMA_STATEMENTS, V59_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V58_TO_V59_ID, SCHEMA_VERSION_V58, SCHEMA_VERSION_V59,
+            MIGRATION_V58_TO_V59_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V59, "schema_version", SCHEMA_VERSION_V58))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v59 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v59_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V58_TO_V59_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V58 or row["to_version"] != SCHEMA_VERSION_V59
+                           or row["fingerprint"] != MIGRATION_V58_TO_V59_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v59 migration record")
+
+    def _migrate_v59_to_v60(self, connection):
+        for statement in V60_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V60_SCHEMA_STATEMENTS, V60_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V59_TO_V60_ID, SCHEMA_VERSION_V59, SCHEMA_VERSION_V60,
+            MIGRATION_V59_TO_V60_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V60, "schema_version", SCHEMA_VERSION_V59))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v60 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v60_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V59_TO_V60_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V59 or row["to_version"] != SCHEMA_VERSION_V60
+                           or row["fingerprint"] != MIGRATION_V59_TO_V60_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v60 migration record")
 
     def _migrate_v52_to_v53(self, connection):
         for statement in V53_MIGRATION_STATEMENTS:

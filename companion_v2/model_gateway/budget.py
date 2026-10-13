@@ -7,14 +7,14 @@ authorization; model tools cannot release reservations or submit usage receipts.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import math
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
-from companion_v2.execution.models import Lane, ProviderBinding, TaskError, digest, encode, stamp
+from companion_v2.execution.models import Lane, ProviderBinding, TaskDeferred, TaskError, digest, encode, stamp
 from companion_v2.execution.runner import TaskRun
 from companion_v2.execution.service import TaskSupervisor
 from companion_v2.storage.runtime import StorageRuntime
@@ -25,11 +25,10 @@ from .usage import MAIN_CHAIN_KIND
 
 
 # Optional background work that may be deferred once the day's soft ceiling is reached.
-# Simulated life, journal writing, reflection and state maintenance stay available: the
-# first two are the product, the last two are the maintenance pass that explains how the
-# interactive quota was spent.
+# Simulated life, journal writing, reflection and state maintenance ignore the soft
+# gate but still use the plugin's hard accounts. Native dialogue is observed separately.
 DEFAULT_SOFT_DEFER_KINDS = frozenset({
-    "role.calendar.plan",
+    "calendar.plan",
     "role.growth.progress",
     "conversation.group.review",
 })
@@ -41,7 +40,7 @@ DEFAULT_SOFT_DEFER_KINDS = frozenset({
 GROUP = "model.budget"
 OWNER = "configuration"
 SOFT_FIELDS = (
-    FieldDefinition(GROUP + ".enable_daily_token_soft_limit", GROUP, GROUP, ValueKind.BOOLEAN, True,
+    FieldDefinition(GROUP + ".enable_daily_token_soft_limit", GROUP, GROUP, ValueKind.BOOLEAN, False,
                     layers=(ConfigLayer.INSTALLATION, ConfigLayer.ROLE),
                     apply_mode=ApplyMode.IMMEDIATE, owner_id=OWNER),
     FieldDefinition(GROUP + ".daily_token_soft_limit", GROUP, GROUP, ValueKind.INTEGER, 800_000,
@@ -55,23 +54,27 @@ def configuration_fields():
 
 
 def effective_soft(runtime, context, fallback=None):
-    """The configured soft ceiling for this installation/role, or the assembly default.
+    """Resolve each field independently; the installation switch is the master gate.
 
-    A data root that has no stored value keeps whatever the host profile supplied,
-    so an existing installation is never silently re-limited by this change.
+    A legacy role switch can narrow an enabled installation, but cannot turn its
+    budget back on. Missing stored fields inherit the host default independently.
     """
     role = context.role_binding.role
     target = ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE, role,
                           bot_id=context.scope.bot_id)
-    snapshot = SparseConfigurationOwner(runtime).read(target, SOFT_FIELDS)
+    owner = SparseConfigurationOwner(runtime)
+    snapshot = owner.read(target, SOFT_FIELDS)
+    installation = owner.read(ConfigTarget(context.scope.installation_id, ConfigLayer.INSTALLATION), SOFT_FIELDS)
     enabled = snapshot.fields[GROUP + ".enable_daily_token_soft_limit"]
     tokens = snapshot.fields[GROUP + ".daily_token_soft_limit"]
-    if not enabled.explicit and not tokens.explicit and fallback is not None:
-        return fallback
-    if type(enabled.value) is not bool or type(tokens.value) is not int:
+    master = installation.fields[GROUP + ".enable_daily_token_soft_limit"]
+    defaults = fallback if fallback is not None else BudgetSoftPolicy(tokens=SOFT_FIELDS[1].default)
+    global_enabled = master.value if master.source is not None else defaults.enabled
+    role_enabled = enabled.value if enabled.source is not None else global_enabled
+    token_limit = tokens.value if tokens.source is not None else defaults.tokens
+    if type(global_enabled) is not bool or type(role_enabled) is not bool or type(token_limit) is not int:
         raise TaskError("model_budget_configuration", "the daily soft ceiling settings are invalid")
-    return BudgetSoftPolicy(enabled=enabled.value, tokens=tokens.value,
-                            kinds=fallback.kinds if fallback is not None else ())
+    return BudgetSoftPolicy(enabled=global_enabled and role_enabled, tokens=token_limit, kinds=defaults.kinds)
 
 
 @dataclass(frozen=True)
@@ -96,22 +99,38 @@ class BudgetSoftPolicy:
         return kind in selected
 
 
+class BudgetDeferral(TaskDeferred):
+    """An original reservation could not start within its daily account."""
+
+    def __init__(self, code, *, account_key, period, amount):
+        retry_at = datetime.fromisoformat(period + "T00:00:00+00:00") + timedelta(days=1)
+        super().__init__(code, "plugin model admission is waiting for its configured local daily budget", retry_at=retry_at)
+        self.account_key, self.period, self.amount = account_key, period, amount
+
+
+DEFERRAL_PREFIX = "model.budget.deferral.v1:"
+
+
 class BudgetLedger:
     def __init__(self, runtime: StorageRuntime, policy: BudgetPolicy, soft: BudgetSoftPolicy | None = None):
         self.runtime = runtime
         self.policy = policy
-        self.policy_hash = digest(policy)
+        # Toggling admission never changes account identity or drops usage history.
+        self.policy_hash = digest({key: value for key, value in policy.document().items() if key != "enabled"})
         self.soft = soft if soft is not None else BudgetSoftPolicy()
 
     def _accounts(self, run: TaskRun, period: str):
-        context = run.task.spec.context
+        background = run.supervisor.registrations[run.task.spec.kind].definition.lane is Lane.BACKGROUND
+        return self._context_accounts(run.task.spec.context, period, background=background)
+
+    def _context_accounts(self, context, period, *, background):
         scope = context.scope
         installation = [scope.installation_id]
         bot = installation + [scope.bot_id]
         role = bot + [asdict(context.role_binding.role)]
         layers = [("installation", installation), ("bot", bot), ("role", role),
                   ("window", [scope.document()])]
-        if run.supervisor.registrations[run.task.spec.kind].definition.lane is Lane.BACKGROUND:
+        if background:
             layers.append(("background", installation))
         return tuple((digest([layer, address, period]), getattr(self.policy, layer)) for layer, address in layers)
 
@@ -131,6 +150,18 @@ class BudgetLedger:
             JOIN model_call_accounts ca ON ca.call_id = c.call_id
             JOIN execution_tasks t ON t.task_id = c.task_id
             WHERE ca.account_key = ? AND t.kind != ?""", (account_key, MAIN_CHAIN_KIND))
+
+    def reservation_sources(self, account_key):
+        """Explain held quota separately from provider-confirmed consumption."""
+        return [dict(row) for row in self.runtime.read_all("""SELECT t.kind, c.state,
+                f.code AS failure, COUNT(*) AS calls,
+                SUM(c.reserved_tokens) AS held_tokens
+            FROM model_calls c JOIN model_call_accounts ca USING(call_id)
+            JOIN execution_tasks t USING(task_id)
+            LEFT JOIN model_call_failures f USING(call_id)
+            WHERE ca.account_key = ? AND t.kind != ? AND c.actual_tokens IS NULL
+            GROUP BY t.kind, c.state, f.code ORDER BY held_tokens DESC, t.kind, c.state""",
+            (account_key, MAIN_CHAIN_KIND))]
 
     def _soft_refusal(self, run: TaskRun, period: str, amount: Amount):
         """The configured account that defers this call, or None.
@@ -155,12 +186,62 @@ class BudgetLedger:
         scope = context.scope
         keys = (digest(["installation", [scope.installation_id], period]),
                 digest(["role", [scope.installation_id, scope.bot_id, asdict(context.role_binding.role)], period]))
-        used = 0
-        for key in keys:
+        # The installation account already includes every role's calls. Adding
+        # the role account again charged the current role twice.
+        usage = self.plugin_account_usage(keys[0])
+        used = usage["spent_tokens"] + usage["held_tokens"]
+        if used + amount.tokens > settings.tokens:
+            return keys[1]
+        return None
+
+    def record_deferral(self, run, error: BudgetDeferral):
+        """Persist after the rejected reservation transaction has rolled back."""
+        with self.runtime.transaction() as connection:
+            run.validate()
+            connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (self._deferral_key(run.task.spec.context, run.task.spec.kind), encode({
+                    "account_key": error.account_key,
+                    "code": error.code, "period": error.period, "policy_hash": self.policy_hash,
+                    "retry_at": stamp(error.retry_at), "tokens": error.amount.tokens,
+                    "cost": error.amount.cost_microusd})))
+
+    @staticmethod
+    def _deferral_key(context, kind):
+        scope = context.scope
+        return DEFERRAL_PREFIX + digest([scope.installation_id, scope.bot_id,
+                                        context.role_binding.role, kind])
+
+    def background_deferral(self, context, kind, *, at):
+        """Recheck saved admission refusals without creating a task or reservation.
+
+        A late usage receipt, a soft-setting change or a new budget day can clear
+        the wait. This never releases unknown calls or replays an original task.
+        """
+        period = stamp(at)[:10]
+        accounts = self._context_accounts(context, period, background=True)
+        row = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?",
+                                    (self._deferral_key(context, kind),))
+        if row is None:
+            return None
+        saved = json.loads(row["value"])
+        if saved["period"] != period or saved["policy_hash"] != self.policy_hash:
+            return None
+        if saved["code"] == "model_budget_exhausted" and self.policy.enabled:
+            ceiling = dict(accounts).get(saved["account_key"])
+            if ceiling is None:
+                return None
+            key = saved["account_key"]
             usage = self.plugin_account_usage(key)
-            used += usage["spent_tokens"] + usage["held_tokens"]
-        if used >= settings.tokens or settings.tokens < amount.tokens:
-            return keys[0]
+            if (usage["spent_tokens"] + usage["held_tokens"] + saved["tokens"] > ceiling.tokens
+                    or usage["spent_cost"] + usage["held_cost"] + saved["cost"] > ceiling.cost_microusd):
+                return {"state": "deferred", "code": saved["code"], "retry_at": saved["retry_at"]}
+        soft = effective_soft(self.runtime, context, self.soft)
+        if (saved["code"] == "model_budget_soft_deferred" and soft.enabled
+                and soft.tokens > 0 and soft.is_deferrable(kind)):
+            usage = self.plugin_account_usage(accounts[0][0])
+            if usage["spent_tokens"] + usage["held_tokens"] + saved["tokens"] > soft.tokens:
+                return {"state": "deferred", "code": saved["code"], "retry_at": saved["retry_at"]}
         return None
 
     def reserve(self, run: TaskRun, *, call_id: str, position: int,
@@ -177,6 +258,7 @@ class BudgetLedger:
                 raise TaskError("model_call_already_reserved", "an original call cannot be repeated")
             period = datetime.fromisoformat(plan["created_at"]).date().isoformat()
             main_chain = self._is_main_chain(run)
+            background = run.supervisor.registrations[run.task.spec.kind].definition.lane is Lane.BACKGROUND
             # Keep role account links as a reporting/ownership index. Main-chain
             # calls use those links for maintenance views, but never charge them.
             accounts = self._accounts(run, period)
@@ -185,7 +267,7 @@ class BudgetLedger:
             for key, ceiling in accounts:
                 connection.execute("INSERT OR IGNORE INTO model_budget_accounts VALUES (?, ?, ?, ?, 0, 0, 0, 0)",
                                    (key, self.policy_hash, ceiling.tokens, ceiling.cost_microusd))
-                if not main_chain:
+                if not main_chain and self.policy.enabled:
                     # Hard ceilings are checked first: software deferral decides
                     # whether optional work should run, never whether the body may answer.
                     account = connection.execute("SELECT * FROM model_budget_accounts WHERE account_key = ?", (key,)).fetchone()
@@ -196,10 +278,14 @@ class BudgetLedger:
                     spent_cost, held_cost = usage["spent_cost"], usage["held_cost"]
                     if (spent_tokens + held_tokens + amount.tokens > account["token_limit"]
                             or spent_cost + held_cost + amount.cost_microusd > account["cost_limit"]):
+                        if background:
+                            raise BudgetDeferral("model_budget_exhausted", account_key=key,
+                                                 period=period, amount=amount)
                         raise TaskError("model_budget_exhausted", "model reservation exceeds an original scope budget")
-            if not main_chain and self._soft_refusal(run, period, amount) is not None:
-                raise TaskError("model_budget_soft_deferred",
-                                "the daily soft ceiling defers this optional background call")
+            soft_key = None if main_chain else self._soft_refusal(run, period, amount)
+            if soft_key is not None:
+                raise BudgetDeferral("model_budget_soft_deferred", account_key=soft_key,
+                                     period=period, amount=amount)
             connection.execute("""INSERT INTO model_calls
                 (call_id, task_id, attempt_id, position, state, provider_json, reserved_tokens, reserved_cost)
                 VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?)""",

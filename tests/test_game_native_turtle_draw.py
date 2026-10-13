@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from astrbot_plugin_game_companion.native_v2 import provider as game_provider
+from companion_v2.games.native import provider as game_provider
+from companion_v2.product import PRODUCT_VERSION
 from tests.test_game_native_pig_dice import request
 
 
@@ -28,9 +29,11 @@ class NativeTurtleSoupTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_judge_context_public_snapshot_and_terminal_replay(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = enabled_plugin()
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             manifest = provider.manifest()
-            self.assertEqual({tool["action"] for tool in manifest["tools"]},
+            self.assertEqual(len(manifest["tools"]), 35)
+            self.assertEqual({tool["action"] for tool in manifest["tools"]
+                              if tool["action"].startswith(("game.turtle_soup.", "game.draw_guess."))},
                 game_provider.TURTLE_ACTIONS | game_provider.DRAW_ACTIONS)
 
             opened = await provider.execute(request(provider, game_provider.TURTLE_CREATE,
@@ -54,7 +57,7 @@ class NativeTurtleSoupTests(unittest.IsolatedAsyncioTestCase):
                 "question": "这件事和约定有关吗？", "verdict": "yes", "matched_facts": [0]},
                 "turtle-question")
             answered = await provider.execute(question, before_dispatch=lambda: True)
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             replayed = await provider.execute(question, before_dispatch=lambda: True)
             self.assertEqual(replayed, answered)
             self.assertEqual(len(next(iter(next(iter(provider.store.data["scopes"].values())).values()))["events"]), 1)
@@ -66,13 +69,13 @@ class NativeTurtleSoupTests(unittest.IsolatedAsyncioTestCase):
             finished = result["result"]["game"]
             self.assertEqual((finished["status"], finished["outcome"]), ("finished", "player"))
             self.assertEqual(finished["state"]["puzzle"]["solution"], puzzle["solution"])
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             self.assertEqual(await provider.execute(solved, before_dispatch=lambda: True), result)
 
     async def test_invalid_facts_close_and_disabled_provider(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = enabled_plugin()
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             game = (await provider.execute(request(provider, game_provider.TURTLE_CREATE,
                 {}, "create"), before_dispatch=lambda: True))["result"]["game"]
             invalid = request(provider, game_provider.TURTLE_ASK, {"game_id": game["game_id"],
@@ -95,7 +98,7 @@ class NativeDrawGuessTests(unittest.IsolatedAsyncioTestCase):
     async def test_answer_stays_hidden_until_authoritative_guess_and_replay(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = enabled_plugin()
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             with patch.object(game_provider.random, "choice", return_value=game_provider.DrawWord(
                     "苹果", ("apple",))):
                 opened = await provider.execute(request(provider, game_provider.DRAW_CREATE,
@@ -107,7 +110,7 @@ class NativeDrawGuessTests(unittest.IsolatedAsyncioTestCase):
 
             wrong = await provider.execute(request(provider, game_provider.DRAW_GUESS,
                 {"game_id": game_id, "guess": "香蕉"}, "draw-wrong"), before_dispatch=lambda: True)
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             repeat = await provider.execute(request(provider, game_provider.DRAW_GUESS,
                 {"game_id": game_id, "guess": "香蕉"}, "draw-wrong"), before_dispatch=lambda: True)
             self.assertEqual(repeat, wrong)
@@ -125,7 +128,7 @@ class NativeDrawGuessTests(unittest.IsolatedAsyncioTestCase):
     async def test_guess_limit_timeout_and_give_up(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = enabled_plugin(native_v2_draw_guess_max_guesses=1)
-            provider = game_provider.NativeGameProvider(plugin, Path(root), version="0.2.8")
+            provider = game_provider.NativeGameProvider(plugin, Path(root), version=PRODUCT_VERSION)
             with patch.object(game_provider.random, "choice", return_value=game_provider.DrawWord("猫")), \
                     patch.object(game_provider.time, "time", return_value=1000):
                 opened = await provider.execute(request(provider, game_provider.DRAW_CREATE,

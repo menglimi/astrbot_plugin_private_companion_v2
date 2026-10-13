@@ -69,9 +69,9 @@ function harness(responses) {
       bridgeNow: () => bridge,
     },
     lucide: {createIcons() {}},
-    confirm: message => {
-      confirmations.push(message);
-      return responses.confirmations?.length ? responses.confirmations.shift() : true;
+    CompanionConfirm: request => {
+      confirmations.push(typeof request === 'string' ? request : request?.message);
+      return Promise.resolve(responses.confirmations?.length ? responses.confirmations.shift() : true);
     },
   };
   const root = {
@@ -127,6 +127,107 @@ function harness(responses) {
   };
 }
 
+test('daily token trend stacks usage, scales the axis, and breaks totals at unknown days', async () => {
+  const today = localDay();
+  const dayOffset = offset => localDay(new Date(Date.now() + offset * 86400000));
+  const rows = [
+    daily(dayOffset(-3), {calls: 1, tokens: 6100, input_tokens: 4800, cached_input_tokens: 1800, output_tokens: 1300}),
+    daily(dayOffset(-2), {calls: 1, tokens: 7400, input_tokens: 5900, cached_input_tokens: 2400, output_tokens: 1500}),
+    daily(dayOffset(-1), {calls: 1, tokens: null, input_tokens: null, cached_input_tokens: null, output_tokens: null}),
+    daily(today, {calls: 1, tokens: 8500, input_tokens: 6500, cached_input_tokens: 2500, output_tokens: 2000}),
+  ];
+  const h = harness({maintenance: {
+    generated_at: today + 'T12:00:00', summary: {calls: 3, tokens: 22000}, totals: {calls: 3, tokens: 22000},
+    daily: rows, history: rows, recent: [], budget: {},
+  }});
+  h.page.mount(h.root);
+  await flush();
+  const dailyTrend = h.root.innerHTML.split('data-trend-panel="daily"')[1].split('data-trend-panel="hourly"')[0];
+  assert.match(dailyTrend, /data-series="cached">缓存输入/);
+  assert.match(dailyTrend, /data-series="input">未命中缓存输入/);
+  assert.match(dailyTrend, /data-series="output">输出/);
+  assert.match(dailyTrend, /data-series="total">总计/);
+  assert.match(dailyTrend, /class="maint-chart-axis"[\s\S]*?>10K<\/span>/);
+  assert.match(dailyTrend, /class="maint-chart-total-line"[^>]*points="[^"]+"/);
+  assert.match(dailyTrend, /title="[^"]+缓存输入 2,500 · 未命中缓存输入 4,000 · 输出 2,000"/);
+  const slots = Number(dailyTrend.match(/data-count="(\d+)"/)[1]);
+  assert.equal((dailyTrend.match(/class="maint-chart-total-dot"/g) || []).length, slots - 1);
+  assert.equal((dailyTrend.match(/class="maint-chart-total-line"/g) || []).length, 1);
+  assert.match(styles, /\.maint-token-trend-panel \.maint-chart-day:hover \.maint-chart-day-point/);
+  assert.match(styles, /\.maint-token-trend-panel \.maint-chart-day small\[aria-hidden="true"\] \{ visibility:hidden; \}/);
+  assert.match(styles, /@keyframes maint-chart-line-in/);
+  assert.match(styles, /@keyframes maint-chart-dot-in/);
+  assert.match(styles, /@keyframes maint-chart-day-point-in/);
+});
+
+test('core efficiency and cache views retain the native measurement basis', async () => {
+  const at = localStamp(), today = localDay();
+  const coreUsage = {execution_path: 'astrbot_core', cost_availability: 'unavailable', summary: {calls: 2, tokens: 1200},
+    daily: [daily(today, {calls: 2, tokens: 1200, cost_microusd: null})], recent: [
+      {kind: 'conversation.astrbot_core', execution_path: 'astrbot_core', at, state: 'returned', tokens: 1200,
+        input_tokens: 1000, output_tokens: 200, cached_input_tokens: null, cost_microusd: null},
+    ], coverage: {turns: 1, observed_requests: 2, fallback_usage_observations: 0, partial_request_observation_turns: 1}, cache_diagnostics: {}};
+  const report = {summary: {samples: 1, completed: 1, send_returned_samples: 1,
+      median_first_send_returned_ms: 2200, median_end_to_end_send_returned_ms: 3100},
+    coverage: {core_samples: 1, core_send_returned: 1, core_request_observation: 1},
+    by_source: {astrbot_core: {samples: 1}, legacy_v2_conversation: {completed: 0}},
+    recent: [{turn_id: 'core-turn-one', execution_path: 'astrbot_core', outcome: 'completed', received_at: at, input_count: 1,
+      model_calls: 2, model_call_count_available: true, model_call_count_complete: false,
+      usage_observation_count: 3, send_returned_parts: 2, part_count: 2,
+      timestamps: {received_at: at, first_send_returned_at: at, last_send_returned_at: at},
+      stages: {first_send_returned_ms: 2200, end_to_end_send_returned_ms: 3100,
+        plugin_preparation_ms: 100, model_request_ms: 900, tool_ms: 300, agent_ms: 1800, send_ms: 400},
+      trace: {model_calls: [{position: 3, state: 'returned', measurement_basis: 'runner_aggregate', tokens: 1200}],
+        preparation_steps: [{name: 'context_build', state: 'returned', started_at: at, elapsed_ms: 100}],
+        materials: [{owner: 'private_companion.v2', purpose: 'memory', state: 'ready', elapsed_ms: 35, chars: 1200}],
+        offered_tools: ['read_file'], tool_calls: [], offered_tool_count: 4}}], daily: []};
+  const h = harness({maintenance: {generated_at: at, summary: {calls: 2, tokens: 1200},
+      daily: [], history: [], recent: [],
+      usage_sources: {astrbot_core: coreUsage}, reply_efficiency: report}});
+  h.page.mount(h.root, {activeView: 'efficiency'});
+  await flush();
+  const efficiency = h.root.innerHTML.split('data-maint-view="efficiency"')[1].split('data-maint-view="recent"')[0];
+  assert.match(efficiency, /核心发送已返回/);
+  assert.match(efficiency, /平台确认未观测/);
+  assert.match(efficiency, /首次发送返回<\/span><strong>2.2 秒/);
+  assert.match(efficiency, /已观测请求 2 次 · 完整次数未知/);
+  assert.match(efficiency, /用量观察 3 条/);
+  assert.match(efficiency, /用量观察 3<\/strong>/);
+  assert.match(efficiency, /单次回复分项耗时/);
+  assert.match(efficiency, /已观测模型请求累计<\/span><strong>900 毫秒/);
+  assert.match(efficiency, /Agent 总时长<\/span><strong>1.8 秒/);
+  assert.match(efficiency, /插件准备 · 素材准备/);
+  assert.match(efficiency, /记忆召回/);
+  assert.match(efficiency, /已注入 · 35 毫秒 · 1,200 字符/);
+  assert.match(efficiency, /read_file/);
+  assert.doesNotMatch(efficiency, /模型调用 2 次/);
+  assert.doesNotMatch(efficiency, /2 \/ 2 段送达|1 条完整送达/);
+  let expanded = true;
+  h.root.querySelectorAll = selector => selector === 'details[data-reply-sample]'
+    ? [{dataset: {replySample: 'core-turn-one'}, get open() { return expanded; }}] : [];
+  h.root.click('[data-refresh]');
+  await flush();
+  assert.match(h.root.innerHTML, /data-reply-sample="core-turn-one" open/);
+  expanded = false;
+  h.root.click('[data-refresh]');
+  await flush();
+  assert.doesNotMatch(h.root.innerHTML, /data-reply-sample="core-turn-one" open/);
+  h.root.click('[data-token-source]', {tokenSource: 'astrbot_core'});
+  h.root.click('[data-maint-nav]', {maintNav: 'cache'});
+  const cache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="efficiency"')[0];
+  assert.match(cache, /SDK 默认缓存 0 不作为缓存实报/);
+  h.root.click('[data-maint-nav]', {maintNav: 'overview'});
+  const overview = h.root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="cache"')[0];
+  assert.match(overview, /核心费用未提供/);
+  assert.match(overview, /2 次实际请求/);
+  assert.match(overview, /1 回合仅观测部分请求/);
+  h.root.click('[data-export-tokens]');
+  const scopeRow = h.exports[0].split('\r\n')[1].split(',');
+  assert.equal(scopeRow[9], '""');
+  assert.match(h.exports[0], /已计价部分微美元（未知留空）/);
+  h.page.unmount();
+});
+
 test('reply efficiency shows a chronological timeline and separates cumulative latency', async () => {
   const received = localStamp(new Date(Date.now() - 8000));
   const lastInput = localStamp(new Date(Date.now() - 7000));
@@ -145,7 +246,7 @@ test('reply efficiency shows a chronological timeline and separates cumulative l
       summary: {samples: 3, completed: 1, partial: 1, median_end_to_end_ms: 7000,
         p95_end_to_end_ms: 7000, median_first_reply_ms: 6000, median_pre_model_ms: 2000,
         median_last_input_to_model_ms: 1000, median_model_ms: 2000, median_post_model_ms: 1000,
-        median_delivery_ms: 2000},
+        median_delivery_ms: 2000, laya_calls: 4, laya_skipped: 2, laya_failed: 1},
       coverage: {received: 3, model_started: 2, model_finished: 2, first_dispatched: 2,
         first_delivered: 2, final_delivered: 1},
       daily: [{day: localDay(), samples: 1, completed: 1, median_end_to_end_ms: 7000}],
@@ -160,7 +261,12 @@ test('reply efficiency shows a chronological timeline and separates cumulative l
           trace: {input_wait_ms: 500, queue_wait_ms: 200, preparation_ms: 300,
             materials: [{owner: 'memory.recall', purpose: 'recent_memory', state: 'ready', payload: 'private body'}],
             offered_tool_count: 1, offered_tools: ['calendar.query'],
-            model_calls: [{position: 0, state: 'generated', started_at: modelStarted, elapsed_ms: 1250},
+            model_calls: [{position: 0, state: 'generated', started_at: modelStarted, elapsed_ms: 1250,
+              provider: 'sensenova', tokens: null, input_tokens: null, output_tokens: null,
+              failure_code: 'provider_request_failed', response_diagnostics: {version: 2,
+                completion_present: false, finish_reason: 'missing', parse_state: 'not_received',
+                raw: null, parsed: null, visible: null, failure_code: 'provider_request_failed',
+                error_type: 'RateLimitError', error_code: 'provider_rate_limited', status_code: 429}},
               {position: 1, state: 'generated', started_at: secondModelStarted, elapsed_ms: 100}],
             tool_calls: [{sequence: 1, action: 'calendar.query', kind: 'extension', state: 'succeeded',
               started_at: pluginStarted, finished_at: pluginFinished, elapsed_ms: 600,
@@ -190,9 +296,10 @@ test('reply efficiency shows a chronological timeline and separates cumulative l
   assert.match(page, /P50 端到端/);
   assert.match(page, /P50 末条消息至模型/);
   assert.match(page, /P50 模型往返区间/);
+  assert.match(page, /Laya 4 次调用 \/ 2 次跳过 \/ 1 次失败/);
   assert.match(page, /首段响应/);
   assert.match(page, /完整送达/);
-  assert.match(page, /3 条输入 · 2 \/ 2 段送达 · 模型 2 次 · 插件 1 次/);
+  assert.match(page, /3 条输入 · 2 \/ 2 段送达 · 模型调用 2 次 · 插件 1 次/);
   assert.match(page, /末条消息/);
   assert.match(page, /7\.0 秒/);
   assert.match(page, /起点累计/);
@@ -215,6 +322,11 @@ test('reply efficiency shows a chronological timeline and separates cumulative l
   assert.match(page, /calendar\.query/);
   assert.match(page, /扩展插件 · calendar\.query/);
   assert.match(page, /data-kind="extension"/);
+  assert.match(page, /Provider 请求失败/);
+  assert.match(page, /HTTP 429/);
+  assert.match(page, /RateLimitError/);
+  assert.match(page, /未收到完整响应内容/);
+  assert.match(page, /用量未确认 · 输入 未确认 · 输出 未确认/);
   assert.match(page, /宿主其他插件钩子未采集/);
   assert.match(page, /data-observed="false"/);
   assert.match(page, /未观测/);
@@ -231,6 +343,38 @@ test('reply efficiency shows a chronological timeline and separates cumulative l
   }
   h.root.click('[data-maint-nav]', {maintNav: 'recent'});
   assert.deepEqual(changedViews, ['efficiency', 'recent']);
+});
+
+test('reply efficiency charts core and historical daily latency as separate measured series', async () => {
+  const h = harness({maintenance: {
+    generated_at: localStamp(), summary: {}, totals: {}, daily: [], history: [], recent: [],
+    reply_efficiency: {
+      summary: {samples: 3}, coverage: {core_samples: 1},
+      by_source: {astrbot_core: {samples: 1}, legacy_v2_conversation: {samples: 2}},
+      daily: [
+        {day: '2026-10-11', samples: 2, core_samples: 0, median_end_to_end_ms: 6400,
+          p95_end_to_end_ms: 9200, median_end_to_end_send_returned_ms: null},
+        {day: '2026-10-12', samples: 1, core_samples: 1, median_end_to_end_ms: null,
+          median_end_to_end_send_returned_ms: 3200, p95_end_to_end_send_returned_ms: 3200},
+      ],
+      recent: [],
+    },
+  }});
+  h.page.mount(h.root, {activeView: 'efficiency'});
+  await flush();
+  const page = h.root.innerHTML.split('data-maint-view="efficiency"')[1].split('data-maint-view="recent"')[0];
+  assert.match(page, /<h3>每日回复时长<\/h3>/);
+  assert.match(page, /核心发送返回/);
+  assert.match(page, /历史平台回执/);
+  assert.match(page, /每日回复时长中位数柱状图，共用纵轴/);
+  assert.match(page, /data-series="legacy" style="--bar-height:[1-9]\d*%" title="历史平台回执 · 2026-10-11 · P50 6\.4 秒 · P95 9\.2 秒"/);
+  assert.match(page, /data-series="core" style="--bar-height:[1-9]\d*%" title="核心发送返回 · 2026-10-12 · P50 3\.2 秒 · P95 3\.2 秒"/);
+  assert.match(page, /data-series="core" aria-hidden="true"><\/span>/);
+  assert.match(page, /role="group" aria-label="2026-10-11：历史平台回执 P50 6\.4 秒，P95 9\.2 秒"/);
+  assert.match(page, /datetime="2026-10-11">10\/11<\/time>/);
+  assert.match(styles, /\.maint-efficiency-day:hover \.maint-efficiency-trend-bar/);
+  assert.match(styles, /@media \(prefers-reduced-motion:reduce\)[\s\S]*\.maint-efficiency-trend-bar/);
+  h.page.unmount();
 });
 
 test('dialogue and plugin views switch totals, rankings, cache, history, traces and CSV together', async () => {
@@ -266,7 +410,7 @@ test('dialogue and plugin views switch totals, rankings, cache, history, traces 
   h.root.click('[data-token-source]', {tokenSource: 'plugin'});
   const overview = () => h.root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="prompts"')[0];
   assert.match(overview(), /Provider 已确认 Token<\/span><strong>1,300<\/strong>/);
-  assert.match(overview(), /US\$0\.013000 已确认本地计价/);
+  assert.match(overview(), /US\$0\.013000 已计价部分/);
   assert.match(overview(), /data-rank-key="proactive\.compose"/);
   assert.doesNotMatch(overview(), /data-task-settings-kind="conversation\.reply"|dialogue-provider/);
   assert.match(overview(), /插件任务预算/);
@@ -300,7 +444,7 @@ test('dialogue and plugin views switch totals, rankings, cache, history, traces 
   assert.match(overview(), /data-rank-key="conversation\.reply"/);
   assert.doesNotMatch(overview(), /data-task-settings-kind="proactive\.compose"|plugin-provider/);
   const dialogueRecent = h.root.innerHTML.split('data-maint-view="recent"')[1];
-  assert.match(dialogueRecent, /对话主链 · V2 接管 · 1 \/ 1 条/);
+  assert.match(dialogueRecent, /对话 · AstrBot 核心与历史 · 1 \/ 1 条/);
   assert.doesNotMatch(dialogueRecent, /已按排行筛选|plugin-provider/);
   h.root.click('[data-maint-nav]', {maintNav: 'cache'});
   const cache = h.root.innerHTML.split('data-maint-view="cache"')[1].split('data-maint-view="recent"')[0];
@@ -315,6 +459,41 @@ test('dialogue and plugin views switch totals, rankings, cache, history, traces 
   assert.match(pluginCache, /data-token-source="plugin" aria-pressed="true"/);
   assert.match(pluginCache, /已采集 1 次 · 等待可比调用/);
   assert.doesNotMatch(pluginCache, /已采集 3 次/);
+  h.page.unmount();
+});
+
+test('Live and Game keep native ledgers separate and describe missing statistics as an internal service', async () => {
+  const today = localDay();
+  const usage = {calls: 2, tokens: 90, reported_tokens: 90, estimated_tokens: 0,
+    input_tokens: 80, output_tokens: 10, unconfirmed_calls: 1, cache_telemetry_calls: 0,
+    cache_reported_calls: 0, cached_input_tokens: null, cache_creation_tokens: null};
+  const totals = daily(today, {calls: 1, tokens: 10000});
+  const h = harness({maintenance: {generated_at: today + 'T09:00:00',
+    summary: totals, totals, daily: [totals], history: [totals], recent: [], budget: {},
+    external_token_sources: {
+      live: {available: true, installed: true, display_name: '直播与表演', totals: usage,
+        daily: [{key: today, ...usage}], history: [{key: today, ...usage}],
+        recent: [{at: today + 'T08:00:00', kind: 'live.auto_reply', provider: 'live-model',
+          state: 'generated', tokens: 90}], by_provider: [], by_task: []},
+      game: {available: false, installed: true, display_name: '共同游玩'},
+    }}});
+  h.page.mount(h.root);
+  await flush();
+  assert.match(h.root.innerHTML, /data-maint-view="overview"/);
+  h.root.click('[data-token-source]', {tokenSource: 'live'});
+  const overview = () => h.root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="prompts"')[0];
+  assert.match(overview(), /直播与表演 独立账本/);
+  assert.match(overview(), /已确认 Token<\/span><strong>90<\/strong>/);
+  assert.match(overview(), /无回执/);
+  h.root.click('[data-maint-nav]', {maintNav: 'recent'});
+  const recent = h.root.innerHTML.split('data-maint-view="recent"')[1];
+  assert.match(recent, /直播与表演 · 1 \/ 1 条/);
+  assert.match(recent, /live-model/);
+  h.root.click('[data-token-source]', {tokenSource: 'game'});
+  assert.match(overview(), /内部能力已装配，统计暂不可用/);
+  assert.doesNotMatch(overview(), /插件已加载，统计桥暂不可用/);
+  h.root.click('[data-token-source]', {tokenSource: 'companion'});
+  assert.match(overview(), /10,000/);
   h.page.unmount();
 });
 
@@ -531,22 +710,34 @@ test('missing usage breakdown never substitutes role totals for plugin or dialog
   }
   assert.equal(h.exports.length, 0);
   h.root.click('[data-token-source]', {tokenSource: 'main'});
-  assert.match(h.root.innerHTML, /AstrBot 默认回复流程的统计未接入/);
+  assert.match(h.root.innerHTML, /AstrBot 全局统计未接入/);
   h.page.unmount();
 });
 
 test('recent calls show response stages and missing parsed text from body-free metadata', async () => {
+  const sampleTime = new Date(); sampleTime.setHours(12, 30, 0, 0);
   const h = harness({maintenance: {generated_at: localStamp(), summary: {calls: 1, tokens: 0},
     daily: [], recent: [{at: localStamp(),
     kind: 'conversation.reply', provider: 'dialogue-provider', tokens: null, state: 'unknown',
-    failure: 'native_response_parse_failed', response_diagnostics: {parse_state: 'native_rejected',
-      finish_reason: 'stop', raw: {chars: 2, has_internal_markers: true}, parsed: null, visible: null}}]}});
+    failure: 'native_response_parse_failed', response_diagnostics: {version: 2, completion_present: true,
+      parse_state: 'native_rejected', finish_reason: 'stop', raw: {chars: 2, has_internal_markers: true},
+      parsed: null, visible: null}},
+    {at: localStamp(new Date(sampleTime.getTime() - 60000)), kind: 'conversation.reply', provider: 'dialogue-provider',
+      tokens: null, state: 'unknown', failure: 'provider_request_failed', response_diagnostics: {version: 2,
+        completion_present: false, parse_state: 'not_received', finish_reason: 'missing', raw: null, parsed: null,
+        visible: null, failure_code: 'provider_request_failed', error_type: 'APIConnectionError',
+        error_code: null, status_code: null}}]}});
   h.page.mount(h.root);
   await flush();
   h.root.click('[data-maint-nav]', {maintNav: 'recent'});
   assert.match(h.root.innerHTML, /宿主解析失败/);
   assert.match(h.root.innerHTML, /原始 2 字 · 含标签样式标记/);
-  assert.match(h.root.innerHTML, /宿主解析未取得文本/);
+  assert.match(h.root.innerHTML, /宿主解析 未记录 · 待呈现 未记录/);
+  assert.match(h.root.innerHTML, /Provider 请求失败/);
+  assert.match(h.root.innerHTML, /结束原因 未返回/);
+  assert.match(h.root.innerHTML, /APIConnectionError/);
+  assert.match(h.root.innerHTML, /未收到响应正文/);
+  assert.doesNotMatch(h.root.innerHTML, /原始未取得文本/);
   h.page.unmount();
 });
 
@@ -585,10 +776,16 @@ test('maintenance groups troubleshooting content by workflow and uses responsive
   h.page.mount(h.root, {activeView: 'diagnostics'});
   await flush();
 
-  const groups = ['maint-diagnostic-overview', 'maint-diagnostic-signals', 'maint-diagnostic-checks',
-    'maint-diagnostic-evidence', 'maint-faq'].map(name => h.root.innerHTML.indexOf('class="' + name + '"'));
+  const groups = ['maint-diagnostic-rail', 'maint-diagnostic-focus', 'maint-diagnostic-inspection',
+    'maint-diagnostic-signals', 'maint-diagnostic-activity', 'maint-diagnostic-checks',
+    'maint-evidence-drawer', 'maint-faq'].map(name => h.root.innerHTML.indexOf('class="' + name + '"'));
   assert.ok(groups.every(index => index >= 0));
   assert.deepEqual(groups, [...groups].sort((left, right) => left - right));
+  assert.match(h.root.innerHTML, /class="maint-diagnostic-workspace"[\s\S]*role="group" aria-label="问题类型"/);
+  assert.match(styles, /\.maint-diagnostic-workspace\s*\{[^}]*grid-template-columns:minmax\(200px, 230px\)/s);
+  assert.match(styles, /@container maint-diagnostics \(max-width: 920px\)/);
+  assert.match(styles, /@container maint-diagnostics \(max-width: 640px\)/);
+  assert.match(styles, /\.maint-diagnostic-categories\s*\{[^}]*flex-wrap:nowrap/s);
   assert.match(h.root.innerHTML, /class="maint-diagnostic-checks"[\s\S]*class="maint-proactive-test"[\s\S]*class="maint-memory-diagnostic"[\s\S]*class="maint-test-zone"/);
   assert.match(h.root.innerHTML, /class="maint-test-row maint-test-row--provider"/);
   assert.match(h.root.innerHTML, /class="maint-test-row maint-test-row--voice"/);
@@ -618,6 +815,7 @@ test('prompt route opens the editor directly and internal tabs update the route 
 
 test('maintenance offers today, total, date drilldown, ranked detail, cache and diagnostic filters', async () => {
   const today = localDay(new Date());
+  const sampleTime = new Date(); sampleTime.setHours(12, 30, 0, 0);
   const previous = localDay(new Date(Date.now() - 86400000));
   const provider = {key: '<main>', calls: 1, tokens: 120, cost_microusd: 15, failures: 0,
     input_tokens: 100, output_tokens: 20, cache_reported_calls: 1, cache_telemetry_calls: 1,
@@ -626,11 +824,11 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   const task = {...provider, key: 'conversation.reply'};
   const current = daily(today, {...provider, calls: 1, tokens: 120, providers: [provider], tasks: [task]});
   const prior = daily(previous, {calls: 2, tokens: 80, input_tokens: 60, output_tokens: 20, providers: [], tasks: []});
-  const hour = String(new Date().getHours()).padStart(2, '0');
+  const hour = String(sampleTime.getHours()).padStart(2, '0');
   const recent = Array.from({length: 12}, (_, index) => ({kind: 'conversation.reply', provider: '<main>',
     state: 'generated', tokens: 120 + index, cost_microusd: 15, input_tokens: 100, cached_input_tokens: 40,
     cache_creation_tokens: 10, output_tokens: 20, cache_hit_rate: 40, latency_ms: 120,
-    at: localStamp(new Date(Date.now() - index * 60000)), failure: index === 11 ? 'provider_request_failed' : null}));
+    at: localStamp(new Date(sampleTime.getTime() - index * 60000)), failure: index === 11 ? 'provider_request_failed' : null}));
   const responses = {
     maintenance: {
       generated_at: localStamp(),
@@ -649,7 +847,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
       hourly: [{day: today, hour, calls: 1, tokens: 120, cost_microusd: 15}],
       by_provider: [provider], by_task: [task],
       recent,
-      budget: {limit_tokens: 1000, spent_tokens: 100, held_tokens: 20, soft_limit_enabled: true, soft_limit_tokens: 500},
+      budget: {hard_limit_enabled: true, limit_tokens: 1000, spent_tokens: 100, held_tokens: 20, soft_limit_enabled: true, soft_limit_tokens: 500},
       providers: [{id: '<main>', model: 'model-a'}],
       runtime: {
         storage: {journal_mode: 'wal', synchronous: 2, busy_timeout_ms: 5000, foreign_keys: true, page_count: 88, freelist_count: 2, schema_version: 49},
@@ -712,7 +910,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(styles, /\.maint-budget-limits/);
   assert.match(styles, /\.maint-budget-meterline \.maint-budget-tick/);
   assert.match(root.innerHTML, /统计口径/);
-  assert.match(root.innerHTML, /当前角色的 V2 模型任务/);
+  assert.match(root.innerHTML, /当前角色的核心回复与插件任务/);
   assert.match(root.innerHTML, /模型任务路由/);
   assert.match(root.innerHTML, /路由正常/);
   assert.match(root.innerHTML, /data-call-search/);
@@ -742,6 +940,8 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.ok(summaryStart >= 0 && balanceCard < usageCard && usageCard < budgetCard);
   assert.match(root.innerHTML, /data-token-detail="daily" aria-selected="true"/);
   assert.match(root.innerHTML, /data-token-breakdown="providers" aria-pressed="true"/);
+  assert.match(root.innerHTML, /data-series="cached" style="--segment-height:\d+px;--segment-offset:0px"/);
+  assert.match(root.innerHTML, /data-series="input" style="--segment-height:\d+px;--segment-offset:\d+px"/);
   root.click('[data-trend-mode]', {trendMode: 'hourly'});
   assert.match(root.innerHTML, /data-trend-mode="hourly" aria-pressed="true"/);
   assert.match(root.innerHTML, /data-trend-panel="daily" hidden/);
@@ -762,6 +962,8 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(styles, /\.maint-token-hero\.maint-token-summary\.maint-token-dashboard-summary\s*\{[^}]*grid-template-columns:/s);
   assert.doesNotMatch(styles, /\.maint-token-hero\.maint-token-summary\s*>\s*\.maint-budget-block\s*\{/);
   assert.match(styles, /\.maint-token-source-control \.maint-source-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit/s);
+  assert.match(styles, /\.maint-token-toolbar\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/s);
+  assert.match(styles, /\.maint-token-trend-panel \.maint-chart-column > i\s*\{[^}]*bottom:var\(--segment-offset,0px\)/s);
   assert.match(styles, /--maint-token-series-1:#A17BFF/);
   assert.match(styles, /--maint-token-series-2:#3FE0A6/);
   assert.match(styles, /--maint-token-series-3:#FFC258/);
@@ -789,7 +991,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(root.innerHTML, /材料前缀/);
   assert.match(root.innerHTML, /升级后尚未采集/);
   assert.match(root.innerHTML, /请求前缀签名/);
-  assert.match(root.innerHTML, /运行证据台/);
+  assert.match(root.innerHTML, /近期事件与运行快照/);
   assert.match(root.innerHTML, /V2 SQLite 存储/);
   assert.match(root.innerHTML, /REQ-041/);
   assert.match(root.innerHTML, /统一身份与隔离/);
@@ -853,12 +1055,30 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(root.innerHTML, /data-category="delivery"/);
   assert.match(root.innerHTML, /data-evidence-kind="debounce"/);
   root.click('[data-diagnostic-category]', {diagnosticCategory: 'identity'});
-  assert.match(root.innerHTML, /aria-selected="true" class="is-active" title="管理身份与角色账本边界/);
+  assert.match(root.innerHTML, /data-diagnostic-category="identity" aria-pressed="true" class="is-active" title="管理身份与角色账本边界/);
   assert.match(root.innerHTML, /data-evidence-kind="identity"/);
   assert.match(root.innerHTML, /REQ-041 结果为什么只显示状态/);
+  let evidenceOpened = false;
+  let focusedIdentity = false;
+  root.querySelector = selector => selector === '[data-focus-target="identity-evidence"]' ? {
+    closest: value => value === 'details.maint-evidence-drawer' ? {set open(value) { evidenceOpened = value; }} : null,
+    scrollIntoView: () => { focusedIdentity = true; },
+  } : null;
+  root.click('[data-focus-panel]', {focusPanel: 'identity-evidence'});
+  assert.equal(evidenceOpened, true);
+  assert.equal(focusedIdentity, true);
+  root.click('[data-diagnostic-category]', {diagnosticCategory: 'storage'});
+  assert.match(root.innerHTML, /data-focus-panel="test-zone">运行只读检查/);
+  let focusedStorageCheck = false;
+  root.querySelector = selector => selector === '[data-focus-target="test-zone"]' ? {
+    closest: () => null,
+    scrollIntoView: () => { focusedStorageCheck = true; },
+  } : null;
+  root.click('[data-focus-panel]', {focusPanel: 'test-zone'});
+  assert.equal(focusedStorageCheck, true);
   root.click('[data-diagnostic-category]', {diagnosticCategory: 'all'});
   root.click('[data-diagnostic-severity]', {diagnosticSeverity: 'all'});
-  assert.match(root.innerHTML, /模型预算额度不足/);
+  assert.match(root.innerHTML, /插件本地硬预算已触发/);
   assert.match(root.innerHTML, /model_budget_exhausted/);
   assert.match(root.innerHTML, /主动消息链路测试/);
   assert.match(root.innerHTML, /作品与阅读/);
@@ -867,7 +1087,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.doesNotMatch(root.innerHTML, /当前没有安全的主动消息测试接口/);
   assert.match(root.innerHTML, /data-focus-target="proactive-test"/);
   assert.match(root.innerHTML, /其他运行诊断/);
-  assert.match(root.innerHTML, /以下信号独立于上方主动消息测试/);
+  assert.match(root.innerHTML, /先处理当前分类信号，再运行按需检测/);
   root.change('[data-proactive-purpose]', 'affection');
   root.click('[data-proactive-test]');
   assert.match(root.innerHTML, /确认真实投递/);
@@ -935,7 +1155,7 @@ test('empty today rankings identify their scope and link to seven-day rankings',
   await flush();
 
   assert.equal((root.innerHTML.match(/今日 · 0 项/g) || []).length, 2);
-  assert.match(root.innerHTML, /当前无硬上限/);
+  assert.match(root.innerHTML, /仅统计用量 · 硬预算关闭/);
   assert.doesNotMatch(root.innerHTML, /aria-valuemax="0"/);
   assert.equal((root.innerHTML.match(/查看近 7 日排行/g) || []).length, 2);
   root.click('[data-period]', {period: '7d'});
@@ -1254,6 +1474,11 @@ test('maintenance shows connected external token ledgers without mixing their bu
         provider: 'v2-role-provider', tokens: 999, input_tokens: 800, output_tokens: 199}], budget: {}, providers: [],
       external_token_sources: {memory: {
         available: true, installed: true, display_name: '记忆伴侣', updated_at: new Date().toISOString(),
+        linkage: {state: 'ready', display_name: '记忆伴侣', counts: {profile: 2, preference: 3,
+          relationship: 1, private_conversation: 4, other: 0, total: 10}, categories: [
+          {key: 'profile', count: 2}, {key: 'preference', count: 3}, {key: 'relationship', count: 1},
+          {key: 'private_conversation', count: 4}, {key: 'other', count: 0},
+        ]},
         totals: {calls: 2, tokens: 115, reported_tokens: 70, estimated_tokens: 45, input_tokens: 85,
           output_tokens: 30, failures: 0, cached_input_tokens: 20, cache_creation_tokens: 5, avg_latency_ms: 80},
         by_provider: [dimension('memory-model', 115)], by_task: [dimension('memory.recall', 115)],
@@ -1274,6 +1499,10 @@ test('maintenance shows connected external token ledgers without mixing their bu
   assert.match(root.innerHTML, /50/);
   assert.match(root.innerHTML, /25/);
   assert.match(root.innerHTML, /V2 角色预算保持独立|不计入 V2 角色预算/);
+  assert.match(root.innerHTML, /V2 联动摘要/);
+  assert.match(root.innerHTML, /只读分类计数，不含记忆正文/);
+  assert.match(root.innerHTML, /私聊内容/);
+  assert.match(root.innerHTML, /<dt>合计<\/dt><dd>10<\/dd>/);
   const externalOverview = root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="prompts"')[0];
   assert.match(externalOverview, /已确认 Token/);
   assert.doesNotMatch(externalOverview, /后台插件任务硬预算|ACCOUNT BALANCE|data-balance-refresh/);
@@ -1293,6 +1522,105 @@ test('maintenance shows connected external token ledgers without mixing their bu
   assert.match(root.innerHTML, /45/);
   assert.match(root.innerHTML, /记忆伴侣 独立账本/);
   page.unmount();
+});
+
+test('maintenance keeps Reality usage unknown independently of Together and core replies', async () => {
+  const today = localDay();
+  const previous = localDay(new Date(Date.now() - 86400000));
+  const unknown = daily(today, {calls: 1, tokens: null, reported_tokens: null, estimated_tokens: 0,
+    unconfirmed_calls: 1, input_tokens: null, output_tokens: null, cached_input_tokens: null,
+    cache_creation_tokens: null, avg_latency_ms: 80,
+    providers: [{key: 'camera-vision', calls: 1, tokens: null, input_tokens: null, output_tokens: null,
+      reported_tokens: null, estimated_tokens: 0, cached_input_tokens: null, cache_creation_tokens: null}],
+    tasks: [{key: 'reality_touch_camera', calls: 1, tokens: null, reported_tokens: null,
+      estimated_tokens: 0, cached_input_tokens: null, cache_creation_tokens: null}]});
+  const reported = daily(previous, {calls: 1, tokens: 120, reported_tokens: 120, estimated_tokens: 0,
+    input_tokens: 100, output_tokens: 20, cached_input_tokens: null, cache_creation_tokens: null});
+  const h = harness({maintenance: {generated_at: today + 'T09:00:00', summary: daily(today),
+    totals: daily(today), daily: [], history: [], providers: [], budget: {},
+    recent: [{at: today + 'T08:00:00', kind: 'conversation.reply', provider: 'core-reply-model', tokens: 999}],
+    external_token_sources: {
+      together: {available: false, installed: false},
+      reality: {available: true, installed: true, display_name: '现实观察',
+        totals: {...reported, calls: 2, unconfirmed_calls: 1}, history: [reported, unknown], daily: [reported, unknown],
+        by_provider: unknown.providers, by_task: unknown.tasks, recent: [
+          {at: today + 'T09:00:00', kind: 'reality_touch_camera', provider: 'camera-vision', state: 'generated',
+            tokens: null, reported_tokens: null, estimated_tokens: 0, input_tokens: null, output_tokens: null,
+            cache_hit_reported: false, cache_creation_tokens: null, latency_ms: 80, usage_availability: 'unavailable'},
+        ]},
+    }}});
+  h.page.mount(h.root);
+  await flush();
+  h.root.click('[data-token-source]', {tokenSource: 'reality'});
+  assert.match(h.root.innerHTML, /现实观察 独立账本/);
+  assert.match(h.root.innerHTML, /今日 · 来源 Token<\/span><strong>未知<\/strong>/);
+  assert.match(h.root.innerHTML, /用量回执未知 1 次/);
+  assert.match(h.root.innerHTML, /缓存写入<\/span><strong>暂无回执/);
+  assert.match(h.root.innerHTML, /用量回执不完整/);
+  assert.doesNotMatch(h.root.innerHTML, /-100\.0%/);
+  assert.match(h.root.innerHTML, new RegExp('title="' + today + ' · 未知 Token · 1 次调用"'));
+  h.root.click('[data-maint-nav]', {maintNav: 'recent'});
+  const recent = h.root.innerHTML.split('data-maint-view="recent"')[1];
+  assert.match(recent, /现实观察 · 1 \/ 1 条/);
+  assert.match(recent, /摄像头视觉分析/);
+  assert.match(recent, /camera-vision/);
+  assert.match(recent, /已完成<small>用量回执未知<\/small>/);
+  assert.doesNotMatch(recent, /core-reply-model/);
+  h.root.click('[data-period]', {period: '7d'});
+  assert.match(h.root.innerHTML, /近 7 日 · 来源 Token<\/span><strong>120<\/strong>/);
+  assert.match(h.root.innerHTML, /用量回执未知 1 次/);
+  assert.match(h.root.innerHTML, /缓存写入<\/span><strong>暂无回执/);
+  h.root.click('[data-token-source]', {tokenSource: 'together'});
+  assert.match(h.root.innerHTML, /一起房间内部统计暂不可用/);
+  h.page.unmount();
+
+  const onlyUnknown = harness({maintenance: {generated_at: today + 'T09:00:00', summary: daily(today),
+    totals: daily(today), providers: [], budget: {}, daily: [], history: [],
+    recent: [], external_token_sources: {reality: {available: true, installed: true, display_name: '现实观察',
+      totals: unknown, daily: [unknown], history: [unknown], by_provider: [], by_task: [], recent: []}}}});
+  onlyUnknown.page.mount(onlyUnknown.root);
+  await flush();
+  onlyUnknown.root.click('[data-token-source]', {tokenSource: 'reality'});
+  for (const period of ['7d', '30d', 'total']) {
+    onlyUnknown.root.click('[data-period]', {period});
+    assert.match(onlyUnknown.root.innerHTML, /来源 Token<\/span><strong>未知<\/strong>/);
+    assert.match(onlyUnknown.root.innerHTML, /输入 \/ 输出<\/span><strong>无回执<\/strong>/);
+    assert.match(onlyUnknown.root.innerHTML, /缓存写入<\/span><strong>暂无回执/);
+  }
+  onlyUnknown.page.unmount();
+});
+
+test('maintenance explains quota held by calls awaiting usage receipts', async () => {
+  const today = localDay();
+  const h = harness({maintenance: {generated_at: today + 'T09:00:00', summary: daily(today), totals: daily(today),
+    daily: [daily(today)], history: [], recent: [], providers: [],
+    budget: {hard_limit_enabled: true, limit_tokens: 3000000, spent_tokens: 0, held_tokens: 2956296,
+      pending_usage_calls: 30, pending_usage_tokens: 2956296,
+      reservation_sources: [{kind: 'calendar.plan', state: 'unknown', calls: 30, held_tokens: 2956296}]}}});
+  h.page.mount(h.root);
+  await flush();
+  assert.match(h.root.innerHTML, /等待用量回执 30 次 · 占用预留 2,956,296 Token/);
+  assert.match(h.root.innerHTML, /日程规划 · 结果未知/);
+  assert.match(h.root.innerHTML, /已入账 <b>0<\/b>/);
+  assert.match(h.root.innerHTML, /软限额关闭 · 本地硬预算已启用/);
+});
+
+test('disabled local budgets retain usage records without an exhaustion warning', async () => {
+  const today = localDay();
+  const h = harness({maintenance: {generated_at: today + 'T09:00:00', summary: daily(today), totals: daily(today),
+    daily: [daily(today)], history: [], recent: [], providers: [],
+    budget: {hard_limit_enabled: false, soft_limit_enabled: false, limit_tokens: 1000,
+      spent_tokens: 2000, held_tokens: 3000, pending_usage_calls: 1, pending_usage_tokens: 3000,
+      reservation_sources: [{kind: 'calendar.plan', state: 'unknown', calls: 1, held_tokens: 3000}]}}});
+  h.page.mount(h.root);
+  await flush();
+  assert.match(h.root.innerHTML, /仅统计用量 · 硬预算关闭/);
+  assert.match(h.root.innerHTML, /本地限额已关闭 · 保留用量统计/);
+  assert.match(h.root.innerHTML, /已入账 <b>2,000<\/b>/);
+  assert.match(h.root.innerHTML, /等待用量回执 1 次 · 占用预留 3,000 Token/);
+  h.root.click('[data-maint-nav]', {maintNav: 'diagnostics'});
+  assert.doesNotMatch(h.root.innerHTML, /今日硬预算接近上限/);
+  h.page.unmount();
 });
 
 test('maintenance distinguishes empty usage from cache receipts without computable hit rate', async () => {

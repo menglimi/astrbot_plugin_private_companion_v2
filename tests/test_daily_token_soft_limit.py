@@ -9,12 +9,14 @@ pinned daily account.
 from dataclasses import replace
 import unittest
 
+from companion_v2.agenda.planning import KIND as CALENDAR_PLANNING_KIND
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget
 from companion_v2.configuration.registry import FieldRegistry, ValueKind
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.model_gateway.budget import (DEFAULT_SOFT_DEFER_KINDS, GROUP, SOFT_FIELDS, BudgetLedger,
                                               BudgetSoftPolicy, configuration_fields, effective_soft)
-from companion_v2.model_gateway.models import Amount, BudgetPolicy
+from companion_v2.model_gateway.models import Amount, BudgetPolicy, ProviderResponse
+from companion_v2.conversation.foreground import ModelDraft
 from tests.test_model_gateway import ModelFixture
 from tests.test_management_access import NOW
 
@@ -33,9 +35,9 @@ class SoftCeilingConfigurationTests(unittest.TestCase):
         self.assertIs(fields[1].kind, ValueKind.INTEGER)
         FieldRegistry(version="budget.v1", fields=fields)
 
-    def test_the_v1_defaults_are_declared(self):
+    def test_a_daily_limit_requires_explicit_enablement(self):
         declared = {f.field_id: f for f in configuration_fields()}
-        self.assertIs(declared[GROUP + ".enable_daily_token_soft_limit"].default, True)
+        self.assertIs(declared[GROUP + ".enable_daily_token_soft_limit"].default, False)
         self.assertEqual(declared[GROUP + ".daily_token_soft_limit"].default, 800_000)
         self.assertEqual((declared[GROUP + ".daily_token_soft_limit"].minimum,
                           declared[GROUP + ".daily_token_soft_limit"].maximum), (0, 10**12))
@@ -59,15 +61,16 @@ class SoftCeilingConfigurationTests(unittest.TestCase):
 
 class SoftCeilingResolutionTests(ModelFixture, unittest.TestCase):
     def target(self, layer=ConfigLayer.ROLE):
-        from companion_v2.configuration.owners import SparseConfigurationOwner
         context = self.context
+        if layer is ConfigLayer.INSTALLATION:
+            return ConfigTarget(context.scope.installation_id, layer)
         return ConfigTarget(context.scope.installation_id, layer, context.role_binding.role,
                             bot_id=context.scope.bot_id)
 
-    def write(self, name, value):
+    def write(self, name, value, *, layer=ConfigLayer.ROLE):
         from companion_v2.configuration.owners import SparseConfigurationOwner
         owner = SparseConfigurationOwner(self.runtime)
-        target = self.target()
+        target = self.target(layer)
         return owner.write(target, SOFT_FIELDS, changes={GROUP + "." + name: value}, reset=(),
                            expected_revision=owner.read(target, SOFT_FIELDS).revision, observed_at=NOW)
 
@@ -76,12 +79,39 @@ class SoftCeilingResolutionTests(ModelFixture, unittest.TestCase):
         self.assertEqual(effective_soft(self.runtime, self.context, fallback), fallback)
 
     def test_a_stored_ceiling_overrides_the_assembly_default(self):
-        self.write("enable_daily_token_soft_limit", True)
+        self.write("enable_daily_token_soft_limit", True, layer=ConfigLayer.INSTALLATION)
         self.write("daily_token_soft_limit", 5000)
         policy = effective_soft(self.runtime, self.context, BudgetSoftPolicy(enabled=False, tokens=0))
         self.assertEqual((policy.enabled, policy.tokens), (True, 5000))
-        self.assertTrue(policy.is_deferrable("role.calendar.plan"))
+        self.assertTrue(policy.is_deferrable(CALENDAR_PLANNING_KIND))
         self.assertFalse(policy.is_deferrable("conversation.reply"))
+
+    def test_a_global_disable_overrides_the_legacy_role_enable(self):
+        self.write("enable_daily_token_soft_limit", False, layer=ConfigLayer.INSTALLATION)
+        self.write("daily_token_soft_limit", 2_000_000, layer=ConfigLayer.INSTALLATION)
+        self.write("enable_daily_token_soft_limit", True)
+        policy = effective_soft(self.runtime, self.context, BudgetSoftPolicy(enabled=True, tokens=800_000))
+        self.assertEqual((policy.enabled, policy.tokens), (False, 2_000_000))
+
+    def test_installation_values_are_used_when_the_role_inherits(self):
+        self.write("enable_daily_token_soft_limit", True, layer=ConfigLayer.INSTALLATION)
+        self.write("daily_token_soft_limit", 5000, layer=ConfigLayer.INSTALLATION)
+        policy = effective_soft(self.runtime, self.context, BudgetSoftPolicy(enabled=False, tokens=800_000))
+        self.assertEqual((policy.enabled, policy.tokens), (True, 5000))
+
+    def test_a_role_switch_alone_cannot_enable_a_disabled_host_default(self):
+        self.write("enable_daily_token_soft_limit", True)
+        policy = effective_soft(self.runtime, self.context, BudgetSoftPolicy(enabled=False, tokens=5000))
+        self.assertEqual((policy.enabled, policy.tokens), (False, 5000))
+
+    def test_partial_overrides_keep_the_host_default_for_the_other_field(self):
+        fallback = BudgetSoftPolicy(enabled=True, tokens=5000)
+        self.write("daily_token_soft_limit", 1234)
+        policy = effective_soft(self.runtime, self.context, fallback)
+        self.assertEqual((policy.enabled, policy.tokens), (True, 1234))
+        self.write("enable_daily_token_soft_limit", False)
+        policy = effective_soft(self.runtime, self.context, fallback)
+        self.assertEqual((policy.enabled, policy.tokens), (False, 1234))
 
     def test_the_ceiling_is_read_per_role_without_a_window_layer(self):
         # Writing at role scope resolves for this role and leaves other scopes alone.
@@ -128,17 +158,18 @@ class SoftCeilingDeferralTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
                                    provider=self.providers[0].binding, amount=self.estimate)
 
     def spend(self, tokens):
-        """Concentrate this day's spending on the installation account.
-
-        The stored ceiling stays generous so the hard check still fits: this test is
-        about the soft gate, not about refusing the call at the hard ceiling.
-        """
-        scope = self.context.scope
-        key = digest(["installation", [scope.installation_id], self.clock.now().date().isoformat()])
-        with self.runtime.transaction() as connection:
-            connection.execute("""INSERT INTO model_budget_accounts VALUES (?, ?, 1000000000000, 1000000000000, 0, 0, ?, 0)
-                ON CONFLICT(account_key) DO UPDATE SET spent_tokens = excluded.spent_tokens""",
-                (key, self.ledger.policy_hash, tokens))
+        """Record a settled plugin call through the same ledger used in production."""
+        identifier = "soft-spending-" + str(tokens)
+        run = self.model_run(identifier, kind="fixture.read")
+        self.stage_plan(run)
+        call_id = "model-call-" + str(tokens)
+        provider = self.providers[0].binding
+        amount = Amount(tokens, 0)
+        self.ledger.reserve(run, call_id=call_id, position=0, provider=provider, amount=amount)
+        self.ledger.dispatch(run, call_id)
+        self.ledger.settle(call_id, provider,
+            ProviderResponse("generated", ModelDraft("settled plugin call", ()), amount,
+                             "soft-spending-receipt-" + str(tokens)), observed_at=self.clock.now())
 
     async def test_a_reached_ceiling_defers_a_listed_background_kind(self):
         self.store(tokens=10**6)
@@ -146,6 +177,18 @@ class SoftCeilingDeferralTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
         self.spend(10**6 + 1)
         with self.assertRaises(TaskError) as error:
             self.attempt(run, "model-call-deferred")
+        self.assertEqual(error.exception.code, "model_budget_soft_deferred")
+
+    async def test_role_spending_is_not_counted_twice_in_the_installation_ceiling(self):
+        self.store(tokens=1000)
+        self.spend(600)
+        self.attempt(self.prepare("soft-not-double-counted"), "single-charge")
+
+    async def test_the_pending_reservation_must_fit_the_remaining_soft_ceiling(self):
+        self.store(tokens=1000)
+        self.spend(990)
+        with self.assertRaises(TaskError) as error:
+            self.attempt(self.prepare("soft-no-overrun"), "overrun-charge")
         self.assertEqual(error.exception.code, "model_budget_soft_deferred")
 
     async def test_a_disabled_ceiling_never_defers(self):

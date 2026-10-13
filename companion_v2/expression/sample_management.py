@@ -100,6 +100,8 @@ class ExpressionSampleManagement:
             else:
                 row = self.runtime.read_one("""SELECT role_instruction FROM conversation_batches
                     WHERE origin_key = ? ORDER BY rowid DESC LIMIT 1""", (context.key,))
+                from companion_v2.conversation.native_turns import latest
+                row = latest(self.runtime, context.key) or row
                 if row is None:
                     raise TaskError("expression_sample_unavailable", "this window has no original conversation")
                 instruction = row["role_instruction"]

@@ -1,20 +1,27 @@
 """Group listening stays silent; admitted non-mention replies carry reasons."""
 
-import asyncio
 from datetime import timedelta
+import asyncio
+from dataclasses import replace as dc_replace
 import json
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.conversation.participation import CONFIG_GROUP, GroupParticipationConfigurationOwner, configuration_fields
-from companion_v2.conversation.reply_settings import ReplyConfigurationOwner, target_for, configuration_fields as reply_fields
-from companion_v2.execution.models import TaskContext
+from companion_v2.conversation.reply_settings import (GROUP as REPLY_GROUP, ReplyConfigurationOwner, target_for,
+    configuration_fields as reply_fields)
+from companion_v2.conversation.reset import ConversationWindow, reset_window
+from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, activate_core_reply_delivery_guard
+from astrbot.core.agent.message import Message, ToolCall
+from astrbot_host.core_reply_tools import native_tool_name
+from astrbot_host.core_reply_tracking import (
+    finish_core_reply_tracking, mark_core_reply_inflight, prepare_core_reply_tracking,
+    observe_core_reply_tool_delivery,
+)
 from tests.group_host_support import GroupFixture, group_config
-from tests.test_group_participation import ACTION, command
-from tests.native_adapter_support import completion, final_text
-from tests.staging_bootstrap_support import wait_for_batch
 from tests.test_main_no_reply import ENTRY
 
 
@@ -24,6 +31,9 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.app = await self.start_host()
         self.plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         self.plugin.staging = self.controller
+        # Public-help scenarios explicitly opt in. New groups only wake from
+        # explicit addressing and configured participation policies.
+        await self.configure(group_wakeup_question_enabled=True)
 
     def event(self, identifier, text, *, sender="200", mention=False, reply=None, target="group-a"):
         event = self.group_event(identifier=identifier, text=text, sender=sender, target=target)
@@ -41,12 +51,36 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_success, result.failure)
         return result.unwrap()
 
-    async def settle(self, batch):
-        await wait_for_batch(self.controller.session, batch)
-        async def wait():
-            while any(work.batch_id == batch for work, _ in self.app._workers.values()):
-                await asyncio.sleep(0.005)
-        await asyncio.wait_for(wait(), 3)
+    @property
+    def admission(self):
+        return self.app.tools.group_participation.admission
+
+    async def core_turn(self, event, *, result_type="LLM_RESULT"):
+        await self.plugin.receive_companion_message(event)
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        self.assertIsInstance(state, dict)
+        event.get_result = lambda: NS(result_content_type=NS(name=result_type))
+        event.core_request = NS(system_prompt="AstrBot prompt")
+        await self.plugin.prepare_companion_core_request(event, event.core_request)
+        await self.flush_tracking()
+        return state["prepared"]
+
+    async def core_send(self, event, text="可以先看看设置。"):
+        await self.plugin.guard_companion_core_delivery(event)
+        result = await event.send(text)
+        await self.plugin.observe_companion_core_reply_sent(event)
+        await self.flush_tracking()
+        return result
+
+    async def flush_tracking(self):
+        observer = self.controller.session.core_reply_observations
+        if observer._pending:
+            await asyncio.gather(*tuple(observer._pending), return_exceptions=True)
+
+    def assert_no_v2_generation(self):
+        self.assertEqual(self.app.runtime.read_all("SELECT * FROM conversation_batches", ()), ())
+        self.assertEqual(self.app.runtime.read_all("SELECT * FROM conversation_parts", ()), ())
+        self.assertEqual(self.native.provider.client.state.calls, [])
 
     async def configure(self, **changes):
         context = (await self.controller.observe_group_early(self.event("settings", "普通群聊天"))).unwrap()
@@ -57,6 +91,125 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         owner.write(target, fields, changes={"conversation.presentation." + key: value for key, value in changes.items()},
                     reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
         return context
+
+    async def test_cleanup_preferences_follow_role_without_promoting_segmentation(self):
+        context = (await self.controller.observe_group_early(self.group_event(identifier="reply-role-scope"))).unwrap()
+        target = target_for(context)
+        other_scope = dc_replace(target.scope, native_scope_id="other-group",
+                                 conversation_id="other-conversation", session_id="other-session")
+        other_target = dc_replace(target, scope=other_scope)
+        common = self.controller.settings.common
+        fields = reply_fields(common.segmentation, common.streaming, common.policy.part_gap_seconds)
+        local_owner = SparseConfigurationOwner(self.app.runtime)
+        reply_owner = ReplyConfigurationOwner(self.app.runtime)
+        cleanup_words = REPLY_GROUP + ".content_cleanup_words"
+        cleanup_enabled = REPLY_GROUP + ".content_cleanup_enabled"
+        split_words = REPLY_GROUP + ".split_words"
+
+        for window, values in ((target, {cleanup_enabled: True, cleanup_words: '["，"]'}),
+                               (other_target, {cleanup_enabled: False, cleanup_words: '["。"]',
+                                               split_words: '["？"]'})):
+            snapshot = local_owner.read(window, fields)
+            local_owner.write(window, fields, changes=values, reset=(), expected_revision=snapshot.revision,
+                              observed_at=self.clock.now())
+
+        snapshot = reply_owner.read(target, fields)
+        reply_owner.write(target, fields, changes={cleanup_enabled: True, cleanup_words: '["，"]'},
+                          reset=(), expected_revision=snapshot.revision, observed_at=self.clock.now())
+        shared = reply_owner.read(other_target, fields)
+
+        self.assertTrue(shared.fields[cleanup_enabled].value)
+        self.assertEqual(shared.fields[cleanup_words].value, '["，"]')
+        self.assertEqual(shared.fields[cleanup_enabled].source.layer, ConfigLayer.ROLE)
+        self.assertEqual(shared.fields[split_words].value, '["？"]')
+        self.assertEqual(shared.fields[split_words].source.layer, ConfigLayer.WINDOW)
+
+    def configure_participation(self, context, **changes):
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
+        owner, fields = GroupParticipationConfigurationOwner(self.app.runtime), configuration_fields()
+        owner.write(target, fields, changes={CONFIG_GROUP + "." + key: value for key, value in changes.items()},
+                    reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+
+    async def choose(self, event, mode, *, reason="", call_id="native-group-choice", extra_calls=()):
+        arguments = {"mode": mode, "reason": reason}
+        call = ToolCall(id=call_id, function=ToolCall.FunctionBody(
+            name=native_tool_name("group.participation.choose"), arguments=json.dumps(arguments)))
+        wrapper = NS(context=NS(event=event), messages=[Message(role="assistant", tool_calls=[call, *extra_calls])])
+        tool = event.core_request.func_tool.get_tool(native_tool_name("group.participation.choose"))
+        self.assertIsNotNone(tool)
+        return json.loads(await tool.call(wrapper, **arguments))
+
+    async def test_native_group_prompt_includes_effective_wakeup_and_participation_references(self):
+        context = await self.configure(group_wakeup_interest_probability=.01,
+            group_wakeup_interest_keywords=json.dumps(["星图"], ensure_ascii=False), group_wakeup_question_threshold=95,
+            group_wakeup_cooldown_seconds=90)
+        self.configure_participation(context, enable_group_interjection=True, group_interject_max_daily=0,
+                                     group_interject_min_interval_minutes=33)
+        event = self.event("core-effective-hints", "这也太离谱了")
+        prepared = await self.core_turn(event)
+        prompt = event.core_request.system_prompt
+        self.assertIn("group_participation", prepared["context_sections"])
+        for text in ("求助强度参考 95/100", "兴趣话题自主接话宜低频", "参考强度约 1%",
+                     "自主插话参考额度剩余 0/0", "最小间隔参考 33 分钟", "本轮没有明确 @"):
+            self.assertIn(text, prompt)
+        self.assertIsNotNone(event.core_request.func_tool.get_tool(native_tool_name("group.participation.choose")))
+        self.assert_no_v2_generation()
+
+    async def test_native_group_skip_is_silent_and_never_counts_as_a_successful_send_or_missing_reply(self):
+        event = self.event("core-skip", "这个问题有人知道怎么处理吗")
+        prepared = await self.core_turn(event)
+        decision = await self.choose(event, "skip", reason="大家正在接话，先旁听")
+        self.assertEqual(decision["state"], "succeeded")
+        await self.plugin.guard_companion_core_delivery(event)
+        await event.send("模型后续不该发出的正文")
+        await self.plugin.observe_companion_core_reply_sent(event)
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["participation"]["mode"], "skip")
+        self.assertEqual((saved["send_attempts"], saved["send_returns"]), (0, 0))
+        self.assertEqual(event.sent, [])
+        self.assertEqual(self.app.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
+        business = event.core_request.func_tool.get_tool(native_tool_name("turn.evidence"))
+        self.assertIsNotNone(business)
+        denied = json.loads(await business.call(NS(context=NS(event=event), messages=[])))
+        self.assertEqual(denied["code"], "group_participation_skipped")
+        self.assert_no_v2_generation()
+
+    async def test_native_group_skip_cannot_revoke_prior_business_or_be_mixed_with_business_tools(self):
+        event = self.event("core-skip-order", "有人知道怎么处理吗")
+        await self.core_turn(event)
+        other = ToolCall(id="business", function=ToolCall.FunctionBody(name=native_tool_name("turn.evidence"), arguments="{}"))
+        denied = await self.choose(event, "skip", extra_calls=(other,))
+        self.assertEqual(denied["code"], "group_participation_skip_alone")
+        business = event.core_request.func_tool.get_tool(native_tool_name("turn.evidence"))
+        await business.call(NS(context=NS(event=event), messages=[]))
+        denied = await self.choose(event, "skip")
+        self.assertEqual(denied["code"], "group_participation_started")
+
+    async def test_native_interjection_budget_uses_send_returns_and_resets_with_the_window(self):
+        context = await self.configure(group_wakeup_bot_name="小星")
+        self.configure_participation(context, enable_group_interjection=True, group_interject_max_daily=2,
+                                     group_interject_min_interval_minutes=33)
+        event = self.event("core-autonomous-1", "这也太离谱了")
+        prepared = await self.core_turn(event)
+        await self.choose(event, "reply", reason="这个梗自然能接上")
+        await self.core_send(event, "哈哈真的离谱")
+        self.clock.advance(timedelta(seconds=1))
+        second = self.event("core-autonomous-2", "小星你觉得呢", sender="201")
+        await self.core_turn(second)
+        self.assertIn("自主插话参考额度剩余 1/2", second.core_request.system_prompt)
+        self.assertIn("最小间隔参考 33 分钟", second.core_request.system_prompt)
+        self.assertIn("宿主发送调用已返回", second.core_request.system_prompt)
+        self.assertNotIn("已确认 Bot 回复", second.core_request.system_prompt)
+        self.clock.advance(timedelta(seconds=1))
+        window = ConversationWindow.from_scope(prepared["context"].scope)
+        reset_window(self.app.runtime, window, reset_id="core-participation-reset", at=self.clock.now())
+        self.admission.reset_window(window)
+        self.clock.advance(timedelta(seconds=1))
+        third = self.event("core-autonomous-3", "小星再看看", sender="201")
+        await self.core_turn(third)
+        self.assertIn("自主插话参考额度剩余 2/2", third.core_request.system_prompt)
+        self.assert_no_v2_generation()
 
     async def test_unmatched_messages_keep_observation_without_intake_logs_batches_or_model_calls(self):
         context = (await self.controller.observe_group_early(self.event("settings", "普通群聊天"))).unwrap()
@@ -121,71 +274,289 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.candidate(self.event("wake-off", "小星来看看")))["admitted"])
         self.assertTrue((await self.candidate(self.event("at-when-off", "来看看", mention=True)))["admitted"])
 
-    async def test_non_mention_reply_logs_policy_reason_and_confirmed_delivery(self):
+    async def test_non_mention_core_reply_logs_reason_and_send_return_without_platform_confirmation(self):
         await self.configure(group_wakeup_bot_name="小星")
         event = self.event("named-reply", "小星来看看")
-        with self.assertLogs("companion_v2.conversation.participation", level="INFO") as logs:
-            await self.plugin.receive_companion_message(event)
-            batch = self.app.runtime.read_one("SELECT batch_id FROM conversation_batches", ())["batch_id"]
-            await self.settle(batch)
+        with self.assertLogs("astrbot_host.core_reply_tracking", level="INFO") as logs:
+            prepared = await self.core_turn(event)
+            await self.core_send(event)
         self.assertEqual(len(logs.output), 2)
         self.assertTrue(all("非@群回复原因" in line and "trigger=direct_word" in line and "reason_source=policy" in line
                             and "命中配置的直接唤醒词或名称" in line for line in logs.output))
-        self.assertIn("stage=delivered", logs.output[-1])
+        self.assertIn("stage=completed", logs.output[-1])
+        self.assertIn("send_state=returned", logs.output[-1])
+        self.assertTrue(all("platform_confirmed=false" in line for line in logs.output))
         self.assertFalse(event.stopped)
-        self.assertTrue(event.call_llm)
-        self.assertEqual(self.app.runtime.read_one("SELECT state FROM conversation_parts", ())["state"], "delivered")
+        self.assertFalse(getattr(event, "call_llm", False))
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["platform_ids"], [])
+        self.assertEqual(event.sent, ["可以先看看设置。"])
+        self.assert_no_v2_generation()
 
-    async def test_model_reason_is_logged_and_repeated_poll_does_not_duplicate_it(self):
-        async def respond(payload, tools):
-            if not any(message["role"] == "tool" for message in payload["messages"]):
-                return completion(tools=[command(ACTION, {"mode": "reply", "reason": "群里正在求助，我可以提供解决步骤"})])
-            return completion(final_text("可以先检查设置。"))
-        self.native.provider.client.state.behavior = respond
+    async def test_repeated_core_hooks_keep_one_turn_and_do_not_duplicate_reason_logs(self):
         event = self.event("help-reply", "如何处理这个问题？")
-        with self.assertLogs("companion_v2.conversation.participation", level="INFO") as logs:
-            await self.plugin.receive_companion_message(event)
-            batch = self.app.runtime.read_one("SELECT batch_id FROM conversation_batches", ())["batch_id"]
-            await self.settle(batch)
-            context = TaskContext.restore(json.loads(self.app.messages.batch(batch)["context_json"]))
-            self.app.tools.group_participation.log_reply_reason(context, batch, stage="delivered")
+        with self.assertLogs("astrbot_host.core_reply_tracking", level="INFO") as logs:
+            prepared = await self.core_turn(event)
+            for _ in range(2):
+                prepare_core_reply_tracking(event, prepared, admission=self.admission, now=self.clock.now,
+                                            reason="question", mentioned=False)
+                mark_core_reply_inflight(event)
+            await self.core_send(event)
+            saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+            for _ in range(2):
+                finish_core_reply_tracking(event)
+                mark_core_reply_inflight(event)
+            self.assertEqual(self.admission.recorded_core_reply(prepared["context"], prepared["event_id"]), saved)
         self.assertEqual(len(logs.output), 2)
-        self.assertTrue(all("群里正在求助，我可以提供解决步骤" in line and "reason_source=model" in line for line in logs.output))
-        instruction = self.native.provider.client.state.calls[0][0]["messages"][1]["content"]
-        self.assertIn("本轮没有明确 @", instruction)
-        self.assertIn("mode=reply", instruction)
+        self.assertTrue(all("reason_source=policy" in line for line in logs.output))
+        self.assertEqual(saved["send_attempts"], 1)
+        self.assertEqual(saved["send_returns"], 1)
+        self.assert_no_v2_generation()
 
-    async def test_active_follow_up_keeps_the_running_reply_and_excludes_other_speakers(self):
-        entered, release = asyncio.Event(), asyncio.Event()
-        async def delayed(payload, tools):
-            entered.set()
-            await release.wait()
-            return completion(final_text("任务处理完了。"))
-        self.native.provider.client.state.behavior = delayed
-        await self.plugin.receive_companion_message(self.event("long-task", "处理这个任务", mention=True))
-        await asyncio.wait_for(entered.wait(), 3)
-        batch = self.app.runtime.read_one("SELECT batch_id FROM conversation_batches", ())["batch_id"]
+    async def test_active_core_follow_up_excludes_other_speakers_and_expires_without_a_v2_task(self):
+        first = self.event("long-task", "处理这个任务", mention=True)
+        with patch.object(self.app, "accept", wraps=self.app.accept) as accept:
+            prepared = await self.core_turn(first)
+            accept.assert_not_called()
+        self.clock.advance(timedelta(seconds=1))
         follow_up = self.event("follow-up", "再补充一点信息")
         self.assertEqual((await self.candidate(follow_up))["reason"], "active_follow_up")
         self.assertFalse((await self.candidate(self.event("other-speaker", "晚饭吃面", sender="201")))["admitted"])
-        await self.plugin.receive_companion_message(follow_up)
-        release.set()
-        await self.settle(batch)
-        self.assertEqual(self.app.messages.batch(batch)["state"], "ready")
-        self.assertEqual(self.app.runtime.read_one("SELECT state FROM conversation_parts WHERE batch_id = ?", (batch,))["state"], "delivered")
+        self.assertEqual(self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])["state"], "inflight")
+        self.clock.advance(timedelta(minutes=3))
+        self.assertFalse((await self.candidate(self.event("stale-task", "再补充一点信息")))["admitted"])
+        self.assertEqual(first.sent, [])
+        self.assert_no_v2_generation()
 
-    async def test_quote_and_natural_follow_up_require_own_confirmed_group_reply(self):
-        await self.plugin.receive_companion_message(self.event("first-reply", "说一句", mention=True))
-        batch = self.app.runtime.read_one("SELECT batch_id FROM conversation_batches", ())["batch_id"]
-        await self.settle(batch)
-        reply_id = self.app.runtime.read_one("SELECT platform_ref FROM conversation_parts WHERE batch_id = ?", (batch,))["platform_ref"]
+    async def test_core_return_allows_same_speaker_follow_up_and_own_quote_in_the_original_group(self):
+        first = self.event("first-reply", "说一句", mention=True)
+        original_send = first.send
+        async def native_send(message):
+            await original_send(message)
+            return {"message_id": "core-platform-id"}
+        first.send = native_send
+        await self.core_turn(first)
+        self.assertEqual(await self.core_send(first), {"message_id": "core-platform-id"})
         self.clock.advance(timedelta(seconds=1))
         self.assertEqual((await self.candidate(self.event("natural-follow-up", "再补充一点")))["reason"], "reply_follow_up")
         self.assertFalse((await self.candidate(self.event("other", "晚饭吃面", sender="201")))["admitted"])
-        self.assertEqual((await self.candidate(self.event("own-quote", "再补充一点", reply=reply_id)))["reason"], "quoted_reply")
-        self.assertFalse((await self.candidate(self.event("wrong-group", "再补充一点", reply=reply_id, target="group-b")))["admitted"])
+        self.assertEqual((await self.candidate(self.event("own-quote", "再补充一点", reply="core-platform-id")))["reason"], "quoted_reply")
+        self.assertFalse((await self.candidate(self.event("wrong-group", "再补充一点", reply="core-platform-id", target="group-b")))["admitted"])
+        native_quote = self.event("native-own-quote", "继续说", reply="id-not-returned-to-v2")
+        native_quote.message_obj.message[0].sender_id = "100"
+        self.assertEqual((await self.candidate(native_quote))["reason"], "native_quote")
+        self.assert_no_v2_generation()
         self.clock.advance(timedelta(minutes=3))
         self.assertFalse((await self.candidate(self.event("later", "再补充一点")))["admitted"])
+
+    async def test_unknown_core_send_does_not_fall_back_to_an_older_reply_or_replay(self):
+        first = self.event("known", "先说一句", mention=True)
+        await self.core_turn(first)
+        await self.core_send(first)
+        self.clock.advance(timedelta(seconds=1))
+        unknown = self.event("unknown", "再说一句", mention=True)
+        attempted = []
+        async def uncertain_send(message):
+            attempted.append(message)
+            unknown._has_send_oper = True
+            raise TimeoutError("platform outcome unavailable")
+        unknown.send = uncertain_send
+        prepared = await self.core_turn(unknown)
+        activate_core_reply_delivery_guard(unknown)
+        with self.assertRaises(TimeoutError):
+            await unknown.send("可能已送到平台的回复")
+        await self.plugin.observe_companion_core_reply_sent(unknown)
+        for _ in range(2):
+            finish_core_reply_tracking(unknown)
+            mark_core_reply_inflight(unknown)
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["send_state"], "unknown")
+        self.assertEqual(saved["unknown_sends"], 1)
+        self.assertEqual(saved["platform_ids"], [])
+        self.clock.advance(timedelta(seconds=1))
+        self.assertFalse((await self.candidate(self.event("unknown-follow-up", "再补充一点")))["admitted"])
+        self.assertEqual(attempted, ["可能已送到平台的回复"])
+        self.assert_no_v2_generation()
+
+    async def test_other_plugin_send_and_model_error_are_not_a_core_reply_receipt(self):
+        event = self.event("plugin-notice", "说一句", mention=True)
+        prepared = await self.core_turn(event, result_type="AGENT_RUNNER_ERROR")
+        await event.send("其他插件进度消息")
+        await self.core_send(event, "模型运行失败")
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertTrue(event._has_send_oper)
+        self.assertEqual(saved["send_state"], "not_started")
+        self.assertEqual(saved["send_attempts"], 0)
+        self.clock.advance(timedelta(seconds=1))
+        self.assertFalse((await self.candidate(self.event("no-final-reply", "再补充一点")))["admitted"])
+        self.assert_no_v2_generation()
+
+    async def test_agent_done_without_final_send_closes_inflight_and_later_delivery_reopens(self):
+        event = self.event("empty-agent", "说一句", mention=True)
+        prepared = await self.core_turn(event)
+        await self.plugin.observe_companion_core_agent_done(event, None, NS(role="assistant", completion_text=""))
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual((saved["state"], saved["send_attempts"]), ("completed", 0))
+        self.clock.advance(timedelta(seconds=1))
+        self.assertFalse((await self.candidate(self.event("empty-agent-follow-up", "再补充一点")))["admitted"])
+        await self.core_send(event, "核心装饰完成后的回复")
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual((saved["state"], saved["send_returns"]), ("completed", 1))
+
+    async def test_streaming_core_reply_finishes_without_a_decorating_or_after_sent_hook(self):
+        event = self.event("stream", "说一句", mention=True)
+        prepared = await self.core_turn(event, result_type="STREAMING_RESULT")
+        self.assertFalse(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["delivery_guard_active"])
+        await event.send_streaming("native-stream", False)
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["send_state"], "returned")
+        self.assertEqual(saved["platform_ids"], [])
+        self.clock.advance(timedelta(seconds=1))
+        self.assertEqual((await self.candidate(self.event("stream-follow-up", "再补充一点")))["reason"], "reply_follow_up")
+        self.assert_no_v2_generation()
+
+    async def test_native_tool_rounds_rearm_tracking_after_each_sent_phase(self):
+        event = self.event("multi-phase", "先解释再查工具", mention=True)
+        prepared = await self.core_turn(event)
+        await self.core_send(event, "我先看看")
+        self.clock.advance(timedelta(seconds=1))
+        await self.core_send(event, "查到了，接着说")
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["send_attempts"], 2)
+        self.assertEqual(saved["send_returns"], 2)
+        self.assertEqual(event.sent, ["我先看看", "查到了，接着说"])
+        self.assertEqual(saved["state"], "completed")
+        self.assert_no_v2_generation()
+
+    async def test_direct_native_tool_sends_record_ids_and_rearm_for_final_reply(self):
+        event = self.event("direct-tool-reply", "先发图片再解释", mention=True)
+        prepared = await self.core_turn(event)
+        observe_core_reply_tool_delivery(event, "started")
+        await self.flush_tracking()
+        inflight = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(inflight["state"], "inflight")
+        observe_core_reply_tool_delivery(event, "returned", {"message_id": "tool-image-id"})
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual((saved["send_attempts"], saved["send_returns"]), (1, 1))
+        self.assertEqual(saved["platform_ids"], ["tool-image-id"])
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(event.sent, [])
+        self.clock.advance(timedelta(seconds=1))
+        self.assertEqual((await self.candidate(self.event("tool-follow-up", "再补充一点")))["reason"],
+                         "reply_follow_up")
+        self.assertEqual((await self.candidate(self.event("tool-quote", "看看", reply="tool-image-id")))["reason"],
+                         "quoted_reply")
+        observe_core_reply_tool_delivery(event, "started")
+        observe_core_reply_tool_delivery(event, "returned", {"data": {"message_id": "tool-second-id"}})
+        await self.core_send(event, "图片里是这样的")
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual((saved["send_attempts"], saved["send_returns"]), (3, 3))
+        self.assertEqual(saved["platform_ids"], ["tool-image-id", "tool-second-id"])
+        self.assertEqual(event.sent, ["图片里是这样的"])
+        self.assertEqual(saved["state"], "completed")
+        self.assert_no_v2_generation()
+
+    async def test_direct_native_tool_unknown_is_preserved_after_final_send(self):
+        event = self.event("direct-tool-unknown", "发图片再解释", mention=True)
+        prepared = await self.core_turn(event)
+        observe_core_reply_tool_delivery(event, "started")
+        observe_core_reply_tool_delivery(event, "unknown")
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["send_state"], "unknown")
+        self.assertEqual((saved["send_attempts"], saved["send_returns"], saved["unknown_sends"]), (1, 0, 1))
+        self.assertEqual(saved["platform_ids"], [])
+        self.assertEqual(event.sent, [])
+        self.clock.advance(timedelta(seconds=1))
+        self.assertFalse((await self.candidate(self.event("unknown-tool-follow-up", "再补充一点")))["admitted"])
+        await self.core_send(event, "继续说明")
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["send_state"], "unknown")
+        self.assertEqual((saved["send_attempts"], saved["send_returns"], saved["unknown_sends"]), (2, 1, 1))
+        self.assertEqual(event.sent, ["继续说明"])
+        self.assert_no_v2_generation()
+
+    async def test_direct_native_tool_denied_does_not_invent_a_send_attempt(self):
+        event = self.event("direct-tool-denied", "发张图片", mention=True)
+        prepared = await self.core_turn(event)
+        observe_core_reply_tool_delivery(event, "denied")
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["send_state"], "denied")
+        self.assertEqual((saved["send_attempts"], saved["send_returns"], saved["unknown_sends"]), (0, 0, 0))
+        self.assertEqual(saved["platform_ids"], [])
+        self.assertEqual(event.sent, [])
+        self.assert_no_v2_generation()
+
+    async def test_stream_envelope_and_its_native_send_are_counted_once(self):
+        event = self.event("nested-stream", "说一句", mention=True)
+        async def native_stream(*args, **kwargs):
+            await event.send("流式回退的原生文本")
+        event.send_streaming = native_stream
+        prepared = await self.core_turn(event, result_type="STREAMING_RESULT")
+        await event.send_streaming("native-stream", False)
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["send_attempts"], 1)
+        self.assertEqual(saved["send_returns"], 1)
+        self.assertEqual(event.sent, ["流式回退的原生文本"])
+        self.assert_no_v2_generation()
+
+    async def test_direct_native_tool_known_failure_does_not_create_a_return_or_unknown(self):
+        event = self.event("direct-tool-failed", "发图片再解释", mention=True)
+        prepared = await self.core_turn(event)
+        observe_core_reply_tool_delivery(event, "started")
+        observe_core_reply_tool_delivery(event, "failed")
+        await self.flush_tracking()
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["send_state"], "failed")
+        self.assertEqual((saved["send_attempts"], saved["send_returns"], saved["unknown_sends"], saved["send_failed"]),
+                         (1, 0, 0, 1))
+        self.assertEqual(event.sent, [])
+        self.clock.advance(timedelta(seconds=1))
+        self.assertFalse((await self.candidate(self.event("failed-tool-follow-up", "再补充一点")))["admitted"])
+        await self.core_send(event, "图片没发出去，先继续说明")
+        saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
+        self.assertEqual(saved["send_state"], "returned")
+        self.assertEqual((saved["send_attempts"], saved["send_returns"], saved["unknown_sends"], saved["send_failed"]),
+                         (2, 1, 0, 1))
+        self.assertEqual(event.sent, ["图片没发出去，先继续说明"])
+        self.assert_no_v2_generation()
+
+    async def test_reset_excludes_late_core_send_from_quote_and_natural_follow_up(self):
+        event = self.event("before-reset", "说一句", mention=True)
+        original_send = event.send
+        async def native_send(message):
+            await original_send(message)
+            return {"message_id": "before-reset-id"}
+        event.send = native_send
+        prepared = await self.core_turn(event)
+        self.clock.advance(timedelta(seconds=1))
+        window = ConversationWindow.from_scope(prepared["context"].scope)
+        reset_window(self.app.runtime, window, reset_id="core-reset", at=self.clock.now())
+        self.admission.reset_window(window)
+        self.clock.advance(timedelta(seconds=1))
+        await self.core_send(event)
+        self.assertFalse((await self.candidate(self.event("after-reset", "再补充一点")))["admitted"])
+        self.assertFalse((await self.candidate(self.event("reset-quote", "再补充一点", reply="before-reset-id")))["admitted"])
+        self.assert_no_v2_generation()
+
+    async def test_optional_tracking_storage_failure_does_not_block_native_core_send(self):
+        event = self.event("storage-failure", "说一句", mention=True)
+        await self.core_turn(event)
+        with patch.object(self.admission, "mark_core_reply", side_effect=OSError("optional tracking unavailable")):
+            await self.core_send(event)
+        self.assertEqual(event.sent, ["可以先看看设置。"])
+        self.assert_no_v2_generation()
 
 
 if __name__ == "__main__":

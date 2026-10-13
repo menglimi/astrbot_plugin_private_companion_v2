@@ -88,7 +88,8 @@ def native_provider():
     # Construction avoids creating even an HTTP client. All preparation, stream
     # accumulation, final parsing and tool descriptors use the installed SDK.
     provider = ProviderOpenAIOfficial.__new__(ProviderOpenAIOfficial)
-    provider.provider_config = {"id": "native-model", "model": "fixture", "custom_extra_body": {}}
+    provider.provider_config = {"id": "native-model", "type": "openai_chat_completion",
+                                "model": "fixture", "custom_extra_body": {}}
     provider.model_name = "fixture"
     provider.reasoning_key = "reasoning_content"
     provider.default_params = inspect.signature(AsyncCompletions.create).parameters.keys()

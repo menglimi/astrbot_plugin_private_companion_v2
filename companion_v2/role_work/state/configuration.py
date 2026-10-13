@@ -10,7 +10,7 @@ from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from .cycle import DEFAULTS as CYCLE_DEFAULTS, validate_settings
 from .humanized import DEFAULTS as HUMANIZED_DEFAULTS, LIMITS as HUMANIZED_LIMITS
 from .humanized import validate_settings as validate_humanized
-from .settings_scope import PhysicalSettingsOwner
+from .settings_scope import PhysicalSettingsOwner, role_preference
 from companion_v2.agenda.planning_config import DEFAULTS as PLANNING_DEFAULTS, MAXIMUMS as PLANNING_MAXIMUMS
 from companion_v2.agenda.planning_config import WEATHER_MAX_AGE_MINIMUM
 from companion_v2.agenda.planning_config import validate_settings as validate_planning
@@ -70,8 +70,32 @@ def validate_mood_settings(values):
             raise ConfigurationError("state_mood_settings", f"{name} must be a boolean")
 
 
+def sync_window_grants(runtime, target, participant, settings, changed, observed_at):
+    if target.layer is not ConfigLayer.WINDOW or participant is None:
+        return
+    identity = PersistentIdentityDirectory(runtime)
+    for action in {action for actions in PERMISSIONS.values() for action in actions}:
+        options = [name for name, actions in PERMISSIONS.items() if action in actions]
+        if not changed.intersection(options):
+            continue
+        prefix = "state-grant:" + digest([target.key, participant, action]) + ":"
+        for grant in identity.snapshot().grants:
+            if grant.grant_id.startswith(prefix) and grant.state is GrantState.ACTIVE:
+                identity.revoke_grant(grant.grant_id, revoked_at=observed_at,
+                                      expected_revision=identity.revision)
+        if any(settings[name] for name in options):
+            identity.issue_grant(grant_id=prefix + str(identity.revision), subject=participant,
+                scope=target.scope, capability=action, tier=AuthorizationTier.STANDARD,
+                valid_from=observed_at, expected_revision=identity.revision)
+
+
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
+
+
+def role_target_for(context):
+    return ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE, context.role_binding.role,
+                        bot_id=context.scope.bot_id)
 
 
 def configuration_fields():
@@ -95,7 +119,8 @@ def configuration_fields():
                       "maximum": PLANNING_MAXIMUMS.get(name, 30 if name.startswith("cycle_")
                                                        else 10 if name == "typing_refresh_seconds" else 1440)}
         fields.append(FieldDefinition(GROUP + "." + name, GROUP, GROUP, kind, value,
-            layers=(ConfigLayer.WINDOW,), apply_mode=ApplyMode.IMMEDIATE, core_only=True, owner_id=OWNER, **bounds))
+            layers=(ConfigLayer.ROLE, ConfigLayer.WINDOW), apply_mode=ApplyMode.IMMEDIATE,
+            core_only=True, owner_id=OWNER, **bounds))
     return tuple(fields)
 
 
@@ -114,11 +139,17 @@ class StateConfigurationOwner(PhysicalSettingsOwner):
 
     def write(self, target, fields, *, changes, reset, expected_revision, observed_at):
         with self.runtime.transaction():
-            route = PersonaDirectory(self.runtime).resolve(target.scope, observed_at=observed_at)
-            if (target.scope.kind is not ScopeKind.PRIVATE or not route.is_success
-                    or route.unwrap().binding.role != target.role or route.unwrap().route.user is None):
-                raise ConfigurationError("state_target_changed", "select the current private role and participant")
-            participant = route.unwrap().route.user
+            names = {key.rsplit(".", 1)[-1] for key in (*changes, *reset)}
+            if target.layer is ConfigLayer.ROLE and any(not role_preference(name) for name in names):
+                raise ConfigurationError("state_configuration_scope_not_supported",
+                    "platform presentation settings belong to the selected window")
+            participant = None
+            if target.layer is ConfigLayer.WINDOW:
+                route = PersonaDirectory(self.runtime).resolve(target.scope, observed_at=observed_at)
+                if (target.scope.kind is not ScopeKind.PRIVATE or not route.is_success
+                        or route.unwrap().binding.role != target.role or route.unwrap().route.user is None):
+                    raise ConfigurationError("state_target_changed", "select the current private role and participant")
+                participant = route.unwrap().route.user
             proposed = {key.rsplit(".", 1)[-1]: field.value for key, field in self.read(target, fields).fields.items()}
             proposed.update({key.rsplit(".", 1)[-1]: value for key, value in changes.items()})
             proposed.update({key.rsplit(".", 1)[-1]: DEFAULTS[key.rsplit(".", 1)[-1]] for key in reset})
@@ -129,22 +160,10 @@ class StateConfigurationOwner(PhysicalSettingsOwner):
             validate_humanized(proposed)
             saved = super().write(target, fields, changes=changes, reset=reset,
                                   expected_revision=expected_revision, observed_at=observed_at)
-            identity = PersistentIdentityDirectory(self.runtime)
             changed = {key.rsplit(".", 1)[-1] for key in (*changes, *reset)}
             if "calendar_enabled" in changed and not proposed["calendar_enabled"]:
+                identity = PersistentIdentityDirectory(self.runtime)
                 revoke_role_calendar_grants(identity, installation_id=target.installation_id,
                     bot_id=target.bot_id, role=target.role, revoked_at=observed_at)
-            for action in {action for actions in PERMISSIONS.values() for action in actions}:
-                options = [name for name, actions in PERMISSIONS.items() if action in actions]
-                if not changed.intersection(options):
-                    continue
-                prefix = "state-grant:" + digest([target.key, participant, action]) + ":"
-                for grant in identity.snapshot().grants:
-                    if grant.grant_id.startswith(prefix) and grant.state is GrantState.ACTIVE:
-                        identity.revoke_grant(grant.grant_id, revoked_at=observed_at,
-                                              expected_revision=identity.revision)
-                if any(proposed[name] for name in options):
-                    identity.issue_grant(grant_id=prefix + str(identity.revision), subject=participant,
-                        scope=target.scope, capability=action, tier=AuthorizationTier.STANDARD,
-                        valid_from=observed_at, expected_revision=identity.revision)
+            sync_window_grants(self.runtime, target, participant, proposed, changed, observed_at)
             return saved

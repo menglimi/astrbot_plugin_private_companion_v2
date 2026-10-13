@@ -13,6 +13,7 @@ from companion_v2.memory.query import MemoryQuery
 from companion_v2.memory import codec
 from companion_v2.memory.reflection_management import ReflectionManagement
 from .management_identity import dashboard_operator
+from .memory_linkage import read_external_memory_summary
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/memory"
@@ -31,6 +32,7 @@ class MemoryWebAPI:
                 (PREFIX + "/reflections", self.reflections, ["GET"], "Inspect pending memory extraction and repair status"),
                 (PREFIX + "/reflections/retry", self.retry_reflection, ["POST"], "Repair a known failed memory extraction"),
                 (PREFIX + "/reflections/queue", self.queue_reflection, ["POST"], "Continue one requested memory reflection in the background"),
+                (PREFIX + "/overview", self.overview, ["GET"], "Read authorized memory and linkage counts"),
                 (PREFIX + "/settings", self.settings, ["GET"], "Read unified V2 memory configuration"),
                 (PREFIX + "/settings/command", self.settings_command, ["POST"], "Update unified V2 memory configuration"),
                 (PREFIX + "/detail", self.detail, ["POST"], "Read one authorized fact with governed evidence handles"),
@@ -60,17 +62,33 @@ class MemoryWebAPI:
         from .web_api import outcome_response
         try:
             query = request.query
-            if (set(query.keys()) - {"limit", "batch_id", "after_id"} or ("batch_id" in query and "after_id" in query)
+            if (set(query.keys()) - {"limit", "batch_id", "after_id", "history"} or ("batch_id" in query and "after_id" in query)
                     or any(len(query.getlist(k)) != 1 for k in query.keys())):
+                raise ValueError()
+            history_value = query.get("history", "0")
+            if history_value not in ("0", "1"):
                 raise ValueError()
             async with self.controller._control_lock:
                 manager, context = self._reflection_manager()
                 return outcome_response(manager.list(context, batch_id=query.get("batch_id"), limit=int(query.get("limit", "20")),
-                                                     after_id=query.get("after_id", "")))
+                                                     after_id=query.get("after_id", ""), history=history_value == "1"))
         except TaskError as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
         except (ValueError, TypeError):
             return outcome_response(Outcome.failed("memory_request_invalid", "invalid reflection query"))
+
+    async def overview(self):
+        from .web_api import outcome_response
+        try:
+            async with self.controller._control_lock:
+                manager, context = self._reflection_manager()
+                local = manager.manager.overview(context)
+            if not local.is_success:
+                return outcome_response(local)
+            linked = await read_external_memory_summary(self.controller, context)
+            return outcome_response(Outcome.success({"local": local.unwrap(), "linkage": linked}))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
 
     async def retry_reflection(self):
         return await self._submit_reflection(background=False)
@@ -317,9 +335,14 @@ class MemoryWebAPI:
 
     async def settings(self):
         from .web_api import outcome_response
-        if request.query:
+        query = request.query
+        if (set(query.keys()) - {"layer"}
+                or "layer" in query and len(query.getlist("layer")) != 1):
             return outcome_response(Outcome.failed("memory_request_invalid", "settings target is supplied by the host"))
-        return await self._run({}, method="settings")
+        layer = query.get("layer", "role")
+        if layer not in ("role", "window"):
+            return outcome_response(Outcome.failed("memory_request_invalid", "invalid memory settings layer"))
+        return await self._run({"layer": layer}, method="settings")
 
     async def settings_command(self):
         from .web_api import outcome_response
@@ -336,7 +359,9 @@ class MemoryWebAPI:
                 return value
             arguments = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
             required = {"operation_key", "expected_edit_token", "changes"}
-            if type(arguments) is not dict or not required.issubset(arguments) or set(arguments) - required - {"reset_to_inherit"}:
+            allowed = required | {"reset_to_inherit", "layer"}
+            if (type(arguments) is not dict or not required.issubset(arguments) or set(arguments) - allowed
+                    or arguments.get("layer", "role") not in ("role", "window")):
                 raise ValueError()
         except (ValueError, UnicodeError, RecursionError):
             return outcome_response(Outcome.failed("memory_request_invalid", "invalid memory configuration patch"))

@@ -38,7 +38,7 @@ class RoleLifeHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.done(host.application, batch))["state"], "complete")
         self.assertEqual(ledger.activity("walk", owner=activity.owner), activity)
         self.assertEqual(len(self.called), 1)
-        self.assertEqual("".join(part.text for part in self.sent), "第一段\n第二段")
+        self.assertEqual([part.text for part in self.sent], ["第一段", "第二段"])
 
 
 if __name__ == "__main__":

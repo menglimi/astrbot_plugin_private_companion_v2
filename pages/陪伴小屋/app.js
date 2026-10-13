@@ -57,6 +57,7 @@ const navGroups = [
 const navItems = navGroups.flatMap(([,items])=>items);
 const lifeTabs=[['home','house','首页'],['state','activity','状态'],['diary','notebook-pen','日记'],['directory','armchair','家具与能力'],['observation','scan-eye','生活观察']];
 let route='life', lifeTab='home', manageTab='host', selfPane='profile', libraryFilter='all', memoryView='list', memoryWorkspaceRoute='records';
+let navigationIntent=0;
 let outputTabId='visual';
 let selfProfileSection='identity';
 let maintenancePane='';
@@ -105,7 +106,7 @@ function navHref(next,tab='',subtab=''){
     ||next==='manage'&&tab==='expression'&&subtab
     ||next==='manage'&&tab==='learning'&&subtab
     ||next==='manage'&&tab==='maintenance'&&subtab&&subtab!=='overview'
-    ||next==='manage'&&tab==='data'&&['storage','backup','records','migration'].includes(subtab)
+    ||next==='manage'&&tab==='data'&&['storage','backup','migration'].includes(subtab)
     ||next==='life'&&tab==='diary'&&subtab&&subtab!=='archive';
   return nested?path+'/'+subtab:path;
 }
@@ -140,10 +141,10 @@ function navigationDestination(next,tab='',subtab=''){
     subtab=tab==='diary'&&['archive','reading','sleep','receipts'].includes(subtab)?subtab:'archive';
   }else if(next==='manage'){
     tab=manageTabs.some(item=>item[0]===tab)?tab:'host';
-    subtab=tab==='learning'?(['overview','review','chain','expression','semantic','reflection'].includes(subtab)?subtab:'overview')
+    subtab=tab==='learning'?(['overview','strategy','review','chain','expression','semantic','reflection'].includes(subtab)?subtab:'overview')
       :tab==='expression'?(['text','segment','style','cleanup','voice','components','checks','timing','platform','reaction','group'].includes(subtab)?subtab:'')
       :tab==='maintenance'?(['diagnostics','cache','efficiency','recent','prompts','patrol'].includes(subtab)?subtab:'')
-        :tab==='data'?(['storage','backup','records','migration'].includes(subtab)?subtab:'storage')
+        :tab==='data'?(['storage','backup','migration'].includes(subtab)?subtab:'storage')
         :tab==='governance'&&['profile','relationship','questionnaire','knowledge'].includes(subtab)?subtab:'profile';
   }else{next='life';tab='home';subtab='archive';}
   return {next,tab,subtab};
@@ -155,46 +156,75 @@ function currentNavigationHref(){
     :'';
   return navHref(route,route==='life'?lifeTab:manageTab,route==='life'?lifeWorkspaceTab:manageTab==='expression'?expressionRoute:manageTab==='learning'?learningTab:manageTab==='maintenance'?maintenancePane:manageTab==='data'?dataPane:selfPane);
 }
+function pageLeaveDecision(){
+  if(window.CompanionStatePage?.canLeave?.()===false)return false;
+  return window.CompanionWeatherSourcePage?.canLeave?.()??true;
+}
+function restoreNavigationPath(){
+  const href=currentNavigationHref();
+  if(location.hash!==href){try{history.replaceState(null,'',href);}catch{}}
+}
+function afterPageLeave(ticket,continuation){
+  let decision;
+  try{decision=pageLeaveDecision();}catch{return false;}
+  if(decision===false){restoreNavigationPath();return false;}
+  if(decision&&typeof decision.then==='function'){
+    return Promise.resolve(decision).then(allowed=>{
+      if(ticket!==navigationIntent)return false;
+      if(!allowed){restoreNavigationPath();return false;}
+      continuation();return true;
+    },()=>{
+      if(ticket===navigationIntent)restoreNavigationPath();
+      return false;
+    });
+  }
+  continuation();return true;
+}
 function navigate(next,tab,subtab='',{replace=false,scroll=true}={}){
+  const ticket=++navigationIntent;
   if(next==='library'||next==='activities'){furnitureFilter='extensions';furnitureQuery='';}
   const destination=navigationDestination(next,tab,subtab),shell=window.CompanionShell;
   const href=navHref(destination.next,destination.tab,destination.subtab);
   const same=navigationInitialized&&currentNavigationHref()===href&&!shell?.furniture
     &&(destination.next==='manage'?shell?.section===destination.tab
       :!shell?.section&&shell?.view===(destination.tab==='home'?null:destination.tab));
-  if(!same&&(window.CompanionStatePage?.canLeave?.()===false||window.CompanionWeatherSourcePage?.canLeave?.()===false)){
-    try{history.replaceState(null,'',currentNavigationHref());}catch{}
-    return;
-  }
-  closeDetail();route=destination.next;
-  if(route==='life'){
-    lifeTab=destination.tab;lifeWorkspaceTab=destination.subtab;
-    if(lifeTab==='home'){
-      shell?.selectSection(null);shell?.selectView(null);shell?.selectFurniture(null);
-    }else shell?.selectView(lifeTab);
-  }else{
-    manageTab=destination.tab;
-    maintenancePane=manageTab==='maintenance'?destination.subtab:'';
-    if(manageTab==='data')dataPane=destination.subtab;
-    selfPane=manageTab==='governance'?destination.subtab:'profile';
-    replyPane=manageTab==='expression'&&destination.subtab!=='platform'?destination.subtab:'';
-    if(manageTab==='expression'&&destination.subtab)
-      expressionModule=({voice:'expression-voice',platform:'expression-platform',reaction:'expression-reaction',
-        timing:'expression-text',segment:'expression-text',style:'expression-text',cleanup:'expression-text',
-        components:'expression-platform',checks:'expression-platform',group:'expression-group',text:'expression-text'})[destination.subtab]||'expression-text';
-    else if(manageTab==='expression')expressionModule='expression-text';
-    if(manageTab==='learning')learningTab=destination.subtab;
-  }
-  try{
-    if(replace)history.replaceState(null,'',href);
-    else if(location.hash!==href)history.pushState(null,'',href);
-  }catch{}
-  if(!same){render();navigationInitialized=true;}
-  if(scroll&&!same)window.scrollTo({top:0,behavior:'instant'});
+  const commit=()=>{
+    closeDetail();route=destination.next;
+    if(route==='life'){
+      lifeTab=destination.tab;lifeWorkspaceTab=destination.subtab;
+      if(lifeTab==='home'){
+        shell?.selectSection(null);shell?.selectView(null);shell?.selectFurniture(null);
+      }else shell?.selectView(lifeTab);
+    }else{
+      manageTab=destination.tab;
+      maintenancePane=manageTab==='maintenance'?destination.subtab:'';
+      if(manageTab==='data')dataPane=destination.subtab;
+      selfPane=manageTab==='governance'?destination.subtab:'profile';
+      replyPane=manageTab==='expression'&&destination.subtab!=='platform'?destination.subtab:'';
+      if(manageTab==='expression'&&destination.subtab)
+        expressionModule=({voice:'expression-voice',platform:'expression-platform',reaction:'expression-reaction',
+          timing:'expression-text',segment:'expression-text',style:'expression-text',cleanup:'expression-text',
+          components:'expression-platform',checks:'expression-platform',group:'expression-group',text:'expression-text'})[destination.subtab]||'expression-text';
+      else if(manageTab==='expression')expressionModule='expression-text';
+      if(manageTab==='learning')learningTab=destination.subtab;
+    }
+    try{
+      if(replace)history.replaceState(null,'',href);
+      else if(location.hash!==href)history.pushState(null,'',href);
+    }catch{}
+    if(!same){render();navigationInitialized=true;}
+    if(scroll&&!same)window.scrollTo({top:0,behavior:'instant'});
+  };
+  if(same){commit();return true;}
+  return afterPageLeave(ticket,commit);
 }
 function navigateToReplySection(next,tab,subtab,section){
-  navigate(next,tab,subtab);
-  requestAnimationFrame(()=>window.CompanionReplyPage?.selectSection?.(section,{scroll:true}));
+  const navigation=navigate(next,tab,subtab);
+  if(navigation&&typeof navigation.then==='function'){
+    return navigation.then(allowed=>{if(allowed)requestAnimationFrame(()=>window.CompanionReplyPage?.selectSection?.(section,{scroll:true}));return allowed;});
+  }
+  if(navigation)requestAnimationFrame(()=>window.CompanionReplyPage?.selectSection?.(section,{scroll:true}));
+  return navigation;
 }
 function onMaintenanceViewChange(view){
   if(route!=='manage'||manageTab!=='maintenance')return;
@@ -226,7 +256,7 @@ function syncFromHash(){
     return;
   }
   const [next,tab,subtab]=hash.split('/');
-  navigate(next,tab,subtab,{replace:true,scroll:false});
+  return navigate(next,tab,subtab,{replace:true,scroll:false});
 }
 /* 角色名徽标。它原先是个下拉，用来在示例角色 chengxi/wangshu 之间切换——
    那是本地预览的遗留物。连上宿主后角色由会话对象决定，页面里再放一个
@@ -252,6 +282,8 @@ function outfitImageSrc(){
 function updateRailBrand(){
   const brand=$('#railBrand');if(!brand)return;
   const src=outfitImageSrc();
+  if(brand.dataset.outfitSource===(src||''))return;
+  brand.dataset.outfitSource=src||'';
   if(src===null){
     brand.classList.remove('rail-outfit');
     brand.innerHTML=`<span class="brand-symbol">${I('house')}</span><span>陪伴小屋<small>V2.0</small></span>`;
@@ -262,11 +294,13 @@ function updateRailBrand(){
   brand.innerHTML=`<img src="${escapeHTML(src)}" alt="当前穿搭图">`;
   icons();
 }
-function integrationProvider(id){return integrationSnapshot?.providers?.find(item=>item.capability_id===id)||null;}
+function integrationProvider(id){return integrationSnapshot?.extensions?.find(item=>item.capability_id===id)
+  || integrationSnapshot?.providers?.find(item=>item.capability_id===id)||null;}
+function integrationExtension(id){return integrationSnapshot?.extensions?.find(item=>item.capability_id===id)||null;}
 function integrationStateCopy(id){
   const provider=integrationProvider(id);
   if(!provider)return null;
-  return ({connected:['扩展状态已读取',''],degraded:['状态待检查','amber'],installed:['已安装 · 尚未加载','amber'],missing:['未安装','gray']})[provider.integration_state]||['状态未知','amber'];
+  return ({connected:['原生拓展已运行',''],assembled:['已装配 · 等待运行','amber'],unassembled:['待装配','gray'],degraded:['状态待检查','amber'],installed:['已安装 · 尚未加载','amber'],missing:['未安装','gray']})[provider.integration_state]||['状态未知','amber'];
 }
 async function probeHost(){
   await product.connect(onProductChanged);
@@ -277,6 +311,12 @@ function onProductChanged(reason){
     updateHostChrome();renderShellSide();return;
   }
   if(reason?.kind==='state-refresh'){renderShellSide();renderHomeEnvironment();return;}
+  if(reason?.kind==='integration-refresh'){
+    syncFurnitureScene();renderShellSide();
+    const grid=$('#directoryGrid');if(grid)grid.innerHTML=directoryCards();
+    window.CompanionNativeExtensionPanel?.refreshStatus();
+    return;
+  }
   render();
 }
 function updateVoxelTour(running){const button=$('[data-voxel-tour]');if(button){button.setAttribute('aria-pressed',String(running));button.querySelector('span').textContent=running?'停止巡游':'巡游';}}
@@ -345,8 +385,8 @@ function syncFurnitureScene(){
   if(!voxelController)return;
   voxelController.setFurnitureCatalog(directory.filter(item=>{
     if(!item.model)return false;
-    const provider=item.cap&&product.provider(item.cap);
-    if(provider?.owner==='companion_v2')return provider.installed===true;
+    const provider=item.cap&&product.capability(item.cap);
+    if(integrationExtension(item.cap))return provider.assembled===true;
     return !['removed','planned'].includes(state.modules[item.cap]);
   }).map(item=>({id:item.station,label:item.name+' · '+capabilityStatus(item.cap)[0],model:item.model,accent:item.accent})));
   const layout=voxelController.getLayout();let changed=false;
@@ -600,16 +640,16 @@ function paintPanel(){
   const section=shell?.section||null;
   const furniture=shell?.furniture||null;
   const view=shell?.view||null;
-  host.innerHTML=furniture?renderFurniturePanel(furniture)
-    :section?renderSectionPanel(section)
-    :view?renderViewPanel(view)
-    :renderHomePanel();
-  host.hidden=!host.innerHTML.trim();
-  const body=$('.shell-panel-body',host);
-  if(body&&!state.reduceMotion&&!matchMedia('(prefers-reduced-motion: reduce)').matches){
-    body.classList.add('is-swapping');
-    setTimeout(()=>body.classList.remove('is-swapping'),400);
-  }
+  const commit=()=>{
+    host.innerHTML=furniture?renderFurniturePanel(furniture)
+      :section?renderSectionPanel(section)
+      :view?renderViewPanel(view)
+      :renderHomePanel();
+    host.hidden=!host.innerHTML.trim();
+  };
+  const key=[section||'',furniture||'',view||'',currentNavigationHref()].join('|');
+  if(window.CompanionPageMotion)window.CompanionPageMotion.paintPage(host,key,commit);
+  else commit();
   /* 面板里可能有需要挂载的工作区（记忆、模型、语义等）。
      这一步必须在 innerHTML 之后，否则容器还不存在。 */
   mountPanelWorkspaces();
@@ -648,17 +688,15 @@ function mountPanelWorkspaces(){
     ?window.CompanionContactPage?.mount(contactHost)
     :window.CompanionContactPage?.unmount());
   const learningHost=$('#learningWorkspace');
-  const skillScope=learningScope('skills');
+  const growthSources=learningReviewSources({scopeKey:learningTab==='chain'?'growth':null});
   guarded('学习与反思',()=>learningHost
-    ?skillScope
-      ?window.CompanionLearningPage?.mount(learningHost,{growthApi:skillScope.role.growth_api,scopeKey:skillScope.key,
-        roleLabel:product.roleLabel?.(skillScope.role)||skillScope.role.role_id,layout:'chain',
-        recordId:learningRecordFocus?.scopeKey===skillScope.key?learningRecordFocus.growth_id:''})
+    ?growthSources.length
+      ?window.CompanionLearningPage?.mount(learningHost,{sources:growthSources,layout:'chain',recordFocus:learningRecordFocus})
       :window.CompanionLearningPage?.unmount()
     :window.CompanionLearningPage?.unmount());
   const learningOverviewHost=$('#learningOverviewWorkspace');
   guarded('学习总览',()=>learningOverviewHost
-    ?window.CompanionLearningOverviewPage?.mount(learningOverviewHost,{sources:learningReviewSources({includeGroups:true}),semantic:learningScope('semantic')})
+    ?window.CompanionLearningOverviewPage?.mount(learningOverviewHost,{sources:learningReviewSources({includeGroups:true}),semantic:{global:true}})
     :window.CompanionLearningOverviewPage?.unmount());
   const learningReviewHost=$('#learningReviewWorkspace');
   guarded('学习审阅中心',()=>learningReviewHost
@@ -720,19 +758,19 @@ function mountPanelWorkspaces(){
   if(expressionHost){
     const selected=learningScope('expression');
     guarded('表达学习',()=>selected
-      ?window.CompanionExpressionLearningPage?.mount(expressionHost,{replyApi:selected.role.reply_api,scopeKey:selected.key,
+      ?window.CompanionExpressionLearningPage?.mount(expressionHost,{replyApi:selected.role.reply_api,
+        scopeKind:selected.target.scope_kind,scopeKey:selected.key,
         target:selected.target,role:selected.role})
       :window.CompanionExpressionLearningPage?.unmount());
   }else guarded('表达学习卸载',()=>window.CompanionExpressionLearningPage?.unmount());
   const expressionSignalsHost=$('#expressionSignalsWorkspace');
-  const expressionScope=learningScope('expression');
-  guarded('表达规则',()=>expressionSignalsHost&&expressionScope
-    ?window.CompanionExpressionSignalsPage?.mount(expressionSignalsHost,{replyApi:expressionScope.role.reply_api,scopeKey:expressionScope.key,
-      target:expressionScope.target,role:expressionScope.role})
+  const expressionSources=learningExpressionSources();
+  guarded('表达规则',()=>expressionSignalsHost&&expressionSources.length
+    ?window.CompanionExpressionSignalsPage?.mount(expressionSignalsHost,{sources:expressionSources})
     :window.CompanionExpressionSignalsPage?.unmount());
   const expressionSamplesHost=$('#expressionSamplesWorkspace');
-  guarded('表达学习素材',()=>expressionSamplesHost&&expressionScope
-    ?window.CompanionExpressionSamplesPage?.mount(expressionSamplesHost,{replyApi:expressionScope.role.reply_api,scopeKey:expressionScope.key})
+  guarded('表达学习素材',()=>expressionSamplesHost&&expressionSources.length
+    ?window.CompanionExpressionSamplesPage?.mount(expressionSamplesHost,{sources:expressionSources})
     :window.CompanionExpressionSamplesPage?.unmount());
   if($('#setupGuideHost'))guarded('首次配置引导',()=>mountSetupGuide());
   const legacyMigrationHost=$('#legacyMigrationWorkspace');
@@ -752,15 +790,19 @@ function mountPanelWorkspaces(){
   if($('#modelWorkspace'))guarded('模型与连接',()=>window.CompanionModelsPage?.mount($('#modelWorkspace')));
   const semanticLearningHost=$('#semanticLearningWorkspace');
   const semanticExpressionHost=$('#semanticExpressionWorkspace');
-  const semanticHost=semanticLearningHost||semanticExpressionHost;
-  const semanticKey=semanticLearningHost?'semantic':'expression';
-  const semanticScope=semanticHost?learningScope(semanticKey):null;
-  guarded('语义目录',()=>semanticHost&&semanticScope
-    ?window.CompanionSemanticPage?.mount(semanticHost,{view:semanticKey==='semantic'?'learning':'expression',
-      target:semanticScope.target,selection:{target_id:semanticScope.target.target_id,role_id:semanticScope.role.role_id},
-      scopeKey:semanticScope.key})
-    :window.CompanionSemanticPage?.unmount());
-  if($('#perceptionProviderWorkspace'))guarded('感知扩展',()=>window.CompanionPerceptionPage?.mount($('#config-screen')));
+  const semanticScope=semanticExpressionHost?learningScope('expression'):null;
+  guarded('语义目录',()=>semanticLearningHost
+    ?window.CompanionSemanticPage?.mount(semanticLearningHost,{view:'learning',globalSettingsOnly:true,scopeKey:'global-semantic-settings'})
+    :semanticExpressionHost&&semanticScope
+      ?window.CompanionSemanticPage?.mount(semanticExpressionHost,{view:'expression',
+        target:semanticScope.target,selection:{target_id:semanticScope.target.target_id,role_id:semanticScope.role.role_id},
+        scopeKey:semanticScope.key})
+      :window.CompanionSemanticPage?.unmount());
+  if($('#perceptionProviderWorkspace'))guarded('现实触及设置',()=>{
+    const nativeHost=$('[data-native-extension-host="reality"]');
+    if(nativeHost)window.CompanionNativeExtensionPanel?.mount(nativeHost,{extensionId:'reality'});
+  });
+  guarded('内置能力面板',()=>window.CompanionNativeExtensionPanel?.prune());
   if($('#perceptionOverviewWorkspace'))guarded('感知上下文',()=>window.CompanionPerceptionOverviewPage?.mount($('#perceptionOverviewWorkspace')));
   if($('#nativeEnvironmentWorkspace'))guarded('原生感知',()=>window.CompanionNativePerceptionPage?.mount({
     environment:$('#nativeEnvironmentWorkspace'),calendar:$('#nativeCalendarWorkspace'),
@@ -792,6 +834,34 @@ function notifyAppearanceChanged(){
   window.CompanionAppearancePage?.refresh?.();
 }
 
+/* 只测量场景之外的空间：天气栏、家具条和底部留白随字号与密度变化。
+   不观察场景高度，避免高度过渡中的 resize 反过来改写目标尺寸。 */
+let stageSpaceFrame=0,stageSpaceObserver=null;
+function syncStageSpace(){
+  if(!stageSpaceObserver){
+    const environment=$('[data-home-environment]'),strip=$('#stageFurniture');
+    if(!environment||!strip)return;
+    stageSpaceObserver=new ResizeObserver(syncStageSpace);
+    stageSpaceObserver.observe(environment);
+    stageSpaceObserver.observe(strip);
+    window.addEventListener('resize',syncStageSpace);
+  }
+  if(stageSpaceFrame)return;
+  stageSpaceFrame=requestAnimationFrame(()=>{
+    stageSpaceFrame=0;
+    const scene=$('#stageScene'),strip=$('#stageFurniture'),body=$('.shell-body');
+    if(!scene||!strip||!body||window.CompanionShell?.section||arrangementDraft)return;
+    const number=value=>parseFloat(value)||0;
+    const regionStyle=getComputedStyle(scene.parentElement);
+    const stripStyle=getComputedStyle(strip),sceneStyle=getComputedStyle(scene);
+    const reserved=scene.getBoundingClientRect().top+window.scrollY
+      +strip.getBoundingClientRect().height+number(regionStyle.rowGap)
+      +number(sceneStyle.marginBottom)+number(stripStyle.marginTop)+number(stripStyle.marginBottom)
+      +number(getComputedStyle(body).paddingBottom);
+    scene.style.setProperty('--shell-stage-chrome',`${Math.ceil(reserved)}px`);
+  });
+}
+
 /* 外壳重绘：左栏导航、小屋速览条、右栏状态、下方面板。
    小屋本身只在签名变化时重挂（见 render）。
 
@@ -809,7 +879,16 @@ function renderShell(){
   if(breadcrumb)breadcrumb.innerHTML=`<span>${shell?.section?'插件配置':'小屋'}</span>${I('chevron-right')}<strong>${label}</strong>`;
   document.title=`${label} · 陪伴 V2`;
   const nav=$('#shellNav');
-  if(nav)nav.innerHTML=window.CompanionShell?.railHTML()||'';
+  if(nav){
+    /* 导航保留同一批按钮，切页时只更新选中态，键盘焦点与悬停不被重绘抹掉。 */
+    if(!nav.querySelector('[data-shell-section]'))nav.innerHTML=shell?.railHTML()||'';
+    nav.querySelectorAll('[data-shell-section]').forEach(link=>{
+      const active=link.dataset.shellSection===shell?.section;
+      link.setAttribute('aria-pressed',String(active));
+      if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');
+    });
+    window.CompanionPageMotion?.syncNavigation(nav);
+  }
   renderHomeEnvironment();
   renderStageBar();
   renderShellSide();
@@ -818,6 +897,7 @@ function renderShell(){
   /* 面板绘制后 iframe 才存在；分区和家具切换也从这里挂载。 */
   product.mountWorkspace();
   window.CompanionShell?.paint();
+  syncStageSpace();
   const shellView=window.CompanionShell?.view||null;
   const mount=$('[data-voxel-room]');
   if(shellView==='state'&&(!shellViewInitialized||shellRenderedView!=='state'))scheduleStatusBuild(mount);
@@ -867,11 +947,13 @@ function renderHomeEnvironment(){
 function chooseFurniture(id){
   const shell=window.CompanionShell;
   if(!shell)return;
-  if(window.CompanionStatePage?.canLeave?.()===false||window.CompanionWeatherSourcePage?.canLeave?.()===false)return;
-  shell.selectFurniture(id);
-  route='life';lifeTab='home';lifeWorkspaceTab='archive';
-  try{if(location.hash!=='#life')history.pushState(null,'','#life');}catch{}
-  renderShell();
+  const ticket=++navigationIntent;
+  return afterPageLeave(ticket,()=>{
+    shell.selectFurniture(id);
+    route='life';lifeTab='home';lifeWorkspaceTab='archive';
+    try{if(location.hash!=='#life')history.pushState(null,'','#life');}catch{}
+    renderShell();
+  });
 }
 /* 选配置分区：换下方面板，小屋退到背景（不销毁）。 */
 function chooseSection(id){
@@ -1112,13 +1194,13 @@ const directory=[
 ];
 const furnitureFilters=[['all','全部'],['base','基础生活'],['extensions','拓展能力'],['attention','待检查']];
 const furnitureNeedsAttention=item=>furnitureUnavailable(item)
-  || Boolean(item.cap&&product.provider(item.cap)?.integration_state!=='connected');
+  || Boolean(item.cap&&product.capability(item.cap)?.integration_state!=='connected');
 function filteredFurniture(){
   const query=furnitureQuery.toLocaleLowerCase();
   return directory.filter(item=>{
     const matches=furnitureFilter==='all'||furnitureFilter==='base'&&item.group==='base'
       ||furnitureFilter==='extensions'&&Boolean(item.cap)||furnitureFilter==='attention'&&furnitureNeedsAttention(item);
-    const owner=item.cap?product.provider(item.cap)?.label||'拓展能力':'基础生活';
+    const owner=item.cap?product.capability(item.cap)?.label||'拓展能力':'基础生活';
     return matches&&(!query||[item.name,item.text,owner].join(' ').toLocaleLowerCase().includes(query));
   });
 }
@@ -1134,8 +1216,8 @@ function filteredFurniture(){
  * 表现是「筛选说不可用、行里却显示可用」，不报错。 */
 function furnitureUnavailable(item){
   if(!item.cap) return false;
-  const provider=product.provider(item.cap);
-  if(provider?.owner==='companion_v2')return ['degraded','stopped'].includes(provider.integration_state);
+  const provider=product.capability(item.cap);
+  if(integrationExtension(item.cap))return ['degraded','stopped'].includes(provider?.integration_state);
   return provider?.integration_state==='missing'
     || ['removed','planned'].includes(state.modules[item.cap]);
 }
@@ -1185,8 +1267,8 @@ function furnitureRow(item){
   const [label,type]=furnitureStatus(item);
   const unavailable=furnitureUnavailable(item);
   const stored=item.station&&(voxelController?voxelController.getState().storedFurniture.includes(item.station):state.roomLayouts[layoutKey()]?.items?.[item.station]?.stored);
-  const owner=item.cap?(product.provider(item.cap)?.label||capabilityConfig(item.cap).label||'拓展能力'):'基础生活';
-  const bundled=['image','screen'].includes(item.cap)&&product.provider(item.cap)?.owner==='companion_v2';
+  const owner=item.cap?(product.capability(item.cap)?.label||capabilityConfig(item.cap).label||'拓展能力'):'基础生活';
+  const bundled=Boolean(item.cap&&integrationExtension(item.cap));
   const action=item.station&&!unavailable&&!bundled
     ? `<button data-locate-furniture="${item.id}" aria-label="${stored?'布置已收纳的':'在小屋中查看'}${item.name}">${I(stored?'archive':'focus')}<span>${stored?'布置':'定位'}</span></button>`
     : `<button data-furniture="${item.id}" aria-label="打开${item.name}"><span>打开</span></button>`;
@@ -1311,7 +1393,7 @@ const capabilities=[
   ['reality','radio','现实触及','Reality','真实设备与场所、镜头与声音覆盖，以及动作结果。'],
   ['live','mic-vocal','直播与表演','Live','节目、场景与直播中的角色呈现。'],
 ];
-function capabilityStatus(id){const item=product.provider(id);if(item?.owner==='companion_v2'){if(item.desired_state==='paused')return ['已暂停','gray'];if(item.desired_state==='discarded'||!item.installed)return ['未装配','gray'];return item.integration_state==='connected'?['已装配','']:['状态待检查','amber'];}if(item)return [product.statusLabel(item.integration_state),item.integration_state==='connected'?'':'gray'];const s=state.modules[id];const local=['paused','setup','permission','removed','planned'].includes(s);if(!local){const connected=integrationStateCopy(id);if(connected)return connected;}return ({enabled:['配置开启',''],disabled:['配置关闭','gray'],unknown:['配置未知','amber'],paused:['已暂停','gray'],setup:['待连接','amber'],permission:['待授权','amber'],removed:['已丢弃','gray'],planned:['待交付','gray']})[s]||['配置未知','amber'];}
+function capabilityStatus(id){const item=product.capability(id);if(integrationExtension(id)){if(item.desired_state==='paused')return ['已暂停','gray'];if(item.desired_state==='discarded'||!item.assembled)return ['未装配','gray'];return item.integration_state==='connected'?['已装配','']:['状态待检查','amber'];}if(item)return [product.statusLabel(item.integration_state),item.integration_state==='connected'?'':'gray'];const s=state.modules[id];const local=['paused','setup','permission','removed','planned'].includes(s);if(!local){const connected=integrationStateCopy(id);if(connected)return connected;}return ({enabled:['配置开启',''],disabled:['配置关闭','gray'],unknown:['配置未知','amber'],paused:['已暂停','gray'],setup:['待连接','amber'],permission:['待授权','amber'],removed:['已丢弃','gray'],planned:['待交付','gray']})[s]||['配置未知','amber'];}
 /* 主题色卡不再硬编码色值——色值只在 tokens.css 里，这里只有注册表给的 id/名/说明。
    色卡预览靠给元素套 data-theme 真实渲染：卡里的文字、边框、强调色都是那套主题
    真正画出来的，而不是画几个假的色条。旧写法把 bg/accent/quiet 抄在数组里，
@@ -1441,7 +1523,7 @@ function consoleSections(sections){
 /* 挂载的工作区自带标题与生效信息，外层无需再加一遍。 */
 function consoleMountHead(){return '';}
 function configLink(label,tab){return button(label+' '+I('arrow-up-right'),`data-go="manage" data-manage="${tab}"`,'small');}
-function providerSummary(ids){return product.providersMarkup(ids);}
+function providerSummary(ids){return product.extensionsMarkup(ids);}
 function consoleLoading(text){return `<p class="console-loading" role="status">${text}</p>`;}
 /* 配置编辑器挂载点。
  *
@@ -1484,18 +1566,10 @@ const perceptionSources=[
   ['messages-square','合并转发','按原消息顺序读取有来源的内容'],
 ];
 const perceptionProviders=[
-  {id:'reality',icon:'radio',name:'现实触及',plugin:'astrbot_plugin_reality_companion',page:'reality-companion',description:'摄像头、移动端与现实设备'},
+  {id:'reality',icon:'radio',name:'现实触及',description:'摄像头、移动端与现实设备'},
 ];
-function perceptionAddress(spec,provider){
-  return product.providerAddress(spec.id,spec.page);
-}
 function renderPerceptionProvider(spec){
-  const provider=product.provider(spec.id);
-  const address=perceptionAddress(spec,provider);
-  const status=provider?product.statusLabel(provider.integration_state):'状态尚未读取';
-  const statusClass=provider?.integration_state==='connected'?'':'gray';
-  const readiness=provider?.runtime_ready===true?'扩展报告已就绪':provider?.runtime_ready===false?'扩展尚未就绪':'执行状态由扩展确认';
-  return `<article class="perception-provider"><div class="perception-provider-main"><span class="perception-provider-icon">${I(spec.icon)}</span><div><div class="perception-provider-title"><h3>${spec.name}</h3>${chip(escapeHTML(status),statusClass)}</div><small>${provider?`${escapeHTML(provider.reason||'状态已读取')} · ${escapeHTML(readiness)}`:'未取得扩展公开状态'}</small></div></div>${address?`<div class="perception-address"><label for="perception-url-${spec.id}">扩展配置地址</label><div><input id="perception-url-${spec.id}" readonly value="${escapeHTML(address)}" aria-label="${spec.name}配置地址"><button class="button small" data-copy-perception="${spec.id}" title="复制${spec.name}配置地址">${I('copy')}<span>复制地址</span></button></div></div>`:''}<div data-perception-provider="${spec.id}" class="perception-editor">${consoleLoading(`正在读取${spec.name}设置…`)}</div></article>`;
+  return `<article class="perception-provider"><div data-native-extension-host="${spec.id}">${consoleLoading(`正在读取${spec.name}设置…`)}</div></article>`;
 }
 /* 感知首页只展示仪表盘，点击区域后在下方选择一个真实配置面板。
    角色级主动联系条件与主动联系页共用配置合同和保存服务；
@@ -1519,6 +1593,7 @@ function activatePerceptionTab(destination,{focus=false,scroll=false,modelTab=''
   const page=panel?.closest?.('[data-perception-page]');
   const target=tabs.find(tab=>tab.dataset.perceptionTab===page?.dataset.perceptionPage);
   if(!panel||!page||target?.hidden)return;
+  const entering=page.hidden;
   const workspace=document.getElementById('perceptionConfigWorkspace');
   if(workspace)workspace.hidden=false;
   $$('[data-perception-page]').forEach(item=>{item.hidden=item!==page;});
@@ -1548,6 +1623,7 @@ function activatePerceptionTab(destination,{focus=false,scroll=false,modelTab=''
     (workspace||anchor).scrollIntoView({behavior:reduced?'instant':'smooth',block:'start'});
   }
   icons();
+  window.CompanionPageMotion?.reveal(page,{enabled:entering});
 }
 /* 仪表盘与其他页面入口共用配置定位；模型、TTS 与生图也在下方的同一工作区编辑。 */
 window.CompanionPerceptionTabs={activate:activatePerceptionTab};
@@ -1733,8 +1809,8 @@ const actionDomains=[
    destination:'perception',destinationLabel:'设备接入与授权',destinationIcon:'scan-eye'}
 ];
 function actionProviderStatus(id){
-  const provider=product.provider(id);
-  if(!provider)return {state:Array.isArray(integrationSnapshot?.providers)?'unknown':'loading',label:Array.isArray(integrationSnapshot?.providers)?'目录未返回':'正在读取'};
+  const provider=product.capability(id);
+  if(!provider)return {state:Array.isArray(integrationSnapshot?.extensions)?'unknown':'loading',label:Array.isArray(integrationSnapshot?.extensions)?'目录未返回':'正在读取'};
   const state=provider.integration_state||'unknown';
   return {state,label:product.statusLabel(state)};
 }
@@ -2825,7 +2901,7 @@ function qzoneClick(el){
   }
 }
 function renderActionOriginal(){
-  const manifestReady=Array.isArray(integrationSnapshot?.providers);
+  const manifestReady=Array.isArray(integrationSnapshot?.extensions);
   const statuses=actionDomains.map(item=>actionProviderStatus(item.provider));
   const connected=statuses.filter(item=>item.state==='connected').length;
   return `<div class="action-page" data-manifest-ready="${manifestReady}">
@@ -2853,7 +2929,7 @@ function renderActionOriginal(){
   </div>`;
 }
 function outputProviderLine(id,label){
-  const provider=integrationProvider(id)||product.provider?.(id);
+  const provider=integrationProvider(id)||product.capability?.(id);
   const status=provider?.integration_state?product.statusLabel(provider.integration_state):'未读取';
   return `<div class="output-provider-line"><span class="output-provider-dot${provider?.integration_state==='connected'?' is-ready':''}" aria-hidden="true"></span><span>${escapeHTML(label||provider?.label||id)}</span><span class="output-status-chip${provider?.integration_state==='connected'?' is-ready':''}">${escapeHTML(status)}</span></div>`;
 }
@@ -2978,11 +3054,13 @@ function activateOutputPreview(id,{focus=false}={}){
   const target=tabs.find(tab=>tab.dataset.outputMode===id);
   const panel=document.getElementById('output-preview-'+id);
   if(!target||!panel)return;
+  const entering=panel.hidden;
   tabs.forEach(tab=>{const active=tab===target;tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;});
   $$('[data-output-view]').forEach(view=>{const active=view===panel;view.hidden=!active;});
   const page=$('.output-page');
   if(page)page.dataset.outputPreviewActive=id;
   if(focus)target.focus();
+  window.CompanionPageMotion?.reveal(panel,{enabled:entering});
 }
 
 function activateOutputTab(id,{focus=false,scroll=false}={}){
@@ -2990,6 +3068,7 @@ function activateOutputTab(id,{focus=false,scroll=false}={}){
   const target=tabs.find(tab=>tab.dataset.outputTab===id);
   const panel=document.getElementById('output-panel-'+id);
   if(!target||!panel)return;
+  const entering=panel.hidden;
   outputTabId=id;
   tabs.forEach(tab=>{const active=tab===target;tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;});
   $$('[data-output-panel]').forEach(view=>{const active=view===panel;view.hidden=!active;});
@@ -3010,6 +3089,7 @@ function activateOutputTab(id,{focus=false,scroll=false}={}){
       ||['low','off'].includes(document.documentElement.dataset.motion);
     document.getElementById('output-config')?.scrollIntoView({behavior:reduced?'instant':'smooth',block:'start'});
   }
+  window.CompanionPageMotion?.reveal(panel,{enabled:entering});
 }
 function activateExpressionModule(id,{focus=false}={}){
   /* 旧的「节奏时机」链接仍可打开，但它归入文字页的分段设置，
@@ -3019,6 +3099,7 @@ function activateExpressionModule(id,{focus=false}={}){
   const target=tabs.find(tab=>tab.dataset.expressionModule===id);
   const panel=document.getElementById(`expression-panel-${id}`);
   if(!target||!panel)return false;
+  const entering=panel.hidden;
   expressionModule=id;
   if(id==='expression-text'&&!['segment','style','cleanup'].includes(replyPane))replyPane='';
   if(id==='expression-voice')replyPane='voice';
@@ -3046,6 +3127,7 @@ function activateExpressionModule(id,{focus=false}={}){
   }
   syncExpressionReplyWorkspace(id);
   if(focus)target.focus();
+  window.CompanionPageMotion?.reveal(panel,{enabled:entering});
   return true;
 }
 function syncExpressionReplyWorkspace(id=expressionModule){
@@ -3132,6 +3214,7 @@ const SELF_PROFILE_SECTIONS=[
   ['boundaries','shield-check','边界',['boundaries','taboos']],
   ['world','globe-2','世界',['world_name','era','tone','rules','scenes','network','world_extra','world','world_adaptation_mode','world_adaptation']],
   ['platform_names','messages-square','称呼',['platform_group_chat','platform_screen','platform_bilibili','platform_qzone','platform_library','platform_names']],
+  ['expression_learning','message-square-more','表达学习范围',['main_companion_subject','expression_private_source_mode','expression_private_source_subject_ids','expression_private_application_mode','expression_private_application_subject_ids']],
 ];
 function selectSelfProfileSection(section){
   selfProfileSection=section;
@@ -3182,7 +3265,7 @@ function renderGovernanceOriginal(){
         ${configEditors('roleProfileConfigWorkspace',['role_profile'],'角色稳定档案')}
         <section class="self-organizer" id="selfProfileOrganizer" aria-label="通过已有人格整理">
           <div class="self-organizer-head"><h3>通过已有人格整理</h3></div>
-          <div class="self-organizer-actions">${button(I('sparkles')+'<span>从当前人格整理角色档案</span>','data-role-profile-draft-open="role_profile"','small primary')}</div>
+          <div class="self-organizer-actions">${button(I('sparkles')+'<span>从当前人格整理角色档案</span>','data-role-profile-draft-open="role_profile"','small primary')}${button(I('file-input')+'<span>迁入已有设定</span>','data-role-profile-migrate-open','small')}</div>
         </section>
       </section>
       <section class="deck-panel self-workspace-panel" id="self-panel-relationship" role="tabpanel" aria-labelledby="self-tab-relationship"${selfPane==='relationship'?'':' hidden'}>
@@ -3194,7 +3277,7 @@ function renderGovernanceOriginal(){
         ${configEditors('knowledgeConfigWorkspace',['knowledge'],'世界知识与来源')}
       </section>
     </div>
-  </div>${window.CompanionRoleProfileDraft?.markup?.()||''}`;
+  </div>${window.CompanionRoleProfileDraft?.markup?.()||''}${window.CompanionRoleProfileMigration?.markup?.()||''}`;
 }
 function renderIdentityPageOriginal(){
   const networkSettings=`<details class="identity-network-settings"><summary><span>${I('sliders-horizontal')}关系网设置</span><small>熟人卡规则 · 群聊成员线索识别</small></summary><div class="identity-network-settings-body">${configEditors('personConfigWorkspace',['person'],'熟人卡默认设置')}${configEditors('memberClueWorkspace',['knowledge'],'群聊成员线索')}</div></details>`;
@@ -3212,22 +3295,12 @@ function renderIdentityPageOriginal(){
      ['identity-access','shield-check','访问规则'],
      ['identity-feelings','heart-handshake','关系与情感']]);
 }
-/* 主动与联系。
- *
- * 这一页此前是废的：正文里调了一个**从未定义**的 renderPreferences()，
- * 一执行就抛 ReferenceError，整页渲染中断——用户看到的是空白与错误。
- * 那个函数要挂的是 proactive.contact 这个 160 字段的大组（联系节奏、
- * 免打扰、各类主动契机、去重与配额），它四层都缺：后端没有 GroupEditor
- * 子类、SECTIONS 注册表没有条目、前端没有 spec 分区、页面没有挂载点。
- *
- * 四个触点现已补齐，160 项按 23 段渲染。上面那块「联系节奏」是现状与快速修改：
- * 它回答「此刻为什么没来找你」，也是唯一会随总开关签发主动联系授权的地方；
- * 下面那张卡是完整的设置面。同一个组只在这一页可写——决策页与表达页只留入口。 */
+/* 主动与联系保存全局默认值。个人覆盖与授权由私聊用户页管理。 */
 function renderContactPageOriginal(){return consoleSections([
-  ['联系节奏','它什么时候来找你、什么时候不打扰。',
-   `${consoleMountHead('安静时段与沉默门槛','改动从下一轮主动评估开始生效；开启总开关时会一并签发这个对象的主动联系授权。')}${renderRoleState('contact')}`],
-  ['主动联系偏好','联系节奏、各类契机、外部事件源与每日额度；按本对象与角色的这一段关系保存。',
-   `${consoleMountHead('四层继承','默认写入窗口层，安装 / 角色 / 关系层的值会被继承；两个关系级配额只能在安装 / 角色 / 关系层设置。')}${configEditors('contactPreferencesWorkspace',['proactive.contact'],'主动联系偏好')}`],
+  ['联系节奏','全局默认设置',
+   `${consoleMountHead('安静时段与沉默门槛','')}${renderRoleState('contact')}`],
+  ['主动联系偏好','全局默认设置；单个用户在私聊用户页调整。',
+   `${consoleMountHead('联系设置','')}${configEditors('contactPreferencesWorkspace',['proactive.contact'],'主动联系偏好')}`],
 ]);}
 function renderMemoryPageOriginal(){return consoleSections([
   ['认知与事实','它记得的事实、整理进度、来源与冷归档，以及按范围清理。',`${consoleMountHead('事实与经历','整理与修复、事实治理、来源与经历、冷归档、迁移、范围清理。整理与事实视图每 8 秒自动刷新。')}${renderMemories()}`],
@@ -3244,13 +3317,10 @@ function renderMaintenancePageOriginal(){
 function renderExpressionLearning(){
   return `<section id="expressionWorkspace" aria-label="表达学习设置">${consoleLoading('正在读取表达学习设置…')}</section>`;
 }
-/* 学习与反思。旧版这一页有 10 张 boundaryCard，全部是「某能力属于哪个子系统」
-   的归属说明——用户在这里找不到任何可操作的东西。现在只留三块有真实端点的：
-   表达学习（按对象或按群保存）、成长与技能、书架；
-   其余归属说明全部删掉，改成指向真实页面的入口行。 */
+/* 技能域与日程影响属于角色默认值；逐用户授权在用户页单独配置。 */
 function renderLearningPageOriginal(){
   return consoleSections([
-    ['表达与说话习惯学习','从当前私聊或群聊中取样，学成规则前先给你过目；设置按会话窗口保存。',`${consoleMountHead('表达学习','从授权会话消息中归纳可复用的表达形式；只有人工采纳的规则才会注入，并按使用情况轮换。')}${renderExpressionLearning()}${configEditors('growthConfigWorkspace',['role_growth','role.growth.skills'],'成长与技能')}${settingsJump('风格提示词与表达规则','expression','候选的采纳、驳回与退役，以及每条已采纳规则被用过多少次。')}`],
+    ['表达与说话习惯学习','',`${renderExpressionLearning()}${configEditors('growthConfigWorkspace',['role.growth.skills'],'成长与技能','')}${settingsJump('风格提示词与表达规则','expression','候选的采纳、驳回与退役，以及每条已采纳规则被用过多少次。')}`],
     ['记忆沉淀与每日反思','反思按时间到点或手动续接，把来源提炼为事实与经历摘要。',`${consoleMountHead('记忆反思','来源 → 新记忆条目；增量、重复安全，不回写改写已成型记忆。')}${settingsJump('反思结果与记忆治理','memory','查看沉淀下来的事实、经历与整理进度。')}`],
   ]);
 }
@@ -3336,17 +3406,21 @@ function renderConfigEditors(){
   if($('#personConfigWorkspace'))configEditorMounts.push(mountConfigEditor('personConfigWorkspace',['person']));
   /* 兼容旧的访问规则深链接仍保留挂载；正式入口由用户页标题按钮打开弹窗。 */
   if($('#privateAccessWorkspace'))configEditorMounts.push(mountConfigEditor('privateAccessWorkspace',['private_access']));
-  if($('#growthConfigWorkspace'))configEditorMounts.push(mountConfigEditor('growthConfigWorkspace',['role_growth','role.growth.skills'],{
+  if($('#growthConfigWorkspace'))configEditorMounts.push(mountConfigEditor('growthConfigWorkspace',['role.growth.skills'],{
     'role.growth.skills':outputConfigView('role.growth.skills',{title:'技能与日程影响',presentation:'journal',
       labels:{enabled:'启用技能域',custom_skills:'自定义技能域',schedule_influence_strength:'日程影响强度'},
       inputs:{custom_skills:'word-list'},listFields:{custom_skills:{maxItems:8,maxLength:24}},
     }),
   }));
+  if($('#expressionLearningConfigWorkspace'))configEditorMounts.push(mountConfigEditor(
+    'expressionLearningConfigWorkspace',['expression.learning'],{
+      'expression.learning':outputConfigView('expression.learning',{presentation:'journal',navigationLimit:0}),
+    }));
   if($('#knowledgeConfigWorkspace'))configEditorMounts.push(mountConfigEditor('knowledgeConfigWorkspace',['knowledge'],{
     knowledge:{sectionIds:['import','inject'],presentation:'journal',navigationLimit:0}
   }));
   if($('#memberClueWorkspace'))configEditorMounts.push(mountConfigEditor('memberClueWorkspace',['knowledge'],{
-    knowledge:{sectionIds:['members'],title:'群聊成员线索',note:'只在群聊输入中提供已登记的成员线索。'}
+    knowledge:{sectionIds:['members'],title:'群聊成员线索',note:'按账号读取 V1 学习关系网的人物描述、相处边界与重要印象；群范围资料只用于对应群。'}
   }));
   if($('#roleProfileConfigWorkspace')){
     roleProfileConfigMount=mountConfigEditor('roleProfileConfigWorkspace',['role_profile'],{
@@ -3551,7 +3625,7 @@ function renderIdentityFeelingsPage(){
 const identitySettingsSpecs={
   person:{title:'用户默认资料',intro:'新用户会从这里继承默认资料；已经登记的用户仍以用户详情里的资料为准。',id:'identityPersonSettingsWorkspace',kinds:['person']},
   'private-access':{title:'私聊用户权限',intro:'这里只设置新私聊用户的默认准入。已有用户的单独权限仍在用户详情中调整。',id:'identityPrivateAccessSettingsWorkspace',kinds:['private_access']},
-  'group-clues':{title:'群成员线索',intro:'为群聊提供已登记成员的线索，辅助理解发言来源，不自动确认身份或授予权限。',id:'identityMemberClueSettingsWorkspace',kinds:['knowledge'],views:{knowledge:{sectionIds:['members'],title:'群聊成员线索',note:'只在群聊输入中提供已登记的成员线索。'}}},
+  'group-clues':{title:'群成员线索',intro:'为群聊提供已登记成员的线索，辅助理解发言来源，不自动确认身份或授予权限。',id:'identityMemberClueSettingsWorkspace',kinds:['knowledge'],views:{knowledge:{sectionIds:['members'],title:'群聊成员线索',note:'按账号读取 V1 学习关系网的人物描述、相处边界与重要印象；群范围资料只用于对应群。'}}},
 };
 function identitySettingsTarget(kind,field='',section=''){
   const spec=identitySettingsSpecs[kind];
@@ -3603,15 +3677,12 @@ function learningRoleApi(target,role,key){
 function roleConfigApi(role){
   const direct=role?.config_api;
   if(typeof direct==='string'&&direct.startsWith('/astrbot_plugin_private_companion_v2/'))return direct;
-  const reply=role?.reply_api;
-  return typeof reply==='string'&&reply.startsWith('/astrbot_plugin_private_companion_v2/')&&reply.endsWith('/reply')
-    ?reply.slice(0,-'/reply'.length)+'/config':'';
+  return '';
 }
 function learningChoices(key){
-  const targets=window.CompanionProduct?.targets?.()||[];
-  return targets.flatMap(target=>(target.roles||[])
+  return (window.CompanionProduct?.targets?.()||[]).flatMap(target=>(target.roles||[])
     .filter(role=>learningRoleApi(target,role,key))
-    .map(role=>({target,role})));
+    .map(role=>({target,role:{...role,bot_id:target.bot_id}})));
 }
 function learningScope(key){
   const choices=learningChoices(key);
@@ -3624,34 +3695,27 @@ function learningScope(key){
   const found=choices.find(item=>item.target.target_id===selected.target_id&&item.role.role_id===selected.role_id);
   return found?{...found,key:JSON.stringify([key,found.target.target_id,found.role.role_id])}:null;
 }
-function learningReviewSources({includeGroups=false}={}){
-  const product=window.CompanionProduct;
-  return (product?.targets?.()||[]).flatMap(target=>{
-    const group=target.scope_kind==='group';
-    if(group&&!includeGroups)return [];
-    return (target.roles||[]).filter(role=>typeof role.reply_api==='string'&&role.reply_api
-      &&(group||typeof role.growth_api==='string'&&role.growth_api))
-      .map((role,index)=>({api:role.growth_api||'',growthApi:role.growth_api||'',replyApi:role.reply_api,
-        key:JSON.stringify([target.target_id,role.role_id]),target,role,
-        label:`${product.targetLabel?.(target)||product.subjectLabel?.(target)||target.target_id} · ${product.roleLabel?.(role,index)||role.role_id}`}));
-  });
-}
 function learningScopeControls(key,label){
   const choices=learningChoices(key),selected=learningScope(key);
-  if(!choices.length)return `<div class="learning-hub-empty" role="status">暂无可读取的${label}范围。</div>`;
+  if(!choices.length)return `<div class="learning-hub-empty" role="status">暂无可读取的${escapeHTML(label)}范围。</div>`;
+  const product=window.CompanionProduct;
   const targets=[...new Map(choices.map(item=>[item.target.target_id,item.target])).values()];
-  const targetLabel=item=>window.CompanionProduct?.targetLabel?.(item)||window.CompanionProduct?.subjectLabel?.(item)||item.target_id;
-  const roleLabel=(item,index)=>window.CompanionProduct?.roleLabel?.(item,index)||item.role_id;
-  const targetField=key==='semantic'?'语义范围':key==='skills'?'角色档案':'学习范围';
-  return `<div class="learning-scope-controls" aria-label="${label}范围">
-    <label><span>${targetField}</span><select data-learning-scope-target="${key}" aria-label="${targetField}">
-      ${targets.map(item=>`<option value="${escapeHTML(item.target_id)}" ${item.target_id===selected?.target.target_id?'selected':''}>${escapeHTML(targetLabel(item))}</option>`).join('')}
+  const targetLabel=target=>product?.targetLabel?.(target)||product?.subjectLabel?.(target)||target.target_id;
+  const roleLabel=(role,index)=>product?.roleLabel?.(role,index)||role.role_name||role.role_id;
+  return `<div class="learning-scope-controls" aria-label="${escapeHTML(label)}范围">
+    <label><span>对象</span><select data-learning-scope-target="${escapeHTML(key)}" aria-label="筛选对象">
+      ${targets.map(target=>`<option value="${escapeHTML(target.target_id)}" ${target.target_id===selected?.target.target_id?'selected':''}>${escapeHTML(targetLabel(target))}</option>`).join('')}
     </select></label>
-    <label><span>角色</span><select data-learning-scope-role="${key}" aria-label="管理角色">
+    <label><span>角色</span><select data-learning-scope-role="${escapeHTML(key)}" aria-label="筛选角色">
       ${(selected?.target.roles||[]).filter(role=>learningRoleApi(selected.target,role,key))
-        .map((item,index)=>`<option value="${escapeHTML(item.role_id)}" ${item.role_id===selected?.role.role_id?'selected':''}>${escapeHTML(roleLabel(item,index))}</option>`).join('')}
+        .map((role,index)=>`<option value="${escapeHTML(role.role_id)}" ${role.role_id===selected?.role.role_id?'selected':''}>${escapeHTML(roleLabel(role,index))}</option>`).join('')}
     </select></label>
   </div>`;
+}
+function learningRoleControls(key,label,controls){
+  if(!learningScope(key))return '';
+  const content=controls||learningScopeControls(key,label);
+  return `<section class="learning-record-scope" aria-label="${escapeHTML(label)}"><h2>${escapeHTML(label)}</h2>${content}</section>`;
 }
 function changeLearningScope(key,field,value){
   const choices=learningChoices(key);
@@ -3666,47 +3730,83 @@ function changeLearningScope(key,field,value){
   learningScopes[key]={target_id:found.target.target_id,role_id:found.role.role_id};
   return true;
 }
+function learningRecordLabel(product,target,role,index){
+  const raw=product.targetLabel?.(target)||product.subjectLabel?.(target)||target.target_id;
+  const subject=String(raw).replace(/^(?:私聊|群聊)\s*/,"");
+  const owner=target.scope_kind==='group'?'群聊':'用户';
+  const roleName=product.roleLabel?.(role,index)||role.role_name||role.role_id;
+  return `${owner} · ${subject||target.target_id} · ${roleName}`;
+}
+function learningReviewSources({includeGroups=false,scopeKey=null}={}){
+  const product=window.CompanionProduct;
+  const sources=(product?.targets?.()||[]).flatMap(target=>{
+    const group=target.scope_kind==='group';
+    if(group&&!includeGroups)return [];
+    return (target.roles||[]).filter(role=>typeof role.reply_api==='string'&&role.reply_api
+      &&(group||typeof role.growth_api==='string'&&role.growth_api))
+      .map((role,index)=>({api:role.growth_api||'',growthApi:role.growth_api||'',replyApi:role.reply_api,
+        key:JSON.stringify([target.target_id,role.role_id]),target,role,
+        label:learningRecordLabel(product,target,role,index)}));
+  });
+  if(!scopeKey)return sources;
+  const selected=learningScope(scopeKey);
+  return selected?sources.filter(item=>item.target.target_id===selected.target.target_id
+    &&item.role.role_id===selected.role.role_id):[];
+}
+function learningExpressionSources(){
+  const product=window.CompanionProduct;
+  const sources=(product?.targets?.()||[]).flatMap(target=>(target.roles||[])
+    .filter(role=>typeof role.reply_api==='string'&&role.reply_api)
+    .map((role,index)=>({key:JSON.stringify([target.target_id,role.role_id]),
+      scopeKey:JSON.stringify([target.target_id,role.role_id]),replyApi:role.reply_api,target,role,
+      label:learningRecordLabel(product,target,role,index)})));
+  const selected=learningScope('expression');
+  return selected?sources.filter(item=>item.target.target_id===selected.target.target_id
+    &&item.role.role_id===selected.role.role_id):[];
+}
 window.addEventListener('companion:learning-open',event=>{
-  const selected=learningChoices('skills').find(item=>item.target.target_id===event.detail?.target_id
-    &&item.role.role_id===event.detail?.role_id);
-  if(!selected)return;
-  learningScopes.skills={target_id:selected.target.target_id,role_id:selected.role.role_id};
-  learningRecordFocus={scopeKey:learningScope('skills').key,growth_id:event.detail.growth_id};
+  learningRecordFocus={target_id:event.detail?.target_id,role_id:event.detail?.role_id,
+    growth_id:event.detail?.growth_id};
   navigate('manage','learning','chain');
 });
-/* 每个学习域独立选择管理范围；目录选择只决定管理 API，不改变小屋当前对话。 */
+/* 策略按安装全局保存；记录页按来源汇总，避免把某个私聊当作策略归属。 */
 function renderLearningPage(){
-  const sections=[['overview','总览'],['review','审阅中心'],['chain','成长链路'],['expression','表达学习'],['semantic','语义目录'],['reflection','每日复盘']];
+  const sections=[['overview','总览'],['strategy','全局策略'],['review','审阅中心'],['chain','成长链路'],['expression','表达学习'],['semantic','语义目录'],['reflection','每日复盘']];
   const titles=Object.fromEntries(sections);
   const nav=`<nav class="learning-hub-nav" aria-label="学习与反思">${sections.map(([key,label],index)=>
     `<a class="learning-hub-tab${learningTab===key?' is-active':''}" href="${navHref('manage','learning',key)}" ${learningTab===key?'aria-current="page"':''}><span>${String(index+1).padStart(2,'0')} ${label}</span></a>`).join('')}</nav>`;
   let content='';
-  const scopeKey=learningTab==='chain'?'skills':learningTab==='expression'?'expression':learningTab==='semantic'?'semantic':'';
-  const scope=scopeKey?learningScope(scopeKey):null;
-  const scopeControls=scopeKey?learningScopeControls(scopeKey,titles[learningTab]):'';
+  const scopeKey=learningTab==='chain'?'growth':learningTab==='expression'?'expression':'';
+  const scopeControls=scopeKey?learningScopeControls(scopeKey,'筛选记录'):'';
+  const recordControls=scopeKey?learningRoleControls(scopeKey,'筛选记录',scopeControls):'';
   if(learningTab==='overview'){
     content=`<section id="learningOverviewWorkspace" class="learning-overview-workspace" aria-label="学习总览">${consoleLoading('正在读取学习状态…')}</section>`;
+  }else if(learningTab==='strategy'){
+    content=`<div class="learning-policy-workspaces">
+      ${configEditors('growthConfigWorkspace',['role.growth.skills'],'成长与技能','',
+        '/astrbot_plugin_private_companion_v2/config',true)}
+      ${configEditors('expressionLearningConfigWorkspace',['expression.learning'],'表达学习策略','',
+        '/astrbot_plugin_private_companion_v2/config',true)}
+    </div>`;
   }else if(learningTab==='review'){
     content=`<section id="learningReviewWorkspace" class="learning-review-workspace" aria-label="学习审阅中心">${consoleLoading('正在汇总待审阅内容…')}</section>`;
   }else if(learningTab==='expression'){
-    content=scope?`<section id="expressionSignalsWorkspace" class="expression-signals-workspace" aria-label="表达规则库">${consoleLoading('正在读取表达规则…')}</section><section id="expressionSamplesWorkspace" class="expression-samples-workspace" aria-label="表达学习观察素材">${consoleLoading('正在读取观察素材…')}</section>${renderExpressionLearning()}`
-      :`<div class="learning-hub-empty" role="status">暂无可读取范围</div>`;
+    content=learningExpressionSources().length?`
+        ${recordControls}<section id="expressionSignalsWorkspace" class="expression-signals-workspace" aria-label="表达规则库">${consoleLoading('正在读取表达规则…')}</section>
+        <section id="expressionSamplesWorkspace" class="expression-samples-workspace" aria-label="表达学习观察素材">${consoleLoading('正在读取观察素材…')}</section>`
+      :`<div class="learning-hub-empty" role="status">暂无表达学习记录</div>`;
   }else if(learningTab==='semantic'){
-    content=scope
-      ?`<section id="semanticLearningWorkspace" class="learning-semantic-workspace" aria-label="语义目录">${consoleLoading('正在读取语义目录…')}</section>`
-      :`<div class="learning-hub-empty" role="status">暂无可读取范围</div>`;
+    content=`<section id="semanticLearningWorkspace" class="learning-semantic-workspace" aria-label="全局语义策略">${consoleLoading('正在读取全局语义设置…')}</section>`;
   }else if(learningTab==='reflection'){
     content=learningReviewSources().length
       ?`<section id="selfReviewWorkspace" class="self-review-workspace" aria-label="插件每日复盘">${consoleLoading('正在汇总每日复盘…')}</section>`
       :`<div class="learning-hub-empty" role="status">暂无可读取复盘的角色。</div>`;
   }else{
-    const configApi=roleConfigApi(scope?.role);
-    content=scope
-      ?`<section class="learning-chain-top" aria-label="成长记录工作台"><section id="learningWorkspace" class="learning-workspace" aria-label="成长记录与进展"></section></section>
-        <section class="learning-config-workspace" aria-label="技能与日程影响">${configEditors('growthConfigWorkspace',['role.growth.skills'],'技能与日程影响',undefined,configApi,true)}</section>`:'';
-    if(!scope)content=`<div class="learning-hub-empty" role="status">暂无可读取范围</div>`;
+    content=learningReviewSources({scopeKey:'growth'}).length
+      ?`${recordControls}<section class="learning-chain-top" aria-label="成长记录工作台"><section id="learningWorkspace" class="learning-workspace" aria-label="成长记录与进展"></section></section>`
+      :`<div class="learning-hub-empty" role="status">暂无成长记录</div>`;
   }
-  return `<div class="learning-hub">${nav}<header class="learning-hub-head"><h1>学习与反思 <span>· ${escapeHTML(titles[learningTab]||'总览')}</span></h1>${scopeControls}</header><section class="learning-hub-panel" aria-label="${escapeHTML(titles[learningTab]||'总览')}">${content}</section></div>`;
+  return `<div class="learning-hub">${nav}<header class="learning-hub-head"><h1>学习与成长 <span>· ${escapeHTML(titles[learningTab]||'总览')}</span></h1></header><section class="learning-hub-panel" aria-label="${escapeHTML(titles[learningTab]||'总览')}">${content}</section></div>`;
 }
 /* 2026-09-30 接回：内容清空期间这一页只渲染一句占位，实现整体保留在 renderMaintenancePageOriginal。挂载点与挂载链从未动过，所以换回名字即可恢复。 */
 function renderMaintenancePage(){return renderMaintenancePageOriginal();}
@@ -3776,7 +3876,7 @@ function renderHostPageOriginal(){
      账号、人格与窗口统一由共享宿主管理。 */
   return renderHostWorkspace();
 }
-/* 资料与维护 = 三件事：各处记录的去向（入口汇集）、账号与会话运行状态、备份与还原。
+/* 资料与维护保留存储、备份和 V1 迁移三项工作区。
  *
  * 备份那一块曾经只是一张 boundaryCard 解释「为什么没有入口」——但后端
  * backup_api.py 有六条真实路由和一台两阶段状态机，从来没被任何页面调过。
@@ -3789,8 +3889,7 @@ function renderDataOriginal(){
   const pages=[
     ['storage','01','database','存储位置与清理策略'],
     ['backup','02','archive','备份与还原'],
-    ['records','03','files','各处记录的入口'],
-    ['migration','04','arrow-right-left','V1 数据迁移'],
+    ['migration','03','arrow-right-left','V1 数据迁移'],
   ];
   const navigation=`<nav class="data-page-nav" aria-label="资料与维护子页面">${pages.map(([id,index,icon,label])=>
     `<a href="#manage/data/${id}"${dataPane===id?' aria-current="page"':''}><span class="data-page-nav-index">${index}</span>${I(icon)}<span class="data-page-nav-label">${label}</span></a>`).join('')}</nav>`;
@@ -3798,15 +3897,7 @@ function renderDataOriginal(){
   if(dataPane==='backup'){
     content=`<section class="data-page-view" aria-labelledby="data-page-title"><header class="data-page-view-head"><span>02</span><h3 id="data-page-title">备份与还原</h3></header><div id="backupWorkspace">${consoleLoading('正在读取快照列表…')}</div></section>`;
   }else if(dataPane==='migration'){
-    content=`<section class="data-page-view" aria-labelledby="data-page-title"><header class="data-page-view-head"><span>04</span><h3 id="data-page-title">V1 数据迁移</h3></header><div id="legacyMigrationWorkspace"></div></section>`;
-  }else if(dataPane==='records'){
-    const entries=[
-      ['orbit','事实整理与追踪','事实修订与来源','data-go="memories"'],
-      ['notebook-pen','日记与生活','日记、作息与执行','data-life="diary"'],
-      ['sparkles','学习与反思','成长记录与每日复盘','data-manage-jump="learning"'],
-    ];
-    content=`<section class="data-page-view" aria-labelledby="data-page-title"><header class="data-page-view-head"><span>03</span><h3 id="data-page-title">各处记录的入口</h3></header><div class="data-record-grid">${entries.map(([icon,title,summary,action])=>
-      `<article class="data-record-card">${I(icon)}<h4>${title}</h4><p>${summary}</p>${button('打开',action,'small')}</article>`).join('')}</div></section>`;
+    content=`<section class="data-page-view" aria-labelledby="data-page-title"><header class="data-page-view-head"><span>03</span><h3 id="data-page-title">V1 数据迁移</h3></header><div id="legacyMigrationWorkspace"></div></section>`;
   }else{
     content=`<section class="data-page-view" aria-labelledby="data-page-title"><header class="data-page-view-head"><span>01</span><h3 id="data-page-title">存储位置与清理策略</h3></header><div id="storageWorkspace">${consoleLoading('正在读取插件存储…')}</div></section>`;
   }
@@ -3822,33 +3913,7 @@ function renderIdentity(){
    同名顶层函数声明不报错，后声明的静默覆盖先声明的——两份都在时上面那份
    是死代码，页面实际渲染的是旧风格。已删除，只保留上面 consoleSections 那一份。 */
 
-/* 设备目录、房间与动作记录由扩展页面读取；V2 手机摘要的会话授权在本页管理。 */
-const providerEntries={
-  reality:{name:'现实触及',plugin:'astrbot_plugin_reality_companion',page:'reality-companion',note:'设备、场所、镜头与声音的授权和动作记录都在现实触及页面。'},
-  together:{name:'一起房间',plugin:'astrbot_plugin_together_companion',page:'一起房间',note:'房间正本由 Together 管理；V2 负责身份授权与邀请编排。'},
-};
-function providerEntryAddress(id){
-  const spec=providerEntries[id];
-  return spec?product.providerAddress(id,spec.page):'';
-}
-function providerEntryMarkup(id,entries,closing){
-  const spec=providerEntries[id];if(!spec)return '';
-  const address=providerEntryAddress(id);
-  /* 拿不到地址时不放 disabled 按钮——那会变成一排永远点不动的控件，
-     用户看不出是「还没读到」还是「不能用」。改成一句说明。 */
-  if(!address)return `<p>未读取到页面入口。</p><div class="dialog-actions"><button class="button small" type="button" data-workspace-retry>重新读取</button>${button('能力目录','data-home-section="furniture"','small')}</div>`;
-  const field=`<div class="perception-address" style="margin:12px 0 0"><label for="provider-url-${id}">${spec.name}页面地址</label><div><input id="provider-url-${id}" readonly value="${escapeHTML(address)}" aria-label="${spec.name}页面地址"><button class="button small" data-copy-address="provider-url-${id}" title="复制${spec.name}页面地址">${I('copy')}<span>复制地址</span></button></div></div>`;
-  const scopeNote=id==='reality'?'本页的手机摘要读取授权作用于所选 V2 私聊窗口；设备动作与采集设置在现实触及页面管理。':'本页提供房间入口，通话与房间授权在一起房间页面管理。';
-  return field;
-}
-/* Reality / Together 的能力面。
- *
- * 这两个扩展的真实清单（设备、场所、镜头与声音覆盖、最近动作、房间、
- * 成员、素材、进度）都在各自的插件页面里，本页拿不到。原先的写法是给
- * 每一项配一个「示例 · 客厅主灯」这样的假值，宿主在读时也照显示——于是
- * 用户在自己家里看到的是别人家的客厅。现在只写**口径**（一件事怎么算数、
- * 什么情况下不会被自动重发），具体值一律指向扩展页面。
- */
+/* Capability settings and lifecycle are managed in the cottage. */
 const bundledExtensionBusy=new Set();
 const pendingExtensionOperations=new Map();
 function newExtensionOperationKey(){
@@ -3856,8 +3921,8 @@ function newExtensionOperationKey(){
   return `furniture-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 async function runBundledExtensionAction(capabilityId,action){
-  const item=product.provider(capabilityId);
-  if(item?.owner!=='companion_v2'||!['image','screen'].includes(capabilityId))return;
+  const item=product.extension(capabilityId);
+  if(!item||!['content','image','screen'].includes(capabilityId))return;
   const revision=Number.isInteger(item.installed_revision)?item.installed_revision:0;
   const signature=`${capabilityId}:${action}:${revision}`;
   if(bundledExtensionBusy.has(capabilityId))return;
@@ -3880,9 +3945,9 @@ async function runBundledExtensionAction(capabilityId,action){
   }
 }
 function bundledCapabilitySurface(key){
-  const item=product.provider(key);
-  if(item?.owner!=='companion_v2')return '';
-  const assembled=item.installed===true&&item.desired_state!=='discarded';
+  const item=product.extension(key);
+  if(!item)return '';
+  const assembled=item.assembled===true&&item.desired_state!=='discarded';
   const paused=item.desired_state==='paused';
   const busy=bundledExtensionBusy.has(key);
   const command=(action,label,kind='small')=>button(label,`data-builtin-extension="${key}" data-builtin-extension-action="${action}" ${busy?'disabled':''}`,kind);
@@ -3894,61 +3959,23 @@ function bundledCapabilitySurface(key){
     :paused
       ?command('resume','恢复使用')+command('uninstall','卸载')
       :command('pause','暂停')+command('uninstall','卸载');
-  const destinations=key==='image'
+  const destinations=key==='content'?'' :key==='image'
     ?button('生成与审核设置','data-go="manage" data-manage="output" data-output-target="visual"','small')
       +button('参考素材与相册','data-go="manage" data-manage="output" data-output-target="materials"','small')
     :button('屏幕采集与会话授权','data-go="manage" data-manage="perception" data-perception-tab-target="config-screen"','small');
-  return `<section class="extension-live-panel"><h3>V2 内置拓展</h3><p>${escapeHTML(item.reason||'由陪伴插件 V2 本体提供，可单独装配。是否可调用仍取决于角色启用和会话授权。')}</p><div class="dialog-actions">${lifecycle}</div><p class="product-muted">卸载会解除装配并保留 V2 中的拓展数据；重新装配后可继续使用。</p></section><section class="extension-live-panel"><h3>${key==='image'?'拓展设置':'设备与授权'}</h3><div class="dialog-actions">${destinations}</div></section>`;
+  return `<section class="extension-live-panel"><h3>V2 内置能力</h3><p>${escapeHTML(item.reason||'由陪伴插件 V2 本体提供；调用时使用当前角色和会话授权。')}</p><div class="dialog-actions">${lifecycle}</div><p class="product-muted">卸载会解除装配并保留 V2 中的数据；重新装配后可继续使用。</p></section>${destinations?`<section class="extension-live-panel"><h3>${key==='image'?'图像设置':'设备与授权'}</h3><div class="dialog-actions">${destinations}</div></section>`:''}`;
 }
 function capabilitySurface(key){
-  if(['image','screen'].includes(key))return bundledCapabilitySurface(key);
-  if(!['reality','together'].includes(key))return '';
-  const address=providerEntryAddress(key);
-  const goto=label=>address?button(I('copy')+' 复制地址',`data-copy-address="provider-url-${key}" title="${escapeHTML(label)}页面地址"`,'small'):button('重新读取','data-workspace-retry');
-  const provider=product.provider(key)||{};
-  const stateLabel=product.statusLabel(provider.integration_state||'unknown');
-  const statusClass=provider.integration_state==='connected'?'ready':provider.integration_state==='degraded'?'warn':'idle';
-  const hero=`<section class="extension-status-hero ${statusClass}"><div class="extension-status-icon">${I(key==='reality'?'radio':'heart-handshake')}</div><div class="extension-status-copy"><span class="section-kicker">EXTENSION STATUS</span><h3>${escapeHTML(provider.label||provider.title||key)}</h3><p>${escapeHTML(provider.reason||'状态来自扩展公开目录。')}</p></div><span class="extension-status-chip">${escapeHTML(stateLabel)}</span></section>`;
-  const steps=[['01','扩展','已发现'],['02','页面','真实入口'],['03','会话','按目标授权']];
-  const flow=`<div class="extension-flow" aria-label="拓展连接阶段">${steps.map((step,index)=>`<div class="extension-flow-step ${index<2?'done':''}"><b>${step[0]}</b><span>${step[1]}</span><small>${step[2]}</small></div>${index<steps.length-1?'<i class="extension-flow-line"></i>':''}`).join('')}</div>`;
-  const actions=`<div class="extension-actions"><div><strong>拓展页面</strong><p>${address?escapeHTML(providerEntries[key].name):'等待拓展页面加载。'}</p></div><div class="dialog-actions">${goto(address?'拓展':'重新读取')}${button('回到能力目录','data-home-section="furniture"','small')}</div></div>`;
-  if(key==='reality')return hero+flow+`<section class="extension-live-panel"><h3>当前会话能力授权</h3><p>八项手机、摄像头、设备读取与动作回执能力按项授权。</p>${button('管理会话授权','data-perception-config="screen"','small')}</section><h3>原生能力</h3>`
-    +definitions([
-      ['手机摘要','读取已配对手机的位置、终端状态、活动与健康摘要。'],
-      ['摄像头单帧','仅按本轮明确请求读取一帧并返回识别摘要。'],
-      ['设备读取','分开开放设备目录与单设备状态查询，仅返回设备档案允许公开的字段。'],
-      ['设备动作','电源控制和可写属性动作分开授权，并继续遵守 Reality 的设备白名单与管理设置。'],
-      ['操作回执','查询原操作或取消尚未派发的操作；不会重放已派发或结果未知的动作。'],
-    ])
-    +`<h3>授权范围</h3>`
-    +definitions([
-      ['当前对象','每项授权只作用于已选择的 Bot、角色和绑定私聊窗口。'],
-      ['提供方设置','V2 会话授权不会替代 Reality 自身的启用状态、设备映射、白名单或用户确认。'],
-      ['动作结果','只有提供方返回确认才显示成功；结果未知时保留原操作并查询，不自动重发。'],
-    ])
-    +providerEntryMarkup('reality',['查看设置','查看操作记录','管理设备映射'],'提供方设置与设备映射在现实触及页面管理');
-  return hero+flow+`<h3>当前房间与模式</h3>`
-    +definitions([
-      ['当前房间',`当前房间在一起房间页面查看 ${goto('打开一起房间')}`],
-      ['可用模式','通话 / 一起看 / 工作协同 / 一起读小说'],
-      ['正在使用',`以房间实际使用的模式为准 ${goto('查看房间模式')}`],
-      ['参与者',`房间成员与各自身份在一起房间页面查看 ${goto('查看成员')}`],
-    ])
-    +`<h3>素材与进度</h3>`
-    +definitions([
-      ['素材',`当前素材与来源在一起房间页面查看 ${goto('查看素材')}`],
-      ['进度',`以房间实际显示的进度为准 ${goto('查看进度')}`],
-      ['进度口径','进度由房间自己记录；本页不推算，也不用一个数字代表文字与语音都已完整送达'],
-    ])
-    +`<h3>邀请与加入</h3><p>在 V2 陪伴对话中创建或接受邀请码。受邀成员进入同一实时房间；各自身份与摄像头输入分开，私人聊天和历史不会随房间共享。</p>`
-    +providerEntryMarkup('together',['查看房间成员'],'成员、模式和房间素材由一起房间管理')+actions;
+  if(['content','image','screen'].includes(key))return bundledCapabilitySurface(key);
+  if(['reality','together','game','live'].includes(key))return `<div data-native-extension-host="${key}">${consoleLoading('正在读取内置能力设置…')}</div>`;
+  return '';
 }
 function definitions(rows){return `<dl class="definition-list">${rows.map(([label,value])=>`<div class="definition-row"><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl>`;}
 function closeDetail(){const d=$('#detailDialog');if(d.open)d.close();}
 function showDetail(id){
   if(id==='arrange'){openRoomEditor();return;}
   /* 详情弹窗的**两种去向**，没有第三种：
-       1. 这件事有真实工作区（life / identity / memory / 各扩展页面）
+       1. 这件事有真实工作区（life / identity / memory / 内置能力设置）
           → 关掉弹窗、跳到那一页，把标签也带上。
        2. 本页只有一个入口（「去哪儿做这件事」）
           → 说清去哪儿，链接就是那个入口。
@@ -3969,13 +3996,18 @@ function showDetail(id){
     const detail=waiting(({desk:'日记与便签',diary:'日记与生活','diary-edit':'日记与生活',sleep:'睡眠与梦境',bed:'睡眠与梦境',reading:'阅读记录',lounge:'阅读记录'})[id],lifeEntries[id]);
     openDetailDialog(detail.title,detail.body);return;
   }
-  if(id==='growth'){navigate('manage','learning','skills');return;}
+  if(id==='growth'){navigate('manage','learning','chain');return;}
   if(id==='profile'||id==='person-self'){navigate('manage','governance','profile');return;}
   if(id==='world'){navigate('manage','governance','knowledge');return;}
   if(id==='roles'||id==='permissions'||id.startsWith('person-')){navigate('manage','identity');return;}
   if(id==='discoveries'){navigate('manage','perception');activatePerceptionTab('config-news',{scroll:true});return;}
   if(id==='album'){navigate('manage','output');activateOutputTab('materials',{focus:true,scroll:true});return;}
+  if(id==='books'){navigate('manage','output');activateOutputTab('creation',{focus:true,scroll:true});return;}
   const cap=id==='books'?'content':id==='album'?'image':id==='discoveries'?'news':id.startsWith('cap-')?id.slice(4):null;
+  if(['reality','together','game','live'].includes(cap)){
+    const label=product.capability(cap)?.label||({reality:'现实触及',together:'一起房间',game:'游戏棋桌',live:'直播与表演'})[cap];
+    openDetailDialog(label,capabilitySurface(cap));return;
+  }
   if(cap&&![].includes(cap)){
     const provider=product.providerDetail(cap);
     if(provider){openDetailDialog(provider.title,provider.body+capabilitySurface(cap));return;}
@@ -3989,10 +4021,17 @@ function openDetailDialog(title,body){
   if(!dialog||!dialog.classList||!$('#dialogContent'))return false;
   identityDialogMount?.stop?.();
   identityDialogMount=null;
-  dialog.classList.remove('detail-dialog-settings');
+  const previousNativeHost=$('#dialogContent').querySelector('[data-native-extension-host]');
+  if(previousNativeHost)window.CompanionNativeExtensionPanel?.unmount(previousNativeHost);
+  dialog.classList.remove('detail-dialog-settings','detail-dialog-native-extension');
   if(!dialog.open){dialogReturnFocus=document.activeElement;dialogReturnFurniture=dialogReturnFocus?.dataset?.furniture||'';}
   lastDetail=title;
   $('#dialogContent').innerHTML=`<header class="dialog-head"><h2 id="dialogTitle">${escapeHTML(title)}</h2><button class="icon-button" data-close-detail aria-label="关闭详情">${I('x')}</button></header><div class="dialog-body">${body}</div>`;
+  const nativeHost=$('#dialogContent').querySelector('[data-native-extension-host]');
+  if(nativeHost){
+    dialog.classList.add('detail-dialog-native-extension');
+    window.CompanionNativeExtensionPanel?.mount(nativeHost,{extensionId:nativeHost.dataset.nativeExtensionHost});
+  }
   icons();if(!dialog.open)dialog.showModal();dialog.scrollTop=0;
   return true;
 }
@@ -4009,8 +4048,8 @@ const configSearchLocations={
   busy_gate:{next:'manage',tab:'contact',contactView:'gates',root:'#replyGateConfigWorkspace'},budget:{next:'manage',tab:'models',root:'#budgetConfigWorkspace'},
   recall:{next:'manage',tab:'perception',root:'#recallConfigWorkspace'},screen:{next:'manage',tab:'perception',root:'#screenConfigWorkspace'},
   person:{next:'manage',tab:'identity-people',identitySettings:'person',root:'#personConfigWorkspace'},private_access:{next:'manage',tab:'identity-people',identitySettings:'private-access',root:'#privateAccessWorkspace'},
-  role_growth:{next:'manage',tab:'learning',subtab:'skills',root:'#growthConfigWorkspace'},
-  'role.growth.skills':{next:'manage',tab:'learning',subtab:'skills',root:'#growthConfigWorkspace'},
+  role_growth:{next:'manage',tab:'identity-people',identitySettings:'person'},
+  'role.growth.skills':{next:'manage',tab:'learning',subtab:'strategy',root:'#growthConfigWorkspace'},
   role_profile:{next:'manage',tab:'governance',root:'#roleProfileConfigWorkspace'},
   relationship_profile:{next:'manage',tab:'governance',subtab:'relationship',root:'#relationshipProfileConfigWorkspace'},
   library:{next:'life',tab:'diary',subtab:'archive',root:'#libraryConfigWorkspace'},
@@ -4103,7 +4142,7 @@ const tokenTaskSettings={
   'role.journal.dream':{next:'life',tab:'diary',subtab:'sleep',workbench:{root:'#lifeConfigWorkspace',section:'sleep',field:'sleep_enabled'}},
   'role.journal.derive':{next:'life',tab:'diary',subtab:'archive',workbench:{root:'#lifeConfigWorkspace',section:'routine',field:'derive_enabled'}},
   'role.journal.select':{next:'life',tab:'diary',subtab:'archive',workbench:{root:'#lifeConfigWorkspace',section:'routine',field:'diary_enabled'}},
-  'role.growth.progress':{next:'manage',tab:'learning',subtab:'skills',workbench:{root:'#growthConfigWorkspace',field:'proposals_enabled'}},
+  'role.growth.progress':{next:'manage',tab:'learning',subtab:'chain'},
   'role.self_review':{next:'manage',tab:'learning',subtab:'reflection'},
   'role.expression.learn':{next:'manage',tab:'learning',subtab:'expression'},
   'role.expression.review':{next:'manage',tab:'learning',subtab:'expression'},
@@ -4442,7 +4481,7 @@ document.addEventListener('submit',event=>{
      弹窗里现在不会有 data-form 表单，保留这条兜底防止未捕获的提交刷新页面。 */
   const form=event.target;if(!form.dataset.form)return;event.preventDefault();
 });
-$('#detailDialog').addEventListener('close',()=>{identityDialogMount?.stop?.();identityDialogMount=null;$('#detailDialog').classList.remove('detail-dialog-settings');if(dialogReturnFocus?.isConnected)dialogReturnFocus.focus({preventScroll:true});else if(dialogReturnFurniture)document.querySelector('[data-furniture="'+dialogReturnFurniture+'"]')?.focus({preventScroll:true});else document.querySelector('[data-detail="'+lastDetail+'"]')?.focus({preventScroll:true});});
+$('#detailDialog').addEventListener('close',()=>{identityDialogMount?.stop?.();identityDialogMount=null;const nativeHost=$('#dialogContent').querySelector('[data-native-extension-host]');if(nativeHost)window.CompanionNativeExtensionPanel?.unmount(nativeHost);$('#detailDialog').classList.remove('detail-dialog-settings','detail-dialog-native-extension');if(dialogReturnFocus?.isConnected)dialogReturnFocus.focus({preventScroll:true});else if(dialogReturnFurniture)document.querySelector('[data-furniture="'+dialogReturnFurniture+'"]')?.focus({preventScroll:true});else document.querySelector('[data-detail="'+lastDetail+'"]')?.focus({preventScroll:true});});
 $('#detailDialog').addEventListener('click',event=>{if(event.target!==event.currentTarget)return;const r=event.currentTarget.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)closeDetail();});
 $('#searchDialog').addEventListener('click',event=>{if(event.target===event.currentTarget){const r=event.currentTarget.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)event.currentTarget.close();}});
 $('#searchButton').addEventListener('click',openSearch);

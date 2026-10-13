@@ -43,7 +43,8 @@ class FakeClient:
 class FakeProvider:
     def __init__(self):
         self.client = FakeClient()
-        self.provider_config = {"id": "native-model", "model": "fixture", "custom_extra_body": {"temperature": 0.7}}
+        self.provider_config = {"id": "native-model", "type": "openai_chat_completion",
+                                "model": "fixture", "custom_extra_body": {"temperature": 0.7}}
         self.default_params = {"model", "messages", "tools", "tool_choice", "max_tokens", "max_completion_tokens"}
         self.model_name = "fixture"
 
@@ -107,7 +108,8 @@ class FakeHostContext:
         self.selected = "original"
         self.role_lookups = 0
         self.before_resolve = None
-        self.persona_manager = NS(resolve_selected_persona=self.resolve)
+        self.persona_manager = NS(resolve_selected_persona=self.resolve, personas_v3=[self.persona],
+                                  get_persona_v3_by_id=self.persona_by_id)
         self.conversation_manager = NS(get_curr_conversation_id=self.current, get_conversation=self.conversation)
 
     def get_platform_inst(self, platform_id):
@@ -116,6 +118,10 @@ class FakeHostContext:
     def get_provider_by_id(self, provider_id): return self.provider if provider_id == "native-model" else None
     def get_config(self, *, umo): return {"provider_settings": {"default_personality": "original"}}
     async def current(self, umo): return self.cid
+
+    def persona_by_id(self, persona_id):
+        return next((persona for persona in self.persona_manager.personas_v3
+                     if persona.get("name") == persona_id), None)
 
     async def conversation(self, umo, cid, *, create_if_not_exists):
         assert not create_if_not_exists
@@ -139,6 +145,23 @@ class FakeEvent:
         self.session = NS(message_type=kind, platform_name=self.platform_meta.id, platform_id=self.platform_meta.id, session_id=sender)
         self.unified_msg_origin = f"{self.platform_meta.id}:FriendMessage:{sender}"
         self.created_at = NOW.timestamp()
+        self._extra = {}
+        self._has_send_oper = False
+        self.sent = []
+
+    def get_extra(self, key, default=None):
+        return self._extra.get(key, default)
+
+    def set_extra(self, key, value):
+        self._extra[key] = value
+
+    async def send(self, message):
+        self.sent.append(message)
+        self._has_send_oper = True
+
+    async def send_streaming(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+        self._has_send_oper = True
 
 
 class NativeFixture(HostFixture):
@@ -162,6 +185,19 @@ class NativeFixture(HostFixture):
         return NativePrivateBridge(self.native, version="4.27.2", event_type=FakeEvent, installation_id=INSTALLATION,
             host_id="host", identities=self.identity, accounts=accounts or (HostAccount("qq-main", "100", "bot-a"),),
             personas=personas or (HostPersona("bot-a", "original", ROLE, digest(persona_instruction(self.native.persona))),))
+
+    def map_second_native_persona(self, persona_id="second"):
+        persona = {"name": persona_id, "prompt": "第二个人格提示词。"}
+        self.native.persona_manager.personas_v3.append(persona)
+        self.bridge.personas[("bot-a", persona_id)] = HostPersona(
+            "bot-a", persona_id, ROLE, digest(persona_instruction(persona)))
+        self.select_window_persona("original")
+
+    def select_window_persona(self, persona_id):
+        async def lookup(_umo):
+            return persona_id
+
+        self.bridge.session_persona_override_lookup = lookup
 
     def make_model(self, **changes):
         return AstrBotTextProvider(self.native, bridge=self.bridge, binding=self.providers[0].binding,

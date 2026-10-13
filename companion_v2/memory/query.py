@@ -164,8 +164,21 @@ class MemoryQuery:
                             "observed_at": stamp(ref.issued_at),
                             "message_time": stamp(ref.issued_at),
                         }
+            from companion_v2.conversation.native_observations import rows_for_context
+            for row in rows_for_context(self.runtime, context):
+                producer = "native_human" if row["kind"] == "input" else "native_reply"
+                try:
+                    captured = self.objects.source(context, producer, row["observation_id"], authoritative=True)
+                    if captured is None:
+                        continue
+                    for start in range(0, len(captured[1]), 1900):
+                        document, metadata, value = self.objects.span(captured, start, row["observation_id"])
+                        documents.append(document)
+                        values[document["id"]] = {**value, **metadata, "delivery_state": row["delivery_state"]}
+                except TaskError:
+                    unavailable = True
         if kind in ("experiences", "all"):
-            for row in self.runtime.read_all("SELECT view_id FROM memory_views WHERE owner_key = ? AND state = 'active' ORDER BY view_id", (owner_key(context),)):
+            for row in self.runtime.read_all("SELECT view_id FROM memory_views WHERE owner_key = ? AND kind = 'experience' AND state = 'active' ORDER BY view_id", (owner_key(context),)):
                 result = self.experiences.read(context, row["view_id"])
                 if not result.is_success:
                     unavailable = True

@@ -73,7 +73,10 @@ test('尺度审计通过：已迁移页面零写死、令牌单源、档位间�
 test('所有已迁移页面都在判定名单内且零写死', () => {
   const {out} = run();
   for (const name of ['memory-page.css', 'learning-page.css', 'contact-page.css',
-                      'models-page.css', 'entrance.css']) {
+                      'models-page.css', 'entrance.css', 'host-options.css',
+                      'learning-hub.css', 'perception-subpages.css', 'state-config.css',
+                      'storage-page.css', 'understanding-page.css', 'weather-source.css',
+                      'native-extension-panel.css']) {
     assert.ok(out.includes(name), name + ' 未出现在审计输出里');
     const line = out.split('\n').find(l => l.includes(name) && /^\s+[✓✗?]/.test(l)) || '';
     assert.match(line, /^  ✓/, name + ' 未通过：' + line.trim());

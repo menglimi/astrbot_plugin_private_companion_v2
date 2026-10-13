@@ -11,6 +11,7 @@ from time import monotonic
 from uuid import uuid4
 
 from astrbot.api.web import request
+from companion_v2.configuration.models import ConfigLayer
 from companion_v2.conversation.reply_management import ReplyManagement
 from companion_v2.decision import LayaDecisionService, LayaSettingsStore
 from companion_v2.decision.client import LayaClientError
@@ -20,7 +21,9 @@ from companion_v2.foundation.outcome import Outcome
 from companion_v2.model_gateway.management import ModelManagement
 
 from .management_identity import dashboard_operator
+from .core_reply_configuration import CORE_MANAGED_FIELDS, project_core_reply_configuration
 from .memory_diagnostics import process_memory_snapshot
+from .memory_linkage import read_external_memory_summary
 from .native_extensions.image_settings import read_image_settings, write_image_settings
 from .settings import HostControlError
 from .native_extensions.images import IMAGE_ACTIONS
@@ -303,6 +306,7 @@ class ModelWebAPI:
             (PREFIX + "/test", self.test, ["POST"], "Probe one registered text provider"),
             (PREFIX + "/laya", self.laya_status, ["GET"], "Read optional Laya decision model configuration"),
             (PREFIX + "/laya/save", self.laya_save, ["POST"], "Save optional Laya decision model configuration"),
+            (PREFIX + "/laya/logs", self.laya_logs, ["GET"], "Read recent Laya decision events"),
             (PREFIX + "/laya/test", self.laya_test, ["POST"], "Test the Laya decision model connection"),
             (PREFIX + "/laya/decide", self.laya_decide, ["POST"], "Call Laya for one semantic decision"),
             (PREFIX + "/voice", self.voice, ["GET"], "Read live TTS bindings"),
@@ -360,12 +364,14 @@ class ModelWebAPI:
         except Exception:
             return outcome_response(Outcome.failed("model_catalog_unavailable", "AstrBot provider list is unavailable"))
 
-    def _authorized(self):
+    def _authorized(self, *, layer="role"):
         controller = self.controller
         username = request.username
         if type(username) is not str or not username.strip() or username.startswith("api_key:"):
             raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
-        if request.query:
+        if layer not in ("role", "window"):
+            raise TaskError("model_request_invalid", "select role defaults or this private window")
+        if request.query and (set(request.query) != {"layer"} or request.query.get("layer") != layer):
             raise TaskError("model_request_invalid", "model routes do not accept target overrides")
         if controller._terminated:
             raise TaskError("staging_host_terminated", "plugin is stopped")
@@ -374,7 +380,7 @@ class ModelWebAPI:
             raise TaskError("staging_not_initialized", "load the V2 profile first")
         operator = dashboard_operator(controller.runtime, username, at=controller.now())
         manager = ModelManagement(session.application, session.profile.target)
-        status = require(manager.status(operator))
+        status = require(manager.status(operator, layer=layer))
         return session, operator, manager, status
 
     @staticmethod
@@ -387,14 +393,27 @@ class ModelWebAPI:
             data = None
             if action == "configure":
                 data = _document_optional(await request.body(),
-                    {"kind", "operation_key", "edit_token", "changes", "reset"}, optional=("section",))
+                    {"kind", "operation_key", "edit_token", "changes", "reset"},
+                    optional=("section", "layer"))
+                if (data.get("kind") == "conversation.reply" and not data.get("section")
+                        and ((set(data.get("changes") or {}) | set(data.get("reset") or []))
+                             & set(CORE_MANAGED_FIELDS))):
+                    raise TaskError("model_configuration_host_managed",
+                                    "普通回复模型由 AstrBot 当前会话管理；此处只保存对话附加提示。")
+            layer = data.get("layer", "role") if data is not None else request.query.get("layer", "role")
             async with self.controller._control_lock:
-                _session, operator, manager, status = self._authorized()
+                _session, operator, manager, status = self._authorized(layer=layer)
                 result = (Outcome.success(status) if action == "status" else manager.maintenance(operator)
-                          if action == "maintenance" else manager.configure(operator, data))
+                          if action == "maintenance" else manager.configure(operator, {**data, "layer": layer}))
+            if action in {"status", "configure"} and result.is_success:
+                result = Outcome.success(project_core_reply_configuration(result.unwrap()))
             if action == "maintenance" and result.is_success:
                 payload = dict(result.unwrap())
-                payload["external_token_sources"] = read_token_sources()
+                payload["external_token_sources"] = read_token_sources(self.controller)
+                memory_source = payload["external_token_sources"].get("memory")
+                if isinstance(memory_source, dict):
+                    memory_source["linkage"] = await read_external_memory_summary(
+                        self.controller, _session.profile.target)
                 result = Outcome.success(payload)
             return self._response(result)
         except TaskError as error:
@@ -512,29 +531,16 @@ class ModelWebAPI:
             return self._response(Outcome.failed("model_request_invalid", "invalid probe request"))
 
     def _laya_service(self):
-        """Resolve a role-scoped store without placing model files in the package."""
+        """Use the same global configuration as every live conversation."""
+        from .laya_client import LayaDecisionClient
         root = Path(getattr(self.controller, "data_root", Path.cwd())).resolve()
-        target_id = getattr(self.controller, "target_id", None)
-        role_id = getattr(self.controller, "role_id", None)
-        # Multi-target routes expose the selected target and role through
-        # TargetControllerView.  Single-target routes use the pinned profile
-        # identity instead; falling back to installation/default here would
-        # make the page save a different file than the live conversation reads.
-        if not target_id or not role_id:
-            settings = None
-            resolver = getattr(self.controller, "resolved_settings", None)
-            if callable(resolver):
-                try:
-                    settings = resolver()
-                except (HostControlError, ValueError, TypeError):
-                    settings = None
-            if settings is None:
-                settings = getattr(self.controller, "settings", None)
-            target_id = target_id or getattr(settings, "profile_id", None)
-            role_id = role_id or getattr(settings, "role_id", None)
-        target_id = target_id or "installation"
-        role_id = role_id or "default"
-        return LayaDecisionService(LayaSettingsStore(root, target_id, role_id))
+        session = getattr(self.controller, "session", None) or getattr(self.controller, "last_session", None)
+        application = getattr(session, "application", None)
+        target = getattr(getattr(session, "profile", None), "target", None)
+        runtime = getattr(application, "runtime", None) or getattr(self.controller, "runtime", None)
+        origin_key = getattr(target, "key", None)
+        return LayaDecisionService(LayaSettingsStore(root),
+                                   runtime=runtime, origin_key=origin_key, client_factory=LayaDecisionClient)
 
     @staticmethod
     def _laya_error(error):
@@ -558,12 +564,26 @@ class ModelWebAPI:
                 raise ValueError("invalid Laya changes")
             async with self.controller._control_lock:
                 self._authorized()
-                result = self._laya_service().save(data["revision"], data["changes"])
-                return self._response(Outcome.success(result))
+                service = self._laya_service()
+                service.save(data["revision"], data["changes"])
+                from .laya_client import start_laya_warmup
+                start_laya_warmup(service.store)
+                return self._response(Outcome.success(service.status()))
         except TaskError as error:
             return self._response(Outcome.failed(error.code, str(error)))
         except (LayaSettingsError, ValueError, TypeError, KeyError, UnicodeError,
                 RecursionError, OverflowError) as error:
+            code, reason = self._laya_error(error)
+            return self._response(Outcome.failed(code, reason))
+
+    async def laya_logs(self):
+        try:
+            async with self.controller._control_lock:
+                self._authorized()
+                return self._response(Outcome.success(self._laya_service().recent()))
+        except TaskError as error:
+            return self._response(Outcome.failed(error.code, str(error)))
+        except (LayaSettingsError, OSError, ValueError) as error:
             code, reason = self._laya_error(error)
             return self._response(Outcome.failed(code, reason))
 
@@ -573,6 +593,7 @@ class ModelWebAPI:
             async with self.controller._control_lock:
                 self._authorized()
                 service = self._laya_service()
+                service.set_trace(source="probe")
             async with self._laya_lock:
                 result = await service.test()
             return self._response(Outcome.success(result))
@@ -591,6 +612,7 @@ class ModelWebAPI:
             async with self.controller._control_lock:
                 self._authorized()
                 service = self._laya_service()
+                service.set_trace(source="dashboard_preview")
             async with self._laya_lock:
                 result = await service.decide(data["facts"])
             return self._response(Outcome.success(result))
@@ -602,7 +624,8 @@ class ModelWebAPI:
             return self._response(Outcome.failed(code, reason))
 
     def _voice_projection(self, session, operator):
-        status = require(ReplyManagement(session.application, session.profile.target).status(operator))
+        status = require(ReplyManagement(session.application, session.profile.target,
+            layer=ConfigLayer.ROLE).status(operator))
         settings = status["settings"]
         catalog = ReplyWebAPI(self.controller)._tts_catalog()
         return {"languages": [{"k": lang, "n": label, "bind": settings[field]}
@@ -633,7 +656,8 @@ class ModelWebAPI:
                     raise ValueError("invalid voice binding")
             async with self.controller._control_lock:
                 session, operator, _manager, _status = self._authorized()
-                saved = require(ReplyManagement(session.application, session.profile.target).configure(operator, data))
+                saved = require(ReplyManagement(session.application, session.profile.target,
+                    layer=ConfigLayer.ROLE).configure(operator, data))
                 return self._response(Outcome.success({**self._voice_projection(session, operator),
                     "replayed": saved["replayed"]}))
         except TaskError as error:
@@ -760,6 +784,10 @@ class ModelWebAPI:
         path = Path(self.controller.data_root) / IMAGE_SETTINGS
         enabled = registry.image_enabled if registry is not None else read_image_settings(path)
         declarations = registry.declarations() if registry is not None else ()
+        module = (registry.status("image") if registry is not None
+                  else {"state": "unavailable", "error_code": "native_registry_unavailable"})
+        issue_code = next((code for package_id, code in getattr(registry, "issues", ())
+                           if isinstance(package_id, str) and package_id.endswith(".image")), "")
         base = getattr(self.controller, "controller", self.controller)
         session = base.session or base.last_session
         external = getattr(getattr(session, "application", None), "external", None)
@@ -770,13 +798,27 @@ class ModelWebAPI:
             current = bool(owner and registry.current_declaration(owner.host_tool_id) == owner)
             registered = bool(owner and external and external.providers.get(action)
                               and external.providers[action].descriptor == owner.descriptor)
+            if not enabled[action]:
+                diagnostic = "image_action_disabled"
+            elif not owner:
+                diagnostic = issue_code or module.get("error_code") or "native_image_declaration_missing"
+            elif not current:
+                diagnostic = "native_declaration_stale"
+            elif not registered:
+                diagnostic = "native_host_registration_missing"
+            else:
+                diagnostic = ""
             rows.append({"action": action, "enabled": enabled[action],
                          "owner": owner.descriptor.package.extension_id if owner else "",
                          "provider_id": owner.descriptor.binding.provider if owner else "",
                          "loaded": bool(owner), "current": current, "registered": registered,
+                         "diagnostic_code": diagnostic,
                          "state": "disabled" if not enabled[action] else
                                   "ready" if current and registered else "unavailable"})
-        return {"actions": rows, "enabled": dict(enabled),
+        module = {**module, "issue_code": issue_code,
+                  "declared_actions": sum(item.descriptor.package.extension_id == "image"
+                                           for item in declarations)}
+        return {"actions": rows, "enabled": dict(enabled), "module": module,
                 "authorization": "checked_for_each_invocation"}
 
     async def image(self):

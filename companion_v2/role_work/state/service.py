@@ -125,7 +125,8 @@ class RoleStateService:
             if key in ("hunger_enabled", "health_enabled") or key.startswith("cycle_")}])
 
     def write(self, context, *, data, expected_revision, operation_key, sources=(), operator=None, reason="maintenance",
-              cycle_alignment=None, projected_inputs=False, expected_settings_token=None, mood_interest=None):
+              cycle_alignment=None, projected_inputs=False, expected_settings_token=None, mood_interest=None,
+              preserve_mood_dynamics=False):
         with self.runtime.transaction():
             self.access.check(context, "role.state.maintain", operator=operator)
             if projected_inputs:
@@ -139,6 +140,8 @@ class RoleStateService:
             values, _ = self.settings(context)
             if not values["enabled"] and operator is None:
                 raise TaskError("role_state_disabled", "role state maintenance is disabled")
+            if preserve_mood_dynamics and (not projected_inputs or operator is not None):
+                raise TaskError("role_mood_preserve_invalid", "only model maintenance may preserve a prior mood snapshot")
             data = validate_state(data, now)
             # Guarded human calibration fingerprints its original payload, including
             # feelings later hidden by settings, so receipt recovery survives edits.
@@ -154,6 +157,8 @@ class RoleStateService:
                     data["conditions"] = [c for c in data["conditions"] if c["kind"] != name]
             actor = operator.subject if operator else context.role_binding.role
             parameters = [original_data if expected_settings_token is not None else dict(data), sources, actor, reason]
+            if preserve_mood_dynamics:
+                parameters.append({"preserve_mood_dynamics": True})
             if type(assertion) is dict or cycle_alignment is not None:
                 parameters.append({"cycle_assertion": assertion, "cycle_alignment": cycle_alignment})
             if expected_settings_token is not None:
@@ -182,13 +187,16 @@ class RoleStateService:
                     feeling = cycle_feelings.update(previous_feeling, assertion, now, key=[context.key, operation_key])
                 # One bounded step per axis; an operator write is explicit calibration.
                 previous_mood = mood_previous(current)
-                if operator is None:
+                if operator is None and not preserve_mood_dynamics:
                     mood.validate_update(previous_mood, data["mood"], at=now,
                         half_life_minutes=values["mood_decay_half_life_minutes"],
                         max_delta=values["mood_update_max_delta"])
-                dynamics = (mood.document(data["mood"], previous_mood, at=now,
-                    half_life_minutes=values["mood_decay_half_life_minutes"], interest_level=mood_interest,
-                    cross_window=True) if mood.axes(data["mood"]) else None)
+                if preserve_mood_dynamics:
+                    dynamics = current.get("mood_dynamics") if current and mood.axes(data["mood"]) else None
+                else:
+                    dynamics = (mood.document(data["mood"], previous_mood, at=now,
+                        half_life_minutes=values["mood_decay_half_life_minutes"], interest_level=mood_interest,
+                        cross_window=True) if mood.axes(data["mood"]) else None)
                 dependencies = tuple(dict.fromkeys(dependencies))
                 self.evidence.validate(context, dependencies, control=True)
                 # A derived source retains prior dependencies without expanding every prompt.

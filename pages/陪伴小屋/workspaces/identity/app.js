@@ -38,6 +38,7 @@
   };
   let bridge, data = null, filter = "stable", selected = null, selectedGroupId = "", activeView = "network", noticeView = "";
   let graphScope = "all", searchTerm = "", graphExpandedCluster = "", requestSequence = 0, hideIdleUsers = true, groupStatusFilter = "all";
+  let memberChangeSequence = 0;
 
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
@@ -866,7 +867,7 @@
     Object.entries(values).forEach(([id, value]) => { const target = $(id); if (target) target.textContent = String(value); });
   }
 
-  function renderGroups() {
+  function renderGroups({preserveDetail = false} = {}) {
     const list = $("groups-list");
     list.replaceChildren();
     const groups = allGroups().filter((group) => {
@@ -887,7 +888,7 @@
       empty.append(node("strong", title),
         node("p", data ? "目录显示当前目标、AstrBot 已发现会话和 V2 历史往来。" : ""));
       list.append(empty);
-      renderGroupDetail(null);
+      if (!preserveDetail || !selectedGroupId) renderGroupDetail(null);
       return;
     }
     groups.forEach((group) => {
@@ -916,7 +917,7 @@
     });
     const selectedGroup = groups.find((group) => groupRouteKey(group) === selectedGroupId) || null;
     if (!selectedGroup) selectedGroupId = "";
-    renderGroupDetail(selectedGroup);
+    if (!preserveDetail || !selectedGroup) renderGroupDetail(selectedGroup);
   }
 
   function renderGroupDetail(group) {
@@ -1244,13 +1245,13 @@
       button.setAttribute("aria-pressed", String(active));
     });
   }
-  function renderAll() {
+  function renderAll({preserveDetails = false} = {}) {
     renderCounts();
     renderNetworkOverview();
     renderGraph();
     renderPeople();
-    renderGroups();
-    renderDetail();
+    renderGroups({preserveDetail: preserveDetails});
+    if (!preserveDetails) renderDetail();
     updateGraphFilters();
     updateFilterButtons();
   }
@@ -1272,6 +1273,7 @@
       openGroup: id => navigateToGroup(id),
       onChanged(person, patch, {identity = false} = {}) {
         if (!data) return;
+        memberChangeSequence++;
         const key = displayPersonKey(person);
         const routeIdentity = route => JSON.stringify([route.platform, route.bot_id, route.account_id, route.role_id]);
         const updateDisplay = item => {
@@ -1364,6 +1366,52 @@
     const group = target?.closest?.("[data-group-id]");
     if (group) navigateToGroup(group.dataset.groupId, group.dataset.groupRoute);
   }
+  function applyDirectory(result, {background = false} = {}) {
+    const persons = mergeDirectoryPeople(Array.isArray(result.persons) ? result.persons : []);
+    const privateCount = persons.filter(item => item.private_chat).length;
+    const groupCount = persons.filter(item => item.group_member).length;
+    const bothCount = persons.filter(item => item.private_chat && item.group_member).length;
+    data = { ...result, persons, groups: Array.isArray(result.groups) ? result.groups : [],
+      counts: {...(result.counts || {}), total: persons.length, private_chat: privateCount,
+        group_member: groupCount, both: bothCount, private_only: privateCount - bothCount,
+        group_only: groupCount - bothCount} };
+    const previous = selected ? displayPersonKey(selected) : null;
+    selected = data.persons.find(person => displayPersonKey(person) === previous) || visiblePeople()[0] || null;
+    if (!background) window.CompanionPrivateMembers?.refresh();
+    const foundGroup = selectedGroupId && allGroups().some((group) => groupRouteKey(group) === selectedGroupId);
+    if (!foundGroup) selectedGroupId = "";
+    renderAll({preserveDetails: background});
+    if (background && previous && (!selected || displayPersonKey(selected) !== previous)) renderDetail();
+  }
+
+  async function supplementDirectory(sequence, edits) {
+    try {
+      const result = unwrap(await bridge.apiGet(endpoint, {}));
+      if (sequence !== requestSequence) return;
+      if (edits !== memberChangeSequence) {
+        setSyncState("ready", "本地关系已读取");
+        return;
+      }
+      applyDirectory(result, {background: true});
+      setSyncState("ready", "V2 数据已同步");
+    } catch (error) {
+      if (sequence !== requestSequence) return;
+      const failure = localized(error);
+      if (["dashboard_identity_required", "core_access_required", "staging_not_initialized",
+           "staging_host_terminated"].includes(error?.code)) {
+        data = null;
+        selected = null;
+        selectedGroupId = "";
+        renderAll();
+        setSyncState("error", "读取未完成");
+        notice(failure.message, true);
+        return;
+      }
+      // The local records remain usable when optional native discovery fails.
+      setSyncState("ready", "本地关系已读取，补充资料暂未更新");
+    }
+  }
+
   async function load({preserveNotice = false} = {}) {
     const sequence = ++requestSequence;
     const refresh = $("refresh");
@@ -1371,24 +1419,12 @@
     refresh.classList.add("is-loading");
     setSyncState("", "正在读取");
     try {
-      const result = unwrap(await bridge.apiGet(endpoint, {}));
+      const result = unwrap(await bridge.apiGet(endpoint, {read_mode: "stored"}));
       if (sequence !== requestSequence) return;
-      const persons = mergeDirectoryPeople(Array.isArray(result.persons) ? result.persons : []);
-      const privateCount = persons.filter(item => item.private_chat).length;
-      const groupCount = persons.filter(item => item.group_member).length;
-      const bothCount = persons.filter(item => item.private_chat && item.group_member).length;
-      data = { ...result, persons, groups: Array.isArray(result.groups) ? result.groups : [],
-        counts: {...(result.counts || {}), total: persons.length, private_chat: privateCount,
-          group_member: groupCount, both: bothCount, private_only: privateCount - bothCount,
-          group_only: groupCount - bothCount} };
-      setSyncState("ready", "V2 数据已同步");
+      applyDirectory(result);
+      setSyncState("ready", result.directory_refresh_pending ? "本地关系已读取，正在更新补充资料" : "V2 数据已同步");
       if (!preserveNotice) notice("");
-      const previous = selected ? displayPersonKey(selected) : null;
-      selected = data.persons.find(person => displayPersonKey(person) === previous) || visiblePeople()[0] || null;
-      window.CompanionPrivateMembers?.refresh();
-      const foundGroup = selectedGroupId && allGroups().some((group) => groupRouteKey(group) === selectedGroupId);
-      if (!foundGroup) selectedGroupId = "";
-      renderAll();
+      if (result.directory_refresh_pending) void supplementDirectory(sequence, memberChangeSequence);
       return true;
     } catch (error) {
       if (sequence !== requestSequence) return;

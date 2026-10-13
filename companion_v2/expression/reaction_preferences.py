@@ -77,6 +77,15 @@ class ReactionPreferences:
             db.execute("INSERT OR REPLACE INTO reaction_turns VALUES (?,?,?,?)",
                        (batch_id, owner, actor, int(requested)))
 
+    def prepare_native(self, context, turn_id, *, event_id, text, at):
+        self.service.check(context)
+        owner, actor = self.service.owner(context), self.actor(context)
+        self._observe(owner, actor, "native:" + digest([context.key, event_id]), text, at.timestamp())
+        requested = matches(REQUEST, text) and not matches(OPT_OUT, text)
+        with self.store.db() as db:
+            db.execute("INSERT OR REPLACE INTO reaction_turns VALUES (?,?,?,?)",
+                       (turn_id, owner, actor, int(requested)))
+
     def _observe(self, owner, actor, event_key, text, received_at):
         out, enabled = matches(OPT_OUT, text), matches(OPT_IN, text)
         signal = "negative" if out or matches(NEGATIVE, text) else "positive" if matches(POSITIVE, text) else ""

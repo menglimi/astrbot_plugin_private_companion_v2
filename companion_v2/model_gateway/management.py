@@ -1,24 +1,26 @@
 """Dashboard model task settings for one authorized private role context."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date
 from collections import deque
 import json
 
-from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget, EffectiveValue
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import OperationRef, VersionRef
 from companion_v2.role_work.life.management import RoleLifeManagement
 from .budget import effective_soft
 from .cache_diagnostics import checked_signature, event_severity, signature_changes, signature_snapshot
+from .core_observations import availability_summary, observations_for_role, request_rows
 from .reply_efficiency import reply_efficiency_report
+from .refusal import canonical_refusal_terms
 from .replacement_rules import checked_rules, validate_targets
 from .usage import MAIN_CHAIN_KIND, ModelUsageReport, usage_source
 
 
 FIELDS = ("provider", "fallback", "prompt", "max_output_tokens", "replacement_rules", "fallback_on_refusal",
-          "timeout_seconds", "replacement_scope")
+          "refusal_terms", "timeout_seconds", "replacement_scope")
 OWNER = "configuration"
 PROMPT_LAYERS = (
     {"key": "role_instruction", "label": "角色指令", "editable": False,
@@ -38,6 +40,8 @@ PROMPT_LAYERS = (
 
 def _target(context, layer):
     scope = context.scope
+    if layer is ConfigLayer.INSTALLATION:
+        return ConfigTarget(scope.installation_id, layer)
     return ConfigTarget(scope.installation_id, layer, context.role_binding.role,
                         scope if layer is ConfigLayer.WINDOW else None, bot_id=scope.bot_id)
 
@@ -49,7 +53,37 @@ def _field(value, inherited):
             "explicit": value.explicit}
 
 
-def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key):
+def _unavailable_core_costs(value):
+    """Unknown host prices stay unknown in every pure-core report bucket."""
+    if isinstance(value, dict):
+        if "cost_microusd" in value:
+            value["cost_microusd"] = None
+            value["cost_availability"] = "unavailable"
+        for child in value.values():
+            _unavailable_core_costs(child)
+    elif isinstance(value, list):
+        for child in value:
+            _unavailable_core_costs(child)
+
+
+def _legacy_cache_rows(runtime, role_accounts, batch_days, origin_key):
+    account_keys = tuple(role_accounts[period] for period in batch_days)
+    placeholders = ",".join("?" for _ in account_keys)
+    return runtime.read_all(f"""SELECT c.call_id, c.position, c.input_tokens,
+            c.cached_input_tokens, c.finished_at, c.started_at, r.created_at, t.kind,
+            t.origin_key, c.provider_json, s.signature_json,
+            CASE WHEN json_valid(t.record_json)
+                THEN json_extract(t.record_json, '$.spec.context.audience.scope') ELSE NULL END AS audience_scope_json
+        FROM model_calls c JOIN model_call_cache_signatures s ON s.call_id = c.call_id
+        JOIN model_requests r ON r.task_id = c.task_id JOIN execution_tasks t ON t.task_id = c.task_id
+        WHERE (EXISTS (SELECT 1 FROM model_call_accounts ca
+                       WHERE ca.call_id = c.call_id AND ca.account_key IN ({placeholders}))
+               OR (t.kind = ? AND t.origin_key = ?))
+        ORDER BY COALESCE(c.finished_at, c.started_at, r.created_at), c.position""",
+        account_keys + (MAIN_CHAIN_KIND, origin_key))
+
+
+def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key, *, core_rows=()):
     def empty_day(day):
         result = {"day": day, "signature_calls": 0, "compared_calls": 0, "baseline_calls": 0,
                 "changed_calls": 0, "high_severity_events": 0, "medium_severity_events": 0,
@@ -82,7 +116,7 @@ def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key):
                            f"{dimension}_cached_input_tokens_total": 0})
         return result
 
-    daily = {key: {} for key in ("all", "conversation", "plugin")}
+    daily = {key: {} for key in ("all", "conversation", "plugin", "astrbot_core", "legacy_conversation")}
     events = {key: deque(maxlen=80) for key in daily}
     previous_by_scope = {}
     change_fields = {
@@ -99,25 +133,12 @@ def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key):
         "context_availability_change": "context_availability_changes",
     }
     ordered_days = sorted(all_days)
-    for offset in range(0, len(ordered_days), 30):
+    for offset in range(0, len(ordered_days) + 30, 30):
         batch_days = ordered_days[offset:offset + 30]
-        account_keys = tuple(role_accounts[period] for period in batch_days)
-        placeholders = ",".join("?" for _ in account_keys)
-        rows = runtime.read_all(f"""SELECT c.call_id, c.position, c.input_tokens,
-                c.cached_input_tokens, c.finished_at, c.started_at, r.created_at, t.kind,
-                t.origin_key, c.provider_json, s.signature_json,
-                CASE WHEN json_valid(t.record_json)
-                    THEN json_extract(t.record_json, '$.spec.context.audience.scope')
-                    ELSE NULL END AS audience_scope_json
-            FROM model_calls c
-            JOIN model_call_cache_signatures s ON s.call_id = c.call_id
-            JOIN model_requests r ON r.task_id = c.task_id
-            JOIN execution_tasks t ON t.task_id = c.task_id
-            WHERE (EXISTS (SELECT 1 FROM model_call_accounts ca
-                           WHERE ca.call_id = c.call_id AND ca.account_key IN ({placeholders}))
-                   OR (t.kind = ? AND t.origin_key = ?))
-            ORDER BY COALESCE(c.finished_at, c.started_at, r.created_at), c.position""",
-            account_keys + (MAIN_CHAIN_KIND, origin_key))
+        if not batch_days:
+            rows = sorted(core_rows, key=lambda row: (row["finished_at"] or row["started_at"] or row["created_at"], row["position"]))
+        else:
+            rows = _legacy_cache_rows(runtime, role_accounts, batch_days, origin_key)
         for row in rows:
             signature = checked_signature(row["signature_json"])
             if signature is None:
@@ -127,7 +148,9 @@ def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key):
             if day not in all_days:
                 continue
             source = usage_source(row["kind"])
-            counts = [daily[key].setdefault(day, empty_day(day)) for key in ("all", source)]
+            path = "astrbot_core" if row["kind"] != MAIN_CHAIN_KIND and source == "conversation" else "legacy_conversation" if source == "conversation" else "plugin"
+            keys = tuple(dict.fromkeys(("all", source, path)))
+            counts = [daily[key].setdefault(day, empty_day(day)) for key in keys]
             for item in counts:
                 item["signature_calls"] += 1
                 if signature.context_observed:
@@ -264,6 +287,8 @@ def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key):
             session_ref = digest(["cache-diagnostics-session", scope_fingerprint])[:8] \
                 if scope_fingerprint else None
             event = {"day": day, "at": at, "kind": row["kind"], "provider": provider_id,
+                     "execution_path": "astrbot_core" if path == "astrbot_core" else "legacy_v2_conversation" if path == "legacy_conversation" else "v2_background",
+                     "measurement_basis": row.get("signature_scope", "ledger_provider_payload") if isinstance(row, dict) else "ledger_provider_payload",
                      "previous_provider": previous_provider,
                      "session_ref": session_ref, "severity": severity,
                      "changes": list(changes), "input_tokens": input_tokens, "cache_hit_rate": hit_rate,
@@ -271,7 +296,7 @@ def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key):
                      "cache_hit_delta": (round(hit_rate - previous_hit_rate, 1)
                                          if hit_rate is not None and previous_hit_rate is not None else None),
                      "before": signature_snapshot(previous), "after": signature_snapshot(signature)}
-            for key in ("all", source):
+            for key in keys:
                 events[key].append(event)
 
     return {key: {"daily": [days[day] for day in sorted(days)], "recent_events": list(reversed(events[key])),
@@ -290,31 +315,40 @@ class ModelManagement:
             raise TaskError("model_task_unavailable", "select a registered model task")
         return self.app.router.profiles[kind]
 
-    def _snapshots(self, operator, profile):
+    def _snapshots(self, operator, profile, layer=ConfigLayer.ROLE):
         now = self.app.now()
-        current = require(self.app.configuration.read(operator, target=_target(self.context, ConfigLayer.WINDOW),
+        parent = ConfigLayer.INSTALLATION if layer is ConfigLayer.ROLE else ConfigLayer.ROLE
+        current = require(self.app.configuration.read(operator, target=_target(self.context, layer),
                                                       group_id=profile.group, observed_at=now))
-        inherited = require(self.app.configuration.read(operator, target=_target(self.context, ConfigLayer.ROLE),
+        inherited = require(self.app.configuration.read(operator, target=_target(self.context, parent),
                                                         group_id=profile.group, observed_at=now))
         provider_default = self.app.router.provider_default(self.context, profile, current)
         return (self.app.router.apply_provider_default(profile, current, provider_default),
                 self.app.router.apply_provider_default(profile, inherited, provider_default), provider_default)
 
-    def _section_snapshots(self, operator, section):
+    def _section_snapshots(self, operator, section, layer=ConfigLayer.ROLE):
         definitions = self.app.configuration.registry.group(section.config_group)
-        relationship = ConfigLayer.RELATIONSHIP in definitions[0].layers
-        target = ConfigTarget(self.context.scope.installation_id, ConfigLayer.WINDOW,
-            self.context.role_binding.role, self.context.scope,
-            subject=self.context.actor.subject if relationship else None)
-        inherited_target = target.chain()[-2]
+        if layer not in (ConfigLayer.ROLE, ConfigLayer.WINDOW) or layer not in definitions[0].layers:
+            raise TaskError("model_configuration_invalid", "the prompt section does not support this configuration scope")
+        if ConfigLayer.RELATIONSHIP in definitions[0].layers:
+            scope = self.context.scope
+            target = ConfigTarget(scope.installation_id, ConfigLayer.WINDOW,
+                self.context.role_binding.role, scope, bot_id=scope.bot_id,
+                subject=self.context.actor.subject)
+        else:
+            target = _target(self.context, layer)
+        inherited_target = next((parent for parent in reversed(target.chain()[:-1])
+                                 if parent.layer in definitions[0].layers), None)
         now = self.app.now()
         current = require(self.app.configuration.read(operator, target=target,
             group_id=section.config_group, observed_at=now))
-        inherited = require(self.app.configuration.read(operator, target=inherited_target,
-            group_id=section.config_group, observed_at=now))
+        inherited = (require(self.app.configuration.read(operator, target=inherited_target,
+            group_id=section.config_group, observed_at=now)) if inherited_target is not None else
+            replace(current, fields={field.field_id: EffectiveValue(field.default, None, False, 0)
+                                     for field in definitions}))
         return current, inherited
 
-    def _prompt_sections(self, operator, profile):
+    def _prompt_sections(self, operator, profile, layer=ConfigLayer.ROLE):
         snapshots, result = {}, []
         for section in profile.prompt_sections:
             item = {"key": section.key, "label": section.label, "condition": section.condition,
@@ -322,19 +356,20 @@ class ModelManagement:
                     "variables": list(section.variables)}
             if section.editable:
                 if section.config_group not in snapshots:
-                    snapshots[section.config_group] = self._section_snapshots(operator, section)
+                    snapshots[section.config_group] = self._section_snapshots(operator, section, layer)
                 current, inherited = snapshots[section.config_group]
                 field_id = section.config_group + "." + section.field
                 field = _field(current.fields[field_id], inherited.fields[field_id])
                 item.update(field=field, edit_token=current.edit_token, config_field=field_id,
+                            configuration_layer=current.target.layer.value,
                             prompt=field["value"], inheritance_label="上级继承值")
             else:
                 item["prompt"] = section.default_prompt
             result.append(item)
         return result
 
-    def _project(self, operator, profile):
-        current, inherited, provider_default = self._snapshots(operator, profile)
+    def _project(self, operator, profile, layer=ConfigLayer.ROLE):
+        current, inherited, provider_default = self._snapshots(operator, profile, layer)
         fields = {name: _field(current.fields[profile.group + "." + name],
                                inherited.fields[profile.group + "." + name]) for name in FIELDS}
         if provider_default is not None:
@@ -346,12 +381,13 @@ class ModelManagement:
                 if fields[name]["inherited_source"] == "default":
                     fields[name]["inherited_source"] = "host_conversation"
         application = require(self.app.configuration.application_status(operator,
-            target=_target(self.context, ConfigLayer.WINDOW), group_id=profile.group, observed_at=self.app.now()))
-        sections = self._prompt_sections(operator, profile)
+            target=_target(self.context, layer), group_id=profile.group, observed_at=self.app.now()))
+        sections = self._prompt_sections(operator, profile, layer)
         layers = [dict(layer) for layer in PROMPT_LAYERS]
         if any(section["editable"] for section in sections):
             layers[1].update(editable=True, description="完整业务模板在下方按场景查看；表达模板可编辑，事实与协议规则固定保留。")
-        return {"kind": profile.kind, "lane": profile.lane.value, "capabilities": list(profile.capabilities),
+        return {"kind": profile.kind, "configuration_layer": layer.value,
+                "lane": profile.lane.value, "capabilities": list(profile.capabilities),
                 "default_prompt": profile.default_prompt, "prompt_version": profile.version,
                 "prompt_layers": layers, "prompt_sections": sections,
                 "fields": fields, "edit_token": current.edit_token, "application_state": application.state,
@@ -476,10 +512,15 @@ class ModelManagement:
                               "latest_at": proactive["latest_at"] if proactive else None}}
 
     @outcome
-    def status(self, operator):
+    def status(self, operator, *, layer="role"):
+        if layer not in (ConfigLayer.ROLE.value, ConfigLayer.WINDOW.value):
+            raise TaskError("model_configuration_invalid", "select role defaults or this private window")
+        selected_layer = ConfigLayer(layer)
         with self.app.runtime.read_snapshot():
             self.access.authorize(operator)
-            return {"tasks": [self._project(operator, profile) for profile in self.app.router.profiles.values()],
+            return {"configuration_layer": selected_layer.value,
+                    "tasks": [self._project(operator, profile, selected_layer)
+                              for profile in self.app.router.profiles.values()],
                     "providers": [{"id": provider.binding.provider, "capabilities": list(provider.capabilities),
                                    "max_output_tokens": provider.maximum_output_tokens,
                                    "supports_model_override": provider.supports_model_override,
@@ -502,6 +543,9 @@ class ModelManagement:
                 FROM model_calls c JOIN model_requests r ON r.task_id = c.task_id
                 ORDER BY day""", ())
             all_days = {today}
+            core_observations = observations_for_role(self.app.runtime, self.context, end=now.isoformat())
+            core_rows = request_rows(core_observations)
+            all_days.update(row["day"] for row in core_rows)
             for item in candidate_days:
                 value = item["day"]
                 try:
@@ -511,7 +555,10 @@ class ModelManagement:
                 if parsed.isoformat() == value:
                     all_days.add(value)
             role_accounts = {period: digest(["role", role_address, period]) for period in all_days}
-            reports = {key: ModelUsageReport() for key in ("all", "conversation", "plugin")}
+            reports = {key: ModelUsageReport() for key in ("all", "conversation", "plugin", "astrbot_core", "legacy_conversation")}
+            def report_keys(kind):
+                source = usage_source(kind)
+                return ("all", "conversation", "legacy_conversation") if source == "conversation" else ("all", "plugin")
             ordered_days = sorted(all_days)
             batch_size = 300
             for offset in range(0, len(ordered_days), batch_size):
@@ -559,7 +606,7 @@ class ModelManagement:
                      GROUP BY day, provider, kind""", account_keys + (MAIN_CHAIN_KIND, self.context.key))
 
                 for row in grouped_rows:
-                    for key in ("all", usage_source(row["kind"])):
+                    for key in report_keys(row["kind"]):
                         reports[key].add_group(row)
                 hour_rows = self.app.runtime.read_all(f"""SELECT
                         substr(COALESCE(c.finished_at, c.started_at, r.created_at), 1, 10) AS day,
@@ -576,10 +623,10 @@ class ModelManagement:
                     GROUP BY day, hour, kind ORDER BY day, hour""",
                     account_keys + (MAIN_CHAIN_KIND, self.context.key))
                 for row in hour_rows:
-                    for key in ("all", usage_source(row["kind"])):
+                    for key in report_keys(row["kind"]):
                         reports[key].add_hour(row)
                 recent_rows = self.app.runtime.read_all(f"""WITH samples AS (
-                    SELECT c.state, c.position, c.actual_tokens,
+                    SELECT c.state, c.position, c.actual_tokens, c.reserved_tokens,
                         c.actual_cost, c.input_tokens, c.cached_input_tokens, c.cache_creation_tokens, c.output_tokens,
                         c.latency_ms, c.finished_at, c.started_at, r.created_at, t.kind, c.provider_json,
                         f.code AS failure_code, d.summary_json AS response_summary_json,
@@ -598,28 +645,54 @@ class ModelManagement:
                      SELECT * FROM samples WHERE source_position <= 80""",
                     account_keys + (MAIN_CHAIN_KIND, self.context.key))
                 for row in recent_rows:
-                    for key in ("all", usage_source(row["kind"])):
+                    for key in report_keys(row["kind"]):
                         reports[key].add_recent(row)
-            cache_reports = _cache_diagnostic_summary(self.app.runtime, role_accounts, all_days, self.context.key)
+            for row in core_rows:
+                for key in ("all", "conversation", "astrbot_core"):
+                    reports[key].add_group({**row, **row["aggregate"]})
+                    reports[key].add_hour(row)
+                    reports[key].add_recent(row)
+            cache_reports = _cache_diagnostic_summary(self.app.runtime, role_accounts, all_days, self.context.key,
+                                                     core_rows=core_rows)
             usage_reports = {key: {**report.project(now), "cache_diagnostics": cache_reports[key]}
                              for key, report in reports.items()}
+            usage_reports["astrbot_core"].update(execution_path="astrbot_core",
+                coverage=availability_summary(core_observations),
+                measurement_basis={"usage": "observed_provider_responses_with_explicit_fallback_scope",
+                                   "cache": "reported_fields_only", "cost": "unavailable",
+                                   "signature": "runner_pre_provider_or_provider_request_hook"})
+            _unavailable_core_costs(usage_reports["astrbot_core"])
+            usage_reports["astrbot_core"]["cost_availability"] = "unavailable"
+            for key in ("all", "conversation"):
+                usage_reports[key]["cost_availability"] = "partial" if core_observations else "local_priced_subtotal"
+                usage_reports[key]["core_cost_availability"] = "unavailable"
+            usage_reports["legacy_conversation"]["execution_path"] = "legacy_v2_conversation"
+            usage_reports["plugin"]["execution_path"] = "v2_background"
             today_account = role_accounts[now.date().isoformat()]
             budget_row = self.app.runtime.read_one(
                 "SELECT token_limit, held_tokens, spent_tokens FROM model_budget_accounts WHERE account_key = ?",
                 (today_account,))
             plugin_usage = self.app.gateway.ledger.plugin_account_usage(today_account)
             policy = self.app.gateway.ledger.policy
-            budget = {"limit_tokens": budget_row["token_limit"] if budget_row else policy.role.tokens,
+            budget = {"hard_limit_enabled": policy.enabled,
+                      "limit_tokens": budget_row["token_limit"] if budget_row else policy.role.tokens,
                       "spent_tokens": plugin_usage["spent_tokens"],
                       "held_tokens": plugin_usage["held_tokens"]}
+            reservations = self.app.gateway.ledger.reservation_sources(today_account)
+            pending = [item for item in reservations if item["state"] not in ("reserved", "dispatched")]
+            budget.update(reservation_sources=reservations,
+                          pending_usage_calls=sum(item["calls"] for item in pending),
+                          pending_usage_tokens=sum(item["held_tokens"] for item in pending),
+                          remaining_tokens=(max(0, budget["limit_tokens"] - budget["spent_tokens"] - budget["held_tokens"])
+                                            if policy.enabled else None))
             soft = effective_soft(self.app.runtime, self.context, self.app.gateway.ledger.soft)
             budget.update({"soft_limit_enabled": bool(soft and soft.enabled),
                            "soft_limit_tokens": soft.tokens if soft else 0})
             providers = [{"id": item.binding.provider, "model": item.model}
                          for item in self.app.router.providers.values()]
             return {"generated_at": now.isoformat(), **usage_reports["all"],
-                    "usage_sources": {key: usage_reports[key] for key in ("conversation", "plugin")},
-                    "reply_efficiency": reply_efficiency_report(self.app.runtime, self.context.key, now),
+                    "usage_sources": {key: usage_reports[key] for key in ("conversation", "plugin", "astrbot_core", "legacy_conversation")},
+                    "reply_efficiency": reply_efficiency_report(self.app.runtime, self.context, now),
                     "budget": budget, "providers": providers, "window_days": 30,
                     "ledger_scope": "current_role", "runtime": runtime_diagnostics}
 
@@ -641,10 +714,30 @@ class ModelManagement:
                 or any(type(name) is not str or name not in FIELDS for name in reset)
                 or len(reset) != len(set(reset)) or set(changes).intersection(reset)):
             raise TaskError("model_configuration_invalid", "select distinct task fields to save or inherit")
+        independent = set(changes).union(reset)
+        if independent and independent <= {"prompt", "fallback_on_refusal", "refusal_terms"}:
+            # These fields do not need a working provider route to be edited.
+            if "prompt" in changes and (type(changes["prompt"]) is not str or len(changes["prompt"]) > 8000):
+                raise TaskError("model_configuration_invalid", "task prompt must be bounded text")
+            if "fallback_on_refusal" in changes and type(changes["fallback_on_refusal"]) is not bool:
+                raise TaskError("model_configuration_invalid", "refusal replacement must be a boolean")
+            if "refusal_terms" in changes:
+                try:
+                    changes = {**changes, "refusal_terms": canonical_refusal_terms(changes["refusal_terms"])}
+                except ValueError as error:
+                    raise TaskError("model_configuration_invalid", "check the refusal match terms") from error
+            return {profile.group + "." + name: value for name, value in changes.items()}, tuple(
+                profile.group + "." + name for name in reset)
         values = {name: current.fields[profile.group + "." + name].value for name in FIELDS}
         for name in reset:
             values[name] = inherited.fields[profile.group + "." + name].value
         values.update(changes)
+        try:
+            values["refusal_terms"] = canonical_refusal_terms(values["refusal_terms"])
+        except ValueError as error:
+            raise TaskError("model_configuration_invalid", "check the refusal match terms") from error
+        if "refusal_terms" in changes:
+            changes = {**changes, "refusal_terms": values["refusal_terms"]}
         if (type(values["provider"]) is not str or type(values["fallback"]) is not str
                 or type(values["prompt"]) is not str
                 or len(values["prompt"]) > 8000 or type(values["max_output_tokens"]) is not int
@@ -677,28 +770,34 @@ class ModelManagement:
     @outcome
     def configure(self, operator, data):
         keys = {"kind", "operation_key", "edit_token", "changes", "reset"}
-        if type(data) is not dict or set(data) not in (keys, keys | {"section"}):
+        if type(data) is not dict or set(data) not in (keys, keys | {"section"}, keys | {"layer"},
+                                                       keys | {"section", "layer"}):
             raise TaskError("model_configuration_invalid", "provide one complete model task patch")
         kind, key, token = data["kind"], data["operation_key"], data["edit_token"]
+        layer = data.get("layer", ConfigLayer.WINDOW.value)
         if (type(key) is not str or not key.strip() or len(key) > 128
-                or type(token) is not str or len(token) != 64):
+                or type(token) is not str or len(token) != 64
+                or layer not in (ConfigLayer.ROLE.value, ConfigLayer.WINDOW.value)):
             raise TaskError("model_configuration_invalid", "provide a stable operation key and edit token")
+        selected_layer = ConfigLayer(layer)
         with self.app.runtime.transaction():
             self.access.authorize(operator)
             profile = self._profile(kind)
             if "section" in data:
-                return self._configure_section(operator, profile, data)
-            current, inherited, _ = self._snapshots(operator, profile)
+                return self._configure_section(operator, profile, data, selected_layer)
+            current, inherited, _ = self._snapshots(operator, profile, selected_layer)
             changes, reset = self._changes(profile, data, current, inherited)
-            op_id = "model-settings:" + digest([operator.subject, self.context.key, kind, key])
+            target = _target(self.context, selected_layer)
+            op_id = "model-settings:" + digest([operator.subject, target.key, kind, key])
             receipt = require(self.app.configuration.patch(operator,
-                target=_target(self.context, ConfigLayer.WINDOW), group_id=profile.group,
-                operation=OperationRef(op_id, OWNER, self.context.scope, VersionRef(op_id, 1), op_id),
+                target=target, group_id=profile.group,
+                operation=OperationRef(op_id, OWNER, target.authorization_scope, VersionRef(op_id, 1), op_id),
                 expected_edit_token=token, changes=changes, reset_to_inherit=reset,
                 observed_at=self.app.now()))
-            return {"replayed": receipt.replayed, "operation_id": op_id, "task": self._project(operator, profile)}
+            return {"replayed": receipt.replayed, "operation_id": op_id,
+                    "task": self._project(operator, profile, selected_layer)}
 
-    def _configure_section(self, operator, profile, data):
+    def _configure_section(self, operator, profile, data, layer):
         section = next((item for item in profile.prompt_sections if item.key == data["section"]), None)
         if section is None or not section.editable:
             raise TaskError("model_prompt_section_readonly", "select a registered editable expression template")
@@ -707,13 +806,15 @@ class ModelManagement:
                 and ((set(changes) == {"prompt"} and not reset and type(changes["prompt"]) is str
                       and len(changes["prompt"]) <= 8000) or (not changes and reset == ["prompt"]))):
             raise TaskError("model_configuration_invalid", "save one expression template or restore its inherited value")
-        current, _ = self._section_snapshots(operator, section)
+        current, _ = self._section_snapshots(operator, section, layer)
         field_id = section.config_group + "." + section.field
         owner = self.app.configuration.registry.group(section.config_group)[0].owner_id
-        op_id = "model-prompt:" + digest([operator.subject, self.context.key, profile.kind, section.key, data["operation_key"]])
+        op_id = "model-prompt:" + digest([operator.subject, current.target.key, profile.kind,
+                                          section.key, data["operation_key"]])
         receipt = require(self.app.configuration.patch(operator,
             target=current.target, group_id=section.config_group,
             operation=OperationRef(op_id, owner, current.target.authorization_scope, VersionRef(op_id, 1), op_id),
             expected_edit_token=data["edit_token"], changes={field_id: changes["prompt"]} if changes else {},
             reset_to_inherit=(field_id,) if reset else (), observed_at=self.app.now()))
-        return {"replayed": receipt.replayed, "operation_id": op_id, "task": self._project(operator, profile)}
+        return {"replayed": receipt.replayed, "operation_id": op_id,
+                "task": self._project(operator, profile, layer)}

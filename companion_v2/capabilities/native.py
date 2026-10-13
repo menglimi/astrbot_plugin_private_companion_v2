@@ -1,4 +1,4 @@
-"""JSON/bytes wire values for cooperative, independently packaged providers."""
+"""JSON/bytes values shared with the V2 plugin's internal extension ports."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 import re
 
 from companion_v2.execution.models import SideEffect, TaskError, TaskResult, encode
-from companion_v2.model_gateway.models import MAX_TOOL_CATALOG
 from .models import CapabilityPackageDescriptor, _opaque
 
 
@@ -19,7 +18,7 @@ MAX_ARTIFACTS = 8
 
 
 def json_document(value, *, maximum=MAX_DOCUMENT_BYTES):
-    """Copy plain finite JSON only, never Python objects supplied by a plugin."""
+    """Copy plain finite JSON only, never runtime-owned Python objects."""
     def check(item, depth=0):
         if depth > 24:
             raise ValueError("native JSON nesting exceeds the contract")
@@ -69,7 +68,9 @@ def parse_manifest(value, *, plugin_id, version):
     package = CapabilityPackageDescriptor(**{**package, "capabilities": tuple(package["capabilities"]),
                                               "dataset_owners": tuple(package["dataset_owners"])})
     tools = value["tools"]
-    if (type(tools) is not list or not 1 <= len(tools) <= MAX_TOOL_CATALOG
+    # A manifest declares installed tools, not a single model request. Its total
+    # UTF-8 byte budget is checked by json_document before parsing the catalog.
+    if (type(tools) is not list or not tools
             or any(type(tool) is not dict or set(tool) != {"action", "capability", "source_owner", "description",
                        "parameters", "side_effect", "timeout_seconds"} for tool in tools)):
         raise ValueError("native tools require a bounded complete declaration")

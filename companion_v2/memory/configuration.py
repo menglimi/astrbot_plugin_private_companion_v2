@@ -92,6 +92,11 @@ def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
 
 
+def role_target_for(context):
+    return ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE,
+                        context.role_binding.role, bot_id=context.scope.bot_id)
+
+
 def validate_schedule(values):
     if values["memory.reflection_response_format"] not in ("text", "json_object", "json_schema"):
         raise ValueError("memory response format must match the selected provider's supported mode")

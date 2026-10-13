@@ -189,11 +189,63 @@ class ReactionLibrary:
         payload = {"kind": "reaction", "items": accepted, "retrieval": {k:v for k,v in result.items() if k != "items"}}
         if not self.service.reaction_available(context, batch_id):
             raise TaskError("reaction_unavailable", "reaction search is unavailable for this turn")
-        self.store.offer(batch_id, call_id, self.service.owner(context), payload)
+        self.store.offer(batch_id, call_id, self.service.ensure_reaction_catalog(context), payload)
         # Sources are published now; image exposure still requires the tool's durable success.
         for item in accepted:
             self._image(context, batch_id, call_id, item, publish=True)
         return payload
+
+    async def search_native(self, context, turn_id, call_id, intent):
+        if not self.service.reaction_available(context, turn_id):
+            raise TaskError("reaction_unavailable", "reaction search is unavailable for this turn")
+        accepted, result = await self._select(context, intent, self.service.validate_item, self.service.check)
+        if not self.service.reaction_available(context, turn_id):
+            raise TaskError("reaction_unavailable", "reaction search is unavailable for this turn")
+        payload = {"kind": "reaction", "items": accepted,
+                   "retrieval": {key: value for key, value in result.items() if key != "items"}}
+        self.store.offer(turn_id, call_id, self.service.ensure_reaction_catalog(context), payload)
+        return payload
+
+    def native_images(self, context, turn_id, call_id, payload):
+        self.service.check(context)
+        self.service.reaction_preferences.require_allowed(context, turn_id)
+        owner = self.service.ensure_reaction_catalog(context)
+        if dict(self.store.offers(turn_id, owner)).get(call_id) != payload:
+            raise TaskError("reaction_changed", "the original native reaction offer changed")
+        images = []
+        for offered in payload["items"]:
+            item = self.store.get(owner, "reaction", offered["id"])
+            if item["revision"] != offered["revision"] or not self.service.validate_item(item, context):
+                raise TaskError("reaction_changed", "the original reaction was revised or disabled")
+            images.append(self.captured(item))
+        return tuple(images)
+
+    def mark_native_returned(self, context, turn_id, call_id, payload, content_hash, returned_at):
+        """Account for a native send callback returning an offered original.
+
+        The existing usage log records the original tool result, including after
+        a catalog edit. This local observation does not create a delivery receipt.
+        """
+        owner = self.service.ensure_reaction_catalog(context)
+        if dict(self.store.offers(turn_id, owner)).get(call_id) != payload:
+            raise TaskError("reaction_usage_manifest_changed", "the original native reaction offer changed")
+        row = self.messages.runtime.read_one("SELECT value FROM runtime_metadata WHERE key=?",
+            ("astrbot.core-tool.native-tool-" + digest([turn_id, call_id]),))
+        saved = json.loads(row["value"]) if row is not None else None
+        if (saved is None or saved["state"] != "succeeded" or saved["action"] != "reaction.search"
+                or saved["origin_key"] != context.key or saved["result"].get("payload") != payload):
+            raise TaskError("reaction_usage_manifest_changed", "the original native reaction operation changed")
+        if content_hash not in {item["id"] for item in payload.get("items", ())}:
+            return False
+        scope_owner = self.service.owner(context)
+        actor = self.service.reaction_preferences.actor(context)
+        at = returned_at.timestamp()
+        with self.store.db() as db:
+            db.execute("INSERT OR IGNORE INTO uses VALUES (?,?,?,?)", (owner, content_hash, turn_id, at))
+            db.execute("INSERT OR IGNORE INTO reaction_deliveries VALUES (?,?,?,?,?,NULL,NULL)",
+                (scope_owner, actor, turn_id, content_hash, at))
+        self.service.reaction_preferences.reconcile_delivery(scope_owner, actor, at)
+        return True
 
     async def select_for_contact(self, context, intent):
         action = "proactive.contact"
@@ -203,7 +255,7 @@ class ReactionLibrary:
         return accepted[0] if accepted else None
 
     async def _select(self, context, intent, validate, check):
-        owner = self.service.owner(context)
+        owner = self.service.ensure_reaction_catalog(context)
         settings, configuration_revision = self.service.reaction_settings(context)
         # Vector upkeep is scheduled from the retrieval path (V1 did the same at
         # llm_tool_actions.py:7199-7213) and is throttled by its own interval.
@@ -371,7 +423,7 @@ class ReactionLibrary:
 
     def _image(self, context, batch_id, call_id, offered, *, publish=False):
         self.service.check(context)
-        item = self.store.get(self.service.owner(context), "reaction", offered["id"])
+        item = self.store.get(self.service.ensure_reaction_catalog(context), "reaction", offered["id"])
         if not self.service.validate_item(item, context) or item["revision"] != offered["revision"]:
             raise TaskError("reaction_changed", "selected reaction was disabled or revised")
         batch = self.messages.owned(context, batch_id)
@@ -417,7 +469,7 @@ class ReactionLibrary:
 
     def contact_image(self, context, contact_id, offered, issued_at, *, publish=False, evidence=()):
         self.service.check(context, action="proactive.contact")
-        item = self.store.get(self.service.owner(context), "reaction", offered["id"])
+        item = self.store.get(self.service.ensure_reaction_catalog(context), "reaction", offered["id"])
         if (item["revision"] != offered["revision"] or
                 not self.service.validate_item(item, context, action="proactive.contact")):
             raise TaskError("reaction_changed", "selected proactive reaction was disabled or revised")
@@ -486,20 +538,23 @@ class ReactionLibrary:
                 or manifest_hash(parts[-1]["text"], (manifest,)) != row["payload_hash"]
                 or request.payload_hash != row["payload_hash"]):
             raise TaskError("reaction_usage_manifest_changed", "confirmed proactive image manifest changed")
-        owner, actor = self.service.owner(request.context), self.service.reaction_preferences.actor(request.context)
+        catalog_owner = self.service.ensure_reaction_catalog(request.context)
+        scope_owner = self.service.owner(request.context)
+        actor = self.service.reaction_preferences.actor(request.context)
         delivered_at = datetime.fromisoformat(row["delivered_at"]).timestamp()
         with self.store.db() as db:
             db.execute("INSERT OR IGNORE INTO uses VALUES (?,?,?,?)",
-                       (owner, reaction["id"], contact["contact_id"], delivered_at))
+                       (catalog_owner, reaction["id"], contact["contact_id"], delivered_at))
             db.execute("INSERT OR IGNORE INTO reaction_deliveries VALUES (?,?,?,?,?,NULL,NULL)",
-                       (owner, actor, contact["contact_id"], reaction["id"], delivered_at))
-        self.service.reaction_preferences.reconcile_delivery(owner, actor, delivered_at)
+                       (scope_owner, actor, contact["contact_id"], reaction["id"], delivered_at))
+        self.service.reaction_preferences.reconcile_delivery(scope_owner, actor, delivered_at)
         return True
 
     def read_batch(self, batch, context):
         batch_id = batch if isinstance(batch, str) else batch["batch_id"]
         images, materials = [], []
-        for call, payload in self.store.offers(batch_id, self.service.owner(context)):
+        owner = self.service.ensure_reaction_catalog(context)
+        for call, payload in self.store.offers(batch_id, owner):
             if payload.get("kind") != "reaction":
                 continue
             row = self.messages.runtime.read_one("SELECT state FROM conversation_tool_calls WHERE batch_id=? AND tool_call_id=?", (batch_id, call))
@@ -564,11 +619,12 @@ class ReactionLibrary:
                 or digest(manifest_items) != batch["manifest_hash"]):
             raise TaskError("reaction_usage_manifest_changed", "confirmed image manifest changed")
         sources = {image["source"]["source_id"] for image in selected}
-        owner = self.service.owner(context)
+        catalog_owner = self.service.ensure_reaction_catalog(context)
+        scope_owner = self.service.owner(context)
         accounted = False
         delivered_at = datetime.fromisoformat(part["delivered_at"]).timestamp()
         actor = self.service.reaction_preferences.actor(context)
-        for call, offer in self.store.offers(batch["batch_id"], owner):
+        for call, offer in self.store.offers(batch["batch_id"], catalog_owner):
             if offer.get("kind") != "reaction":
                 continue
             tool = self.messages.runtime.read_one("""SELECT state FROM conversation_tool_calls
@@ -580,10 +636,10 @@ class ReactionLibrary:
                 if identifier in sources:
                     with self.store.db() as db:
                         db.execute("INSERT OR IGNORE INTO uses VALUES (?,?,?,?)",
-                                   (owner, item["id"], batch["batch_id"], delivered_at))
+                                   (catalog_owner, item["id"], batch["batch_id"], delivered_at))
                         db.execute("INSERT OR IGNORE INTO reaction_deliveries VALUES (?,?,?,?,?,NULL,NULL)",
-                                   (owner, actor, batch["batch_id"], item["id"], delivered_at))
+                                   (scope_owner, actor, batch["batch_id"], item["id"], delivered_at))
                     accounted = True
         if accounted:
-            self.service.reaction_preferences.reconcile_delivery(owner, actor, delivered_at)
+            self.service.reaction_preferences.reconcile_delivery(scope_owner, actor, delivered_at)
         return accounted

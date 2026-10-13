@@ -16,7 +16,6 @@ from companion_v2.conversation.external_tools import (
 from companion_v2.execution.models import TaskError, digest, encode
 from companion_v2.foundation.refs import SourceRef, VersionRef
 from companion_v2.identity_policy.models import _opaque
-from companion_v2.model_gateway.models import MAX_TOOL_CATALOG
 from companion_v2.sources.models import SourceRecord
 from companion_v2.qzone.capability import COMMENT_ACTION, LIKE_ACTION, PUBLISH_ACTION, READ_ACTION, tool_descriptors
 
@@ -49,6 +48,7 @@ class CompositeAstrBotToolPort:
     The core receives one executor, while each provider keeps its own declaration,
     binding and lifecycle.  A missing optional provider therefore contributes no
     declaration at all and cannot create a half-installed tool.
+    This installation directory is independent of any one model request's budget.
     """
 
     def __init__(self, *ports):
@@ -56,8 +56,6 @@ class CompositeAstrBotToolPort:
         declarations = tuple(item for port in self.ports for item in port.declarations())
         if len({item.host_tool_id for item in declarations}) != len(declarations):
             raise ValueError("composed host tool declarations must have unique identities")
-        if len(declarations) > MAX_TOOL_CATALOG:
-            raise ValueError("composed host tool catalog exceeds its bound")
         self._declarations = declarations
 
     def declarations(self):
@@ -188,7 +186,7 @@ def map_tools(runtime, port: AstrBotToolPort) -> ExternalToolExecutor:
             or inspect.iscoroutinefunction(port.current_declaration)):
         raise ValueError("host port requires synchronous attestations and cooperative asynchronous invocation")
     declarations = port.declarations()
-    if (not isinstance(declarations, tuple) or not 1 <= len(declarations) <= MAX_TOOL_CATALOG
+    if (not isinstance(declarations, tuple) or not declarations
             or any(not isinstance(item, AstrBotToolDeclaration) for item in declarations)
             or len({item.host_tool_id for item in declarations}) != len(declarations)):
         raise ValueError("host declarations require bounded unique trusted tool identities")

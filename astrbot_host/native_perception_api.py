@@ -2,28 +2,32 @@
 
 import asyncio
 import json
+import logging
 import math
 from types import SimpleNamespace
 
 from astrbot.api.web import request
 
+from companion_v2.configuration.management import ProactiveContactManagement
 from companion_v2.agenda.planning_config import configured_annual_calendars, configured_weather_location
 from companion_v2.capabilities.reality_access import ACTION as REALITY_SNAPSHOT_ACTION, RealitySnapshotAccess
 from companion_v2.capabilities.reality_camera import ACTION as REALITY_CAMERA_ACTION, RealityCameraAccess
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.conversation.perception_management import PerceptionManagement
 from companion_v2.conversation.date_context import project_local_date
+from companion_v2.conversation.native_tool_results import operation_rows, snapshot as native_snapshot
 from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.proactive.management import ContactManagement
-from companion_v2.proactive.material_pool import read_material_pool
+from companion_v2.proactive.material_pool import read_role_material_pool
 from companion_v2.role_work.state.management import StateManagement
 
 from .management_identity import dashboard_operator
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/perception-native"
+logger = logging.getLogger(__name__)
 ENVIRONMENT_STATUS_FIELDS = frozenset(("planning_timezone", "planning_annual_calendars",
                                        "planning_weather_enabled", "planning_weather_location",
                                        "planning_weather_max_age_minutes"))
@@ -196,14 +200,12 @@ class NativePerceptionWebAPI:
         external = getattr(app, "external", None)
         if external is None:
             return {"state": "ready", "reason": "no_recent_snapshot"}
-        rows = app.runtime.read_all("""SELECT i.* FROM extension_tool_invocations AS i
-            JOIN conversation_batches AS b ON b.batch_id = i.batch_id
-            WHERE i.action = ? AND i.state = 'succeeded' AND b.origin_key = ?
-            ORDER BY i.finished_at DESC, i.created_at DESC LIMIT 8""",
-            (REALITY_SNAPSHOT_ACTION, context.key))
+        rows = self._reality_result_rows(app, context, REALITY_SNAPSHOT_ACTION)
         for row in rows:
             try:
-                result, material = external.snapshot(row, context, observed_at)
+                reader = native_snapshot if row.get("execution_path") == "astrbot_core" else external.snapshot
+                result, material = (reader(external, row, context, observed_at)
+                                    if reader is native_snapshot else reader(row, context, observed_at))
                 if result["state"] != "succeeded" or material is None:
                     continue
                 document = json.loads(material.payload)
@@ -215,6 +217,19 @@ class NativePerceptionWebAPI:
             except (TaskError, ValueError, TypeError, KeyError, AttributeError):
                 continue
         return {"state": "ready", "reason": "no_recent_snapshot"}
+
+    @staticmethod
+    def _reality_result_rows(app, context, action):
+        """Merge original receipts from both reply paths, scoped before reading."""
+        legacy = app.runtime.read_all("""SELECT i.* FROM extension_tool_invocations AS i
+            JOIN conversation_batches AS b ON b.batch_id = i.batch_id
+            WHERE i.action = ? AND i.state = 'succeeded' AND b.origin_key = ?
+            ORDER BY i.finished_at DESC, i.created_at DESC LIMIT 8""", (action, context.key))
+        native = operation_rows(app.runtime, context, (action,), limit=8,
+                                newest_first=True, states=("succeeded",))
+        rows = (*[dict(row) for row in legacy], *native)
+        return sorted(rows, key=lambda row: (row["finished_at"] or row["created_at"],
+                      row["created_at"], row.get("scan_id", 0)), reverse=True)[:8]
 
     @staticmethod
     def _public_camera_observation(value):
@@ -254,14 +269,12 @@ class NativePerceptionWebAPI:
         external = getattr(app, "external", None)
         if external is None:
             return {"state": "ready", "reason": "no_recent_observation"}
-        rows = app.runtime.read_all("""SELECT i.* FROM extension_tool_invocations AS i
-            JOIN conversation_batches AS b ON b.batch_id = i.batch_id
-            WHERE i.action = ? AND i.state = 'succeeded' AND b.origin_key = ?
-            ORDER BY i.finished_at DESC, i.created_at DESC LIMIT 8""",
-            (REALITY_CAMERA_ACTION, context.key))
+        rows = self._reality_result_rows(app, context, REALITY_CAMERA_ACTION)
         for row in rows:
             try:
-                result, material = external.snapshot(row, context, observed_at)
+                reader = native_snapshot if row.get("execution_path") == "astrbot_core" else external.snapshot
+                result, material = (reader(external, row, context, observed_at)
+                                    if reader is native_snapshot else reader(row, context, observed_at))
                 if result["state"] != "succeeded" or material is None:
                     continue
                 document = json.loads(material.payload)
@@ -362,14 +375,25 @@ class NativePerceptionWebAPI:
                 observed_at = controller.now()
                 operator = dashboard_operator(controller.runtime, username, at=observed_at)
                 app, context = session.application, session.profile.target
-                contact = require(ContactManagement(app, context).status(operator))
-                return outcome_response(Outcome.success(read_material_pool(
-                    app.contact_schedule, context, observed_at=observed_at,
+                contact = require(ProactiveContactManagement(app, context).status(operator))
+                schedule = app.contact_schedule
+                events = getattr(schedule, "news_events", None)
+                if events is not None:
+                    try:
+                        events.maintain_role(contact["settings"])
+                    except Exception:
+                        logger.exception("[CompanionV2] 角色共享资讯巡视未能启动")
+                return outcome_response(Outcome.success(read_role_material_pool(
+                    schedule, observed_at=observed_at,
                     settings=contact["settings"])))
         except (TaskError, ConfigurationError) as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
         except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
             return outcome_response(Outcome.failed("perception_request_invalid", "invalid material request"))
+        except Exception:
+            logger.exception("[CompanionV2] 角色共享素材读取失败")
+            return outcome_response(Outcome.failed(
+                "material_pool_unavailable", "role-wide shared materials are temporarily unavailable"))
 
     async def news_diagnostic(self):
         from .web_api import outcome_response

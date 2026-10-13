@@ -23,6 +23,36 @@ _CORE_PATH_INSERTED = activate_plugin_imports(_PLUGIN_ROOT, __name__)
 
 from .astrbot_host.multi_controller import AstrBotMultiController
 from .astrbot_host.conversation_reset import install_native_reset_marker
+from .astrbot_host.core_reply import (
+    CORE_REPLY_CONTEXT_EXTRA,
+    activate_core_reply_delivery_guard,
+    inject_core_reply_prompt,
+    prepare_core_reply_event,
+    restore_core_reply_event,
+)
+from .astrbot_host.core_reply_tools import inject_core_reply_tools
+from .astrbot_host.core_reply_preparation import measure_core_preparation
+from .astrbot_host.core_reply_decision import prepare_core_reply_decision
+from .astrbot_host.native import warm_session_settings
+from .astrbot_host.core_reply_tool_dispatch import observe_core_tool_dispatch_begin, restore_core_tool_dispatch
+from .astrbot_host.core_reply_native_send import inject_core_reply_send_tool
+from .astrbot_host.native_extensions.host_events import (
+    prepare_native_host_request, observe_native_host_response, observe_native_host_result,
+)
+from .astrbot_host.core_reply_segmentation import (
+    activate_core_reply_segmentation, prepare_core_reply_segmentation,
+    prepare_core_reply_streaming_boundary,
+)
+from .astrbot_host.core_reply_tracking import (
+    activate_core_reply_tracking, finish_core_reply_tracking, mark_core_reply_inflight,
+    observe_core_group_participation, prepare_core_reply_tracking,
+)
+from .astrbot_host.core_reply_telemetry import (
+    finish_core_reply_telemetry, observe_core_agent_begin, observe_core_agent_done,
+    observe_core_llm_response, observe_core_reply_delivery, observe_core_tool_finished,
+    observe_core_tool_started, prepare_core_reply_telemetry, observe_core_reply_suppressed,
+)
+from .astrbot_host.calendar_command import parse_calendar_command
 from .astrbot_host.event_routing import (
     COMPANION_INTAKE_PRIORITY, competing_command_handler, suppress_default_reply,
 )
@@ -49,6 +79,27 @@ GROUP_INPUT_PASSTHROUGH_FAILURES = frozenset({
     "host_group_media_unsupported",
     "host_media_unsupported",
 })
+CORE_REPLY_NATIVE_PASSTHROUGH_PREFIXES = (
+    "host_persona_",
+    "host_conversation_",
+    "host_native_lookup_timeout",
+)
+RETRYABLE_HOST_STARTUP_CODES = frozenset({
+    "host_platform_unavailable", "host_account_unavailable", "host_persona_unavailable",
+    "host_persona_window_unbound", "host_conversation_changed", "host_startup_failed",
+    "staging_preflight_failed",
+})
+
+
+def _can_continue_astrbot_core_reply(code):
+    if code in {
+        "host_reply_settings_unavailable", "host_core_reply_prepare_failed",
+        "host_core_reply_capture_failed", "host_not_claimed", "application_not_running",
+        "host_persona_changed", "host_core_reply_conversation_unavailable",
+        "host_session_settings_timeout",
+    }:
+        return True
+    return isinstance(code, str) and code.startswith(CORE_REPLY_NATIVE_PASSTHROUGH_PREFIXES)
 
 
 @register(
@@ -62,6 +113,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         super().__init__(context, config)
         self._imports_retired = False
         self._host_start_task = None
+        self._startup_failure_key = None
+        self._startup_failure_at = 0.0
+        self._session_settings_warm_task = None
         self.config = config if config is not None else {}
         default_data_root = Path(StarTools.get_data_dir(PLUGIN_NAME)).resolve()
         data_root = prepare_storage_root(default_data_root, self.config)
@@ -81,8 +135,8 @@ class PrivateCompanionV2StagingPlugin(Star):
                     config_object.save_config()
                 except Exception:
                     logger.warning("[CompanionV2] 旧单目标设置已在内存迁移，但持久化失败", exc_info=True)
-        # This is the one public product facade. Optional plugins stay data
-        # owners and are observed through their documented extension_api.
+        # One public facade exposes the body and its seven internal modules.
+        # Independent third-party integrations use their documented APIs.
         self.extension_api = UnifiedCompanionExtensionAPI(self.staging)
         try:
             self.staging.register_routes()
@@ -167,6 +221,9 @@ class PrivateCompanionV2StagingPlugin(Star):
                 "staging_target_not_claimed")
 
     async def initialize(self) -> None:
+        if self._session_settings_warm_task is None or self._session_settings_warm_task.done():
+            self._session_settings_warm_task = asyncio.create_task(
+                warm_session_settings(), name="companion-v2-session-settings-warmup")
         if self.staging.settings is None or not self.staging.settings.enabled:
             logger.info("[CompanionV2] 共享宿主已加载，等待账号与人格配置")
             return
@@ -177,45 +234,78 @@ class PrivateCompanionV2StagingPlugin(Star):
         try:
             readiness = self.staging.startup_readiness()
         except Exception as error:
-            logger.warning("[CompanionV2] 保存的运行档暂不能启动 code=%s error_type=%s",
-                           getattr(error, "code", "startup_readiness_failed"), type(error).__name__)
+            self._note_startup_failure("readiness", getattr(error, "code", "startup_readiness_failed"),
+                                       type(error).__name__, str(error))
             return True
         if readiness in ("host_platform_unavailable", "host_account_unavailable"):
             return False
         if readiness is not None:
-            logger.warning("[CompanionV2] 保存的运行档暂不能启动: %s", readiness)
+            self._note_startup_failure("readiness", readiness)
             return True
 
         initialized_profile = False
         if self.staging.session is None:
             loaded = await self.staging.load_existing()
             if loaded.failure is not None:
-                if loaded.failure.code in ("host_platform_unavailable", "host_account_unavailable"):
-                    return False
-                logger.warning("[CompanionV2] 已固定 profile 只读加载失败: %s — %s",
-                               loaded.failure.code, loaded.failure.reason)
-                return True
+                if loaded.failure.code == "host_terminated":
+                    return True
+                retry = self._retry_startup_failure(loaded.failure.code)
+                self._note_startup_failure("load_existing", loaded.failure.code,
+                                           detail=loaded.failure.reason, retrying=retry)
+                return not retry
             if not loaded.unwrap()["loaded"]:
                 # Account/persona mappings are sufficient to create the shared
                 # installation. The old core-window binding was only a first-run bootstrap.
                 initialized = await self.staging.initialize_profile()
                 if initialized.failure is not None:
-                    if initialized.failure.code in ("host_platform_unavailable", "host_account_unavailable"):
-                        return False
-                    logger.warning("[CompanionV2] staging profile 自动初始化失败: %s",
-                                   initialized.failure.code)
-                    return True
+                    if initialized.failure.code == "host_terminated":
+                        return True
+                    retry = self._retry_startup_failure(initialized.failure.code)
+                    self._note_startup_failure("initialize", initialized.failure.code,
+                                               detail=initialized.failure.reason, retrying=retry)
+                    return not retry
                 initialized_profile = True
 
         started = await self.staging.start()
         if started.failure is not None:
-            if started.failure.code in ("host_platform_unavailable", "host_account_unavailable"):
-                return False
-            logger.warning("[CompanionV2] staging profile 自动启动失败: %s", started.failure.code)
-            return True
+            if started.failure.code == "host_terminated":
+                return True
+            retry = self._retry_startup_failure(started.failure.code)
+            self._note_startup_failure("start", started.failure.code,
+                                       detail=started.failure.reason, retrying=retry)
+            return not retry
+        self._startup_failure_key = None
         logger.info("[CompanionV2] staging profile %s并开始接收入站消息",
                     "已自动初始化" if initialized_profile else "已加载")
         return True
+
+    @staticmethod
+    def _retry_startup_failure(code: str) -> bool:
+        return code in RETRYABLE_HOST_STARTUP_CODES or code.startswith("host_native_lookup_timeout")
+
+    def _note_startup_failure(self, stage: str, code: str, error_type: str | None = None,
+                              detail: str | None = None, *, retrying: bool = False) -> None:
+        key = (stage, code, error_type)
+        now = asyncio.get_running_loop().time()
+        previous_key = getattr(self, "_startup_failure_key", None)
+        previous_at = getattr(self, "_startup_failure_at", 0.0)
+        if previous_key == key and now - previous_at < 60.0:
+            return
+        self._startup_failure_key = key
+        self._startup_failure_at = now
+        suffix = "，将自动重试" if retrying else "，请修正配置或重新加载插件"
+        if stage == "load_existing":
+            logger.warning("[CompanionV2] 已固定 profile 加载失败%s code=%s detail=%s",
+                           suffix, code, detail or "unavailable")
+        elif stage == "initialize":
+            logger.warning("[CompanionV2] staging profile 自动初始化失败%s code=%s detail=%s",
+                           suffix, code, detail or "unavailable")
+        elif stage == "start":
+            logger.warning("[CompanionV2] staging profile 自动启动失败%s code=%s detail=%s",
+                           suffix, code, detail or "unavailable")
+        else:
+            logger.warning("[CompanionV2] 保存的运行档暂不能启动 code=%s error_type=%s detail=%s",
+                           code, error_type or "unknown", detail or "unavailable")
 
     def _schedule_host_start(self) -> None:
         if self.staging._terminated:
@@ -246,10 +336,10 @@ class PrivateCompanionV2StagingPlugin(Star):
             if finished:
                 return
             if not warned and loop.time() - started_at >= 30:
-                logger.warning("[CompanionV2] 正在等待配置的 OneBot 账号连接；连接就绪后会自动恢复运行")
+                logger.warning("[CompanionV2] 运行档尚未进入接收状态，恢复任务仍在运行并会自动重试")
                 warned = True
             await asyncio.sleep(delay)
-            delay = min(delay * 1.6, 5.0)
+            delay = min(delay * 1.8, 30.0)
 
     @filter.on_platform_loaded()
     async def on_companion_platform_loaded(self) -> None:
@@ -354,14 +444,14 @@ class PrivateCompanionV2StagingPlugin(Star):
                 suppress_default_reply(event)
             return
         try:
-            mapping = await self.staging.persona_mapping_for_event(event)
+            target = self.staging.target_for_event(event)
         except Exception as error:
-            logger.warning("[CompanionV2] 当前会话角色无法核验，交由 AstrBot 处理 error_type=%s",
+            logger.warning("[CompanionV2] V2 原生路由暂不可用，继续 AstrBot 核心回复 error_type=%s",
                            type(error).__name__)
             return
-        if mapping is None:
+        if target is None:
             return
-        # V2 owns the default reply for this route, not the entire event.
+        # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)
         kind = getattr(getattr(getattr(event, "message_obj", None), "type", None), "value", None)
@@ -371,8 +461,10 @@ class PrivateCompanionV2StagingPlugin(Star):
             try:
                 candidate = await self.staging.group_reply_candidate(event)
                 if candidate.failure is not None:
-                    if candidate.failure.code in GROUP_INPUT_PASSTHROUGH_FAILURES:
-                        logger.info("[CompanionV2] 群消息组件暂不支持，交由 AstrBot 处理 event_ref=%s code=%s",
+                    if (candidate.failure.code in GROUP_INPUT_PASSTHROUGH_FAILURES
+                            or _can_continue_astrbot_core_reply(candidate.failure.code)
+                            or candidate.failure.code == "host_group_preflight_failed"):
+                        logger.info("[CompanionV2] V2 群回复材料暂不可用，继续 AstrBot 核心处理 event_ref=%s code=%s",
                                     event_ref, candidate.failure.code)
                         return
                     suppress_default_reply(event)
@@ -381,70 +473,334 @@ class PrivateCompanionV2StagingPlugin(Star):
                     return
                 group_admission = candidate.unwrap()
             except Exception as error:
-                suppress_default_reply(event)
-                logger.warning("[CompanionV2] 群回复候选检查异常 event_ref=%s error_type=%s",
+                logger.warning("[CompanionV2] 群回复候选检查异常，继续 AstrBot 核心处理 event_ref=%s error_type=%s",
                                event_ref, type(error).__name__)
                 return
             if not group_admission["admitted"]:
                 suppress_default_reply(event)
                 return
-        suppress_default_reply(event)
-        logger.info("[CompanionV2] 接管入站 event_ref=%s channel=%s", event_ref, channel)
+        logger.info("[CompanionV2] 核心回复准入检查 event_ref=%s channel=%s", event_ref, channel)
         try:
             reply_enabled = await self.staging.session_topology.reply_enabled(event)
         except Exception as error:
-            self._record_no_reply(event, "session_reply_check_failed", origin_key=origin_key,
-                                  channel=channel, event_ref=event_ref, turn=event_ref,
-                                  code=type(error).__name__)
-            logger.warning("[CompanionV2] 会话回复开关读取异常 event_ref=%s error_type=%s",
+            reply_enabled = True
+            logger.warning("[CompanionV2] 会话回复开关暂不可读，继续核心授权检查 event_ref=%s error_type=%s",
                            event_ref, type(error).__name__)
-            return
         if not reply_enabled:
+            suppress_default_reply(event)
             self._record_no_reply(event, "session_reply_disabled", origin_key=origin_key,
                                   channel=channel, event_ref=event_ref, turn=event_ref)
             return
-        await self._observe_session(event)
-        refusal = {}
+
+        if channel == "group" and group_admission is not None and not group_admission.get("mentioned"):
+            policy = group_admission.get("participation_policy") or {}
+            reference = group_admission.get("question_reference") or {}
+            logger.info("[CompanionV2] 非@群核心回复候选 event_ref=%s trigger=%s candidate_source=policy "
+                        "question_enabled=%s interjection_enabled=%s question_score=%s question_threshold=%s",
+                        event_ref, group_admission.get("reason") or "role_choice", policy.get("question_enabled"),
+                        policy.get("interjection_enabled"), reference.get("score"), policy.get("question_threshold"))
+
+        if channel == "private" and parse_calendar_command(str(getattr(event, "message_str", "") or "")):
+            suppress_default_reply(event)
+            try:
+                result = await self.staging.receive_core_command(event)
+            except Exception as error:
+                result = None
+                logger.warning("[CompanionV2] 日程命令处理异常 event_ref=%s error_type=%s",
+                               event_ref, type(error).__name__)
+            if result is None or result.failure is not None:
+                reason = result.failure.code if result is not None and result.failure is not None else "calendar_command_failed"
+                self._record_no_reply(event, reason, origin_key=origin_key, channel=channel,
+                                      event_ref=event_ref, stage="command", turn=event_ref)
+            else:
+                logger.info("[CompanionV2] 日程命令由专用流程处理 event_ref=%s", event_ref)
+            return
+
+        # Repeat candidates stay literal even if optional preparation fails.
+        # The optional Laya decision may keep listening, but the main reply
+        # model must never receive a repeat candidate as ordinary conversation.
+        if channel == "group" and group_admission is not None and group_admission.get("reason") == "repeat":
+            suppress_default_reply(event)
         try:
-            result = await self.staging.receive_claimed(
-                event, on_refusal=lambda receipt: refusal.update(receipt=receipt),
-                group_admission=group_admission)
+            admission = await self.staging.prepare_core_reply(
+                event, target, group_admission=group_admission)
         except Exception as error:
-            self._record_no_reply(event, "inbound_processing_failed", origin_key=origin_key,
-                                  channel=channel, event_ref=event_ref, turn=event_ref,
-                                  code=type(error).__name__)
-            logger.error("[CompanionV2] 入站处理异常 event_ref=%s error_type=%s",
+            logger.warning("[CompanionV2] V2 回复材料准备失败，继续 AstrBot 核心回复 event_ref=%s error_type=%s",
                          event_ref, type(error).__name__)
             return
-        if result.failure is not None:
-            refusal_receipt = refusal.get("receipt")
-            if (result.failure.code == "private_access_dialogue_denied" and isinstance(refusal_receipt, dict)
-                    and refusal_receipt.get("state") == "delivered"):
-                logger.info("[CompanionV2] 私聊权限拒绝消息已投递 event_ref=%s",
-                            event_ref)
-            else:
-                reason = ("private_access_refusal_not_sent"
-                          if result.failure.code == "private_access_dialogue_denied"
-                          else result.failure.code)
-                self._record_no_reply(event, reason, origin_key=origin_key, channel=channel,
-                                      event_ref=event_ref, stage="intake", turn=event_ref,
-                                      code=result.failure.code)
-        else:
-            # 受理成功只是开了这一轮：沉默、生成失败与投递失败由 turn 对应的
-            # batch 自己解析（[CompanionV2][reply] stage=... turn=<batch_ref>）。
-            logger.info("[CompanionV2] 入站已受理 event_ref=%s batch_ref=%s",
-                        event_ref, result.unwrap())
+        if admission.failure is not None:
+            failure = admission.failure
+            if _can_continue_astrbot_core_reply(failure.code):
+                logger.warning("[CompanionV2] V2 回复材料暂不可用，继续 AstrBot 核心回复 event_ref=%s code=%s",
+                               event_ref, failure.code)
+                return
+            suppress_default_reply(event)
+            if failure.code == "private_access_dialogue_denied":
+                await self.staging.refuse_core_reply(event)
+            self._record_no_reply(event, failure.code, origin_key=origin_key,
+                                  channel=channel, event_ref=event_ref, stage="admission",
+                                  turn=event_ref, code=failure.code)
+            logger.warning("[CompanionV2] 核心回复未获准 event_ref=%s code=%s",
+                           event_ref, failure.code)
+            return
 
-    async def _observe_session(self, event: AstrMessageEvent) -> None:
+        prepared = dict(admission.unwrap())
+        prepared["event_ref"] = event_ref
+        prepared["origin_key"] = origin_key
+        prepared["channel"] = channel
+        if group_admission is not None:
+            prepared["group_admission"] = dict(group_admission)
+        application = getattr(getattr(self.staging, "session", None), "application", None)
+        decision = await prepare_core_reply_decision(event, prepared, application=application, now=self.staging.now)
+
+        if (channel == "group" and group_admission is not None and group_admission.get("reason") == "repeat"
+                and not decision["suppress_reply"]):
+            suppress_default_reply(event)
+            self._observe_session(event)
+            try:
+                result = await self.staging.receive_group_repeat(event, group_admission, prepared=prepared)
+                if result.failure is not None:
+                    self._record_no_reply(event, result.failure.code, origin_key=origin_key,
+                                          channel=channel, event_ref=event_ref, stage="repeat", turn=event_ref)
+                else:
+                    outcome = result.unwrap()
+                    logger.debug("[CompanionV2] 群复读判定 event_ref=%s action=%s state=%s reason=%s",
+                                 event_ref, outcome.get("action"), outcome.get("state"), outcome.get("reason"))
+            except Exception as error:
+                logger.warning("[CompanionV2] 群复读处理异常 event_ref=%s error_type=%s",
+                               event_ref, type(error).__name__)
+                self._record_no_reply(event, "group_repeat_failed", origin_key=origin_key,
+                                      channel=channel, event_ref=event_ref, stage="repeat", turn=event_ref)
+            finally:
+                self._observe_core_phase(prepared, "completed")
+            return
+
+        async def authorize_core_send(current):
+            return await self.staging.authorize_core_reply(event, target, current)
+
+        def note_core_send_denied(current, error):
+            reason = getattr(error, "code", type(error).__name__)
+            self._record_no_reply(event, "core_reply_send_denied", origin_key=origin_key,
+                                  channel=channel, event_ref=event_ref, stage="delivery",
+                                  turn=event_ref, code=reason)
+            logger.warning("[CompanionV2] 核心回复发送前复核失败 event_ref=%s code=%s",
+                           event_ref, reason)
+
+        def observe_core_send(current, text):
+            observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
+            if observer is not None:
+                observer.output(current, text, state="send_returned")
+
+        def observe_core_delivery(stage):
+            if stage == "finished":
+                finish_core_reply_telemetry(event)
+            else:
+                observe_core_reply_delivery(event, stage)
+
+        async def prepare_core_voice(current, message, authorize, segment_index, segment_count):
+            from .astrbot_host.core_reply_voice import prepare_core_reply_voice_message
+            from .astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
+            session = getattr(self.staging, "session", None)
+            message = await prepare_core_reply_voice_message(
+                event, current, message,
+                renderer=getattr(session, "voice", None),
+                delivery=getattr(session, "voice_delivery", None),
+                authorize=authorize,
+                segment_index=segment_index,
+                segment_count=segment_count,
+            )
+            return prepare_core_reply_outbound_message(
+                event, current, message, segment_index=segment_index)
+
+        prepare_core_reply_event(event, prepared, authorize=authorize_core_send,
+                                 on_denied=note_core_send_denied, on_sent=observe_core_send,
+                                 on_delivery=observe_core_delivery, prepare_send=prepare_core_voice)
+        observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
+        media = getattr(observer, "media", None)
+        if callable(media):
+            try:
+                media(event, prepared)
+            except Exception:
+                pass
+        if channel == "group" and group_admission is not None:
+            application = getattr(getattr(self.staging, "session", None), "application", None)
+            participation = getattr(getattr(application, "tools", None), "group_participation", None)
+            observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
+            if participation is not None:
+                prepare_core_reply_tracking(
+                    event, prepared, admission=participation.admission, now=self.staging.now,
+                    reason=group_admission.get("reason", ""), mentioned=group_admission.get("mentioned", False),
+                    submit=getattr(observer, "submit", None))
+        prepare_core_reply_segmentation(event)
+        self._observe_session(event)
+        if decision["suppress_reply"]:
+            suppress_default_reply(event)
+            action = decision["applied_decision"]["action"]
+            observe_core_group_participation(event, {
+                "mode": "skip", "reason": "Laya 判断本轮行动为 " + action,
+                "act": "", "signature": "", "source": "laya", "decision_action": action})
+            finish_core_reply_tracking(event)
+            observe_core_reply_suppressed(event, prepared, application=application,
+                submit=getattr(observer, "submit", None), now=self.staging.now)
+            self._observe_core_phase(prepared, "completed")
+            self._record_no_reply(event, "laya_" + action, origin_key=origin_key,
+                channel=channel, event_ref=event_ref, stage="decision", turn=prepared.get("turn_id"), expected=False)
+            restore_core_reply_event(event)
+            logger.info("[CompanionV2] Laya 决策跳过主模型 event_ref=%s turn_id=%s action=%s",
+                        event_ref, prepared.get("turn_id"), action)
+            return
+        prepare_core_reply_streaming_boundary(event)
+        event.is_wake = True
+        event.is_at_or_wake_command = True
+        logger.info("[CompanionV2] 交由 AstrBot 核心回复管线 event_ref=%s channel=%s",
+                    event_ref, channel)
+
+    @filter.on_llm_request(priority=250000)
+    async def prepare_companion_core_request(self, event: AstrMessageEvent, req):
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        if not isinstance(state, dict):
+            prepare_native_host_request(self.staging, event, req)
+            return
+        prepared = state.get("prepared")
         try:
-            await self.staging.session_topology.observe(event)
+            with measure_core_preparation(event, "request_authorization", now=self.staging.now):
+                target = self.staging.target_for_event(event)
+                result = await self.staging.authorize_core_reply(event, target, prepared)
+        except Exception as error:
+            result = None
+            code = type(error).__name__
+        else:
+            code = result.failure.code if result.failure is not None else ""
+        if result is None or result.failure is not None:
+            event_ref = prepared.get("event_ref") if isinstance(prepared, dict) else None
+            origin_key = prepared.get("origin_key") if isinstance(prepared, dict) else None
+            channel = prepared.get("channel") if isinstance(prepared, dict) else None
+            self._record_no_reply(event, "core_reply_authorization_changed", origin_key=origin_key,
+                                  channel=channel, event_ref=event_ref, stage="model_request",
+                                  turn=event_ref, code=code or "authorization_denied")
+            event.stop_event()
+            return
+        with measure_core_preparation(event, "prompt_injection", now=self.staging.now):
+            inject_core_reply_prompt(event, req)
+        mark_core_reply_inflight(event)
+        application = getattr(getattr(self.staging, "session", None), "application", None)
+        observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
+        self._observe_core_phase(prepared, "running")
+        if application is not None:
+            try:
+                with measure_core_preparation(event, "tool_injection", now=self.staging.now):
+                    inject_core_reply_tools(event, req, application=application)
+            except Exception as error:
+                logger.warning("[CompanionV2] V2 工具暂不可用，保留 AstrBot 核心工具 error_type=%s",
+                               type(error).__name__)
+        prepare_native_host_request(self.staging, event, req)
+        with measure_core_preparation(event, "send_tool_injection", now=self.staging.now):
+            inject_core_reply_send_tool(event, req, submit=getattr(observer, "submit", None))
+        if application is not None:
+            try:
+                prepare_core_reply_telemetry(event, req, application=application,
+                    submit=getattr(observer, "submit", None), now=self.staging.now)
+            except Exception as error:
+                logger.warning("[CompanionV2] 核心回复统计暂不可用，继续回复 error_type=%s", type(error).__name__)
+        from .astrbot_host.core_reply_presentation import capture_core_reply_tool_names
+        capture_core_reply_tool_names(event, req)
+
+    @filter.on_agent_begin()
+    async def observe_companion_core_agent_begin(self, event: AstrMessageEvent, run_context):
+        observe_core_tool_dispatch_begin(event, run_context)
+        observe_core_agent_begin(event, run_context)
+
+    @filter.on_agent_done()
+    async def observe_companion_core_agent_done(self, event: AstrMessageEvent, run_context, response):
+        restore_core_tool_dispatch(event, run_context)
+        observe_core_agent_done(event, run_context, response)
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        prepared = state.get("prepared") if isinstance(state, dict) else None
+        self._observe_core_phase(prepared, "completed" if getattr(response, "role", None) == "assistant" else "failed")
+        # Empty/error results can end the runner without a final send hook.
+        # A subsequent native delivery reopens the observation phase itself.
+        finish_core_reply_tracking(event, log_completion=False)
+
+    @filter.on_using_llm_tool()
+    async def observe_companion_core_tool_begin(self, event: AstrMessageEvent, tool, tool_args):
+        observe_core_tool_started(event, tool)
+
+    @filter.on_llm_tool_respond()
+    async def observe_companion_core_tool_done(self, event: AstrMessageEvent, tool, tool_args, tool_result):
+        observe_core_tool_finished(event, tool)
+
+    @filter.after_message_sent(priority=1000000)
+    async def observe_companion_core_reply_sent(self, event: AstrMessageEvent):
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        if isinstance(state, dict):
+            if not state.get("delivery_guard_active"):
+                getter = getattr(event, "get_result", None)
+                result = getter() if callable(getter) else None
+                if getattr(getattr(result, "result_content_type", None), "name", None) == "AGENT_RUNNER_ERROR":
+                    self._observe_core_phase(state.get("prepared"), "failed")
+                    restore_core_tool_dispatch(event)
+                    finish_core_reply_tracking(event)
+                    finish_core_reply_telemetry(event, delivery=state)
+                    restore_core_reply_event(event)
+                return
+            prepared = state.get("prepared")
+            event_ref = prepared.get("event_ref") if isinstance(prepared, dict) else "unknown"
+            tracked = finish_core_reply_tracking(event)
+            send_attempted = (tracked["send_attempts"] if tracked is not None else state.get("send_attempts", 0)) > 0
+            send_unknown = (tracked["unknown_sends"] if tracked is not None else state.get("send_unknown", 0)) > 0
+            send_returned = (tracked["send_returns"] if tracked is not None else state.get("send_returns", 0)) > 0
+            send_state = ("denied" if state.get("denial_notified") else "unknown" if send_unknown
+                          else "returned" if send_returned else "failed" if state.get("send_failed") else "not_started")
+            finish_core_reply_telemetry(event, delivery=state)
+            restore_core_reply_event(event)
+            logger.info("[CompanionV2] AstrBot 核心回复阶段结束 event_ref=%s send_attempted=%s send_state=%s",
+                        event_ref, send_attempted, send_state)
+            if (send_state in {"unknown", "not_started"} and isinstance(prepared, dict)
+                    and not state.get("_text_presentation_removed")
+                    and state.get("group_participation", {}).get("mode") != "skip"):
+                self._record_no_reply(
+                    event, "core_reply_delivery_unknown" if send_unknown else "core_reply_no_delivery",
+                    origin_key=prepared.get("origin_key"),
+                    channel=prepared.get("channel"), event_ref=event_ref,
+                    stage="delivery", turn=event_ref)
+
+    @filter.on_decorating_result(priority=-1000000)
+    async def guard_companion_core_delivery(self, event: AstrMessageEvent):
+        activate_core_reply_delivery_guard(event)
+        activate_core_reply_tracking(event)
+        activate_core_reply_segmentation(event)
+
+    def _observe_session(self, event: AstrMessageEvent) -> None:
+        try:
+            self.staging.session_topology.schedule_observe(event)
         except Exception:
             logger.warning("[CompanionV2] 会话目录更新失败", exc_info=True)
 
+    def _observe_core_phase(self, prepared, state):
+        observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
+        phase = getattr(observer, "phase", None)
+        if isinstance(prepared, dict) and callable(phase):
+            try:
+                # phase() only queues background observation, like output().
+                phase(prepared, state)
+            except Exception:
+                pass
+
     @filter.on_llm_response()
     async def observe_companion_model_session(self, event: AstrMessageEvent, response):
+        observe_native_host_response(self.staging, event, response)
+        observe_core_llm_response(event, response)
         if response is not None and getattr(response, "role", None) == "assistant":
-            await self._observe_session(event)
+            state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+            prepared = state.get("prepared") if isinstance(state, dict) else None
+            observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
+            if observer is not None and isinstance(prepared, dict):
+                observer.output(prepared, getattr(response, "completion_text", "") or "")
+            self._observe_session(event)
+
+    @filter.on_decorating_result(priority=-999999)
+    async def observe_companion_native_presentation(self, event: AstrMessageEvent):
+        observe_native_host_result(self.staging, event)
 
     @filter.on_decorating_result(priority=100000)
     async def observe_companion_context_reset(self, event: AstrMessageEvent):
@@ -455,6 +811,14 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.info("[CompanionV2] 窗口临时上下文已清理")
 
     async def terminate(self) -> None:
+        settings_task = getattr(self, "_session_settings_warm_task", None)
+        self._session_settings_warm_task = None
+        if settings_task is not None and not settings_task.done():
+            settings_task.cancel()
+            try:
+                await settings_task
+            except asyncio.CancelledError:
+                pass
         startup_task = getattr(self, "_host_start_task", None)
         self._host_start_task = None
         if startup_task is not None and not startup_task.done():
@@ -469,6 +833,8 @@ class PrivateCompanionV2StagingPlugin(Star):
             self._retire_context_reset_marker = None
         try:
             await self.staging.terminate()
+            from .astrbot_host.laya_client import cancel_laya_warmup
+            await cancel_laya_warmup()
             logger.info("[CompanionV2] 共享宿主已停止" if self.staging.runtime is None
                         else "[CompanionV2] 共享宿主正在收尾")
         finally:

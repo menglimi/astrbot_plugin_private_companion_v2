@@ -57,6 +57,7 @@ GUIDANCE = (
     "把最近这段私聊整理成一段简短的共同经历描述，可以覆盖上一版，不要复述聊天记录。",
     "严格区分说话人：user 行是对方真实说过的事；bot 行是角色当时自己的回复，只能当作当时的状态或语气，",
     "不要写成对方的事实、承诺或共同经历。",
+    "send_returned 只记录 AstrBot 发送调用返回，不证明平台送达或对方收到；不能把发送状态整理成已读或共同经历。",
     "只为确实有延续价值的内容写条目；玩笑、反讽、一时情绪不要写成长期事实，不确定就写得轻一点。",
     "没有新内容时不要产出条目，也不要引用本轮没有提供的行。",
 )
@@ -181,8 +182,21 @@ def recent_dialogue_lines(runtime, access, context, manifest, *, limit=MAX_SOURC
         plain = " ".join(str(row["text"] or "").split())
         if plain:
             lines.append({"speaker": "bot", "at": row["delivered_at"], "text": plain[:MAX_LINE_CHARS]})
+    from companion_v2.conversation.native_observations import rows_for_context, validate_observation
+    for row in rows_for_context(runtime, context, start=start, end=end, limit=limit):
+        try:
+            reference = codec.source(json.loads(row["source_json"]))
+            _, source_kind = validate_observation(runtime, row, context, reference)
+            text = access.source(context, reference).payload
+        except (TaskError, KeyError, TypeError, ValueError):
+            continue
+        plain = " ".join(str(text or "").split())
+        if plain:
+            lines.append({"speaker": "user" if source_kind == "human_message" else "bot",
+                          "at": row["sent_at"] or row["observed_at"], "text": plain[:MAX_LINE_CHARS],
+                          "delivery_state": row["delivery_state"]})
     lines.sort(key=lambda item: (item["at"], item["speaker"]))
-    return tuple(lines[:limit])
+    return tuple(lines[-limit:])
 
 
 def dialogue_episode_material(runtime, settings_reader, access, context, manifest):

@@ -7,10 +7,12 @@ import types
 
 import pytest
 
-from companion_v2.decision.client import LayaClientError, LayaDecisionClient, _LOCAL_ROUTERS
+from companion_v2.decision.client import LayaClientError
+from astrbot_host.laya_client import LayaDecisionClient, _LOCAL_ROUTERS
 from companion_v2.decision.contract import DecisionContractError, deterministic_skip_reason, parse_decision
 from companion_v2.decision.prompt import DECISION_QUESTIONS, build_state
-from companion_v2.decision.store import LayaSettingsStore
+from companion_v2.decision.service import LayaDecisionService
+from companion_v2.decision.store import LayaSettingsStore, LayaSettingsError, role_storage_key
 
 
 def decision_document():
@@ -40,15 +42,71 @@ def test_laya_contract_is_exact_and_numeric_free():
         parse_decision({**document, "wait_seconds": 2})
     with pytest.raises(DecisionContractError):
         parse_decision({**document, "reason_codes": [2]})
+    with pytest.raises(DecisionContractError):
+        parse_decision({**document, "reply_form": "none"})
 
 
 def test_laya_questions_use_official_choice_types_without_numeric_controls():
     assert set(DECISION_QUESTIONS) == set(decision_document()) - {"reason_codes"}
+
+
+def test_local_inference_uses_dedicated_executor_and_keeps_runtime_profile(monkeypatch):
+    import threading
+    from astrbot_host import laya_client
+
+    observed = {}
+
+    def predict(_state, _questions):
+        observed["thread"] = threading.current_thread().name
+        laya_client._LOCAL_PREDICTION_TRACE.value = {
+            "lock_wait_ms": 2,
+            "router_predict_ms": 8,
+            "device": "cuda:0",
+            "cpu_fallback_count": 0,
+            "cpu_fallback_reason_type": None,
+        }
+        return laya_result()
+
+    monkeypatch.setattr(laya_client, "_local_predict", predict)
+    client = LayaDecisionClient(mode="local")
+    result = asyncio.run(client.decide({"message_kind": "text", "user_text": "新问题", "scope_kind": "group"}))
+
+    profile = client.last_trace["processing"]["local_runtime"]
+    assert result.action == "reply"
+    assert observed["thread"].startswith("companion-laya")
+    assert profile["device"] == "cuda:0"
+    assert profile["cpu_fallback_count"] == 0
+    assert profile["lock_wait_ms"] == 2
+    assert profile["router_predict_ms"] == 8
+    assert isinstance(profile["executor_queue_ms"], int)
+    assert isinstance(profile["worker_ms"], int)
+
+
+def test_laya_state_uses_stable_fact_order():
+    first = {"message_kind": "text", "scope_kind": "private", "user_text": "unfinished input"}
+    second = {"user_text": "unfinished input", "message_kind": "text", "scope_kind": "private"}
+
+    assert build_state(first) == build_state(second)
     assert all(question["type"] == "choice" for question in DECISION_QUESTIONS.values())
     assert all("criteria" in question for question in DECISION_QUESTIONS.values())
     assert "seconds" not in str(DECISION_QUESTIONS).lower()
     state = build_state({"message_kind": "text", "user_text": "还没说完，稍等"})
     assert json.loads(state)["facts"]["user_text"] == "还没说完，稍等"
+
+
+def test_model_state_uses_current_message_and_authorized_context_without_routing_ids():
+    from companion_v2.decision.prompt import render_model_state
+    facts = {"scope_kind": "group", "user_text": "继续等我补充", "mentioned": True,
+             "companion_role_id": "persona-binding-id", "bot_account_id": "bot-account-id",
+             "recent_group_messages": [{"speaker_id": "synthetic-member", "text": "此前消息"}],
+             "has_image": True}
+    rendered = render_model_state(build_state(facts))
+    assert json.loads(rendered)["facts"]["user_text"] == "继续等我补充"
+    assert "此消息@了机器人" in rendered
+    assert "此前消息" in rendered
+    assert "附有：图片" in rendered
+    assert "persona-binding-id" not in rendered
+    assert "bot-account-id" not in rendered
 
 
 def test_robot_message_and_quote_are_rule_owned():
@@ -105,35 +163,59 @@ def test_model_page_and_multi_runtime_share_target_storage_key(tmp_path):
     assert page_service.store.path == runtime_store.path
 
 
-def test_multi_runtime_maps_dynamic_private_scope_to_configured_template():
-    from types import SimpleNamespace as NS
-    from astrbot_host.multi_controller import laya_target_id_for_scope
-    from astrbot_host.multi_settings import MultiHostSettings
-    from companion_v2.foundation.refs import ScopeKind
-    from tests.multi_host_support import multi_config
+def test_every_target_and_persona_share_global_settings_and_conflict_detection(tmp_path):
+    private = LayaSettingsStore(tmp_path, "private-a", "role-a")
+    group = LayaSettingsStore(tmp_path, "group-b", "role-b")
+    initial = group.read()
+    saved = private.update(private.read()["revision"], {"enabled": True, "decision_fields": {"action": False},
+                                                     "local_model_path": str(tmp_path / "custom-checkpoint")})
+    assert group.read() == private.read()
+    assert group.read()["configuration_scope"] == "global"
+    assert group.path == tmp_path / "decision" / "settings.json"
+    assert group.raw()["enabled"] is True
+    assert group.raw()["local_model_path"] == str(tmp_path / "custom-checkpoint")
+    assert group.raw()["decision_fields"]["action"] is False
+    with pytest.raises(LayaSettingsError) as error:
+        group.update(initial["revision"], {"enabled": False})
+    assert error.value.code == "laya_config_conflict"
+    group.update(saved["revision"], {"enabled": False})
+    assert private.raw()["enabled"] is False
 
-    explicit = MultiHostSettings.parse(multi_config())
-    exact_scope = NS(kind=ScopeKind.PRIVATE, platform="qq-main", account_id="100", native_scope_id="200")
-    assert laya_target_id_for_scope(explicit, exact_scope) == "first"
 
-    template = {"target_id": "all-private", "platform_id": "qq-main", "account_id": "100",
-                "bot_id": "bot-a", "participant_id": "*"}
-    second = {"target_id": "second", "platform_id": "qq-second", "account_id": "101",
-              "bot_id": "bot-b", "participant_id": "200"}
-    configured = MultiHostSettings.parse(multi_config(targets=[template, second]))
-    dynamic_scope = NS(kind=ScopeKind.PRIVATE, platform="qq-main", account_id="100", native_scope_id="999")
-    assert laya_target_id_for_scope(configured, dynamic_scope) == "all-private"
+def test_legacy_latest_configuration_is_adopted_globally_without_changing_originals(tmp_path):
+    import os
+
+    directory = tmp_path / "decision" / "roles"
+    directory.mkdir(parents=True)
+    old = directory / (role_storage_key("private", "old-role") + ".json")
+    latest = directory / (role_storage_key("group", "new-role") + ".json")
+    old.write_text(json.dumps({"enabled": False, "revision": "old"}), encoding="utf-8")
+    latest.write_text(json.dumps({"enabled": True, "mode": "remote", "endpoint": "http://localhost:8000",
+                                  "api_key": "legacy-secret", "decision_fields": {"action": False}}), encoding="utf-8")
+    os.utime(old, (1, 1))
+    os.utime(latest, (2, 2))
+    originals = (old.read_bytes(), latest.read_bytes())
+    private, group = LayaSettingsStore(tmp_path, "private", "old-role"), LayaSettingsStore(tmp_path, "group", "new-role")
+    assert private.raw() == group.raw()
+    assert group.raw()["api_key"] == "legacy-secret"
+    assert group.raw()["enabled"] is True
+    group.update(group.raw()["revision"], {"enabled": True})
+    assert group.path.is_file()
+    assert private.raw()["decision_fields"]["action"] is False
+    assert (old.read_bytes(), latest.read_bytes()) == originals
 
 
 def test_local_router_adapter_calls_predict_and_maps_choices(monkeypatch):
     _LOCAL_ROUTERS.clear()
+    monkeypatch.setattr("astrbot_host.laya_client.cached_multilingual_model", lambda: None)
     calls = []
 
     class Router:
         def __init__(self, **kwargs):
             assert kwargs == {"default": "multilingual", "max_loaded": 1}
 
-        def predict(self, state, questions):
+        def predict(self, state, questions, *, model):
+            assert model == "multilingual"
             calls.append((state, questions))
             return laya_result()
 
@@ -144,6 +226,37 @@ def test_local_router_adapter_calls_predict_and_maps_choices(monkeypatch):
     assert len(calls) == 1
     assert set(calls[0][1]) == set(DECISION_QUESTIONS)
     assert json.loads(calls[0][0])["facts"]["user_text"] == "你好"
+    assert client.last_trace["request"]["sent"] is True
+    assert client.last_trace["request"]["state"] == calls[0][0]
+    assert json.loads(client.last_trace["response"]["body"]) == laya_result()
+    assert client.last_trace["processing"]["effective_decision"] == decision_document()
+    _LOCAL_ROUTERS.clear()
+
+
+def test_private_scope_normalizes_an_inapplicable_interjection():
+    seen_actions = []
+
+    class Router:
+        def __init__(self, **_kwargs):
+            pass
+
+        def predict(self, _state, questions, *, model):
+            assert model == "multilingual"
+            seen_actions.append(set(questions["action"]["criteria"]))
+            values = {**decision_document(), "action": "interject"}
+            return {"answers": {key: {"type": "choice", "choice": value}
+                                 for key, value in values.items() if key != "reason_codes"}}
+
+    _LOCAL_ROUTERS.clear()
+    client = LayaDecisionClient(mode="local")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, "laya", types.SimpleNamespace(Router=Router))
+        private = asyncio.run(client.decide({"message_kind": "text", "scope_kind": "private", "user_text": "你好"}))
+        group = asyncio.run(client.decide({"message_kind": "text", "scope_kind": "group", "user_text": "你好"}))
+    assert private.action == "reply"
+    assert group.action == "interject"
+    assert "interject" not in seen_actions[0]
+    assert "interject" in seen_actions[1]
     _LOCAL_ROUTERS.clear()
 
 
@@ -184,16 +297,68 @@ def test_remote_adapter_uses_systemone_contract_and_parses_answers(monkeypatch):
         captured["timeout"] = timeout
         return Response()
 
-    monkeypatch.setattr("companion_v2.decision.client.urlopen", open_url)
+    monkeypatch.setattr("astrbot_host.laya_client.urlopen", open_url)
     client = LayaDecisionClient(mode="remote", endpoint="http://127.0.0.1:8000/v1",
                                 api_key="private-key", timeout_seconds=17)
     result = asyncio.run(client.decide({"message_kind": "text", "user_text": "你好"}))
     assert result.document() == decision_document()
     assert captured["url"] == "http://127.0.0.1:8000/v1/systemone"
     assert captured["headers"]["Authorization"] == "Bearer private-key"
-    assert "model" not in captured["body"]
+    assert captured["body"]["model"] == "multilingual"
     assert set(captured["body"]["questions"]) == set(DECISION_QUESTIONS)
     assert captured["timeout"] == 17
+    assert client.last_trace["request"]["sent"] is True
+    assert client.last_trace["request"]["state"] == captured["body"]["state"]
+    assert json.loads(client.last_trace["response"]["body"]) == laya_result()
+    assert client.last_trace["processing"]["contract_decision"] == decision_document()
+
+
+def test_call_log_persists_model_input_raw_answer_and_processed_decision(tmp_path):
+    from companion_v2.storage.runtime import StorageRuntime
+
+    store = LayaSettingsStore(tmp_path / "settings", "target", "role")
+    status = store.read()
+    store.update(status["revision"], {"enabled": True})
+    runtime = StorageRuntime.open(data_root=tmp_path / "runtime", installation_id="laya-diagnostics-test")
+
+    class RecordedClient:
+        last_trace = {
+            "request": {"model": "multilingual", "sent": True, "state": '{"facts":{"user_text":"hello"}}',
+                        "questions": {"action": {"type": "choice"}}},
+            "response": {"format": "json", "body": '{"answers":{"action":{"choice":"wait"}}}',
+                         "value": {"answers": {"action": {"choice": "wait"}}}},
+            "processing": {"stages": [{"name": "inference", "status": "ok"}],
+                           "contract_decision": {**decision_document(), "action": "wait"},
+                           "effective_decision": {**decision_document(), "action": "wait"},
+                           "transformations": []},
+        }
+
+        async def decide(self, _facts, *, enabled_fields=None):
+            return parse_decision({**decision_document(), "action": "wait"})
+
+    try:
+        service = LayaDecisionService(store, runtime=runtime, origin_key="role-key")
+        service._client = lambda _values: RecordedClient()
+        service.set_trace(event_ref="reply-" + "c" * 32, source="conversation")
+        asyncio.run(service.decide({"message_kind": "text", "user_text": "hello"}))
+
+        event = service.recent()["events"][0]
+        assert event["request"]["sent"] is True
+        assert event["request"]["state"] == '{"facts":{"user_text":"hello"}}'
+        assert event["response"]["body"].startswith('{"answers"')
+        assert event["processing"]["effective_decision"]["action"] == "wait"
+        assert event["processing"]["status"] == "ok"
+    finally:
+        runtime.close()
+
+
+def test_call_diagnostic_json_truncation_respects_column_limit():
+    from companion_v2.decision.service import _diagnostic_json
+
+    for value in ('"' * 1000, "\\" * 1000, "\u0000" * 1000):
+        encoded = _diagnostic_json({"body": value}, 256)
+        assert len(encoded) <= 256
+        assert json.loads(encoded)["truncated"] is True
 
 
 def test_remote_adapter_rejects_openai_chat_shape(monkeypatch):
@@ -207,11 +372,95 @@ def test_remote_adapter_rejects_openai_chat_shape(monkeypatch):
         def read(self, _limit):
             return b'{"choices":[]}'
 
-    monkeypatch.setattr("companion_v2.decision.client.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("astrbot_host.laya_client.urlopen", lambda *_args, **_kwargs: Response())
     client = LayaDecisionClient(mode="remote", endpoint="https://example.test")
     with pytest.raises(LayaClientError) as error:
         asyncio.run(client.decide({"message_kind": "text", "user_text": "hello"}))
     assert error.value.code == "laya_response_invalid"
+
+
+def test_disabled_decision_fields_are_omitted_and_fall_back_to_plugin_defaults(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _limit):
+            return json.dumps({"answers": {"reply_style": {"type": "choice", "choice": "playful"}}}).encode()
+
+    def open_url(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return Response()
+
+    monkeypatch.setattr("astrbot_host.laya_client.urlopen", open_url)
+    enabled = {name: False for name in decision_document() if name != "reason_codes"}
+    enabled["reply_style"] = True
+    client = LayaDecisionClient(mode="remote", endpoint="https://example.test")
+    result = asyncio.run(client.decide({"message_kind": "text", "user_text": "hello"}, enabled_fields=enabled))
+
+    assert set(captured["body"]["questions"]) == {"reply_style"}
+    assert json.loads(captured["body"]["state"])["facts"]["user_text"] == "hello"
+    expected = {**decision_document(), "reply_style": "playful", "segment_mode": "natural"}
+    assert result.document() == expected
+
+
+def test_decision_field_settings_and_runtime_events_are_persisted(tmp_path):
+    from companion_v2.storage.runtime import StorageRuntime
+
+    store = LayaSettingsStore(tmp_path / "settings", "target", "role")
+    status = store.read()
+    fields = dict(status["decision_fields"])
+    fields["tool_need"] = False
+    status = store.update(status["revision"], {"decision_fields": fields})
+    assert status["decision_fields"]["tool_need"] is False
+
+    runtime = StorageRuntime.open(data_root=tmp_path / "runtime", installation_id="laya-test")
+    try:
+        service = LayaDecisionService(store, runtime=runtime, origin_key="role-key")
+        service.set_trace(event_ref="reply-" + "a" * 32, source="conversation")
+        result = asyncio.run(service.decide({"message_kind": "text", "user_text": "private message"}))
+        assert result == {"status": "skipped", "reason": "laya_disabled"}
+        event = service.recent()["events"][0]
+        assert event["status"] == "skipped"
+        assert event["reason_code"] == "laya_disabled"
+        assert event["batch_id"] == "reply-" + "a" * 32
+        assert event["enabled_fields"]["tool_need"] is False
+        stored = runtime.read_one("SELECT * FROM laya_decision_events WHERE event_id = ?", (event["event_id"],))
+        assert "private message" not in str(dict(stored))
+    finally:
+        runtime.close()
+
+
+def test_failure_logs_keep_http_status_without_persisting_remote_error_body(tmp_path):
+    from companion_v2.storage.runtime import StorageRuntime
+
+    store = LayaSettingsStore(tmp_path / "settings", "target", "role")
+    status = store.read()
+    store.update(status["revision"], {"enabled": True})
+    runtime = StorageRuntime.open(data_root=tmp_path / "runtime", installation_id="laya-error-test")
+
+    class FailedClient:
+        async def decide(self, _facts, *, enabled_fields=None):
+            raise LayaClientError("laya_http_error", "Laya HTTP 429：用户私密内容被服务端回显")
+
+    try:
+        service = LayaDecisionService(store, runtime=runtime, origin_key="role-key")
+        service._client = lambda _values: FailedClient()
+        service.set_trace(event_ref="reply-" + "b" * 32, source="conversation")
+        with pytest.raises(LayaClientError):
+            asyncio.run(service.decide({"message_kind": "text", "user_text": "用户私密内容"}))
+
+        event = service.recent()["events"][0]
+        assert event["status"] == "failed"
+        assert event["reason_code"] == "laya_http_error"
+        assert event["reason"] == "Laya HTTP 429。"
+        assert "用户私密内容" not in json.dumps(event, ensure_ascii=False)
+    finally:
+        runtime.close()
 
 
 def test_store_reports_runtime_and_keeps_api_key_secret(tmp_path, monkeypatch):
@@ -248,6 +497,38 @@ def test_store_detects_complete_multilingual_hub_snapshot(tmp_path, monkeypatch)
     assert store.read()["model_cache_ready"] is True
 
 
+def test_local_adapter_reuses_complete_download_and_pins_multilingual(tmp_path, monkeypatch):
+    from companion_v2.decision import store as laya_store
+
+    cache = tmp_path / "hub"
+    model = cache / "models--convaiinnovations--laya" / "snapshots" / "cached" / "multilingual"
+    for relative in ("rl_agent_config.json", "model.safetensors", "tokenizer/tokenizer.json", "encoder/config.json"):
+        path = model / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    monkeypatch.setattr(laya_store, "_model_cache_dir", lambda: cache)
+    calls = []
+
+    class Router:
+        def __init__(self, *, models, default, max_loaded):
+            assert models["multilingual"] == str(model)
+            assert default == "multilingual"
+
+        def predict(self, state, questions, *, model):
+            calls.append(model)
+            return laya_result()
+
+    monkeypatch.setitem(sys.modules, "laya", types.SimpleNamespace(Router=Router))
+    _LOCAL_ROUTERS.clear()
+    try:
+        decision = asyncio.run(LayaDecisionClient(mode="local").decide(
+            {"message_kind": "text", "user_text": "你好", "scope_kind": "group"}))
+        assert decision.action == "reply"
+        assert calls == ["multilingual"]
+    finally:
+        _LOCAL_ROUTERS.clear()
+
+
 def test_old_mode_less_laya_settings_migrate_to_multilingual(tmp_path):
     store = LayaSettingsStore(tmp_path, "target", "role")
     store.directory.mkdir(parents=True)
@@ -257,3 +538,104 @@ def test_old_mode_less_laya_settings_migrate_to_multilingual(tmp_path):
     assert values["mode"] == "remote"
     assert values["api_key"] == "old-secret"
     assert store.read()["default_model"] == "multilingual"
+
+
+def test_selected_checkpoint_is_used_instead_of_official_cached_weights(tmp_path, monkeypatch):
+    from astrbot_host import laya_client
+    model = tmp_path / "fine-tuned"
+    for relative in ("rl_agent_config.json", "model.safetensors", "tokenizer/tokenizer.json", "encoder/config.json"):
+        path = model / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    store = LayaSettingsStore(tmp_path / "settings")
+    store.update(store.raw()["revision"], {"enabled": True, "local_model_path": str(model)})
+
+    class Router:
+        def __init__(self, *, models, default, max_loaded):
+            assert models == {"multilingual": str(model)}
+
+        def predict(self, state, questions, *, model):
+            return laya_result({"action": "wait"})
+
+    monkeypatch.setitem(sys.modules, "laya", types.SimpleNamespace(Router=Router))
+    monkeypatch.setattr(laya_client, "cached_multilingual_model", lambda: (_ for _ in ()).throw(AssertionError("unexpected official model")))
+    _LOCAL_ROUTERS.clear()
+    try:
+        service = LayaDecisionService(store, client_factory=LayaDecisionClient)
+        result = asyncio.run(service.decide({"scope_kind": "group", "user_text": "等我补充"}))
+        assert result["decision"]["action"] == "wait"
+        assert service.status()["local_runtime_state"] == "ready"
+        assert store.read()["model_cache_ready"] is True
+    finally:
+        _LOCAL_ROUTERS.clear()
+
+
+def test_missing_selected_checkpoint_has_explicit_error_and_cannot_download_another_model(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "laya", types.SimpleNamespace(Router=lambda **_options: None))
+    _LOCAL_ROUTERS.clear()
+    try:
+        with pytest.raises(LayaClientError) as error:
+            asyncio.run(LayaDecisionClient(local_model_path=str(tmp_path / "missing")).decide(
+                {"scope_kind": "private", "user_text": "你好"}))
+        assert error.value.code == "laya_model_path_invalid"
+    finally:
+        _LOCAL_ROUTERS.clear()
+
+
+def test_background_warmup_is_shared_and_does_not_queue_expired_message_inference(tmp_path, monkeypatch):
+    import threading
+    from astrbot_host import laya_client
+    from companion_v2.storage.runtime import StorageRuntime
+
+    store = LayaSettingsStore(tmp_path / "settings")
+    store.update(store.raw()["revision"], {"enabled": True})
+    runtime = StorageRuntime.open(data_root=tmp_path / "runtime", installation_id="laya-warmup-test")
+    service = LayaDecisionService(store, runtime=runtime, origin_key="synthetic-window", client_factory=LayaDecisionClient)
+    started, release_load = threading.Event(), threading.Event()
+    inference_started, release_inference = threading.Event(), threading.Event()
+    monkeypatch.setattr(laya_client, "_LOCAL_WARMUP_TASKS", {})
+    monkeypatch.setattr(laya_client, "_LOCAL_READY", set())
+    monkeypatch.setattr(laya_client, "cached_multilingual_model", lambda: tmp_path / "installed")
+
+    def load(_path=""):
+        started.set()
+        release_load.wait(3)
+        laya_client._LOCAL_ROUTERS[laya_client.DEFAULT_MODEL] = (None, None)
+        return "cpu"
+
+    def synthetic_inference(state, questions, **_options):
+        inference_started.set()
+        release_inference.wait(3)
+        assert "我这边在测试连接" in state
+        assert "action" in questions
+        return laya_result()
+
+    monkeypatch.setattr(laya_client, "_load_local_model", load)
+    monkeypatch.setattr(laya_client, "_local_predict", synthetic_inference)
+
+    async def run():
+        task = laya_client.start_laya_warmup(store)
+        try:
+            assert laya_client.start_laya_warmup(store) is task
+            await asyncio.to_thread(started.wait, 2)
+            result = await service.decide({"message_kind": "text", "user_text": "你好"})
+            assert result == {"status": "skipped", "reason": "laya_initializing"}
+            assert service.status()["local_runtime_state"] == "warming"
+            row = service.recent()["events"][0]
+            assert row["status"] == "skipped"
+            assert row["reason_code"] == "laya_initializing"
+            release_load.set()
+            await asyncio.to_thread(inference_started.wait, 2)
+            assert service.status()["local_runtime_state"] == "warming"
+        finally:
+            release_load.set()
+            release_inference.set()
+            await asyncio.wait_for(task, 3)
+        assert service.status()["local_runtime_state"] == "ready"
+        assert laya_client.start_laya_warmup(store) is None
+
+    try:
+        asyncio.run(run())
+    finally:
+        runtime.close()
+        laya_client._LOCAL_ROUTERS.clear()

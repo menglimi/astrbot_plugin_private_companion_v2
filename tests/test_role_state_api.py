@@ -13,6 +13,7 @@ from astrbot_host.management_identity import dashboard_operator
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.proactive.external_materials import WeatherSnapshot
+from companion_v2.role_work.state.configuration import GROUP, role_target_for
 from tests.test_management_access import NOW
 from tests.test_role_state import state_data, calendar_data
 from tests.native_adapter_support import completion
@@ -58,8 +59,8 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
 
         before = (await self.request())["data"]
-        configured = await self.request(data={"action":"configure", "operation_key":"weather-enabled",
-            "edit_token":before["edit_token"], "changes":{"planning_weather_enabled":True,
+        configured = await self.request(data={"action":"configure_role", "operation_key":"weather-enabled",
+            "role_edit_token":before["role_edit_token"], "changes":{"planning_weather_enabled":True,
                 "planning_weather_location":json.dumps(location, ensure_ascii=False)}})
         self.assertEqual(configured["status"], "ok", configured)
         current = await self.weather()
@@ -69,13 +70,41 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current["data"]["condition"], "小雨")
         self.assertEqual(current["data"]["temperature_c"], 22.4)
         self.assertEqual([(item.name, item.latitude, item.longitude) for item in calls],
-                         [(location["name"], location["latitude"], location["longitude"])])
+               [(location["name"], location["latitude"], location["longitude"])])
         self.assertEqual((await self.weather())["data"], current["data"])
         self.assertEqual(len(calls), 1, "repeated page reads reuse the observation")
         self.assertEqual((await self.weather(username=None))["data"]["code"], "dashboard_identity_required")
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.native.provider.client.state.calls, [])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_role_defaults_apply_across_windows_and_mixed_settings_save_atomically(self):
+        session = await self.initialize()
+        app = session.application
+        before = (await self.request())["data"]
+        self.assertIsInstance(before.get("role_edit_token"), str)
+
+        role_saved = await self.request(data=dict(action="configure_role", operation_key="role-default",
+            role_edit_token=before["role_edit_token"], changes={"maintenance_minutes":45}))
+        self.assertEqual(role_saved["status"], "ok", role_saved)
+        role_status = (await self.request())["data"]
+        self.assertEqual(role_status["settings"]["maintenance_minutes"], 45)
+        self.assertEqual(app.role_state.settings(session.profile.target)[0]["maintenance_minutes"], 45)
+
+        local_saved = await self.request(data=dict(action="configure_window", operation_key="local-platform-flag",
+            edit_token=role_status["edit_token"],
+            changes={"maintenance_minutes":20, "typing_enabled":True}))
+        self.assertEqual(local_saved["status"], "ok", local_saved)
+        self.assertEqual(app.role_state.settings(session.profile.target)[0]["maintenance_minutes"], 20)
+        self.assertTrue(app.role_state.settings(session.profile.target)[0]["typing_enabled"])
+        role_target = role_target_for(session.profile.target)
+        operator = dashboard_operator(app.runtime, "admin", at=NOW)
+        role_snapshot = app.configuration.read(operator, target=role_target, group_id=GROUP,
+            observed_at=NOW).unwrap()
+        self.assertEqual(role_snapshot.values[GROUP + ".maintenance_minutes"], 45)
+        self.assertTrue((await self.request(data={"action":"configure_window", "operation_key":"local-platform-flag",
+            "edit_token":role_status["edit_token"],
+            "changes":{"maintenance_minutes":20, "typing_enabled":True}}))["data"]["replayed"])
 
     async def test_configuration_and_human_edit_with_cas_and_idempotency(self):
         session = await self.initialize()
@@ -87,10 +116,13 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["data"]["sleep_schedule"]["owner"]["role_id"], self.target.role_binding.role.subject_id)
         self.assertFalse(status["data"]["sleep_schedule"]["enabled"])
         body = dict(action="configure", operation_key="enable", edit_token=status["data"]["edit_token"],
+                    role_edit_token=status["data"]["role_edit_token"],
                     changes={"enabled": True, "calendar_enabled": True, "typing_enabled": True})
         changed = await self.request(data=body)
         self.assertEqual(changed["status"], "ok", changed)
-        self.assertTrue((await self.request(data=body))["data"]["replayed"])
+        replayed = await self.request(data=body)
+        self.assertEqual(replayed["status"], "ok", replayed)
+        self.assertTrue(replayed["data"]["replayed"])
         diagnostic = (await self.request())["data"]["presentation_diagnostics"]["typing"]
         self.assertEqual((diagnostic["state"], diagnostic["reason"]), ("paused", "host_not_running"))
         current = (await self.request())["data"]["state"]
@@ -146,7 +178,8 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request())["data"]["code"], "staging_not_initialized")
         await self.initialize()
         before = (await self.request())["data"]
-        body = dict(action="configure", operation_key="enable", edit_token=before["edit_token"], changes={"enabled": True})
+        body = dict(action="configure", operation_key="enable", edit_token=before["edit_token"],
+                    role_edit_token=before["role_edit_token"], changes={"enabled": True})
         for extra in ({"context": {}}, {"operator": "admin"}, {"role_id": "someone"}):
             self.assertEqual((await self.request(data=body | extra))["data"]["code"], "state_command_invalid")
         for raw in (b'[]', b'\xff', b'{"action":"maintain","action":"configure"}', b'{"action":[]}'):
@@ -167,6 +200,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.native.provider.client.state.behavior = respond
         status = (await self.request())["data"]
         self.assertEqual((await self.request(data=dict(action="configure", operation_key="enabled",
+            role_edit_token=status["role_edit_token"],
             edit_token=status["edit_token"], changes={"enabled": True, "typing_enabled": True, "presence_enabled": True})))["status"], "ok")
         started = await self.controller.start()
         self.assertTrue(started.is_success, started.failure)
@@ -208,6 +242,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         status = (await self.request())["data"]
         self.assertEqual(status["settings"]["cycle_initialization"], "natural")
         configured = await self.request(data=dict(action="configure", operation_key="initialize",
+            role_edit_token=status["role_edit_token"],
             edit_token=status["edit_token"], changes={"enabled": True, "cycle_enabled": True,
                 "cycle_initialization": "unknown", "cycle_discomfort_enabled": True}))
         self.assertEqual(configured["status"], "ok", configured)
@@ -238,6 +273,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         before = (await self.request())["data"]
         self.assertFalse(before["settings"]["cycle_variation_enabled"])
         configured = await self.request(data=dict(action="configure", operation_key="vary",
+            role_edit_token=before["role_edit_token"],
             edit_token=before["edit_token"], changes={"enabled": True, "cycle_enabled": True,
                 "cycle_initialization": "first_day", "cycle_variation_enabled": True}))
         self.assertEqual(configured["status"], "ok", configured)
@@ -256,6 +292,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
             edit_token=active["edit_token"], changes={"cycle_variation_enabled": "true"}))
         self.assertEqual(invalid["data"]["code"], "state_configuration_invalid")
         disabled = await self.request(data=dict(action="configure", operation_key="fixed-next-round",
+            role_edit_token=active["role_edit_token"],
             edit_token=active["edit_token"], changes={"cycle_variation_enabled": False}))
         self.assertEqual(disabled["status"], "ok", disabled)
         current = (await self.request())["data"]["state"]
@@ -274,6 +311,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         session = await self.initialize()
         before = (await self.request())["data"]
         configured = await self.request(data=dict(action="configure", operation_key="cycle-settings",
+            role_edit_token=before["role_edit_token"],
             edit_token=before["edit_token"], changes={"enabled": True, "cycle_enabled": True,
                 "cycle_mode": "six_phase", "cycle_menstrual_days": 4, "cycle_discomfort_enabled": True,
                 "cycle_expression_prompt": "自然表达，不反复播报。"}))
@@ -291,6 +329,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(timeline["discomfort_enabled"])
         self.assertEqual(timeline["expression_prompt"], "自然表达，不反复播报。")
         disabled = await self.request(data=dict(action="configure", operation_key="cycle-off",
+            role_edit_token=result["role_edit_token"],
             edit_token=result["edit_token"], changes={"cycle_enabled": False}))
         self.assertEqual(disabled["status"], "ok", disabled)
         self.assertNotIn("cycle_timeline", (await self.request())["data"]["state"])
@@ -302,6 +341,7 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         await self.initialize()
         before = (await self.request())["data"]
         configured = await self.request(data=dict(action="configure", operation_key="enable-guarded-cycle",
+            role_edit_token=before["role_edit_token"],
             edit_token=before["edit_token"], changes={"enabled": True, "cycle_enabled": True}))
         self.assertEqual(configured["status"], "ok", configured)
         before = (await self.request())["data"]
@@ -314,12 +354,13 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
             view_token=before["state"]["view_token"], settings_token=before["cycle_settings_token"],
             data={"applicability": "applicable", "day": 4})
         local = await self.request(data=dict(action="configure", operation_key="unrelated-local-settings",
-            edit_token=before["edit_token"], changes={"typing_refresh_seconds": 5, "maintenance_minutes": 45}))
+            edit_token=before["edit_token"], role_edit_token=before["role_edit_token"],
+            changes={"typing_refresh_seconds": 5, "maintenance_minutes": 45}))
         self.assertEqual(local["status"], "ok", local)
         before = (await self.request())["data"]
         self.assertEqual(before["cycle_settings_token"], command["settings_token"])
-        changed = await self.request(data=dict(action="configure", operation_key="concurrent-cycle-length",
-            edit_token=before["edit_token"], changes={"cycle_menstrual_days": 6}))
+        changed = await self.request(data=dict(action="configure_role", operation_key="concurrent-cycle-length",
+            role_edit_token=before["role_edit_token"], changes={"cycle_menstrual_days": 6}))
         self.assertEqual(changed["status"], "ok", changed)
         denied = await self.request(data=command)
         self.assertEqual(denied["data"]["code"], "role_cycle_settings_conflict", denied)
@@ -333,8 +374,8 @@ class StateAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current["state"]["cycle_timeline"]["cycle_day"], 4)
         # Later settings can hide the original feelings without changing the
         # parameters used to recover the already-completed calibration receipt.
-        changed = await self.request(data=dict(action="configure", operation_key="hide-hunger-after-alignment",
-            edit_token=current["edit_token"], changes={"hunger_enabled": False, "cycle_timezone": "UTC"}))
+        changed = await self.request(data=dict(action="configure_role", operation_key="hide-hunger-after-alignment",
+            role_edit_token=current["role_edit_token"], changes={"hunger_enabled": False, "cycle_timezone": "UTC"}))
         self.assertEqual(changed["status"], "ok", changed)
         replayed = await self.request(data=command)
         self.assertEqual(replayed["status"], "ok", replayed)

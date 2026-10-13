@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
 import json
 import unittest
 
@@ -149,6 +150,17 @@ class ModelGatewayTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
         plan = router.resolve(self.model_run(), self.request())
         self.assertEqual([provider.binding.provider for provider in plan.providers], ["fallback", "primary"])
 
+    async def test_inherited_role_provider_is_not_replaced_by_host_conversation_model(self):
+        role = ConfigTarget(self.context.scope.installation_id, ConfigLayer.ROLE,
+                            self.context.role_binding.role, bot_id=self.context.scope.bot_id)
+        self.patch_model(target=role, provider="fallback", fallback="primary")
+        self.router.default_provider_resolver = lambda context, profile: "primary"
+
+        plan = self.router.resolve(self.model_run(), self.request())
+
+        self.assertEqual([provider.binding.provider for provider in plan.providers], ["fallback", "primary"])
+        self.assertEqual(plan.audit["fields"]["model.fixture.read.provider"]["source"]["layer"], "role")
+
     async def test_actual_local_call_keeps_original_persona_materials_and_prompt_provenance(self):
         run = self.model_run()
         request = self.request()
@@ -169,6 +181,31 @@ class ModelGatewayTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
         encoded = json.dumps(projection)
         for private in ("private draft", "private material", "Original persona instruction", "Task supplement"):
             self.assertNotIn(private, encoded)
+
+    async def test_configured_refusal_term_retries_the_task_fallback(self):
+        self.patch_model(fallback_on_refusal=True, refusal_terms="denied by policy\nrequest blocked")
+        self.responses["primary"] = ProviderResponse(
+            "generated", ModelDraft("This request was denied by policy.", ()),
+            Amount(12, 30), "primary:matched-refusal")
+
+        completion = await self.gateway.generate(self.model_run(), self.request())
+
+        self.assertEqual(completion.draft.text, "private draft")
+        self.assertEqual([name for name, _ in self.called], ["primary", "fallback"])
+        observed = self.gateway.observe(self.context, "task-1").unwrap()
+        self.assertEqual(observed["calls"][0]["failure"]["code"], ModelFailure.REFUSAL.value)
+        self.assertNotIn("denied by policy", json.dumps(observed["plan"]))
+
+    async def test_configured_refusal_terms_do_not_intercept_when_disabled(self):
+        self.patch_model(refusal_terms="cannot help with that")
+        self.responses["primary"] = ProviderResponse(
+            "generated", ModelDraft("I cannot help with that, but here is context.", ()),
+            Amount(12, 30), "primary:normal-draft")
+
+        completion = await self.gateway.generate(self.model_run(), self.request())
+
+        self.assertEqual(completion.draft.text, "I cannot help with that, but here is context.")
+        self.assertEqual([name for name, _ in self.called], ["primary"])
 
     async def test_provider_cache_receipt_details_survive_settlement_and_observation(self):
         usage = Amount(15, 40, input_tokens=12, cached_input_tokens=5,
@@ -423,6 +460,25 @@ class ModelGatewayTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.code, "model_budget_exhausted")
         await self.gateway.generate(self.model_run(), self.request())
         self.assertEqual(len(self.called), 2)
+
+    async def test_budget_wait_survives_ledger_recreation_and_clears_after_a_receipt_or_new_day(self):
+        self.responses["primary"] = ProviderResponse("generated", ModelDraft("usage missing", ()))
+        first = self.model_run("held-background", kind="fixture.background")
+        completion = await self.gateway.generate(first, self.request())
+        self.tasks.finish(first.claim, TaskResult("succeeded")).unwrap()
+        with self.assertRaises(TaskError) as error:
+            await self.gateway.generate(self.model_run("deferred-background", kind="fixture.background"), self.request())
+        self.assertEqual(error.exception.code, "model_budget_exhausted")
+        ledger = BudgetLedger(self.runtime, self.budget_policy)
+        wait = ledger.background_deferral(self.context, "fixture.background", at=self.clock.now())
+        self.assertEqual(wait["state"], "deferred")
+        self.assertEqual(len(self.called), 1)
+        self.assertIsNone(ledger.background_deferral(self.context, "fixture.read", at=self.clock.now()))
+        self.assertIsNone(ledger.background_deferral(self.context, "fixture.background",
+                                                    at=self.clock.now() + timedelta(days=1)))
+        ledger.reconcile_usage(completion.call_id, self.providers[0].binding, Amount(0, 0),
+                               receipt_ref="provider-confirmed-no-charge", observed_at=self.clock.now())
+        self.assertIsNone(ledger.background_deferral(self.context, "fixture.background", at=self.clock.now()))
 
     async def test_diagnostic_projection_tracks_model_records_and_observes_usage_unknown(self):
         run = self.model_run()

@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from companion_v2.foundation.refs import OperationRef, ScopeKind, ScopeRef, VersionRef
 from companion_v2.storage.models import OperationState
@@ -14,7 +15,7 @@ from companion_v2.storage.repositories import (
     NamespaceRepository,
     OperationRepository,
 )
-from companion_v2.storage.runtime import StorageOpenError, StoragePathError, StorageRuntime
+from companion_v2.storage.runtime import SCHEMA_VERSION, StorageOpenError, StoragePathError, StorageRuntime
 
 
 NOW = datetime(2026, 9, 21, 0, 0, tzinfo=timezone.utc)
@@ -41,6 +42,64 @@ def operation() -> OperationRef:
 
 
 class StorageRuntimeTests(unittest.TestCase):
+    def test_wal_checkpoints_run_outside_commits_without_weakening_durability(self) -> None:
+        with TemporaryDirectory(prefix="companion-v2-storage-") as temporary:
+            runtime = StorageRuntime.open(data_root=Path(temporary) / "v2-data", installation_id=INSTALLATION_ID)
+            try:
+                self.assertEqual(runtime.read_one("PRAGMA wal_autocheckpoint", ())[0], 0)
+                self.assertEqual(runtime.read_one("PRAGMA synchronous", ())[0], 2)
+                result = runtime.checkpoint_passive()
+                self.assertEqual(len(result), 3)
+                self.assertGreaterEqual(result[1], result[2])
+            finally:
+                runtime.close()
+
+    def test_current_schema_reopen_skips_full_integrity_scan(self) -> None:
+        with TemporaryDirectory(prefix="companion-v2-storage-") as temporary:
+            root = Path(temporary) / "v2-data"
+            runtime = StorageRuntime.open(data_root=root, installation_id=INSTALLATION_ID)
+            runtime.close()
+
+            with patch("companion_v2.storage.runtime._validate_integrity") as integrity_check:
+                reopened = StorageRuntime.open(data_root=root, installation_id=INSTALLATION_ID)
+            try:
+                integrity_check.assert_not_called()
+                self.assertEqual(reopened.read_one(
+                    "SELECT value FROM runtime_metadata WHERE key = ?", ("schema_version",))["value"],
+                    SCHEMA_VERSION)
+            finally:
+                reopened.close()
+
+    def test_slow_sqlite_diagnostics_include_safe_timing_fields(self) -> None:
+        with TemporaryDirectory(prefix="companion-v2-storage-") as temporary:
+            runtime = StorageRuntime.open(data_root=Path(temporary) / "v2-data", installation_id=INSTALLATION_ID)
+            runtime.SLOW_OPERATION_SECONDS = 0
+            try:
+                with self.assertLogs("companion_v2.storage.runtime", level="WARNING") as captured:
+                    runtime.read_one("SELECT 1", ())
+                message = captured.output[0]
+                self.assertIn("operation=read_one", message)
+                self.assertIn("lock_wait_ms=", message)
+                self.assertIn("caller=test_storage_runtime.py:", message)
+                self.assertNotIn("SELECT 1", message)
+
+                with self.assertLogs("companion_v2.storage.runtime", level="WARNING") as captured:
+                    with runtime.read_snapshot():
+                        runtime.read_one("SELECT 1", ())
+                self.assertEqual(len(captured.output), 1)
+                self.assertIn("operation=read_one", captured.output[0])
+
+                with self.assertLogs("companion_v2.storage.runtime", level="WARNING") as captured:
+                    with runtime.transaction():
+                        pass
+                self.assertIn("caller=test_storage_runtime.py:", captured.output[0])
+                self.assertIn("begin_ms=", captured.output[0])
+                self.assertIn("body_ms=", captured.output[0])
+                self.assertIn("commit_ms=", captured.output[0])
+            finally:
+                runtime.SLOW_OPERATION_SECONDS = 1.0
+                runtime.close()
+
     def test_namespace_operation_outbox_and_inbox_survive_a_restart(self) -> None:
         with TemporaryDirectory(prefix="companion-v2-storage-") as temporary:
             root = Path(temporary) / "v2-data"

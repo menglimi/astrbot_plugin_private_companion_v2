@@ -48,10 +48,11 @@ class PersonaCraftMigrationTests(unittest.TestCase):
                                (schema.SCHEMA_VERSION_V44,))
             connection.commit()
 
-    def test_a_fresh_root_lands_on_v45_with_the_draft_table_and_triggers(self):
+    def test_a_fresh_root_includes_the_v45_draft_table_and_triggers(self):
         self.open_runtime()
-        self.assertEqual(schema.SCHEMA_VERSION, schema.SCHEMA_VERSION_V45)
-        self.assertEqual(schema.migration_count(), 44)
+        self.assertEqual(self.query("SELECT value FROM runtime_metadata WHERE key='schema_version'")[0][0],
+                         schema.SCHEMA_VERSION)
+        self.assertGreaterEqual(schema.migration_count(), 44)
         table = self.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'persona_draft_versions'")
         self.assertEqual(len(table), 1)
         triggers = {row[0] for row in self.query(
@@ -66,11 +67,10 @@ class PersonaCraftMigrationTests(unittest.TestCase):
         self.assertEqual(recorded, schema.migration_count())
         # 迁移数必须真的比 v44 时多：只断言「等于派生值」在没加迁移时也成立。
         # v44 时的迁移数是 43（V1→V2 … V43→V44），加了 V44→V45 之后是 44。
-        earlier = len([name for name in vars(schema)
-                       if name.startswith("MIGRATION_") and name.endswith("_ID")
-                       and name != "MIGRATION_V44_TO_V45_ID"])
+        earlier = sum(int(row["to_version"].rsplit(".v", 1)[1]) <= 44
+                      for row in self.query("SELECT to_version FROM schema_migrations"))
         self.assertEqual(earlier, 43)
-        self.assertEqual(schema.migration_count(), earlier + 1)
+        self.assertGreaterEqual(schema.migration_count(), earlier + 1)
         self.assertGreaterEqual(recorded, 44)
         row = self.query("SELECT from_version, to_version, fingerprint FROM schema_migrations "
                          "WHERE migration_id = ?", (schema.MIGRATION_V44_TO_V45_ID,))
@@ -94,7 +94,7 @@ class PersonaCraftMigrationTests(unittest.TestCase):
 
         upgraded = self.open_runtime()
         self.assertEqual(upgraded.read_one(
-            "SELECT value FROM runtime_metadata WHERE key = 'schema_version'", ())["value"], schema.SCHEMA_VERSION_V45)
+            "SELECT value FROM runtime_metadata WHERE key = 'schema_version'", ())["value"], schema.SCHEMA_VERSION)
         kept = self.query("SELECT title, state FROM reading_archive_entries WHERE entry_id = 'entry-1'")
         self.assertEqual([(row[0], row[1]) for row in kept], [("旧书架上的书", "available")])
         self.assertEqual(len(self.query("SELECT 1 FROM schema_migrations WHERE migration_id = ?",

@@ -17,7 +17,7 @@ class CalendarTools:
         self.calendar, self.messages = calendar, messages
         self.sources = GrowthToolSources(messages)
         self.catalog = (
-            ToolSpec("calendar.query", "查看当前私聊日历；时间是计划，不是已发生经历。", encode({"type": "object",
+            ToolSpec("calendar.query", "查看当前角色日历；时间是计划，不是已发生经历。", encode({"type": "object",
                 "properties": {"after_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}},
                 "additionalProperties": False})),
             ToolSpec("calendar.command", "新增、修改、取消计划或提议约定，设置期次例外或提醒；不替用户确认约定。", encode({
@@ -40,7 +40,8 @@ class CalendarTools:
         return tuple(result)
 
     def execute(self, context, batch_id, call_id, action, arguments):
-        self.messages.owned(context, batch_id)
+        from companion_v2.conversation.native_tool_sources import validate_tool_turn
+        validate_tool_turn(self.messages, context, batch_id)
         if action == "calendar.query":
             if set(arguments) - {"after_id", "limit"} or not 1 <= arguments.get("limit", 20) <= 20:
                 raise ValueError("invalid calendar query")

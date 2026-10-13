@@ -10,7 +10,7 @@ window.CompanionSelfReviewPage = (() => {
     relationship_required:"当前角色还没有可用的复盘权限。",
     self_review_query_invalid:"复盘列表条件无效，请刷新后重试。",
     self_review_command_invalid:"复盘操作未被接受，请刷新后重试。",
-    self_review_item_unavailable:"这条复盘记录已不在当前角色范围内。",
+    self_review_item_unavailable:"这条复盘记录的来源已不可用。",
     self_review_view_stale:"复盘内容已有变化，请刷新后重新核对。",
     self_review_evidence_changed:"原始依据已变化或撤回，不能继续采纳。",
     self_review_expired:"这条短期建议已过期。",
@@ -107,7 +107,7 @@ window.CompanionSelfReviewPage = (() => {
     const expired = item.expires_at && Date.parse(item.expires_at) <= Date.now();
     return `<article class="sr-item">
       <header class="sr-item-head"><span class="sr-kind">${e(KIND[item.kind] || "复盘建议")}</span>
-        <span class="sr-source">${e(item._sourceLabel || "角色工作范围")}</span>
+        <span class="sr-source">记录归属 · ${e(item._sourceLabel || "数据来源")}</span>
         <time datetime="${e(item.created_at || "")}">${e(when(item.created_at))}</time>
         ${confidence === null ? "" : `<span class="sr-confidence">置信度 ${confidence}%</span>`}
         ${expired ? `<span class="sr-expired">已过期</span>` : ""}</header>
@@ -125,24 +125,24 @@ window.CompanionSelfReviewPage = (() => {
     const policy=data.policy||{};
     const duration=seconds=>Number.isFinite(seconds)?seconds%3600===0?`${seconds/3600} 小时`:seconds%60===0?`${seconds/60} 分钟`:`${seconds} 秒`:"—";
     const metrics=[["自动应用",data.items.filter(item=>item.automatic&&!item.unavailable_reason).length,"条"],
-      ["生效中",valid.length,"条"],["复盘窗口",Number.isFinite(policy.window_hours)?`${policy.window_hours} 小时`:"—",""],
-      ["无可复盘时",duration(policy.empty_retry_seconds),"后重查"]];
+      ["生效中",valid.length,"条"],["复盘周期",Number.isFinite(policy.window_hours)?`${policy.window_hours} 小时`:"—",""],
+      ["空结果重查",duration(policy.empty_retry_seconds),"后重查"]];
     const mechanisms=[
-      ["复盘窗口",Number.isFinite(policy.window_hours)?`${policy.window_hours} 小时`:"—"],
+      ["复盘周期",Number.isFinite(policy.window_hours)?`${policy.window_hours} 小时`:"—"],
       ["证据门槛",Number.isInteger(policy.minimum_evidence)?`至少 ${policy.minimum_evidence} 条`:"—"],
-      ["无可复盘窗口",duration(policy.empty_retry_seconds)+" 后重查"],
+      ["空结果重查",duration(policy.empty_retry_seconds)+" 后重查"],
       ["指导类型","下次尝试 · 保持 · 询问 · 无需调整"],
       ["生效方式","低风险建议自动应用；询问项进入审阅中心"],
     ];
     const active=valid.length?`<div class="sr-list">${valid.map(card).join("")}</div>`:`<div class="sr-empty">${data.loading?"正在读取…":"暂无生效中的指导"}</div>`;
     const stopped=data.stopped.length?`<section class="sr-stopped"><h3>已停止注入</h3><div class="sr-list">${data.stopped.map(card).join("")}</div></section>`:"";
-    root.innerHTML=`<div class="sr-toolbar"><span>${data.sources.length} 个角色范围${data.loading?" · 正在读取":""}</span>
+    root.innerHTML=`<div class="sr-toolbar"><span>${data.sources.length} 个记录归属${data.loading?" · 正在读取":""}</span>
       <button class="lh-refresh" type="button" data-review-refresh aria-label="重新读取" title="重新读取" ${data.loading||data.writing?"disabled":""}><i data-lucide="refresh-cw"></i></button></div>
       ${data.notice?`<p class="sr-status${data.error?" is-error":""}" role="status" aria-live="polite">${e(data.notice)}</p>`:""}
       ${data.sources.length?`<section class="sr-kpis" aria-label="复盘状态">${metrics.map(([label,value,unit])=>`<article><span>${label}</span><strong>${e(value)}${unit&&typeof value==="number"?` ${unit}`:""}</strong></article>`).join("")}</section>
         <section class="sr-mechanism"><header><h2>复盘运行机制</h2><span>${data.loading?"":"已连接"}</span></header><div>${mechanisms.map(([label,value])=>`<article><strong>${label}</strong><span>${e(value)}</span></article>`).join("")}</div></section>
         <section class="sr-effective"><header><h2>生效中的自我指导</h2><span>${valid.length} 条</span></header>${active}</section>${stopped}`
-        :`<div class="sr-empty">暂无可读取的角色范围</div>`}
+        :`<div class="sr-empty">暂无复盘记录</div>`}
       ${data.error&&!data.sources.length?`<div class="sr-empty">${e(data.notice)}</div>`:""}
       ${data.sources.some(source=>source.next)?`<div class="sr-more"><button class="button small" type="button" data-review-more ${data.loading?"disabled":""}>加载更多</button></div>`:""}`;
     window.lucide?.createIcons({nodes:root.querySelectorAll("[data-lucide]")});
@@ -150,7 +150,7 @@ window.CompanionSelfReviewPage = (() => {
   let loadGeneration = 0;
   async function load({append = false, force = false} = {}) {
     if (data.loading && !force) return;
-    if (!data.sources.length) { note("没有可读取的复盘范围。", true); render(); return; }
+    if (!data.sources.length) { note("暂无可读取的复盘记录。", true); render(); return; }
     const ticket = generation;
     const query = ++loadGeneration;
     data.loading = true;
@@ -208,7 +208,7 @@ window.CompanionSelfReviewPage = (() => {
     data.expired = append ? data.expired + expired : expired;
     data.sourceErrors = failures;
     if (failures.length) note(succeeded
-      ? `部分范围读取失败（${failures.length}/${targets.length}）；已显示其余角色的复盘。`
+      ? `部分记录归属暂不可读（${failures.length}/${targets.length}）；已显示其余记录。`
       : `复盘记录暂时无法读取：${failures[0]}`, true);
     data.loading = false;
     render();

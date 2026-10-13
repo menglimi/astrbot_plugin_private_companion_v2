@@ -47,7 +47,7 @@ class AstrBotAnimationHostTests(unittest.IsolatedAsyncioTestCase):
         event.message_obj.message = [Plain("看看这个动画"), Image.fromBytes(animation_bytes(kind, count=count))]
         return event
 
-    async def test_installed_image_components_expand_three_animation_formats_in_preview(self):
+    async def test_installed_image_components_expand_three_animation_formats_in_delivery(self):
         await self.start_host()
         for kind in ("GIF", "PNG", "WEBP"):
             with self.subTest(kind=kind):
@@ -55,14 +55,15 @@ class AstrBotAnimationHostTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(self.controller.claims(event))
                 batch = (await self.controller.receive_claimed(event)).unwrap()
                 await wait_for_batch(self.controller.session, batch)
-                preview = (await self.controller.preview(batch)).unwrap()
-                self.assertFalse(preview["sent"])
-                self.assertEqual(preview["parts"][0]["text"], "我在这里。")
+                report = (await self.controller.inspect(batch)).unwrap()
+                self.assertTrue(report["confirmed_delivery"])
+                self.assertEqual(report["delivery_receipts"][0]["state"], "delivered")
                 content = self.native.provider.client.state.calls[-1][0]["messages"][2]["content"]
                 urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
                 self.assertEqual(len(urls), 3)
                 self.assertTrue(all(url.startswith("data:image/png;base64,") for url in urls))
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assertEqual([action for action, _ in self.native.platform.client._api._wsr_api.calls],
+                         ["send_private_msg"] * 3)
 
     async def test_installed_provider_keeps_sampled_frames_and_coverage_metadata(self):
         await self.start_host()
@@ -73,7 +74,7 @@ class AstrBotAnimationHostTests(unittest.IsolatedAsyncioTestCase):
         wire = build_wire(ModelEnvelope(request, "本轮原任务", 100, "fixture"))
         self.assertEqual(wire.image_count, 4)
         native = object.__new__(ProviderOpenAIOfficial)
-        native.provider_config = {}
+        native.provider_config = {"id": "fixture", "type": "openai_chat_completion", "model": "fixture"}
         native.model_name = "fixture"
         native.client = NS(base_url=NS(host="fixture.invalid"))
         native._materialize_context_image_parts = AsyncMock(side_effect=lambda values: deepcopy(values))

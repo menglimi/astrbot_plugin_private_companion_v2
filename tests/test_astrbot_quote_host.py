@@ -44,13 +44,13 @@ class AstrBotQuoteHostTests(unittest.IsolatedAsyncioTestCase):
             return {"messages": [deepcopy(self.raw)]}
         self.api.call_action = history
 
-    async def start_host(self):
+    async def start_host(self, *, review_only=False):
         (await self.controller.initialize_profile()).unwrap()
-        (await self.controller.start()).unwrap()
+        (await self.controller.start(review_only=review_only)).unwrap()
 
     async def test_installed_reply_with_expanded_forward_reaches_preview(self):
         self.raw = quoted_forward_raw(nodes=[node_raw(nested=[node_raw(images=(animation_bytes(),))])])
-        await self.start_host()
+        await self.start_host(review_only=True)
         batch = (await self.controller.receive_claimed(self.event())).unwrap()
         await wait_for_batch(self.controller.session, batch)
         self.assertFalse((await self.controller.preview(batch)).unwrap()["sent"])
@@ -123,7 +123,7 @@ class AstrBotQuoteHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(installed.forward, Forward)
         self.assertTrue(callable(installed.forward_loader))
         self.assertTrue(callable(installed.group_forward_loader))
-        await self.start_host()
+        await self.start_host(review_only=True)
         event = self.event()
         self.assertTrue(self.controller.claims(event))
         batch = (await self.controller.receive_claimed(event)).unwrap()

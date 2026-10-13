@@ -9,6 +9,81 @@
   let current = null;
   const fieldLabels = {default_nickname: "对用户的称呼", user_gender: "性别", user_birthday: "生日", user_occupation: "职业",
     role_relation: "关系定位", interaction: "相处方式", extra: "其他补充"};
+  const replyLabels = {
+    enabled: "启用消息分段", streaming: "启用模型流式传输", streaming_mode: "流式发送方式",
+    llm_controlled: "由模型决定分段边界", rule_mode: "规则分段方式", threshold: "分段字数阈值",
+    min_segment_chars: "短段合并参考字数", max_segments: "最多消息条数", part_gap_ms: "固定段间隔（毫秒）",
+    part_gap_mode: "段间隔方式", part_gap_min_ms: "间隔下限（毫秒）", part_gap_max_ms: "间隔上限（毫秒）",
+    part_gap_log_base: "长度调节强度", prompt: "分段提示词", split_words: "分段标记词",
+    match_width_variants: "兼容全半角标点", rule_regex: "分段正则表达式",
+    style_prompt: "表达风格补充", enable_humanized_expression: "启用日常表达", humanized_expression_prompt: "日常表达提示词",
+    content_cleanup_enabled: "启用文字清理", content_cleanup_mode: "清理方式", content_cleanup_scope: "清理范围",
+    content_cleanup_rule: "清理正则", content_cleanup_words: "清理词列表",
+    content_replacement_enabled: "启用文字替换", content_replacements: "替换规则",
+    reply_quote_enabled: "引用触发消息", reply_quote_first_part_only: "只在首段引用", reply_quote_skip_chars: "短回复不引用字数",
+    image_position: "图片位置", reply_mention_speaker_enabled: "群聊提及发言者", forward_message_adaptation_enabled: "整理合并转发",
+    voice_enabled: "启用语音回复", voice_trigger_mode: "语音触发方式", voice_generation_mode: "朗读内容",
+    voice_segment_mode: "朗读段落", voice_delivery_mode: "发送形式", voice_position: "语音位置",
+    voice_language: "语音语言", voice_foreign_text_mode: "外语文字处理",
+    voice_provider_id: "通用语音扩展", voice_zh_provider_id: "中文语音扩展",
+    voice_ja_provider_id: "日语语音扩展", voice_en_provider_id: "英语语音扩展",
+    voice_probability: "语音触发概率", voice_cooldown_seconds: "语音冷却（秒）",
+    voice_max_speech_chars: "单段朗读上限", voice_timeout_seconds: "合成超时（秒）",
+    voice_trigger_keywords: "语音触发词", voice_extra_prompt: "语音表达偏好",
+    enable_private_image_self_recognition: "启用图片转述增强",
+    private_image_self_recognition_hint: "图片自我识别线索",
+    enable_private_image_vision_cache: "复用重复图片转述", private_image_vision_cache_max_items: "图片转述缓存上限",
+    private_image_vision_custom_prompt: "图片转述提示词补充", private_image_vision_max_chars: "图片转述长度上限",
+    private_image_vision_wait_seconds: "图片转述等待时间（秒）",
+    private_image_provider_failure_cooldown_seconds: "图片识别失败冷却（秒）",
+    video_understanding_enabled: "启用视频理解", video_understanding_max_chars: "视频转述长度上限",
+    video_understanding_wait_seconds: "视频转述等待时间（秒）", video_self_recognition_hint: "视频自我识别线索",
+    video_understanding_prompt: "视频理解提示词补充", file_understanding_enabled: "启用文件理解",
+    file_understanding_format_groups: "可读取文件格式", file_understanding_max_size_mb: "文件大小上限（MB）",
+    file_understanding_max_chars: "文件正文长度上限", file_understanding_timeout_seconds: "文件读取等待时间（秒）",
+    file_understanding_prompt: "文件阅读提示词补充",
+    image_understanding_private_enabled: "私聊图片理解", video_understanding_private_enabled: "私聊视频理解",
+    file_understanding_private_enabled: "私聊文件理解",
+  };
+  const replyChoices = {
+    streaming_mode: {buffered: "收齐后分段发送", incremental: "边生成边发送"},
+    rule_mode: {words: "词列表", regex: "正则表达式", sentences: "按句子", paragraphs: "按段落"},
+    part_gap_mode: {fixed: "固定", random: "随机", log: "按文本长度"},
+    content_cleanup_mode: {words: "按清理词", regex: "按正则"},
+    content_cleanup_scope: {all: "整段回复", trailing: "仅句尾"},
+    voice_trigger_mode: {always: "每轮", request: "按请求", adaptive: "模型择句"},
+    voice_generation_mode: {plain: "朗读正文", model_tag: "模型语音标签"},
+    voice_segment_mode: {each: "每一段", first: "仅首段", last: "仅末段"},
+    voice_delivery_mode: {voice_and_text: "文字与语音", voice_only: "仅语音"},
+    voice_position: {before_text: "文字前", after_text: "文字后", after_media: "所有组件后"},
+    voice_language: {zh: "中文", ja: "日语", en: "英语"},
+    voice_foreign_text_mode: {original: "原文", translation: "中文译文", bilingual: "双语"},
+    image_position: {after_text: "文字后", before_text: "文字前"},
+  };
+  const replyGroups = [
+    {title: "表达风格", fields: ["style_prompt", "enable_humanized_expression", "humanized_expression_prompt"]},
+    {title: "分段与节奏", fields: ["enabled", "streaming", "streaming_mode", "llm_controlled", "rule_mode",
+      "threshold", "min_segment_chars", "max_segments", "part_gap_ms", "part_gap_mode", "part_gap_min_ms",
+      "part_gap_max_ms", "part_gap_log_base", "prompt", "split_words", "match_width_variants", "rule_regex"]},
+    {title: "文字处理", fields: ["content_cleanup_enabled", "content_cleanup_mode", "content_cleanup_scope",
+      "content_cleanup_rule", "content_cleanup_words", "content_replacement_enabled", "content_replacements"]},
+    {title: "语音回复", fields: ["voice_enabled", "voice_trigger_mode", "voice_generation_mode", "voice_segment_mode",
+      "voice_delivery_mode", "voice_position", "voice_language", "voice_foreign_text_mode", "voice_provider_id",
+      "voice_zh_provider_id", "voice_ja_provider_id", "voice_en_provider_id", "voice_probability",
+      "voice_cooldown_seconds", "voice_max_speech_chars", "voice_timeout_seconds", "voice_trigger_keywords", "voice_extra_prompt"]},
+    {title: "图片理解", fields: ["image_understanding_private_enabled", "enable_private_image_self_recognition",
+      "private_image_self_recognition_hint", "enable_private_image_vision_cache", "private_image_vision_cache_max_items",
+      "private_image_vision_custom_prompt", "private_image_vision_max_chars", "private_image_vision_wait_seconds",
+      "private_image_provider_failure_cooldown_seconds"]},
+    {title: "视频理解", fields: ["video_understanding_private_enabled", "video_understanding_enabled",
+      "video_understanding_max_chars", "video_understanding_wait_seconds", "video_self_recognition_hint",
+      "video_understanding_prompt"]},
+    {title: "文件理解", fields: ["file_understanding_private_enabled", "file_understanding_enabled",
+      "file_understanding_format_groups", "file_understanding_max_size_mb", "file_understanding_max_chars",
+      "file_understanding_timeout_seconds", "file_understanding_prompt"]},
+    {title: "引用与消息组件", fields: ["reply_quote_enabled", "reply_quote_first_part_only", "reply_quote_skip_chars",
+      "forward_message_adaptation_enabled", "reply_mention_speaker_enabled", "image_position"]},
+  ];
   const tierLabels = {standard: "普通用户", important: "重要用户", core: "核心用户"};
   const tierEyebrow = {standard: "STANDARD · 普通", important: "IMPORTANT · 重要", core: "CORE · 核心"};
   // 印鉴缩写：名片右侧那枚超大水印，是这一屏的视觉锚点。
@@ -51,7 +126,8 @@
     supervisor_fenced: "运行实例当前未启动，启动后即可保存资料。", staging_not_initialized: "请先加载当前运行实例。",
     acquaintance_person_unknown: "此成员还没有熟人记录，暂时不能设置面板备注。",
     person_nickname_revision_conflict: "成员记录已有更新，请重新读取后保存备注。",
-    invalid_configuration_value: "请核对字段长度和数值范围。", relationship_profile_configuration_invalid: "请核对资料长度，总字数不超过 3000。"};
+    invalid_configuration_value: "请核对字段长度和数值范围。", relationship_profile_configuration_invalid: "请核对资料长度，总字数不超过 3000。",
+    reply_configuration_invalid: "请核对回复设置的取值范围。"};
   const element = (tag, text, className) => {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -100,7 +176,7 @@
   function errorText(error) { return failureLabels[error?.code] || "操作未完成，草稿已保留，请重新读取后重试。"; }
   function stateFor(person) {
     const key = keyOf(person);
-    if (!states.has(key)) states.set(key, {pane: "access", drafts: {}, sections: {}, authorization: null,
+    if (!states.has(key)) states.set(key, {pane: "access", drafts: {}, sections: {}, authorization: null, resetToRole: new Set(),
       settingsError: "", authError: "", loading: false, loaded: false, busy: false, dirty: new Set(),
       nickname: person.admin_nickname || "", tier: person.identity_tier || "standard", message: "", failed: false});
     return states.get(key);
@@ -118,7 +194,7 @@
       state.sections[section] = value;
       state.drafts[section] = {...value.settings, ...retained};
     }
-    if (!preserve) state.dirty.clear();
+    if (!preserve) { state.dirty.clear(); state.resetToRole.clear(); }
   }
   async function load(person, {preserve = true} = {}) {
     const state = stateFor(person), services = current.services;
@@ -206,10 +282,25 @@
     return {label: "未开启", state: "off", enabled: false};
   };
   const settingOf = (state, section, name) => state.sections?.[section]?.settings?.[name];
+  function findNamedControl(root, name) {
+    const pending = [root];
+    while (pending.length) {
+      const item = pending.pop();
+      if (item?.name === name) return item;
+      pending.push(...(item?.children || []));
+    }
+    return null;
+  }
+  const replyVisibilityFields = new Set(["streaming", "llm_controlled", "rule_mode", "content_cleanup_enabled",
+    "content_cleanup_mode", "content_replacement_enabled", "reply_quote_enabled", "voice_enabled",
+    "enable_private_image_self_recognition", "video_understanding_enabled", "file_understanding_enabled"]);
   function updateDraft(state, section, field, value) {
+    const focusedName = section === "reply" && replyVisibilityFields.has(field)
+      ? document.activeElement?.name : "";
     state.drafts[section] ||= {};
     state.drafts[section][field] = value;
     const token = section + "." + field;
+    if (["reply", "person", "person_learning"].includes(section)) state.resetToRole.delete(field);
     if (value === state.sections[section]?.settings?.[field]) state.dirty.delete(token);
     else state.dirty.add(token);
     state.pendingSave = null;
@@ -217,8 +308,12 @@
       const replacement = savebar(state);
       bar.replaceChildren(...replacement.children);
     });
+    if (section === "reply" && replyVisibilityFields.has(field)) {
+      redraw(state);
+      if (focusedName) findNamedControl(current?.panel, focusedName)?.focus?.({preventScroll: true});
+    }
   }
-  function field(state, section, name, label, {rows = 0, placeholder = "", suffix = ""} = {}) {
+  function field(state, section, name, label, {rows = 0, placeholder = "", suffix = "", choices = null} = {}) {
     const definition = state.sections[section]?.fields?.[name] || {};
     const value = state.drafts[section]?.[name] ?? "";
     const boolean = definition.kind === "boolean" || typeof value === "boolean";
@@ -226,13 +321,22 @@
     const caption = element("span", undefined, "member-field-caption");
     caption.append(element("span", label));
     if (suffix) caption.append(element("small", suffix));
-    const input = element(rows ? "textarea" : "input");
+    const options = choices || (section === "reply" ? replyChoices[name] : null);
+    const input = element(rows ? "textarea" : options ? "select" : "input");
     input.name = name;
     input.setAttribute("aria-label", label);
     input.disabled = state.busy || state.loading || !state.sections[section] || !!state.settingsError;
     if (boolean) { input.type = "checkbox"; input.checked = value; input.setAttribute("role", "switch"); }
-    else {
-      if (!rows) input.type = definition.kind === "integer" || typeof value === "number" ? "number"
+    else if (options) {
+      for (const [optionValue, text] of Object.entries(options)) {
+        const option = element("option", text); option.value = optionValue; option.selected = optionValue === String(value);
+        input.append(option);
+      }
+      if (!Object.hasOwn(options, String(value))) {
+        const option = element("option", String(value)); option.value = String(value); option.selected = true; input.append(option);
+      }
+    } else {
+      if (!rows) input.type = ["integer", "probability", "weight"].includes(definition.kind) || typeof value === "number" ? "number"
         : ["quiet_start", "quiet_end"].includes(name) ? "time" : "text";
       input.value = value;
       input.placeholder = placeholder;
@@ -240,9 +344,9 @@
       if (definition.maximum_chars) input.maxLength = definition.maximum_chars;
       if (definition.minimum != null) input.min = definition.minimum;
       if (definition.maximum != null) input.max = definition.maximum;
-      if (input.type === "number") input.step = "1";
+      if (input.type === "number") input.step = definition.decimal_places != null ? String(10 ** -definition.decimal_places) : "1";
     }
-    input.addEventListener(boolean ? "change" : "input", () => updateDraft(state, section, name,
+    input.addEventListener(boolean || options ? "change" : "input", () => updateDraft(state, section, name,
       boolean ? input.checked : input.type === "number" ? (input.value === "" ? "" : Number(input.value)) : input.value));
     wrapper.append(caption, input);
     return wrapper;
@@ -322,18 +426,45 @@
     const memory = block("互动记忆", personaLabel(person));
     memory.body.append(facts([
       ["人格归属", personaLabel(person)],
-      ["持续积累", onOff(settingOf(state, "person", "acquaintance_learning_enabled"))],
+      ["持续积累", onOff(settingOf(state, "person_learning", "acquaintance_learning_enabled"))],
       ["往来消息", `${person.total?.msg_count ?? 0} 条`],
     ]));
-    const usage = block("自动积累", "");
+    const usage = block("角色默认与个人设置", "");
     usage.body.append(field(state, "person", "acquaintance_enabled", "使用熟人卡"),
-      field(state, "person", "acquaintance_learning_enabled", "持续更新熟人卡"),
-      field(state, "person", "acquaintance_card_chars", "熟人卡字数上限", {suffix: "字符"}));
+      overrideStatus(state, "person", "acquaintance_enabled"),
+      resetToRoleButton(state, "person", "acquaintance_enabled"),
+      field(state, "person", "acquaintance_card_chars", "熟人卡字数上限", {suffix: "字符"}),
+      overrideStatus(state, "person", "acquaintance_card_chars"),
+      resetToRoleButton(state, "person", "acquaintance_card_chars"),
+      field(state, "person_learning", "acquaintance_learning_enabled", "持续更新熟人卡"),
+      overrideStatus(state, "person_learning", "acquaintance_learning_enabled"));
     const updated = block("最近互动", "");
     updated.body.append(facts([["最近往来", shortTime(person.total?.last_seen)],
       ["首次往来", shortTime(person.total?.first_seen)],
       ["记忆更新", shortTime(person.updated_at)]]));
     return [memory.root, usage.root, updated.root];
+  }
+  function resetToRoleButton(state, section, name) {
+    const provenance = state.sections[section]?.provenance?.[name];
+    if (!provenance?.explicit) return element("span", undefined, "member-reset-placeholder");
+    const button = element("button", "恢复角色默认", "member-reset-field");
+    button.type = "button";
+    button.disabled = state.busy || state.loading || !!state.settingsError;
+    button.addEventListener("click", () => {
+      state.drafts[section][name] = state.sections[section].inherited_settings[name];
+      state.resetToRole.add(name);
+      state.dirty.add(section + "." + name);
+      state.pendingSave = null;
+      redraw(state);
+    });
+    return button;
+  }
+  function overrideStatus(state, section, name) {
+    const provenance = state.sections[section]?.provenance?.[name] || {};
+    const label = section === "person_learning" ? "仅对此用户生效"
+      : provenance.legacy ? "历史窗口覆盖"
+      : provenance.explicit ? "仅此用户覆盖" : "跟随角色默认";
+    return element("span", label, "member-override-state");
   }
   function relationshipPane(state, person) {
     const pane = element("div", undefined, "member-relationship-pane");
@@ -545,12 +676,15 @@
   function contactPane(state) {
     const pane = element("div", undefined, "member-contact-pane");
     const contact = state.sections?.contact?.settings || {};
-    pane.append(overview("联系偏好", "决定是否会主动开口、多久开口一次，以及哪些时段不打扰。", [
+    const overrides = Object.values(state.sections?.contact?.provenance || {})
+      .filter(item => item.explicit || item.layer === "relationship").length;
+    pane.append(overview("联系偏好", overrides ? `仅对这位用户生效 · ${overrides} 项单独设置` : "跟随全局设置", [
       ["主动计划", onOff(contact.enabled), contact.enabled ? "ok" : "muted"],
       ["24 小时上限", contact.max_contacts_24h != null ? contact.max_contacts_24h + " 次" : "跟随全局"],
       ["最小间隔", contact.interval_seconds != null ? Math.round(contact.interval_seconds / 60) + " 分钟" : "跟随全局"],
     ]));
-    const switchesBlock = block("主动联系", "总开关；关闭后不再主动发起，只回应这位成员");
+    pane.append(contactScheduleDiagnostic(state));
+    const switchesBlock = block("主动联系", "仅此用户");
     const switches = element("div", undefined, "member-switches");
     switches.append(field(state, "contact", "enabled", "启用主动计划"),
       field(state, "contact", "automatic_enabled", "自动寻找联系契机"),
@@ -565,6 +699,93 @@
     rhythmBlock.body.append(grid);
     pane.append(switchesBlock.root, rhythmBlock.root);
     return pane;
+  }
+  const scheduleReasons = {
+    never_evaluated: ["此窗口还没有自动评估记录", "确认插件正在运行，并等待本窗口进入下一轮调度评估。"],
+    newer_conversation_not_evaluated: ["最近一轮私聊尚未完成评估", "等当前私聊处理完成后重新读取调度状态。"],
+    proactive_permission_denied: ["此私聊没有主动联系授权", "在身份与权限中允许角色主动联系。"],
+    automatic_contact_disabled: ["后台自动联系已关闭", "打开此窗口的后台自动联系开关。"],
+    contact_settings_disabled: ["主动联系总开关已关闭", "在角色或窗口的主动联系设置中打开总开关。"],
+    contact_paused: ["主动联系正处于暂缓期", "等待暂停结束，或核对全局、窗口与联系目的的暂停时间。"],
+    quiet_hours: ["当前处于免打扰时段", "等待免打扰结束，或核对时区与起止时间。"],
+    contact_conditions_blocked: ["当前联系条件未满足", "核对联系总开关、目的开关、暂停和免打扰设置。"],
+    idle_period_not_elapsed: ["仍在对话后的静默等待期", "等待静默时长结束；诊断中会显示预计时间。"],
+    calendar_source_pending: ["日历契机仍在准备", "检查日历来源状态，来源完成后调度会继续。"],
+    activity_source_pending: ["生活事件仍在准备", "检查角色生活状态和事件来源。"],
+    journal_source_pending: ["日记契机仍在准备", "检查角色日记与生活工作区。"],
+    appointment_silence: ["约定前后静默规则正在生效", "按约定静默结束后再评估。"],
+    recent_attempt_cooldown: ["主动尝试间隔尚未结束", "等待最小联系间隔结束。"],
+    unanswered_pause: ["未回复后的暂停规则正在生效", "收到新的私聊消息后会重置这项暂停。"],
+    chat_purpose_disabled: ["日常话题联系目的已关闭", "启用日常话题，或等待其他已开启的契机。"],
+    closing_silence: ["连续联系后的收尾静默正在生效", "等待收尾静默结束或等对方回复。"],
+    slot_already_processed: ["当前节律时段已处理", "不会重放同一时段；等待下一时段。"],
+    outside_contact_slot: ["当前不在节律评估窗口", "等待下一个节律时段。"],
+    activity_curve_skipped: ["当前时段被活跃度曲线跳过", "检查本地时区和按小时活跃曲线，或等待下一时段。"],
+    screen_observation_pending: ["正在等待屏幕观察结果", "观察完成后再判断是否形成主动消息。"],
+    platform_circuit_open: ["平台发送通道暂时冷却", "检查 AstrBot 平台连接；冷却结束后会恢复评估。"],
+    conversation_busy: ["角色当前处于忙碌时段", "忙碌状态结束后会恢复联系评估。"],
+    opportunity_found: ["已找到主动联系候选", "继续查看后台任务与模型决策结果。"],
+    candidate_queued: ["候选已进入后台执行", "若没有发出，请查看任务执行和投递回执诊断。"],
+    contact_model_unregistered: ["主动联系模型任务尚未登记", "检查模型路由配置并重启插件。"],
+    background_capacity_exhausted: ["后台执行槽位暂时占满", "等待现有后台任务结束后会继续评估。"],
+    contact_attempt_budget: ["此私聊的主动尝试额度已用完", "等待滚动 24 小时额度释放，或调整本窗口的主动尝试上限。"],
+    contact_relationship_attempt_budget: ["这段关系的主动尝试额度已用完", "等待关系级滚动额度释放，或检查角色的关系级联系上限。"],
+    delivery_history_unavailable: ["当前私聊历史无法完成核验", "检查 AstrBot 会话历史是否可读取后再重新评估。"],
+    contact_conversation_changed: ["原私聊已变化，旧候选被安全取消", "等待当前私聊完成后重新评估。"],
+    scheduler_heartbeat_missing: ["尚未收到主动调度心跳", "确认插件已启动且主动联系模型已登记。"],
+    scheduler_heartbeat_stale: ["主动调度心跳已中断", "检查插件调度器是否异常或已停止。"],
+  };
+  const scheduleStages = {permission: "权限", settings: "设置", conversation: "会话", sources: "来源",
+    rhythm: "节律", validation: "校验", candidate: "候选", delivery_admission: "发送准入",
+    busy_gate: "忙碌门槛", task_queue: "任务队列", scheduler: "调度器"};
+  const scheduleOutcomes = {not_evaluated: "尚未评估", stale: "等待新会话评估", running: "运行中",
+    blocked: "暂时受阻", candidate: "发现候选", queued: "已排队", pending: "等待来源",
+    skipped: "按策略跳过", failed: "检查失败"};
+  const schedulerStates = {running: "正常运行", blocked: "暂时受阻", stale: "心跳中断",
+    not_seen: "尚未启动", stopped: "宿主未运行"};
+  function diagnosticTime(value) {
+    if (!value) return "无记录";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "时间无法解析" : new Intl.DateTimeFormat("zh-CN", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    }).format(date);
+  }
+  function contactScheduleDiagnostic(state) {
+    const section = element("section", undefined, "member-schedule-diagnostic");
+    section.setAttribute("aria-label", "主动联系调度诊断");
+    const diagnostic = state.sections?.contact?.schedule_diagnostic;
+    section.append(element("h4", "最近自动调度"));
+    if (!diagnostic) {
+      const text = state.loading ? "正在读取调度状态…" : state.settingsError
+        ? "联系配置读取失败，暂时无法显示调度诊断。重新读取成员配置后再试。"
+        : "当前没有调度记录。请确认插件已启动，并在下次状态刷新时查看本窗口的评估结果。";
+      section.append(element("p", text, "member-schedule-empty"));
+      return section;
+    }
+    const scheduler = diagnostic.scheduler || {};
+    const evaluation = diagnostic.evaluation || {};
+    const issue = scheduleReasons[evaluation.reason_code] || ["调度记录了一个待核对的条件",
+      "检查联系开关、来源状态和后台任务；若持续出现，可将评估时间与阶段提供给维护者。"];
+    section.dataset.outcome = evaluation.outcome || "unknown";
+    const details = element("dl", undefined, "member-schedule-facts");
+    const rows = [
+      ["调度器", `${schedulerStates[scheduler.state] || "状态待核对"} · ${diagnosticTime(scheduler.last_seen_at)}`],
+      ["最近评估", diagnosticTime(evaluation.observed_at)],
+      ["结果", `${scheduleOutcomes[evaluation.outcome] || "状态待核对"} · ${scheduleStages[evaluation.stage] || "未知阶段"}`
+        + (evaluation.purpose ? ` · ${evaluation.purpose}` : "")],
+    ];
+    if (evaluation.next_at) rows.push(["预计恢复", diagnosticTime(evaluation.next_at)]);
+    for (const [label, value] of rows) {
+      const row = element("div");
+      row.append(element("dt", label), element("dd", value));
+      details.append(row);
+    }
+    section.append(details, element("p", issue[0], "member-schedule-issue"),
+      element("p", issue[1], "member-schedule-next"));
+    if (!scheduleReasons[evaluation.reason_code] && evaluation.reason_code) {
+      section.append(element("small", `诊断代码：${evaluation.reason_code}`, "member-schedule-code"));
+    }
+    return section;
   }
   function historyPane(person, services) {
     const pane = element("div", undefined, "member-history-pane");
@@ -616,11 +837,91 @@
     const cancel = element("button", "撤销修改", "secondary"); cancel.type = "button";
     cancel.disabled = !state.dirty.size || state.busy;
     cancel.addEventListener("click", () => {adoptSettings(state, {sections: state.sections}, false); state.pendingSave = null; redraw(state);});
-    const save = element("button", state.busy ? "保存中" : "保存资料", "member-primary"); save.type = "button";
+    const save = element("button", state.busy ? "保存中" : state.pane === "reply" ? "保存回复设置" : "保存资料", "member-primary"); save.type = "button";
     save.disabled = !state.dirty.size || state.busy || state.loading || !!state.settingsError;
     save.addEventListener("click", () => saveSettings(activePerson(), state));
     bar.append(cancel, save);
     return bar;
+  }
+  function replyFieldBlock(state, name) {
+    const provenance = state.sections.reply?.provenance?.[name] || {};
+    const inherited = state.sections.reply?.inherited_settings?.[name];
+    const rows = ["prompt", "style_prompt", "humanized_expression_prompt", "content_cleanup_words",
+      "content_cleanup_rule", "content_replacements", "voice_trigger_keywords", "voice_extra_prompt",
+      "private_image_self_recognition_hint"].includes(name) ? 3 : 0;
+    const wrapper = element("div", undefined, "member-reply-field");
+    if (provenance.explicit) wrapper.dataset.explicit = "true";
+    const label = name === "voice_probability" ? "语音触发概率（0–1）" : replyLabels[name] || name;
+    wrapper.append(field(state, "reply", name, label, {rows}));
+    const source = element("small", provenance.explicit ? "此用户覆盖" : "跟随角色默认", "member-reply-source");
+    wrapper.append(source);
+    if (provenance.explicit) {
+      const reset = element("button", state.resetToRole.has(name) ? "将随保存恢复角色默认" : "恢复角色默认", "member-reply-reset");
+      reset.type = "button";
+      reset.disabled = state.busy || state.loading || !!state.settingsError;
+      reset.setAttribute("aria-label", `恢复${label}的角色默认值`);
+      reset.addEventListener("click", () => {
+        state.drafts.reply[name] = inherited;
+        state.resetToRole.add(name);
+        state.dirty.add("reply." + name);
+        state.pendingSave = null;
+        redraw(state);
+      });
+      wrapper.append(reset);
+    }
+    return wrapper;
+  }
+  function replyPane(state, person) {
+    const pane = element("div", undefined, "member-reply-pane");
+    const settings = {...(state.sections.reply?.settings || {}), ...(state.drafts.reply || {})};
+    const styleOverride = state.sections.reply?.provenance?.style_prompt?.explicit === true;
+    const explicit = Object.values(state.sections.reply?.provenance || {}).filter(value => value.explicit).length;
+    pane.append(overview("私聊回复", explicit ? `仅对此用户覆盖角色默认 · ${explicit} 项` : "全部跟随当前角色", [
+      ["表达风格", styleOverride ? "此用户已覆盖" : "继承角色默认"],
+      ["语音回复", onOff(settings.voice_enabled)], ["窗口覆盖", `${explicit} 项`],
+    ]));
+    const visible = new Set([
+      "style_prompt", "enable_humanized_expression", "humanized_expression_prompt",
+      "enabled", "streaming", "streaming_mode", "llm_controlled", "rule_mode", "threshold",
+      "min_segment_chars", "max_segments", "part_gap_ms", "part_gap_mode", "part_gap_min_ms",
+      "part_gap_max_ms", "part_gap_log_base", "prompt", "split_words", "match_width_variants", "rule_regex",
+      "content_cleanup_enabled", "content_replacement_enabled", "voice_enabled", "reply_quote_enabled",
+      "enable_private_image_self_recognition", "image_understanding_private_enabled",
+      "video_understanding_private_enabled", "video_understanding_enabled",
+      "file_understanding_private_enabled", "file_understanding_enabled",
+    ]);
+    if (settings.streaming) visible.add("streaming_mode");
+    if (settings.llm_controlled) visible.add("prompt");
+    if (settings.rule_mode === "words") visible.add("split_words");
+    if (settings.rule_mode === "regex") visible.add("rule_regex");
+    if (settings.rule_mode === "words") visible.add("match_width_variants");
+    if (settings.content_cleanup_enabled) for (const name of ["content_cleanup_mode", "content_cleanup_scope"])
+      visible.add(name);
+    if (settings.content_cleanup_enabled && settings.content_cleanup_mode === "regex") visible.add("content_cleanup_rule");
+    if (settings.content_cleanup_enabled && settings.content_cleanup_mode !== "regex") visible.add("content_cleanup_words");
+    if (settings.content_replacement_enabled) visible.add("content_replacements");
+    if (settings.reply_quote_enabled) for (const name of ["reply_quote_first_part_only", "reply_quote_skip_chars"]) visible.add(name);
+    if (settings.voice_enabled) for (const group of replyGroups.filter(group => group.title === "语音回复"))
+      for (const name of group.fields) visible.add(name);
+    if (settings.enable_private_image_self_recognition) visible.add("private_image_self_recognition_hint");
+    if (settings.enable_private_image_self_recognition) for (const name of ["enable_private_image_vision_cache",
+      "private_image_vision_cache_max_items", "private_image_vision_custom_prompt", "private_image_vision_max_chars",
+      "private_image_vision_wait_seconds", "private_image_provider_failure_cooldown_seconds"]) visible.add(name);
+    if (settings.video_understanding_enabled) for (const name of ["video_understanding_max_chars",
+      "video_understanding_wait_seconds", "video_self_recognition_hint", "video_understanding_prompt"]) visible.add(name);
+    if (settings.file_understanding_enabled) for (const name of ["file_understanding_format_groups",
+      "file_understanding_max_size_mb", "file_understanding_max_chars", "file_understanding_timeout_seconds",
+      "file_understanding_prompt"]) visible.add(name);
+    for (const group of replyGroups) {
+      const fields = group.fields.filter(name => visible.has(name) && Object.hasOwn(settings, name));
+      if (!fields.length) continue;
+      const section = block(group.title, "");
+      const grid = element("div", undefined, "member-reply-fields");
+      for (const name of fields) grid.append(replyFieldBlock(state, name));
+      section.body.append(grid);
+      pane.append(section.root);
+    }
+    return pane;
   }
   function render() {
     const {panel, services} = current;
@@ -732,9 +1033,9 @@
       message.setAttribute("role", "status"); panel.append(message);
     }
     const tabs = element("nav", undefined, "member-tabs"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "成员配置分区");
-    const paneNames = ["access", "relationship", "contact", "history"];
+    const paneNames = ["access", "relationship", "reply", "contact", "history"];
     for (const [name, title] of [["access", "身份与权限"], ["relationship", "人工关系资料"],
-      ["contact", "联系偏好"], ["history", "往来记录"]]) {
+      ["reply", "回复微调"], ["contact", "联系偏好"], ["history", "往来记录"]]) {
       const button = element("button", title); button.type = "button"; button.id = "member-tab-" + name;
       button.setAttribute("role", "tab"); button.setAttribute("aria-controls", "member-pane");
       button.setAttribute("aria-selected", String(state.pane === name)); button.tabIndex = state.pane === name ? 0 : -1;
@@ -764,13 +1065,21 @@
       if (state.settingsError) body.append(retry(state, person, state.settingsError));
       else if (state.loading && !state.sections.profile) body.append(element("p", "正在读取人工关系资料…", "member-loading"));
       else body.append(relationshipPane(state, person));
+    } else if (state.pane === "reply") {
+      if (state.settingsError) body.append(retry(state, person, state.settingsError));
+      else if (state.loading && !state.sections.reply) body.append(element("p", "正在读取私聊回复设置…", "member-loading"));
+      else if (state.sections.reply) body.append(replyPane(state, person));
     } else {
       if (state.settingsError) body.append(retry(state, person, state.settingsError));
       if (state.loading && !Object.keys(state.sections).length) body.append(element("p", "正在读取成员配置…", "member-loading"));
       body.append(contactPane(state));
     }
     panel.append(body);
-    if (canConfigure && (state.pane === "contact" || state.pane === "relationship" && !isCore)) panel.append(savebar(state));
+    if (canConfigure && (state.pane === "contact" || state.pane === "reply"
+        || state.pane === "relationship" && !isCore
+        || [...state.dirty].some(token => token.startsWith("person.") || token.startsWith("person_learning.")))) {
+      panel.append(savebar(state));
+    }
     // 熟人卡弹窗在重绘后重建，保证里面的草稿与保存条跟着最新状态。
     if (current.card) openCard(state, person);
     window.lucide?.createIcons();
@@ -781,7 +1090,10 @@
     for (const token of state.dirty) {
       const [section, field] = token.split(".");
       sections[section] ||= {edit_token: state.sections[section].edit_token, changes: {}};
-      sections[section].changes[field] = state.drafts[section][field];
+      if (["reply", "person", "person_learning"].includes(section) && state.resetToRole.has(field)) {
+        sections[section].reset_to_inherit ||= [];
+        sections[section].reset_to_inherit.push(field);
+      } else sections[section].changes[field] = state.drafts[section][field];
     }
     const fingerprint = JSON.stringify(sections);
     if (state.pendingSave?.fingerprint !== fingerprint) state.pendingSave = {fingerprint, key: operation()};
@@ -791,7 +1103,7 @@
       const result = unwrap(await services.bridge.apiPost(ROOT + "/settings", {subject_id: person.subject_id,
         route: routeOf(person), operation_key: state.pendingSave.key, sections}));
       adoptSettings(state, result, false); state.pendingSave = null;
-      notify(state, "成员资料已保存。");
+      notify(state, state.pane === "reply" ? "私聊回复设置已保存。" : "成员资料已保存。");
     } catch (error) {
       notify(state, errorText(error), true);
       if (error.code === "configuration_revision_conflict") {state.pendingSave = null; await load(person);}
@@ -854,12 +1166,12 @@
     current = {panel, person, services, route: routes.length === 1 ? routes[0] : null, card: false};
     const routed = activePerson();
     const state = stateFor(routed);
-    if (["access", "relationship", "contact", "history"].includes(previousPane)) state.pane = previousPane;
+    if (["access", "relationship", "reply", "contact", "history"].includes(previousPane)) state.pane = previousPane;
     render();
     if (current.route && !state.loaded) void load(routed);
   }
   function selectPane(name) {
-    if (!current || !["access", "relationship", "contact", "history"].includes(name)) return;
+    if (!current || !["access", "relationship", "reply", "contact", "history"].includes(name)) return;
     const state = stateFor(activePerson());
     state.pane = name; current.card = false;
     render();

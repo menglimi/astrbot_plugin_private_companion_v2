@@ -108,7 +108,7 @@ window.CompanionLearningReviewPage = (() => {
       <button type="button" class="lh-review-row${keyFor(item)===data.selected?" is-selected":""}"
       data-review-select="${e(keyFor(item))}" aria-pressed="${keyFor(item)===data.selected}">
       <span class="lh-review-type is-${item._type}">${KIND[item._type]}</span><span class="lh-review-row-copy"><strong>${e(title(item))}</strong>
-      <small>${e(item._source.label)} · ${e(when(item.created_at))}</small></span><i data-lucide="chevron-right" aria-hidden="true"></i></button></div>`).join("")
+      <small>记录归属 · ${e(item._source.label)} · ${e(when(item.created_at))}</small></span><i data-lucide="chevron-right" aria-hidden="true"></i></button></div>`).join("")
       : `<div class="lh-review-empty">${data.loading?"正在读取…":"没有待处理记录"}</div>`;
     let detail = `<div class="lh-review-detail-empty">选择一条记录</div>`;
     if (current) {
@@ -121,7 +121,7 @@ window.CompanionLearningReviewPage = (() => {
         ? `<div class="lh-review-confirm" role="alertdialog"><span>确认${e(labelAction(current,data.confirming.action))}？</span>
           <button type="button" data-review-confirm="yes"${data.writing?" disabled":""}>确认</button><button type="button" data-review-confirm="no">取消</button></div>` : "";
       detail = `<article class="lh-review-detail"><header><span class="lh-review-type is-${current._type}">${KIND[current._type]}</span>
-        <span>${e(current._source.label)}</span><strong>${e(title(current))}</strong></header>
+        <span>记录归属 · ${e(current._source.label)}</span><strong>${e(title(current))}</strong></header>
         ${body?`<section class="lh-review-observation"><small>${current._type==="growth"?"申报进展":current._type==="style"?"观察":"建议"}</small><p>${e(body)}</p></section>`:""}
         ${current._type==="style"&&current.dimension?`<p class="lh-review-meta">${e(DIMENSION[current.dimension]||current.dimension)} · ${(Number(current.confidence||0)*100).toFixed(0)}%</p>`:""}
         ${current._type==="style"&&current.source_kind==="shared_pack"?`<p class="lh-review-meta">分享包 · ${e(current.source_title||"导入规则")}</p>`:""}
@@ -145,7 +145,7 @@ window.CompanionLearningReviewPage = (() => {
         <span>已选 ${selectedVisible.length}</span><button type="button" data-review-bulk="accept"${!bulkAccept||data.writing?" disabled":""}>批量通过${bulkAccept?` · ${bulkAccept}`:""}</button>
         <button type="button" data-review-bulk="reject"${!bulkReject||data.writing?" disabled":""}>批量拒绝${bulkReject?` · ${bulkReject}`:""}</button></div>
       ${data.notice?`<p class="lh-inline-status ${data.error?"is-error":""}" role="status">${e(data.notice)}</p>`:""}
-      ${data.errors?`<p class="lh-inline-status" role="status">部分角色范围暂时无法读取</p>`:""}
+      ${data.errors?`<p class="lh-inline-status" role="status">部分记录归属暂时无法读取</p>`:""}
       ${bulkConfirm}<div class="lh-review-layout"><section class="lh-review-queue"><header><h3>待裁决</h3><span>${visible.length}</span></header>${list}
       ${pages.some(page=>page.next)?`<button type="button" class="lh-command" data-review-more${data.loading||data.writing?" disabled":""}>加载更多</button>`:""}</section>${detail}</div>`;
     window.lucide?.createIcons({attrs:{"aria-hidden":"true"}});

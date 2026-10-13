@@ -36,7 +36,7 @@ def validate(mood):
                         "mood must be text, null, or an object with baseline, four axes and intensity")
     values = {"baseline": _axis(mood["baseline"], "baseline")}
     values.update({name: _axis(mood[name], name) for name in AXES})
-    if mood["intensity"] not in INTENSITIES:
+    if mood["intensity"] is not None and mood["intensity"] not in INTENSITIES:
         raise TaskError("role_mood_contract", "intensity must be mild, moderate, strong or null")
     description = mood.get("description")
     if description is not None and (type(description) is not str or not description.strip() or len(description) > 256):

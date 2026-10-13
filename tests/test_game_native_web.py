@@ -6,7 +6,8 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from astrbot_plugin_game_companion.native_v2 import provider as game_provider
+from companion_v2.games.native import provider as game_provider
+from companion_v2.product import PRODUCT_VERSION
 
 
 def request(provider, action, arguments, invocation_id, *, subject="player-a"):
@@ -35,7 +36,7 @@ class NativeGameWebTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.provider = game_provider.NativeGameProvider(self.plugin, self.root, version="0.2.8")
+        self.provider = game_provider.NativeGameProvider(self.plugin, self.root, version=PRODUCT_VERSION)
 
     async def test_web_ticket_moves_the_existing_chat_game(self):
         created = await self.provider.execute(request(self.provider, game_provider.CREATE,

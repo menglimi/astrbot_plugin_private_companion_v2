@@ -1,10 +1,12 @@
 """The V2 perception page edits only its selected private role's owners."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 from tests import test_astrbot_staging_host as support
 
@@ -14,6 +16,9 @@ from starlette.requests import Request
 from astrbot_host.native_perception_api import PREFIX
 from astrbot_host.management_identity import dashboard_operator
 from companion_v2.role_work.state.management import StateManagement
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.conversation.perception_settings import (PerceptionConfigurationOwner,
+    configuration_fields as perception_fields, role_target_for, target_for as perception_window_target)
 
 
 class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
@@ -58,6 +63,7 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["model"]["settings"]["calendar_enabled"])
         self.assertTrue(data["model"]["settings"]["holiday_enabled"])
         self.assertTrue(data["model"]["settings"]["automatic_solar_terms_enabled"])
+        self.assertEqual(data["model"]["scope"], "role")
         self.assertFalse(data["environment"]["settings"]["planning_weather_enabled"])
         self.assertTrue(data["environment"]["sources"]["weather_ready"])
         weather_port = self.controller.session.application.contact_schedule.weather_events.port
@@ -118,6 +124,35 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay["status"], "ok", replay)
         self.assertTrue(replay["data"]["result"]["replayed"])
 
+    async def test_perception_role_defaults_are_shared_and_window_overrides_stay_local(self):
+        (await self.controller.initialize_profile()).unwrap()
+        context = self.controller.session.profile.target
+        runtime = self.controller.runtime
+        definitions = perception_fields()
+        owner = PerceptionConfigurationOwner(runtime)
+        role_target = role_target_for(context)
+        current_window = perception_window_target(context)
+        other_scope = replace(context.scope, conversation_id="other-conversation", session_id="other-session")
+        other_window = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
+                                    context.role_binding.role, other_scope)
+
+        role_snapshot = owner.read(role_target, definitions)
+        owner.write(role_target, definitions, changes={
+            "conversation.perception.calendar_timezone": "UTC",
+            "conversation.perception.guidance": "按角色语气自然提及日期。",
+        }, reset=(), expected_revision=role_snapshot.revision, observed_at=support.NOW)
+        local_snapshot = owner.read(current_window, definitions)
+        owner.write(current_window, definitions, changes={
+            "conversation.perception.calendar_timezone": "Asia/Tokyo",
+        }, reset=(), expected_revision=local_snapshot.revision, observed_at=support.NOW)
+
+        local = owner.read(current_window, definitions).fields
+        inherited = owner.read(other_window, definitions).fields
+        self.assertEqual(local["conversation.perception.calendar_timezone"].value, "Asia/Tokyo")
+        self.assertEqual(inherited["conversation.perception.calendar_timezone"].value, "UTC")
+        self.assertEqual(inherited["conversation.perception.guidance"].value, "按角色语气自然提及日期。")
+        self.assertEqual(inherited["conversation.perception.guidance"].source, role_target)
+
     async def test_authentication_payload_and_owner_boundaries(self):
         (await self.controller.initialize_profile()).unwrap()
         data = (await self.call())["data"]
@@ -138,6 +173,38 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native.registered_web_apis, [])
         self.assertEqual((await self.call())["data"]["code"], "staging_host_terminated")
 
+    async def test_role_material_pool_uses_global_settings_without_private_history(self):
+        (await self.controller.initialize_profile()).unwrap()
+        events = self.controller.session.application.contact_schedule.news_events
+        item = {"id": "role-news-1", "category": "资讯", "title": "角色共享见闻",
+                "captured_at": support.NOW.isoformat(), "source": "共享资讯池"}
+        with patch.object(events, "maintain_role", side_effect=RuntimeError("refresh unavailable")) as maintain:
+            with patch.object(events, "role_materials", return_value={"state": "ready",
+                "checked_at": support.NOW.isoformat(), "failure": None, "items": [item]}) as reader:
+                with patch("astrbot_host.native_perception_api.ContactManagement.status",
+                           side_effect=AssertionError("global materials must not read one private window")):
+                    with patch("astrbot_host.native_perception_api.logger.exception") as log_error:
+                        response = await self.call(route=PREFIX + "/materials")
+
+        self.assertEqual(response["status"], "ok", response)
+        self.assertEqual(response["data"]["items"], [{**item, "scope": "role"}])
+        self.assertEqual(response["data"]["history_count"], 0)
+        maintain.assert_called_once()
+        log_error.assert_called_once()
+        settings = reader.call_args.args[0]
+        self.assertIn("news_source_kind", settings)
+
+    async def test_role_material_pool_reports_and_logs_unexpected_read_failures(self):
+        (await self.controller.initialize_profile()).unwrap()
+        events = self.controller.session.application.contact_schedule.news_events
+        with patch.object(events, "maintain_role"):
+            with patch.object(events, "role_materials", side_effect=RuntimeError("synthetic failure")):
+                with patch("astrbot_host.native_perception_api.logger.exception") as log_error:
+                    response = await self.call(route=PREFIX + "/materials")
+
+        self.assertEqual(response["data"]["code"], "material_pool_unavailable")
+        log_error.assert_called_once()
+
     async def test_runtime_snapshot_uses_enabled_weather_and_returns_explicit_empty_states(self):
         class WeatherPort:
             def __init__(self):
@@ -156,14 +223,30 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
 
         path = PREFIX + "/runtime"
         disabled = await self.call(route=path)
+        self.assertEqual(disabled["status"], "ok", disabled)
         self.assertEqual(disabled["data"]["weather"]["state"], "disabled")
         self.assertEqual(weather.locations, [])
         self.assertEqual(disabled["data"]["calendar"]["status"], "available")
         self.assertEqual(disabled["data"]["screen"]["state"], "empty")
-        self.assertEqual(disabled["data"]["reality"]["reason"], "reality_provider_unavailable")
-        self.assertEqual(disabled["data"]["camera"]["reason"], "reality_provider_unavailable")
+        # V2 carries these declarations itself; a fresh window has not enabled
+        # either capability. That differs from an actually missing provider.
+        registry = self.controller.native_extensions
+        actions = {item.descriptor.tool.action for item in registry.declarations()}
+        self.assertTrue({"reality.snapshot.read", "reality.camera.observe"}.issubset(actions))
+        for section in ("reality", "camera"):
+            self.assertEqual(disabled["data"][section], {
+                "state": "blocked", "reason": "capability_not_installed"})
+        with patch.object(registry, "declarations", return_value=()):
+            missing = await self.call(route=path)
+        self.assertEqual(missing["status"], "ok", missing)
+        for section in ("reality", "camera"):
+            self.assertEqual(missing["data"][section], {
+                "state": "unavailable", "reason": "reality_provider_unavailable"})
+        self.assertEqual(missing["data"]["screen"]["state"], "empty")
+        self.assertEqual(weather.locations, [])
 
         settings = (await self.call())["data"]["environment"]["settings"]
+        self.assertFalse(settings["planning_weather_enabled"])
         location = json.dumps({"name": "测试区域", "latitude": 12.34, "longitude": 56.78}, ensure_ascii=False)
         app = self.controller.session.application
         context = self.controller.session.profile.target
@@ -174,6 +257,9 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
             "edit_token": state_status["edit_token"], "changes": {
                 "planning_weather_location": location, "planning_weather_enabled": True,
             }}).unwrap()
+        configured = (await self.call())["data"]["environment"]["settings"]
+        self.assertTrue(configured["planning_weather_enabled"])
+        self.assertEqual(configured["planning_weather_location"], location)
         runtime = await self.call(route=path)
         self.assertEqual(runtime["status"], "ok", runtime)
         self.assertEqual(runtime["data"]["weather"]["state"], "available")

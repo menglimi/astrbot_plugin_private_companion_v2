@@ -413,14 +413,65 @@
   .res strong { font-size: var(--fs-tiny); }
   .res ul { list-style: none; display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); color: var(--text-2); font-family: var(--mono); }
   .res .next { font-size: var(--fs-micro); color: var(--text-2); }
-  .stages { display: grid; gap: 2px; }
-  .stages li { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: var(--sp-2); align-items: center;
-    padding: 3px var(--sp-2); border-radius: var(--r-2xs); background: var(--card); font-size: var(--fs-micro); }
-  .stages li[data-state="passed"] b { color: var(--sev-ok); }
-  .stages li[data-state="failed"] { background: var(--risk-quiet); }
-  .stages li[data-state="failed"] b { color: var(--sev-error); }
-  .stages li[data-state="skipped"], .stages li[data-state="not_required"] { opacity: .6; }
-  .stages li[data-state="pending"] b, .stages li[data-state="running"] b { color: var(--accent-ink); }
+  /* ---------- 04b 链路测试：v1 chain_tests 信封 UI 化（「后端待补」= V2 合同未落地，交互为演示） ---------- */
+  .drawer-section + .drawer-section { margin-top: var(--sp-5); padding-top: var(--sp-4); border-top: 1px dashed var(--line); }
+  .drawer-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2); margin-bottom: var(--sp-3);
+    font-size: var(--fs-tiny); font-weight: 700; color: var(--text-2); }
+  .drawer-title .hint { font-weight: 400; font-size: var(--fs-micro); color: var(--text-3); }
+  .chain-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--sp-3); }
+  .chain { display: grid; gap: var(--sp-2); align-content: start; padding: var(--sp-4);
+    background: var(--card-2); border: 1px solid var(--line-soft); border-radius: var(--r-md); }
+  .chain.is-flash { animation: probe-flash 1.2s ease-out 1; }
+  .chain > .hd { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+  .chain > .hd strong { font-size: var(--fs-tiny); }
+  .chain > .hd .last { margin-left: auto; font-size: var(--fs-micro); color: var(--text-3); text-align: right; }
+  .pending-badge { font-family: var(--mono); font-size: var(--fs-micro); padding: 1px 7px; border-radius: var(--r-pill);
+    color: var(--sev-warn); border: 1px dashed color-mix(in srgb, var(--sev-warn) 55%, transparent); }
+  .chain p { font-size: var(--fs-micro); color: var(--text-2); line-height: var(--lh-body); }
+  .env { display: grid; gap: var(--sp-2); }
+  .env-overview { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--r-sm); background: var(--card-3); border: 1px solid var(--line-soft); font-size: var(--fs-tiny); }
+  .env-overview span { color: var(--text-2); }
+  .env-overview b[data-state="passed"] { color: var(--sev-ok); }
+  .env-overview b[data-state="failed"] { color: var(--sev-error); }
+  .env-overview b[data-state="warn"] { color: var(--sev-warn); }
+  .env-overview b[data-state="running"], .env-overview b[data-state="pending"] { color: var(--accent-ink); }
+  .env-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: var(--sp-2); }
+  .env-facts div { padding: var(--sp-2) var(--sp-3); background: var(--card-3); border-radius: var(--r-sm); }
+  .env-facts dt { font-size: var(--fs-micro); color: var(--text-3); }
+  .env-facts dd { font-family: var(--mono); font-size: var(--fs-tiny); margin-top: 2px; }
+  .steps-rail { position: relative; display: grid; gap: 2px; }
+  .steps-rail::before { content: ''; position: absolute; left: 11px; top: 14px; bottom: 14px; width: 1px; background: var(--line); }
+  .steps-rail .step { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto;
+    gap: var(--sp-2); align-items: start; padding: 3px 2px; }
+  .steps-rail .step i { position: relative; z-index: 1; width: 8px; height: 8px; margin-top: 7px; justify-self: center;
+    border-radius: 50%; background: var(--t-line-firm); }
+  .steps-rail .step[data-state="passed"] i { background: var(--sev-ok); }
+  .steps-rail .step[data-state="failed"] i { background: var(--sev-error); box-shadow: 0 0 0 3px var(--risk-quiet); }
+  .steps-rail .step[data-state="warn"] i { background: var(--sev-warn); }
+  .steps-rail .step[data-state="skipped"] i { background: var(--card); box-shadow: inset 0 0 0 1px var(--t-line-firm); }
+  .steps-rail .step[data-state="running"] i { background: var(--t-accent); animation: step-pulse 1s ease infinite; }
+  .steps-rail .step b { font-size: var(--fs-tiny); font-weight: 500; color: var(--text); }
+  .steps-rail .step small { display: block; font-size: var(--fs-micro); color: var(--text-3); margin-top: 1px; }
+  .steps-rail .step[data-state="failed"] small { color: var(--sev-error); }
+  .steps-rail .step[data-state="pending"] b, .steps-rail .step[data-state="pending"] small { opacity: .45; }
+  .steps-rail .step time { font-family: var(--mono); font-size: var(--fs-micro); color: var(--text-3); padding-top: 2px; }
+  .env-log { display: grid; gap: 2px; }
+  .env-log .row { display: grid; grid-template-columns: 66px 96px minmax(0, 1fr); gap: var(--sp-2); align-items: baseline;
+    padding: 3px var(--sp-2); border-radius: var(--r-2xs); background: var(--card-3); font-size: var(--fs-micro); }
+  .env-log .row time { font-family: var(--mono); color: var(--text-3); }
+  .env-log .row b { font-weight: 500; color: var(--text-2); }
+  .env-log .row span { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .env-preview { display: grid; gap: var(--sp-2); }
+  .env-preview .pv { padding: var(--sp-2) var(--sp-3); background: var(--card-3); border-radius: var(--r-sm); }
+  .env-preview .pv b { display: block; font-size: var(--fs-tiny); }
+  .env-preview .pv p { font-size: var(--fs-micro); color: var(--text-2); margin-top: 2px; }
+  .env-error { margin: 0; padding: var(--sp-2) var(--sp-3); font-family: var(--mono); font-size: var(--fs-micro);
+    color: var(--sev-error); background: var(--risk-quiet); border-radius: var(--r-sm); overflow: auto; white-space: pre-wrap; }
+  .env-suggestion { display: grid; gap: 2px; padding: var(--sp-2) var(--sp-3); border-left: 3px solid var(--t-accent);
+    background: var(--card-3); border-radius: 0 var(--r-sm) var(--r-sm) 0; font-size: var(--fs-tiny); }
+  .env-suggestion b { font-size: var(--fs-micro); font-weight: 700; letter-spacing: .08em; color: var(--accent-ink); }
+  @keyframes step-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--t-accent) 22%, transparent); } }
   .mem-chart { display: flex; align-items: flex-end; gap: 2px; height: 72px; padding: var(--sp-2);
     background: var(--card); border: 1px solid var(--line-soft); border-radius: var(--r-sm); }
   .mem-chart span { flex: 1 1 0; min-width: 2px; background: color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 1px; }
@@ -551,14 +602,21 @@
   </p>
 </section>
 
-<!-- 04 按需检测 -->
+<!-- 04 链路测试与按需检测 -->
 <details class="board probes" style="--d:.26s">
   <summary>
     <span class="eyebrow">Checks / 04</span>
-    <h3>按需检测</h3>
-    <span class="tail">有副作用或耗时的操作都在这里，默认收起</span>
+    <h3>链路测试与按需检测</h3>
+    <span class="tail">链路端到端验证与单点探测都在这里，默认收起</span>
   </summary>
-  <div class="probe-grid" id="probeGrid"></div>
+  <div class="drawer-section">
+    <div class="drawer-title">链路测试<span class="hint">端到端跑一遍真实链路；「后端待补」表示 V2 合同尚未落地，交互为设计演示</span></div>
+    <div class="chain-grid" id="chainGrid"></div>
+  </div>
+  <div class="drawer-section">
+    <div class="drawer-title">单点探测<span class="hint">固定动作快速验证，不进入完整链路</span></div>
+    <div class="probe-grid" id="probeGrid"></div>
+  </div>
 </details>
 
 <!-- 05 常见问题：真实页每分类一组 FAQ，答案末尾带定位按钮 -->
@@ -573,6 +631,8 @@
 
 <footer class="doc-note">
   <span><b>数据合同</b>：分类、信号、证据、FAQ 与检测字段全部对照 <code>maintenance-page.js</code> 的 <code>diagnosticItems</code> / <code>categoryFocusMarkup</code> / <code>operationsMarkup</code> / <code>integrationsMarkup</code> / <code>proactiveTestMarkup</code> / <code>memoryDiagnosticMarkup</code> 与 FAQ 分组；后端能力对照 <code>astrbot_host/model_api.py</code>（storage_test / voice_test / image_test / memory_diagnostic / test / balance）。</span>
+  <span class="sep">·</span>
+  <span><b>链路测试</b>：结果信封对照 v1 <code>normalize_diagnostic_result</code>（概览 / 事实 / 执行阶段 / 结果预览 / 诊断记录 / 错误详情 / 建议 / 复制诊断）；主动消息链路为 V2 现有合同，文生图 / 自拍 / TTS 链路标注「后端待补」，交互为设计演示。</span>
   <span class="sep">·</span>
   <span><b>跨子页动作</b>：真实实现通过 <code>data-set-call-filter</code>（最近调用：失败 / 未确认 / 低命中样本）与 <code>data-focus-panel</code> 跳转；本稿以按钮 + 提示表达，落码时接真实导航。</span>
   <span class="sep">·</span>
@@ -724,8 +784,8 @@ const STAGES = [["authorization", "核心管理员与角色授权", "passed"], [
   ["model_route", "主动联系模型任务", "passed"], ["model_generation", "模型生成", "passed"], ["persona_review", "人格复核", "failed"],
   ["execution", "端到端执行", "skipped"], ["delivery", "消息投递", "skipped"]];
 
-const STAGE_STATE = {passed: "通过", failed: "失败", pending: "处理中", skipped: "未执行", not_required: "无需复核",
-  not_started: "未开始", checking: "检查中", running: "运行中"};
+const CHAIN_STATE = {passed: "通过", failed: "失败", pending: "等待执行", skipped: "未执行", warn: "通过但有提示",
+  not_required: "无需复核", not_started: "未开始", checking: "检查中", running: "运行中"};
 
 /* ============================================================
    状态与渲染
@@ -938,7 +998,6 @@ function renderTimeline() {
 /* ---------- 检测卡 ---------- */
 function renderProbes() {
   $("probeGrid").innerHTML = [
-    card("主动消息测试", "cost", "端到端跑一次真实生产链路，需要确认投递；可能调用模型并占用 24 小时额度。", proactiveCtl(), "proactive-res"),
     card("文本 Provider 探测", "cost", "固定连接探测，不生成角色回复；服务商可能计费。", providerCtl(), "provider-res"),
     card("TTS 合成", "cost", "合成一句短测试音频，不发送给联系人；服务商可能计费。合成成功后结果区会提供内联试听控件（音频来自后端 audio_base64，可回放验证音色与语言绑定）。", ttsCtl(), "tts-res"),
     card("原生图片工具", "read", "只验证扩展注册状态，不会提交图片生成请求。", imageCtl(), "image-res"),
@@ -961,9 +1020,6 @@ const ttsCtl = () => '<select data-voice><option value="">无可用 TTS</option>
 const imageCtl = () => '<select data-action><option>image.generate</option></select>' +
   '<button type="button" class="probe-btn" data-run="image">检查注册</button>';
 const storageCtl = () => '<button type="button" class="probe-btn" data-run="storage">运行只读检查</button>';
-const proactiveCtl = () => '<select data-purpose>' + PURPOSES.map(([v, l]) => '<option value="' + v + '">' + l + "</option>").join("") +
-  '</select><label class="check"><input type="checkbox" data-confirm>确认投递</label>' +
-  '<button type="button" class="probe-btn" data-run="proactive">运行端到端测试</button>';
 
 function memoryCtl() {
   return '<button type="button" class="probe-btn" data-run="memory-start" id="memStart">开始 3 分钟检测</button>' +
@@ -1003,8 +1059,6 @@ const RESULTS = {
     facts: [], next: "刷新运行态后确认对应扩展已启用并完成注册。"},
   storage: {state: "warn", title: "完整性检查完成", message: "quick_check 通过 · 外键未启用",
     facts: ["耗时 42 ms", "完整性 ok", "外键问题 1"], next: "外键保护未启用会导致级联删除失效，建议重启后检查连接参数。"},
-  proactive: {state: "failed", title: "人格复核未放行", message: "模型把握度 0.41 低于沉默阈值 0.55",
-    facts: ["目的 想念与亲近", "尝试额度 3 / 20", "投递额度 1 / 6"], next: "这是生产链路的真实决策结果；降低阈值或补充材料前先确认是否要真的发出。"},
 };
 function renderResult(id, r) {
   const box = $(id);
@@ -1013,14 +1067,215 @@ function renderResult(id, r) {
     (r.facts.length ? "<ul>" + r.facts.map(f => "<li>" + esc(f) + "</li>").join("") + "</ul>" : "") +
     '<p class="next"><b>下一步</b> ' + esc(r.next) + "</p></div>";
 }
-function renderStages() {
-  const box = $("proactive-res");
-  if (!box) return;
-  box.innerHTML = '<div class="res" data-state="failed"><strong>' + esc(RESULTS.proactive.title) + "</strong><span>" +
-    esc(RESULTS.proactive.message) + '</span><ol class="stages">' + STAGES.map(([stage, label, state]) =>
-      '<li data-state="' + state + '"><span>' + esc(label) + "</span><b>" + esc(STAGE_STATE[state] || state) + "</b></li>").join("") +
-    '</ol><p class="next">' + esc(RESULTS.proactive.next) + "</p></div>";
+/* ---------- 链路测试：v1 chain_tests 信封 UI 化 ----------
+   信封字段对照 v1 normalize_diagnostic_result：概览 / 事实 / 执行阶段(steps) / 结果预览 /
+   诊断记录(diagnostic_entries) / 错误详情(error) / 建议(suggestion) / 复制诊断。
+   主动消息链路 = V2 现有合同（14 阶段）；文生图 / 自拍 / TTS 链路 = 后端待补，交互为设计演示。 */
+const PROACTIVE_STEP_NOTE = {
+  authorization: ["授权上下文就绪", "12 ms"],
+  settings: ["私聊主动已启用", "8 ms"],
+  purpose: ["目的「想念与亲近」已开启", "5 ms"],
+  trusted_candidate: ["核心管理员候选有效", "21 ms"],
+  contact_admission: ["准入检查通过", "15 ms"],
+  attempt_budget: ["本私聊 3 / 20", "6 ms"],
+  relationship_attempt_budget: ["关系级 12 / 40", "4 ms"],
+  delivery_budget: ["本私聊 1 / 6", "5 ms"],
+  relationship_delivery_budget: ["关系级 4 / 12", "3 ms"],
+  model_route: ["主 Provider · claude-sonnet", "42 ms"],
+  model_generation: ["草稿 142 字生成完成", "6,080 ms"],
+  persona_review: ["把握度 0.41 < 沉默阈值 0.55", "240 ms"],
+  execution: ["上游未放行，未执行", ""],
+  delivery: ["上游未放行，未执行", ""],
+};
+const CHAINS = {
+  proactive_message: {
+    label: "主动消息链路", pending: false,
+    note: "预约一次临时主动并走完整生产链路，验证生成、复核、投递与归档；可能调用模型并占用 24 小时额度。",
+    last: "最近测试：失败 · 10-09 22:31",
+    result: {
+      state: "failed",
+      detail: "人格复核未放行：模型把握度 0.41 低于沉默阈值 0.55",
+      facts: [["目的", "想念与亲近"], ["尝试额度", "3 / 20"], ["投递额度", "1 / 6"], ["复核阈值", "0.55"]],
+      steps: STAGES.map(([key, label, state]) => [key, label, state].concat(PROACTIVE_STEP_NOTE[key] || ["", ""])),
+      preview: [],
+      entries: [["起始", "model_route", "主动模型任务使用主 Provider"], ["+6,080 ms", "model_generation", "草稿 142 字生成完成"],
+        ["+6,320 ms", "persona_review", "把握度 0.41 < 0.55，未放行"], ["+6,380 ms", "archive", "审计已写入，未投递"]],
+      error: "",
+      suggestion: "这是生产链路的真实决策结果；确认要真的发出再调整沉默阈值或补充关系材料。",
+    },
+  },
+  image_generation_text2img: {
+    label: "文生图链路", pending: true,
+    note: "实际生成一张测试图并校验文件落盘，比注册检查更接近真实链路；在线后端可能计费。",
+    last: "尚未运行",
+    result: {
+      state: "failed",
+      detail: "在线后端返回 401，生成未完成",
+      facts: [["后端", "在线 API · primary"], ["模型", "flux-schnell"], ["尺寸", "1024×1024"]],
+      steps: [
+        ["read_config", "读取生图配置", "passed", "平台与 Key 已配置", "3 ms"],
+        ["resolve_workflow", "解析工作流", "passed", "text2img 默认工作流", "11 ms"],
+        ["call_api", "调用在线后端", "failed", "HTTP 401 Unauthorized", "1,204 ms"],
+        ["save_file", "保存生成文件", "skipped", "上游失败，未执行", ""],
+        ["verify_file", "校验文件可读", "skipped", "上游失败，未执行", ""],
+      ],
+      preview: [],
+      entries: [["起始", "config", "生图后端 primary 生效"], ["+1,204 ms", "api", "401 · Key 校验失败"],
+        ["+1,210 ms", "guard", "文件未生成，未登记相册"]],
+      error: "HTTP 401 Unauthorized · provider=primary",
+      suggestion: "401 属于凭据问题，重试不会自行恢复；先到模型页核对在线 API 的 Key 与端点。",
+    },
+  },
+  image_generation_selfie: {
+    label: "自拍链路", pending: true,
+    note: "带参考图一致性预设的端到端测试；会实际生成文件，不发送给联系人。",
+    last: "尚未运行",
+    result: {
+      state: "warn",
+      detail: "生成完成，但参考图一致性被跳过",
+      facts: [["预设", "自拍 · 默认"], ["参考图", "未登记"], ["总耗时", "8.4 s"]],
+      steps: [
+        ["ref_check", "参考图登记校验", "skipped", "未登记参考素材，一致性跳过", "2 ms"],
+        ["resolve_workflow", "解析 selfie 预设", "passed", "自拍预设生效", "9 ms"],
+        ["call_api", "调用生图后端", "passed", "本地 ComfyUI", "7,900 ms"],
+        ["save_file", "保存生成文件", "passed", "已写入缓存目录", "310 ms"],
+        ["verify_file", "校验文件可读", "passed", "PNG · 812 KB", "14 ms"],
+      ],
+      preview: [["测试图", "selfie_test_20261010.png · 812 KB"]],
+      entries: [["起始", "ref", "无受管参考素材"], ["+8,235 ms", "done", "文件已生成，未发送"]],
+      error: "",
+      suggestion: "要验证人设一致性，先在产出页登记参考图并启用一致性，再重跑本测试。",
+    },
+  },
+  tts_generation: {
+    label: "TTS 链路", pending: true,
+    note: "文本转换到合成的完整链路；v1 会把测试语音真实发送到主要用户私聊，V2 落地时沿用或改为仅合成。",
+    last: "尚未运行",
+    result: {
+      state: "failed",
+      detail: "没有可用 TTS Provider",
+      facts: [["Provider", "未加载"], ["文本转换", "独立于 TTS Provider"]],
+      steps: [
+        ["find_provider", "查找 TTS Provider", "failed", "会话中没有任何已加载的 TTS Provider", "4 ms"],
+        ["text_rewrite", "文本转换模型改写", "skipped", "上游失败，未执行", ""],
+        ["synthesize", "合成 audio_base64", "skipped", "上游失败，未执行", ""],
+        ["deliver", "回执与试听", "skipped", "上游失败，未执行", ""],
+      ],
+      preview: [],
+      entries: [["+4 ms", "provider", "TTS Provider 列表为空"]],
+      error: "NoTTSProvider · 语音设置未加载任何 TTS Provider",
+      suggestion: "先在语音设置里加载一个 TTS Provider；文本转换模型不可替代真正的 TTS Provider。",
+    },
+  },
+};
+
+function chainCard(kind) {
+  const c = CHAINS[kind];
+  const runBtn = '<button type="button" class="probe-btn" data-chain-run="' + kind + '">运行端到端测试</button>';
+  const ctl = kind === "proactive_message"
+    ? '<div class="btn-row"><select data-chain-purpose aria-label="测试用途">' +
+      PURPOSES.map(([v, l]) => '<option value="' + v + '">' + esc(l) + "</option>").join("") +
+      '</select><label class="check"><input type="checkbox" data-chain-confirm>确认投递</label>' + runBtn + "</div>"
+    : '<div class="btn-row">' + runBtn + "</div>";
+  return '<section class="chain" data-kind="' + kind + '">' +
+    '<div class="hd"><strong>' + esc(c.label) + "</strong>" +
+    (c.pending ? '<span class="pending-badge" title="V2 后端合同待补：此处交互为设计演示，落码后接入真实链路接口">后端待补</span>' : "") +
+    '<span class="last">' + esc(c.last) + "</span></div>" +
+    "<p>" + esc(c.note) + "</p>" + ctl +
+    '<div class="env" id="env-' + kind + '"></div></section>';
 }
+function envelopeHtml(kind, R) {
+  const r = CHAINS[kind].result;
+  if (R === -1) return '<div class="env-overview"><b data-state="pending">尚未运行</b><span>运行后展开执行阶段、事实、诊断记录与建议</span></div>';
+  const running = R < r.steps.length;
+  let h = '<div class="env-overview"><b data-state="' + (running ? "running" : r.state) + '">' +
+    (running ? "正在运行 · " + esc(r.steps[Math.min(R, r.steps.length - 1)][1]) : esc(CHAIN_STATE[r.state] || r.state)) +
+    "</b><span>" + (running ? "端到端链路执行中" : esc(r.detail)) + "</span></div>";
+  if (!running && r.facts.length) h += '<dl class="env-facts">' +
+    r.facts.map(f => "<div><dt>" + esc(f[0]) + "</dt><dd>" + esc(f[1]) + "</dd></div>").join("") + "</dl>";
+  h += '<div class="steps-rail">' + r.steps.map((s, i) => {
+    const st = i < R ? s[2] : i === R ? "running" : "pending";
+    const done = i < R;
+    return '<div class="step" data-state="' + st + '"><i></i><div><b>' + esc(s[1]) + "</b>" +
+      (done && s[3] ? "<small>" + esc(s[3]) + "</small>" : "") + '</div><time>' +
+      (done && s[4] ? "+" + esc(s[4]) : "") + "</time></div>";
+  }).join("") + "</div>";
+  if (!running) {
+    if (r.preview.length) h += '<div class="env-preview">' +
+      r.preview.map(p => '<div class="pv"><b>' + esc(p[0]) + "</b><p>" + esc(p[1]) + "</p></div>").join("") + "</div>";
+    if (r.entries.length) h += '<div class="env-log">' +
+      r.entries.map(e => '<div class="row"><time>' + esc(e[0]) + "</time><b>" + esc(e[1]) + "</b><span>" + esc(e[2]) + "</span></div>").join("") + "</div>";
+    if (r.error) h += '<pre class="env-error">' + esc(r.error) + "</pre>";
+    h += '<div class="env-suggestion"><b>下一步建议</b><span>' + esc(r.suggestion) + "</span></div>" +
+      '<div class="btn-row"><button type="button" class="probe-btn" data-chain-copy="' + kind + '">复制诊断</button>' +
+      '<button type="button" class="probe-btn" data-chain-run="' + kind + '">重新运行</button></div>';
+  }
+  return h;
+}
+function renderChains() {
+  $("chainGrid").innerHTML = Object.keys(CHAINS).map(chainCard).join("");
+  Object.keys(CHAINS).forEach(k => { $("env-" + k).innerHTML = envelopeHtml(k, -1); });
+}
+function runChain(kind) {
+  const c = CHAINS[kind], r = c.result;
+  const cardEl = document.querySelector('.chain[data-kind="' + kind + '"]');
+  if (!cardEl) return;
+  if (kind === "proactive_message" && !cardEl.querySelector("[data-chain-confirm]").checked)
+    return toast("先勾选「确认投递」——链路会真实走生产端到端");
+  if (c.pending) toast("「" + c.label + "」后端合同待补，当前为设计演示数据");
+  c.last = "最近测试：正在运行 · 刚刚";
+  cardEl.querySelector(".last").textContent = c.last;
+  const btn = cardEl.querySelector("[data-chain-run]");
+  if (btn) btn.disabled = true;
+  const env = $("env-" + kind);
+  let R = 0;
+  const tick = () => {
+    env.innerHTML = envelopeHtml(kind, R);
+    R++;
+    if (R <= r.steps.length) setTimeout(tick, 110);
+    else {
+      c.last = "最近测试：" + (CHAIN_STATE[r.state] || r.state) + " · 刚刚";
+      cardEl.querySelector(".last").textContent = c.last;
+      const bodyBtn = cardEl.querySelector("[data-chain-run]");
+      if (bodyBtn) bodyBtn.disabled = false;
+      env.innerHTML = envelopeHtml(kind, Infinity);
+      toast("链路测试完成 · " + (CHAIN_STATE[r.state] || r.state));
+    }
+  };
+  setTimeout(tick, 120);
+}
+function serializeChain(kind) {
+  const c = CHAINS[kind], r = c.result;
+  const lines = ["链路测试诊断 · " + c.label,
+    "状态：" + (CHAIN_STATE[r.state] || r.state) + " · " + r.detail,
+    "范围说明：" + c.note,
+    "事实：", ...r.facts.map(f => "- " + f[0] + "：" + f[1]),
+    "执行阶段：", ...r.steps.map(s => "- [" + s[2] + "] " + s[1] + (s[4] ? " · " + s[4] : "") + (s[3] ? "：" + s[3] : ""))];
+  if (r.entries.length) lines.push("诊断记录：", ...r.entries.map(e => "- " + e[0] + " [" + e[1] + "] " + e[2]));
+  if (r.error) lines.push("错误详情：" + r.error);
+  lines.push("建议：" + r.suggestion, "（排障页演示数据 · 落码后由后端链路信封生成）");
+  return lines.join("\n");
+}
+function copyChainDiag(kind) {
+  const txt = serializeChain(kind);
+  const done = () => toast("链路诊断已复制到剪贴板");
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, () => fallbackCopy(txt, done));
+  else fallbackCopy(txt, done);
+}
+function fallbackCopy(txt, done) {
+  const ta = document.createElement("textarea");
+  ta.value = txt;
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); done(); } catch (err) { toast("复制失败，请手动选择文本"); }
+  document.body.removeChild(ta);
+}
+$("chainGrid").addEventListener("click", e => {
+  const run = e.target.closest("[data-chain-run]");
+  if (run && !run.disabled) return runChain(run.dataset.chainRun);
+  const copy = e.target.closest("[data-chain-copy]");
+  if (copy) return copyChainDiag(copy.dataset.chainCopy);
+});
 
 /* ---------- 常见问题：文案取自真实页 FAQ（按分类组织，答案末尾带定位按钮） ---------- */
 const FAQS = [
@@ -1028,7 +1283,7 @@ const FAQS = [
   {cats: ["all", "model"], q: "结果未知为什么不能重试？", a: "请求可能已到达 Provider，但回执未能确认。自动重放可能重复计费或产生重复回复，因此保留原记录供核对。", act: "calls:uncertain", label: "查看记录"},
   {cats: ["all", "tasks"], q: "任务路由检查什么？", a: "核对主/备用 Provider 是否存在、能力是否匹配，以及输出上限是否超过 Provider 声明值；不读取提示词内容。", act: "ev:route", label: "查看路由"},
   {cats: ["all", "delivery"], q: "未知投递结果为什么不能重发？", a: "片段可能已到达会话但回执缺失。重发可能造成重复消息，这里只保留原记录供核对。", act: "ev:delivery", label: "查看收口"},
-  {cats: ["all", "proactive"], q: "能从这里发送测试主动消息吗？", a: "可以。先选择用途并确认真实投递；系统会经过角色模型与人格复核再投递到核心管理员私聊，没有当前来源时不会调用模型。", act: "probe:proactive", label: "查看主动消息测试"},
+  {cats: ["all", "proactive"], q: "能从这里发送测试主动消息吗？", a: "可以。先选择用途并确认真实投递；系统会经过角色模型与人格复核再投递到核心管理员私聊，没有当前来源时不会调用模型。", act: "chain:proactive_message", label: "查看主动消息链路"},
   {cats: ["all", "image_generation"], q: "注册检查会实际生成图片吗？", a: "不会。它只核对生图动作是否已注册且声明仍有效，不发起外部生成请求。", act: "probe:image", label: "检查生图工具"},
   {cats: ["all", "voice"], q: "TTS 测试会把语音发给谁？", a: "不会发送给联系人。测试仅合成短音频并返回状态，成功后可内联试听；所选服务商可能计费。", act: "probe:tts", label: "运行 TTS 测试"},
   {cats: ["all", "storage"], q: "SQLite 检查会修改数据吗？", a: "不会。检查通过只读快照执行 quick_check 和外键一致性核对。", act: "probe:storage", label: "运行只读检查"},
@@ -1046,6 +1301,7 @@ $("faqList").addEventListener("click", e => {
   const b = e.target.closest("[data-faq]");
   if (!b) return;
   const act = b.dataset.faq;
+  if (act.startsWith("chain:")) return openProbe(act.slice(6));
   if (act.startsWith("probe:")) return openProbe(act.split(":")[1]);
   if (act.startsWith("calls:")) return toast("跳转最近调用 · 仅未确认与未知");
   if (act.startsWith("ev:")) {
@@ -1134,15 +1390,19 @@ $("evList").addEventListener("click", e => {
   /* 跨子页动作：真实实现是 data-set-call-filter / data-focus-panel；设计稿以 toast 表达跳转目标 */
   if (act.startsWith("calls:")) return toast("跳转最近调用 · " + ({failed: "仅失败", uncertain: "仅未确认与未知", "cache-low": "仅低命中样本"}[act.split(":")[1]] || "记录"));
   if (act === "cache-panel") return toast("跳转缓存诊断子页");
+  if (act.startsWith("chain:")) return openProbe(act.slice(6));
   if (act.startsWith("probe:")) return openProbe(act.split(":")[1]);
 });
 
-/* 证据卡直达检测抽屉里的对应探测卡（真实实现为 data-focus-panel="test-zone"） */
+/* 证据卡 / FAQ 直达检测抽屉：链路卡与单点探测卡共用一套定位闪烁（真实实现为 data-focus-panel="test-zone"） */
 function openProbe(kind) {
   document.querySelector("details.probes").open = true;
-  const btn = document.querySelector('.probe [data-run="' + kind + '"]');
-  if (!btn) return toast("未找到对应检测卡");
-  const target = btn.closest(".probe");
+  let target = CHAINS[kind] ? document.querySelector('.chain[data-kind="' + kind + '"]') : null;
+  if (!target) {
+    const btn = document.querySelector('.probe [data-run="' + kind + '"]');
+    target = btn && btn.closest(".probe");
+  }
+  if (!target) return toast("未找到对应检测卡");
   target.scrollIntoView({block: "center", behavior: "smooth"});
   target.classList.remove("is-flash");
   void target.offsetWidth;
@@ -1153,7 +1413,6 @@ function runProbe(kind, resId) {
   const box = $(resId);
   box.innerHTML = '<div class="res" data-state="warn"><strong>执行中…</strong><span>结果只保留 15 分钟，不会写入运行账本。</span></div>';
   setTimeout(() => {
-    if (kind === "proactive") { renderStages(); toast("端到端测试完成 · 人格复核未放行"); return; }
     renderResult(resId, RESULTS[kind]);
     toast("检测完成 · 结果 15 分钟后自动清除");
   }, 900);
@@ -1164,7 +1423,7 @@ $("probeGrid").addEventListener("click", e => {
   const kind = b.dataset.run;
   if (kind === "memory-start") return startMemory();
   if (kind === "memory-stop") return stopMemory();
-  const resId = {provider: "provider-res", tts: "tts-res", image: "image-res", storage: "storage-res", proactive: "proactive-res"}[kind];
+  const resId = {provider: "provider-res", tts: "tts-res", image: "image-res", storage: "storage-res"}[kind];
   runProbe(kind, resId);
 });
 
@@ -1210,6 +1469,7 @@ document.addEventListener("keydown", e => {
   e.preventDefault();
 });
 
+renderChains();
 renderProbes();
 render();
 </script>

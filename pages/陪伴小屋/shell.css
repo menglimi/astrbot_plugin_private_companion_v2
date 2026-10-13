@@ -311,6 +311,7 @@
   /* 速览条移到场景下方、工具按钮收进场景之后，场景是首页的主视觉，
      比例相应放宽（2026-09-29 设计稿）。 */
   height: clamp(400px, 60vh, 680px);
+  max-height: none;
   border-radius: var(--r-lg, var(--r-md));
   border: 1px solid var(--t-line);
   overflow: hidden;
@@ -361,7 +362,7 @@
   left: 12px;
   box-sizing: border-box;
   max-width: calc(100% - 136px);
-  padding: 6px 9px;
+  padding: calc(var(--sp-1) * 1.5) calc(var(--sp-3) * .75);
   border: 1px solid var(--t-line);
   border-radius: var(--r-sm, var(--r-xs));
   background: color-mix(in srgb, var(--t-surface) 90%, transparent);
@@ -546,17 +547,7 @@
   font-weight: 600;
 }
 
-/* 面板切换时的入场：轻微上浮 + 淡入。
-   只作用在内容上，不作用在小屋上——小屋常在，动了会显得整个页面在跳。 */
-@keyframes shell-panel-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
-}
-.shell-panel-body.is-swapping { animation: shell-panel-in var(--dur) both; }
-
-/* 路由切换时只淡化非布局属性。
-   持续插值高度和网格轨道会反复触发布局与 3D 场景 resize，
-   页面较长时还会把内容面板连续推移，形成明显漂移。 */
+/* 配置路由切换只淡化非布局属性；首页工作区的高度联动单独处理。 */
 .stage-region,
 .shell-side,
 .shell-panel,
@@ -566,6 +557,21 @@
 }
 #homeShell[data-away="true"] .stage-region .room-stage {
   transition: filter var(--dur), border-color var(--dur);
+}
+/* 右栏仍在场景旁时，收起下方工作区就把空余视口交给小屋。
+   chrome 由实际天气栏与家具条测量，兼容文字换行、字号与密度。
+   直接跟随面板的 hidden，深链接、家具切换与返回首页共用同一判据。 */
+@media (min-width: 1121px) {
+  body:not(.room-editing) #homeShell[data-away="false"]:has(#shellPanel[hidden]) .shell-body {
+    grid-template-rows: auto;
+    grid-template-areas: "stage side";
+  }
+  body:not(.room-editing) #homeShell[data-away="false"]:has(#shellPanel[hidden]) .stage-region .room-stage {
+    height: max(var(--shell-stage-min), calc(100dvh - var(--shell-stage-chrome, 192px)));
+  }
+  .stage-region .room-stage {
+    transition: height var(--dur) cubic-bezier(.22, .68, .32, 1), opacity var(--dur), filter var(--dur);
+  }
 }
 /* 入场期间关掉淡化过渡，避免干扰按帧驱动的场景尺寸。 */
 .is-entrance .stage-region,
@@ -577,15 +583,12 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .shell-panel-body.is-swapping { animation: none; }
   .shell-nav-link { transition: none; }
   .stage-region,
   .shell-side,
   .shell-panel,
   .stage-region .room-stage { transition: none; }
 }
-:root[data-motion="off"] .shell-panel-body.is-swapping { animation: none; }
-:root[data-motion="low"] .shell-panel-body.is-swapping { animation-duration: .01ms; }
 :root[data-motion="off"] .stage-region,
 :root[data-motion="off"] .shell-side,
 :root[data-motion="off"] .shell-panel,

@@ -12,10 +12,11 @@ from companion_v2.conversation.external_tools import ExternalToolInvocation
 from companion_v2.execution.models import TaskError, digest, encode, require
 from companion_v2.foundation.refs import ScopeRef
 from companion_v2.sources.models import GovernanceState
+from companion_v2.together.mobile.requests import MobileRoomRequests
 
 
-REALITY_PLUGIN_ID = "astrbot_plugin_reality_companion"
-TOGETHER_PLUGIN_ID = "astrbot_plugin_together_companion"
+REALITY_PLUGIN_ID = "astrbot_plugin_private_companion_v2.reality"
+TOGETHER_PLUGIN_ID = "astrbot_plugin_private_companion_v2.together"
 TOGETHER_ACTIONS = {
     "create": "together.room.create",
     "invite": "together.room.invite",
@@ -31,15 +32,8 @@ class MobileTogetherBridge:
         self.controller = controller
 
     def _extension_api(self, plugin_id):
-        getter = getattr(self.controller.context, "get_registered_star", None)
-        if not callable(getter):
-            return None
-        try:
-            metadata = getter(plugin_id)
-            star = getattr(metadata, "star_cls", None) if metadata is not None else None
-            return getattr(star, "extension_api", None)
-        except Exception:
-            return None
+        registry = getattr(self.controller, "native_extensions", None)
+        return registry.api(plugin_id.rsplit(".", 1)[-1]) if registry is not None else None
 
     def _mobile_user(self, session_token):
         if type(session_token) is not str or not 24 <= len(session_token) <= 512:
@@ -57,6 +51,49 @@ class MobileTogetherBridge:
     def mobile_session_user(self, session_token):
         user_id = self._mobile_user(session_token)
         return {"schema": "companion.mobile-session.v1", "user_id": user_id}
+
+    def pairing_candidates(self):
+        """List only people with an exact, current V2 private conversation.
+
+        This is a pairing convenience, not a capability grant. Every later room
+        operation still checks the phone session and current per-action policy.
+        """
+        controller = self.controller
+        try:
+            self._running_session()
+        except TaskError:
+            return ()
+        candidates = set()
+        if getattr(controller, "_multi_host", False):
+            settings = getattr(controller, "settings", None)
+            for target in getattr(settings, "targets", ()):
+                user_id = getattr(target, "participant_id", "")
+                if user_id and user_id != "*":
+                    candidates.add(user_id)
+            runtime = getattr(controller, "runtime", None)
+            if runtime is not None:
+                for row in runtime.read_all("SELECT value FROM runtime_metadata WHERE key LIKE ?",
+                                            ("host.multi.active:%",)):
+                    try:
+                        scope = ScopeRef.restore(json.loads(row["value"]))
+                    except (ValueError, TypeError, KeyError):
+                        continue
+                    if scope.kind.value == "private":
+                        candidates.add(scope.native_scope_id)
+        else:
+            target = getattr(getattr(controller.session, "profile", None), "target", None)
+            user_id = getattr(getattr(getattr(target, "actor", None), "principal", None),
+                              "native_account_id", "")
+            if user_id:
+                candidates.add(user_id)
+        current = []
+        for user_id in sorted(candidates):
+            try:
+                if self._target_context(user_id) is not None:
+                    current.append(user_id)
+            except TaskError:
+                continue
+        return tuple(current)
 
     def _running_session(self):
         controller = self.controller
@@ -165,14 +202,21 @@ class MobileTogetherBridge:
             if name == "create" and declaration is not None:
                 schema = json.loads(declaration.descriptor.tool.parameters_json)
                 modes = schema.get("properties", {}).get("mode", {}).get("enum", [])
-        ready = bool(status["enabled"] and actions["create"])
+        lifecycle_reader = getattr(registry, "status", None)
+        lifecycle = lifecycle_reader("together") if callable(lifecycle_reader) else {}
+        failed = lifecycle.get("state") == "failed"
+        ready = bool(status["enabled"] and actions["create"] and not failed)
+        reason = ("mobile_together_disabled" if not status["enabled"] else
+                  "mobile_v2_together_start_failed" if failed else
+                  "mobile_together_not_authorized" if not actions["create"] else None)
         return {"matched": True, "available": status["enabled"], "ready": ready,
-                "running": status["running"], "capabilities": actions,
+                "enabled": status["enabled"], "running": status["running"], "capabilities": actions,
                 "modes": [item for item in modes if type(item) is str],
-                "reason": None if ready else "mobile_v2_together_not_ready"}
+                "reason": reason}
 
     async def invoke(self, session_token, *, request_id, operation, arguments):
-        if type(request_id) is not str or not REQUEST_ID.fullmatch(request_id):
+        legacy_create = operation == "create" and (request_id is None or request_id == "")
+        if not legacy_create and (type(request_id) is not str or not REQUEST_ID.fullmatch(request_id)):
             raise TaskError("mobile_request_id_required", "a stable request_id is required for this room operation")
         if operation not in TOGETHER_ACTIONS or type(arguments) is not dict:
             raise TaskError("mobile_together_request_invalid", "the room operation is invalid")
@@ -190,6 +234,31 @@ class MobileTogetherBridge:
             raise TaskError("mobile_together_not_authorized", "the current V2 target is not authorized for this room operation")
         if not self._together_status()["enabled"]:
             raise TaskError("mobile_together_disabled", "the Together room service is disabled")
+        requests = None
+        if legacy_create:
+            modes = json.loads(declaration.descriptor.tool.parameters_json).get("properties", {}).get("mode", {}).get("enum", [])
+            if arguments.get("mode") not in modes or set(arguments) != {"mode"}:
+                raise TaskError("mobile_together_request_invalid", "the room mode is invalid")
+            requests = MobileRoomRequests(application.runtime)
+            from .native_extensions.together.mobile_requests import room_request_available
+            getter = getattr(registry, "active_service", None)
+            service = getter("together") if callable(getter) else None
+            request_id = requests.begin(user_id, context.key, arguments.get("mode"),
+                now=self.controller.now().timestamp(),
+                room_available=lambda original: room_request_available(service, context, original))
+        try:
+            response = await self._invoke_native(session_token, user_id, session, application, context,
+                                                  registry, declaration, request_id, arguments)
+        except TaskError as error:
+            error.request_id = request_id
+            raise
+        if requests is not None:
+            requests.finish(user_id, arguments.get("mode"), request_id, response)
+        return {**response, "request_id": request_id}
+
+    async def _invoke_native(self, session_token, user_id, session, application, context,
+                             registry, declaration, request_id, arguments):
+        action = declaration.descriptor.tool.action
         stable = digest(["mobile-together.v1", action, request_id, context.key])
         invocation = ExternalToolInvocation(
             "mobile-" + stable, "mobile-parent-" + stable, "mobile-call-" + stable,

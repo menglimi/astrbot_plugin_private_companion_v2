@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from companion_v2.agenda.annual_calendar import SCHEMA
 from companion_v2.agenda.models import Frequency, Schedule
-from companion_v2.agenda.planning import KIND, planning_profile
+from companion_v2.agenda.planning import KIND, CalendarPlanning, planning_profile
 from companion_v2.agenda.planning_config import configured_annual_calendars, planning_values
 from companion_v2.agenda.planning_inputs import capture, validate, MATERIAL_CHARS, planning_calendar_context
 from companion_v2.agenda.planning_output import INSTRUCTION, parse_output
@@ -23,6 +23,8 @@ from companion_v2.foundation.refs import AudienceRef, SourceRef, VersionRef, Ope
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.model_gateway.routing import configuration_fields
+from companion_v2.model_gateway.budget import BudgetLedger
+from companion_v2.model_gateway.models import Amount, BudgetPolicy
 from companion_v2.proactive.management import ContactManagement
 from companion_v2.role_work.growth import RoleGrowthRecord, GrowthKind
 from companion_v2.role_work.growth.progress import growth_progress_profile
@@ -203,6 +205,23 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
             app.calendar_planning.next_checks[context.key] = NOW + timedelta(days=1)
         self.model_behavior = lambda envelope: self.response(envelope)
         return app, context, manager
+
+    async def test_budget_deferral_waits_and_later_recaptures_the_unstarted_plan(self):
+        app, context, _ = await self.ready()
+        old = app.gateway.ledger
+        app.gateway.ledger = BudgetLedger(self.runtime, BudgetPolicy(*(Amount(1, 100000) for _ in range(5))))
+        result = await self.plan(app, context)
+        self.assertEqual((result["state"], result["code"]), ("deferred", "model_budget_exhausted"))
+        self.assertFalse(app.calendar_planning.attempted(context, "manual-day"))
+        count = self.runtime.read_one("SELECT COUNT(*) n FROM execution_tasks", ())["n"]
+        self.assertEqual((await self.plan(app, context))["state"], "deferred")
+        self.assertEqual(self.runtime.read_one("SELECT COUNT(*) n FROM execution_tasks", ())["n"], count)
+        self.assertEqual(self.called, [])
+        app.gateway.ledger = old
+        resumed = await self.plan(app, context)
+        self.assertEqual(resumed["state"], "succeeded", resumed)
+        self.assertNotEqual(resumed["task_id"], result["task_id"])
+        self.assertEqual(len(self.called), 1)
 
     async def response(self, envelope):
         return answered(json.dumps({"items": [output(self.clock.now())]}, ensure_ascii=False))
@@ -420,6 +439,86 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.called), 2)
         self.assertEqual(self.sent, [])
 
+    async def test_automatic_slot_is_shared_across_private_windows_for_the_same_role(self):
+        app, context, _ = await self.ready()
+        other_scope = replace(context.scope, native_scope_id="another-window",
+                              conversation_id="conversation-another", session_id="session-another")
+        self.personas.register_route(ConversationRoute(other_scope, user=context.actor.subject), observed_at=NOW)
+        other_context = TaskContext(context.actor, self.identity.resolve_role(other_scope, observed_at=NOW).unwrap(),
+                                    AudienceRef(other_scope, (context.actor.subject,)))
+        instruction = app.state_maintenance.bindings[context.key][1]
+        app.state_maintenance.bind(other_context, instruction)
+        settings = app.role_state.settings(context)[0]
+        mode, slot, occurrence = app.calendar_planning.opportunity(context, settings, NOW)
+
+        first, second = await asyncio.gather(
+            app.calendar_planning.run(context, instruction, mode=mode, slot=slot,
+                                      occurrence=occurrence, automatic=True),
+            app.calendar_planning.run(other_context, instruction, mode=mode, slot=slot,
+                                      occurrence=occurrence, automatic=True),
+        )
+
+        self.assertEqual({first["state"], second["state"]}, {"succeeded", "already_attempted"})
+        self.assertEqual(len(self.called), 1)
+        self.assertTrue(app.calendar_planning.attempted(other_context, slot, automatic=True))
+        self.assertEqual(len(app.calendar.inventory(other_context)["items"]), 1)
+        restarted = CalendarPlanning(self.runtime)
+        restarted.attach(app)
+        self.assertTrue(restarted.attempted(other_context, slot, automatic=True))
+        marker_key = restarted._automatic_marker_key(context, slot)
+        with self.runtime.transaction() as connection:
+            connection.execute("DELETE FROM runtime_metadata WHERE key = ?", (marker_key,))
+        app.state_maintenance.bindings.pop(context.key)
+        self.assertTrue(restarted.attempted(other_context, slot, automatic=True))
+        marker = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (marker_key,))
+        self.assertEqual(json.loads(marker["value"])["status"], "legacy_attempt")
+        await restarted.close()
+
+    async def test_automatic_scheduler_uses_one_entry_for_all_windows_of_a_role(self):
+        app, context, _ = await self.ready()
+        other_scope = replace(context.scope, native_scope_id="scheduler-window",
+                              conversation_id="conversation-scheduler", session_id="session-scheduler")
+        self.personas.register_route(ConversationRoute(other_scope, user=context.actor.subject), observed_at=NOW)
+        other_context = TaskContext(context.actor, self.identity.resolve_role(other_scope, observed_at=NOW).unwrap(),
+                                    AudienceRef(other_scope, (context.actor.subject,)))
+        instruction = app.state_maintenance.bindings[context.key][1]
+        app.state_maintenance.bind(other_context, instruction)
+        app.calendar_planning.invalidate(context)
+
+        app.calendar_planning.advance()
+
+        role_key = app.calendar.records.role_key(context)
+        self.assertEqual(set(app.calendar_planning.workers), {role_key})
+        await self.until(lambda: app.calendar_planning.results.get(context.key, {}).get("state") == "succeeded")
+        self.assertEqual(len(self.called), 1)
+        shared = app.calendar.inventory(other_context)["items"]
+        self.assertEqual(len(shared), 1)
+        self.assertEqual(shared[0]["sources"], [])
+        self.assertEqual(app.calendar_planning.status(other_context)["last_result"]["mode"], "daily")
+
+    async def test_role_global_planning_excludes_private_window_material(self):
+        app, context, _ = await self.ready()
+        app.calendar.command(context, identifier="shared-role-plan", action="create", expected_revision=0,
+            operation_key="shared-role-plan", data=calendar_data(title="角色自己的计划"))
+        app.calendar.command(context, identifier="private-report", action="create", expected_revision=0,
+            operation_key="private-report", data=calendar_data(kind="user_report", title="窗口自述"))
+        app.calendar.command(context, identifier="private-commitment", action="create", expected_revision=0,
+            operation_key="private-commitment", data=calendar_data(kind="commitment", title="窗口约定"))
+        private_source = self.source(app, context, "private-plan-evidence")
+        app.calendar.command(context, identifier="private-evidence-plan", action="create", expected_revision=0,
+            operation_key="private-evidence-plan", data=calendar_data(title="带私聊来源的计划"),
+            sources=(private_source,))
+        instruction = app.state_maintenance.bindings[context.key][1]
+
+        job = capture(app.calendar_planning, context, instruction, "daily", "role-global-test", role_global=True)
+
+        self.assertEqual(job["sources"], ())
+        self.assertEqual([item["title"] for item in job["material"]["calendar"]], ["角色自己的计划"])
+        self.assertEqual(job["material"]["current_reports"], [])
+        self.assertEqual(job["material"]["confirmed_goals_and_skills"], [])
+        self.assertEqual(job["material"]["memories"], [])
+        self.assertEqual(job["material"]["planning_scope"], "role")
+
     async def test_calendar_material_is_bounded_and_marks_omitted_details(self):
         app, context, manager = await self.ready()
         self.configure(manager, planning_prompt="保留空闲" * 800, planning_annual_calendars=json.dumps([
@@ -596,6 +695,14 @@ class CalendarGlobalSwitchTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         rows = self.runtime.read_all("SELECT * FROM role_state_schedules", ())
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["context_key"], role_schedule_key(context))
+        self.assertEqual(TaskContext.restore(json.loads(rows[0]["context_json"])), context)
+
+        self.grant(other_context.actor, other_scope, "role.state.read")
+        self.grant(other_context.actor, other_scope, "role.state.maintain")
+        app.state_maintenance.bind(other_context, "same persona")
+        rows = self.runtime.read_all("SELECT * FROM role_state_schedules", ())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["context_key"], role_schedule_key(context))
         self.assertEqual(TaskContext.restore(json.loads(rows[0]["context_json"])), other_context)
 
     async def test_role_plans_follow_role_while_private_calendar_entries_stay_in_their_window(self):
@@ -668,9 +775,9 @@ class CalendarGlobalSwitchTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         private_source = self.source(app, context, "private-calendar-evidence")
         app.calendar.command(context, identifier="evidence-bound-plan", action="create", expected_revision=0,
             operation_key="create-evidence-bound-plan", data=calendar_data(), sources=(private_source,))
-        with self.assertRaises(TaskError) as hidden:
-            app.calendar.read(other_context, "evidence-bound-plan")
-        self.assertEqual(hidden.exception.code, "calendar_unavailable")
+        shared_evidence_plan = app.calendar.read(other_context, "evidence-bound-plan")
+        self.assertEqual(shared_evidence_plan["sources"], app.calendar.read(context, "evidence-bound-plan")["sources"])
+        self.assertEqual(app.calendar.inventory(other_context)["skipped"], 0)
 
         self.identity.issue_grant(grant_id="role-plan-reminder-create", subject=context.actor.subject,
             scope=context.scope, capability="reminder.create", tier=AuthorizationTier.STANDARD,

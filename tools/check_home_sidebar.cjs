@@ -9,7 +9,8 @@ const {chromium} = require("playwright");
 function syntheticBridge(options={}) {
   const HOST="astrbot_plugin_private_companion_v2", base="/"+HOST+"/host/targets/";
   const iso = offset => new Date(Date.now()+offset*60000).toISOString();
-  const qa=window.__sidebarQA={empty:false,denyState:false,deferSecond:false,hiddenKinds:[],stateEnabled:true,posts:0};
+  const qa=window.__sidebarQA={empty:false,denyState:false,deferSecond:false,hiddenKinds:[],
+    calendarCoverage:null,stateEnabled:true,posts:0};
   const catalog={mode:"multi",installation_id:"sidebar-qa",operator_id:"dashboard:qa",targets:["a","b"].map(id=>({
     target_id:id,scope_kind:"private",participant_id:"合成对象 "+id,platform_id:"qq",account_id:"qa-bot",bot_id:"qa-bot",
     roles:[{role_id:id==="a"?"晨星":"晚星",state_api:base+id+"/roles/role-"+id+"/state",life_api:base+id+"/roles/role-"+id+"/life"}],
@@ -19,7 +20,8 @@ function syntheticBridge(options={}) {
     state:{state:qa.empty?"unknown":"ready",revision:qa.empty?0:1,updated_at:qa.empty?undefined:iso(-10),values:qa.empty?{}:{
       energy:id==="a"?71:83,mood:{description:id==="a"?"平静而专注":"心情轻快",joy:7,anger:2,sorrow:2,fear:2,baseline:6},
       location:id==="a"?"小屋窗边":"庭院",sleep:"清醒",busy:"稍忙",health:"稳定",hunger:"不饿"}},
-    calendar:{items:[],next_cursor:null,skipped:0},occurrences:{partial:false,items:qa.empty?[]:[
+    calendar:{items:[],next_cursor:null,skipped:0},occurrences:{partial:Boolean(qa.calendarCoverage),
+      ...(qa.calendarCoverage||{}),items:qa.empty?[]:[
       {id:"later",sequence:0,kind:"role_plan",state:"accepted",title:"给花草浇水 "+id,start:iso(120),end:iso(150)},
       {id:"now",sequence:0,kind:"role_plan",state:"accepted",title:"阅读时间 "+id,start:iso(-20),end:iso(30)},
       {id:"old",sequence:0,kind:"role_plan",state:"accepted",title:"过去的安排",start:iso(-180),end:iso(-120)},
@@ -35,7 +37,7 @@ function syntheticBridge(options={}) {
         if(options.catalogDelay)await new Promise(resolve=>setTimeout(resolve,options.catalogDelay));
         return catalog;
       }
-      if(endpoint==="integration/manifest")return {product:{version:"2.0.0"},host:{enabled:true},core:[],providers:[],summary:{connected_count:0,installed_count:0,missing_count:7}};
+      if(endpoint==="integration/manifest")return {product:{version:"2.0.0"},host:{enabled:true},core:[],extensions:[],providers:[],summary:{connected_count:0,extension_ready_count:0,unassembled_extension_count:0,provider_count:0}};
       const match=/host\/targets\/([ab])\/roles\/role-[ab]\/(state|life)$/.exec(endpoint);
       if(!match)throw new Error("unexpected read: "+endpoint);
       if(match[2]==="life")return life(match[1]);
@@ -103,6 +105,12 @@ if(require.main===module)(async()=>{
     assert.match(await side.innerText(),/暂无近期安排/);assert.match(await side.innerText(),/尚未记录/);
     assert.doesNotMatch(await side.innerText(),/整理散步见闻|平静而专注/);await capture("empty");
     checks.push("空记录保留状态位置与日程入口，不补写生活内容");
+    await page.evaluate(async()=>{__sidebarQA.empty=false;__sidebarQA.calendarCoverage={skipped:2,
+      skipped_reasons:{role_mismatch:2},scan_truncated:true,occurrences_truncated:3};await CompanionProduct.connect();});
+    const coverage=await side.innerText();
+    assert.match(coverage,/2 条日历记录已跳过（2 条来源角色不匹配）/);
+    assert.match(coverage,/日历记录达到读取上限/);assert.match(coverage,/3 个日历期次超过读取上限/);
+    checks.push("首页分别说明来源跳过数量、扫描截断和期次截断");
     await page.evaluate(async()=>{__sidebarQA.hiddenKinds=["energy","location"];await CompanionProduct.connect();});
     assert.equal(await side.locator(".home-state-point").count(),5);
     assert.doesNotMatch(await side.locator(".home-state-board").innerText(),/能量|位置/);

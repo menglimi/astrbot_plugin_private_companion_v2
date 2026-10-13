@@ -211,7 +211,7 @@ class _SourceAccess:
 class ExternalToolExecutor:
     """Construct before TaskSupervisor; attach after registering its task definitions."""
     def __init__(self, runtime, providers: tuple[ExternalToolProvider, ...]):
-        if (not isinstance(providers, tuple) or not 1 <= len(providers) <= MAX_TOOL_CATALOG
+        if (not isinstance(providers, tuple) or not providers
                 or any(not isinstance(provider, ExternalToolProvider) for provider in providers)):
             raise ValueError("register a bounded tuple of trusted extension providers")
         values = {provider.descriptor.tool.action: provider for provider in providers}
@@ -294,6 +294,9 @@ class ExternalToolExecutor:
 
     def _row(self, invocation_id):
         row = self.runtime.read_one("SELECT * FROM extension_tool_invocations WHERE invocation_id = ?", (invocation_id,))
+        if row is None:
+            from .native_tool_results import operation_row
+            row = operation_row(self.runtime, invocation_id)
         if row is None:
             raise TaskError("external_invocation_unavailable", "original invocation is unavailable")
         return row
@@ -617,6 +620,9 @@ class ExternalToolExecutor:
                           receipt_ref=row["receipt_ref"], operation_id=row["operation_id"])
 
     def snapshot(self, row, context, at):
+        if isinstance(row, dict) and row.get("execution_path") == "astrbot_core":
+            from .native_tool_results import snapshot
+            return snapshot(self, row, context, at)
         descriptor = self._descriptor(row)
         self._admit(descriptor, context, at)
         batch = self.messages.batch(row["batch_id"])

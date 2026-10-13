@@ -12,7 +12,7 @@ from .segment_control import LLM_SEGMENT_MARKER, controlled_parts, protected_ran
 from .text_processing import literal_ranges
 
 
-DEFAULT_SPLIT_WORDS = ("。", "？", "！", "~", "～", "?", ".", "!", ";", "；", "……", "）", "“", "，", "…")
+DEFAULT_SPLIT_WORDS = ("。", "？", "！", "~", "～", "?", ".", "!", ";", "；", "……", "）", "“", "…")
 DEFAULT_RULE_REGEX = r"(?<=[。！？!?…~～])\s*|\n+"
 PART_GAP_MODES = frozenset(("fixed", "random", "log"))
 
@@ -118,7 +118,8 @@ def _word_boundaries(text, words, protected):
 
 COHERENCE_PROMPT = (
     "消息正文组织（只影响表达与排版，不改变角色、事实、来源和本轮任务）："
-    "先把同一个意思自然说完整，紧接的回应与理由保持连贯；不要为制造聊天感，"
+    "先把同一个意思自然说完整，紧接的回应与理由保持连贯；简短不等于只说几个字或一句就结束。"
+    "对轻松、亲昵或分享式消息，可以像熟人一样自然接住情绪并多回应一点；称呼要和所在的完整句子放在一起。不要为制造聊天感，"
     "把一次接话写成一串反问、称呼、否认和重复解释。称呼和语气词随语境使用，不必每句都补。"
     "标点按语义使用，不为凑消息条数额外添加标点、换行或短句，分段上限不是需要达到的目标。"
     "日常短消息正文内部不插入空行，每条正文首尾不填充空行；换行只用于实际内容格式或已配置的分段边界，"

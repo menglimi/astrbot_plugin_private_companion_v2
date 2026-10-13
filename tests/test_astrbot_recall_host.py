@@ -104,17 +104,19 @@ class MultiHostRecallTests(RecallAssertions, GroupFixture, unittest.IsolatedAsyn
         original = self.event(identifier="701")
         first = await self.admit(original)
         self.clock.advance(timedelta(seconds=1))
-        self.native.selections["qq-main"] = "second"
+        self.window_personas[original.unified_msg_origin] = "second"
         self.native.conversations["qq-main"] = "changed-conversation"
         second = await self.admit(self.event(identifier="701"))
         self.assertNotEqual(self.original_context(app, first).scope, self.original_context(app, second).scope)
         async def forbidden_lookup(_):
             raise AssertionError("recall must not resolve the current persona")
-        self.native.before_resolve = forbidden_lookup
+        bridge = self.controller.session.bridge
+        original_lookup = bridge.session_persona_override_lookup
+        bridge.session_persona_override_lookup = forbidden_lookup
         try:
             result = await self.recall(recall_notice(original))
         finally:
-            self.native.before_resolve = None
+            bridge.session_persona_override_lookup = original_lookup
         self.assertEqual(result["withdrawn_inputs"], 2)
         self.assert_withdrawn(app, first)
         self.assert_withdrawn(app, second)
@@ -173,10 +175,13 @@ class MultiHostRecallTests(RecallAssertions, GroupFixture, unittest.IsolatedAsyn
     async def test_recall_during_persona_capture_prevents_late_input_admission(self):
         app = await self.start_host()
         entered, release = asyncio.Event(), asyncio.Event()
-        async def held(_):
+        bridge = self.controller.session.bridge
+        original_lookup = bridge.session_persona_override_lookup
+        async def held(umo):
             entered.set()
             await release.wait()
-        self.native.before_resolve = held
+            return await original_lookup(umo)
+        bridge.session_persona_override_lookup = held
         original = self.event(identifier="701")
         pending = asyncio.create_task(self.controller.receive_claimed(original))
         try:
@@ -185,7 +190,7 @@ class MultiHostRecallTests(RecallAssertions, GroupFixture, unittest.IsolatedAsyn
             self.assertEqual(result["withdrawn_inputs"], 0)
         finally:
             release.set()
-            self.native.before_resolve = None
+            bridge.session_persona_override_lookup = original_lookup
         self.assertEqual((await pending).failure.code, "message_withdrawn")
         self.assertEqual(app.runtime.read_one("SELECT COUNT(*) FROM conversation_inputs", ())[0], 0)
         self.assertEqual(self.native.provider.client.state.calls, [])

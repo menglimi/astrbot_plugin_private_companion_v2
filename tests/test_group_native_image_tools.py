@@ -156,17 +156,21 @@ class GroupImageToolFixture(MessageFixture):
 
 class GroupNativeImageToolTests(GroupImageToolFixture, unittest.IsolatedAsyncioTestCase):
     async def test_catalog_exposes_only_authorized_image_actions_beside_group_memory(self):
+        # This fixture has no V1 legacy-memory service.  The current catalog
+        # must omit that compatibility action instead of exposing a dead tool.
+        group_memory_actions = self.tools.group_memory.actions - {"group.memory.legacy.query"}
         group = {t.action for t in self.tools.catalog_for(self.context)}
-        self.assertEqual(group, self.tools.group_memory.actions | self.tools.group_participation.actions | {"image.generate", "image.edit"})
+        self.assertEqual(group, group_memory_actions | self.tools.group_participation.actions | {"image.generate", "image.edit"})
+        self.assertNotIn("group.memory.legacy.query", group)
         self.assertIn("device.read", {t.action for t in self.tools.catalog_for(self.private_context)})
         self.assertTrue({"source.read", "memo.read", "device.read"}.isdisjoint(group))
         self.consent("image.edit", active=False, revision=1)
         self.assertEqual({t.action for t in self.tools.catalog_for(self.context)},
-                         self.tools.group_memory.actions | self.tools.group_participation.actions | {"image.generate"})
+                         group_memory_actions | self.tools.group_participation.actions | {"image.generate"})
         self.capabilities.set_role_enabled(extension_id=PACKAGE.extension_id, role=self.context.role_binding.role,
             bot_id=self.context.scope.bot_id, enabled=False, expected_revision=1, observed_at=NOW).unwrap()
         self.assertEqual({t.action for t in self.tools.catalog_for(self.context)},
-                         self.tools.group_memory.actions | self.tools.group_participation.actions)
+                         group_memory_actions | self.tools.group_participation.actions)
 
     async def test_private_audience_cannot_open_group_image_catalog(self):
         forged = replace(self.context, audience=AudienceRef(self.context.scope, (self.context.actor.subject,)))

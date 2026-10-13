@@ -21,7 +21,6 @@ from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS, SCREEN_READ
 from astrbot_host.management_identity import dashboard_operator
 from tests import test_astrbot_staging_host as support
-from tests.test_native_screen_flow import provider_module
 
 
 class ScreenAccessAPITests(unittest.IsolatedAsyncioTestCase):
@@ -30,15 +29,9 @@ class ScreenAccessAPITests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.native = support.WebContext()
-        provider = provider_module().NativeScreenProvider(
-            self.root / "screen-native", version="3.3.1", device_id="desktop",
-            platform_id="qq-main", account_id="100", bot_id="bot-a",
-            capture=lambda: b"unused", now=lambda: support.NOW)
-        self.addAsyncCleanup(provider.close)
-        star = NS(root_dir_name="astrbot_plugin_screen_companion",
-            version="3.3.1", activated=True,
-            star_cls=NS(extension_api=NS(companion_v2_native=lambda: provider)))
-        self.native.get_all_stars = lambda: (star,)
+        # The host assembles its bundled Screen owner. An optional legacy star
+        # is excluded by discovery and must not replace that provider in a test.
+        self.native.get_all_stars = lambda: ()
         types = support.NativeAdapterTypes("4.27.2", support.FakeEvent, support.FakeProvider,
                                           NS, NS, support.FakeReverseApi)
         self.controller = support.AstrBotStagingController(
@@ -72,11 +65,17 @@ class ScreenAccessAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(initial["installed"])
         self.assertFalse(initial["invokable"])
         self.assertTrue(initial["can_manage"])
+        self.assertIsNone(initial["installed_package_version"])
+        self.assertIsNone(initial["installed_artifact_hash"])
+        self.assertIsNone(initial["installed_revision"])
         command = {"operation_key": "screen-enable-1", "edit_token": initial["edit_token"], "enabled": True}
         enabled = await self.call(body=command)
         self.assertEqual(enabled["status"], "ok", enabled)
         self.assertTrue(enabled["data"]["status"]["invokable"])
         self.assertTrue(enabled["data"]["status"]["consented"])
+        self.assertFalse(enabled["data"]["status"]["upgrade_available"])
+        self.assertEqual(enabled["data"]["status"]["installed_package_version"], initial["package_version"])
+        self.assertEqual(enabled["data"]["status"]["installed_revision"], 1)
         replay = await self.call(body=command)
         self.assertTrue(replay["data"]["replayed"])
         repository = CapabilityRepository(self.controller.runtime)

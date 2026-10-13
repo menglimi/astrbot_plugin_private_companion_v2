@@ -201,7 +201,19 @@ window.CompanionHomeSidebar = (() => {
       if (missingRuntimeSections.length) messages.push(`${missingRuntimeSections.join("与")}暂不可读取：角色数据尚未就绪，请核对账号与人格的角色映射；首次设置状态不会因此改变。`);
       if (!calendarRead && !stateRuntimeMissing) messages.push(`日历：${state ? "安排尚未读取" : unavailable("state")}`);
       if (!lifeRead && !lifeRuntimeMissing) messages.push(`活动：${unavailable("life")}`);
-      if (state?.occurrences?.partial) messages.push("部分日历安排未完整读取");
+      const coverage = state?.occurrences;
+      if (coverage?.skipped) {
+        const reasons = coverage.skipped_reasons || {};
+        const labels = [];
+        if (reasons.role_mismatch) labels.push(`${reasons.role_mismatch} 条来源角色不匹配`);
+        if (reasons.source_unavailable) labels.push(`${reasons.source_unavailable} 条来源失效或不可验证`);
+        messages.push(`${coverage.skipped} 条日历记录已跳过${labels.length ? `（${labels.join("，")}）` : "（来源不可用）"}`);
+      }
+      if (coverage?.scan_truncated) messages.push("日历记录达到读取上限，仍有记录未检查");
+      if (coverage?.occurrences_truncated) messages.push(`${coverage.occurrences_truncated} 个日历期次超过读取上限，未显示`);
+      if (coverage?.partial && !coverage?.skipped && !coverage?.scan_truncated && !coverage?.occurrences_truncated) {
+        messages.push("部分日历安排未完整读取");
+      }
     }
     const emptyTitle = loading ? "正在读取日程…" : calendarRead && lifeRead
       ? state?.occurrences?.partial ? "日程未完整读取" : "今日暂无安排"

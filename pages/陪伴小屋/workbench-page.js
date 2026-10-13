@@ -99,7 +99,7 @@ window.CompanionWorkbench = (() => {
        编辑器自己的 proactive_contact_*，以及所有者与分组校验器的 contact_* /
        invalid_contact_preference——后者是后端唯一的取值校验码，而页面能先拦的形状
        由 contactAudit 兜住，所以这里要把两张表的码都写上。 */
-    proactive_contact_scope_invalid: "主动联系偏好按会话生效，请选择一个已初始化的私聊对象。",
+    proactive_contact_scope_invalid: "当前对象的联系状态不可用，请选择已建立私聊的用户。",
     proactive_contact_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     proactive_contact_configuration_invalid: "请核对主动联系设置：数值需在各自范围内，枚举项需在下拉选项内。",
     contact_relationship_budget_scope: "关系级配额（同一关系 24 小时内的联系与尝试上限）按安装 / 角色 / 关系层设置，不能按会话保存。",
@@ -302,13 +302,14 @@ window.CompanionWorkbench = (() => {
   /* === 渲染 === */
   function railMarkup(state, name, item, provenance, container) {
     const source = provenance?.[name]?.layer ?? null;
+    const writeLayer = item.writeLayer || container.writeLayer;
     const nodes = container.layers.map(layer => {
       const sourceClass = layer === source ? " is-source" : "";
       const editable = item.editable.length && !item.editable.includes(layer) ? " is-locked" : " is-editable";
       const label = LAYER_LABELS[layer] || layer;
       const shortLabel = LAYER_SHORT_LABELS[layer] || layer;
       const inherits = (!item.editable.length || item.editable.includes(layer))
-        ? (layer === container.writeLayer ? "本次保存写入这一层" : `${label}层可写`)
+        ? (layer === writeLayer ? "本次保存写入这一层" : `${label}层可写`)
         : `${shortLabel}层不适用于这一字段`;
       return `<span class="wb-node${sourceClass}${editable}" data-layer="${e(layer)}"`
         + ` title="${e(label)}层 · ${e(layer === source ? "当前生效值来自这里" : inherits)}"></span>`;
@@ -374,6 +375,25 @@ window.CompanionWorkbench = (() => {
         + (rows || `<div class="wb-empty-list">${e(empty)}</div>`)
         + `<span class="wb-source-count">已选 ${count} / ${selectedLimit} 项</span></div>`;
     }
+    if (item.kind === "text" && item.input === "identity-checklist") {
+      let selected = [];
+      try {
+        const parsed = JSON.parse(String(value || "[]"));
+        if (Array.isArray(parsed)) selected = parsed.filter(id => typeof id === "string");
+      } catch {}
+      const selectedSet = new Set(selected);
+      const entries = item.catalog?.(state.status) || {};
+      const option = (id, label, missing = false) => `<label class="wb-source-option">`
+        + `<input type="checkbox" data-wb-field="${e(item.name)}" data-wb-identity-id="${e(id)}"`
+        + `${selectedSet.has(id) ? " checked" : ""}${dis}>`
+        + `<span><b>${e(label)}</b>${missing ? "<small>当前角色目录中暂不可用</small>" : ""}</span></label>`;
+      const rows = Object.entries(entries).filter(([id]) => id).map(([id, label]) => option(id, label));
+      selected.filter(id => !Object.hasOwn(entries, id)).forEach((id, index) =>
+        rows.push(option(id, `已选身份 ${index + 1}`, true)));
+      return `<div class="wb-source-picker wb-identity-picker">`
+        + (rows.join("") || `<div class="wb-empty-list">暂无当前角色已绑定的私聊对象</div>`)
+        + `<span class="wb-source-count">已选 ${selectedSet.size} 项</span></div>`;
+    }
     if (item.catalog) {
       /* 选项在读取之后才知道（如 TTS 扩展目录），所以由分区声明一个
          取选项的函数；当前值不在目录里时补一条标注，避免选择被静默改写。 */
@@ -415,12 +435,22 @@ window.CompanionWorkbench = (() => {
           + (locked || present || words.length >= limit ? " disabled" : "") + ">"
           + glyph + "<span>" + e(specialLabels[special] || special) + "</span></button>";
       }).join("");
-      const quickWords = (policy.quickAdd || []).map(word => {
+      const quickWords = (policy.quickAdd || []).map(option => {
+        const entry = typeof option === "string" ? {value: option, label: option}
+          : option && typeof option === "object" ? option : null;
+        if (!entry) return "";
+        const special = Object.hasOwn(specialWords, entry.special) ? entry.special : "";
+        const word = special ? specialWords[special] : String(entry.value ?? "");
+        if (!word) return "";
+        const label = String(entry.label ?? (special ? specialLabels[special] : word));
         const present = words.includes(word);
-        return "<button type=\"button\" class=\"wb-word-special\" data-wb-word-value=\""
-          + e(word) + "\" data-wb-word-field=\"" + e(item.name) + "\""
+        const valueAttribute = special
+          ? `data-wb-word-special=\"${e(special)}\"` : `data-wb-word-value=\"${e(word)}\"`;
+        const glyph = special === "newline" ? icon("corner-down-left") : "";
+        return `<button type=\"button\" class=\"wb-word-special\" ${valueAttribute}`
+          + ` data-wb-word-field=\"${e(item.name)}\"`
           + (locked || present || words.length >= limit ? " disabled" : "") + ">"
-          + "<span>" + e(word) + "</span></button>";
+          + glyph + `<span>${e(label)}</span></button>`;
       }).join("");
       return "<div class=\"wb-word-editor\" data-wb-word-list=\"" + e(item.name) + "\">"
         + "<div class=\"wb-keywords\" role=\"group\" aria-label=\"" + e(item.label || item.name) + "\">"
@@ -601,15 +631,17 @@ window.CompanionWorkbench = (() => {
     const value = state.draft[name];
     const provenance = state.status?.provenance?.[name] || {};
     const inherited = provenance.explicit === false && provenance.layer !== null;
-    const locked = state.locked();
-    /* 继承态：标签上显示被覆盖的幽灵值与实际生效值。 */
+    const layerEditable = !item.editable.length || item.editable.includes(item.writeLayer || container.writeLayer);
+    const locked = state.locked() || !layerEditable;
+    /* 控件已显示当前值；只有草稿覆盖继承值时，额外标出被替换的来源值。 */
     let label = item.label || name;
     if (inherited && container.presentation !== "journal") {
       const ghost = state.base?.[name];
       const shown = displayValue(item, ghost);
-      const live = displayValue(item, value);
-      label = `${e(item.label || name)} <span class="wb-ghost">${e(shown)}</span>`
-        + `<span class="wb-live">${e(live)}</span>`;
+      label = e(item.label || name);
+      if (value !== ghost) {
+        label += ` <span class="wb-ghost" title="当前草稿覆盖前的继承值">继承值 ${e(shown)}</span>`;
+      }
     } else {
       label = e(item.label || name);
     }
@@ -621,7 +653,7 @@ window.CompanionWorkbench = (() => {
     const inheritClass = inherited ? " is-inherited" : "";
     const visible = !item.visibleWhen || Object.entries(item.visibleWhen)
       .every(([field, expected]) => state.draft?.[field] === expected);
-    return `<div class="wb-field${dirty}${inheritClass}" data-wb-row="${e(name)}"${visible ? "" : " hidden"}>`
+    return `<div class="wb-field${dirty}${inheritClass}${layerEditable ? "" : " is-layer-locked"}" data-wb-row="${e(name)}"${visible ? "" : " hidden"}>`
       + (container.presentation === "journal" ? "" : railMarkup(state, name, item, state.status?.provenance, container))
       + `<div class="wb-field-main"><span class="wb-label">${label}</span>`
       + (item.help && container.presentation !== "journal" ? `<p class="wb-help">${e(item.help)}</p>` : "")
@@ -722,7 +754,8 @@ window.CompanionWorkbench = (() => {
          : "保存结果尚未确认。可能已经写入；核对会沿用同一个操作标识，不会重复保存。")
        : "";
      const scopeLabel = s.status
-      ? (container.scopeNote || (s.status.scope === "role" ? "安装与角色"
+      ? (container.scopeNote || (s.status.scope === "installation" ? "插件安装全局"
+        : s.status.scope === "role" ? "安装与角色"
         /* 默认写窗口、但角色层同样可写的组（技能领域、日记与作息）：值是角色共享的，
            只有本会话覆盖才落在窗口层，所以不能只标「当前会话」。
            角色层之上还有关系层的组（主动联系偏好）由分区自己声明 scopeNote：
@@ -815,12 +848,13 @@ window.CompanionWorkbench = (() => {
     state.dirty = dirty;
 
      const storageKey = () => {
-       const identity = window.CompanionProduct?.identity?.() || {};
-       let scope = "";
-       try {
-         scope = typeof scopeKeyOverride === "string" && scopeKeyOverride
-           ? scopeKeyOverride : typeof window.CompanionProduct?.scopeKey === "function"
-             ? String(window.CompanionProduct.scopeKey() || "") : "";
+     const identity = window.CompanionProduct?.identity?.() || {};
+      let scope = "";
+      try {
+        scope = state.status?.scope === "installation" ? "installation"
+          : typeof scopeKeyOverride === "string" && scopeKeyOverride
+            ? scopeKeyOverride : typeof window.CompanionProduct?.scopeKey === "function"
+              ? String(window.CompanionProduct.scopeKey() || "") : "";
        } catch (_) {}
        return STORE + JSON.stringify([identity.installation_id, identity.operator_id, scope, group]);
      };
@@ -842,11 +876,37 @@ window.CompanionWorkbench = (() => {
           } else {
             delete restored.pending_reason;
           }
+          if (typeof restored.pending_reason_code !== "string"
+              || !/^[a-z][a-z0-9_]{2,79}$/.test(restored.pending_reason_code)) {
+            delete restored.pending_reason_code;
+          }
           return restored;
         }
       } catch {}
       return null;
     };
+
+    function recoverConfirmedConflict(pending) {
+      const confirmedConflict = pending?.pending_reason_code === "configuration_revision_conflict"
+        || pending?.pending_reason === errors.configuration_revision_conflict;
+      if (!confirmedConflict) return false;
+      const changes = pending.changes || {};
+      const resets = Array.isArray(pending.reset_to_inherit) ? pending.reset_to_inherit : [];
+      const names = [...Object.keys(changes), ...resets];
+      if (!names.every(name => Object.hasOwn(state.draft || {}, name))) return false;
+      for (const [name, value] of Object.entries(changes)) state.draft[name] = value;
+      for (const name of resets) {
+        state.draft[name] = state.base[name];
+        if (!resets_.includes(name)) resets_.push(name);
+      }
+      state.pending = null;
+      state.pendingReason = "";
+      savePending();
+      clearAutoRecovery(pending.operation_key);
+      state.stale = false;
+      state.ok = false;
+      return true;
+    }
 
     function scheduleAutoRecovery(operationKey, ticket = state.ticket) {
       if (!operationKey || state.pending?.operation_key !== operationKey || autoRecoveryKey === operationKey) return;
@@ -877,6 +937,7 @@ window.CompanionWorkbench = (() => {
         fields[name] = contract(name, definitions[name], choices[name] || null);
         fields[name].label = labels[name] || name;
         fields[name].help = helps[name] || "";
+        fields[name].writeLayer = definitions[name].write_layer || "";
         /* 目录型控件（选项来自读取结果，如 TTS 扩展）与多行文本框行数。 */
         if (typeof catalogs[name] === "function") fields[name].catalog = catalogs[name];
         if (rows[name]) fields[name].rows = rows[name];
@@ -1012,9 +1073,11 @@ window.CompanionWorkbench = (() => {
       if (presentation === "journal") {
         const panels = mountPoint()?.querySelectorAll?.("[data-wb-section-panel]") || [];
         for (const panel of panels) panel.hidden = panel.dataset.wbSectionPanel !== id;
+        window.CompanionPageMotion?.reveal([...panels].find(panel=>!panel.hidden));
         return;
       }
       paint();
+      window.CompanionPageMotion?.reveal(mountPoint()?.querySelector?.('[data-wb-section-panel]:not([hidden])'));
       if (focus) focusSection(id);
     }
 
@@ -1189,6 +1252,19 @@ window.CompanionWorkbench = (() => {
         if (count) count.textContent = `已选 ${options.length} / ${maximum} 项`;
         return;
       }
+      if (item.input === "identity-checklist" && el.type === "checkbox") {
+        const control = el.closest(".wb-identity-picker");
+        const selected = [...(control?.querySelectorAll("[data-wb-identity-id]:checked") || [])]
+          .map(input => input.dataset.wbIdentityId);
+        const raw = JSON.stringify(selected);
+        state.draft[name] = raw;
+        state.savedState = ""; state.ok = false;
+        const row = el.closest(".wb-field");
+        if (row) row.classList.toggle("is-dirty", state.base && raw !== state.base[name]);
+        const count = control?.querySelector(".wb-source-count");
+        if (count) count.textContent = `已选 ${selected.length} 项`;
+        return;
+      }
       const raw = item.kind === "bool" ? el.checked
         : el.tagName === "SELECT" ? coerceChoice(item, el.value)
           : item.kind === "text" && item.input === "line-list" ? JSON.stringify(parseLineList(el.value))
@@ -1259,7 +1335,7 @@ window.CompanionWorkbench = (() => {
       const specialWord = event.target.closest("[data-wb-word-special]");
       if (specialWord) {
         const value = {newline: "\n", space: " ", tab: "\t"}[specialWord.dataset.wbWordSpecial];
-        if (value !== undefined) addWord(specialWord.dataset.wbWordField, value);
+        if (value !== undefined) addWord(specialWord.dataset.wbWordField, value, true);
         return;
       }
       const quickWord = event.target.closest("[data-wb-word-value]");
@@ -1343,12 +1419,13 @@ window.CompanionWorkbench = (() => {
       }
     }
 
-    function addWord(name, rawWord) {
+    function addWord(name, rawWord, preserveWhitespace = false) {
       if (!state.draft || locked()) return;
       const item = state.container?.fields[name];
       if (!item || item.input !== "word-list") return;
       const policy = item.listPolicy || {};
-      const word = policy.trim ? String(rawWord ?? "").trim() : String(rawWord ?? "");
+      const word = preserveWhitespace ? String(rawWord ?? "")
+        : policy.trim ? String(rawWord ?? "").trim() : String(rawWord ?? "");
       if (!word.length) return;
       if (word.length > (policy.maxLength || 200)) {
         state.notice = `每个词条最多 ${policy.maxLength || 200} 个字符。`;
@@ -1658,7 +1735,24 @@ window.CompanionWorkbench = (() => {
       state.notice = state.status ? state.notice : "";
       paint();
       try {
-        const payload = await api("GET", endpoint, null, query || undefined);
+        let payload, retried = false;
+        for (let retries = 0; ; retries += 1) {
+          try {
+            payload = await api("GET", endpoint, null, query || undefined);
+            break;
+          } catch (problem) {
+            if (ticket !== state.ticket) return;
+            const code = problem?.code || (isCode(problem?.message) ? problem.message : "");
+            if (code !== "bridge_timeout" || retries >= 2) throw problem;
+            retried = true;
+            state.notice = `宿主响应超时，自动重试读取（${retries + 1}/2）…`;
+            state.bad = false;
+            state.denied = false;
+            paint();
+            await new Promise(resolve => setTimeout(resolve, retries === 0 ? 400 : 1200));
+            if (ticket !== state.ticket) return;
+          }
+        }
         if (ticket !== state.ticket) return;
         /* 配置接口按分区返回 {sections: {name: {...}}}；取本分区那一片。 */
         const value = payload.sections ? payload.sections[group] : payload;
@@ -1683,12 +1777,23 @@ window.CompanionWorkbench = (() => {
           if (changed) resets_ = resets_.filter(name => name in state.draft);
         }
         state.stale = false;
+        let recoveredConflict = false;
         if (!state.pending) {
-          state.pending = restorePending();
-          state.pendingReason = state.pending?.pending_reason || "";
+          const restored = restorePending();
+          if (restored) {
+            if (recoverConfirmedConflict(restored)) recoveredConflict = true;
+            else {
+              state.pending = restored;
+              state.pendingReason = restored.pending_reason || "";
+            }
+          }
         }
         state.denied = false; state.bad = false;
-        if (changed) state.notice = "已读取最新配置。";
+        if (recoveredConflict) {
+          state.bad = true;
+          state.notice = "上次保存遇到配置版本冲突，服务端没有写入；草稿已恢复，请核对后重新保存。";
+        } else if (changed) state.notice = "已读取最新配置。";
+        else if (retried) state.notice = "";
         state.loading = false;
         paint();
         if (onStatus) onStatus(value);
@@ -1823,7 +1928,8 @@ window.CompanionWorkbench = (() => {
       } catch (problem) {
         state.busy = false;
         state.bad = true;
-        if (problem.confirmed) {
+        const problemCode = problem?.code || (isCode(problem?.message) ? problem.message : "");
+        if (problem.confirmed || problemCode === "configuration_revision_conflict") {
            state.pending = null; state.pendingReason = ""; savePending();
            clearAutoRecovery(request.operation_key);
            state.stale = true;
@@ -1831,6 +1937,7 @@ window.CompanionWorkbench = (() => {
         } else {
            state.pendingReason = localized(problem, "连接没有返回保存确认。");
            state.pending.pending_reason = state.pendingReason.slice(0, 512);
+           if (problemCode) state.pending.pending_reason_code = problemCode.slice(0, 80);
            savePending();
            scheduleAutoRecovery(request.operation_key, state.ticket);
            /* 待核对块会展示原因和唯一操作入口；顶部不要再重复一条红色提示。 */

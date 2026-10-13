@@ -128,7 +128,10 @@ from companion_v2.expression.style_service import ExpressionStyleService
 from companion_v2.expression.review import ExpressionDraftReview
 from companion_v2.expression.style_management import ExpressionStyleManagement
 from companion_v2.expression.configuration import (ExpressionConfigurationOwner,
-    configuration_fields as expression_configuration_fields)
+    GroupExpressionConfigurationOwner, PrivateExpressionConfigurationOwner,
+    configuration_fields as expression_configuration_fields,
+    group_configuration_fields as expression_group_configuration_fields,
+    private_configuration_fields as expression_private_configuration_fields)
 from companion_v2.expression.reaction_configuration import (ReactionConfigurationOwner,
     configuration_fields as reaction_configuration_fields)
 from companion_v2.knowledge.configuration import (KnowledgeConfigurationOwner,
@@ -153,7 +156,9 @@ from companion_v2.memory.models import MemoryPolicy
 from companion_v2.memory.reflection import MemoryReflection
 from companion_v2.memory.scheduling import MemorySchedule
 from companion_v2.memory.configuration import extend_registry
-from companion_v2.memory.person.configuration import AcquaintanceSettings, configuration_fields as person_configuration_fields
+from companion_v2.memory.person.configuration import (AcquaintanceSettings,
+    configuration_fields as person_configuration_fields,
+    learning_configuration_fields as person_learning_configuration_fields)
 from companion_v2.proactive.configuration import ContactConfigurationOwner, GROUP as CONTACT_GROUP, with_contact_fields
 from companion_v2.proactive.service import ProactiveContacts
 from companion_v2.proactive.scheduling import ContactSchedule
@@ -179,6 +184,8 @@ class ShutdownReport:
 
 
 class CompanionApplication:
+    WAL_CHECKPOINT_INTERVAL_SECONDS = 30.0
+
     def __init__(self, runtime, *, registry, profiles, providers, budget, sender, external=None,
                  policy=ConversationPolicy(), limits=SupervisorLimits(), split=single_part,
                  now=None, owns_runtime=False, agenda_policy=AgendaDispatchPolicy(), memory_policy=MemoryPolicy(),
@@ -214,9 +221,11 @@ class CompanionApplication:
                                  *state_configuration_fields(),
             *reply_configuration_fields(segmentation, streaming, policy.part_gap_seconds, voice_policy),
             *perception_configuration_fields(), *person_configuration_fields(),
+            *person_learning_configuration_fields(),
             *image_quota_configuration_fields(), *image_review_configuration_fields(),
             *image_output_configuration_fields(),
-            *expression_configuration_fields(), *reaction_configuration_fields(),
+            *expression_configuration_fields(), *expression_private_configuration_fields(),
+            *expression_group_configuration_fields(), *reaction_configuration_fields(),
             *busy_gate_configuration_fields(), *group_participation_configuration_fields(),
             *knowledge_configuration_fields(), *budget_configuration_fields(),
             *screen_configuration_fields(), *recall_configuration_fields(),
@@ -239,6 +248,7 @@ class CompanionApplication:
                     PerceptionConfigurationOwner(runtime), ImageQuotaConfigurationOwner(runtime),
                     ImageOutputConfigurationOwner(runtime),
                     ImageReviewConfigurationOwner(runtime), ExpressionConfigurationOwner(runtime),
+                    PrivateExpressionConfigurationOwner(runtime), GroupExpressionConfigurationOwner(runtime),
                     ReactionConfigurationOwner(runtime), BusyGateConfigurationOwner(runtime),
                     GroupParticipationConfigurationOwner(runtime), KnowledgeConfigurationOwner(runtime),
                     ScreenConfigurationOwner(runtime), RecallConfigurationOwner(runtime),
@@ -281,6 +291,7 @@ class CompanionApplication:
             DeliveryOwner(FALLBACK_OWNER, "conversation.reply", lambda request, at: self.image_fallback.read(request, at)),
         ), concurrency=limits.background_slots)
         self.outbound.on_delivered = self._mark_contact_sent
+        self.outbound.on_receipt = self._record_contact_delivery_receipt
         # The review executor only needs the runtime until its app is attached; the
         # conversation owner binds the real review instance once messages exist.
         self.image_review_service = GroupImageReviewService(runtime, notify=self.notify)
@@ -292,7 +303,7 @@ class CompanionApplication:
         self.authoring = ContentAuthoringWorkflow(runtime)
         registrations = (
             TaskRegistration(TaskDefinition(REPLY_KIND, "conversation", REPLY_ACTION, Lane.FOREGROUND,
-                timeout_seconds=180, max_attempts=1, concurrency=self.worker_limit),
+                timeout_seconds=600, max_attempts=1, concurrency=self.worker_limit),
                 lambda spec, at: self.messages.validate_generation(spec, at)),
             TaskRegistration(TaskDefinition(DELIVERY_KIND, "conversation.delivery", REPLY_ACTION, Lane.FOREGROUND,
                 side_effect=SideEffect.MESSAGE_DELIVERY, binding=sender.binding, timeout_seconds=30,
@@ -482,6 +493,7 @@ class CompanionApplication:
         self.failure_detail = None
         self._wake = asyncio.Event()
         self._driver = None
+        self._wal_checkpoint_worker = None
         self._workers = {}
         self._storage_closed = False
         self._closing = asyncio.Lock()
@@ -501,11 +513,11 @@ class CompanionApplication:
         logger.error("[CompanionV2] 宿主运行失败 code=%s error_type=%s location=%s",
                      self.failure_code, type(error).__name__, location)
 
-    def attach_semantics(self, port):
+    def attach_semantics(self, port, *, reaction_role_count=0):
         from companion_v2.expression.semantic_service import SemanticService
         if self.semantics is not None:
             raise ValueError("semantic service already attached")
-        self.semantics = SemanticService(self, port)
+        self.semantics = SemanticService(self, port, reaction_role_count=reaction_role_count)
         self.tools.semantic = self.semantics
         self.tools.actions |= self.semantics.actions
         self.messages.semantics = self.semantics
@@ -611,11 +623,9 @@ class CompanionApplication:
         if context.scope.kind is ScopeKind.GROUP:
             self.notify()
             return batch_id
-        try:
-            self.memory_schedule.sync_configuration(context, role_instruction)
-        except (TaskError, ValueError, KeyError):
-            # Invalid optional memory settings cannot reject an accepted message.
-            self.memory_schedule.results["configuration"] = {"state": "blocked", "code": "memory_schedule_configuration"}
+        # Schedule persistence is optional for reply admission and can wait until
+        # the intake transaction has committed.
+        self.memory_schedule.schedule_configuration(context, role_instruction)
         try:
             self.state_maintenance.bind(context, role_instruction)
             if self.presence is not None:
@@ -748,6 +758,19 @@ class CompanionApplication:
                 self.semantics.errors["reaction_usage"] = getattr(exc, "code", type(exc).__name__)
         self.notify()
 
+    def _record_contact_delivery_receipt(self, request, receipt):
+        if request.owner == CONTACT_GROUP:
+            self.proactive.record_delivery_receipt(request, receipt)
+
+    @staticmethod
+    def _report_wal_checkpoint(task):
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as error:
+            logger.warning("[CompanionV2] SQLite WAL checkpoint failed error_type=%s", type(error).__name__)
+
     def _reconcile_contact_reactions(self):
         last = ""
         while True:
@@ -763,7 +786,21 @@ class CompanionApplication:
             last = rows[-1]["delivery_id"]
 
     def notify(self):
-        """Host-thread wake for committed permission/config/receipt changes or a test clock."""
+        """Wake the owning loop after a committed change, including worker writes."""
+        loop = self._driver.get_loop() if self._driver is not None else None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if loop is not None and loop is not current_loop:
+            # SQLite observations also notify from a worker. Event.set() must
+            # run on its loop so waiter callbacks and cancellation stay valid.
+            try:
+                loop.call_soon_threadsafe(self._wake.set)
+            except RuntimeError:
+                if not loop.is_closed():
+                    raise
+            return
         self._wake.set()
 
     async def _execute(self, run):
@@ -787,6 +824,7 @@ class CompanionApplication:
         try:
             loop = asyncio.get_running_loop()
             next_contact_delivery_check = 0.0
+            next_wal_checkpoint = loop.time()
             while self.state == "running":
                 self._wake.clear()
                 require(self.tasks.check_generation())
@@ -854,6 +892,15 @@ class CompanionApplication:
                 timeout = max(0, (deadline - self.now()).total_seconds()) if deadline else None
                 more_background = self.background.advance()
                 self.contact_schedule.advance()
+                if loop.time() >= next_wal_checkpoint:
+                    checkpoint = getattr(self.runtime, "checkpoint_passive", None)
+                    worker = self._wal_checkpoint_worker
+                    if callable(checkpoint) and (worker is None or worker.done()):
+                        worker = asyncio.create_task(asyncio.to_thread(checkpoint),
+                                                     name="companion:sqlite-wal-checkpoint")
+                        worker.add_done_callback(self._report_wal_checkpoint)
+                        self._wal_checkpoint_worker = worker
+                    next_wal_checkpoint = loop.time() + self.WAL_CHECKPOINT_INTERVAL_SECONDS
                 timeout = 0 if more_background else min(timeout, 1.0) if timeout is not None else 1.0
                 if timeout == 0:
                     await asyncio.sleep(0)  # Bounded pages yield to intake, cancellation and other routes.
@@ -926,6 +973,9 @@ class CompanionApplication:
             if self._driver is not None:
                 self._driver.cancel()
                 await asyncio.gather(self._driver, return_exceptions=True)
+            if self._wal_checkpoint_worker is not None:
+                await asyncio.gather(self._wal_checkpoint_worker, return_exceptions=True)
+                self._wal_checkpoint_worker = None
             workers = tuple(worker for _, worker in self._workers.values())
             if workers:
                 _, pending = await asyncio.wait(workers, timeout=grace_seconds)

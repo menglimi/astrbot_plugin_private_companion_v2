@@ -133,8 +133,12 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
 
     native = MultiNativeContext()
     clock = DeterministicClock.at(NOW)
+    async def selected_persona(_umo):
+        return "original"
+
     native_types = NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider, SimpleNamespace,
-                                      SimpleNamespace, FakeReverseApi)
+                                      SimpleNamespace, FakeReverseApi,
+                                      session_persona_override_lookup=selected_persona)
     with TemporaryDirectory(prefix="companion-v2-complete-v1-data-acceptance-") as temporary:
         data_root = Path(temporary) / "v2-data"
         controller = AstrBotMultiController(native, multi_config(), data_root,

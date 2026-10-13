@@ -45,6 +45,7 @@ from .contact_models import ContactIntent, ContactJob
 from .inspirations import ProactiveInspirations
 from .persona_judge import (KIND as JUDGE_KIND, PersonaJudge, JudgeVerdict, exempt_purposes, judge_output,
                             judge_request, signature_for)
+from .platform_circuit import ProactivePlatformCircuit
 from .news_events import SOURCE_OWNER as NEWS_SOURCE_OWNER, news_provenance
 from .planner import ProactivePlanner
 from .preferences import ProactivePreferences
@@ -123,6 +124,7 @@ class ProactiveContacts:
         # 推送端口是旁路：它记录角色说过的话，但不参与「说不说、说什么」的决定。
         self.memory_push = DEFAULT_MEMORY_PUSH if memory_push is None else memory_push
         self.sources, self.operations = SourceRepository(self.runtime), OperationRepository(self.runtime)
+        self.platform_circuit = ProactivePlatformCircuit(self.runtime)
         self.budget = ContactBudget(self.runtime)
         self.history = self.schedule = self.semantics = None
         self.inspirations = ProactiveInspirations(self)
@@ -202,7 +204,8 @@ class ProactiveContacts:
         if self.expression_context is None:
             return None
         try:
-            return self.expression_context.capture(context, at, policy=expression_settings(self.runtime, context))
+            return self.expression_context.capture(context, at, policy=expression_settings(self.runtime, context),
+                                                  channel="proactive")
         except Exception as error:
             logger.warning("V2 proactive expression capture unavailable: %s", type(error).__name__)
             return None
@@ -315,7 +318,8 @@ class ProactiveContacts:
 
     def _policy(self, context, purpose, at, *, token=None, contact_id="", administrator_test=False):
         preferences = require(self.preferences.read(context, observed_at=at))
-        preferences.require_contact(purpose, ignore_time_restrictions=administrator_test)
+        preferences.require_contact(purpose, ignore_time_restrictions=administrator_test,
+                                    ignore_master_switch=administrator_test)
         if token is not None and preferences.snapshot.resolution_token != token:
             raise TaskError("contact_preferences_changed", "prepared contact belongs to earlier preferences")
         if not administrator_test:
@@ -460,6 +464,10 @@ class ProactiveContacts:
                               + (["administrator_test"] if administrator_test else []))
         try:
             self.require_running()
+            if not administrator_test and self.platform_circuit.cooldown_until(
+                    context, at=self.tasks.now()) is not None:
+                raise TaskError("proactive_platform_cooldown",
+                                "proactive contact is paused after repeated platform send refusals")
             if CONTACT_KIND not in self.gateway.router.profiles:
                 raise TaskError("model_task_unregistered", "contact requires its own explicit background model profile")
             require(self.tasks.authorize_context(context, action=GROUP, observed_at=self.tasks.now()))
@@ -505,7 +513,8 @@ class ProactiveContacts:
                         self._continuity(context, history, interaction, automatic_origin, at)
                     feasible, originals, records_by_id = [], {}, {}
                     for intent in intents:
-                        if preferences.reason(intent.purpose, ignore_time_restrictions=administrator_test):
+                        if preferences.reason(intent.purpose, ignore_time_restrictions=administrator_test,
+                                              ignore_master_switch=administrator_test):
                             continue
                         try:
                             records = self._records(context, intent.thought.evidence.sources, at)
@@ -567,6 +576,15 @@ class ProactiveContacts:
         except (TaskError, ConfigurationError) as error:
             return Outcome.failed(error.code, str(error))
 
+    def record_delivery_receipt(self, request, receipt):
+        if request.owner != GROUP or request.context.scope.account_id is None:
+            return
+        rejected = receipt.status == "not_sent" and receipt.failure_code == "qq_eventchecker_1200"
+        self.platform_circuit.record(request.context, at=self.tasks.now(),
+            failure_code=receipt.failure_code if rejected else None,
+            reset_failures=(receipt.status in ("delivered", "accepted")
+                            or receipt.status == "not_sent" and not rejected))
+
     @outcome
     def validate(self, spec, at):
         self.require_running()
@@ -624,7 +642,8 @@ class ProactiveContacts:
                 dialogue_snapshot = self.history.conversation.capture(job.context, at,
                     limit=preferences.values["generation_history_limit"],
                     max_chars=preferences.values["history_max_chars"],
-                    exclude_reply_part_id=(last_reply["reference"]["part_id"] if last_reply is not None else None))
+                    exclude_reply_part_id=(last_reply["reference"].get("part_id", last_reply["reference"].get("observation_id"))
+                                           if last_reply is not None else None))
                 dialogue = self.history.conversation.read(dialogue_snapshot, job.context, at)
                 kept = [("dialogue", index, item, item.get("delivered_at", item.get("received_at")))
                         for index, item in enumerate(dialogue)]
@@ -1079,7 +1098,8 @@ class ProactiveContacts:
             self.schedule.validate_origin(context, origin, at)
             _, batch, _ = self.schedule._origin(context, origin["batch_id"], at)
         preferences = require(self.preferences.read(context, observed_at=at))
-        preferences.require_contact(data["purpose"], ignore_time_restrictions=diagnostic_origin is not None)
+        preferences.require_contact(data["purpose"], ignore_time_restrictions=diagnostic_origin is not None,
+                                    ignore_master_switch=data.get("administrator_test") is True)
         entry = {"context": context, "purpose": data["purpose"], "body": row["body"], "at": stamp(at),
                  "note": preferences.values["note"], "confidence": data.get("decision_confidence", 1.0),
                  "role_instruction": batch["role_instruction"], "observed_at": at,
@@ -1213,14 +1233,14 @@ class ProactiveContacts:
             if not final_part or (voice is None and poke is None):
                 return part_text
             return DeliveryContent(part_text, (), voice=voice, poke=poke)
-        if not final_part:
-            return part_text
         if not self._reaction_available(request.context, row["contact_id"]):
             raise TaskError("reaction_unavailable", "selected proactive reaction is no longer allowed")
         image = self.semantics.reactions.contact_image(request.context, row["contact_id"], reaction,
             datetime.fromisoformat(reaction["issued_at"]), evidence=tuple(source_from_document(ref) for ref in data["sources"]))
         if image_manifest(image) != reaction["manifest"]:
             raise TaskError("reaction_changed", "selected proactive reaction no longer matches its original")
+        if not final_part:
+            return part_text
         return DeliveryContent(part_text, (image,), voice=voice, poke=poke)
 
     def _draft(self, request, at, *, historical=False):

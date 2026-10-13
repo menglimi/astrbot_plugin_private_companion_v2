@@ -93,3 +93,25 @@ class PlatformDisplayNameTests(unittest.IsolatedAsyncioTestCase):
         before = self.api.call_action.await_count
         self.assertEqual(await self.names.lookup("qq-main", "100", "private", "200"), "")
         self.assertEqual(self.api.call_action.await_count, before)
+
+    async def test_cached_directory_labels_do_not_contact_onebot_even_after_expiry(self):
+        people = [dict(platform="qq-main", account_id="100", native_account_id="200",
+                       display_name="记录里的名字")]
+        groups = [dict(platform_id="qq-main", account_id="100", group_id="300")]
+        with patch.object(self.context, "get_platform_inst") as platform:
+            self.assertEqual((await self.names.persons(people, cached_only=True))[0]["display_name"],
+                             "记录里的名字")
+            self.assertEqual((await self.names.targets(groups, cached_only=True))[0]["display_name"], "")
+            self.names._cache.update({
+                ("qq-main", "100", "private", "200"): (0, "已缓存好友备注"),
+                ("qq-main", "101", "private", "200"): (0, "另一账号备注"),
+                ("qq-main", "100", "group", "300"): (0, "已缓存群名"),
+                ("qq-main", "100", "account", "100"): (0, "已缓存 Bot 名称"),
+            })
+            self.assertEqual((await self.names.persons(people, cached_only=True))[0]["display_name"],
+                             "已缓存好友备注")
+            group = (await self.names.targets(groups, cached_only=True))[0]
+            self.assertEqual((group["display_name"], group["account_name"]), ("已缓存群名", "已缓存 Bot 名称"))
+            platform.assert_not_called()
+        self.assertNotIn("name_basis", people[0])
+        self.assertEqual(self.calls, [])

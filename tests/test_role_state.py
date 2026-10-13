@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import unittest
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from companion_v2.agenda.models import Frequency, Schedule
@@ -14,8 +15,10 @@ from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.execution.models import TaskContext, TaskError, encode
 from companion_v2.foundation.refs import AudienceRef, SourceRef, VersionRef
 from companion_v2.model_gateway.routing import configuration_fields
-from companion_v2.model_gateway.models import MAX_TOOL_CATALOG, ToolCall
+from companion_v2.model_gateway.models import MAX_TOOL_CATALOG, Amount, BudgetPolicy, ToolCall
+from companion_v2.model_gateway.budget import BudgetLedger
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
+from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.role_work.growth import GrowthKind, GrowthState, RoleGrowthRecord
 from companion_v2.role_work.state.maintenance import state_profile
 from companion_v2.role_work.state.management import StateManagement
@@ -53,7 +56,7 @@ class StateFixture(HostFixture):
         self.counter += 1
         before = manager.status(self.core).unwrap()
         return manager.command(self.core, dict(action="configure", operation_key="config-" + str(self.counter),
-            edit_token=before["edit_token"], changes=changes)).unwrap()
+            edit_token=before["edit_token"], role_edit_token=before["role_edit_token"], changes=changes)).unwrap()
 
     def source(self, app, context, identifier="original"):
         source = SourceRef(identifier, "test", context.scope, VersionRef(identifier, 1), self.clock.now())
@@ -114,7 +117,7 @@ class RoleStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         _host, app, _context, manager = self.setup_state()
         captured = {}
 
-        def occurrences(_context, *, start, end, operator=None):
+        def occurrences(_context, *, start, end, operator=None, diagnostics=False):
             captured.update(start=start, end=end)
             return {"items": [], "partial": False, "skipped": 0}
 
@@ -129,6 +132,7 @@ class RoleStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         _, app, context, manager = self.setup_state()
         before = manager.status(self.core).unwrap()
         command = dict(action="configure", operation_key="enable", edit_token=before["edit_token"],
+                       role_edit_token=before["role_edit_token"],
                        changes={"enabled": True, "calendar_enabled": True, "typing_enabled": True})
         manager.command(self.core, command).unwrap()
         self.assertTrue(manager.command(self.core, command).unwrap()["replayed"])
@@ -228,6 +232,23 @@ class CalendarTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.host1, self.app, self.ctx, self.manager = self.setup_state()
         self.configure(self.manager, calendar_enabled=True)
 
+    async def test_role_plan_evidence_is_readable_from_another_window_of_the_same_role(self):
+        scope = replace(self.ctx.scope, native_scope_id="second-private", conversation_id="conversation-second",
+                        session_id="session-second")
+        self.personas.register_route(ConversationRoute(scope, user=self.ctx.actor.subject), observed_at=NOW)
+        self.grant(self.ctx.actor, scope, "conversation.reply")
+        other_context = TaskContext(self.ctx.actor, self.identity.resolve_role(scope, observed_at=NOW).unwrap(),
+                                    AudienceRef(scope, (self.ctx.actor.subject,)))
+        source = self.source(self.app, self.ctx, "cross-window-calendar-source")
+        self.event_command(self.app, self.ctx, identifier="cross-window-plan", data=calendar_data(),
+                           sources=(source,))
+
+        record = self.app.calendar.read(other_context, "cross-window-plan")
+        self.assertEqual(record["sources"], self.app.calendar.read(self.ctx, "cross-window-plan")["sources"])
+        self.assertEqual(self.app.calendar.inventory(other_context)["skipped"], 0)
+        window = self.app.calendar.occurrences(other_context, start=NOW, end=NOW + timedelta(days=1))
+        self.assertEqual([item["id"] for item in window["items"]], ["cross-window-plan"])
+
     async def test_public_wording_edit_preserves_plan_sources_exceptions_and_reminder(self):
         app, context = self.app, self.ctx
         source = self.source(app, context)
@@ -315,7 +336,9 @@ class CalendarTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.revoke_source(self.app, source)
         with self.assertRaises(TaskError):
             self.app.calendar.validate_reminder(self.ctx, reminder, NOW)
-        self.assertEqual(self.app.calendar.inventory(self.ctx)["skipped"], 1)
+        inventory = self.app.calendar.inventory(self.ctx)
+        self.assertEqual(inventory["skipped"], 1)
+        self.assertEqual(inventory["skipped_reasons"], {"source_unavailable": 1})
 
     async def test_calendar_tool_query_then_revision_and_evidence_dependencies(self):
         source = self.source(self.app, self.ctx)
@@ -378,6 +401,18 @@ class StateMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "failed")
         self.assertEqual(result["reason"], "worker_error")
         self.assertEqual(result["code"], "model_budget_exhausted")
+
+    async def test_daily_budget_refusal_defers_maintenance_without_repeated_tasks(self):
+        _, app, context, _ = await self.ready()
+        app.gateway.ledger = BudgetLedger(self.runtime, BudgetPolicy(*(Amount(1, 100000) for _ in range(5))))
+        result = await app.state_maintenance.run(context, "原角色人格提示", "deferred-first")
+        self.assertEqual(result["state"], "deferred")
+        self.assertEqual(result["code"], "model_budget_exhausted")
+        before = self.runtime.read_one("SELECT COUNT(*) AS n FROM execution_tasks", ())["n"]
+        again = await app.state_maintenance.run(context, "原角色人格提示", "deferred-next")
+        self.assertEqual(again["state"], "deferred")
+        self.assertEqual(self.runtime.read_one("SELECT COUNT(*) AS n FROM execution_tasks", ())["n"], before)
+        self.assertEqual(self.called, [])
 
     async def test_state_maintenance_does_not_reuse_conversation_inputs_already_in_the_previous_state(self):
         host, app, context, _ = await self.ready()
@@ -500,6 +535,127 @@ class StateMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         other.state_maintenance.advance()
         self.assertEqual(self.runtime.read_one("SELECT next_at FROM role_state_schedules", ())["next_at"], next_at)
         self.assertEqual(other.role_state.read(context)["revision"], 1)
+
+    async def test_due_maintenance_waits_for_fresh_binding_then_resumes(self):
+        host, app, context, _ = await self.ready()
+        app.role_state.write(context, data=state_data(mood="平静", energy=42), expected_revision=0,
+                             operation_key="seed-before-window-close")
+        self.model_behavior = lambda env: asyncio.sleep(0,
+            result=answered(encode(state_data(mood="平静", energy=42))))
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE role_state_schedules SET next_at = ?", (NOW.isoformat(),))
+        schedule_before = self.runtime.read_one("SELECT context_key, next_at, enabled FROM role_state_schedules", ())
+        await app.close()
+
+        reopened = self.host()
+        other = reopened.application
+        await self.start(reopened, task_generation=1, model_generation=1)
+        with self.assertLogs("companion_v2.role_work.state.maintenance", level="INFO") as captured:
+            other.state_maintenance.advance()
+        self.assertTrue(any("角色状态计划已保留，等待可信运行上下文" in record.getMessage()
+                            for record in captured.records))
+        self.assertFalse(any(record.levelname == "WARNING" for record in captured.records))
+        waiting = self.runtime.read_one("SELECT result_json FROM role_state_schedules", ())
+        self.assertEqual(json.loads(waiting["result_json"]),
+                         {"state": "waiting", "code": "state_role_context_unavailable", "stage": "binding"})
+        schedule_after = self.runtime.read_one("SELECT context_key, next_at, enabled FROM role_state_schedules", ())
+        self.assertEqual(tuple(schedule_after), tuple(schedule_before))
+        self.assertEqual(other.role_state.read(context)["values"]["energy"], 42)
+        self.assertEqual(self.runtime.read_one("SELECT COUNT(*) AS n FROM execution_tasks WHERE kind = ?",
+                                               ("role.state.maintain",))["n"], 0)
+
+        other.state_maintenance.bind(context, "原角色人格提示")
+        self.assertIsNone(self.runtime.read_one("SELECT result_json FROM role_state_schedules", ())["result_json"])
+        other.state_maintenance.advance()
+        await self.until(lambda: (other.role_state.records.get(context, "current") or {}).get("revision") == 2)
+        self.assertEqual(other.role_state.read(context)["revision"], 2)
+        self.assertEqual(other.role_state.read(context)["values"]["energy"], 42)
+
+    async def test_role_schedule_resumes_through_another_authorized_context(self):
+        _, app, context, _ = await self.ready()
+        self.model_behavior = lambda env: asyncio.sleep(0, result=answered(encode(state_data(mood="平静"))))
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE role_state_schedules SET next_at = ?", (NOW.isoformat(),))
+
+        scope_b = replace(context.scope, native_scope_id="native-b", conversation_id="conversation-b",
+                          session_id="session-b")
+        self.personas.register_route(ConversationRoute(scope_b, user=self.important.subject), observed_at=NOW)
+        role_b = self.identity.resolve_role(scope_b, observed_at=NOW).unwrap()
+        context_b = TaskContext(self.important, role_b, AudienceRef(scope_b, (self.important.subject,)))
+        for capability in ("conversation.reply", "role.state.read", "role.state.maintain"):
+            self.grant(self.important, scope_b, capability)
+
+        # A live trusted role context can outlast the exact conversation that
+        # originally created the role-owned schedule.
+        app.state_maintenance.bindings = {context_b.key: (context_b, "原角色人格提示", None)}
+        app.state_maintenance.advance()
+
+        row = self.runtime.read_one("SELECT context_json FROM role_state_schedules", ())
+        self.assertEqual(TaskContext.restore(json.loads(row["context_json"])).key, context_b.key)
+        await self.until(lambda: app.role_state.records.get(context_b, "current") is not None)
+        self.assertEqual(app.role_state.read(context_b)["revision"], 1)
+
+    async def test_stale_exact_context_does_not_mask_an_authorized_role_context(self):
+        _, app, context, _ = await self.ready()
+        scope_b = replace(context.scope, native_scope_id="native-b", conversation_id="conversation-b",
+                          session_id="session-b")
+        self.personas.register_route(ConversationRoute(scope_b, user=self.important.subject), observed_at=NOW)
+        role_b = self.identity.resolve_role(scope_b, observed_at=NOW).unwrap()
+        context_b = TaskContext(self.important, role_b, AudienceRef(scope_b, (self.important.subject,)))
+        for capability in ("conversation.reply", "role.state.read", "role.state.maintain"):
+            self.grant(self.important, scope_b, capability)
+        app.state_maintenance.bindings[context_b.key] = (context_b, "原角色人格提示", None)
+
+        with patch.object(app.state_maintenance, "_can_anchor_schedule",
+                          side_effect=lambda candidate: candidate.key == context_b.key):
+            selected = app.state_maintenance._current_role_binding(context)
+
+        self.assertEqual(selected[0].key, context_b.key)
+
+    async def test_unauthorized_window_cannot_replace_the_role_schedule_anchor(self):
+        _, app, context, _ = await self.ready()
+        scope_b = replace(context.scope, native_scope_id="native-b", conversation_id="conversation-b",
+                          session_id="session-b")
+        self.personas.register_route(ConversationRoute(scope_b, user=self.standard.subject), observed_at=NOW)
+        role_b = self.identity.resolve_role(scope_b, observed_at=NOW).unwrap()
+        context_b = TaskContext(self.standard, role_b, AudienceRef(scope_b, (self.standard.subject,)))
+        self.grant(self.standard, scope_b, "conversation.reply")
+
+        blocked = {"state": "blocked", "code": "authorization_denied", "stage": "authorization"}
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE role_state_schedules SET result_json = ?", (encode(blocked),))
+        app.state_maintenance.bind(context_b, "原角色人格提示")
+
+        row = self.runtime.read_one("SELECT context_json, result_json FROM role_state_schedules", ())
+        self.assertEqual(TaskContext.restore(json.loads(row["context_json"])).key, context.key)
+        self.assertEqual(json.loads(row["result_json"]), blocked)
+
+        self.grant(self.standard, scope_b, "role.state.read")
+        self.grant(self.standard, scope_b, "role.state.maintain")
+        app.state_maintenance.bind(context_b, "原角色人格提示")
+        row = self.runtime.read_one("SELECT context_json, result_json FROM role_state_schedules", ())
+        self.assertEqual(TaskContext.restore(json.loads(row["context_json"])).key, context_b.key)
+        self.assertIsNone(row["result_json"])
+
+    async def test_preflight_task_errors_are_visible_and_retried_with_backoff(self):
+        _, app, context, _ = await self.ready()
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE role_state_schedules SET next_at = ?", (NOW.isoformat(),))
+        denied = TaskError("state_maintenance_permission_denied", "private authorization detail")
+        with patch.object(app.role_state.access, "check", side_effect=denied) as check:
+            app.state_maintenance.advance()
+            row = self.runtime.read_one("SELECT result_json FROM role_state_schedules", ())
+            self.assertEqual(json.loads(row["result_json"]), {"state": "blocked",
+                "code": "state_maintenance_permission_denied", "stage": "authorization"})
+            first_checks = check.call_count
+            self.assertGreater(first_checks, 0)
+            app.state_maintenance.bind(context, "原角色人格提示")
+            app.state_maintenance.advance()
+            self.assertEqual(check.call_count, first_checks)
+            self.clock.advance(timedelta(seconds=31))
+            app.state_maintenance.advance()
+            self.assertGreater(check.call_count, first_checks)
+        self.assertEqual(self.called, [])
 
 
 class StateSkillMaterialTests(StateMaintenanceTests):

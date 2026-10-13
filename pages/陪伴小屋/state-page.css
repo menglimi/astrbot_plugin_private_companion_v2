@@ -79,6 +79,15 @@ body.state-connected{min-width:320px}
 .state-contact-purposes{display:grid;gap:var(--sp-3)}.state-contact-purpose{border-top:1px solid var(--t-text-soft);padding:var(--sp-3) 0 var(--sp-1);min-width:0}
 .state-contact-purpose h5{font-size:var(--fs-body);color:var(--t-accent-ink);margin:0 0 var(--sp-3)}.state-contact-status{list-style:none;padding:0;margin:var(--sp-2) 0}
 .state-contact-status li{display:flex;gap:var(--sp-3);justify-content:space-between;flex-wrap:wrap;padding:var(--sp-2) 0;border-top:1px solid var(--t-text-soft);font-size:var(--fs-body);line-height:1.7}
+.state-contact-diagnostic{margin-top:var(--sp-4);padding-top:var(--sp-3);border-top:1px solid var(--t-line)}
+.state-contact-diagnostic h4{margin:0 0 var(--sp-2);font-size:var(--fs-body);color:var(--t-text)}
+.state-contact-diagnostic dl{display:grid;gap:var(--sp-1);margin:0}
+.state-contact-diagnostic dl>div{display:grid;grid-template-columns:minmax(6rem,auto) minmax(0,1fr);gap:var(--sp-2);line-height:1.6}
+.state-contact-diagnostic dt{color:var(--t-text-soft)}
+.state-contact-diagnostic dd{margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.state-contact-diagnostic p{margin:var(--sp-2) 0 0;line-height:1.6}
+.state-contact-diagnostic-next{color:var(--t-text-soft)}
+@media(max-width:560px){.state-contact-diagnostic dl>div{grid-template-columns:minmax(0,1fr);gap:0}}
 .state-phase-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-3) var(--sp-4)}
 .state-phase-block{border:1px solid var(--t-surface-soft);border-radius:var(--r-sm);padding:var(--sp-3) var(--sp-4);margin:var(--sp-3) 0;background:var(--t-text-invert)}.state-phase-block legend{padding:0 var(--sp-2);font-size:var(--fs-body);font-weight:600;color:var(--t-accent-ink)}.state-phase-block .state-phase-fields{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:var(--sp-2)}.state-phase-block>label{margin-top:var(--sp-2)}.state-phase-help{margin:0 0 var(--sp-2);font-size:var(--fs-tiny);line-height:1.6;color:var(--t-accent-ink)}
 .state-maintenance-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-4) var(--sp-5);margin:var(--sp-4) 0}
@@ -241,7 +250,7 @@ body.state-connected{min-width:320px}
 .state-annual-months span{display:grid;justify-items:center;gap:1px;padding:var(--sp-1) 0;border:1px solid var(--t-line);border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--t-text-faint)}
 .state-annual-months span.is-marked{border-color:var(--t-ok-ink);background:var(--t-ok-quiet);color:var(--t-ok-ink)}
 .state-annual-months b{font:inherit;font-size:var(--fs-micro);font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
-.state-annual-months small{font-size:9px;line-height:1;letter-spacing:.02em}
+.state-annual-months small{font-size:var(--fs-micro);line-height:1;letter-spacing:.02em}
 .state-annual-section{display:grid;gap:var(--sp-2)}
 .state-annual-section>header{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-2);flex-wrap:wrap}
 .state-annual-section h5{margin:0;color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:650}

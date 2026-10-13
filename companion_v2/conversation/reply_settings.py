@@ -4,10 +4,11 @@ from dataclasses import asdict, replace
 import json
 import math
 
-from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError, EffectiveValue
 from companion_v2.configuration.role_settings import RoleSharedSettingsOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
 from companion_v2.execution.models import require
+from companion_v2.foundation.refs import ScopeKind, ScopeRef
 
 from .segmentation import SegmentationPolicy
 from .segmentation import PART_GAP_MODES
@@ -18,13 +19,14 @@ from .media.understanding import (
     DEFAULTS as UNDERSTANDING_DEFAULTS,
     LIMITS as UNDERSTANDING_LIMITS,
     format_groups_for_legacy,
-    SCOPE_PERMISSION_FIELDS,
     settings as understanding_settings,
 )
 
 
 GROUP = "conversation.presentation"
 OWNER = "conversation.presentation"
+CONFIGURATION_LAYERS = (ConfigLayer.ROLE, ConfigLayer.WINDOW)
+ROLE_PROMPT_FIELDS = frozenset(("style_prompt", "humanized_expression_prompt"))
 RULES_FIELD = GROUP + ".rules_enabled"
 IMAGE_POSITIONS = frozenset(("after_text", "before_text"))
 VOICE_FIELDS = tuple(key for key in asdict(VoiceReplyPolicy())
@@ -38,8 +40,8 @@ GROUP_WAKEUP_LEGACY_FIELDS = frozenset(("group_wakeup_enabled", "group_wakeup_di
                                         "group_wakeup_context_words", "group_wakeup_interest_keywords",
                                         "group_wakeup_question_enabled"))
 GROUP_WAKEUP_DEFAULTS = {"group_wakeup_enabled": True, "group_wakeup_direct_words": "[]",
-                         "group_wakeup_context_words": '["机器人", "bot"]',
-                         "group_wakeup_interest_keywords": "[]", "group_wakeup_question_enabled": True,
+                         "group_wakeup_context_words": "[]",
+                         "group_wakeup_interest_keywords": "[]", "group_wakeup_question_enabled": False,
                          "group_wakeup_bot_name": "", "group_wakeup_primary_member_ids": "[]",
                          "group_wakeup_owner_direct_words": "[]",
                          "group_wakeup_interest_probability": 0.18, "group_wakeup_question_threshold": 65,
@@ -61,6 +63,7 @@ GROUP_WAKEUP_PROMPT_FIELDS = frozenset(GROUP_WAKEUP_DEFAULTS) - GROUP_WAKEUP_TIM
 GROUP_WAKEUP_PREVIOUS_FIELDS = GROUP_WAKEUP_PROMPT_FIELDS - GROUP_WAKEUP_ADDED_FIELDS
 GROUP_WAKEUP_WORD_FIELDS = ("group_wakeup_direct_words", "group_wakeup_context_words",
                             "group_wakeup_interest_keywords", "group_wakeup_owner_direct_words")
+GROUP_WAKEUP_GROUP_FIELDS = frozenset(("group_wakeup_primary_member_ids", "group_wakeup_owner_direct_words"))
 GROUP_WAKEUP_LIMITS = {"group_wakeup_question_threshold": (0, 100),
                        "group_wakeup_cold_group_threshold": (0, 100),
                        "group_wakeup_cold_group_idle_minutes": (3, 720),
@@ -94,6 +97,9 @@ FORWARD_DEFAULTS = {"forward_message_adaptation_enabled": True}
 SPACING_DEFAULTS = {"part_gap_mode": "log", "part_gap_min_ms": 1500,
                     "part_gap_max_ms": 3500, "part_gap_log_base": 2.1}
 SPACING_FIELDS = frozenset(SPACING_DEFAULTS)
+SEGMENTATION_SHARED_FIELDS = frozenset(asdict(SegmentationPolicy())) | SPACING_FIELDS | frozenset(("part_gap_ms",))
+TEXT_CLEANUP_SHARED_FIELDS = frozenset(
+    key for key in TEXT_DEFAULTS if key.startswith(("content_cleanup_", "content_replacement")))
 CONTEXT_IMAGE_DEFAULTS = {"enable_context_image_captioning": False,
                           "context_image_caption_max_items": 2}
 IMAGE_NARRATION_DEFAULTS = {"enable_private_image_self_recognition": False,
@@ -103,6 +109,14 @@ IMAGE_NARRATION_DEFAULTS = {"enable_private_image_self_recognition": False,
     "private_image_provider_failure_cooldown_seconds": 60,
     "private_image_self_recognition_hint": ""}
 DIAGNOSTIC_DEFAULTS = {"reply_diagnostic_limit": 80}
+ROLE_SHARED_FIELDS = (frozenset(asdict(SegmentationPolicy())) | SPACING_FIELDS
+    | frozenset(("streaming", "part_gap_ms", "image_position", "rules_enabled"))
+    | frozenset(VOICE_FIELDS) | frozenset(GROUP_AIR_DEFAULTS)
+    | (frozenset(GROUP_WAKEUP_DEFAULTS) - GROUP_WAKEUP_GROUP_FIELDS)
+    | frozenset(GROUP_SAFETY_DEFAULTS) | frozenset(OUTBOUND_DEFAULTS) | frozenset(TEXT_DEFAULTS)
+    | frozenset(FORWARD_DEFAULTS) | frozenset(CONTEXT_IMAGE_DEFAULTS)
+    | frozenset(IMAGE_NARRATION_DEFAULTS) | frozenset(UNDERSTANDING_DEFAULTS)
+    | frozenset(DIAGNOSTIC_DEFAULTS) | ROLE_PROMPT_FIELDS)
 
 
 def outbound_settings(values):
@@ -195,8 +209,13 @@ def voice_policy(values):
     return policy if values["voice_enabled"] else None
 
 
-def target_for(context):
-    return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
+def target_for(context, layer=ConfigLayer.WINDOW):
+    if layer is ConfigLayer.ROLE:
+        return ConfigTarget(context.scope.installation_id, layer, context.role_binding.role,
+                            bot_id=context.scope.bot_id)
+    if layer is not ConfigLayer.WINDOW:
+        raise ValueError("reply configuration supports role defaults or one window")
+    return ConfigTarget(context.scope.installation_id, layer, context.role_binding.role, context.scope)
 
 
 def validate(values):
@@ -284,6 +303,16 @@ def validate(values):
     return policy
 
 
+def expression_prompt_sections():
+    from companion_v2.model_gateway.models import PromptSection
+    return (
+        PromptSection("style", "回复风格补充", TEXT_DEFAULTS["style_prompt"],
+                      "填写后追加到 AstrBot 核心回复提示", GROUP, "style_prompt"),
+        PromptSection("humanized", "日常表达", TEXT_DEFAULTS["humanized_expression_prompt"],
+                      "开启日常表达时生效；开关在表达设置中调整", GROUP, "humanized_expression_prompt"),
+    )
+
+
 def configuration_fields(segmentation, streaming, gap, voice=None):
     defaults = {**asdict(segmentation), "streaming": streaming, "part_gap_ms": round(gap * 1000),
               **SPACING_DEFAULTS, "image_position": "after_text", **voice_settings(voice), **GROUP_AIR_DEFAULTS,
@@ -315,7 +344,7 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
         ValueKind.WEIGHT if name == "part_gap_log_base" else
         ValueKind.PROBABILITY if name in ("voice_probability", "group_wakeup_interest_probability") else
         {bool: ValueKind.BOOLEAN, int: ValueKind.INTEGER, float: ValueKind.PROBABILITY, str: ValueKind.TEXT}[type(value)], value,
-        layers=(ConfigLayer.WINDOW,), owner_id=OWNER,
+        layers=CONFIGURATION_LAYERS, owner_id=OWNER,
         **(dict(zip(("minimum", "maximum"), limits[name])) if name in limits else {}),
         **({"decimal_places": 1} if name == "part_gap_log_base" else {}))
         for name, value in defaults.items())
@@ -325,17 +354,121 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
     owner_id = OWNER
 
     def is_shared(self, field):
-        return field.field_id.rsplit(".", 1)[-1] in SCOPE_PERMISSION_FIELDS
+        name = field.field_id.rsplit(".", 1)[-1]
+        return name in ROLE_SHARED_FIELDS
 
     def role_value_overrides_window(self, field):
-        return self.is_shared(field)
+        return False
+
+    def role_explicit_value_overrides_window(self, field):
+        return False
+
+    def adopt_window_value_on_write(self, field, changed_fields):
+        return False
+
+    def window_write_role_default(self, field):
+        return False
+
+    def window_reset_role_default(self, field):
+        return False
+
+    @staticmethod
+    def _stable_group_target(target):
+        scope = target.scope
+        if (target.layer is not ConfigLayer.WINDOW or scope is None
+                or scope.kind is not ScopeKind.GROUP):
+            return target
+        stable_session = scope.session_id or scope.native_scope_id
+        stable_scope = replace(scope, conversation_id=stable_session, session_id=stable_session)
+        if stable_scope == scope:
+            return target
+        return ConfigTarget(target.installation_id, ConfigLayer.WINDOW, target.role, stable_scope,
+                            bot_id=target.bot_id)
+
+    def _legacy_group_values(self, target, fields):
+        scope = target.scope
+        if (target.layer is not ConfigLayer.WINDOW or scope is None
+                or scope.kind is not ScopeKind.GROUP or target.role is None):
+            return {}
+        identifiers = tuple(field.field_id for field in fields)
+        if not identifiers:
+            return {}
+        placeholders = ",".join("?" for _ in identifiers)
+        rows = self.runtime.read_all(f"""SELECT field_id, value_json, revision, target_json FROM (
+                SELECT v.field_id, v.value_json, v.revision, t.target_json,
+                    ROW_NUMBER() OVER (PARTITION BY v.field_id ORDER BY t.updated_at DESC, t.target_key DESC) AS rank
+                FROM configuration_values v JOIN configuration_targets t USING (target_key)
+                WHERE v.field_id IN ({placeholders})
+                  AND json_extract(t.target_json, '$.layer') = 'window'
+                  AND json_extract(t.target_json, '$.role_id') = ?
+                  AND json_extract(t.target_json, '$.scope.platform') = ?
+                  AND json_extract(t.target_json, '$.scope.kind') = 'group'
+                  AND json_extract(t.target_json, '$.scope.native_scope_id') = ?
+                  AND json_extract(t.target_json, '$.scope.bot_id') = ?
+                  AND json_extract(t.target_json, '$.scope.account_id') = ?
+                  AND json_extract(t.target_json, '$.scope.session_id') = ?
+                  AND json_extract(t.target_json, '$.scope.conversation_id') <> ?
+            ) WHERE rank = 1""",
+            (*identifiers, target.role.subject_id, scope.platform, scope.native_scope_id,
+             scope.bot_id, scope.account_id, scope.session_id, scope.conversation_id))
+        definitions = {field.field_id: field for field in fields}
+        result = {}
+        for row in rows:
+            definition = definitions[row["field_id"]]
+            try:
+                value = definition.validate(json.loads(row["value_json"]))
+                document = json.loads(row["target_json"])
+                legacy_scope = ScopeRef.restore(document["scope"])
+                source = ConfigTarget(document["installation_id"], ConfigLayer.WINDOW,
+                    target.role, legacy_scope, bot_id=document.get("bot_id"))
+            except (ConfigurationError, KeyError, TypeError, ValueError):
+                continue
+            result[row["field_id"]] = EffectiveValue(value, source, True, row["revision"])
+        return result
+
+    def _clear_legacy_group_values(self, target, field_ids):
+        scope = target.scope
+        if (not field_ids or target.layer is not ConfigLayer.WINDOW or scope is None
+                or scope.kind is not ScopeKind.GROUP or target.role is None):
+            return
+        rows = self.runtime.read_all("""SELECT target_key FROM configuration_targets
+            WHERE json_extract(target_json, '$.layer') = 'window'
+              AND json_extract(target_json, '$.role_id') = ?
+              AND json_extract(target_json, '$.scope.platform') = ?
+              AND json_extract(target_json, '$.scope.kind') = 'group'
+              AND json_extract(target_json, '$.scope.native_scope_id') = ?
+              AND json_extract(target_json, '$.scope.bot_id') = ?
+              AND json_extract(target_json, '$.scope.account_id') = ?
+              AND json_extract(target_json, '$.scope.session_id') = ?
+              AND json_extract(target_json, '$.scope.conversation_id') <> ?""",
+            (target.role.subject_id, scope.platform, scope.native_scope_id, scope.bot_id,
+             scope.account_id, scope.session_id, scope.conversation_id))
+        placeholders = ",".join("?" for _ in field_ids)
+        with self.runtime.transaction() as connection:
+            for row in rows:
+                cursor = connection.execute(
+                    f"DELETE FROM configuration_values WHERE target_key = ? AND field_id IN ({placeholders})",
+                    (row["target_key"], *field_ids))
+                if cursor.rowcount:
+                    connection.execute(
+                        "UPDATE configuration_targets SET revision = revision + 1 WHERE target_key = ?",
+                        (row["target_key"],))
 
     def __init__(self, runtime, voice=None):
         super().__init__(runtime)
         self.voice = voice or VoiceReplyPolicy()
 
     def read(self, target, fields):
-        snapshot = super().read(target, fields)
+        storage_target = self._stable_group_target(target)
+        snapshot = super().read(storage_target, fields)
+        legacy = self._legacy_group_values(storage_target, fields)
+        if legacy:
+            effective = dict(snapshot.fields)
+            for field_id, value in legacy.items():
+                current = effective[field_id]
+                if current.source is None or current.source.layer is ConfigLayer.ROLE:
+                    effective[field_id] = value
+            snapshot = replace(snapshot, fields=effective)
         rules = snapshot.fields.get(RULES_FIELD)
         if rules is not None and rules.value is not True:
             snapshot = replace(snapshot, fields={**snapshot.fields,
@@ -358,6 +491,7 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
         return snapshot
 
     def preview_set(self, target, fields, *, changes):
+        target = self._stable_group_target(target)
         normalized = dict(changes)
         if RULES_FIELD in normalized:
             normalized[RULES_FIELD] = True
@@ -366,12 +500,14 @@ class ReplyConfigurationOwner(RoleSharedSettingsOwner):
         return result
 
     def write(self, target, fields, *, changes, reset, expected_revision, observed_at):
+        target = self._stable_group_target(target)
         normalized = dict(changes)
         if RULES_FIELD in normalized:
             normalized[RULES_FIELD] = True
         with self.runtime.transaction():
             result = super().write(target, fields, changes=normalized, reset=reset,
                 expected_revision=expected_revision, observed_at=observed_at)
+            self._clear_legacy_group_values(target, reset)
             validate({key.removeprefix(GROUP + "."): item.value for key, item in self.read(target, fields).fields.items()})
             return result
 

@@ -36,7 +36,11 @@ from companion_v2.foundation.outcome import Outcome
 from companion_v2.legacy.migration import LegacyMigration, MigrationState, plugin_data_path
 from companion_v2.legacy.data_migration import (
     build_data_plan,
+    MAX_REFERENCE_IMAGE_BYTES,
+    MAX_REFERENCE_IMAGE_ITEMS,
+    load_reference_image,
     load_reaction_asset,
+    next_reference_image_batch,
     next_reaction_batch,
     next_journal_batch,
 )
@@ -50,6 +54,11 @@ from companion_v2.memory.legacy_materials import (
     LegacyMemoryBinding,
     LegacyOwnerSelector,
 )
+from companion_v2.references.models import (MAX_ROLE_REFERENCE_BYTES,
+    ContentDigest, ReferenceAsset, ReferenceKind, ReferenceRole, ReferenceSource, WardrobeItem)
+from companion_v2.references.repositories import ReferenceAssetRepository
+from companion_v2.references.service import OWNED_REFERENCE_PREFIX
+from companion_v2.storage.reference_asset_schema import reference_limit
 from companion_v2.legacy.configuration_migration import (
     ACCOUNT_CONFIGURATION_TARGETS,
     plugin_configuration_defaults,
@@ -58,18 +67,15 @@ from companion_v2.legacy.configuration_migration import (
 
 from .management_identity import dashboard_operator
 from .identity_derivation import derive_role_id
+from .legacy_config import (V1_HOST_CONFIG_NAME, V1_PLUGIN_DATA_NAME,
+                            read_v1_host_configuration, v1_host_config_path)
 from .persona_catalog import available_personas
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/legacy"
 MAX_REQUEST_BYTES = 8192
 
-# V1 插件的目录名。V2 是 ``…_v2``，所以去掉后缀就是它的数据目录名。
-V1_PLUGIN_DATA_NAME = "astrbot_plugin_private_companion"
 MEMORY_PLUGIN_DATA_NAME = "astrbot_plugin_memory_companion"
-# V1 的插件配置不在它的数据目录里，而在 AstrBot 数据目录的 config 子目录下——
-# 宿主按 ``<插件目录名>_config.json`` 命名（star_manager 的约定）。
-V1_HOST_CONFIG_NAME = V1_PLUGIN_DATA_NAME + "_config.json"
 _NO_ACCOUNT_CHANGE = object()
 _WEATHER_PLUGIN_FIELDS = frozenset({
     "weather.provider", "weather.api_host", "weather.credential", "weather.refresh_minutes",
@@ -176,13 +182,7 @@ class LegacyMigrationWebAPI:
         挂在数据目录下，往上一级才是。两种都试，与 ``_v1_root`` 对同级目录的
         处理同一风格。
         """
-        from pathlib import Path
-        base = Path(getattr(self.controller, "data_root", "."))
-        for parent in (base.parent.parent, base.parent):
-            path = parent / "config" / V1_HOST_CONFIG_NAME
-            if path.is_file():
-                return path
-        return None
+        return v1_host_config_path(getattr(self.controller, "data_root", "."))
 
     def _v1_host_configuration(self):
         """读出 V1 在宿主里的插件配置映射；读不到返回 None。
@@ -192,14 +192,11 @@ class LegacyMigrationWebAPI:
         定位宿主文件。读不到（路径不存在或文件损坏）返回 None，域侧会回落到 V1
         数据根里的配置转储，再不行才报「未发现」。
         """
-        path = self._v1_host_config_path()
-        if path is None:
-            return None
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+            loaded, _, _ = read_v1_host_configuration(getattr(self.controller, "data_root", "."))
         except (OSError, ValueError, UnicodeDecodeError):
             return None
-        return loaded if isinstance(loaded, dict) else None
+        return loaded
 
     def _fingerprint(self, root) -> str:
         """V1 目录的指纹：只取顶层条目的「名字 + 大小 + 修改时间」。
@@ -303,11 +300,14 @@ class LegacyMigrationWebAPI:
         options = self._data_query_options()
         if options is False:
             return outcome_response(Outcome.failed("legacy_request_invalid", "invalid data migration query"))
-        root_override, source_group_id, source_persona_id, memory_owner_ids, memory_group_mappings = options
+        (root_override, source_group_id, source_persona_id, memory_owner_ids, memory_group_mappings,
+         reference_slots, reference_bytes, wardrobe_slots) = options
         response = await self._run(
             lambda migration, root, session: self._data_plan(
                 migration, root, session, source_group_id, source_persona_id,
-                memory_owner_ids=memory_owner_ids, memory_group_mappings=memory_group_mappings),
+                memory_owner_ids=memory_owner_ids, memory_group_mappings=memory_group_mappings,
+                reference_slots_available=reference_slots, reference_bytes_available=reference_bytes,
+                wardrobe_slots_available=wardrobe_slots),
             root_override=root_override,
             offload_sync=True,
         )
@@ -363,7 +363,8 @@ class LegacyMigrationWebAPI:
                        "import_reactions", "import_group_network", "confirm_member_ids",
                        "import_journals", "confirm_persona_mapping", "import_worldbook",
                        "import_archive", "import_memory_database", "memory_owner_ids",
-                       "memory_group_mappings", "confirm_memory_mapping"}
+                       "memory_group_mappings", "confirm_memory_mapping", "import_reference_images",
+                       "import_wardrobe_items", "confirm_reference_persona_mapping"}
             if (type(arguments) is not dict or not {"plan_token", "import_reactions",
                     "import_group_network", "confirm_member_ids", "source_persona_id",
                     "import_journals", "confirm_persona_mapping", "import_worldbook"}.issubset(arguments)
@@ -376,6 +377,12 @@ class LegacyMigrationWebAPI:
                     or type(arguments["import_journals"]) is not bool
                     or type(arguments["confirm_persona_mapping"]) is not bool
                     or type(arguments["import_worldbook"]) is not bool
+                    or ("import_reference_images" in arguments
+                        and type(arguments["import_reference_images"]) is not bool)
+                    or ("import_wardrobe_items" in arguments
+                        and type(arguments["import_wardrobe_items"]) is not bool)
+                    or ("confirm_reference_persona_mapping" in arguments
+                        and type(arguments["confirm_reference_persona_mapping"]) is not bool)
                     or ("import_archive" in arguments and type(arguments["import_archive"]) is not bool)
                     or ("import_memory_database" in arguments
                         and type(arguments["import_memory_database"]) is not bool)
@@ -410,7 +417,10 @@ class LegacyMigrationWebAPI:
                 arguments["confirm_persona_mapping"], arguments["import_worldbook"],
                 arguments.get("import_archive", False),
                 arguments.get("import_memory_database", False), memory_owner_ids,
-                arguments.get("confirm_memory_mapping", False), memory_group_mappings),
+                arguments.get("confirm_memory_mapping", False), memory_group_mappings,
+                arguments.get("import_reference_images", False),
+                arguments.get("import_wardrobe_items", False),
+                arguments.get("confirm_reference_persona_mapping", False)),
             root_override=root_override,
         )
 
@@ -418,7 +428,8 @@ class LegacyMigrationWebAPI:
     def _data_query_options():
         query = request.query
         if (set(query.keys()) - {"v1_root", "source_group_id", "source_persona_id", "memory_owner_ids",
-                                 "memory_group_mappings"}
+                                 "memory_group_mappings", "reference_slots_available",
+                                 "reference_bytes_available", "wardrobe_slots_available"}
                 or any(len(query.getlist(key)) != 1 for key in query.keys())):
             return False
         root = query.get("v1_root")
@@ -426,6 +437,9 @@ class LegacyMigrationWebAPI:
         persona_id = query.get("source_persona_id", "")
         raw_owner_ids = query.get("memory_owner_ids", "")
         raw_group_mappings = query.get("memory_group_mappings", "[]")
+        raw_reference_slots = query.get("reference_slots_available", "24")
+        raw_reference_bytes = query.get("reference_bytes_available", str(MAX_REFERENCE_IMAGE_BYTES * 24))
+        raw_wardrobe_slots = query.get("wardrobe_slots_available", "24")
         if (group_id and len(group_id) > 256) or len(persona_id) > 96:
             return False
         owner_ids = tuple(raw_owner_ids.split(",")) if raw_owner_ids else ()
@@ -441,7 +455,13 @@ class LegacyMigrationWebAPI:
                 json.loads(raw_group_mappings))
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
-        return root, group_id, persona_id, owner_ids, group_mappings
+        try:
+            reference_slots = max(0, min(24, int(raw_reference_slots)))
+            reference_bytes = max(0, min(MAX_REFERENCE_IMAGE_BYTES * 24, int(raw_reference_bytes)))
+            wardrobe_slots = max(0, min(24, int(raw_wardrobe_slots)))
+        except (TypeError, ValueError):
+            return False
+        return root, group_id, persona_id, owner_ids, group_mappings, reference_slots, reference_bytes, wardrobe_slots
 
     @staticmethod
     def _normalize_memory_group_mappings(value):
@@ -471,10 +491,43 @@ class LegacyMigrationWebAPI:
             raise TaskError("legacy_data_service_unavailable", "V2 data services are not initialized")
         return context, service
 
+    @staticmethod
+    def _reference_import_state(session, context):
+        reference_service = getattr(session.application, "references", None)
+        if reference_service is None:
+            return {"owner": "", "hashes": [], "wardrobe_ids": [],
+                    "active_asset_count": 0, "active_wardrobe_count": 0,
+                    "reference_slots": 0, "wardrobe_slots": 0,
+                    "reference_bytes": 0, "registered": False}
+        owner = reference_service.owner(context)
+        assets = session.application.runtime.read_all(
+            "SELECT asset_id, state, content_hash FROM reference_assets WHERE owner_key = ?",
+            (owner,))
+        wardrobe = session.application.runtime.read_all(
+            "SELECT item_id, state FROM wardrobe_items WHERE owner_key = ?", (owner,))
+        payloads = session.application.runtime.read_all(
+            "SELECT COALESCE(SUM(size_bytes), 0) AS n FROM reference_asset_payloads WHERE owner_key = ?",
+            (owner,))
+        used_bytes = payloads[0]["n"] if payloads else 0
+        active_assets = sum(row["state"] == "active" for row in assets)
+        active_wardrobe = sum(row["state"] == "active" for row in wardrobe)
+        return {
+            "owner": owner,
+            "hashes": sorted({row["content_hash"] for row in assets}),
+            "wardrobe_ids": sorted({row["item_id"] for row in wardrobe}),
+            "active_asset_count": active_assets,
+            "active_wardrobe_count": active_wardrobe,
+            "reference_slots": max(0, reference_limit() - active_assets),
+            "wardrobe_slots": max(0, reference_limit() - active_wardrobe),
+            "reference_bytes": max(0, MAX_ROLE_REFERENCE_BYTES - used_bytes),
+            "registered": True,
+        }
+
     def _data_plan_token(self, data_plan, context, service, source_group_id, source_persona_id,
                        existing_reaction_ids=(), existing_journal_heads=None,
                        existing_worldbook=None, archive_inventory_fingerprint="",
-                         memory_database_fingerprint="", memory_owner_ids=(), memory_group_mappings=()):
+                         memory_database_fingerprint="", memory_owner_ids=(), memory_group_mappings=(),
+                         reference_state=None):
         scope = context.scope
         material = {
             "source": data_plan.source_fingerprint,
@@ -484,7 +537,7 @@ class LegacyMigrationWebAPI:
             "memory_group_mappings": list(memory_group_mappings),
             "source_group_id": source_group_id,
             "source_persona_id": source_persona_id,
-            "target_owner": service.owner(context),
+            "target_owner": service.reaction_owner(context),
             "scope": [scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
                       getattr(scope.kind, "value", scope.kind), scope.native_scope_id],
             "role": getattr(context.role_binding.role, "subject_id", ""),
@@ -496,12 +549,15 @@ class LegacyMigrationWebAPI:
                  bool(head.get("derivatives_conflict")))
                 for (kind, local_date), head in (existing_journal_heads or {}).items()),
             "existing_worldbook": existing_worldbook or {},
+            "reference_state": reference_state or {},
         }
         encoded = json.dumps(material, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _data_plan(self, migration, root, session, source_group_id="", source_persona_id="",
-                   *, memory_owner_ids=(), memory_group_mappings=()):
+                   *, memory_owner_ids=(), memory_group_mappings=(), reference_slots_available=0,
+                   reference_bytes_available=MAX_REFERENCE_IMAGE_BYTES * 24,
+                   wardrobe_slots_available=0):
         planned = migration.discover()
         if not planned.is_success:
             return planned
@@ -510,13 +566,24 @@ class LegacyMigrationWebAPI:
         archive_plan = build_v1_archive_plan(root)
         memory_plan = build_memory_database_plan(self._memory_database_path(root))
         context, service = self._data_context(session)
-        owner = service.owner(context)
+        owner = service.ensure_reaction_catalog(context)
         existing_ids = self._reaction_ids(service, owner)
         existing_heads = self._journal_heads(data_plan, session, context)
         worldbook_state = self._worldbook_state(data_plan, context, source_group_id)
+        reference_state = self._reference_import_state(session, context)
+        existing_reference_hashes = set(reference_state["hashes"])
+        existing_wardrobe_ids = set(reference_state["wardrobe_ids"])
+        reference_slots_available = min(reference_slots_available, reference_state["reference_slots"])
+        wardrobe_slots_available = min(wardrobe_slots_available, reference_state["wardrobe_slots"])
+        reference_bytes_available = min(reference_bytes_available, reference_state["reference_bytes"])
         document = data_plan.document(source_group_id=source_group_id,
                                       existing_reaction_ids=existing_ids,
-                                      existing_journal_heads=existing_heads)
+                                      existing_journal_heads=existing_heads,
+                                      existing_reference_hashes=existing_reference_hashes,
+                                      existing_wardrobe_ids=existing_wardrobe_ids,
+                                      reference_slots_available=reference_slots_available,
+                                      reference_bytes_available=reference_bytes_available,
+                                      wardrobe_slots_available=wardrobe_slots_available)
         document["archive"] = archive_plan.document()
         document["memory_database"] = memory_plan.document()
         memory_projection = self._memory_projection(session, memory_plan, context, memory_owner_ids,
@@ -565,12 +632,11 @@ class LegacyMigrationWebAPI:
                                                 source_persona_id, existing_ids, existing_heads,
                                                 worldbook_state, archive_plan.inventory_fingerprint,
                                                 memory_plan.fingerprint, memory_owner_ids,
-                                                memory_group_mappings),
+                                                memory_group_mappings, reference_state),
         })
         document["worldbook"]["available_count"] = (
             document["worldbook"]["general_count"]
             + document["worldbook"]["member_count"]
-            + document["worldbook"]["member_profile_count"]
             + (document["worldbook"]["selected_group_entry_count"]
                + document["worldbook"]["selected_group_member_profile_count"]
                if scope_kind == "group" else 0))
@@ -857,18 +923,23 @@ class LegacyMigrationWebAPI:
                           source_persona_id, import_reactions, import_group_network,
                           confirm_member_ids, import_journals, confirm_persona_mapping,
                           import_worldbook, import_archive=False, import_memory_database=False,
-                          memory_owner_ids=(), confirm_memory_mapping=False, memory_group_mappings=()):
+                          memory_owner_ids=(), confirm_memory_mapping=False, memory_group_mappings=(),
+                          import_reference_images=False, import_wardrobe_items=False,
+                          confirm_reference_persona_mapping=False):
         return await asyncio.to_thread(
             self._data_apply_sync, migration, root, session, plan_token, source_group_id,
             source_persona_id, import_reactions, import_group_network, confirm_member_ids,
             import_journals, confirm_persona_mapping, import_worldbook, import_archive,
-            import_memory_database, memory_owner_ids, confirm_memory_mapping, memory_group_mappings)
+            import_memory_database, memory_owner_ids, confirm_memory_mapping, memory_group_mappings,
+            import_reference_images, import_wardrobe_items, confirm_reference_persona_mapping)
 
     def _data_apply_sync(self, migration, root, session, plan_token, source_group_id,
                          source_persona_id, import_reactions, import_group_network,
                          confirm_member_ids, import_journals, confirm_persona_mapping,
                          import_worldbook, import_archive=False, import_memory_database=False,
-                         memory_owner_ids=(), confirm_memory_mapping=False, memory_group_mappings=()):
+                         memory_owner_ids=(), confirm_memory_mapping=False, memory_group_mappings=(),
+                         import_reference_images=False, import_wardrobe_items=False,
+                         confirm_reference_persona_mapping=False):
         found = migration.discover()
         if not found.is_success:
             return found
@@ -889,14 +960,16 @@ class LegacyMigrationWebAPI:
         except ValueError:
             return Outcome.failed("legacy_request_invalid", "独立记忆群身份映射无效，请重新试算。")
         context, service = self._data_context(session)
-        existing_ids = self._reaction_ids(service, service.owner(context))
+        owner = service.ensure_reaction_catalog(context)
+        existing_ids = self._reaction_ids(service, owner)
         existing_heads = self._journal_heads(data_plan, session, context)
         worldbook_state = self._worldbook_state(data_plan, context, source_group_id)
+        reference_state = self._reference_import_state(session, context)
         if plan_token != self._data_plan_token(data_plan, context, service, source_group_id,
                                                source_persona_id, existing_ids, existing_heads,
                                                worldbook_state, archive_plan.inventory_fingerprint,
                                                memory_plan.fingerprint, memory_owner_ids,
-                                               memory_group_mappings):
+                                               memory_group_mappings, reference_state):
             return Outcome.failed("legacy_plan_stale", "V1 来源或 V2 目标在预览后发生变化，请重新试算。")
         from companion_v2.foundation.refs import ScopeKind
         if (memory_owner_ids or memory_group_mappings) and (not import_memory_database or not confirm_memory_mapping):
@@ -905,8 +978,19 @@ class LegacyMigrationWebAPI:
         if memory_owner_ids and context.scope.kind is not ScopeKind.PRIVATE:
             return Outcome.failed("legacy_memory_private_target_required",
                                   "历史私聊记忆只能绑定到 V2 私聊身份。")
+        if import_reference_images or import_wardrobe_items:
+            if not reference_state.get("registered"):
+                return Outcome.failed("legacy_reference_service_unavailable",
+                    "V2 参考图库服务尚未启动，无法迁入参考图或衣柜。")
+            if context.scope.kind is not ScopeKind.PRIVATE:
+                return Outcome.failed("legacy_reference_private_target_required",
+                    "V1 人设参考图和衣柜只能迁入已选择的人格私聊角色。")
+            if confirm_reference_persona_mapping is not True:
+                return Outcome.failed("legacy_reference_mapping_confirmation_required",
+                    "请确认所选 V1 人格的参考图与衣柜归属于当前 V2 私聊角色。")
         if (not import_reactions and not import_group_network and not import_journals
-                and not import_worldbook and not import_archive and not import_memory_database):
+                and not import_worldbook and not import_archive and not import_memory_database
+                and not import_reference_images and not import_wardrobe_items):
             return Outcome.failed("legacy_nothing_to_import", "请选择至少一种要导入的数据。")
 
         archive_result = None
@@ -1000,7 +1084,7 @@ class LegacyMigrationWebAPI:
                 metadata = {**item.metadata, "legacy_source_id": "private.reaction_assets",
                             "legacy_filename": item.filename}
                 imported, was_created = service.reactions.import_image_with_status(
-                    service.owner(context), image, metadata, collection_source="legacy_migration",
+                    owner, image, metadata, collection_source="legacy_migration",
                     enabled=item.enabled)
                 (created if was_created else duplicates).append(imported["id"])
             except Exception as error:  # noqa: BLE001 - report per asset and continue idempotently
@@ -1060,6 +1144,12 @@ class LegacyMigrationWebAPI:
                     journal_errors.append({"kind": item.kind, "date": item.local_date,
                         "reason": getattr(error, "code", type(error).__name__)})
 
+        reference_result = None
+        if import_reference_images or import_wardrobe_items:
+            reference_result = self._import_legacy_reference_images(
+                root, data_plan, session, context, reference_state,
+                include_references=import_reference_images, include_wardrobe=import_wardrobe_items)
+
         group_result = None
         if import_group_network:
             source_key = digest(["v1-group-network-import.v1", source_group_id,
@@ -1079,7 +1169,7 @@ class LegacyMigrationWebAPI:
             if worldbook_result.get("errors"):
                 errors.extend(worldbook_result["errors"])
 
-        refreshed_ids = self._reaction_ids(service, service.owner(context))
+        refreshed_ids = self._reaction_ids(service, owner)
         remaining = sum(1 for item in data_plan.reaction_assets if item.sha256 not in refreshed_ids)
         refreshed_heads = self._journal_heads(data_plan, session, context)
         journal_remaining = sum(1 for item in data_plan.journals
@@ -1103,15 +1193,130 @@ class LegacyMigrationWebAPI:
             "journal_derivatives_created": journal_derivatives_created,
             "journal_derivatives_remaining": journal_derivatives_remaining,
             "journal_errors": journal_errors,
+            "reference_images": reference_result,
             "group_network": group_result,
             "worldbook": worldbook_result,
             "archive": archive_result,
             "memory_archive": memory_archive_result,
             "memory_materials": memory_materials_result,
-            "errors": errors + journal_errors,
+            "errors": errors + journal_errors + (reference_result.get("errors", []) if reference_result else []),
             "source_persona_id": source_persona_id,
             "idempotent": True,
         })
+
+    def _import_legacy_reference_images(self, root, data_plan, session, context, state,
+                                        *, include_references, include_wardrobe):
+        from companion_v2.conversation.media.models import ImageDescriptor
+        from companion_v2.foundation.refs import ScopeKind
+        from companion_v2.references.management import ReferenceMaterialManagement
+        from companion_v2.references.repositories import ReferenceAssetRepository
+        from companion_v2.references.models import ReferenceState
+        from companion_v2.legacy.data_migration import load_reference_image, next_reference_image_batch
+        from .media import inspect_image
+
+        result = {"reference_created": 0, "reference_roles_added": 0,
+                  "reference_remaining": 0, "wardrobe_created": 0,
+                  "wardrobe_remaining": 0, "wardrobe_images_skipped": 0, "errors": []}
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            result["errors"].append({"source_id": "private.photo_references",
+                                     "reason": "legacy_reference_private_target_required"})
+            return result
+        at = self.controller.now()
+        operator = self._operator()
+        manager = ReferenceMaterialManagement(session.application)
+        owner = manager._admit(operator, context, at)
+        repository: ReferenceAssetRepository = manager.repository
+        existing_hashes = set(state["hashes"])
+        existing_wardrobe_ids = set(state["wardrobe_ids"])
+        wardrobe_batch = ([item for item in data_plan.wardrobe_items
+                          if item.item_id not in existing_wardrobe_ids][:state["wardrobe_slots"]]
+                          if include_wardrobe else [])
+
+        by_hash = {item.sha256: item for item in data_plan.reference_images}
+        for wardrobe in data_plan.wardrobe_items:
+            image = wardrobe.image
+            if image is None:
+                continue
+            previous = by_hash.get(image.sha256)
+            if previous is None:
+                by_hash[image.sha256] = image
+            else:
+                by_hash[image.sha256] = replace(
+                    previous, roles=tuple(dict.fromkeys((*previous.roles, *image.roles))))
+        wardrobe_hashes = {item.image.sha256 for item in wardrobe_batch if item.image is not None}
+        ready = [item for item in by_hash.values() if item.sha256 not in existing_hashes
+                 and (include_references or item.sha256 in wardrobe_hashes)]
+        priority = {item.image.sha256 for item in wardrobe_batch if item.image is not None}
+        batch = next_reference_image_batch(ready, slots_available=state["reference_slots"],
+            bytes_available=state["reference_bytes"], priority_hashes=priority)
+        for item in batch:
+            try:
+                content = load_reference_image(root, item)
+            except Exception as error:  # noqa: BLE001 - keep V1 paths and image bytes private
+                result["errors"].append({"filename": item.filename,
+                    "reason": getattr(error, "code", str(error) or type(error).__name__)})
+                continue
+            try:
+                captured = inspect_image(content, 0)
+                if type(captured.descriptor) is not ImageDescriptor:
+                    raise TaskError("reference_image_animated", "animated images cannot be registered as reference material")
+                roles = tuple(ReferenceRole(role) for role in item.roles)
+                if not roles:
+                    roles = (ReferenceRole.IDENTITY,)
+                identifier = "v1_ref_" + digest([owner, item.source_key, item.sha256])[:40]
+                asset = ReferenceAsset(asset_id=identifier, kind=ReferenceKind.REFERENCE_IMAGE,
+                    role=roles[0], content_hash=ContentDigest(item.sha256), size_bytes=len(content),
+                    mime_type=captured.descriptor.mime_type,
+                    media_ref=OWNED_REFERENCE_PREFIX + "legacy-v1:" + identifier,
+                    source=ReferenceSource.OPERATOR, label=item.label[:120],
+                    created_at=at, updated_at=at)
+                existing = repository.get(owner, identifier)
+                if existing is None:
+                    with self.controller.runtime.transaction():
+                        repository.put(owner, asset, created_at=at, payload=content)
+                        for role in roles[1:]:
+                            repository.add_role(owner, identifier, role, created_at=at)
+                    result["reference_created"] += 1
+                else:
+                    if (existing.content_hash.sha256 != item.sha256 or existing.state is not ReferenceState.ACTIVE
+                            or repository.get_payload(owner, identifier) != content):
+                        raise TaskError("reference_operation_conflict", "this migrated reference now names different material")
+                    current_roles = set(repository.roles_of(owner, identifier))
+                    for role in roles:
+                        if role.value not in current_roles:
+                            repository.add_role(owner, identifier, role, created_at=at)
+                            result["reference_roles_added"] += 1
+            except (TaskError, ValueError, TypeError) as error:
+                result["errors"].append({"filename": item.filename,
+                    "reason": getattr(error, "code", type(error).__name__)})
+
+        active_assets = repository.list(owner, state=ReferenceState.ACTIVE, limit=reference_limit())
+        active_hash_to_id = {asset.content_hash.sha256: asset.asset_id for asset in active_assets}
+        for item in wardrobe_batch:
+            asset_id = None
+            if item.image is not None:
+                asset_id = active_hash_to_id.get(item.image.sha256)
+                if asset_id is None:
+                    result["wardrobe_images_skipped"] += 1
+            elif item.image_reason:
+                result["wardrobe_images_skipped"] += 1
+            try:
+                wardrobe_item = WardrobeItem(item_id=item.item_id, name=item.name[:120],
+                    description=item.description[:2000], tags=tuple(sorted(item.tags[:16])),
+                    asset_id=asset_id, source=ReferenceSource.OPERATOR,
+                    created_at=at, updated_at=at)
+                repository.put_item(owner, wardrobe_item, created_at=at)
+                result["wardrobe_created"] += 1
+            except (TaskError, ValueError, TypeError) as error:
+                result["errors"].append({"source_id": item.source_key,
+                    "reason": getattr(error, "code", type(error).__name__)})
+
+        final_assets = self._reference_import_state(session, context)
+        result["reference_remaining"] = sum(item.sha256 not in set(final_assets["hashes"])
+            for item in by_hash.values() if include_references or item.sha256 in wardrobe_hashes)
+        result["wardrobe_remaining"] = sum(item.item_id not in set(final_assets["wardrobe_ids"])
+            for item in (data_plan.wardrobe_items if include_wardrobe else ()))
+        return result
 
     def _import_legacy_worldbook(self, data_plan, context, source_group_id, *, confirm_member_ids):
         from companion_v2.foundation.refs import ScopeKind

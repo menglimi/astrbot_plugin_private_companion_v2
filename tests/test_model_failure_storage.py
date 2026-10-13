@@ -128,6 +128,9 @@ class ModelFailureStorageTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(StorageOpenError):
                     StorageRuntime.open(data_root=self.root, installation_id=INSTALLATION)
                 self.assertEqual(self.version(), version)
+                with closing(sqlite3.connect(self.database)) as connection:
+                    connection.execute("DROP TABLE model_call_failures")
+                    connection.commit()
 
     async def test_changed_failure_migration_fingerprint_is_rejected(self):
         self.open_runtime().close()

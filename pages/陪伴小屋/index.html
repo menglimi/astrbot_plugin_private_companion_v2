@@ -55,8 +55,10 @@
   </script>
   <link rel="stylesheet" href="tokens.css?v=theme-material-20261001">
   <link rel="stylesheet" href="styles.css?v=room-editor-v1-cards-20261004">
+  <link rel="stylesheet" href="confirmation-dialog.css?v=page-confirmation-20261011">
   <link rel="stylesheet" href="tokens-bridge.css?v=scale-system-20260930">
   <link rel="stylesheet" href="memory-page.css?v=memory-config-ownership-20261001">
+  <link rel="stylesheet" href="workspace-loading.css?v=workspace-lazy-20261012">
   <link rel="stylesheet" href="contact-page.css?v=proactive-material-pool-20261007">
   <link rel="stylesheet" href="learning-page.css?v=learning-workbench-20261002">
   <link rel="stylesheet" href="self-review-page.css?v=learning-workbench-20261002">
@@ -64,7 +66,7 @@
   <link rel="stylesheet" href="state-page.css?v=status-manual-maintenance-20261007">
   <link rel="stylesheet" href="state-config.css?v=status-settings-20261007">
   <link rel="stylesheet" href="weather-source.css?v=weather-source-config-20261007">
-  <link rel="stylesheet" href="reply-page.css?v=reply-segmentation-preview-20261007">
+  <link rel="stylesheet" href="reply-page.css?v=astrbot-core-reply-20261010">
   <link rel="stylesheet" href="expression-config.css?v=reply-component-placements-20261007">
   <link rel="stylesheet" href="host-options.css?v=forward-intake-settings-20261004">
   <link rel="stylesheet" href="config-editor.css?v=config-ownership-20261001">
@@ -79,27 +81,29 @@
        预览构建器按这里的引用收集样式，所以漏引时预览也同样无样式，
        两边表现一致，一直没被察觉。 -->
   <link rel="stylesheet" href="console.css?v=page-lead-two-20260930">
-  <link rel="stylesheet" href="output-page.css?v=output-interactions-20261007">
+  <link rel="stylesheet" href="output-page.css?v=image-route-config-20261012">
   <link rel="stylesheet" href="decision-page.css?v=reply-decision-split-20261001">
   <link rel="stylesheet" href="action-page.css?v=action-workspace-20261007">
   <link rel="stylesheet" href="home.css?v=status-display-policy-20261007">
-  <link rel="stylesheet" href="models-page.css?v=tts-preview-diagnostics-20261007">
+  <link rel="stylesheet" href="models-page.css?v=replacement-policy-design-20261013">
   <link rel="stylesheet" href="product-page.css?v=no-host-state-20260929">
+  <link rel="stylesheet" href="native-extension-panel.css?v=native-management-20261010">
   <link rel="stylesheet" href="semantic-page.css?v=learning-semantic-layout-20261008">
   <link rel="stylesheet" href="perception-subpages.css?v=perception-subpages-20261007">
   <link rel="stylesheet" href="understanding-page.css?v=understanding-figma-layout-20261007">
   <link rel="stylesheet" href="setup-guide.css?v=quick-config-inline-20261007">
   <link rel="stylesheet" href="backup-page.css?v=data-subpages-20261008-r2">
   <link rel="stylesheet" href="storage-page.css?v=data-subpages-20261008-r2">
-  <link rel="stylesheet" href="maintenance-page.css?v=prompt-workspace-redesign-20261010">
+  <link rel="stylesheet" href="maintenance-page.css?v=token-dashboard-layout-20261012">
   <link rel="stylesheet" href="navigation.css?v=console-20260926">
   <link rel="stylesheet" href="appearance-page.css?v=appearance-workbench-20261008">
   <link rel="stylesheet" href="entrance.css?v=cottage-title-in-scene-20261005-r1">
   <!-- 外壳布局：小屋常驻 + 左栏 + 右栏 + 下方面板。必须在 styles.css 之后，
        它覆盖旧的固定定位左栏与顶栏栅格。 -->
-  <link rel="stylesheet" href="shell.css?v=cottage-title-in-scene-20261005-r1">
+  <link rel="stylesheet" href="shell.css?v=home-viewport-height-20261011">
   <link rel="stylesheet" href="self-page.css?v=core-user-relationship-20261007">
   <link rel="stylesheet" href="theme-skins.css?v=theme-material-20261001">
+  <link rel="stylesheet" href="page-motion.css?v=page-interactions-20261011">
   <!-- 小屋就绪闸门（见 tokens.css）。
        体素包 677 KB，它是首屏唯一一个「到了才能画」的资源：在它解析完之前，
        app.js 的 mountStage() 不会执行，.room-stage 是个空盒子。所以在这一行
@@ -147,59 +151,69 @@
   <!-- 外壳状态：选中的家具与配置分区。app.js 依赖它决定下方渲染什么，
        所以在 app.js 之前。 -->
   <script defer src="shell.js?v=understanding-entry-20261007"></script>
+  <script defer src="page-motion.js?v=page-interactions-20261011"></script>
   <!-- 入场序列：只驱动体素控制器的公开接口，必须在 app.js 之前就位。 -->
   <script defer src="entrance.js?v=entrance-state-build-20261001"></script>
   <script defer src="config-snapshot.js?v=config-aligned-20260925"></script>
-  <script defer src="workspace-bundle.js?v=workspace-request-timeout-20261009"></script>
-  <script defer src="home-sidebar.js?v=status-action-20261007"></script>
-  <script defer src="product-page.js?v=migration-request-timeout-20261009"></script>
+  <!-- 工作区采用按需拆包；静态地址留在 inert template 中，运行时才请求。 -->
+  <template data-workspace-bundle="host"><script src="workspace-bundles/host.js?v=workspace-lazy-20261012"></script></template>
+  <template data-workspace-bundle="life"><script src="workspace-bundles/life.js?v=workspace-lazy-20261012"></script></template>
+  <template data-workspace-bundle="relationships"><script src="workspace-bundles/relationships.js?v=workspace-lazy-20261012"></script></template>
+  <template data-workspace-bundle="identity"><script src="workspace-bundles/identity.js?v=workspace-lazy-20261012"></script></template>
+  <template data-workspace-bundle="persona"><script src="workspace-bundles/persona.js?v=workspace-lazy-20261012"></script></template>
+  <script defer src="home-sidebar.js?v=role-calendar-20261013"></script>
+  <script defer src="product-page.js?v=workspace-resource-diagnostics-20261012"></script>
+  <script defer src="confirmation-dialog.js?v=page-confirmation-20261011"></script>
+  <script defer src="native-extension-management.js?v=native-management-20261010"></script>
+  <script defer src="native-extension-panel.js?v=native-management-20261010"></script>
   <script defer src="self-relationship.js?v=core-user-profile-20261007"></script>
   <script defer src="home-environment.js?v=role-time-auto-light-20261004"></script>
   <!-- 设置与迁移工作区：依赖 product-page.js 的桥接与错误翻译。 -->
   <script defer src="setup-guide.js?v=migration-timeout-progress-20261009"></script>
-  <script defer src="semantic-page.js?v=learning-semantic-catalog-20261008"></script>
+  <script defer src="semantic-page.js?v=learning-global-settings-20261012"></script>
   <script defer src="perception-page.js?v=perception-camera-consent-20261001"></script>
   <script defer src="perception-native-page.js?v=weather-source-copy-20261007"></script>
   <script defer src="weather-source-page.js?v=weather-source-config-text-cleanup-20261007"></script>
-  <script defer src="perception-overview.js?v=perception-cards-and-config-20261007-r2"></script>
+  <script defer src="perception-overview.js?v=perception-mihome-v2-bridge-20261013"></script>
   <script defer src="reality-access.js?v=reality-readonly-consent-20261002"></script>
-  <script defer src="screen-access.js?v=screen-readonly-consent-20261002"></script>
+  <script defer src="screen-access.js?v=screen-upgrade-20261012"></script>
   <script defer src="room-editor.js?v=transient-time-preview-20261004"></script>
   <script defer src="memory-page.js?v=directory-names-20261002"></script>
   <script defer src="contact-page.js?v=contact-save-history-fallback-20261008"></script>
-  <script defer src="learning-page.js?v=learning-workbench-20261002"></script>
-  <script defer src="learning-overview.js?v=learning-design-20261008"></script>
-  <script defer src="learning-review-page.js?v=expression-feedback-20261008"></script>
+  <script defer src="learning-page.js?v=learning-record-ownership-20261012"></script>
+  <script defer src="learning-overview.js?v=learning-record-ownership-20261012"></script>
+  <script defer src="learning-review-page.js?v=learning-record-ownership-20261012"></script>
   <script defer src="expression-signals-page.js?v=expression-samples-20261008"></script>
-  <script defer src="expression-samples-page.js?v=expression-samples-20261008"></script>
-  <script defer src="self-review-page.js?v=learning-workbench-20261002"></script>
-  <script defer src="state-maintenance.js?v=status-settings-text-cleanup-20261007"></script>
-  <script defer src="state-contact.js?v=text-cleanup-20260930"></script>
+  <script defer src="expression-samples-page.js?v=learning-record-ownership-20261012"></script>
+  <script defer src="self-review-page.js?v=learning-record-ownership-20261012"></script>
+  <script defer src="state-maintenance.js?v=state-sleep-settings-clarity-20261013"></script>
+  <script defer src="state-contact.js?v=contact-schedule-diagnostic-20261012"></script>
   <script defer src="calendar-editor.js?v=schedule-workspace-20261003-r2"></script>
   <script defer src="state-editor.js?v=status-settings-20261007"></script>
-  <script defer src="state-page.js?v=state-summary-refresh-20261008"></script>
-  <script defer src="reply-page.js?v=reply-component-placements-20261007"></script>
+  <script defer src="state-page.js?v=role-owned-state-maintenance-20261013"></script>
+  <script defer src="reply-page.js?v=expression-scope-help-20261013"></script>
   <script defer src="host-options-page.js?v=forward-intake-settings-20261004"></script>
   <!-- 工作台内核必须先于使用它的编辑器加载（config-editor / expression-page
        都依赖 CompanionWorkbench）。 -->
-  <script defer src="workbench-page.js?v=workbench-save-receipt-20261007"></script>
+  <script defer src="workbench-page.js?v=page-interactions-20261011"></script>
   <!-- 忆忆策略位于忆忆页的独立视图。 -->
   <script defer src="memory-settings-section.js?v=memory-config-ownership-20261001"></script>
-  <script defer src="config-editor.js?v=config-output-save-20261007"></script>
-  <script defer src="output-page.js?v=output-interactions-20261007"></script>
+  <script defer src="config-editor.js?v=life-sleep-settings-clarity-20261013"></script>
+  <script defer src="output-page.js?v=image-route-config-20261012"></script>
   <script defer src="role-profile-draft.js?v=config-receipt-recovery-20261007"></script>
-  <script defer src="decision-page.js?v=decision-no-perception-overview-20261002"></script>
+  <script defer src="role-profile-migration.js?v=storage-fallback-20261012"></script>
+  <script defer src="decision-page.js?v=role-wakeup-shared-20261013"></script>
   <script defer src="expression-page.js?v=expression-completion-20261008"></script>
-  <script defer src="models-page.js?v=response-envelope-shape-20261007"></script>
+  <script defer src="models-page.js?v=replacement-policy-design-20261013"></script>
   <script defer src="image-materials-page.js?v=reference-usage-persistence-20261007"></script>
-  <script defer src="maintenance-page.js?v=prompt-workspace-redesign-20261010"></script>
+  <script defer src="maintenance-page.js?v=token-dashboard-layout-20261012"></script>
   <script defer src="appearance-page.js?v=appearance-workbench-20261008"></script>
   <!-- 备份与还原：后端 backup_api.py 有六条真实路由，而这一页此前没有任何
        入口加载它——资料与维护页的挂载点永远停在「正在读取快照列表…」。 -->
   <script defer src="backup-page.js?v=data-subpages-20261008-r2"></script>
   <script defer src="storage-page.js?v=data-subpages-20261008-r2"></script>
   <script defer src="understanding-page.js?v=understanding-figma-layout-20261007"></script>
-  <script defer src="app.js?v=v1-migration-under-data-20261009"></script>
+  <script defer src="app.js?v=learning-record-ownership-20261012"></script>
 </head>
 <body>
   <!-- 启动幕：首屏闸门（tokens.css 的 data-room-ready）在体素包解析完之前
@@ -224,21 +238,19 @@
   </div>
   <script>
     (function(){
-      var source=document.documentElement.dataset.roomBootGif;
+      var root=document.documentElement;
+      var source=root.dataset.roomBootGif;
       var image=document.getElementById("roomBootGif");
-      if(!source||!image)return;
       var templates=document.querySelectorAll("template[data-room-boot-gif]");
-      var selected=null;
+      if(!source||!image||templates.length<2)return;
+      var images=[];
       for(var i=0;i<templates.length;i++){
-        if(templates[i].getAttribute("data-room-boot-gif")===source){
-          selected=templates[i];
-          break;
-        }
+        var candidate=templates[i].content&&templates[i].content.firstElementChild;
+        if(candidate)images.push({source:templates[i].getAttribute("data-room-boot-gif"),image:candidate});
       }
-      var candidate=selected&&selected.content&&selected.content.firstElementChild;
-      if(!candidate)return;
-      /* candidate.src 已经是宿主改写后的绝对地址；用它预载，避免再次把
-         未改写的相对字符串交给浏览器。随后克隆同一节点，复用缓存响应。 */
+      var current=images.findIndex(function(item){return item.source===source;});
+      if(current<0)return;
+      var candidate=images[current].image;
       var preload=document.createElement("link");
       preload.rel="preload";
       preload.as="image";
@@ -249,6 +261,27 @@
       clone.id=image.id;
       clone.hidden=false;
       image.replaceWith(clone);
+      image=clone;
+      function playNext(){
+        if(root.hasAttribute("data-room-ready"))return;
+        var next=(current+1)%images.length;
+        var candidate=images[next].image;
+        var probe=new Image();
+        probe.onload=function(){
+          if(root.hasAttribute("data-room-ready"))return;
+          var nextImage=candidate.cloneNode(true);
+          nextImage.id="roomBootGif";
+          nextImage.hidden=false;
+          image.replaceWith(nextImage);
+          image=nextImage;
+          current=next;
+          root.dataset.roomBootGif=images[current].source;
+          window.setTimeout(playNext,1900);
+        };
+        probe.onerror=function(){window.setTimeout(playNext,1900);};
+        probe.src=candidate.src;
+      }
+      window.setTimeout(playNext,1900);
     })();
   </script>
   <a class="skip-link" href="#main">跳到主要内容</a>
@@ -292,6 +325,10 @@
   <!-- #main 保留：既有的路由渲染（人物、忆忆、专题配置）仍然写进这里，
        它现在是小屋下方面板区的另一处落点。 -->
   <main id="main" tabindex="-1" hidden></main>  <dialog id="detailDialog" class="detail-dialog" aria-labelledby="dialogTitle"><div id="dialogContent"></div></dialog>
+  <dialog id="confirmationDialog" class="confirmation-dialog" aria-labelledby="confirmationTitle" aria-describedby="confirmationMessage" data-intent="normal">
+    <div class="confirmation-copy"><span class="confirmation-mark" aria-hidden="true"><i data-lucide="circle-help"></i></span><div><h2 id="confirmationTitle">请确认此操作</h2><p id="confirmationMessage"></p></div></div>
+    <div class="confirmation-actions"><button id="confirmationCancel" class="button small" type="button">取消</button><button id="confirmationAccept" class="button primary small" type="button">确认</button></div>
+  </dialog>
   <dialog id="searchDialog" class="search-dialog" aria-label="搜索功能与内容">
     <div class="search-field"><i data-lucide="search"></i><input id="globalSearch" type="search" placeholder="搜索功能与设置…" aria-label="搜索功能与内容"><button class="icon-button" data-close-search aria-label="关闭搜索"><i data-lucide="x"></i></button></div>
     <div id="searchResults" class="search-results"></div><div class="search-hint"><kbd>Esc</kbd> 关闭</div>

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 MANIFEST = "astrbot.multi.manifest.v1"
+VERIFIED_RUNTIME = "astrbot.multi.verified_runtime.v1"
 HOST_ID = "astrbot-native"
 DELIVERY = "message.delivery"
 
@@ -79,7 +80,15 @@ class MultiAuthority:
             names = ", ".join(differences)
             raise TaskError("host_binding_changed", "the fixed run profile binding changed: " + names)
         if manifest.get("fingerprint") != current.get("fingerprint"):
-            logger.warning("[CompanionV2] 固定共享运行档的模型或运行参数已变化，按当前参数继续连接")
+            # Runtime parameters may change without moving an identity. Keep
+            # the reviewed binding immutable, and acknowledge the verified
+            # parameters separately so load/start and later restarts stay quiet.
+            with self.runtime.transaction():
+                accepted = self.read(VERIFIED_RUNTIME)
+                if not accepted or accepted.get("fingerprint") != current.get("fingerprint"):
+                    self.write(VERIFIED_RUNTIME, {"fingerprint": current.get("fingerprint"),
+                               "verified_at": stamp(self.now())})
+                    logger.info("[CompanionV2] 已采用更新的模型与运行参数，账号和角色绑定核验通过")
         return manifest
 
     @staticmethod

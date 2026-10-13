@@ -164,7 +164,6 @@
   text-decoration:line-through;text-decoration-color:var(--t-line-firm);
   opacity:.62;
 }
-.wb-label .wb-live{color:var(--t-accent-ink);font-weight:600}
 .wb-help{color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.7;margin:0}
 
 .wb-control{min-width:0}
@@ -546,15 +545,15 @@
   transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease;
 }
 .wb-date input[type=date]:focus-visible{outline:none;border-color:var(--t-accent);box-shadow:var(--focus-ring)}
-.wb-date-flag{display:inline-flex;align-items:center;gap:5px;min-height:38px;padding:0 var(--sp-3);
+.wb-date-flag{display:inline-flex;align-items:center;gap:calc(var(--sp-1) * 1.25);min-height:38px;padding:0 var(--sp-3);
   border:1px solid var(--field-border);border-radius:var(--field-radius);background:var(--field-bg);
   color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer;user-select:none;white-space:nowrap}
 .wb-date-flag input{width:15px;height:15px;margin:0;accent-color:var(--t-accent)}
 .wb-chipset{display:grid;gap:var(--sp-2);min-width:0}
-.wb-chip-opts{display:flex;flex-wrap:wrap;gap:6px}
+.wb-chip-opts{display:flex;flex-wrap:wrap;gap:calc(var(--sp-1) * 1.5)}
 .wb-chip-opt{
-  display:inline-flex;align-items:center;min-height:30px;padding:4px 14px;
-  border:1px solid var(--field-border);border-radius:99px;background:var(--field-bg);
+  display:inline-flex;align-items:center;min-height:30px;padding:var(--sp-1) calc(var(--sp-2) * 1.75);
+  border:1px solid var(--field-border);border-radius:var(--r-pill);background:var(--field-bg);
   color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer;white-space:nowrap;
   transition:border-color var(--dur-fast) ease,color var(--dur-fast) ease,background var(--dur-fast) ease;
 }
@@ -563,29 +562,29 @@
 .wb-chip-opt:disabled{opacity:.5;cursor:not-allowed}
 .wb-chipset input[type=text]{min-height:34px}
 .wb-tagset{display:grid;gap:var(--sp-2);min-width:0}
-.wb-tag-slips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
-.wb-tag{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px 4px 12px;
-  border:1px solid var(--t-line);border-radius:99px;background:var(--t-surface);
+.wb-tag-slips{display:flex;flex-wrap:wrap;gap:calc(var(--sp-1) * 1.5);min-width:0}
+.wb-tag{display:inline-flex;align-items:center;gap:calc(var(--sp-1) * 1.5);max-width:100%;padding:var(--sp-1) calc(var(--sp-1) * 1.5) var(--sp-1) var(--sp-3);
+  border:1px solid var(--t-line);border-radius:var(--r-pill);background:var(--t-surface);
   color:var(--t-text-soft);font-size:var(--fs-tiny)}
 .wb-tag>span:first-child{overflow-wrap:anywhere;white-space:nowrap}
 .wb-tag button{display:grid;place-items:center;width:20px;height:20px;flex:none;border:0;border-radius:50%;
   background:transparent;color:var(--t-text-faint);cursor:pointer}
 .wb-tag button:hover{background:var(--t-risk-quiet);color:var(--t-risk-ink)}
 .wb-tag button svg{width:11px;height:11px}
-.wb-tag-form{display:flex;gap:6px;min-width:0}
+.wb-tag-form{display:flex;gap:calc(var(--sp-1) * 1.5);min-width:0}
 .wb-tag-form input[type=text]{flex:1 1 160px;min-width:120px;min-height:34px}
 .wb-tag-form .wb-keyword-add{min-height:34px}
 .wb-quotes{display:grid;gap:var(--sp-2);min-width:0}
 .wb-quote-list{display:grid;gap:var(--sp-2);min-width:0}
 .wb-quote{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:var(--sp-2);min-width:0}
-.wb-quote-no{display:grid;place-items:center;width:22px;height:22px;margin-top:5px;
+.wb-quote-no{display:grid;place-items:center;width:22px;height:22px;margin-top:calc(var(--sp-1) * 1.25);
   border:1px solid var(--t-line);border-radius:50%;background:var(--t-surface);
   color:var(--t-text-faint);font:600 10px/1 var(--numeric-font)}
 .wb-quote textarea{
   min-height:0;height:auto;resize:none;overflow:hidden;line-height:1.7;
   border-bottom-left-radius:4px;box-shadow:var(--t-shadow);
 }
-.wb-quote-remove{display:grid;place-items:center;width:24px;height:24px;margin-top:4px;
+.wb-quote-remove{display:grid;place-items:center;width:24px;height:24px;margin-top:var(--sp-1);
   border:1px solid var(--t-line-firm);border-radius:50%;background:var(--t-surface);
   color:var(--t-text-faint);cursor:pointer}
 .wb-quote-remove:hover{background:var(--t-risk-quiet);color:var(--t-risk-ink)}

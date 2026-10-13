@@ -1,44 +1,34 @@
-"""Real independent Content domain, synthetic Star/model/platform, temporary data."""
+"""Real internal Content domain and lease, synthetic model/platform, temporary data."""
 
-import importlib
-import os
-from pathlib import Path
-import sys
 import traceback
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 from astrbot_host.native_extensions import NativeExtensionRegistry
+from astrbot_host.native_extensions.builtins import MANAGED_EXTENSIONS
 from companion_v2.capabilities.models import CapabilityAuthorizationState
 from companion_v2.capabilities.repositories import CapabilityRepository
+from companion_v2.content.assembly import build_provider
 from companion_v2.conversation.flow import ConversationPolicy
+from companion_v2.product import PRODUCT_VERSION
+from tests.native_internal_support import internal_lease
 from tests.test_management_access import NOW, SCOPE
 
 
 def content_builder():
-    root = Path(os.environ.get("CONTENT_V2_PROVIDER_ROOT", Path(__file__).resolve().parents[2] /
-                               "astrbot_plugin_content_companion" / "companion" / "content_v2"))
-    if not (root / "assembly.py").is_file():
-        raise RuntimeError("Content integration requires the native Content source package")
-    name = "_companion_content_native_test"
-    if name not in sys.modules:
-        module = ModuleType(name)
-        module.__path__ = [str(root)]
-        sys.modules[name] = module
-    return importlib.import_module(name + ".assembly").build_provider
+    return build_provider
 
 
 class NativeContentFixture:
     def create_content_port(self, *, directory=None):
         self.content_directory = directory or self.root.parent / "content-provider"
-        self.content_port = content_builder()(self.content_directory, version="0.2.3", live=lambda: None)
+        self.content_port = content_builder()(self.content_directory, version=PRODUCT_VERSION, live=lambda: None)
         self.content_port.now = self.clock.now
         self.addAsyncCleanup(self.content_port.close)
-        self.content_star = SimpleNamespace(root_dir_name="astrbot_plugin_content_companion",
-            name="astrbot_plugin_content_companion", version="0.2.3", activated=True,
-            star_cls=SimpleNamespace(extension_api=SimpleNamespace(companion_v2_native=lambda: self.content_port)))
-        self.native_context = SimpleNamespace(get_all_stars=lambda: (self.content_star,))
-        self.native_registry = NativeExtensionRegistry(self.native_context, now=self.clock.now)
-        self.addCleanup(self.native_registry.close)
+        self.content_lease = internal_lease(self.content_port)
+        self.native_context = SimpleNamespace(get_all_stars=lambda: ())
+        self.native_registry = NativeExtensionRegistry(self.native_context, now=self.clock.now,
+            bundled_extensions=(self.content_lease,), managed_extensions=MANAGED_EXTENSIONS)
+        self.addAsyncCleanup(self.native_registry.aclose)
         self.content_errors = []
         original_invoke = self.native_registry.invoke
         async def observe(*args):

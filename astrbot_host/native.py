@@ -2,26 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from aiocqhttp.api_impl import WebSocketReverseApi
 from astrbot import __version__ as ASTRBOT_VERSION
+from astrbot.core import sp
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 from astrbot.core.provider.sources.gemini_source import ProviderGoogleGenAI
 from astrbot.core.message.components import Image, Reply, Forward, Record, Video, File
+from astrbot.core.db.po import ConversationV2
+from sqlmodel import select
 
 from companion_v2.adapters.astrbot.native import (
-    HostPersona, NativePrivateBridge, account_number, bounded_native_lookup, persona_instruction,
+    NATIVE_LOOKUP_SLOW_SECONDS, HostPersona, NativePrivateBridge, account_number, bounded_native_lookup,
+    persona_instruction, report_slow_native_lookup,
 )
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.adapters.astrbot.staging_config import REQUIRED_CAPABILITIES, StagingConfiguration
-from companion_v2.execution.models import digest
+from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectKind, SubjectRef
 
 from .settings import HostControlError, HostSettings, INSTALLATION_PREFIX
@@ -37,10 +44,180 @@ from .forwards import load_native_forwards, load_native_group_forwards
 
 HOST_ID = "astrbot-local-staging"
 ECOSYSTEM_ID = "companion-v2"
+logger = logging.getLogger(__name__)
+SESSION_SETTINGS_CACHE_SECONDS = 30.0
+SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS = 1.0
+_session_settings_cache = {}
+_session_settings_reads = {}
+_session_settings_versions = {}
 
 
 def _native_video_provider(context, bridge, native_types, native, settings):
     return GeminiNativeVideoProvider(context, bridge, native_types, native, settings=settings)
+
+
+async def load_session_persona_override(umo):
+    """Read the V2-owned persona choice saved for one native window."""
+    try:
+        services = await asyncio.wait_for(
+            load_session_settings(umo), timeout=SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS)
+    except TimeoutError as error:
+        raise TaskError("host_session_settings_timeout", "native session settings are still loading") from error
+    return services.get("persona_id")
+
+
+async def load_persona_snapshot_selection(context, umo, conversation_id):
+    """Read only the selected persona id, never the AstrBot conversation history."""
+    if conversation_id is None:
+        return None
+    database = getattr(context, "_db", None)
+    if database is None:
+        raise TaskError("host_conversation_unavailable", "AstrBot conversation database is unavailable")
+    started = time.perf_counter()
+    stop_loop_probe = _start_event_loop_lag_probe()
+    session_ready = query_started = query_finished = result_finished = started
+    try:
+        async with database.get_db() as session:
+            session_ready = time.perf_counter()
+            query_started = session_ready
+            result = await session.execute(select(ConversationV2.persona_id).where(
+                ConversationV2.conversation_id == conversation_id))
+            query_finished = time.perf_counter()
+            row = result.one_or_none()
+            result_finished = time.perf_counter()
+    finally:
+        loop_lag_max_ms, loop_lag_total_ms = stop_loop_probe()
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
+    if elapsed_ms >= NATIVE_LOOKUP_SLOW_SECONDS * 1000:
+        report_slow_native_lookup("conversation", elapsed_ms, details=(
+            f"database_ready={getattr(database, 'inited', None)} "
+            f"db_context_ms={round((session_ready - started) * 1000)} "
+            f"query_ms={round((query_finished - query_started) * 1000)} "
+            f"result_ms={round((result_finished - query_finished) * 1000)} "
+            f"loop_lag_max_ms={loop_lag_max_ms} loop_lag_total_ms={loop_lag_total_ms}"
+        ))
+    if row is None:
+        raise TaskError("host_conversation_missing", "selected AstrBot conversation is unavailable")
+    return row[0]
+
+
+def _start_event_loop_lag_probe(interval=1.0):
+    loop = asyncio.get_running_loop()
+    next_expected = loop.time() + interval
+    maximum_lag = 0.0
+    total_lag = 0.0
+    handle = None
+
+    def sample():
+        nonlocal next_expected, maximum_lag, total_lag, handle
+        now = loop.time()
+        lag = max(0.0, now - next_expected)
+        maximum_lag = max(maximum_lag, lag)
+        total_lag += lag
+        next_expected = now + interval
+        handle = loop.call_later(interval, sample)
+
+    handle = loop.call_later(interval, sample)
+
+    def stop():
+        nonlocal maximum_lag, total_lag
+        if handle is not None:
+            handle.cancel()
+        lag = max(0.0, loop.time() - next_expected)
+        maximum_lag = max(maximum_lag, lag)
+        total_lag += lag
+        return round(maximum_lag * 1000), round(total_lag * 1000)
+
+    return stop
+
+
+async def _read_session_settings(umo, version):
+    task = asyncio.current_task()
+    try:
+        services = await sp.get_async(scope="umo", scope_id=umo, key="session_service_config", default={})
+        if services is None:
+            services = {}
+        if not isinstance(services, dict):
+            raise ValueError("native session settings are not an object")
+        services = dict(services)
+        if version != _session_settings_versions.get(umo, 0):
+            cached = _session_settings_cache.get(umo)
+            return dict(cached[1]) if cached is not None else services
+        _session_settings_cache[umo] = (time.monotonic() + SESSION_SETTINGS_CACHE_SECONDS, services)
+        return services
+    finally:
+        if _session_settings_reads.get(umo) is task:
+            _session_settings_reads.pop(umo, None)
+
+
+async def load_session_settings(umo):
+    """Share the native settings read across admission, capture and send checks."""
+    if type(umo) is not str or not umo:
+        raise ValueError("native session settings need a unified message origin")
+    cached = _session_settings_cache.get(umo)
+    now = time.monotonic()
+    if cached is not None:
+        if cached[0] > now:
+            return dict(cached[1])
+        task = _session_settings_reads.get(umo)
+        if task is None or task.done():
+            version = _session_settings_versions.get(umo, 0)
+            task = asyncio.create_task(_read_session_settings(umo, version),
+                                       name="companion-v2-session-settings-refresh")
+            _session_settings_reads[umo] = task
+            task.add_done_callback(lambda completed: _report_session_settings_refresh(umo, completed))
+        return dict(cached[1])
+    task = _session_settings_reads.get(umo)
+    if task is None or task.done():
+        version = _session_settings_versions.get(umo, 0)
+        task = asyncio.create_task(_read_session_settings(umo, version),
+                                   name="companion-v2-session-settings")
+        _session_settings_reads[umo] = task
+    return dict(await asyncio.shield(task))
+
+
+def _report_session_settings_refresh(umo, task):
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as error:
+        logger.warning("[CompanionV2] 会话设置后台刷新失败 error_type=%s", type(error).__name__)
+
+
+async def warm_session_settings():
+    """Load saved native-window settings while the host is starting."""
+    versions = dict(_session_settings_versions)
+    try:
+        rows = await sp.range_get_async(scope="umo", scope_id=None, key="session_service_config")
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning("[CompanionV2] 会话设置预热失败 error_type=%s", type(error).__name__)
+        return 0
+
+    expires_at = time.monotonic() + SESSION_SETTINGS_CACHE_SECONDS
+    loaded = 0
+    for row in rows or ():
+        umo = getattr(row, "scope_id", None)
+        raw = getattr(row, "value", None)
+        services = raw.get("val") if isinstance(raw, dict) else None
+        if type(umo) is not str or not umo or not isinstance(services, dict):
+            continue
+        if _session_settings_versions.get(umo, 0) != versions.get(umo, 0):
+            continue
+        _session_settings_cache[umo] = (expires_at, dict(services))
+        loaded += 1
+    logger.info("[CompanionV2] 会话设置预热完成 windows=%s", loaded)
+    return loaded
+
+
+def remember_session_settings(umo, services):
+    """Publish a successful dashboard write before the next native event."""
+    if type(umo) is not str or not umo or not isinstance(services, dict):
+        raise ValueError("native session settings cache needs a window and object")
+    _session_settings_versions[umo] = _session_settings_versions.get(umo, 0) + 1
+    _session_settings_cache[umo] = (time.monotonic() + SESSION_SETTINGS_CACHE_SECONDS, dict(services))
 
 
 def installed_native_types() -> NativeAdapterTypes:
@@ -69,6 +246,8 @@ def installed_native_types() -> NativeAdapterTypes:
         file_loader=load_native_file,
         video_provider_type=ProviderGoogleGenAI,
         video_provider_factory=_native_video_provider,
+        session_persona_override_lookup=load_session_persona_override,
+        persona_snapshot_lookup=load_persona_snapshot_selection,
     )
 
 
@@ -206,23 +385,26 @@ class NativeProbeService:
         umo = f"{settings.platform_id}:FriendMessage:{settings.participant_id}"
         manager = self.context.conversation_manager
         conversation_id = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
-        conversation = (
-            await bounded_native_lookup(manager.get_conversation(umo, conversation_id, create_if_not_exists=False),
-                                        operation="conversation")
-            if conversation_id is not None
-            else None
-        )
-        if conversation_id is not None and conversation is None:
-            raise HostControlError("staging_conversation_missing", "the selected AstrBot conversation is unavailable")
-        provider_settings = self.context.get_config(umo=umo).get("provider_settings", {})
-        selected, persona, _, special = await bounded_native_lookup(
-            self.context.persona_manager.resolve_selected_persona(
-                umo=umo,
-                conversation_persona_id=conversation.persona_id if conversation is not None else None,
-                platform_name="aiocqhttp",
-                provider_settings=provider_settings,
-            ), operation="persona"
-        )
+        override = None
+        if self.native_types.session_persona_override_lookup is not None:
+            override = await bounded_native_lookup(
+                self.native_types.session_persona_override_lookup(umo), operation="session_settings")
+        selected = override if override is not None else settings.persona_id
+        if selected is None or selected == "":
+            raise HostControlError("staging_persona_unbound", "bind a persona to this window in Companion settings")
+        if (type(selected) is not str or not selected.strip() or len(selected) > 120
+                or any(ord(char) < 32 for char in selected)):
+            raise HostControlError("staging_persona_invalid", "the V2 window persona binding is invalid")
+        if selected == "[%None]":
+            persona = None
+        else:
+            resolver = getattr(self.context.persona_manager, "get_persona_v3_by_id", None)
+            persona = resolver(selected) if callable(resolver) else next((item for item in
+                getattr(self.context.persona_manager, "personas_v3", ())
+                if isinstance(item, dict) and item.get("name") == selected), None)
+            if persona is None or persona.get("name") != selected:
+                raise HostControlError("staging_persona_unavailable", "the V2 window persona is unavailable")
+        special = False
         if await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_verify") != conversation_id:
             raise HostControlError("staging_conversation_changed", "the AstrBot conversation changed during the probe")
         if special or persona is None and selected not in (None, "[%None]"):

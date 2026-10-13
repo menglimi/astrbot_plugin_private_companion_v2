@@ -89,6 +89,19 @@ class StagingConfigurationTests(unittest.TestCase):
                 with self.assertRaises(StagingConfigurationError):
                     self.parse(doc)
 
+    def test_disabled_hard_budget_round_trips_without_changing_legacy_pins(self):
+        disabled = replace(self.config, budget=replace(self.config.budget, enabled=False))
+        document = disabled.document()
+        self.assertIs(document["budget"]["enabled"], False)
+        restored = self.parse(document)
+        self.assertEqual(restored, disabled)
+        self.assertEqual(restored.fingerprint, digest(document))
+        self.assertIs(self.parse(self.document).budget.enabled, True)
+        self.assertEqual(self.parse(self.document).fingerprint, digest(self.document))
+        document["budget"]["enabled"] = "yes"
+        with self.assertRaises(StagingConfigurationError):
+            self.parse(document)
+
     def test_a_pinned_document_keeps_its_own_hash_whatever_shape_it_has(self):
         """The receipt recorded at initialization hashes the document that was pinned.
 

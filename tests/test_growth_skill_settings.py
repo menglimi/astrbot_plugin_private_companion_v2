@@ -1,18 +1,20 @@
-"""Growth skill configuration: parsing, role-window sharing, and registry contract."""
+"""Growth skill configuration: parsing, installation-wide storage, and contract."""
 
 import json
+from dataclasses import replace
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectKind, SubjectRef
 from companion_v2.role_work.growth.configuration import (INFLUENCE_NOTES, SKILL_FIELDS, SKILLS_GROUP,
                                                          SkillConfigurationOwner, configuration_fields,
                                                          custom_skills, skill_configuration_fields,
-                                                         skill_settings)
+                                                         migrate_legacy_skill_values, skill_settings)
 from companion_v2.storage.runtime import StorageRuntime
 from tests.test_management_access import INSTALLATION, NOW
 
@@ -36,13 +38,14 @@ class GrowthSkillTests(unittest.TestCase):
     def context(self, scope=SCOPE, role=ROLE):
         return SimpleNamespace(scope=scope, role_binding=SimpleNamespace(role=role))
 
-    def target(self, scope=SCOPE, role=ROLE, layer=ConfigLayer.WINDOW):
-        # Only window targets carry a scope; a role target is the role and the bot.
+    def target(self, scope=SCOPE, role=ROLE, layer=ConfigLayer.ROLE):
+        if layer is ConfigLayer.INSTALLATION:
+            return ConfigTarget(INSTALLATION, layer)
         if layer is ConfigLayer.ROLE:
-            return ConfigTarget(INSTALLATION, layer, role, None)
+            return ConfigTarget(INSTALLATION, layer, role, bot_id=scope.bot_id)
         return ConfigTarget(INSTALLATION, layer, role, scope)
 
-    def set_skills(self, value, strength=0, *, scope=SCOPE, role=ROLE, layer=ConfigLayer.WINDOW):
+    def set_skills(self, value, strength=0, *, scope=SCOPE, role=ROLE, layer=ConfigLayer.ROLE):
         fields = tuple(f for f in SKILL_FIELDS)
         target = self.target(scope, role, layer)
         snapshot = self.owner.read(target, fields)
@@ -72,8 +75,9 @@ class GrowthSkillTests(unittest.TestCase):
                           SKILLS_GROUP + ".schedule_influence_strength"})
         # Permissions stay window-only: a grant is issued per participant.
         self.assertTrue(all(f.layers == (ConfigLayer.WINDOW,) for f in permissions))
-        # Skill content may be set at either layer, like role.life.
-        self.assertTrue(all(f.layers == (ConfigLayer.WINDOW, ConfigLayer.ROLE) for f in skills))
+        # Skills have role defaults with an installation fallback; per-person
+        # permissions remain window-scoped.
+        self.assertTrue(all(f.layers == (ConfigLayer.INSTALLATION, ConfigLayer.ROLE) for f in skills))
         FieldRegistry(version="growth.v2", fields=(*permissions, *skills))
 
     def test_settings_roundtrip(self):
@@ -91,38 +95,63 @@ class GrowthSkillTests(unittest.TestCase):
         stored = self.owner.read(target, SKILL_FIELDS).fields[SKILLS_GROUP + ".custom_skills"].value
         self.assertEqual(custom_skills(stored), ("写作", "吉他"))
 
-    def test_a_skill_set_in_one_window_is_visible_in_another_window_of_the_role(self):
-        # The point of sharing: the same role talking to the same person in another
-        # conversation window keeps its skill domains.
+    def test_role_skill_policy_is_shared_by_its_windows_but_not_other_roles(self):
         self.set_skills("水彩、吉他", strength=2, scope=SCOPE)
         self.assertEqual(skill_settings(self.runtime, self.context(scope=OTHER_SCOPE)),
                          (("水彩", "吉他"), 2))
+        self.assertEqual(skill_settings(self.runtime, self.context(scope=OTHER_SCOPE, role=OTHER_ROLE)),
+                         ((), 0))
 
-    def test_the_first_window_write_is_promoted_and_then_applies_to_every_window(self):
-        # This is how a role-level value comes to exist: the first window to set skill
-        # content promotes it onto the role, and later windows inherit it.
-        self.set_skills("摄影", strength=3, scope=SCOPE)
-        for scope in (SCOPE, OTHER_SCOPE):
-            self.assertEqual(skill_settings(self.runtime, self.context(scope=scope)), (("摄影",), 3))
+    def test_installation_skill_values_remain_a_fallback(self):
+        self.set_skills("全局技能", strength=1, role=OTHER_ROLE, layer=ConfigLayer.INSTALLATION)
+        self.assertEqual(skill_settings(self.runtime, self.context(role=OTHER_ROLE)), (("全局技能",), 1))
+        self.set_skills("角色技能", strength=3, role=OTHER_ROLE)
+        self.assertEqual(skill_settings(self.runtime, self.context(role=OTHER_ROLE)), (("角色技能",), 3))
+        self.assertEqual(skill_settings(self.runtime, self.context(role=ROLE)), ((), 0))
 
-    def test_a_window_override_does_not_change_what_other_windows_see(self):
-        self.set_skills("水彩", strength=1, scope=SCOPE)
-        self.set_skills("油画", strength=3, scope=OTHER_SCOPE)
-        third = ScopeRef(INSTALLATION, "onebot", ScopeKind.PRIVATE, "native-a", "bot-a", "login-a",
-                         "conversation-c", "session-c")
-        self.assertEqual(skill_settings(self.runtime, self.context(scope=SCOPE)), (("水彩",), 1))
-        self.assertEqual(skill_settings(self.runtime, self.context(scope=OTHER_SCOPE)), (("油画",), 3))
-        self.assertEqual(skill_settings(self.runtime, self.context(scope=third)), (("水彩",), 1))
+    def test_roles_can_save_different_skill_defaults(self):
+        self.set_skills("摄影", strength=3, scope=SCOPE, role=ROLE)
+        self.set_skills("写作", strength=1, scope=OTHER_SCOPE, role=OTHER_ROLE)
+        self.assertEqual(skill_settings(self.runtime, self.context(scope=OTHER_SCOPE, role=ROLE)), (("摄影",), 3))
+        self.assertEqual(skill_settings(self.runtime, self.context(scope=SCOPE, role=OTHER_ROLE)), (("写作",), 1))
 
-    def test_the_role_uses_the_key_of_the_group_it_is_stored_under(self):
-        # A role-layer target carries no scope; the shared owner builds it itself.
-        target = self.target(layer=ConfigLayer.ROLE)
+    def test_global_target_has_no_role_or_window_address(self):
+        target = self.target()
         self.assertIsNone(target.scope)
-        self.assertEqual(target.role, ROLE)
+        self.assertIsNone(target.role)
+        self.assertIsNone(target.bot_id)
 
-    def test_another_role_does_not_inherit_the_skills(self):
-        self.set_skills("水彩", strength=2, scope=SCOPE)
-        self.assertEqual(skill_settings(self.runtime, self.context(role=OTHER_ROLE)), ((), 0))
+    def test_legacy_window_values_promote_once_without_globalizing_role_values(self):
+        legacy_fields = tuple(replace(field, layers=(ConfigLayer.ROLE,)) for field in SKILL_FIELDS)
+        legacy_owner = SparseConfigurationOwner(self.runtime)
+        for role, scope, value, at in ((ROLE, SCOPE, '["写作"]', NOW),
+                                       (OTHER_ROLE, OTHER_SCOPE, '["摄影"]', NOW.replace(minute=1))):
+            target = self.target(scope=scope, role=role, layer=ConfigLayer.ROLE)
+            snapshot = legacy_owner.read(target, legacy_fields)
+            legacy_owner.write(target, legacy_fields,
+                changes={SKILLS_GROUP + ".enabled": True, SKILLS_GROUP + ".custom_skills": value,
+                         SKILLS_GROUP + ".schedule_influence_strength": 2},
+                reset=(), expected_revision=snapshot.revision, observed_at=at)
+        legacy_window_fields = tuple(replace(field, layers=(ConfigLayer.WINDOW,)) for field in SKILL_FIELDS)
+        target = self.target(scope=SCOPE, role=ROLE, layer=ConfigLayer.WINDOW)
+        snapshot = legacy_owner.read(target, legacy_window_fields)
+        legacy_owner.write(target, legacy_window_fields,
+            changes={SKILLS_GROUP + ".custom_skills": '["油画"]'}, reset=(),
+            expected_revision=snapshot.revision, observed_at=NOW.replace(minute=2))
+        expected = {SKILLS_GROUP + ".custom_skills"}
+        self.assertEqual(set(migrate_legacy_skill_values(self.runtime)), expected)
+        self.assertEqual(skill_settings(self.runtime, self.context(role=ROLE)), (("写作",), 2))
+        self.assertEqual(skill_settings(self.runtime, self.context(role=OTHER_ROLE)), (("摄影",), 2))
+        self.assertEqual(migrate_legacy_skill_values(self.runtime), ())
+
+        target = self.target(role=ROLE)
+        snapshot = self.owner.read(target, SKILL_FIELDS)
+        self.owner.write(target, SKILL_FIELDS,
+            changes={SKILLS_GROUP + ".custom_skills": '["角色设置"]'}, reset=(),
+            expected_revision=snapshot.revision, observed_at=NOW)
+        self.assertEqual(migrate_legacy_skill_values(self.runtime), ())
+        self.assertEqual(skill_settings(self.runtime, self.context()), (("角色设置",), 2))
+        self.assertEqual(skill_settings(self.runtime, self.context(role=OTHER_ROLE)), (("摄影",), 2))
 
     def test_influence_notes_bounds(self):
         self.assertEqual(sorted(INFLUENCE_NOTES), [1, 2, 3])

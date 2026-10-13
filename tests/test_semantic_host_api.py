@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
+import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from astrbot.api.web import PluginRequest, bind_request_context
@@ -31,13 +33,15 @@ class VocabularyPort(SemanticPort):
         super().__init__()
         self.analysis_calls = 0
         self.failures = 0
+        self.term = "集合灯"
 
     async def analyze(self, identifier, prompt, images=()):
         self.analysis_calls += 1
         if self.failures:
             self.failures -= 1
             raise RuntimeError("analysis unavailable")
-        return [{"term": "小灯", "meaning": "今晚集合", "usage": "群内约见", "evidence": [0]}]
+        return [{"term": self.term, "meaning": "今晚集合", "usage": "群内约见",
+                 "confidence": 0.8, "evidence": [0]}]
 
 
 class SemanticRequests:
@@ -79,6 +83,19 @@ class PrivateSemanticAPITests(SemanticRequests, unittest.IsolatedAsyncioTestCase
         self.assertEqual((await self.semantic_request(self.selection))["data"]["code"], "staging_not_initialized")
         (await self.controller.initialize_profile()).unwrap()
         (await self.controller.start()).unwrap()
+        global_status = await self.semantic_request({"global": True})
+        self.assertEqual(global_status["status"], "ok", global_status)
+        self.assertFalse(global_status["data"]["selection_ready"])
+        self.assertEqual(global_status["data"]["scope_kind"], "global")
+        self.assertEqual(global_status["data"]["settings_scope"], "installation")
+        global_revision = global_status["data"]["settings"]["revision"]
+        global_update = await self.semantic_request({"global": True}, action="configure",
+            changes={"learning_interval_seconds": 1200}, revision=global_revision)
+        self.assertEqual(global_update["status"], "ok", global_update)
+        self.assertEqual(global_update["data"]["settings"]["learning_interval_seconds"], 1200)
+        mixed_global = await self.semantic_request({**self.selection, "global": True}, action="configure",
+            changes={"learning_interval_seconds": 1500}, revision=global_revision + 1)
+        self.assertEqual(mixed_global["data"]["code"], "semantic_request_invalid")
         status = await self.semantic_request(self.selection)
         self.assertEqual(status["status"], "ok", status)
         self.assertTrue(status["data"]["selection_ready"])
@@ -110,7 +127,7 @@ class PrivateSemanticAPITests(SemanticRequests, unittest.IsolatedAsyncioTestCase
         self.assertEqual(stale["data"]["code"], "semantic_conflict")
 
         output = io.BytesIO()
-        Image.new("RGB", (3, 3), "red").save(output, format="PNG")
+        Image.new("RGB", (320, 180), "red").save(output, format="PNG")
         content = output.getvalue()
         imported = await self.semantic_request(self.selection, action="import",
                                                 content=base64.b64encode(content).decode("ascii"),
@@ -126,6 +143,11 @@ class PrivateSemanticAPITests(SemanticRequests, unittest.IsolatedAsyncioTestCase
         listed = await self.semantic_request(self.selection, kind="reaction")
         self.assertEqual([row["id"] for row in listed["data"]["items"]], [item["id"]])
         self.assertEqual(listed["data"]["catalog"]["reaction"]["total"], 1)
+        thumbnail_url = listed["data"]["items"][0]["thumbnail_url"]
+        self.assertTrue(thumbnail_url.startswith("data:image/jpeg;base64,"))
+        thumbnail = base64.b64decode(thumbnail_url.split(",", 1)[1])
+        with Image.open(io.BytesIO(thumbnail)) as preview:
+            self.assertLessEqual(max(preview.size), 160)
         detail = await self.semantic_request(self.selection, kind="reaction", id=item["id"])
         self.assertEqual(base64.b64decode(detail["data"]["image_url"].split(",", 1)[1]), content)
         edited = await self.semantic_request(self.selection, action="edit", kind="reaction", id=item["id"],
@@ -161,6 +183,12 @@ class GroupSemanticAPITests(SemanticRequests, GroupMemoryManagementFixture, unit
     def setUp(self):
         super().setUp()
         self.register_semantic()
+
+    def save_slang_from_turn(self, context, batch, term, meaning, usage):
+        row = self.app.runtime.read_one("""SELECT * FROM conversation_inputs
+            WHERE batch_id=? AND withdrawn=0 ORDER BY position LIMIT 1""", (batch,))
+        reference = self.app.messages.group_context.input_ref(row)
+        return self.app.semantics.slang.save(context, term, meaning, usage, [reference], "manual")
 
     async def test_group_reaction_requires_scope_enablement(self):
         await self.start_host()
@@ -207,9 +235,10 @@ class GroupSemanticAPITests(SemanticRequests, GroupMemoryManagementFixture, unit
             return {"items": []}
 
         service.search.search = record_search
-        await self.conversation(remember=False, wording="凹凸是以撒里祸兽的代称")
-        await self.conversation(remember=False, wording="为什么我记得普通掉半血？", sender="202")
-        self.assertEqual(len(queries), 2)
+        context, batch, _ = await self.conversation(remember=False, wording="凹凸是以撒里祸兽的代称")
+        self.save_slang_from_turn(context, batch, "凹凸", "以撒里的祸兽", "本群的代称")
+        await self.conversation(remember=False, wording="普通掉半血是什么梗？", sender="202")
+        self.assertEqual(len(queries), 1)
         self.assertIn("凹凸", queries[-1])
         self.assertIn("普通掉半血", queries[-1])
         self.assertNotIn("收到这条群聊发言", queries[-1])
@@ -221,34 +250,54 @@ class GroupSemanticAPITests(SemanticRequests, GroupMemoryManagementFixture, unit
         service = self.app.semantics
         service.gateway.port = port
         selection = {"target_id": "group-a", "role_id": "role-a"}
-        await self.conversation(remember=False, wording="小灯是今晚集合的暗号")
-        self.assertEqual(port.analysis_calls, 1)
-        self.assertEqual((await self.semantic_request(selection, kind="slang"))["data"]["items"], [])
-        context, batch, _ = await self.conversation(remember=False, wording="说小灯就是今晚集合")
+        known_context, known_batch, _ = await self.conversation(remember=False,
+            wording="“观星局”和“摸鱼王”是群里的说法")
+        self.save_slang_from_turn(known_context, known_batch, "观星局", "夜间活动", "群内活动名")
+        self.save_slang_from_turn(known_context, known_batch, "摸鱼王", "摸鱼的人", "群内称呼")
+
+        async def observe_at(timestamp, wording):
+            fake_time = NS(time=lambda: timestamp, monotonic=time.monotonic)
+            with patch("companion_v2.memory.group.slang.time", fake_time):
+                return await self.conversation(remember=False, wording=wording)
+
+        await observe_at(1000.0, "“集合灯”与“观星局”“摸鱼王”都是今晚集合的说法")
+        self.assertEqual(port.analysis_calls, 0, "only two eligible candidates should not call the model")
+        await observe_at(1001.0, "又提到“集合灯”，还有“观星局”和“摸鱼王”")
+        self.assertEqual(port.analysis_calls, 1, "three eligible candidates start the first attempt")
+        before_retry = await self.semantic_request(selection, kind="slang")
+        self.assertNotIn("集合灯", [row["payload"]["term"] for row in before_retry["data"]["items"]])
+
+        context, batch, _ = await observe_at(2802.0, "再说“集合灯”以及“观星局”和“摸鱼王”")
         self.assertEqual(port.analysis_calls, 2)
         listed = await self.semantic_request(selection, kind="slang")
-        self.assertEqual(listed["data"]["items"][0]["payload"]["meaning"], "今晚集合")
-        self.assertIn("vector_ready", listed["data"]["items"][0])
-        result = await self.semantic_request(selection, action="search", kind="slang", query="小灯")
-        self.assertEqual(len(result["data"]["items"]), 1)
+        learned = next(row for row in listed["data"]["items"] if row["payload"]["term"] == "集合灯")
+        self.assertEqual(learned["payload"]["meaning"], "今晚集合")
+        self.assertIn("vector_ready", learned)
+        result = await self.semantic_request(selection, action="search", kind="slang", query="集合灯")
+        self.assertTrue(any(row["payload"]["term"] == "集合灯" for row in result["data"]["items"]))
         event = self.app.runtime.read_one("SELECT event_key FROM conversation_inputs WHERE batch_id=?", (batch,))
         self.app.withdraw(context, event[0]).unwrap()
         listed = await self.semantic_request(selection, kind="slang")
-        self.assertFalse(listed["data"]["items"][0]["source_valid"])
-        result = await self.semantic_request(selection, action="search", kind="slang", query="小灯")
-        self.assertEqual(result["data"]["items"], [])
+        learned = next(row for row in listed["data"]["items"] if row["payload"]["term"] == "集合灯")
+        self.assertFalse(learned["source_valid"])
+        result = await self.semantic_request(selection, action="search", kind="slang", query="集合灯")
+        self.assertFalse(any(row["payload"]["term"] == "集合灯" for row in result["data"]["items"]))
         current = service.store.settings()
         service.store.configure({"slang_learning": False}, current["revision"])
-        next_context, next_batch, _ = await self.conversation(remember=False, wording="小灯是什么意思？")
+        analysis_calls = port.analysis_calls
+        next_context, next_batch, _ = await self.conversation(remember=False, wording="集合灯是什么意思？")
+        self.assertEqual(port.analysis_calls, analysis_calls)
         materials = self.app.messages._request(
             self.app.messages.batch(next_batch), next_context, self.clock.now()).context.materials
-        self.assertFalse(any(m.purpose == "contextual_word_meanings" for m in materials))
+        self.assertFalse(any(m.purpose == "contextual_word_meanings" and "集合灯" in m.payload
+                             for m in materials))
 
     async def test_same_turn_correction_supersedes_old_search_and_context(self):
         await self.start_host()
         port = VocabularyPort()
         self.app.semantics.gateway.port = port
-        await self.conversation(remember=False, wording="小灯代表今晚集合")
+        source_context, source_batch, _ = await self.conversation(remember=False, wording="“小灯”代表今晚集合")
+        self.save_slang_from_turn(source_context, source_batch, "小灯", "今晚集合", "群内约见")
 
         async def model(payload, _):
             done = len([m for m in payload["messages"] if m["role"] == "tool"])

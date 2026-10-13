@@ -46,7 +46,7 @@ class RoleJournalHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.get(draft.context.key).draft, draft)
         service.save(replace(draft, body="新增一段记录。"), expected_revision=1, operation_id="edit")
         self.assertEqual(len(self.called), 1)
-        self.assertEqual("".join(part.text for part in self.sent), "第一段\n第二段")
+        self.assertEqual([part.text for part in self.sent], ["第一段", "第二段"])
 
 
 if __name__ == "__main__":

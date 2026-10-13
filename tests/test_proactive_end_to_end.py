@@ -69,7 +69,8 @@ from tests.test_semantic_integration import SemanticPort
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "fixtures" / "proactive"
 SAMPLE = json.loads((FIXTURES / "news_feed_sample.json").read_text(encoding="utf-8"))
-RECORDED_BYTES = (FIXTURES / SAMPLE["sample"]).read_bytes()
+RECORDED_PATH = FIXTURES / SAMPLE["sample"]
+RECORDED_BYTES = RECORDED_PATH.read_bytes() if RECORDED_PATH.is_file() else None
 RECORDED_ARTICLE = SAMPLE["article"]
 # 清单保存真实录制的绝对时间；用例回放时把整条时间轴平移，但保持条目之间的相对间隔。
 RECORDED_LEAD = datetime.fromisoformat(SAMPLE["recorded_at"]) - datetime.fromisoformat(
@@ -127,6 +128,8 @@ class RecordedNewsPort:
         return self.alignment - RECORDED_LEAD
 
     async def fetch(self):
+        if RECORDED_BYTES is None:
+            raise unittest.SkipTest("recorded public RSS body is intentionally excluded from release packages")
         self.calls += 1
         if self.failures:
             raise self.failures.pop(0)
@@ -326,6 +329,8 @@ class ProactiveEndToEndFixture(ContactScheduleFixture):
 
     def recorded_port(self, *, failures=()):
         """录制回放端口：调用前先算好对齐时刻与样本基准。"""
+        if RECORDED_BYTES is None:
+            self.skipTest("recorded public RSS body is intentionally excluded from release packages")
         alignment = self.clock.now() + RECORDED_ALIGNMENT_LEAD
         port = RecordedNewsPort(alignment=alignment, failures=list(failures))
         return (lambda _alignment: port), port.published_at, port

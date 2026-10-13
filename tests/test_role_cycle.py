@@ -197,7 +197,7 @@ class CycleStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.app.role_state.read(self.ctx)["cycle_timeline"]["discomfort_enabled"])
 
     async def test_phase_preferences_adopt_on_maintenance_and_history_keeps_original(self):
-        self.configure(self.manager, cycle_menstrual_energy=-20, cycle_menstrual_mood="安静",
+        self.configure(self.manager, mood_enabled=True, cycle_menstrual_energy=-20, cycle_menstrual_mood="安静",
                        cycle_menstrual_prompt="允许慢一点回应")
         self.write("phase-original", cycle=assertion(), energy=60, mood="平常")
         consumer = ConversationStateContext(self.app.role_state)

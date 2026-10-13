@@ -1,0 +1,1274 @@
+{
+  "auto_discover": {
+    "description": "自动发现 VTube Studio 的运行地址（推荐开启）",
+    "type": "bool",
+    "default": true
+  },
+  "vts_host": {
+    "description": "VTube Studio 的 IP 地址",
+    "type": "string",
+    "hint": "VTube Studio 所在主机，默认 localhost"
+  },
+  "vts_port": {
+    "description": "VTube Studio WebSocket API 端口",
+    "type": "int",
+    "hint": "默认 8001，可在 VTS 设置→插件 API 中查看",
+    "default": 8001
+  },
+  "auto_connect": {
+    "description": "插件启动时自动连接 VTS 并尝试认证",
+    "type": "bool",
+    "default": true
+  },
+  "native_v2": {
+    "description": "V2 原生直播读取",
+    "type": "object",
+    "hint": "只允许 V2 宿主读取已运行的公开直播状态和近期事件；不会启动监听、推流或旧自动回复。V2 宿主仍须单独授权。",
+    "items": {
+      "enabled": {
+        "description": "启用 V2 直播只读端口",
+        "type": "bool",
+        "default": false
+      },
+      "bili_events_enabled": {
+        "description": "允许读取 B站公开事件",
+        "type": "bool",
+        "default": true
+      },
+      "twitch_events_enabled": {
+        "description": "允许读取 Twitch 公开事件",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "autonomous_l2d_enabled": {
+    "description": "启用自主 Live2D 标签表情",
+    "type": "bool",
+    "hint": "开启后，插件会在每次 LLM 回复前注入可选表情标签说明，并在回复后截获 <l2d:标签> 触发对应 VTS 热键",
+    "default": true
+  },
+  "l2d_max_tags_per_reply": {
+    "description": "每次回复最多触发表情数",
+    "type": "int",
+    "hint": "限制模型在一次回复中最多触发多少个 L2D 标签，避免连续触发过多热键",
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    },
+    "default": 1
+  },
+  "l2d_hotkeys": {
+    "description": "Live2D 表情按键条目",
+    "type": "template_list",
+    "hint": "为每个 VTS 热键配置一个给 LLM 使用的标签、说明和持续时间。模型会输出 <l2d:标签>，插件截获后触发对应 hotkey_id；中文标签可直接使用",
+    "templates": {
+      "default": {
+        "name": "Live2D 表情",
+        "items": {
+          "name": {
+            "description": "表情名称",
+            "type": "string",
+            "hint": "用于在配置列表和命令中识别这个表情，例如 开心、害羞、生气。建议填写人类可读的中文名",
+            "default": "开心"
+          },
+          "tag": {
+            "description": "标签名",
+            "type": "string",
+            "hint": "给 LLM 输出用的短标签，例如 开心、生气、害羞。留空时会使用表情名称。最终格式为 <l2d:开心>",
+            "default": "开心"
+          },
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "hint": "关闭后该标签不会注入给 LLM，也不会响应触发",
+            "default": true
+          },
+          "hotkey_id": {
+            "description": "VTS 热键 ID/名称",
+            "type": "string",
+            "hint": "对应 VTube Studio 当前模型中的热键 ID 或名称，在陪伴小屋点击“读取热键”查看并添加到表情配置。",
+            "default": ""
+          },
+          "description": {
+            "description": "表情说明",
+            "type": "text",
+            "hint": "描述这个表情适合什么语气、情绪或场景，LLM 会根据说明自主选择",
+            "default": "开心、赞同、轻松回应时使用"
+          },
+          "duration": {
+            "description": "持续时间（秒）",
+            "type": "float",
+            "hint": "大于 0 且开启自动结束时，插件会在持续时间后再次触发同一个热键，适合开关型表情热键。设为 0 表示只触发一次",
+            "slider": {
+              "min": 0,
+              "max": 30,
+              "step": 0.5
+            },
+            "default": 3
+          },
+          "release_after_duration": {
+            "description": "持续后再次触发",
+            "type": "bool",
+            "hint": "适合 VTS 中按一次开启、再按一次关闭的表情热键；如果是一次性动作热键，建议关闭",
+            "default": true
+          }
+        }
+      }
+    }
+  },
+  "soullink_enabled": {
+    "description": "启用 Soullink Emotion 实时表演引擎",
+    "type": "bool",
+    "hint": "可选功能，默认关闭。启用后使用连续 VAD、FACS、Idle 和动作混合驱动 VTS；启动失败会保留原有 L2D 热键链路",
+    "default": false
+  },
+  "soullink_mode": {
+    "description": "Soullink 运行模式",
+    "type": "string",
+    "hint": "emotion 优先使用模型输出的情绪意图；full 在缺少意图时也会用本地文本分类触发表演",
+    "options": [
+      "emotion",
+      "full"
+    ],
+    "default": "emotion"
+  },
+  "soullink_motion_style": {
+    "description": "Soullink 动作风格",
+    "type": "string",
+    "options": [
+      "natural",
+      "lively",
+      "calm",
+      "shy"
+    ],
+    "default": "natural"
+  },
+  "soullink_fps": {
+    "description": "Soullink 实时帧率",
+    "type": "int",
+    "hint": "VTS API 场景建议 15~20 FPS；过高会增加 WebSocket 压力",
+    "slider": {
+      "min": 5,
+      "max": 30,
+      "step": 1
+    },
+    "default": 20
+  },
+  "soullink_prompt_intent_enabled": {
+    "description": "通过提示词生成 Soullink 情绪意图",
+    "type": "bool",
+    "hint": "让模型在回复末尾附加不可见的结构化情绪、强度和 VAD；不会强制改变回复正文",
+    "default": true
+  },
+  "soullink_local_fallback_enabled": {
+    "description": "缺少情绪意图时使用本地分类",
+    "type": "bool",
+    "hint": "仅建议 full 模式使用；关键词分类可能误判安慰语中的负面词",
+    "default": false
+  },
+  "soullink_parameter_gain": {
+    "description": "Soullink 表情参数增益",
+    "type": "float",
+    "slider": {
+      "min": 0.4,
+      "max": 5,
+      "step": 0.05
+    },
+    "default": 1.7
+  },
+  "soullink_body_motion_gain": {
+    "description": "Soullink 头部与身体动作增益",
+    "type": "float",
+    "slider": {
+      "min": 0,
+      "max": 4,
+      "step": 0.05
+    },
+    "default": 1.6
+  },
+  "soullink_vad_decay_rate": {
+    "description": "Soullink 情绪衰减速度",
+    "type": "float",
+    "hint": "越小情绪余韵越长；建议 0.05~0.12",
+    "slider": {
+      "min": 0,
+      "max": 0.2,
+      "step": 0.001
+    },
+    "default": 0.075
+  },
+  "soullink_node_path": {
+    "description": "Node.js 路径（可选）",
+    "type": "string",
+    "hint": "留空时自动查找 PATH 中的 node；需要 Node.js 18 或更高版本",
+    "default": ""
+  },
+  "soullink_vts_mapping": {
+    "description": "Soullink 到 VTS 参数与动作规则（高级）",
+    "type": "text",
+    "hint": "请在 Soullink 实时测试台中编辑，可配置连续参数、情绪挂件和互斥场景姿势，并先临时预览再保存或撤销。参数目标只能使用 VTS 可写追踪输入；脸黑、眼泪、问号、游戏手、绘画手等模型自定义参数通常应绑定对应 .exp3.json 表达式。{} 会持续跟随插件内置映射",
+    "default": "{}"
+  },
+  "bilibili_enabled": {
+    "description": "启用 B站直播功能",
+    "type": "bool",
+    "hint": "直播功能总开关。关闭后不会自动启动、不会手动启动监听、不会向 LLM 注入弹幕上下文，LLM 工具也不可用",
+    "default": false
+  },
+  "bilibili_ai_memory_integration_enabled": {
+    "description": "联动 BiliBot 用户画像与记忆",
+    "type": "bool",
+    "hint": "同一 AstrBot 中安装 astrbot_plugin_bilibili_ai_bot 1.3.1+ 后，按弹幕事件自带的 B站 UID 精确读取用户画像和相关记忆，并把直播互动写回 BiliBot；未安装时自动跳过",
+    "default": true
+  },
+  "bilibili_ai_memory_event_types": {
+    "description": "写入 BiliBot 的直播事件类型",
+    "type": "list",
+    "hint": "默认记录有语义或关系价值的弹幕、礼物、SC、上舰和关注；进房、点赞等高频低信息事件不写入向量记忆",
+    "default": [
+      "danmaku",
+      "gift",
+      "super_chat",
+      "buy_guard",
+      "follow"
+    ]
+  },
+  "bilibili_type": {
+    "description": "B站直播监听类型",
+    "type": "string",
+    "hint": "web 使用普通直播间弹幕接口；laplace 连接本机 LAPLACE Event Bridge；open_live 使用 B站直播开放平台",
+    "default": "web"
+  },
+  "bilibili_room_id": {
+    "description": "B站直播房间号",
+    "type": "int",
+    "hint": "填写要监听的 B站直播间房间号，也可以用 /bili_live_start <房间号> 临时启动",
+    "default": 0
+  },
+  "part_id": {
+    "description": "B站直播父分区 ID",
+    "type": "int",
+    "hint": "B站直播父分区 ID，例如 2=网游。通常无需手填，可用 /分区 <子分区名/拼音/area_id> 自动反查并保存",
+    "default": 0
+  },
+  "area_id": {
+    "description": "B站直播子分区 ID",
+    "type": "int",
+    "hint": "B站直播子分区 ID，例如 86=英雄联盟。建议用 /分区 英雄联盟 或 /分区 86 设置，插件会自动同步 part_id",
+    "default": 0
+  },
+  "bilibili_web_backend": {
+    "description": "B站 Web 弹幕后端",
+    "type": "string",
+    "hint": "推荐 builtin。builtin 为 B站直连；history 只使用历史弹幕轮询，不请求 websocket 弹幕服务器信息，适合 getDanmuInfo -352 风控时使用；laplace 连接本机 LAPLACE Event Bridge；blivedm 保留为兼容选项但可能无事件",
+    "options": [
+      "history",
+      "laplace",
+      "blivedm",
+      "builtin"
+    ],
+    "default": "builtin"
+  },
+  "laplace_event_bridge_url": {
+    "description": "Laplace Event Bridge 地址",
+    "type": "string",
+    "hint": "Laplace Event Bridge 默认 ws://localhost:9696；Event Fetcher Bridge Mode 通常是 ws://主机:8080/。插件会自动附加 rooms=房间号",
+    "default": "ws://localhost:9696"
+  },
+  "laplace_event_bridge_token": {
+    "description": "Laplace Event Bridge 密码",
+    "type": "string",
+    "hint": "如果 Laplace Event Bridge 设置了 Server Password，在这里填写；未设置则留空",
+    "default": ""
+  },
+  "bilibili_sessdata": {
+    "description": "B站 Cookie / SESSDATA（可选）",
+    "type": "string",
+    "hint": "可直接粘贴 bilibot 使用的完整 Cookie，也可只填写浏览器 Cookie 中的 SESSDATA",
+    "default": ""
+  },
+  "bilibili_ACCESS_KEY_ID": {
+    "description": "开放平台 ACCESS_KEY_ID",
+    "type": "string",
+    "hint": "bilibili_type=open_live 时必填，在 B站直播开放平台获取",
+    "default": ""
+  },
+  "bilibili_ACCESS_KEY_SECRET": {
+    "description": "开放平台 ACCESS_KEY_SECRET",
+    "type": "string",
+    "hint": "bilibili_type=open_live 时必填，在 B站直播开放平台获取",
+    "default": ""
+  },
+  "bilibili_APP_ID": {
+    "description": "开放平台 APP_ID",
+    "type": "string",
+    "hint": "bilibili_type=open_live 时必填，对应开放平台项目 ID",
+    "default": ""
+  },
+  "bilibili_ROOM_OWNER_AUTH_CODE": {
+    "description": "开放平台主播身份码",
+    "type": "string",
+    "hint": "bilibili_type=open_live 时必填，主播在直播开放平台/互动玩法中获取的身份码",
+    "default": ""
+  },
+  "bili_live_inject_enabled": {
+    "description": "向 LLM 注入最近直播弹幕",
+    "type": "bool",
+    "hint": "开启后，只有弹幕监听正在运行且已读取到事件时，才会在 LLM 回复前注入最近直播间上下文",
+    "default": true
+  },
+  "bili_live_inject_max_events": {
+    "description": "每次注入的最大直播事件数",
+    "type": "int",
+    "hint": "限制注入给 LLM 的最近弹幕/事件数量，避免上下文过长",
+    "slider": {
+      "min": 1,
+      "max": 30,
+      "step": 1
+    },
+    "default": 8
+  },
+  "bili_live_inject_event_types": {
+    "description": "注入事件类型",
+    "type": "list",
+    "hint": "默认只注入弹幕 danmaku。可添加 gift、super_chat、enter_room、follow、like",
+    "default": [
+      "danmaku"
+    ]
+  },
+  "bili_live_cache_size": {
+    "description": "直播事件缓存数量",
+    "type": "int",
+    "hint": "插件内存中保留最近多少条直播事件，供命令和 LLM 工具读取",
+    "slider": {
+      "min": 10,
+      "max": 300,
+      "step": 10
+    },
+    "default": 80
+  },
+  "live_relationship_context_enabled": {
+    "description": "V2 原生直播关系资料",
+    "type": "bool",
+    "hint": "开启后，按直播平台提供的账号读取 V2 本地直播称呼、互动风格和公开直播记忆。昵称不能证明私聊身份；不会从同名用户的私聊或群聊记录读取背景。资料不可用时自动跳过。",
+    "default": true
+  },
+  "live_relationship_context_max_age_seconds": {
+    "description": "近期直播互动有效时间",
+    "type": "float",
+    "hint": "观众活跃画像只引用该时间范围内同一平台账号的最近弹幕。默认 900 秒，即 15 分钟。",
+    "slider": {
+      "min": 30,
+      "max": 7200,
+      "step": 30
+    },
+    "default": 900
+  },
+  "live_relationship_context_recent_limit": {
+    "description": "每人近期弹幕条数",
+    "type": "int",
+    "hint": "观众活跃画像最多参考同一直播平台账号的多少条近期弹幕。",
+    "slider": {
+      "min": 1,
+      "max": 8,
+      "step": 1
+    },
+    "default": 3
+  },
+  "live_relationship_context_max_users": {
+    "description": "最多识别观众数",
+    "type": "int",
+    "hint": "一次直播上下文中最多对多少个直播用户名尝试注入关系网线索，避免提示词过长",
+    "slider": {
+      "min": 1,
+      "max": 8,
+      "step": 1
+    },
+    "default": 3
+  },
+  "live_relationship_context_include_identity_note": {
+    "description": "注入身份备注",
+    "type": "bool",
+    "hint": "默认关闭。开启后会把V2 关系资料中的身份备注也注入给 LLM；建议只在备注不含隐私、且你希望直播回应能参考身份设定时开启",
+    "default": false
+  },
+  "live_relationship_style_context_enabled": {
+    "description": "注入关系称呼风格",
+    "type": "bool",
+    "hint": "开启后，识别到关系网用户时会把可用称呼、别名和互动边界作为直播回复风格线索注入给 LLM",
+    "default": true
+  },
+  "live_relationship_style_include_profile": {
+    "description": "注入关系画像",
+    "type": "bool",
+    "hint": "默认关闭。开启后会把关系节点的简短画像也注入给直播回复风格，适合画像不含隐私且希望熟人回复更贴近时使用",
+    "default": false
+  },
+  "live_relationship_style_include_memories": {
+    "description": "注入关系重要记忆",
+    "type": "bool",
+    "hint": "默认关闭。开启后参考本地资料中明确来源于直播互动的重要记忆；私聊记忆不会作为直播回复风格注入。",
+    "default": false
+  },
+  "live_state_writeback_enabled": {
+    "description": "写入 V2 直播状态库",
+    "type": "bool",
+    "hint": "开启后，直播事件会写入 V2 直播状态库：重要互动写入关系记忆，陌生观众可自动登记候选关系，直播热度影响当日状态，下播时生成直播小结/日记",
+    "default": true
+  },
+  "live_viewer_activity_enabled": {
+    "description": "记录直播观众活跃画像",
+    "type": "bool",
+    "hint": "开启后，按 B站或 Twitch 平台账号分别累计互动次数、事件类型、最近弹幕和重要互动，供后续直播回复和小结使用。账号未知时仅登记当前平台的昵称观察。",
+    "default": true
+  },
+  "live_viewer_activity_context_enabled": {
+    "description": "注入观众活跃画像",
+    "type": "bool",
+    "hint": "开启后，直播回复会读取观众累计互动、最近弹幕和重要互动次数，形成“这个人常来/常聊什么”的感觉",
+    "default": true
+  },
+  "live_writeback_event_types": {
+    "description": "写入关系记忆的事件类型",
+    "type": "list",
+    "hint": "默认只把 gift、super_chat、buy_guard 这类重要互动写入对应用户的重要记忆，避免普通弹幕刷爆关系网",
+    "default": [
+      "gift",
+      "super_chat",
+      "buy_guard"
+    ]
+  },
+  "live_auto_register_viewers": {
+    "description": "自动登记直播观众",
+    "type": "bool",
+    "hint": "开启后，未匹配到关系网的直播用户名在多次出现后，会创建一个 B站直播观众候选关系节点，后续可人工合并或修正",
+    "default": true
+  },
+  "live_auto_register_min_events": {
+    "description": "自动登记最少互动次数",
+    "type": "int",
+    "hint": "同一直播用户名至少出现多少次后才创建候选关系节点",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 2
+  },
+  "live_afterglow_enabled": {
+    "description": "直播互动影响当日状态",
+    "type": "bool",
+    "hint": "开启后，直播间高频互动、礼物、SC 或上舰会给 V2 状态库添加短时状态余韵，让 Bot 后续语气更像刚直播过",
+    "default": true
+  },
+  "live_afterglow_cooldown_seconds": {
+    "description": "直播状态影响冷却",
+    "type": "float",
+    "hint": "两次写入直播状态余韵之间至少间隔多少秒，避免每条弹幕都改状态",
+    "slider": {
+      "min": 30,
+      "max": 1800,
+      "step": 30
+    },
+    "default": 300
+  },
+  "live_afterglow_duration_hours": {
+    "description": "直播状态余韵持续小时",
+    "type": "int",
+    "hint": "直播互动对 V2 当日状态余韵的影响持续多久",
+    "slider": {
+      "min": 1,
+      "max": 12,
+      "step": 1
+    },
+    "default": 2
+  },
+  "live_summary_enabled": {
+    "description": "下播生成直播小结",
+    "type": "bool",
+    "hint": "开启后，停止直播监听或监听任务结束时，会把本场直播互动整理成一条 V2 直播小结",
+    "default": true
+  },
+  "live_memory_enabled": {
+    "description": "启用直播专用记忆",
+    "type": "bool",
+    "hint": "开启后，会把直播弹幕中的偏好、未完话题、常聊主题和礼物/SC/上舰高光整理成专门面向直播场景的记忆。当前存储在 V2 原生 live_state.json 的直播数据区",
+    "default": true
+  },
+  "live_memory_context_enabled": {
+    "description": "注入直播专用记忆",
+    "type": "bool",
+    "hint": "开启后，直播自动回应和直播相关 LLM 回复会读取专门的直播记忆上下文，让 Bot 能承接老梗、常聊话题和本场未完问题",
+    "default": true
+  },
+  "live_memory_context_max_lines": {
+    "description": "直播记忆上下文行数",
+    "type": "int",
+    "hint": "每次注入给 LLM 的直播专用记忆最多多少行，避免提示词过长",
+    "slider": {
+      "min": 4,
+      "max": 30,
+      "step": 1
+    },
+    "default": 12
+  },
+  "live_memory_max_items": {
+    "description": "直播记忆条目上限",
+    "type": "int",
+    "hint": "保留多少条可承接的直播记忆，例如观众偏好、下次想看什么、刚才提到的未完话题",
+    "slider": {
+      "min": 20,
+      "max": 300,
+      "step": 10
+    },
+    "default": 80
+  },
+  "live_memory_topic_enabled": {
+    "description": "记录直播常聊话题",
+    "type": "bool",
+    "hint": "开启后，会从普通弹幕中提取话题词并累计频率，用于形成“直播间常聊什么”的上下文",
+    "default": true
+  },
+  "live_memory_max_topics": {
+    "description": "直播话题上限",
+    "type": "int",
+    "hint": "最多保留多少个直播话题词",
+    "slider": {
+      "min": 20,
+      "max": 300,
+      "step": 10
+    },
+    "default": 80
+  },
+  "live_memory_max_open_threads": {
+    "description": "未完话题上限",
+    "type": "int",
+    "hint": "最多保留多少条直播间未完问题、待会继续聊的话题或观众请求",
+    "slider": {
+      "min": 6,
+      "max": 80,
+      "step": 2
+    },
+    "default": 20
+  },
+  "live_memory_max_highlights": {
+    "description": "直播高光上限",
+    "type": "int",
+    "hint": "最多保留多少条礼物、SC、上舰等直播高光事件",
+    "slider": {
+      "min": 10,
+      "max": 120,
+      "step": 5
+    },
+    "default": 40
+  },
+  "live_memory_highlight_event_types": {
+    "description": "直播高光事件类型",
+    "type": "list",
+    "hint": "这些事件会进入直播高光记忆，并优先作为可承接记忆注入给 LLM",
+    "default": [
+      "gift",
+      "super_chat",
+      "buy_guard"
+    ]
+  },
+  "bili_live_log_events": {
+    "description": "记录直播事件日志",
+    "type": "bool",
+    "hint": "开启后，每次捕获到 B站弹幕、礼物、SC 等事件都会写入 AstrBot 日志，便于排查是否成功监听",
+    "default": true
+  },
+  "bili_live_debug_log": {
+    "description": "直播协议调试日志",
+    "type": "bool",
+    "hint": "开启后会以 info 级别输出 WebSocket 包和原始事件 cmd，用于排查已连接但没有弹幕事件的问题",
+    "default": false
+  },
+  "bili_live_history_poll_interval": {
+    "description": "历史弹幕轮询间隔",
+    "type": "float",
+    "hint": "builtin 后端的兜底轮询，也是 history 后端的主监听间隔；设为 0 可关闭历史轮询",
+    "slider": {
+      "min": 0,
+      "max": 30,
+      "step": 0.5
+    },
+    "default": 3.0
+  },
+  "obs_control_enabled": {
+    "description": "启用 OBS 开播控制",
+    "type": "bool",
+    "hint": "允许拓展页启动 OBS/L2DStudio，并通过 OBS WebSocket 做直播调试。真正开始推流仍需要单独允许并二次确认。",
+    "default": false
+  },
+  "obs_exe_path": {
+    "description": "OBS 程序路径",
+    "type": "string",
+    "hint": "例如 C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe。留空则不能自动启动 OBS。",
+    "default": ""
+  },
+  "l2dstudio_exe_path": {
+    "description": "L2DStudio 程序路径",
+    "type": "string",
+    "hint": "填写 L2DStudio 的 exe 路径。当前先支持启动与进程检查；若后续提供本地 API 地址，可继续扩展自动加载模型/调试。",
+    "default": ""
+  },
+  "obs_ws_host": {
+    "description": "OBS WebSocket 地址",
+    "type": "string",
+    "hint": "通常为 127.0.0.1。OBS 需要启用 WebSocket 服务。",
+    "default": "127.0.0.1"
+  },
+  "obs_ws_port": {
+    "description": "OBS WebSocket 端口",
+    "type": "int",
+    "hint": "OBS 28+ 常见默认端口为 4455。",
+    "default": 4455
+  },
+  "obs_ws_password": {
+    "description": "OBS WebSocket 密码",
+    "type": "string",
+    "hint": "如果 OBS WebSocket 开启了鉴权，这里填写密码。拓展页留空会保留已有密码。",
+    "default": ""
+  },
+  "obs_live_scene_name": {
+    "description": "默认直播场景名",
+    "type": "string",
+    "hint": "直播调试和开始推流前会尝试切换到该场景。留空则不自动切换场景。",
+    "default": ""
+  },
+  "obs_startup_wait_seconds": {
+    "description": "启动后等待秒数",
+    "type": "int",
+    "hint": "执行直播调试时，打开 OBS/L2DStudio 后等待多久再连接 OBS。范围 0-20 秒。",
+    "slider": {
+      "min": 0,
+      "max": 20,
+      "step": 1
+    },
+    "default": 3
+  },
+  "obs_debug_start_virtual_camera": {
+    "description": "调试时开启 OBS 虚拟摄像机",
+    "type": "bool",
+    "hint": "直播调试会启动程序、切换场景，并按此项决定是否开启虚拟摄像机。",
+    "default": true
+  },
+  "obs_allow_stream_start": {
+    "description": "允许插件开始推流",
+    "type": "bool",
+    "hint": "关闭时拓展页不能调用 OBS StartStream。开启后仍需要在拓展页二次点击确认。B 站直播建议先在 OBS 安装并配置 obs-bilibili-stream：https://github.com/Zarosmm/obs-bilibili-stream/releases",
+    "default": false
+  },
+  "bili_live_auto_reply_enabled": {
+    "description": "启用直播弹幕自动回应",
+    "type": "bool",
+    "hint": "开启后，捕获到指定类型直播事件会按冷却时间自动调用 LLM 生成回复，并发送到绑定会话",
+    "default": false
+  },
+  "bili_live_auto_reply_mode": {
+    "description": "自动回应模式",
+    "type": "string",
+    "hint": "native 表示复制绑定会话事件并投递回 AstrBot 原生事件队列，可吃到人格/世界书/TTS 等完整链路；direct 为旧的直接调用 LLM 模式",
+    "default": "native"
+  },
+  "bili_live_auto_reply_session_id": {
+    "description": "自动回应会话ID",
+    "type": "string",
+    "hint": "可留空，然后在目标聊天发送 /bili_live_bind_here 绑定当前会话",
+    "default": ""
+  },
+  "bili_live_auto_reply_event_types": {
+    "description": "自动回应事件类型",
+    "type": "list",
+    "hint": "默认回应普通弹幕；guaranteed_event_types 中的 SC 等优先事件无论此处是否填写都会进入回应队列",
+    "default": [
+      "danmaku"
+    ]
+  },
+  "bili_live_auto_reply_skip_emoticon_danmaku": {
+    "description": "自动回应跳过表情/语音弹幕",
+    "type": "bool",
+    "hint": "开启后，dm_type 为表情弹幕（1）或语音弹幕（2）时不会触发 LLM 自动回应，只响应普通文字弹幕",
+    "default": true
+  },
+  "bili_live_auto_reply_guaranteed_event_types": {
+    "description": "保证鸣谢的事件类型",
+    "type": "list",
+    "hint": "这些事件在自动回应开启时会跳过普通冷却等待、最少事件数、读空气和每分钟限流，并按事件 ID 去重；默认保证逐一鸣谢 SC",
+    "default": [
+      "super_chat"
+    ]
+  },
+  "bili_live_auto_reply_cooldown_seconds": {
+    "description": "自动回应冷却时间",
+    "type": "float",
+    "hint": "两次自动回应之间至少间隔多少秒，避免刷屏",
+    "slider": {
+      "min": 3,
+      "max": 120,
+      "step": 1
+    },
+    "default": 12
+  },
+  "bili_live_auto_reply_max_per_minute": {
+    "description": "每分钟最多自动回复",
+    "type": "int",
+    "hint": "限制普通弹幕自动回应每分钟最多发送多少条。设为 0 表示不限流；礼物、SC、上舰等豁免事件不受此限制，也不占用额度",
+    "slider": {
+      "min": 0,
+      "max": 60,
+      "step": 1
+    },
+    "default": 6
+  },
+  "bili_live_auto_reply_rate_limit_exempt_event_types": {
+    "description": "限流豁免事件类型",
+    "type": "list",
+    "hint": "这些事件类型触发的自动回应不受每分钟上限限制。默认豁免 gift、super_chat、buy_guard",
+    "default": [
+      "gift",
+      "super_chat",
+      "buy_guard"
+    ]
+  },
+  "bili_live_auto_reply_min_events": {
+    "description": "触发回应最少事件数",
+    "type": "int",
+    "hint": "积累多少条弹幕后触发一次自动回应",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 1
+  },
+  "bili_live_auto_reply_max_events": {
+    "description": "每次参考事件数",
+    "type": "int",
+    "hint": "每次自动回应最多参考最近多少条直播事件",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 5
+  },
+  "bili_live_auto_reply_air_guard_enabled": {
+    "description": "启用直播读空气降噪",
+    "type": "bool",
+    "hint": "开启后，直播自动回应会先判断本批弹幕是否值得出声。单条你好、来了、贴贴、哈哈、6、晚安等轻寒暄/反应通常会静默；具体问题、请求、纠错、多人连续话题、礼物/SC/上舰仍会回应。",
+    "default": true
+  },
+  "bili_live_auto_reply_air_guard_model_enabled": {
+    "description": "联动 V2 回复判定",
+    "type": "bool",
+    "hint": "开启后，遇到边界模糊的弹幕批次会调用 V2 的轻量 LLM 判定能力决定 reply/silent；判定失败时自动退回本地规则。",
+    "default": true
+  },
+  "bili_live_auto_reply_air_guard_threshold": {
+    "description": "直播读空气回应阈值",
+    "type": "float",
+    "hint": "本地规则的开口阈值。数值越高越少回复，越低越积极回复。建议 2.0 到 3.5。",
+    "slider": {
+      "min": 0.5,
+      "max": 6,
+      "step": 0.1
+    },
+    "default": 2.5
+  },
+  "bili_live_continuity_context_max_viewers": {
+    "description": "连续对话参考观众数",
+    "type": "int",
+    "hint": "自动回应时，为当前批次中最多多少位观众附加本场前文",
+    "slider": {
+      "min": 1,
+      "max": 8,
+      "step": 1
+    },
+    "default": 3
+  },
+  "bili_live_continuity_context_per_viewer": {
+    "description": "每位观众前文条数",
+    "type": "int",
+    "hint": "自动回应时，为同一直播用户名最多附加多少条本场旧互动",
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    },
+    "default": 4
+  },
+  "bili_live_auto_reply_max_length": {
+    "description": "自动回应最大长度",
+    "type": "int",
+    "slider": {
+      "min": 20,
+      "max": 200,
+      "step": 5
+    },
+    "default": 80
+  },
+  "bili_live_auto_reply_force_full_tts": {
+    "description": "直播自动回应请求语音回复",
+    "type": "bool",
+    "hint": "开启后，native 框架链路会向模型补充“本次回复需要包含语音消息”，并在完整框架链路中标记 TTS 插件强制语音",
+    "default": true
+  },
+  "bili_live_auto_reply_sync_tts_subtitle": {
+    "description": "直播 TTS 与打字机同步",
+    "type": "bool",
+    "hint": "开启后，直播自动回应会先等待 TTS 音频生成，再同时发送语音、可见文字并推送 OBS 打字机字幕；关闭时文字和字幕先出，TTS 后台补发。需要同时开启“直播自动回应请求语音回复”。",
+    "default": true
+  },
+  "bili_live_tts_local_playback_enabled": {
+    "description": "直播 TTS 本机播放",
+    "type": "bool",
+    "hint": "开启后，直播自动回应的 TTS 音频生成成功后由 V2 Live 原生链路直接在本机播放。播放顺序为 ffplay、Windows PowerShell MediaPlayer、winsound 兜底；winsound 会禁用默认错误提示音。",
+    "default": true
+  },
+  "bili_live_tts_web_playback_enabled": {
+    "description": "直播 TTS 网页播放",
+    "type": "bool",
+    "hint": "开启后，直播自动回应的 TTS 音频会推送到打字机字幕 overlay 页面，由 OBS 浏览器源播放出声。适合 AstrBot 在服务器、直播在另一台机器的场景。需要同时开启“启用打字机字幕 overlay”，并把字幕服务监听地址改成 0.0.0.0 或服务器局域网 IP。",
+    "default": false
+  },
+  "bili_live_reply_identity_mode": {
+    "description": "直播回复身份模式",
+    "type": "string",
+    "hint": "host=主播模式，Bot 以主播身份直接回应弹幕；assistant=主播助理模式，Bot 作为辅助用户直播的聊天助手/场控助理回应弹幕，不假装自己是主播。",
+    "options": [
+      "host",
+      "assistant"
+    ],
+    "default": "host"
+  },
+  "bili_live_streamer_identity_from_v2_enabled": {
+    "description": "从 V2 关系资料读取主播身份",
+    "type": "bool",
+    "hint": "开启后，主播助理模式会优先从 V2 的主要用户、昵称和关系资料中读取主播称呼/身份线索。手动填写主播显示名时仍以手动配置优先。",
+    "default": true
+  },
+  "bili_live_streamer_display_name": {
+    "description": "主播显示名覆盖",
+    "type": "string",
+    "hint": "可选。填写后主播助理模式会使用这个称呼，例如“小环这边听得到哦”。留空时从 V2 主要用户资料推断，仍没有则使用“主播”。",
+    "default": ""
+  },
+  "bili_live_auto_reply_system_prompt": {
+    "description": "自动回应系统提示词",
+    "type": "text",
+    "hint": "控制 Bot 回应直播弹幕时的语气和角色",
+    "default": "你是正在直播中的虚拟主播助手。请根据观众最近的弹幕自然回应，语气像实时聊天，不要逐条复读。"
+  },
+  "twitch_enabled": {
+    "description": "启用 Twitch 直播功能",
+    "type": "bool",
+    "hint": "开启 Twitch 匿名 IRC 只读监听。无需 Token；自动回应会发送到绑定的 AstrBot 会话、OBS 字幕和 TTS，不会代发到 Twitch 聊天室。",
+    "default": false
+  },
+  "twitch_channel": {
+    "description": "Twitch 频道",
+    "type": "string",
+    "hint": "填写频道名或频道 URL，例如 xingchina 或 https://www.twitch.tv/xingchina。",
+    "default": ""
+  },
+  "twitch_auto_start": {
+    "description": "启动时自动监听 Twitch",
+    "type": "bool",
+    "hint": "开启后，插件启动时会自动监听已配置的 Twitch 频道。",
+    "default": true
+  },
+  "twitch_live_cache_size": {
+    "description": "Twitch 弹幕缓存数量",
+    "type": "int",
+    "hint": "仅保留最近的弹幕用于状态页和自动回应。修改后在下次插件加载时应用。",
+    "slider": {
+      "min": 20,
+      "max": 1000,
+      "step": 20
+    },
+    "default": 200
+  },
+  "twitch_live_log_events": {
+    "description": "记录 Twitch 弹幕日志",
+    "type": "bool",
+    "hint": "开启后，每条 Twitch 弹幕会写入 AstrBot 日志。",
+    "default": true
+  },
+  "twitch_live_debug_log": {
+    "description": "Twitch IRC 调试日志",
+    "type": "bool",
+    "hint": "仅排查连接或解析问题时开启，会输出 IRC 协议调试信息。",
+    "default": false
+  },
+  "twitch_auto_reply_enabled": {
+    "description": "启用 Twitch 弹幕自动回应",
+    "type": "bool",
+    "hint": "按冷却和读空气规则调用 LLM。回复发送到绑定会话和直播输出，不会发回 Twitch 聊天室。",
+    "default": false
+  },
+  "twitch_auto_reply_session_id": {
+    "description": "Twitch 自动回应会话 ID",
+    "type": "string",
+    "hint": "建议留空，然后在目标聊天发送 /twitch_live_bind_here；未单独绑定时会复用 B站直播绑定。",
+    "default": ""
+  },
+  "twitch_auto_reply_cooldown_seconds": {
+    "description": "Twitch 自动回应冷却时间",
+    "type": "float",
+    "hint": "两次自动回应之间至少间隔的秒数。",
+    "slider": {
+      "min": 3,
+      "max": 120,
+      "step": 1
+    },
+    "default": 12.0
+  },
+  "twitch_auto_reply_max_per_minute": {
+    "description": "Twitch 每分钟最多自动回复",
+    "type": "int",
+    "hint": "设为 0 表示不限制。",
+    "slider": {
+      "min": 0,
+      "max": 60,
+      "step": 1
+    },
+    "default": 6
+  },
+  "twitch_auto_reply_min_events": {
+    "description": "Twitch 触发回应最少弹幕数",
+    "type": "int",
+    "hint": "至少积累多少条弹幕后尝试一次自动回应。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 1
+  },
+  "twitch_auto_reply_max_events": {
+    "description": "Twitch 每次参考弹幕数",
+    "type": "int",
+    "hint": "一次自动回应最多消费并参考多少条待处理弹幕。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 5
+  },
+  "twitch_auto_reply_air_guard_enabled": {
+    "description": "启用 Twitch 读空气降噪",
+    "type": "bool",
+    "hint": "开启后，纯寒暄和过短弹幕通常保持静默，具体问题和连续话题更容易回应。",
+    "default": true
+  },
+  "twitch_auto_reply_air_guard_threshold": {
+    "description": "Twitch 读空气回应阈值",
+    "type": "float",
+    "hint": "数值越高越克制，越低越活跃，建议 1.5 到 3.0。",
+    "slider": {
+      "min": 0.5,
+      "max": 6,
+      "step": 0.1
+    },
+    "default": 2.0
+  },
+  "twitch_auto_reply_max_length": {
+    "description": "Twitch 自动回应最大长度",
+    "type": "int",
+    "slider": {
+      "min": 20,
+      "max": 200,
+      "step": 5
+    },
+    "default": 80
+  },
+  "twitch_auto_reply_tts_enabled": {
+    "description": "Twitch 自动回应生成 TTS",
+    "type": "bool",
+    "hint": "播放位置复用直播 TTS 的本机播放和网页播放开关；生成失败时回退为纯文字。",
+    "default": true
+  },
+  "twitch_auto_reply_system_prompt": {
+    "description": "Twitch 自动回应系统提示词",
+    "type": "text",
+    "hint": "控制 Bot 回应 Twitch 弹幕时的身份、语气和语言。",
+    "default": "你是正在直播中的虚拟主播助手。请根据 Twitch 观众最近的弹幕自然回应，使用观众的主要语言，语气像实时聊天，不要逐条复读，也不要声称回复已发送到 Twitch 聊天室。"
+  },
+  "mouth_sync_enabled": {
+    "description": "启用 TTS 语音嘴型联动",
+    "type": "bool",
+    "hint": "开启后，插件会在最终消息链中收到语音组件后读取本地 wav 音频，并把音量包络同步注入到 VTS 嘴部参数",
+    "default": false
+  },
+  "mouth_sync_open_parameter": {
+    "description": "嘴部开闭参数",
+    "type": "string",
+    "hint": "必须填写 VTS 追踪输入，通常为 MouthOpen；不可填写 ParamMouthOpenY 等 Live2D 输出参数",
+    "default": "MouthOpen"
+  },
+  "mouth_sync_form_parameter": {
+    "description": "嘴型变形参数（可选）",
+    "type": "string",
+    "hint": "必须是 VTS 追踪输入。建议留空，避免覆盖 Soullink 的情绪嘴型",
+    "default": ""
+  },
+  "mouth_sync_fps": {
+    "description": "嘴型更新帧率",
+    "type": "int",
+    "hint": "每秒向 VTS 推送多少次嘴型参数。建议 20~30，过高会增加 WebSocket 压力",
+    "slider": {
+      "min": 5,
+      "max": 60,
+      "step": 1
+    },
+    "default": 30
+  },
+  "mouth_sync_gain": {
+    "description": "嘴型音量增益",
+    "type": "float",
+    "hint": "越大嘴张得越明显。建议 1.2~2.5",
+    "slider": {
+      "min": 0.1,
+      "max": 5,
+      "step": 0.1
+    },
+    "default": 1.6
+  },
+  "mouth_sync_smoothing": {
+    "description": "嘴型平滑",
+    "type": "float",
+    "hint": "0 表示完全跟随音量，越接近 1 越平滑但越慢。建议 0.35~0.55",
+    "slider": {
+      "min": 0,
+      "max": 0.95,
+      "step": 0.05
+    },
+    "default": 0.45
+  },
+  "mouth_sync_noise_gate": {
+    "description": "静音阈值",
+    "type": "float",
+    "hint": "低于该归一化音量时视为闭嘴，减少底噪导致的微张嘴",
+    "slider": {
+      "min": 0,
+      "max": 0.3,
+      "step": 0.01
+    },
+    "default": 0.03
+  },
+  "mouth_sync_form_strength": {
+    "description": "嘴型变形强度",
+    "type": "float",
+    "hint": "仅在 mouth_sync_form_parameter 非空时生效，用于轻微驱动嘴型形状变化",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.18
+  },
+  "mouth_sync_mode": {
+    "description": "参数注入模式",
+    "type": "string",
+    "hint": "通常使用 set。若你的模型需要叠加控制，可改为 add",
+    "options": [
+      "set",
+      "add"
+    ],
+    "default": "set"
+  },
+  "subtitle_enabled": {
+    "description": "启用打字机字幕 overlay",
+    "type": "bool",
+    "hint": "开启后插件会启动一个透明网页字幕层，并在 Bot 回复时以打字机效果显示回复内容",
+    "default": false
+  },
+  "subtitle_scope": {
+    "description": "打字机字幕触发范围",
+    "type": "string",
+    "hint": "bili_live 仅 B站直播；twitch_live 仅 Twitch 直播；live 同时包含两种直播来源；all 还包含所有普通 Bot 回复。手动测试和预览始终允许。",
+    "options": [
+      "all",
+      "live",
+      "bili_live",
+      "twitch_live"
+    ],
+    "default": "bili_live"
+  },
+  "subtitle_host": {
+    "description": "字幕服务监听地址",
+    "type": "string",
+    "hint": "OBS 和插件在同一台机器时用 127.0.0.1；跨机器访问或网页播放 TTS 时用 0.0.0.0 或服务器局域网 IP，并在 OBS 浏览器源里填写服务器局域网 IP。",
+    "default": "127.0.0.1"
+  },
+  "subtitle_port": {
+    "description": "字幕服务端口",
+    "type": "int",
+    "hint": "OBS 浏览器源地址默认为 http://127.0.0.1:18081/；跨机器时改为 http://<服务器局域网IP>:18081/。",
+    "default": 18081
+  },
+  "subtitle_typing_speed_ms": {
+    "description": "打字速度（毫秒/字）",
+    "type": "int",
+    "hint": "每个字符出现的间隔，数值越小越快",
+    "slider": {
+      "min": 5,
+      "max": 200,
+      "step": 5
+    },
+    "default": 45
+  },
+  "subtitle_hold_seconds": {
+    "description": "字幕停留时间（秒）",
+    "type": "float",
+    "hint": "打字完成后字幕停留多久再淡出",
+    "slider": {
+      "min": 0,
+      "max": 30,
+      "step": 0.5
+    },
+    "default": 4
+  },
+  "subtitle_max_length": {
+    "description": "字幕最大长度",
+    "type": "int",
+    "hint": "超过长度会截断，避免长回复遮挡画面。设为 0 表示不限制",
+    "slider": {
+      "min": 0,
+      "max": 500,
+      "step": 10
+    },
+    "default": 120
+  },
+  "subtitle_font_size": {
+    "description": "字幕字号",
+    "type": "int",
+    "slider": {
+      "min": 16,
+      "max": 96,
+      "step": 2
+    },
+    "default": 42
+  },
+  "subtitle_font_weight": {
+    "description": "字幕字重",
+    "type": "int",
+    "hint": "常用 400 / 500 / 700",
+    "default": 700
+  },
+  "subtitle_text_color": {
+    "description": "字幕颜色",
+    "type": "string",
+    "hint": "CSS 颜色值，例如 #ffffff",
+    "default": "#ffffff"
+  },
+  "subtitle_stroke_color": {
+    "description": "字幕描边颜色",
+    "type": "string",
+    "hint": "CSS 颜色值，例如 #111111",
+    "default": "#111111"
+  },
+  "subtitle_stroke_size": {
+    "description": "字幕描边大小",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 12,
+      "step": 1
+    },
+    "default": 4
+  },
+  "subtitle_cursor_color": {
+    "description": "打字光标颜色",
+    "type": "string",
+    "hint": "留空时使用字幕颜色",
+    "default": "#ffffff"
+  },
+  "subtitle_show_cursor": {
+    "description": "显示打字光标",
+    "type": "bool",
+    "default": true
+  },
+  "subtitle_fade_out": {
+    "description": "字幕结束时淡出",
+    "type": "bool",
+    "default": true
+  },
+  "subtitle_position": {
+    "description": "字幕位置",
+    "type": "string",
+    "hint": "可填 bottom / center / top",
+    "default": "bottom"
+  },
+  "subtitle_padding": {
+    "description": "字幕边距",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 200,
+      "step": 4
+    },
+    "default": 48
+  },
+  "subtitle_max_width": {
+    "description": "字幕最大宽度",
+    "type": "int",
+    "slider": {
+      "min": 300,
+      "max": 1920,
+      "step": 20
+    },
+    "default": 1100
+  },
+  "subtitle_strip_l2d_tags": {
+    "description": "字幕清理 L2D 标签",
+    "type": "bool",
+    "hint": "开启后字幕中不会显示 <l2d:...> 控制标签",
+    "default": true
+  },
+  "subtitle_strip_tts_blocks": {
+    "description": "字幕移除 TTS 语音段",
+    "type": "bool",
+    "hint": "开启后会移除整段 <tts>...</tts>，避免把语音文本也显示成字幕",
+    "default": true
+  },
+  "subtitle_voice_use_following_plain": {
+    "description": "语音消息只显示后续文本",
+    "type": "bool",
+    "hint": "开启后，如果最终回复里包含语音组件，字幕只取语音组件后面的普通文本，适合日语语音 + 中文字幕",
+    "default": true
+  },
+  "subtitle_prefer_chinese_text": {
+    "description": "字幕优先提取中文",
+    "type": "bool",
+    "hint": "开启后，字幕会优先显示包含中文的片段；当文本前半段是日语语音内容、后半段是中文正文时，会从第一个中文字符开始截取",
+    "default": true
+  },
+  "subtitle_use_tts_spoken_text": {
+    "description": "直播 TTS 字幕显示朗读文本",
+    "type": "bool",
+    "hint": "开启后，直播自动回应的打字机字幕会显示实际送入 TTS 的朗读文本，例如日语或英语；关闭时显示中文可见回复。",
+    "default": false
+  },
+  "subtitle_strip_html_tags": {
+    "description": "字幕清理尖括号标签",
+    "type": "bool",
+    "hint": "开启后会清理类似 <tts> 的控制标签",
+    "default": true
+  },
+  "show_status_on_mention": {
+    "description": "当用户提及 VTS 相关话题时自动显示连接状态",
+    "type": "bool",
+    "default": false
+  },
+  "debug_mode": {
+    "description": "在控制台输出详细的调试日志",
+    "type": "bool",
+    "default": false
+  }
+}

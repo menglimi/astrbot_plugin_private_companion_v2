@@ -17,12 +17,14 @@ from .models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
 
 
 SOURCE_OWNER = "proactive.news"
+SHARED_FEED_PREFIX = "proactive.news.feed:"
 EVENT_WINDOW = timedelta(minutes=30)
 MAX_AGE = timedelta(hours=24)
 RETRY = timedelta(minutes=5)
 MAX_SEEN = 128
 MAX_FEED_ITEMS = 32
 MEANING = ("这是外部资讯源提供的标题和摘要，未经角色独立核实；"
+           "类别只是资讯源的分类标签，不代表用户兴趣或报道事实；"
            "不要把它说成亲历、刚刚发生或已阅读完整原文。只有自然相关时才分享；"
            "来源、链接和发布日期由程序留存，主动正文不附出处页脚，待对方追问时再给。")
 
@@ -37,11 +39,14 @@ def news_provenance(material):
     published = datetime.fromisoformat(material["published_at"])
     url = canonical_news_url(material["url"])
     title, summary = material.get("title", ""), material.get("summary", "")
+    category = material.get("category", "")
+    category = " ".join(category.split())[:48] if isinstance(category, str) else ""
     if (not source or len(source) > 100 or published.tzinfo is None or published.utcoffset() is None
             or not url or type(title) is not str or len(title) > 240
             or type(summary) is not str or len(summary) > 1000):
         raise ValueError("news attribution is invalid")
     return {"source": source, "published_at": published.isoformat(), "url": url,
+            "category": category,
             "title": title, "summary": summary}
 
 
@@ -59,6 +64,7 @@ class NewsContactEvents:
         self.runtime = contacts.runtime
         self.guard = bind(self.runtime, SOURCE_OWNER, self._validate_source)
         self._maintenance_workers = {}
+        self._feed_locks = {}
 
     def _port(self, preferences):
         resolver = getattr(self.port, "for_settings", None)
@@ -69,6 +75,7 @@ class NewsContactEvents:
         for worker in tuple(self._maintenance_workers.values()):
             worker.cancel()
         self._maintenance_workers.clear()
+        self._feed_locks.clear()
 
     def _maintenance_allowed(self, context, preferences):
         """Whether the source should be kept warm independently of contact delivery.
@@ -80,6 +87,10 @@ class NewsContactEvents:
         """
         if self.port is None or context.scope.kind is not ScopeKind.PRIVATE:
             return False
+        return self._source_enabled(preferences)
+
+    @staticmethod
+    def _source_enabled(preferences):
         values = preferences.values
         kind = values.get("news_source_kind", "host")
         if kind == "disabled":
@@ -97,12 +108,14 @@ class NewsContactEvents:
             title = str(item.title or "").strip()[:240]
             summary = str(item.summary or "").strip()[:1000]
             source = str(item.source or fallback_source or "").strip()[:100]
+            raw_category = getattr(item, "category", "")
+            category = " ".join(raw_category.split())[:48] if type(raw_category) is str else ""
             url = canonical_news_url(item.url)
             published = item.published_at
             if (not title or not source or not url or published is None
                     or published.tzinfo is None or published.utcoffset() is None):
                 return None
-            return {"title": title, "summary": summary, "source": source, "url": url,
+            return {"title": title, "summary": summary, "source": source, "category": category, "url": url,
                     "published_at": stamp(published)}
         except (AttributeError, TypeError, ValueError, OverflowError):
             return None
@@ -116,33 +129,162 @@ class NewsContactEvents:
         items.sort(key=lambda value: (value["published_at"], value["url"]), reverse=True)
         return items[:MAX_FEED_ITEMS]
 
-    def _maintenance_due(self, context, preferences, at):
-        if not self._maintenance_allowed(context, preferences):
-            return False
-        diagnostic = self.diagnostic(context, preferences)
-        last = diagnostic.get("last_attempt_at") or diagnostic.get("last_checked_at")
-        if not last:
-            return True
+    def _feed_cache_key(self, port):
+        return SHARED_FEED_PREFIX + self.source_fingerprint(port)
+
+    def _shared_feed(self, port):
+        if port is None:
+            return None
+        row = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?",
+                                    (self._feed_cache_key(port),))
+        if row is None:
+            return None
         try:
-            return at >= datetime.fromisoformat(last) + self._poll_interval(preferences)
+            value = json.loads(row["value"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if (type(value) is not dict or value.get("source_fingerprint") != self.source_fingerprint(port)
+                or type(value.get("items")) is not list):
+            return None
+        return value
+
+    def _save_shared_feed(self, port, value):
+        value = dict(value)
+        value["source_fingerprint"] = self.source_fingerprint(port)
+        value["items"] = value.get("items", [])[:MAX_FEED_ITEMS]
+        payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self.runtime.transaction() as connection:
+            connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (self._feed_cache_key(port), payload))
+
+    def _shared_feed_due(self, port, preferences, at):
+        cached = self._shared_feed(port)
+        if cached is None:
+            return True
+        attempted = cached.get("last_attempt_at")
+        checked = cached.get("last_checked_at")
+        try:
+            if cached.get("failure") is not None:
+                return not attempted or at >= datetime.fromisoformat(attempted) + min(RETRY, self._poll_interval(preferences))
+            return not checked or at >= datetime.fromisoformat(checked) + self._poll_interval(preferences)
         except (TypeError, ValueError):
             return True
 
+    async def _refresh_shared_feed(self, context, preferences, port, *, force=False):
+        fingerprint = self.source_fingerprint(port)
+        lock = self._feed_locks.setdefault(fingerprint, asyncio.Lock())
+        async with lock:
+            attempted = self.contacts.tasks.now()
+            previous = self._shared_feed(port)
+            if not force and not self._shared_feed_due(port, preferences, attempted):
+                return previous
+            try:
+                batch = await asyncio.wait_for(port.fetch(), timeout=10)
+                if type(batch) is not ParseBatch:
+                    raise ValueError("news port returned an invalid batch")
+                checked = self.contacts.tasks.now()
+                current = require(self.contacts.preferences.read(context, observed_at=checked))
+                current_port = self._source(current)
+                if (not self._maintenance_allowed(context, current)
+                        or self.source_fingerprint(current_port) != fingerprint):
+                    return None
+                value = {"last_attempt_at": stamp(attempted), "last_checked_at": stamp(checked),
+                         "failure": None, "item_count": len(batch.items), "candidate": False,
+                         "items": self._feed_items(batch, port)}
+            except Exception as error:
+                try:
+                    current = require(self.contacts.preferences.read(context, observed_at=self.contacts.tasks.now()))
+                    current_port = self._source(current)
+                except (TaskError, ValueError, TypeError, AttributeError):
+                    return None
+                if (not self._maintenance_allowed(context, current)
+                        or self.source_fingerprint(current_port) != fingerprint):
+                    return None
+                value = dict(previous or {"last_checked_at": None, "item_count": 0, "items": []})
+                value.update(last_attempt_at=stamp(attempted), failure=news_failure(error), candidate=False)
+            self._save_shared_feed(port, value)
+            self._save_diagnostic(context, {
+                "last_attempt_at": value.get("last_attempt_at"),
+                "last_checked_at": value.get("last_checked_at"),
+                "failure": value.get("failure"), "item_count": value.get("item_count", 0),
+                "candidate": False, "items": value.get("items", []),
+            }, port=port)
+            return value
+
+    def _maintenance_due(self, context, preferences, at):
+        if not self._maintenance_allowed(context, preferences):
+            return False
+        try:
+            port = self._source(preferences)
+            return port is not None and self._shared_feed_due(port, preferences, at)
+        except (TypeError, ValueError, AttributeError):
+            return True
+
     def maintain(self, context, preferences):
-        """Schedule a durable source refresh without creating a contact opportunity."""
-        worker = self._maintenance_workers.get(context.key)
+        """Refresh one shared feed without creating a contact opportunity."""
+        if not self._maintenance_allowed(context, preferences):
+            return
+        try:
+            port = self._source(preferences)
+        except (TypeError, ValueError, AttributeError):
+            return
+        if port is None:
+            return
+        key = self._feed_cache_key(port)
+        worker = self._maintenance_workers.get(key)
         if worker is not None:
             if not worker.done():
                 return
             if not worker.cancelled():
                 worker.exception()
-            self._maintenance_workers.pop(context.key, None)
+            self._maintenance_workers.pop(key, None)
         at = self.contacts.tasks.now()
         if not self._maintenance_due(context, preferences, at):
             return
-        self._maintenance_workers[context.key] = asyncio.create_task(
+        self._maintenance_workers[key] = asyncio.create_task(
             self._maintain(context, preferences.values.copy()),
-            name="companion:news-maintenance:" + context.key)
+            name="companion:news-maintenance:" + digest(key))
+
+    def maintain_role(self, settings):
+        """Warm the public feed from global settings without selecting a window."""
+        preferences = type("RoleNewsPreferences", (), {"values": dict(settings)})()
+        try:
+            port = self._source(preferences)
+        except (TypeError, ValueError, AttributeError):
+            port = None
+        if port is None or not self._source_enabled(preferences):
+            return
+        key = self._feed_cache_key(port)
+        worker = self._maintenance_workers.get(key)
+        if worker is not None:
+            if not worker.done():
+                return
+            if not worker.cancelled():
+                worker.exception()
+            self._maintenance_workers.pop(key, None)
+        at = self.contacts.tasks.now()
+        if not self._shared_feed_due(port, preferences, at):
+            return
+        self._maintenance_workers[key] = asyncio.create_task(
+            self._maintain_role_feed(port),
+            name="companion:news-role-maintenance:" + digest(key))
+
+    async def _maintain_role_feed(self, port):
+        attempted = self.contacts.tasks.now()
+        previous = self._shared_feed(port)
+        try:
+            batch = await asyncio.wait_for(port.fetch(), timeout=10)
+            if type(batch) is not ParseBatch:
+                raise ValueError("news port returned an invalid batch")
+            checked = self.contacts.tasks.now()
+            value = {"last_attempt_at": stamp(attempted), "last_checked_at": stamp(checked),
+                     "failure": None, "item_count": len(batch.items), "candidate": False,
+                     "items": self._feed_items(batch, port)}
+        except Exception as error:
+            value = dict(previous or {"last_checked_at": None, "item_count": 0, "items": []})
+            value.update(last_attempt_at=stamp(attempted), failure=news_failure(error), candidate=False)
+        self._save_shared_feed(port, value)
 
     async def _maintain(self, context, values):
         preferences = type("NewsMaintenancePreferences", (), {"values": values})()
@@ -157,17 +299,8 @@ class NewsContactEvents:
                                  "provider_code": None}, "item_count": 0,
                     "candidate": False}, port=port)
                 return
-            batch = await asyncio.wait_for(port.fetch(), timeout=10)
-            if type(batch) is not ParseBatch:
-                raise ValueError("news port returned an invalid batch")
-            checked = self.contacts.tasks.now()
-            items = self._feed_items(batch, port)
-            self._save_diagnostic(context, {"last_attempt_at": stamp(attempted),
-                "last_checked_at": stamp(checked), "failure": None,
-                "item_count": len(batch.items), "candidate": False,
-                "items": items}, port=port)
+            await self._refresh_shared_feed(context, preferences, port)
         except Exception as error:
-            checked = self.contacts.tasks.now()
             self._save_diagnostic(context, {"last_attempt_at": stamp(attempted),
                 "last_checked_at": None, "failure": news_failure(error),
                 "item_count": 0, "candidate": False}, port=port)
@@ -253,6 +386,10 @@ class NewsContactEvents:
                 pass
         if status.get("source_fingerprint") != self.source_fingerprint(port):
             status = {}
+        shared = self._shared_feed(port)
+        if shared is not None:
+            status.update({key: shared.get(key) for key in (
+                "source_fingerprint", "last_attempt_at", "last_checked_at", "failure", "item_count", "items")})
         failure = status.get("failure")
         if type(failure) is not dict:
             failure = None
@@ -283,6 +420,64 @@ class NewsContactEvents:
                 "last_success_at": last_checked_at,
                 "failure": failure, "item_count": item_count, "items": items,
                 "candidate": bool(status.get("candidate", False))}
+
+    def role_materials(self, settings, at):
+        """Project only role-wide public discoveries, independent of a private window."""
+        preferences = type("SharedFeedPreferences", (), {"values": settings})()
+        try:
+            port = self._source(preferences)
+        except (TypeError, ValueError, AttributeError):
+            port = None
+        if not self._source_enabled(preferences) or port is None:
+            return {"state": "not_configured", "checked_at": None, "failure": None, "items": []}
+        return self._project_shared_materials(port, at)
+
+    def shared_materials(self, context, settings, at):
+        """Project the current public feed for one authorized private conversation."""
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            return {"state": "unavailable", "checked_at": None, "failure": None, "items": []}
+        preferences = type("SharedFeedPreferences", (), {"values": settings})()
+        try:
+            port = self._source(preferences)
+        except (TypeError, ValueError, AttributeError):
+            port = None
+        if not self._maintenance_allowed(context, preferences) or port is None:
+            return {"state": "not_configured", "checked_at": None, "failure": None, "items": []}
+        return self._project_shared_materials(port, at)
+
+    def _project_shared_materials(self, port, at):
+        cached = self._shared_feed(port)
+        worker = self._maintenance_workers.get(self._feed_cache_key(port))
+        if cached is None:
+            return {"state": "refreshing" if worker is not None and not worker.done() else "not_checked",
+                    "checked_at": None, "failure": None, "items": []}
+        checked_at = cached.get("last_checked_at")
+        items = []
+        for article in cached["items"][:MAX_FEED_ITEMS]:
+            try:
+                published = datetime.fromisoformat(article["published_at"])
+                url = canonical_news_url(article["url"])
+                title = article["title"]
+                summary = article["summary"]
+                source = article["source"]
+                if (published.tzinfo is None or published.utcoffset() is None or not url
+                        or type(title) is not str or not title or type(summary) is not str
+                        or type(source) is not str or not source or not timedelta(0) <= at - published <= MAX_AGE):
+                    continue
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            items.append({"id": digest([self.source_fingerprint(port), url])[:20],
+                "category": (article.get("category") if type(article.get("category")) is str
+                             and article.get("category").strip() else "资讯"),
+                "purpose": "值得和朋友分享的见闻", "title": title,
+                "detail": summary, "note": source, "source": "共享资讯池",
+                "captured_at": checked_at or stamp(published), "expires_at": stamp(published + MAX_AGE),
+                "url": url})
+        state = "failed" if cached.get("failure") else "ready" if checked_at else "not_checked"
+        if state == "failed" and items:
+            state = "stale"
+        return {"state": state, "checked_at": checked_at,
+                "failure": cached.get("failure"), "items": items[:MAX_FEED_ITEMS]}
 
     def _save_diagnostic(self, context, value, *, port=None):
         value = dict(value)
@@ -334,18 +529,13 @@ class NewsContactEvents:
                 value = {"last_attempt_at": stamp(attempt_at), "last_checked_at": None,
                          "failure": {"code": "news_source_disabled", "http_status": None,
                                      "provider_code": None}, "item_count": 0, "candidate": False}
+                self._save_diagnostic(context, value, port=port)
             else:
-                batch = await asyncio.wait_for(port.fetch(), timeout=10)
-                if type(batch) is not ParseBatch:
-                    raise ValueError("news port returned an invalid batch")
-                checked_at = self.contacts.tasks.now()
-                value = {"last_attempt_at": stamp(attempt_at), "last_checked_at": stamp(checked_at),
-                         "failure": None, "item_count": len(batch.items), "candidate": False,
-                         "items": self._feed_items(batch, port)}
+                await self._refresh_shared_feed(context, preferences, port, force=True)
         except Exception as error:
             value = {"last_attempt_at": stamp(attempt_at), "last_checked_at": None,
                      "failure": news_failure(error), "item_count": 0, "candidate": False}
-        self._save_diagnostic(context, value, port=port)
+            self._save_diagnostic(context, value, port=port)
         return self.diagnostic(context, preferences)
 
     @staticmethod
@@ -401,7 +591,8 @@ class NewsContactEvents:
         opportunity = self._opportunity(context, event)
         article = event["article"]
         body = {"event": "external_news_item", "feed": event.get("feed", ""),
-                "source": article["source"], "title": article["title"], "summary": article["summary"],
+                "source": article["source"], "category": article.get("category", ""),
+                "title": article["title"], "summary": article["summary"],
                 "url": article["url"], "published_at": article["published_at"],
                 "retrieved_at": event["opened_at"], "meaning": MEANING}
         payload = encode({**body, "_receipt": {"context": json.loads(encode(context)),
@@ -457,9 +648,7 @@ class NewsContactEvents:
             port = self._port(preferences)
             if port is None:
                 return None
-            batch = await asyncio.wait_for(port.fetch(), timeout=10)
-            if type(batch) is not ParseBatch:
-                raise ValueError("news port returned an invalid batch")
+            feed = await self._refresh_shared_feed(context, preferences, port)
         except Exception as error:
             at = self.contacts.tasks.now()
             preferences = require(self.contacts.preferences.read(context, observed_at=at))
@@ -469,6 +658,13 @@ class NewsContactEvents:
                 self._save_diagnostic(context, {"last_attempt_at": stamp(at), "last_checked_at": None,
                     "failure": news_failure(error), "item_count": 0, "candidate": False}, port=port)
             return None
+        if feed is None or not feed.get("last_checked_at"):
+            at = self.contacts.tasks.now()
+            preferences = require(self.contacts.preferences.read(context, observed_at=at))
+            if self._settings(context, preferences) == settings_hash:
+                seen = json.loads(row["seen_json"]) if row is not None else ()
+                self._save(context, settings_hash, at, checked=False, retry_after=at + RETRY, seen=seen)
+            return None
         at = self.contacts.tasks.now()
         preferences = require(self.contacts.preferences.read(context, observed_at=at))
         if self._settings(context, preferences) != settings_hash:
@@ -476,20 +672,20 @@ class NewsContactEvents:
         row = self._row(context)
         seen = json.loads(row["seen_json"]) if row is not None else []
         candidates = []
-        for item in batch.items[:100]:
+        for item in feed["items"][:100]:
             try:
-                published = item.published_at
-                url = canonical_news_url(item.url)
+                published = datetime.fromisoformat(item["published_at"])
+                url = canonical_news_url(item["url"])
                 if (not url
                         or published is None or published.tzinfo is None or published.utcoffset() is None
                         or not timedelta(0) <= at - published <= MAX_AGE
-                        or not 1 <= len(item.title) <= 240 or len(item.summary) > 1000
-                        or len(item.source) > 100 or len(url) > 2048):
+                        or not 1 <= len(item["title"]) <= 240 or len(item["summary"]) > 1000
+                        or len(item["source"]) > 100 or len(url) > 2048):
                     continue
                 key = digest(url)
                 if key not in seen:
                     candidates.append((published, key, item, url))
-            except (TypeError, ValueError, AttributeError):
+            except (KeyError, TypeError, ValueError, AttributeError):
                 continue
         event = None
         if candidates:
@@ -499,17 +695,15 @@ class NewsContactEvents:
                      "opened_at": stamp(at), "expires_at": stamp(expires),
                      "settings_hash": settings_hash, "key": key,
                      "feed": port.source_label,
-                     "article": {"source": item.source or port.source_label,
-                                 "title": item.title, "summary": item.summary, "url": url,
+                     "article": {"source": item["source"] or port.source_label,
+                                 "category": item.get("category", ""),
+                                 "title": item["title"], "summary": item["summary"], "url": url,
                                  "published_at": stamp(published)}}
             if not self._self_link_cooled_down(context, preferences, at):
                 seen.append(key)
             else:
                 event = None
         self._save(context, settings_hash, at, checked=True, seen=seen, event=event)
-        self._save_diagnostic(context, {"last_attempt_at": stamp(at), "last_checked_at": stamp(at),
-            "failure": None, "item_count": len(batch.items), "candidate": event is not None,
-            "items": self._feed_items(batch, port)}, port=port)
         return self._project(context, event, at) if event is not None else None
 
     def _validate_source(self, record, at):

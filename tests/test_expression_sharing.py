@@ -31,6 +31,7 @@ class ExpressionSharePackTests(unittest.TestCase):
         self.assertEqual(normalized["title"], "晚间表达")
         self.assertEqual(normalized["signals"][0]["dimension"], "sentence_rhythm")
         self.assertEqual(normalized["signals"][0]["proposal"], "保留句末停顿（句式参考：简短地结束）")
+        self.assertEqual(normalized["signals"][0]["applicability"]["relationship_stages"], ["any"])
         self.assertEqual(normalized["rejected"][0]["reason"], "invalid_rule")
         self.assertNotIn("user_id", json.dumps(normalized))
 
@@ -45,10 +46,14 @@ class ExpressionSharePackTests(unittest.TestCase):
 
     def test_v2_export_uses_the_v1_envelope_without_evidence(self):
         package = build_pack([{"dimension": "emoji", "observation": "少量使用表情",
-                               "proposal": "保持克制", "confidence": 0.8}])
+                               "proposal": "保持克制", "confidence": 0.8,
+                               "applicability": {"channels": ["proactive"], "intent": "casual",
+                                                 "keywords": ["闲聊"]}}])
         self.assertEqual(package["schema"], "private-companion-expression-pack")
         self.assertEqual(package["version"], 1)
         self.assertEqual(package["rule_groups"][0]["rules"][0]["signals"], ["emoji"])
+        self.assertEqual(package["rule_groups"][0]["rules"][0]["channels"], ["proactive"])
+        self.assertEqual(package["rule_groups"][0]["rules"][0]["keywords"], ["闲聊"])
         self.assertNotIn("evidence", json.dumps(package))
 
 

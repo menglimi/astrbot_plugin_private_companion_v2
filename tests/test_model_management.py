@@ -2,13 +2,14 @@
 
 import unittest
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import timedelta
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.diagnostics.inbound import InboundNoReplyLedger
 from companion_v2.execution.models import digest, encode
 from companion_v2.model_gateway.management import ModelManagement
+from companion_v2.model_gateway.failures import ModelFailure
 from companion_v2.model_gateway.response_diagnostics import ResponseDiagnostics, ResponseTextSummary
 from tests.test_host_application import HostFixture
 
@@ -29,6 +30,33 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         return {"kind": task["kind"], "operation_key": key, "edit_token": task["edit_token"],
                 "changes": changes or {}, "reset": reset or []}
 
+    async def test_pending_plugin_reservations_are_visible_without_becoming_actual_tokens(self):
+        call = self.app.runtime.read_one("SELECT * FROM model_calls LIMIT 1", ())
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE execution_tasks SET kind = 'calendar.plan' WHERE task_id = ?",
+                               (call["task_id"],))
+            connection.execute("UPDATE model_calls SET state='unknown',actual_tokens=NULL,actual_cost=NULL WHERE call_id=?",
+                               (call["call_id"],))
+        report = self.manager.maintenance(self.core).unwrap()
+        budget = report["budget"]
+        self.assertEqual((budget["spent_tokens"], budget["pending_usage_calls"]), (0, 1))
+        self.assertEqual(budget["pending_usage_tokens"], call["reserved_tokens"])
+        self.assertEqual(budget["reservation_sources"][0]["kind"], "calendar.plan")
+        recent = report["usage_sources"]["plugin"]["recent"][0]
+        self.assertIsNone(recent["tokens"])
+        self.assertEqual(recent["held_tokens"], call["reserved_tokens"])
+        self.assertEqual(recent["usage_state"], "awaiting_receipt")
+
+    async def test_disabled_hard_budget_is_reported_without_a_fictitious_remaining_quota(self):
+        ledger = self.app.gateway.ledger
+        ledger.policy = replace(ledger.policy, enabled=False)
+        report = self.manager.maintenance(self.core).unwrap()
+        self.assertFalse(report["budget"]["hard_limit_enabled"])
+        self.assertIsNone(report["budget"]["remaining_tokens"])
+        self.assertIn("limit_tokens", report["budget"])
+        self.assertIn("held_tokens", report["budget"])
+        self.assertGreater(report["usage_sources"]["conversation"]["totals"]["calls"], 0)
+
     async def test_maintenance_includes_body_free_response_stage_summaries(self):
         summary = ResponseDiagnostics(True, "stop", "native_parsed",
             raw=ResponseTextSummary.from_text("private raw model content"),
@@ -41,6 +69,25 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["recent"][0]["response_diagnostics"], summary.to_record())
         self.assertEqual(data["usage_sources"]["conversation"]["recent"][0]["response_diagnostics"], summary.to_record())
         self.assertNotIn("private raw model content", json.dumps(data))
+
+    async def test_reply_efficiency_exposes_safe_failure_and_response_metadata_per_call(self):
+        call = self.app.runtime.read_one("SELECT call_id, task_id FROM model_calls LIMIT 1", ())
+        summary = ResponseDiagnostics(False, failure=ModelFailure.TRANSPORT,
+            error_type="RateLimitError", error_code="provider_rate_limited", status_code=429)
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE model_calls SET state = 'unknown', actual_tokens = NULL, actual_cost = NULL "
+                               "WHERE call_id = ?", (call["call_id"],))
+            connection.execute("INSERT INTO model_call_failures(call_id, code, observed_at) VALUES (?, ?, ?)",
+                (call["call_id"], ModelFailure.TRANSPORT.value, self.app.now().isoformat()))
+            connection.execute("INSERT INTO model_call_diagnostics(call_id, summary_json, observed_at) VALUES (?, ?, ?)",
+                (call["call_id"], encode(summary.to_record()), self.app.now().isoformat()))
+
+        sample = self.manager.maintenance(self.core).unwrap()["reply_efficiency"]["recent"][0]
+        model_call = sample["trace"]["model_calls"][0]
+        self.assertEqual(model_call["failure_code"], "provider_request_failed")
+        self.assertEqual(model_call["response_diagnostics"], summary.to_record())
+        self.assertIn("RateLimitError", json.dumps(sample))
+        self.assertNotIn("private", json.dumps(sample))
 
     async def test_reply_efficiency_uses_platform_receipts_for_end_to_end_latency(self):
         batch = self.app.runtime.read_one("SELECT batch_id, generation_task_id FROM conversation_batches LIMIT 1", ())
@@ -72,7 +119,6 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sample["stages"], {"pre_model_ms": 2000, "last_input_to_model_ms": 2000, "model_ms": 1000,
             "post_model_ms": 1000, "first_reply_ms": 5000, "delivery_ms": 1000, "end_to_end_ms": 5000})
         self.assertEqual(report["coverage"]["final_delivered"], 1)
-        self.assertNotIn("text", sample)
 
         with self.app.runtime.transaction() as connection:
             connection.execute("UPDATE conversation_parts SET state = 'unknown', delivered_at = NULL WHERE batch_id = ?",
@@ -92,6 +138,57 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active["active_model_calls"], 1)
         self.assertFalse(active["observed"]["model_finished"])
         self.assertIsNone(active["stages"]["model_ms"])
+
+    async def test_reply_efficiency_projects_laya_calls_separately(self):
+        from companion_v2.execution.models import encode
+
+        batch = self.app.runtime.read_one("SELECT batch_id FROM conversation_batches LIMIT 1", ())
+        observed_at = self.app.now().isoformat()
+        decision = {"turn_state": "complete", "action": "reply", "reply_intent": "answer",
+                    "reply_style": "normal", "reply_form": "text", "segment_mode": "natural",
+                    "tool_need": "none", "reason_codes": []}
+        with self.app.runtime.transaction() as connection:
+            connection.execute("""INSERT INTO laya_decision_events
+                (event_id, origin_key, batch_id, source, status, mode, reason_code, reason, elapsed_ms,
+                 decision_json, enabled_fields_json, observed_at)
+                VALUES (?, ?, ?, 'conversation', 'ok', 'local', NULL, NULL, 137, ?, ?, ?)""",
+                ("e" * 32, self.role_context.key, batch["batch_id"], encode(decision), encode({}), observed_at))
+
+        report = self.manager.maintenance(self.core).unwrap()["reply_efficiency"]
+        sample = next(item for item in report["recent"] if item["batch_id"] == batch["batch_id"])
+        self.assertEqual(report["summary"]["laya_calls"], 1)
+        self.assertEqual(report["summary"]["laya_succeeded"], 1)
+        self.assertEqual(report["summary"]["median_laya_ms"], 137)
+        self.assertEqual(sample["trace"]["laya"]["elapsed_ms"], 137)
+        self.assertEqual(sample["trace"]["laya"]["events"][0]["decision"], decision)
+
+    async def test_reply_efficiency_includes_current_role_private_sessions_only(self):
+        async def complete_session(identifier, session_id):
+            scope = replace(self.role_context.scope, native_scope_id=session_id,
+                            conversation_id=session_id, session_id=session_id)
+            self.grant(self.important, scope, "text")
+            batch = self.host_instance.receive(self.event(identifier, scope=scope)).unwrap()
+            self.advance(self.app)
+            await self.done(self.app, batch)
+            return batch
+
+        included_batch = await complete_session("same-role-session", "same-role-session")
+        excluded_batch = await complete_session("other-role-session", "other-role-session")
+        context = json.loads(self.app.messages.batch(excluded_batch)["context_json"])
+        context["role_binding"]["role"]["subject_id"] = "another-role"
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE conversation_batches SET context_json = ? WHERE batch_id = ?",
+                               (encode(context), excluded_batch))
+
+        report = self.manager.maintenance(self.core).unwrap()["reply_efficiency"]
+        batch_ids = {item["batch_id"] for item in report["recent"]}
+        original = self.app.runtime.read_one("SELECT batch_id FROM conversation_batches "
+                                             "WHERE origin_key = ? ORDER BY created_at LIMIT 1",
+                                             (self.role_context.key,))["batch_id"]
+        self.assertEqual(report["summary"]["samples"], 2)
+        self.assertIn(original, batch_ids)
+        self.assertIn(included_batch, batch_ids)
+        self.assertNotIn(excluded_batch, batch_ids)
 
     async def test_reply_efficiency_projects_injections_and_extension_timing_without_payloads(self):
         batch = self.app.runtime.read_one("SELECT batch_id, generation_task_id, contributions_json "
@@ -483,3 +580,29 @@ class ModelManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
             reset=["replacement_rules"], key="inherit-routes")).unwrap()
         field = inherited["task"]["fields"]["replacement_rules"]
         self.assertEqual((field["value"], field["source"], field["explicit"]), ("[]", "default", False))
+
+    async def test_refusal_terms_save_canonicalize_and_inherit(self):
+        before = self.manager.status(self.core).unwrap()
+        saved = self.manager.configure(self.core, self.request(before, changes={
+            "fallback_on_refusal": True,
+            "refusal_terms": "policy denied; request blocked\nPOLICY DENIED",
+        }, key="save-refusal-terms")).unwrap()
+        field = saved["task"]["fields"]["refusal_terms"]
+        self.assertEqual(field["value"], "policy denied\nrequest blocked")
+        self.assertEqual((field["source"], field["explicit"]), ("window", True))
+
+        current = self.manager.status(self.core).unwrap()
+        invalid = self.manager.configure(self.core, self.request(current, changes={
+            "refusal_terms": "\n".join(f"term-{index}" for index in range(65)),
+        }, key="too-many-refusal-terms"))
+        self.assertEqual(invalid.failure.code, "model_configuration_invalid")
+
+        current = self.manager.status(self.core).unwrap()
+        inherited = self.manager.configure(self.core, self.request(current,
+            reset=["refusal_terms"], key="inherit-refusal-terms")).unwrap()
+        field = inherited["task"]["fields"]["refusal_terms"]
+        self.assertEqual(field["value"], "\n".join((
+            "很抱歉，我无法", "很抱歉,我无法", "我有我自己的底线", "我们可以聊聊别的", "我无法满足",
+            "露骨性行为", "没办法提交这个请求", "这个请求没办法提交",
+            "The prompt could not be submitted", "request could not be submitted")))
+        self.assertFalse(field["explicit"])

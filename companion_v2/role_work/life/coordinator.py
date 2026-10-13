@@ -41,6 +41,19 @@ class RoleLifeCoordinator:
                 other.retire()
         return routine
 
+    async def rebind(self, context, role_instruction, *, guard=None):
+        """Refresh edited native persona text after its old workers finish."""
+        routine = self.routines.get(context.key)
+        if routine is not None and routine.instruction not in (None, role_instruction):
+            routine.retire()
+            await routine.close()
+            if routine._workers:
+                await asyncio.gather(*tuple(routine._workers.values()), return_exceptions=True)
+                await routine.close()
+            if self.routines.get(context.key) is routine:
+                del self.routines[context.key]
+        return self.bind(context, role_instruction, guard=guard)
+
     def consumer_generation(self):
         if self._generation is None:
             row = self.app.runtime.read_one("SELECT generation FROM configuration_consumers WHERE consumer_id = ?", (GROUP,))

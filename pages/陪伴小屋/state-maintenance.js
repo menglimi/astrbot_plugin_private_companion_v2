@@ -13,7 +13,7 @@ window.CompanionStateMaintenance = (() => {
     energy:{label:"能量",icon:"battery-medium",help:"模拟日常精力的自然起伏。"},
     health:{label:"健康",icon:"heart-pulse",help:"记录角色自身的主观体感。",special:"仅生病或不适时"},
     hunger:{label:"饥饿",icon:"utensils",help:"模拟随作息变化的饥饿感受。",special:"仅饥饿时"},
-    sleep:{label:"睡眠",icon:"moon-star",help:"模拟困意与睡眠感受；作息安排独立设置。",special:"仅失眠或睡不好时"},
+    sleep:{label:"睡眠状态",icon:"moon-star",help:"只维护困意与主观睡眠感受，不会按时入睡。自动作息需在「日记与生活」同时开启生活日程总开关和「按角色作息自动入睡」。",special:"仅失眠或睡不好时"},
     cycle:{label:"生理期",icon:"calendar-heart",help:"模拟周期阶段与阶段表达。",special:"仅经期"},
     mood:{label:"心情",icon:"smile",help:"模拟互动中的情绪变化与回归。"},
     busy:{label:"忙碌",icon:"briefcase-business",help:"模拟当下的注意力状态；日程安排独立设置。",special:"仅忙碌时"},
@@ -518,11 +518,11 @@ window.CompanionStateMaintenance = (() => {
       return configGroup(1,"后台状态维护","定期更新角色的身体与心理状态，设置随当前人格共享。",
         configField("enabled",values,e,{title:"启用状态维护",help:"关闭后暂停后台更新，已有状态记录保留。"})
         +configField("maintenance_minutes",values,e,{title:"更新间隔（分钟）",help:"1–1440 分钟；保存后用于后续维护安排。"}))
-        +configGroup(2,"分项功能与展示","功能开关控制对应状态模拟；展示开关与条件只控制小屋首页，状态详情仍可查看。",
+        +configGroup(2,"状态模拟与首页展示","状态模拟开关控制后台是否更新这一项；首页展示只控制小屋首页是否显示，状态详情仍可查看。睡眠状态模拟与按角色作息自动入睡是两个独立开关。",
           `<div class="state-home-display-summary"><span data-state-home-count>${Object.keys(homeFeatures).filter(name=>values[name+"_enabled"]&&values["home_show_"+name]).length} 项允许展示</span><small>特殊状态依据已有记录判断</small></div><div class="state-home-feature-list">${Object.entries(homeFeatures).map(([name,spec])=>{
             const special="home_only_special_"+name,id="state-config-"+special;
-            return `<article class="state-home-feature" data-state-home-feature="${name}"><div class="state-home-feature-copy"><i data-lucide="${spec.icon}" aria-hidden="true"></i><div><h5>${spec.label}</h5><p>${spec.help}</p></div></div><div class="state-home-feature-controls">${configField(name+"_enabled",values,e,{title:"功能",ariaLabel:spec.label+"功能"})}${configField("home_show_"+name,values,e,{title:"首页展示",ariaLabel:spec.label+"首页展示"})}${spec.special?`<label class="state-home-display-policy" for="${id}"><span class="sr-only">${spec.label}展示条件</span><select id="${id}" data-state-field="${special}" data-state-display-policy ${values["home_show_"+name]?"":"disabled"}><option value="always" ${values[special]?"":"selected"}>始终展示</option><option value="special" ${values[special]?"selected":""}>${spec.special}</option></select></label>`:'<span class="state-home-display-policy-note">始终展示</span>'}</div></article>`;
-          }).join("")}</div><p class="state-home-special-note">仅特殊状态展示时，正常、未知或未记录的值会隐藏；功能关闭的项目也不会出现在首页。</p>`);
+            return `<article class="state-home-feature" data-state-home-feature="${name}"><div class="state-home-feature-copy"><i data-lucide="${spec.icon}" aria-hidden="true"></i><div><h5>${spec.label}</h5><p>${spec.help}</p></div></div><div class="state-home-feature-controls">${configField(name+"_enabled",values,e,{title:"状态模拟",ariaLabel:spec.label+"状态模拟"})}${configField("home_show_"+name,values,e,{title:"首页展示",ariaLabel:spec.label+"首页展示"})}${spec.special?`<label class="state-home-display-policy" for="${id}"><span class="sr-only">${spec.label}展示条件</span><select id="${id}" data-state-field="${special}" data-state-display-policy ${values["home_show_"+name]?"":"disabled"}><option value="always" ${values[special]?"":"selected"}>始终展示</option><option value="special" ${values[special]?"selected":""}>${spec.special}</option></select></label>`:'<span class="state-home-display-policy-note">始终展示</span>'}</div></article>`;
+          }).join("")}</div><p class="state-home-special-note">仅特殊状态展示时，正常、未知或未记录的值会隐藏；状态模拟关闭的项目也不会出现在首页。</p>`);
     }
     if(draft.kind==="intensity")return configGroup(1,"表达强度","0 表示不注入状态表达；数值越高，身体与情绪的余波越容易自然影响回复语气。",
       configField("humanized_state_intensity",values,e,{slider:true}))
@@ -617,7 +617,7 @@ window.CompanionStateMaintenance = (() => {
       :!enabled?"自动规划已关闭":planning?.running?"正在规划":planning?"等待下次检查":"运行状态尚未提供";
     const mode={daily:"当天安排",horizon:"长期节点",refine:"临近细化"};
     const result=planning?.last_result;
-    const resultState={succeeded:"已完成",blocked:"条件未满足",failed:"本次未完成",cancelled:"已取消",interrupted:"已中断"};
+    const resultState={succeeded:"已完成",blocked:"条件未满足",deferred:"本地预算允许后自动恢复",failed:"本次未完成",cancelled:"已取消",interrupted:"已中断"};
     const last=result?[mode[result.mode]||"规划任务",resultState[result.state]||"已有处理记录"].join(" · "):"尚无规划记录";
     const rejected=Array.isArray(result?.rejected)?result.rejected.length:result?.rejected;
     const counts=result?[Number.isInteger(result.saved)&&result.saved>=0?`保存 ${result.saved} 项`:null,

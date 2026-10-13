@@ -79,7 +79,8 @@ class RelationshipTools:
                 or set(arguments) - required - {"emotion_subject"}):
             raise ValueError("relationship tool arguments do not match its registered contract")
         with self.runtime.transaction():
-            self.messages.owned(context, batch_id)
+            from companion_v2.conversation.native_tool_sources import validate_tool_turn
+            validate_tool_turn(self.messages, context, batch_id)
             at = self.tasks.now()
             owner = self._authorize(context, at)
             if self.runtime.read_one("""SELECT 1 FROM conversation_tool_calls

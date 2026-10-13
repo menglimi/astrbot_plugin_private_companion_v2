@@ -1,10 +1,12 @@
-/* Product navigation and integration status. All target paths come from the host directory. */
+/* Navigation and status for capabilities owned by the V2 plugin. */
 "use strict";
 window.CompanionProduct = (() => {
   const HOST = "astrbot_plugin_private_companion_v2", PREFIX = "/" + HOST + "/";
+  const bundledExtensions = {content:"content", reality:"reality", together:"together", game:"game", live:"live", image:"image", screen:"companion.screen.native"};
   const e = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const labels = {connected:"已连接", installed:"已安装 · 未上报状态", missing:"未安装", disabled:"已停用",
-    waiting:"已安装 · 尚未就绪", degraded:"状态读取失败 · 可重新检查", conflict:"重复安装", stopped:"插件已停止", unknown:"状态未知"};
+    waiting:"已安装 · 尚未就绪", degraded:"状态读取失败 · 可重新检查", conflict:"重复安装", stopped:"插件已停止", unknown:"状态未知",
+    unassembled:"未装配", assembled:"已装配"};
   const states = {planned:"待开始", active:"进行中", paused:"已暂停", completed:"已完成", cancelled:"已取消",
     written:"已保存", proposed:"待确认", achieved:"已达成", retired:"已归档", running:"运行中", new:"尚未启动", stopped:"已停止"};
   const errors = {staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；首次设置已保留，已保存可重新读取状态。", staging_host_terminated:"角色已停止，重新打开插件页面即可恢复。",
@@ -241,6 +243,7 @@ window.CompanionProduct = (() => {
   let releaseAppearanceContext = null;
   let generation = 0, changed = () => {}, loading = false, notice = "";
   const workspaceFrames = new Map();
+  const workspaceBundleLoads = new Map();
   let growthPage = null, growthCursor = null, growthBusy = false;
   const pendingGrowth = new Map();
   const appearance = {};
@@ -546,18 +549,21 @@ window.CompanionProduct = (() => {
     changed({kind:"host-mappings", selection:{...selected}});
   }
   async function manageExtension(capabilityId, action, expectedRevision, operationKey) {
-    const bundled = {image:"image", screen:"companion.screen.native"};
-    const item = manifest?.providers?.find(provider => provider.capability_id === capabilityId);
-    if (!item || item.owner !== "companion_v2" || item.extension_id !== bundled[capabilityId]
+    const item = manifest?.extensions?.find(extension => extension.capability_id === capabilityId);
+    if (!item || item.extension_id !== bundledExtensions[capabilityId]
         || !["assemble","update","pause","resume","uninstall"].includes(action)
         || !Number.isInteger(expectedRevision) || expectedRevision < 0
         || typeof operationKey !== "string" || !operationKey) throw fail("integration_lifecycle_request_invalid");
     const result = await api("POST", "integration/lifecycle", {
       extension_id: item.extension_id, action, expected_revision: expectedRevision, operation_key: operationKey,
     });
+    await refreshIntegrations();
+    return result;
+  }
+  async function refreshIntegrations() {
     manifest = await api("GET", "integration/manifest");
     changed({kind:"integration-refresh"});
-    return result;
+    return manifest;
   }
   function acquaintanceDirectory() {
     if (typeof catalog?.acquaintance_api !== "string") return Promise.reject(fail("invalid_response"));
@@ -676,11 +682,13 @@ window.CompanionProduct = (() => {
     const summary = manifest?.summary;
     if(!summary) return rows([row("拓展能力", e(unavailable("capability")),
       link("能力目录", 'data-home-section="furniture"'))]);
+    const ready = Number.isInteger(summary.extension_ready_count) ? summary.extension_ready_count : 0;
+    const unassembled = Number.isInteger(summary.unassembled_extension_count) ? summary.unassembled_extension_count : 0;
     return rows([
-      row("状态可用", "扩展自报状态正常，功能由它自己执行。",
-        `<span class="home-row-value"><b>${summary.connected_count}</b><small>项</small></span>`),
-      row("已安装", "已安装，但运行状态尚未更新。",
-        `<span class="home-row-value"><b>${summary.installed_count}</b><small>项</small></span>`),
+      row("原生拓展运行中", "七项能力由 V2 本体装配和管理。",
+        `<span class="home-row-value"><b>${ready}</b><small>项</small></span>`),
+      row("待装配", "数据会保留，装配后即可继续使用。",
+        `<span class="home-row-value"><b>${unassembled}</b><small>项</small></span>`),
       row("能力目录", "", link("打开", 'data-home-section="furniture"')),
     ]);
   }
@@ -734,7 +742,6 @@ window.CompanionProduct = (() => {
     const title = name === "identity"
       ? ({network:"关系网",people:"用户",groups:"群聊"}[tab] || "关系管理")
       : {host:"账号与会话",life:"日记与生活",relationships:"人物与关系",persona:"人格问卷"}[name];
-    if(!window.CompanionWorkspaceBundle?.[name]) return empty("工作区资源未发布，请更新插件页面。");
     const available = name === "host" ? bridgeReady : !loading && !!catalog;
     if(!available) {
       /* 不用 I()：那是 app.js 里的顶层 const，product-page.js 是独立 IIFE，
@@ -746,14 +753,146 @@ window.CompanionProduct = (() => {
     }
     if(name==="identity" && !catalog.acquaintance_api) return empty("关系网入口尚未加载，请重新读取角色与会话。");
     if(name!=="host" && name!=="identity" && !role()?.[name+"_api"]) return empty(unavailable(name));
-    return `<section class="product-workspace" data-workspace="${name}" data-workspace-tab="${e(tab)}"><iframe title="${title}工作区" class="product-workspace-frame" sandbox="allow-scripts allow-forms"></iframe></section>`;
+    return `<section class="product-workspace" data-workspace="${name}" data-workspace-tab="${e(tab)}" data-load-state="loading" aria-busy="true"><div class="product-workspace-loading" role="status" aria-live="polite"><span class="product-workspace-spinner" aria-hidden="true"></span><span data-workspace-status>正在打开${e(title)}…</span><button class="button small" type="button" data-workspace-load-retry hidden>重试</button></div><iframe title="${title}工作区" class="product-workspace-frame" sandbox="allow-scripts allow-forms"></iframe></section>`;
   }
   /* 工作区仍由唯一公开页面承载，页内路由保留原有宿主桥上下文。 */
   function workspaceAddress(name, tab="") {
     return {host:"#manage",life:"#life/diary"+(["reading","sleep","receipts"].includes(tab)?"/"+tab:""),
       relationships:"#manage/governance/relationship",identity:"#manage/identity",persona:"#manage/governance/questionnaire"}[name]||"";
   }
-  function unmountWorkspace() {workspaceFrames.clear();}
+  function unmountWorkspace() {
+    for(const context of workspaceFrames.values())clearTimeout(context.loadTimer);
+    workspaceFrames.clear();
+  }
+  function setWorkspaceLoadState(owner, state, message) {
+    const section=owner.parentElement;
+    if(!section)return;
+    section.dataset.loadState=state;
+    section.setAttribute("aria-busy",String(state==="loading"));
+    const status=section.querySelector("[data-workspace-status]");
+    if(status&&message)status.textContent=message;
+    const retry=section.querySelector("[data-workspace-load-retry]");
+    if(retry)retry.hidden=state!=="error";
+  }
+  function requestWorkspaceBundle(name, source) {
+    const script=document.createElement("script");
+    script.src=source;
+    script.async=true;
+    return new Promise((resolve,reject)=>{
+      script.onload=()=>{
+        const html=window.CompanionWorkspaceBundle?.[name];
+        if(typeof html==="string")resolve(html);
+        else {
+          const error=new Error("workspace bundle missing");
+          error.workspaceCode="bundle_missing";
+          reject(error);
+        }
+      };
+      script.onerror=()=>{
+        const error=new Error("workspace bundle request failed");
+        error.workspaceCode="bundle_request_failed";
+        reject(error);
+      };
+      document.head.appendChild(script);
+    });
+  }
+  function workspaceLoadMessage(error) {
+    if(error?.workspaceCode==="entry_auth")
+      return "工作区授权刷新需要有效的 AstrBot 登录状态。请重新登录控制台后重试；已有数据不受影响。";
+    if(error?.workspaceCode==="entry_request")
+      return "AstrBot 没能生成新的工作区资源授权。请刷新陪伴小屋后重试；若仍失败，请检查插件 API 日志。已有数据不受影响。";
+    if(error?.workspaceCode==="entry_network")
+      return "工作区授权刷新请求未完成。请检查 AstrBot 控制台连接并重试；已有数据不受影响。";
+    if(error?.workspaceCode==="entry_invalid")
+      return "AstrBot 未返回有效的工作区入口信息。请刷新插件页后重试；已有数据不受影响。";
+    if(error?.workspaceCode==="bundle_missing_token")
+      return "工作区资源地址缺少访问授权。请重新打开陪伴小屋后重试；已有数据不受影响。";
+    if(error?.workspaceAfterRefresh)
+      return "授权已刷新，但工作区资源仍无法读取。请刷新插件页后重试；若仍失败，请检查 AstrBot 插件资源加载日志。已有数据不受影响。";
+    if(error?.workspaceCode==="bundle_missing")
+      return "工作区资源已返回，但内容不完整。请刷新插件页；若仍失败，请重新构建并加载插件包。已有数据不受影响。";
+    return "工作区资源无法读取，请刷新插件页后重试；已有数据不受影响。";
+  }
+  async function refreshWorkspaceAssetUrl(source) {
+    const assetUrl=new URL(source,window.location.href);
+    const bridge=bridgeOf();
+    if(!bridge?.apiGet) {
+      const error=new Error("workspace page bridge unavailable");
+      error.workspaceCode="entry_network";
+      throw error;
+    }
+    let entry;
+    try {
+      entry=await bridge.apiGet("page/workspace-entry",{});
+    } catch(cause) {
+      const code=cause?.code||cause?.message;
+      const error=new Error("workspace entry request failed");
+      error.workspaceCode=code==="dashboard_identity_required"?"entry_auth"
+        :code==="Network Error"||code==="Failed to fetch"?"entry_network":"entry_request";
+      throw error;
+    }
+    const contentPath=entry?.content_path;
+    if(typeof contentPath!=="string") {
+      const error=new Error("workspace entry configuration is invalid");
+      error.workspaceCode="entry_invalid";
+      throw error;
+    }
+    const entryUrlWithToken=new URL(contentPath,window.location.href);
+    const token=entryUrlWithToken.searchParams.get("asset_token");
+    if(entryUrlWithToken.origin!==assetUrl.origin||!token
+        ||!entryUrlWithToken.pathname.startsWith(`/api/plugin/page/content/${HOST}/`)) {
+      const error=new Error("workspace entry configuration is invalid");
+      error.workspaceCode="entry_invalid";
+      throw error;
+    }
+    assetUrl.searchParams.set("asset_token",token);
+    return assetUrl.href;
+  }
+  function loadWorkspaceBundle(name) {
+    const existing=window.CompanionWorkspaceBundle?.[name];
+    if(typeof existing==="string")return Promise.resolve(existing);
+    if(workspaceBundleLoads.has(name))return workspaceBundleLoads.get(name);
+    const template=document.querySelector(`template[data-workspace-bundle="${name}"]`);
+    const source=template?.content?.querySelector("script")?.src;
+    if(!source)return Promise.reject(new Error("工作区资源地址未发布"));
+    const pending=(async()=>{
+      try { return await requestWorkspaceBundle(name,source); }
+      catch(error) {
+        if(!new URL(source,window.location.href).searchParams.has("asset_token")) {
+          error.workspaceCode="bundle_missing_token";
+          throw error;
+        }
+        const refreshedSource=await refreshWorkspaceAssetUrl(source);
+        try { return await requestWorkspaceBundle(name,refreshedSource); }
+        catch(retryError) {
+          retryError.workspaceAfterRefresh=true;
+          throw retryError;
+        }
+      }
+    })().catch(error=>{
+      workspaceBundleLoads.delete(name);
+      throw error;
+    });
+    workspaceBundleLoads.set(name,pending);
+    return pending;
+  }
+  function startWorkspace(owner, context) {
+    const title={host:"账号与会话",life:"日记与生活",relationships:"人物与关系",identity:"关系管理",persona:"人格问卷"}[context.kind]||"工作区";
+    setWorkspaceLoadState(owner,"loading",`正在打开${title}…`);
+    clearTimeout(context.loadTimer);
+    context.loadTimer=setTimeout(()=>{
+      if(workspaceFrames.get(owner)===context&&owner.parentElement?.dataset.loadState==="loading")
+        setWorkspaceLoadState(owner,"error","工作区打开时间较长，页面暂时没有响应，可以重试。");
+    },20000);
+    loadWorkspaceBundle(context.kind).then(html=>{
+      if(workspaceFrames.get(owner)!==context||!owner.isConnected)return;
+      owner.srcdoc=html;
+    }).catch(error=>{
+      if(workspaceFrames.get(owner)!==context||!owner.isConnected)return;
+      clearTimeout(context.loadTimer);
+      setWorkspaceLoadState(owner,"error",workspaceLoadMessage(error));
+    });
+  }
   function workspaceContext(owner) {
     const kind=owner.parentElement.dataset.workspace;
     const selectedTarget=target(),selectedRole=role();
@@ -778,10 +917,15 @@ window.CompanionProduct = (() => {
       // Account and person directories have installation scope. Keep their DOM
       // and in-flight reads while the selected role's routing context changes.
       if (["host","identity"].includes(context.kind)) Object.assign(previous,context);
-      else workspaceFrames.set(owner,context);
-      if (!["host","identity"].includes(context.kind) && previous.key!==context.key)
-        owner.srcdoc=window.CompanionWorkspaceBundle[context.kind];
-      else sendWorkspaceContext(owner,context);
+      else {
+        clearTimeout(previous.loadTimer);
+        workspaceFrames.set(owner,context);
+      }
+      if (!["host","identity"].includes(context.kind) && previous.key!==context.key) {
+        setWorkspaceLoadState(owner,"loading","正在切换当前对象…");
+        if(window.CompanionWorkspaceBundle?.[context.kind])owner.srcdoc=window.CompanionWorkspaceBundle[context.kind];
+        else startWorkspace(owner,context);
+      } else sendWorkspaceContext(owner,context);
     }
   }
   function mountWorkspace() {
@@ -791,9 +935,21 @@ window.CompanionProduct = (() => {
       const context=workspaceContext(owner);
       context.lifetime={};
       workspaceFrames.set(owner,context);
-      owner.srcdoc=window.CompanionWorkspaceBundle[context.kind];
+      if(window.CompanionWorkspaceBundle?.[context.kind])owner.srcdoc=window.CompanionWorkspaceBundle[context.kind];
+      else startWorkspace(owner,context);
     }
   }
+  document.addEventListener("click",event=>{
+    const button=event.target?.closest?.("[data-workspace-load-retry]");
+    if(!button)return;
+    const owner=button.closest("[data-workspace]")?.querySelector(".product-workspace-frame");
+    const previous=owner&&workspaceFrames.get(owner);
+    if(!owner||!previous)return;
+    clearTimeout(previous.loadTimer);
+    const context={...previous,lifetime:{}};
+    workspaceFrames.set(owner,context);
+    startWorkspace(owner,context);
+  });
   window.addEventListener("message",async event=>{
     const message=event.data;
     if(message?.channel!=="companion-workspace")return;
@@ -805,6 +961,8 @@ window.CompanionProduct = (() => {
     const send=payload=>{if(workspaceFrames.get(owner)?.lifetime===context.lifetime&&owner.isConnected)
       owner.contentWindow.postMessage({channel:"companion-workspace",...payload},"*");};
     if(message.kind==="ready"){
+      clearTimeout(context.loadTimer);
+      setWorkspaceLoadState(owner,"ready");
       // Display labels never participate in identity checks or request routing.
       sendWorkspaceContext(owner,context);
       send({kind:"appearance",appearance:{...appearance}});return;
@@ -890,25 +1048,34 @@ window.CompanionProduct = (() => {
         code:code||undefined,reason:reason||undefined,confirmed:error?.confirmed===true});
     }
   });
+  function extensionsMarkup(ids) {
+    const extensions = manifest?.extensions?.filter(p=>!ids||ids.includes(p.capability_id))||[];
+    if(!extensions.length) return empty(loading?"正在读取能力目录…":"尚未读取 V2 内置拓展目录。请刷新，或在账号与会话中检查连接。");
+    return `<div class="capabilities-grid">${extensions.map(p=>`<article class="panel capability"><div class="capability-top"><div><h3>${e(p.label)}</h3><small>V2 本体内置 · ${e(p.version||"未读取")}</small></div><span class="pill ${p.integration_state==="connected"?"":"gray"}">${e(labels[p.integration_state]||"状态未知")}</span></div><p>${e(p.description)}</p><div class="capability-footer"><span>${e(p.reason)}</span><button class="button small" data-product-provider="${e(p.capability_id)}">查看入口</button></div></article>`).join("")}</div>`;
+  }
   function providersMarkup(ids) {
     const providers = manifest?.providers?.filter(p=>!ids||ids.includes(p.capability_id))||[];
-    if(!providers.length) return empty(loading?"正在读取能力目录…":"尚未读取能力目录。请刷新，或在账号与会话中检查连接。");
+    if(!providers.length) return "";
     return `<div class="capabilities-grid">${providers.map(p=>`<article class="panel capability"><div class="capability-top"><div><h3>${e(p.label)}</h3><small>${e(p.version||"未安装")}</small></div><span class="pill ${p.integration_state==="connected"?"":"gray"}">${e(labels[p.integration_state]||"状态未知")}</span></div><p>${e(p.description)}</p><div class="capability-footer"><span>${e(p.reason)}</span><button class="button small" data-product-provider="${e(p.capability_id)}">查看入口</button></div></article>`).join("")}</div>`;
   }
   function capabilitiesMarkup() {
-    return `<div class="settings-heading"><div><h2>能力目录</h2></div></div><div class="product-domain-grid">${(manifest?.core||[]).map(item=>`<article><strong>${e(item.label)}</strong><p>${e(item.description)}</p><span>已包含</span></article>`).join("")}</div><h3 class="product-section-title">拓展能力状态</h3>${providersMarkup()}`;
+    const external = providersMarkup();
+    return `<div class="settings-heading"><div><h2>能力目录</h2></div></div><div class="product-domain-grid">${(manifest?.core||[]).map(item=>`<article><strong>${e(item.label)}</strong><p>${e(item.description)}</p><span>已包含</span></article>`).join("")}</div><h3 class="product-section-title">V2 内置拓展</h3>${extensionsMarkup()}${external?`<h3 class="product-section-title">外部兼容状态</h3>${external}`:""}`;
   }
   function providerAddress(id, preferredPage="") {
+    if (bundledExtensions[id]) return "";
     const item=manifest?.providers?.find(p=>p.capability_id===id);
-    if(!item?.installed||item.owner==="companion_v2"||typeof item.plugin_id!=="string"||!item.plugin_id)return "";
+    if(!item?.installed||typeof item.plugin_id!=="string"||!item.plugin_id)return "";
     const pages=(Array.isArray(item.pages)?item.pages:[]).filter(page=>typeof page==="string"&&page.trim());
     const page=pages.includes(preferredPage)?preferredPage:pages[0];
     const route=page?`/#/plugin-page/${encodeURIComponent(item.plugin_id)}/${encodeURIComponent(page)}`:"/#/extension/plugins";
     try{return new URL(route,window.location.href).href;}catch(_){return "";}
   }
   function providerLinks(item) {
-    if(!item.installed)return "";
-    if(item.owner==="companion_v2")return "";
+    if(item.capability_id === "content") return `<div class="dialog-actions"><button type="button" class="button small" data-go="manage" data-manage="output" data-output-target="creation">创作与作品</button></div>`;
+    if(["reality","together","game","live"].includes(item.capability_id)) return `<div class="dialog-actions"><button type="button" class="button small" data-product-provider="${e(item.capability_id)}">设置与运行</button></div>`;
+    const bundled = item.owner === "companion_v2" || Boolean(bundledExtensions[item.capability_id]);
+    if(!bundled && !item.installed)return "";
     const pages=Array.isArray(item.pages)?item.pages.filter(page=>typeof page==="string"&&page.trim()):[];
     if(!pages.length&&["content","image"].includes(item.capability_id)) {
       const image=item.capability_id==="image";
@@ -922,9 +1089,9 @@ window.CompanionProduct = (() => {
     }).join("");
   }
   function providerDetail(id) {
-    const item=manifest?.providers?.find(p=>p.capability_id===id);
-    const bundled=item?.owner==="companion_v2";
-    return {title:item?.label||"拓展能力",body:item?`<p>${e(item.description)}</p><p class="product-muted">${e(item.reason)}</p><dl class="definition-list"><div><dt>${bundled?"V2 内置版本":"插件版本"}</dt><dd>${e(item.version||"未安装")}</dd></div>${bundled?`<div><dt>已装配版本</dt><dd>${e(item.installed_package_version||"未装配")}</dd></div>`:""}<div><dt>配置开关</dt><dd>${item.enabled===true?"开启":item.enabled===false?"关闭":"尚未读取"}</dd></div><div><dt>执行就绪</dt><dd>${item.runtime_ready===true?"扩展报告已就绪":item.runtime_ready===false?"尚未就绪":"由扩展工作台确认"}</dd></div></dl>${providerLinks(item)}`:empty("尚未读取此插件状态，请刷新能力目录。")};
+    const item=manifest?.extensions?.find(p=>p.capability_id===id) || manifest?.providers?.find(p=>p.capability_id===id);
+    const bundled=Boolean(manifest?.extensions?.some(p=>p.capability_id===id));
+    return {title:item?.label||"拓展能力",body:item?`<p>${e(item.description)}</p><p class="product-muted">${e(item.reason)}</p><dl class="definition-list"><div><dt>${bundled?"V2 内置版本":"插件版本"}</dt><dd>${e(item.version||"尚未读取")}</dd></div>${bundled?`<div><dt>装配版本</dt><dd>${e(item.installed_package_version||"未装配")}</dd></div>`:""}<div><dt>配置开关</dt><dd>${item.enabled===true?"开启":item.enabled===false?"关闭":"尚未读取"}</dd></div><div><dt>运行状态</dt><dd>${item.runtime_ready===true?"已就绪":item.runtime_ready===false?"尚未就绪":"请重新读取"}</dd></div></dl>${providerLinks(item)}`:empty("尚未读取此能力状态，请刷新能力目录。")};
   }
   function growthMarkup() {
     const page=growthPage||data.growth;
@@ -981,7 +1148,7 @@ window.CompanionProduct = (() => {
   const stateValues   = () => data.state?.state?.values || null;
   const stateLabel = value => states[value] || "";
   const unavailableReason = name => unavailable(name);
-  return {hosted,unwrap,connect,refreshSummary,manageExtension,choose,chooseRole,selection:()=>({...selected}),scopeKey,role,target,roleTarget,roleChoices,identity,connection,renderScope,scopeVisible,
+  return {hosted,unwrap,connect,refreshSummary,refreshIntegrations,manageExtension,choose,chooseRole,selection:()=>({...selected}),scopeKey,role,target,roleTarget,roleChoices,identity,connection,renderScope,scopeVisible,
     /* 首次使用引导走同一套桥接与错误翻译，别让它自己再实现一遍超时与判据。 */
     request:api,acquaintanceDirectory,
     errorLabel:code=>errors[code]||"当前设置未能确认，请刷新并核对账号、人格与模型。",
@@ -989,8 +1156,11 @@ window.CompanionProduct = (() => {
     themeLight,lightOf:id=>themeLight[id]||"day",followLight:()=>followLight,setFollowLight,syncLight,
     targets:()=>catalog?.targets||[],targetLabel,subjectLabel,platformLabel,accountLabel,roleLabel,scopeLabel,actorLabel,executorLabel,
     get manifest(){return manifest;},get data(){return data;},stateCard,scheduleCard,capabilityCard,growthCard,memoryCard,
-    workspace,unmountWorkspace,mountWorkspace,workspaceAddress,providerAddress,providersMarkup,capabilitiesMarkup,providerDetail,growthMarkup,
-    provider:id=>manifest?.providers?.find(p=>p.capability_id===id),statusLabel:id=>labels[id]||"状态未知",unavailable,
+    workspace,unmountWorkspace,mountWorkspace,workspaceAddress,providerAddress,extensionsMarkup,providersMarkup,capabilitiesMarkup,providerDetail,growthMarkup,
+    extension:id=>manifest?.extensions?.find(p=>p.capability_id===id),
+    provider:id=>manifest?.providers?.find(p=>p.capability_id===id),
+    capability:id=>manifest?.extensions?.find(p=>p.capability_id===id)||manifest?.providers?.find(p=>p.capability_id===id),
+    statusLabel:id=>labels[id]||"状态未知",unavailable,
     when,lifeActivities,lifeJournals,stateValues,stateLabel,unavailableReason,
     unavailableCode:name=>failureCodes[name]||"",
     /* 各页共用一个「等桥注进来」的实现。桥的注入晚于脚本执行是正常时序，

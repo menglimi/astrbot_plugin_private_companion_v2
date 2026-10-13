@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from companion_v2.role_profile.drafts import (
+    DRAFT_FIELD_LIMITS,
     MAX_KNOWLEDGE_CHARS,
     MAX_KNOWLEDGE_ITEMS,
     build_role_profile_prompt,
@@ -80,6 +82,23 @@ class RoleProfileDraftPromptTests(unittest.TestCase):
         self.assertEqual(operator_mode["fields"]["world_adaptation_mode"], "sci_fi")
         self.assertEqual(operator_mode["inferred_fields"], [])
         self.assertEqual(operator_mode["notes"], [])
+
+    def test_operator_control_fields_are_excluded_from_role_drafts(self):
+        from companion_v2.role_profile.configuration import CONTROL_FIELDS
+
+        controls = {name: "private-control-value" for name in CONTROL_FIELDS}
+        prompt = build_role_profile_prompt("你住在海边。", current_profile=controls)
+        draft = parse_role_profile_draft(
+            json.dumps({"fields": {"name": "海边旅人", **controls},
+                        "inferred_fields": ["main_companion_subject"]})
+        )
+
+        self.assertTrue(CONTROL_FIELDS.isdisjoint(DRAFT_FIELD_LIMITS))
+        for name in CONTROL_FIELDS:
+            self.assertNotIn(name, prompt)
+            self.assertNotIn(name, draft["fields"])
+        self.assertEqual(draft["inferred_fields"], [])
+        self.assertTrue(any("档案外字段" in note for note in draft["notes"]))
 
     def test_relationship_draft_keeps_current_person_details_in_their_own_contract(self):
         prompt = build_relationship_profile_prompt(

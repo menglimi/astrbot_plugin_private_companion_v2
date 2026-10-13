@@ -2,6 +2,8 @@
 
 日期：2026-09-25。协调任务：`01a0cd49-59e3-7e90-8050-9d6281c49d18`。
 
+> **当前实现状态（2026-10-11）**：本文前期盘点中的“七个可选伴侣仍各自登记”是历史快照，不是当前 V2 运行合同。Content、Image、Together、Game、Screen、Reality、Live 已作为 `astrbot_plugin_private_companion_v2` 内部 native extension 装配，由唯一 V2 Star 统一启停和治理；它们不再是 V2 的运行依赖，也不注册独立 Star。`providers` 仅保留给真正的外部兼容状态入口。
+
 ## 最终状态
 
 新框架本体只有 **1 个**，统一为 `astrbot_plugin_private_companion_v2`，显示名「我会永远陪着你 V2.0」，版本 `2.0.0`；公开 Dashboard 入口只有 **「陪伴小屋」**。插件已启用的登记状态不表示宿主已接管消息。
@@ -14,7 +16,7 @@
 | V2 公开页面 | 陪伴小屋、宿主管理、日记与生活、关系与记忆 | 陪伴小屋 |
 | Content 新框架开发预览 | `pages/framework-preview-v1` 被发现为页面 | `design-previews/companion-v2`，不再作为插件页面 |
 
-七个可选伴侣仍各自登记：Content、Image、Together、Game、Screen、Reality、Live。这些是能力提供方，并非七个新框架本体；当前接通的是目录及公开状态发现，执行器接入 V2 工具运行端口仍由后续工作完成。旧核心 `astrbot_plugin_private_companion` 6.6.2 是现役 V1；旧记忆、Bug 伴侣及其他插件不因本次统一而合并或删除。
+当时的七个可选伴侣登记记录仅用于解释整理前的在线状态。当前运行时使用 `integration/manifest.extensions` 和 V2 native registry，内部拓展的 owner 统一为 `companion_v2`；旧核心 `astrbot_plugin_private_companion` 仍可作为外部兼容状态入口，但不参与 V2 对话和拓展执行。
 
 ## 身份与页面规范
 
@@ -74,10 +76,10 @@ AstrBot 4.27.2 的插件重载 API 按名称定位首个实例。本次每步先
 | `astrbot_plugin_private_companion_v2-2.0.0.zip` | 12,793,434 字节 | `61cfed459fc1f266b8a31a36b474953d7e726bb8af02af1559a0c9c36dbc21b5` |
 | `companion-v2-2.0.0-suite.zip` | 16,034,613 字节 | `116d5142bcfc66a7ea0d1b4670ce40e0df36e5c18797b1d89af218fa525dd9cc` |
 
-套件内含本体及七个可选伴侣的独立安装包，需先解压，再按需导入插件 ZIP。`verified/package-verification.json` 记录 8 包哈希与语法通过、唯一小屋入口、默认关闭且投递模式为 preview。`snapshot/package-verification.json` 记录首次解压副本的真实 SDK 主入口、4 条生活路由、启停与路由注销通过，真实模型与平台调用均为 0。整合任务另已完成副本 15 项产品/页面/隔离测试、22 项记忆浏览器检查及套件 CRC/嵌套包核验；详细回执见 `REGISTRATION_COORDINATION_20260925_01a0b900.md`。
+该历史套件曾包含本体及七个可选伴侣的独立安装包；当前 V2 交付包只包含唯一的 `astrbot_plugin_private_companion_v2`，七项能力随本体内置。`verified/package-verification.json` 等历史证据仍保留，不能作为当前包结构的说明。
 
-最终包使用已验收快照，已包含注册统一记录及工程约定，没有纳入状态窗口后续尚在开发的功能。本节为交付后补记，无需为记录更新重建安装包。七个可选伴侣当前仍为目录与状态接入，套件交付不表示其执行器已接入 V2。
+最终包使用已验收快照，已包含注册统一记录及工程约定，没有纳入状态窗口后续尚在开发的功能。本节为历史交付补记；当前包结构以 `tools/build_v2_release.py` 和 `tools/verify_v2_release.py` 的单包合同为准。
 
 ## 下一步
 
-各领域继续在同一本体内接入功能；七个可选伴侣的实际执行器接入与能力验收按各自合同推进。新功能通过验收后，从对应快照重建统一安装包。可加载 worktree、备份及测试副本继续放在 AstrBot 的一级插件扫描目录之外，避免再次被当作插件加载。
+各领域继续在同一本体内维护功能。新增能力沿用 native extension registry 和唯一「陪伴小屋」入口；可加载 worktree、备份及测试副本继续放在 AstrBot 的一级插件扫描目录之外，避免再次被当作插件加载。

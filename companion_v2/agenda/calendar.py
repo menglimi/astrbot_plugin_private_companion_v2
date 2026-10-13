@@ -13,6 +13,7 @@ from .records import CalendarRecords
 
 INSTRUCTION = (
     "日历里的 role_plan 是角色计划，user_report 是用户自述，commitment/proposed 是未接受的约定。"
+    "角色计划由角色身份持有；仅使用当前角色与当前私聊用户可验证的来源。"
     "accepted 也只表示接受安排，不代表到点已发生或已完成。缺席和过时不能推断完成。"
     "条件讨论先保留候选，不代替对方确认。改期后的约定重新确认。"
     "presence 是会公开显示的角色短状态，不包含用户姓名、地点、约定正文或健康隐私。"
@@ -46,10 +47,6 @@ class CalendarService:
         self.records = CalendarRecords(self.runtime, tasks.identity)
 
     def _evidence(self, context, sources, *, at=None):
-        for item in sources:
-            ref = source_ref(item) if isinstance(item, dict) else item
-            if ref.scope != context.scope:
-                raise TaskError("calendar_unavailable", "event is unavailable")
         self.access.evidence(context, sources, at=at)
 
     def read(self, context, identifier, *, operator=None):
@@ -57,7 +54,12 @@ class CalendarService:
         record = self.records.get(context, identifier)
         if record is None:
             raise TaskError("calendar_unavailable", "event is unavailable")
-        self._evidence(context, record["sources"])
+        try:
+            self._evidence(context, record["sources"])
+        except TaskError as error:
+            if error.code.startswith(("calendar_source_", "domain_source_", "source_")):
+                raise TaskError("calendar_unavailable", "event is unavailable") from error
+            raise
         return record
 
     def command(self, context, *, identifier, action, expected_revision, operation_key,
@@ -146,24 +148,30 @@ class CalendarService:
     def inventory(self, context, *, after_id="", limit=30, operator=None, kinds=None):
         self.access.check(context, "calendar.read", operator=operator)
         rows = self.records.list(context, after_id=after_id, limit=limit, kinds=kinds)
-        items, skipped = [], 0
+        items, skipped, skipped_reasons = [], 0, {"role_mismatch": 0, "source_unavailable": 0}
         for row in rows:
             try:
                 self._evidence(context, row["sources"])
                 items.append(row)
-            except TaskError:
+            except TaskError as error:
                 skipped += 1
+                reason = "role_mismatch" if error.code == "calendar_source_role_mismatch" else "source_unavailable"
+                skipped_reasons[reason] += 1
         return {"items": items, "skipped": skipped,
+                "skipped_reasons": {key: count for key, count in skipped_reasons.items() if count},
                 "next_cursor": rows[-1]["id"] if len(rows) == limit else None}
 
-    def occurrences(self, context, *, start, end, operator=None, kinds=None):
+    def occurrences(self, context, *, start, end, operator=None, kinds=None, diagnostics=False):
         if not start < end or end - start > timedelta(days=31):
             raise TaskError("calendar_window_invalid", "query a positive window no longer than 31 days")
         self.access.check(context, "calendar.read", operator=operator)
-        items, cursor, skipped, scanned = [], "", 0, 0
+        items, cursor, skipped, scanned, has_more = [], "", 0, 0, False
+        skipped_reasons = {"role_mismatch": 0, "source_unavailable": 0}
         while scanned < 200:
             page = self.inventory(context, after_id=cursor, limit=50, operator=operator, kinds=kinds)
             skipped += page["skipped"]
+            for reason, count in page.get("skipped_reasons", {}).items():
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + count
             for row in page["items"]:
                 if row["state"] == "cancelled":
                     continue
@@ -193,9 +201,20 @@ class CalendarService:
             if not page["next_cursor"]:
                 break
             cursor = page["next_cursor"]
+            if scanned >= 200:
+                probe = self.inventory(context, after_id=cursor, limit=1, operator=operator, kinds=kinds)
+                skipped += probe["skipped"]
+                for reason, count in probe.get("skipped_reasons", {}).items():
+                    skipped_reasons[reason] = skipped_reasons.get(reason, 0) + count
+                has_more = bool(probe["items"] or probe["skipped"])
         items.sort(key=lambda item: (item["start"], item["id"], item["sequence"]))
-        return {"items": items[:64], "partial": bool(page["next_cursor"]) or len(items) > 64 or bool(skipped),
-                "skipped": skipped}
+        occurrence_overflow = max(0, len(items) - 64)
+        result = {"items": items[:64], "partial": has_more or occurrence_overflow > 0 or bool(skipped),
+                  "skipped": skipped}
+        if diagnostics:
+            result.update(skipped_reasons={key: count for key, count in skipped_reasons.items() if count},
+                          scan_truncated=has_more, occurrences_truncated=occurrence_overflow)
+        return result
 
     def _target(self, context):
         return AgendaTarget(context.scope, context.role_binding.role, context.actor.subject)

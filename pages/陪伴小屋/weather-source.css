@@ -1,13 +1,13 @@
-.weather-source-settings { padding-block: 6px 18px; border-bottom: 1px solid var(--t-line); }
-.weather-source-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-.weather-source-heading h4 { margin: 0 0 6px; font-size: 15px; }
-.weather-source-heading p, .weather-source-footer p { margin: 0; color: var(--t-text-soft); font-size: 12px; line-height: 1.6; }
-.weather-source-state { flex-shrink: 0; color: var(--t-ok-ink); font-size: 12px; line-height: 1.6; }
-.weather-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 20px; margin: 0; padding: 0; border: 0; }
+.weather-source-settings { padding-block: calc(var(--sp-1) * 1.5) calc(var(--sp-3) * 1.5); border-bottom: 1px solid var(--t-line); }
+.weather-source-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.weather-source-heading h4 { margin: 0 0 calc(var(--sp-1) * 1.5); font-size: var(--fs-lead); }
+.weather-source-heading p, .weather-source-footer p { margin: 0; color: var(--t-text-soft); font-size: var(--fs-micro); line-height: 1.6; }
+.weather-source-state { flex-shrink: 0; color: var(--t-ok-ink); font-size: var(--fs-micro); line-height: 1.6; }
+.weather-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: calc(var(--sp-2) * 1.75) calc(var(--sp-4) * 1.25); margin: 0; padding: 0; border: 0; }
 .weather-source-grid .perception-setting { min-width: 0; }
 .weather-source-grid input, .weather-source-grid select { box-sizing: border-box; width: 100%; min-width: 0; }
 .weather-source-grid small { overflow-wrap: anywhere; }
-.weather-source-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; }
+.weather-source-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); margin-top: calc(var(--sp-3) * 1.5); }
 .weather-source-footer p { max-width: 420px; }
 .weather-source-footer .native-perception-actions { flex-wrap: wrap; flex-shrink: 0; }
 @media (max-width: 640px) {

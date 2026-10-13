@@ -66,6 +66,23 @@
 
 /* ===== 主区 ===== */
 .mem-main{display:flex;flex-direction:column;gap:var(--sp-4);min-width:0}
+.mem-overview-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-3);padding:0 var(--sp-4) var(--sp-4)}
+.mem-overview-grid>div{display:flex;flex-direction:column;gap:3px;min-width:0;padding:var(--sp-3);background:var(--t-surface-sunken);border-radius:var(--r-sm)}
+.mem-overview-grid span,.mem-overview-grid small{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.mem-overview-grid strong{color:var(--t-text-strong);font-size:var(--fs-head);font-variant-numeric:tabular-nums}
+.mem-overview-grid small{overflow-wrap:anywhere}
+.mem-linkage{margin:0 var(--sp-4) var(--sp-4);padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm)}
+.mem-linkage-head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
+.mem-linkage-head h4{margin:0;color:var(--t-text-strong);font-size:var(--fs-body)}
+.mem-linkage-head p{margin:3px 0 0;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.mem-linkage-counts{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0 0}
+.mem-linkage-counts>div{display:flex;justify-content:space-between;gap:var(--sp-2);padding:var(--sp-2);background:var(--t-surface-soft);border-radius:var(--r-xs)}
+.mem-linkage-counts dt{color:var(--t-text-faint);font-size:var(--fs-micro)}
+.mem-linkage-counts dd{margin:0;color:var(--t-text-strong);font-size:var(--fs-tiny);font-variant-numeric:tabular-nums}
+.mem-reflection-views{display:flex;gap:var(--sp-1);padding:0 var(--sp-4) var(--sp-3)}
+.mem-reflection-views button{display:flex;align-items:center;gap:var(--sp-2);min-height:36px;padding:0 var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer}
+.mem-reflection-views button[aria-pressed="true"]{border-color:var(--t-accent);background:var(--t-accent-quiet);color:var(--t-accent-ink)}
+.mem-reflection-views b{font-variant-numeric:tabular-nums}
 
 /* 页头：对象/角色选择与一句话状态同排。选择器是「这一页在讲谁」，
    不是筛选项，所以它永远在最上面，且不随视图切换而消失。 */
@@ -609,6 +626,10 @@
   .mem-block-head,.mem-filters{padding:var(--sp-3) var(--sp-3)}
   .mem-stages li{font-size:var(--fs-micro)}
   .mem-btn{min-height:40px}
+  .mem-overview-grid{grid-template-columns:repeat(2,minmax(0,1fr));padding-inline:var(--sp-3)}
+  .mem-linkage{margin-inline:var(--sp-3)}
+  .mem-linkage-counts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .mem-reflection-views{padding-inline:var(--sp-3)}
 }
 
 .memory-route{min-width:0}

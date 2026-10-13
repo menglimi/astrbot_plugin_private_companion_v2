@@ -1,0 +1,717 @@
+from __future__ import annotations
+
+import json
+import mimetypes
+import re
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from aiohttp import web
+from astrbot.api import logger
+
+from companion_v2.games.models import GameRoom
+from companion_v2.games.room_manager import RoomManager
+
+
+class GameRoomServer:
+    """Serve the mobile game UI without sharing AstrBot's dashboard port."""
+
+    ASSETS = {"index.html", "app.css", "app.js", "lucide.min.js",
+              "native.html", "native.css", "native.js"}
+    TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{24,80}")
+    TRUSTED_BROWSER_COOKIE = "game_companion_device"
+
+    def __init__(
+        self,
+        plugin: Any,
+        manager: RoomManager,
+        *,
+        host: str,
+        port: int,
+        web_root: Path,
+    ) -> None:
+        self.plugin = plugin
+        self.manager = manager
+        self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        self.requested_port = max(1, min(int(port), 65535))
+        self.port = self.requested_port
+        self.web_root = Path(web_root)
+        self._runner: web.AppRunner | None = None
+        self._site: web.BaseSite | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._runner is not None and self._site is not None
+
+    @property
+    def local_base_url(self) -> str:
+        host = "127.0.0.1" if self.host in {"0.0.0.0", "::", "[::]"} else self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}"
+
+    async def start(self) -> None:
+        """Start on the configured port or one of the next ten ports."""
+        if self.running:
+            return
+        missing = [name for name in self.ASSETS if not (self.web_root / name).is_file()]
+        if missing:
+            raise RuntimeError("游戏页面静态资源不完整：" + "、".join(sorted(missing)))
+        app = self._build_app()
+        self._runner = web.AppRunner(app, access_log=None)
+        await self._runner.setup()
+        last_error: OSError | None = None
+        for candidate in range(
+            self.requested_port, min(65535, self.requested_port + 10) + 1
+        ):
+            site = web.TCPSite(self._runner, self.host, candidate)
+            try:
+                await site.start()
+            except OSError as exc:
+                last_error = exc
+                continue
+            self._site = site
+            self.port = candidate
+            return
+        await self.stop()
+        raise RuntimeError(
+            f"无法监听游戏端口 {self.requested_port}-{min(65535, self.requested_port + 10)}：{last_error}"
+        )
+
+    def _build_app(self) -> web.Application:
+        """Build the room application for the real server and isolated tests."""
+        app = web.Application(
+            # A 384 KiB image expands to slightly over 512 KiB once base64 and
+            # the JSON envelope are included. Raw image validation remains
+            # capped in the plugin before it reaches the visual provider.
+            client_max_size=768 * 1024,
+            middlewares=[self._error_middleware],
+        )
+        app.router.add_get("/", self._serve_index)
+        app.router.add_get("/room/{access_token}", self._serve_index)
+        app.router.add_get("/native/{access_token}", self._serve_native)
+        app.router.add_get("/assets/{name}", self._serve_asset)
+        app.router.add_get("/native-assets/{name}", self._serve_native_asset)
+        app.router.add_get("/health", self._health)
+        app.router.add_get("/api/native/{access_token}/state", self._native_state)
+        app.router.add_post("/api/native/{access_token}/action", self._native_action)
+        app.router.add_post("/api/room/{access_token}/join", self._join)
+        app.router.add_get("/api/room/{access_token}/state", self._state)
+        app.router.add_post(
+            "/api/room/{access_token}/identity/forget", self._forget_identity
+        )
+        app.router.add_post("/api/room/{access_token}/claim", self._claim)
+        app.router.add_post("/api/room/{access_token}/start", self._start_game)
+        app.router.add_post("/api/room/{access_token}/move", self._move)
+        app.router.add_post("/api/room/{access_token}/dice/action", self._dice_action)
+        app.router.add_post(
+            "/api/room/{access_token}/blackjack/action", self._blackjack_action
+        )
+        app.router.add_post(
+            "/api/room/{access_token}/draw/strokes", self._draw_strokes
+        )
+        app.router.add_post(
+            "/api/room/{access_token}/draw/guess", self._draw_guess
+        )
+        app.router.add_post(
+            "/api/room/{access_token}/soup/question", self._soup_question
+        )
+        app.router.add_post("/api/room/{access_token}/soup/answer", self._soup_answer)
+        app.router.add_post("/api/room/{access_token}/soup/hint", self._soup_hint)
+        app.router.add_post("/api/room/{access_token}/soup/reverse", self._soup_reverse)
+        app.router.add_post("/api/room/{access_token}/soup/correct", self._soup_correct)
+        app.router.add_post(
+            "/api/room/{access_token}/seat/swap/request", self._seat_swap_request
+        )
+        app.router.add_post(
+            "/api/room/{access_token}/seat/swap/respond", self._seat_swap_respond
+        )
+        app.router.add_post("/api/room/{access_token}/rematch", self._rematch)
+        app.router.add_post("/api/room/{access_token}/chat", self._chat)
+        app.router.add_post("/api/room/{access_token}/leave", self._leave)
+        return app
+
+    async def stop(self) -> None:
+        """Stop only the server instance owned by this plugin."""
+        site, runner = self._site, self._runner
+        self._site = None
+        self._runner = None
+        if site is not None:
+            await site.stop()
+        if runner is not None:
+            await runner.cleanup()
+
+    async def _serve_index(self, _request: web.Request) -> web.FileResponse:
+        return web.FileResponse(
+            self.web_root / "index.html",
+            headers=self._headers("text/html; charset=utf-8"),
+        )
+
+    async def _serve_native(self, request: web.Request) -> web.FileResponse:
+        ticket = str(request.match_info.get("access_token") or "")
+        if not self.TOKEN_PATTERN.fullmatch(ticket):
+            raise web.HTTPNotFound(text="对局链接无效")
+        try:
+            await self._native_provider().web_state(ticket)
+        except ValueError as exc:
+            code = str(getattr(exc, "code", ""))
+            if code == "game_web_link_expired":
+                raise web.HTTPGone(text="对局链接已失效") from exc
+            raise web.HTTPNotFound(text="对局链接无效") from exc
+        return web.FileResponse(
+            self.web_root / "native.html",
+            headers=self._headers("text/html; charset=utf-8"),
+        )
+
+    async def _serve_native_asset(self, request: web.Request) -> web.FileResponse:
+        name = str(request.match_info.get("name") or "")
+        if name not in {"native.css", "native.js"}:
+            raise web.HTTPNotFound()
+        path = self.web_root / name
+        return web.FileResponse(
+            path,
+            headers=self._headers(
+                mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            ),
+        )
+
+    def _native_provider(self) -> Any:
+        provider = getattr(self.plugin, "_native_provider", None)
+        if provider is None or not callable(getattr(provider, "web_state", None)):
+            raise RuntimeError("V2 原生游戏执行端当前不可用")
+        return provider
+
+    async def _native_state(self, request: web.Request) -> web.Response:
+        ticket = str(request.match_info.get("access_token") or "")
+        if not self.TOKEN_PATTERN.fullmatch(ticket):
+            raise web.HTTPNotFound(text="对局链接无效")
+        return self._response(await self._native_provider().web_state(ticket))
+
+    async def _native_action(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        ticket = str(request.match_info.get("access_token") or "")
+        if not self.TOKEN_PATTERN.fullmatch(ticket):
+            raise web.HTTPNotFound(text="对局链接无效")
+        payload = await self._payload(request)
+        return self._response(await self._native_provider().web_action(ticket, payload))
+
+    async def _serve_asset(self, request: web.Request) -> web.FileResponse:
+        name = str(request.match_info.get("name") or "")
+        if name not in self.ASSETS - {"index.html"}:
+            raise web.HTTPNotFound()
+        path = self.web_root / name
+        return web.FileResponse(
+            path,
+            headers=self._headers(
+                mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            ),
+        )
+
+    async def _health(self, _request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "ok": True,
+                "plugin": "astrbot_plugin_private_companion_v2.game",
+                "rooms": len(self.manager.rooms),
+            },
+            headers=self._headers("application/json"),
+        )
+
+    async def _join(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        trusted_identity = await self._resolve_trusted_identity(request)
+        visitor = await self.manager.join(
+            room,
+            str(payload.get("visitor_token") or ""),
+            trusted_identity=trusted_identity,
+        )
+        return await self._identity_response(
+            request,
+            room,
+            visitor,
+            {
+                "visitor_token": visitor.token,
+            },
+            remember=payload.get("remember_identity") is True,
+            trusted_identity=trusted_identity,
+        )
+
+    async def _state(self, request: web.Request) -> web.Response:
+        room = self._room(request)
+        visitor_token = str(request.query.get("visitor_token") or "")
+        visitor = await self.manager.heartbeat(room, visitor_token)
+        return await self._identity_response(
+            request,
+            room,
+            visitor,
+            {},
+            remember=str(request.query.get("remember_identity") or "") == "1",
+        )
+
+    async def _forget_identity(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.heartbeat(room, visitor_token)
+        raw_token = str(request.cookies.get(self.TRUSTED_BROWSER_COOKIE) or "")
+        store = getattr(self.plugin, "trusted_identity_store", None)
+        if store is not None and raw_token:
+            await store.revoke_token(raw_token)
+        snapshot = room.public_snapshot(visitor_token)
+        snapshot.update(self._trusted_browser_snapshot(active=False, expires_at=0))
+        response = self._response({"room": snapshot, "forgotten": True})
+        response.del_cookie(
+            self.TRUSTED_BROWSER_COOKIE,
+            path=self._trusted_cookie_path(),
+        )
+        return response
+
+    async def _claim(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.require_visitor_identity(room, visitor_token)
+        await self.manager.claim_and_start(
+            room,
+            visitor_token,
+            str(payload.get("side") or "human_black"),
+        )
+        return self._response(
+            {"room": room.public_snapshot(visitor_token)}
+        )
+
+    async def _start_game(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.require_visitor_identity(room, visitor_token)
+        await self.manager.start_game(
+            room, visitor_token, str(payload.get("side") or "human_black")
+        )
+        return self._response({"room": room.public_snapshot(visitor_token)})
+
+    async def _move(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.player_move(
+            room,
+            visitor_token,
+            row=int(payload.get("row", -1)),
+            column=int(payload.get("column", -1)),
+            from_row=int(payload.get("from_row", -1)),
+            from_column=int(payload.get("from_column", -1)),
+            to_row=int(payload.get("to_row", -1)),
+            to_column=int(payload.get("to_column", -1)),
+            interaction=str(payload.get("interaction") or "click"),
+            color=int(payload.get("color", 0)),
+            pair_row=int(payload.get("pair_row", -1)),
+            pair_column=int(payload.get("pair_column", -1)),
+            pair_color=int(payload.get("pair_color", 0)),
+        )
+        return self._response({"room": room.public_snapshot(visitor_token)})
+
+    async def _rematch(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.request_rematch(room, visitor_token)
+        return self._response({"room": room.public_snapshot(visitor_token)})
+
+    async def _chat(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        result = await self.plugin.submit_room_chat(
+            room,
+            str(payload.get("text") or ""),
+            visitor_token=visitor_token,
+        )
+        return self._response({**result, "room": room.public_snapshot(visitor_token)})
+
+    async def _dice_action(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.player_dice_action(
+            room, visitor_token, str(payload.get("action") or "")
+        )
+        return self._response({"room": room.public_snapshot(visitor_token)})
+
+    async def _blackjack_action(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.player_blackjack_action(
+            room, visitor_token, str(payload.get("action") or "")
+        )
+        return self._response({"room": room.public_snapshot(visitor_token)})
+
+    async def _draw_strokes(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.update_drawing(
+            room, visitor_token, payload.get("strokes")
+        )
+        return self._response({"room": room.public_snapshot(visitor_token)})
+
+    async def _draw_guess(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        result = await self.plugin.submit_draw_guess(
+            room,
+            visitor_token=visitor_token,
+            image_data_url=str(payload.get("image_data_url") or ""),
+        )
+        return self._response(
+            {**result, "room": room.public_snapshot(visitor_token)}
+        )
+
+    async def _soup_question(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        result = await self.plugin.submit_turtle_soup_question(
+            room,
+            str(payload.get("text") or ""),
+            source="web",
+            visitor_token=visitor_token,
+        )
+        return self._response({**result, "room": room.public_snapshot(visitor_token)})
+
+    async def _soup_answer(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        result = await self.plugin.submit_turtle_soup_answer(
+            room,
+            str(payload.get("text") or ""),
+            source="web",
+            visitor_token=visitor_token,
+        )
+        return self._response({**result, "room": room.public_snapshot(visitor_token)})
+
+    async def _soup_hint(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        hint = await self.manager.request_turtle_soup_hint(
+            room,
+            source="web",
+            visitor_token=visitor_token,
+        )
+        return self._response(
+            {
+                "hint": hint,
+                "room": room.public_snapshot(visitor_token),
+            }
+        )
+
+    async def _soup_reverse(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        result = await self.plugin.submit_reverse_turtle_soup_turn(
+            room,
+            str(payload.get("text") or ""),
+            source="web",
+            visitor_token=visitor_token,
+        )
+        return self._response({**result, "room": room.public_snapshot(visitor_token)})
+
+    async def _soup_correct(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        await self.manager.confirm_reverse_turtle_soup_guess(
+            room, source="web", visitor_token=visitor_token
+        )
+        return self._response({"room": room.public_snapshot(visitor_token)})
+
+    async def _seat_swap_request(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        request_id = await self.manager.request_seat_swap(
+            room,
+            visitor_token,
+            int(payload.get("target_number") or 0),
+        )
+        return self._response(
+            {
+                "request_id": request_id,
+                "room": room.public_snapshot(visitor_token),
+            }
+        )
+
+    async def _seat_swap_respond(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        visitor_token = str(payload.get("visitor_token") or "")
+        accepted = payload.get("accepted") is True
+        await self.manager.resolve_seat_swap(
+            room,
+            visitor_token,
+            str(payload.get("request_id") or ""),
+            accepted=accepted,
+        )
+        return self._response(
+            {"accepted": accepted, "room": room.public_snapshot(visitor_token)}
+        )
+
+    async def _leave(self, request: web.Request) -> web.Response:
+        self._require_origin(request)
+        room = self._room(request)
+        payload = await self._payload(request)
+        await self.manager.leave(room, str(payload.get("visitor_token") or ""))
+        return self._response({"left": True})
+
+    async def _resolve_trusted_identity(self, request: web.Request) -> Any | None:
+        if not self._trusted_browser_enabled():
+            return None
+        store = getattr(self.plugin, "trusted_identity_store", None)
+        if store is None:
+            return None
+        token = str(request.cookies.get(self.TRUSTED_BROWSER_COOKIE) or "")
+        return await store.resolve(token)
+
+    async def _identity_response(
+        self,
+        request: web.Request,
+        room: GameRoom,
+        visitor: Any,
+        data: dict[str, Any],
+        *,
+        remember: bool,
+        trusted_identity: Any | None = None,
+    ) -> web.Response:
+        issued_token = ""
+        identity = (
+            trusted_identity
+            if trusted_identity is not None
+            else await self._resolve_trusted_identity(request)
+        )
+        active = bool(
+            identity is not None
+            and visitor.identity_confirmed
+            and identity.qq == visitor.qq
+        )
+        enrollment_pending = bool(
+            getattr(visitor, "trusted_browser_enrollment_pending", False)
+        )
+        if (
+            self._trusted_browser_enabled()
+            and remember
+            and not room.admin_room
+            and enrollment_pending
+            and visitor.identity_confirmed
+            and visitor.qq
+            and not active
+        ):
+            store = getattr(self.plugin, "trusted_identity_store", None)
+            if store is not None:
+                old_token = str(
+                    request.cookies.get(self.TRUSTED_BROWSER_COOKIE) or ""
+                )
+                if old_token:
+                    await store.revoke_token(old_token)
+                issued_token, identity = await store.issue(
+                    visitor.qq, visitor.display_name
+                )
+                active = True
+        if enrollment_pending:
+            visitor.trusted_browser_enrollment_pending = False
+        snapshot = room.public_snapshot(visitor.token)
+        snapshot.update(
+            self._trusted_browser_snapshot(
+                active=active,
+                expires_at=float(getattr(identity, "expires_at", 0) or 0)
+                if active
+                else 0,
+            )
+        )
+        response = self._response({**data, "room": snapshot})
+        if issued_token:
+            ttl_days = int(
+                getattr(self.plugin, "trusted_browser_ttl_days", 30) or 30
+            )
+            response.set_cookie(
+                self.TRUSTED_BROWSER_COOKIE,
+                issued_token,
+                max_age=max(1, min(ttl_days, 365)) * 86400,
+                path=self._trusted_cookie_path(),
+                secure=True,
+                httponly=True,
+                samesite="Lax",
+            )
+        return response
+
+    def _trusted_browser_snapshot(
+        self, *, active: bool, expires_at: float
+    ) -> dict[str, object]:
+        enabled = self._trusted_browser_enabled()
+        return {
+            "trusted_browser_available": enabled,
+            "trusted_browser_active": bool(enabled and active),
+            "trusted_browser_expires_at": expires_at if enabled and active else 0,
+            "trusted_browser_ttl_days": int(
+                getattr(self.plugin, "trusted_browser_ttl_days", 30) or 30
+            ),
+        }
+
+    def _trusted_browser_enabled(self) -> bool:
+        external_base = str(
+            getattr(self.plugin, "external_base_url", "") or ""
+        )
+        return bool(
+            getattr(self.plugin, "trusted_browser_enabled", False)
+            and (
+                getattr(self.plugin, "public_base_url", "")
+                or external_base
+            )
+            and getattr(self.plugin, "trusted_identity_store", None) is not None
+        )
+
+    def _trusted_cookie_path(self) -> str:
+        path = str(getattr(self.plugin, "trusted_browser_cookie_path", "/") or "/")
+        return path if path.startswith("/") else "/"
+
+    @web.middleware
+    async def _error_middleware(
+        self, request: web.Request, handler: Any
+    ) -> web.StreamResponse:
+        try:
+            return await handler(request)
+        except web.HTTPException as exc:
+            if request.path.startswith("/api/"):
+                return web.json_response(
+                    {"status": "error", "message": exc.text or exc.reason},
+                    status=exc.status,
+                    headers=self._headers("application/json"),
+                )
+            raise
+        except PermissionError as exc:
+            return web.json_response(
+                {"status": "error", "message": str(exc)},
+                status=403,
+                headers=self._headers("application/json"),
+            )
+        except (TypeError, ValueError) as exc:
+            return web.json_response(
+                {"status": "error", "message": str(exc)},
+                status=400,
+                headers=self._headers("application/json"),
+            )
+        except RuntimeError as exc:
+            return web.json_response(
+                {"status": "error", "message": str(exc)},
+                status=503,
+                headers=self._headers("application/json"),
+            )
+        except Exception as exc:
+            logger.warning("[GameCompanion] 房间请求处理失败: %s", exc, exc_info=True)
+            return web.json_response(
+                {"status": "error", "message": "房间服务处理请求失败"},
+                status=500,
+                headers=self._headers("application/json"),
+            )
+
+    def _room(self, request: web.Request) -> GameRoom:
+        token = str(request.match_info.get("access_token") or "")
+        if not self.TOKEN_PATTERN.fullmatch(token):
+            raise web.HTTPNotFound(text="房间链接无效")
+        room = self.manager.by_access_token(token)
+        if room is None:
+            reason = self.manager.closed_reason_by_access_token(token)
+            raise web.HTTPGone(text=reason or "房间已结束或链接已经失效")
+        return room
+
+    async def _payload(self, request: web.Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, TypeError):
+            raise web.HTTPBadRequest(text="请求内容不是有效 JSON") from None
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="请求内容格式无效")
+        return payload
+
+    def _require_origin(self, request: web.Request) -> None:
+        if not self._origin_allowed(request):
+            raise web.HTTPForbidden(text="房间来源校验失败")
+
+    def _origin_allowed(self, request: Any) -> bool:
+        origin = str(request.headers.get("Origin") or "").strip()
+        if not origin:
+            return False
+        try:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return False
+            origin_value = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            request_value = (
+                f"{str(request.scheme).lower()}://{str(request.host).lower()}"
+            )
+        except Exception:
+            return False
+        if origin_value == request_value:
+            return True
+        public_urls = (
+            str(getattr(self.plugin, "public_base_url", "") or ""),
+            str(getattr(self.plugin, "external_base_url", "") or ""),
+            str(getattr(getattr(self.plugin, "quick_tunnel", None), "url", "") or ""),
+        )
+        for public_url in public_urls:
+            try:
+                public = urlsplit(public_url)
+                if (
+                    public.scheme
+                    and public.netloc
+                    and origin_value
+                    == f"{public.scheme.lower()}://{public.netloc.lower()}"
+                ):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _response(data: dict[str, Any]) -> web.Response:
+        return web.json_response({"status": "ok", "data": data})
+
+    @staticmethod
+    def _headers(content_type: str) -> dict[str, str]:
+        headers = {
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        }
+        if content_type.startswith("text/html"):
+            headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            )
+        return headers

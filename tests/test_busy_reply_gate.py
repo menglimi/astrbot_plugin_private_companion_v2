@@ -509,6 +509,22 @@ class BusyGateProactiveTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.gate(app, context, {"busy_reply_gate_enabled": True, **gate_changes})
         return host, app, context, batch
 
+    async def test_busy_gate_reads_the_role_calendar_from_another_private_window(self):
+        host = await self.start(self.host())
+        app = host.application
+        owner_context = self.contact_context()
+        self.grant(self.important, SCOPE, "calendar.write")
+        self.calendar(app, owner_context, start=NOW, title="项目会议")
+
+        other_context = self.other_window_context("shared-calendar-window")
+        self.gate(app, other_context, {"busy_reply_gate_enabled": True})
+        settings = busy_gate.SettingsReader(app.runtime).read(other_context)
+        items = busy_gate.readable_items(app.runtime, other_context)
+        decision = busy_gate.busy_context(items, now=self.clock.now(), settings=settings)
+
+        self.assertEqual([item["id"] for item in items], ["plan"])
+        self.assertTrue(decision["busy"])
+
     async def test_a_busy_calendar_holds_automatic_contact_and_resumes_after_the_window(self):
         host, app, context, batch = await self.scheduled_with_busy_window(
             busy_reply_proactive_resume_buffer_minutes=10)

@@ -17,7 +17,7 @@ from companion_v2.identity_policy.private_domain import source_ref
 from companion_v2.role_work.growth.configuration import skills_enabled
 from .service import FIELDS, INSTRUCTION
 from .configuration import FEATURE_SWITCHES
-from .ownership import role_schedule_key
+from .ownership import role_owner, role_schedule_key
 from . import humanized
 from . import mood
 from .cycle_prompts import INSTRUCTION as CYCLE_INSTRUCTION, MAINTENANCE as CYCLE_MAINTENANCE, PHASE_HINTS
@@ -26,6 +26,7 @@ from .cycle_prompts import INSTRUCTION as CYCLE_INSTRUCTION, MAINTENANCE as CYCL
 logger = getLogger(__name__)
 
 KIND = "role.state.maintain"
+PREFLIGHT_RETRY_SECONDS = 30
 # The local patrol reads state once per bound role and never calls a model; the
 # throttle only keeps the wake loop from re-reading configuration on every tick.
 PATROL_CHECK_SECONDS = 60
@@ -95,12 +96,13 @@ def _mood_instruction(*, enabled, axes, gate, reference, allowed, baseline, inte
     """Per-round mood output contract; the model still authors every number."""
     if not enabled:
         return "心情模拟已关闭，mood 使用 null，conditions 不添加 mood 项。"
-    lead = ("mood 沿用上一轮的结构：baseline、joy、anger、sorrow、fear、intensity（mild、moderate、strong 或 null）、description。"
+    lead = ("mood 沿用上一轮的结构：baseline、joy、anger、sorrow、fear 都必须是 1 到 10 的 JSON 整数，禁止小数；"
+            "intensity 为 mild、moderate、strong 或 null，description 为简短文字或 null。"
             "情绪随时间与无交互自然回归基线：一次夸奖不让你整日亢奋，一次不愉快不让你永久低落；"
             "数值只是语气与浓度，不覆盖原人格、当前事实和你的判断，也不改变是否回应。"
             "description 只写你自己的主观感受，不诊断用户心情，也不把负面情绪归咎于用户。" if axes else
-            "mood 本轮首次给出结构对象：baseline、joy、anger、sorrow、fear（各 1 到 10 的整数）、"
-            "intensity（mild、moderate、strong 或 null）、description（你自己的主观感受，只写自己）；"
+            "mood 本轮首次给出结构对象：baseline、joy、anger、sorrow、fear 都必须是 1 到 10 的 JSON 整数，禁止小数；"
+            "intensity 为 mild、moderate、strong 或 null，description 为简短文字或 null（只写自己的主观感受）；"
             "上一轮只有文字时把它的意思并入 description，保持连续。")
     return lead + (mood.prompts.maintenance(reference=reference, allowed=allowed, baseline=baseline,
         half_life_minutes=half_life, interest_level=interest, neutral_band=band, cross_window=cross_window) if gate == "open"
@@ -147,6 +149,8 @@ class StateMaintenance:
         self.patrol_results = {}
         self._patrol_checked_at = None
         self._scan_after = None
+        self._budget_checks = {}
+        self._preflight_checks = {}
         self.registrations = (TaskRegistration(TaskDefinition(KIND, "role.state", KIND, Lane.BACKGROUND,
             side_effect=SideEffect.LOCAL, binding=ProviderBinding("role.state", "local", "1", "state-1"),
             timeout_seconds=180, max_attempts=1, concurrency=1), self.validate),)
@@ -155,9 +159,90 @@ class StateMaintenance:
         self.app, self.service, self.tasks, self.gateway = app, app.role_state, app.tasks, app.gateway
         self.runner = ExactTaskRunner(self.tasks, frozenset({KIND}), self.generate, waiting=app.background_waiting)
 
-    def bind(self, context, instruction, *, guard=None):
+    def _can_anchor_schedule(self, context):
+        try:
+            self.service.access.check(context, "role.state.read")
+            self.service.access.check(context, KIND)
+        except TaskError:
+            return False
+        return True
+
+    def _current_role_binding(self, context):
+        """Find a currently authorized execution context for this role-owned schedule."""
+        owner = role_owner(context)
+        exact = self.bindings.get(context.key)
+        if exact is not None and self._can_anchor_schedule(exact[0]):
+            return exact
+        candidates = reversed(tuple(self.bindings.values()))
+        replacement = next((binding for binding in candidates
+                            if binding is not exact and role_owner(binding[0]) == owner
+                            and self._can_anchor_schedule(binding[0])), None)
+        return replacement or exact
+
+    def _is_schedule_anchor(self, context):
+        row = self.runtime.read_one("SELECT context_json FROM role_state_schedules WHERE context_key = ?",
+                                    (role_schedule_key(context),))
+        return row is not None and row["context_json"] == encode(context)
+
+    def bind(self, context, instruction, *, guard=None, refresh=True):
         old = self.bindings.get(context.key)
-        self.bindings[context.key] = (context, instruction, guard or (old[2] if old else None))
+        effective_guard = guard or (old[2] if old else None)
+        binding_changed = old is None or old[:2] != (context, instruction) or old[2] != effective_guard
+        self.bindings[context.key] = (context, instruction, effective_guard)
+        schedule_changed = self._bind_schedule(context, instruction)
+        if refresh and (schedule_changed or binding_changed and self._is_schedule_anchor(context)):
+            self._clear_preflight(context)
+
+    async def bind_async(self, context, instruction, *, guard=None):
+        """Keep live bindings on the host loop and prepare schedules off it."""
+        old = self.bindings.get(context.key)
+        effective_guard = guard or (old[2] if old else None)
+        binding_changed = old is None or old[:2] != (context, instruction) or old[2] != effective_guard
+        self.bindings[context.key] = (context, instruction, effective_guard)
+        schedule_changed = await asyncio.to_thread(self._bind_schedule, context, instruction, notify=False)
+        if schedule_changed or binding_changed and self._is_schedule_anchor(context):
+            self._clear_preflight(context)
+        self.app.notify()
+
+    def _clear_preflight(self, context):
+        schedule_key = role_schedule_key(context)
+        self._preflight_checks.pop(schedule_key, None)
+        row = self.runtime.read_one("SELECT result_json FROM role_state_schedules WHERE context_key = ?",
+                                    (schedule_key,))
+        if row is None or not row["result_json"]:
+            return
+        result = json.loads(row["result_json"])
+        if (not isinstance(result, dict) or result.get("state") not in {"waiting", "blocked"}
+                or not result.get("stage")):
+            return
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE role_state_schedules SET result_json = NULL WHERE context_key = ? AND result_json = ?",
+                               (schedule_key, row["result_json"]))
+        self.results.pop(context.key, None)
+
+    def _record_preflight(self, row, context, *, state, code, stage):
+        schedule_key = row["context_key"]
+        result = {"state": state, "code": code, "stage": stage}
+        encoded = encode(result)
+        current = self.runtime.read_one("SELECT result_json FROM role_state_schedules WHERE context_key = ?",
+                                        (schedule_key,))
+        changed = current is not None and current["result_json"] != encoded
+        if changed:
+            with self.runtime.transaction() as connection:
+                connection.execute("UPDATE role_state_schedules SET result_json = ? WHERE context_key = ?",
+                                   (encoded, schedule_key))
+        key = context.key if context is not None else schedule_key
+        self.results[key] = result
+        self._preflight_checks[schedule_key] = self.tasks.now() + timedelta(seconds=PREFLIGHT_RETRY_SECONDS)
+        if changed:
+            if code == "state_role_context_unavailable":
+                logger.info("[CompanionV2] 角色状态计划已保留，等待可信运行上下文 schedule=%s",
+                            schedule_key[:12])
+            else:
+                logger.warning("[CompanionV2] 状态维护预检未通过 schedule=%s stage=%s code=%s",
+                               schedule_key[:12], stage, code)
+
+    def _bind_schedule(self, context, instruction, *, notify=True):
         settings, token = self.service.settings(context)
         schedule_key = role_schedule_key(context)
         values = {"values": settings, "token": token, "instruction": instruction}
@@ -178,15 +263,22 @@ class StateMaintenance:
             next_at, result, revision = row["next_at"], row["result_json"], row["revision"]
         else:
             next_at, result, revision = stamp(self.tasks.now()), None, 0
+        context_json = encode(context)
+        if row is not None and row["context_json"] != context_json:
+            if not settings["enabled"] or not self._can_anchor_schedule(context):
+                context_json = row["context_json"]
+        elif row is None and legacy and settings["enabled"] and not self._can_anchor_schedule(context):
+            context_json = min(legacy, key=lambda item: item["next_at"])["context_json"]
         settings_match = row is not None and row["settings_json"] == encoded
         if settings_match and not legacy:
-            if row["context_json"] != encode(context):
+            context_changed = row["context_json"] != context_json
+            if context_changed:
                 with self.runtime.transaction() as connection:
                     connection.execute("UPDATE role_state_schedules SET context_json = ? WHERE context_key = ?",
-                                       (encode(context), schedule_key))
-            return
+                                       (context_json, schedule_key))
+            return context_changed
         if row is None and not legacy and not settings["enabled"]:
-            return
+            return False
         due_at = next_at if settings_match or row is None and legacy else stamp(self.tasks.now())
         result = result if settings_match or row is None and legacy else None
         with self.runtime.transaction() as connection:
@@ -194,16 +286,21 @@ class StateMaintenance:
                 ON CONFLICT(context_key) DO UPDATE SET context_json=excluded.context_json,
                 settings_json=excluded.settings_json, next_at=excluded.next_at,
                 revision=excluded.revision, enabled=excluded.enabled, result_json=excluded.result_json""",
-                (schedule_key, encode(context), encoded, due_at, revision + 1,
+                (schedule_key, context_json, encoded, due_at, revision + 1,
                  int(settings["enabled"]), result))
             if legacy:
                 connection.executemany("DELETE FROM role_state_schedules WHERE context_key = ?",
                                        ((item["context_key"],) for item in legacy))
         if legacy:
             self._scan_after = None
-            self.app.notify()
+            if notify:
+                self.app.notify()
+        return True
 
     def foreground_busy(self, context):
+        from companion_v2.conversation.native_turns import foreground_busy
+        if foreground_busy(self.runtime, context):
+            return True
         return self.runtime.read_one("""SELECT 1 FROM conversation_flows f JOIN conversation_batches b USING(batch_id)
             WHERE f.state IN ('collecting','generating','delivering')
               AND json_extract(b.context_json, '$.role_binding.scope.installation_id') = ?
@@ -222,7 +319,28 @@ class StateMaintenance:
             parameters.append(since)
         query += " ORDER BY f.sequence DESC, i.position DESC LIMIT 4"
         rows = self.runtime.read_all(query, tuple(parameters))
-        return tuple(event_from_document(json.loads(row["event_json"]), context) for row in reversed(rows))
+        events = [event_from_document(json.loads(row["event_json"]), context) for row in rows]
+        events.extend(self._native_events(context, since=since, limit=4))
+        events.sort(key=lambda event: (event.received_at, event.scoped_key))
+        return tuple(events[-4:])
+
+    def _native_events(self, context, *, since=None, limit=32):
+        from companion_v2.conversation.native_observations import inbound_event, input_rows_for_context, validate_observation
+        from companion_v2.conversation.reset import source_current
+        events = []
+        for row in input_rows_for_context(self.runtime, context, start=since, limit=limit):
+            try:
+                event = inbound_event(row)
+                if since is not None and stamp(event.received_at) <= since:
+                    continue
+                validate_observation(self.runtime, row, context, event.source)
+                if not source_current(self.runtime, event.source):
+                    continue
+                self.app.messages._read_source(event.source, context, event.capability, self.tasks.now())
+            except TaskError:
+                continue
+            events.append(event)
+        return tuple(events)
 
     def _inputs(self, context, events):
         materials, sources = [], []
@@ -280,9 +398,12 @@ class StateMaintenance:
             WHERE b.origin_key = ? AND i.withdrawn = 0 AND json_extract(i.event_json, '$.received_at') > ?
             ORDER BY json_extract(i.event_json, '$.received_at') DESC LIMIT 32""",
             (context.key, stamp(at - timedelta(minutes=settings["mood_interest_window_minutes"]))))
+        candidates = [event_from_document(json.loads(row["event_json"]), context) for row in rows]
+        candidates.extend(self._native_events(context,
+            since=stamp(at - timedelta(minutes=settings["mood_interest_window_minutes"])), limit=32))
+        candidates.sort(key=lambda event: (event.received_at, event.scoped_key), reverse=True)
         recent, characters, materials, sources = [], 0, [], []
-        for row in reversed(rows):
-            event = event_from_document(json.loads(row["event_json"]), context)
+        for event in reversed(candidates[:32]):
             try:
                 source = self.app.messages._read_source(event.source, context, event.capability, self.tasks.now())
             except TaskError:
@@ -306,7 +427,7 @@ class StateMaintenance:
             gate = "hold"
         else:
             gate = "open" if random.random() < probability else "hold"
-        return {"axes": previous is not None, "gate": gate, "interest": interest, "messages": len(rows),
+        return {"axes": previous is not None, "gate": gate, "interest": interest, "messages": len(recent),
                 "characters": characters, "reference": hint["reference"], "allowed": hint["allowed"],
                 "baseline": baseline, "materials": tuple(materials), "sources": tuple(sources)}
 
@@ -347,7 +468,8 @@ class StateMaintenance:
                                        *(source_ref(s) for s in dependencies))))
         self.service.evidence.validate(context, sources)
         return {"context": context, "instruction": instruction, "request_id": request_id, "at": now,
-            "revision": record["revision"] if record else 0, "record_hash": digest(record), "previous": previous,
+            "revision": record["revision"] if record else 0, "record_hash": digest(record), "record": record,
+            "previous": previous,
             "settings": settings, "token": token, "sources": sources, "materials": materials,
             "calendar": calendar, "activities": activities, "cycle_timeline": cycle_timeline,
             "mood_round": mood_round, "sleep_execution": self.service.body_clock.read(context),
@@ -388,6 +510,9 @@ class StateMaintenance:
         binding = self.bindings.get(context.key)
         if binding is None or binding[1] != instruction:
             raise TaskError("state_not_bound", "bind the current host persona before maintenance")
+        deferred = self.gateway.ledger.background_deferral(context, KIND, at=self.tasks.now())
+        if deferred:
+            return deferred
         if binding[2] is not None:
             await binding[2](context.scope, context.role_binding, instruction)
         job = self.prepare(context, instruction, request_id)
@@ -400,12 +525,35 @@ class StateMaintenance:
                 require(self.tasks.discard_queued(key, reason="owner_unavailable"))
             task = require(self.tasks.read(context, key))
             response = {"task_id": key, "state": task.state, "reason": task.reason}
+            if result.retry_at is not None:
+                response.update(state="deferred", retry_at=stamp(result.retry_at))
             if result.failure_code:
                 response["code"] = result.failure_code
             return response
         finally:
             self.pending.pop(key, None)
             self.committed.discard(key)
+
+    def _retain_previous_mood(self, job, data):
+        """Isolate a malformed mood field so it cannot discard the rest of a valid round."""
+        if not job["settings"]["mood_enabled"] or type(data) is not dict or "mood" not in data:
+            return None
+        record = job["record"]
+        previous_value = record["values"]["mood"] if record else None
+        previous = mood.previous_axes(previous_value, record.get("mood_dynamics") if record else None)
+        try:
+            mood.validate_update(previous, data["mood"], at=job["at"],
+                half_life_minutes=job["settings"]["mood_decay_half_life_minutes"],
+                max_delta=job["settings"]["mood_update_max_delta"])
+        except TaskError as error:
+            if error.code != "role_mood_contract":
+                raise
+            try:
+                data["mood"] = mood.validate(previous_value)
+            except TaskError:
+                data["mood"] = None
+            return error
+        return None
 
     async def generate(self, run):
         job = self.pending[run.task.task_id]
@@ -440,19 +588,29 @@ class StateMaintenance:
             data = json.loads(result.draft.text)
             logger.debug("[CompanionV2][开发者追踪] 状态维护正文解析 task=%s data=%r",
                          run.task.task_id, data)
+            mood_error = None
             with self.runtime.transaction():
                 run.validate()
                 if self.foreground_busy(context):
                     raise TaskError("state_foreground_active", "defer state changes while an original reply is using them")
+                mood_error = self._retain_previous_mood(job, data)
                 run.begin_effect()
                 receipt = self.service.write(context, data=data, expected_revision=job["revision"],
                     operation_key=run.task.task_id, sources=job["sources"], projected_inputs=True,
-                    mood_interest=mood_round["interest"] if mood_round["gate"] == "open" else None)
+                    mood_interest=(mood_round["interest"] if mood_round["gate"] == "open" and mood_error is None
+                                   else None),
+                    preserve_mood_dynamics=mood_error is not None)
                 self.committed.add(run.task.task_id)
                 run.record_operation(receipt["operation_id"])
+            if mood_error is not None:
+                logger.warning("[CompanionV2] 状态维护心情字段未通过校验，已沿用上一有效心情并保存其余状态 "
+                               "task=%s detail=%s", run.task.task_id, str(mood_error))
             return TaskResult("succeeded", effect="committed", result_ref=digest(receipt),
                 receipt_ref=receipt["operation_id"], operation_id=receipt["operation_id"])
         except BaseException as error:
+            if isinstance(error, TaskError) and error.code == "role_mood_contract":
+                logger.warning("[CompanionV2] 状态维护情绪字段校验失败 task=%s detail=%s",
+                               run.task.task_id, str(error))
             logger.debug("[CompanionV2][开发者追踪] 状态维护处理失败 task=%s error_type=%s",
                          run.task.task_id, type(error).__name__, exc_info=True)
             self.gateway.ledger.discard(result.call_id)
@@ -475,7 +633,7 @@ class StateMaintenance:
                                 (encode(self.results[key]), schedule_key))
         if self.workers:
             return
-        # Seek past visited records, including retired/unbound/disabled ones.
+        # Seek past visited records, including retired/unavailable/disabled ones.
         # A stale prefix must not permanently hide another target's due work.
         after = self._scan_after
         rows = self.runtime.read_all("""SELECT * FROM role_state_schedules
@@ -484,26 +642,52 @@ class StateMaintenance:
             (after[0], after[0], after[0], after[1]) if after else (None, None, None, None))
         for row in rows:
             self._scan_after = (row["next_at"], row["context_key"])
+            now = self.tasks.now()
+            if self._preflight_checks.get(row["context_key"], now) > now:
+                continue
             context = TaskContext.restore(json.loads(row["context_json"]))
-            if context.key not in self.bindings:
-                continue  # Restart requires a fresh trusted host binding, never a stored prompt alone.
-            saved = json.loads(row["settings_json"])
+            active_binding = self._current_role_binding(context)
+            if active_binding is None:
+                self._record_preflight(row, context, state="waiting", code="state_role_context_unavailable",
+                                       stage="binding")
+                continue
+            context, instruction, guard = active_binding
+            if self._budget_checks.get(context.key, self.tasks.now()) > self.tasks.now():
+                continue
+            stage = "schedule_refresh"
             try:
-                self.bind(context, saved["instruction"])
+                self.bind(context, instruction, guard=guard)
                 row = self.runtime.read_one("SELECT * FROM role_state_schedules WHERE context_key = ?",
                                             (role_schedule_key(context),))
                 if row is None:
                     continue
                 context = TaskContext.restore(json.loads(row["context_json"]))
                 if context.key not in self.bindings:
+                    self._record_preflight(row, context, state="waiting", code="state_role_context_unavailable",
+                                           stage="binding")
                     continue
                 saved = json.loads(row["settings_json"])
+                stage = "authorization"
                 self.service.access.check(context, KIND)
+                stage = "settings"
                 settings, token = self.service.settings(context)
                 if (not settings["enabled"] or token != saved["token"] or row["next_at"] > stamp(self.tasks.now())
                         or self.foreground_busy(context) or context.key in self.workers or self.workers):
                     continue
                 now = self.tasks.now()
+                self._clear_preflight(context)
+                stage = "budget"
+                deferred = self.gateway.ledger.background_deferral(context, KIND, at=now)
+                if deferred:
+                    self.results[context.key] = deferred
+                    self._budget_checks[context.key] = now + timedelta(seconds=30)
+                    encoded = encode(deferred)
+                    if row["result_json"] != encoded:
+                        with self.runtime.transaction() as connection:
+                            connection.execute("UPDATE role_state_schedules SET result_json = ? WHERE context_key = ?",
+                                               (encoded, row["context_key"]))
+                    continue
+                self._budget_checks.pop(context.key, None)
                 with self.runtime.transaction() as connection:
                     updated = connection.execute("UPDATE role_state_schedules SET next_at = ? WHERE context_key = ? AND next_at = ? AND revision = ? AND enabled = 1",
                         (stamp(now + timedelta(minutes=settings["maintenance_minutes"])), row["context_key"],
@@ -517,7 +701,8 @@ class StateMaintenance:
                 self.worker_schedules[context.key] = row["context_key"]
                 worker.add_done_callback(lambda done: self.app.notify())
                 return
-            except TaskError:
+            except TaskError as error:
+                self._record_preflight(row, context, state="blocked", code=error.code, stage=stage)
                 continue
         if len(rows) < 16:
             self._scan_after = None

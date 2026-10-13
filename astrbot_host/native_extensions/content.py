@@ -102,8 +102,8 @@ class ContentConsumer:
         latest_at = None
         for row in rows:
             try:
-                payload = json.loads(row["payload_json"])
-                if (payload.get("schema") != "companion.content-source.v1" or payload.get("owner") != owner
+                payload = json.loads(json.loads(row["payload_json"]))
+                if (type(payload) is not dict or payload.get("schema") != "companion.content-source.v1" or payload.get("owner") != owner
                         or TaskContext.restore(payload["context"]).key != context.key
                         or type(payload.get("work_id")) is not str or not payload["work_id"]):
                     continue
@@ -118,6 +118,14 @@ class ContentConsumer:
             (context.key,))
         candidate_count = int(candidate["total"] if candidate is not None else 0)
         candidate_at = candidate["updated_at"] if candidate is not None else None
+        native = self.application.runtime.read_one("""SELECT COUNT(*) AS total, MAX(t.updated_at) AS updated_at
+            FROM runtime_metadata n JOIN execution_tasks t ON t.task_id=json_extract(n.value, '$.task_id')
+            WHERE n.key LIKE 'astrbot.core-tool.%' AND json_extract(n.value, '$.origin_key')=?
+            AND json_extract(n.value, '$.action')='content.work.save_candidate'
+            AND json_extract(n.value, '$.state')='succeeded'""", (context.key,))
+        candidate_count += int(native["total"] if native is not None else 0)
+        if native is not None and native["updated_at"]:
+            candidate_at = max(candidate_at or "", native["updated_at"])
         if candidate_at:
             latest_at = max(latest_at or "", candidate_at)
         return {"available": True, "works_count": len(works), "candidate_count": candidate_count,

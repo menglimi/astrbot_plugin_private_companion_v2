@@ -11,10 +11,14 @@ class Runtime:
 
     def read_one(self, query, parameters):
         self.calls.append((query, parameters))
+        if "FROM runtime_metadata m" in query:
+            return {"total": 0}
         return {"total": 2}
 
     def read_all(self, query, parameters):
         self.calls.append((query, parameters))
+        if "FROM runtime_metadata m" in query:
+            return []
         return [
             {"action": "image.generate", "state": "succeeded", "error_code": None,
              "created_at": "2026-10-07T10:00:00+00:00", "finished_at": "2026-10-07T10:00:03+00:00"},

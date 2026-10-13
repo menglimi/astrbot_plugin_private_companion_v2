@@ -40,11 +40,11 @@ class ContactPreferences:
     def __post_init__(self):
         object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
 
-    def reason(self, purpose, *, ignore_time_restrictions=False):
+    def reason(self, purpose, *, ignore_time_restrictions=False, ignore_master_switch=False):
         if purpose not in PURPOSES:
             raise TaskError("unknown_contact_purpose", "contact purpose must be registered")
         values = self.values
-        if not values["enabled"] or not values[purpose + ".enabled"]:
+        if (not values["enabled"] and not ignore_master_switch) or not values[purpose + ".enabled"]:
             return "proactive_disabled"
         if not ignore_time_restrictions:
             if any(until is not None and self.observed_at < until for until in
@@ -57,8 +57,9 @@ class ContactPreferences:
                 return "proactive_quiet_hours"
         return None
 
-    def require_contact(self, purpose, *, ignore_time_restrictions=False):
-        reason = self.reason(purpose, ignore_time_restrictions=ignore_time_restrictions)
+    def require_contact(self, purpose, *, ignore_time_restrictions=False, ignore_master_switch=False):
+        reason = self.reason(purpose, ignore_time_restrictions=ignore_time_restrictions,
+                             ignore_master_switch=ignore_master_switch)
         if reason:
             raise TaskError(reason, "current contact preferences do not permit this contact")
 

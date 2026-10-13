@@ -56,6 +56,9 @@ class ResponseDiagnostics:
     parsed: ResponseTextSummary | None = None
     visible: ResponseTextSummary | None = None
     failure: ModelFailure | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    status_code: int | None = None
 
     def __post_init__(self):
         if (type(self.completion_present) is not bool or self.finish_reason not in FINISH_REASONS
@@ -63,16 +66,23 @@ class ResponseDiagnostics:
                 or any(value is not None and not isinstance(value, ResponseTextSummary)
                        for value in (self.raw, self.parsed, self.visible))
                 or self.failure is not None and not isinstance(self.failure, ModelFailure)
+                or self.error_type is not None and (type(self.error_type) is not str
+                    or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", self.error_type) is None)
+                or self.error_code is not None and (type(self.error_code) is not str
+                    or re.fullmatch(r"[a-z0-9_.-]{1,80}", self.error_code) is None)
+                or self.status_code is not None and (type(self.status_code) is not int
+                    or not 100 <= self.status_code <= 599)
                 or not self.completion_present and any(value is not None for value in (self.raw, self.parsed, self.visible))):
             raise ValueError("response diagnostics require fixed classifications and body-free summaries")
 
     def to_record(self):
-        return {"version": 1, "completion_present": self.completion_present,
+        return {"version": 2, "completion_present": self.completion_present,
             "finish_reason": self.finish_reason, "parse_state": self.parse_state,
             "raw": asdict(self.raw) if self.raw is not None else None,
             "parsed": asdict(self.parsed) if self.parsed is not None else None,
             "visible": asdict(self.visible) if self.visible is not None else None,
-            "failure_code": self.failure.value if self.failure is not None else None}
+            "failure_code": self.failure.value if self.failure is not None else None,
+            "error_type": self.error_type, "error_code": self.error_code, "status_code": self.status_code}
 
 
 def checked_response_diagnostics(raw):
@@ -81,12 +91,14 @@ def checked_response_diagnostics(raw):
         return None
     try:
         value = json.loads(raw)
-        if type(value) is not dict or value.get("version") != 1:
+        if type(value) is not dict or value.get("version") not in (1, 2):
             return None
         summaries = {name: ResponseTextSummary(**value[name]) if value[name] is not None else None
                      for name in ("raw", "parsed", "visible")}
         result = ResponseDiagnostics(value["completion_present"], value["finish_reason"], value["parse_state"],
-            **summaries, failure=ModelFailure(value["failure_code"]) if value["failure_code"] is not None else None)
+            **summaries, failure=ModelFailure(value["failure_code"]) if value["failure_code"] is not None else None,
+            error_type=value.get("error_type"), error_code=value.get("error_code"),
+            status_code=value.get("status_code"))
         return result.to_record()
     except (KeyError, TypeError, ValueError, RecursionError):
         return None

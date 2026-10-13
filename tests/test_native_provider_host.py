@@ -20,7 +20,7 @@ from companion_v2.screen import SCREEN_EXTENSION
 from companion_v2.storage.runtime import StorageRuntime
 from tests.test_host_application import HostFixture
 from tests.test_management_access import NOW, SCOPE
-from tests.test_native_extensions_registry import Context, Port, Star
+from tests.test_native_extensions_registry import Context, Port, Star, SYNTHETIC_IMAGE_PLUGIN
 from tests.test_role_tool_loop import answered, requested
 
 
@@ -67,6 +67,7 @@ class NativeProviderHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_catalog_is_explicit_and_never_grants_access(self):
         host = self.native_host()
+        self.assertEqual(self.package.package_id, SYNTHETIC_IMAGE_PLUGIN)
         self.assertEqual(self.capabilities.descriptors(extension_id="image"), ())
         p = self.native_registry.register_catalog(observed_at=NOW).unwrap()
         self.assertEqual(p, (self.package,))
@@ -144,9 +145,12 @@ class NativeProviderHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         port.document["plugin_id"] = "astrbot_plugin_screen_companion"
         port.document["package"].update(extension_id="companion.screen",
                                         package_id="astrbot_plugin_screen_companion")
-        registry = NativeExtensionRegistry(Context(Star(port)), managed_extensions=MANAGED_EXTENSIONS)
+        star = Star(port)
+        star.root_dir_name = star.name = "astrbot_plugin_screen_companion"
+        registry = NativeExtensionRegistry(Context(star), managed_extensions=MANAGED_EXTENSIONS)
         self.addCleanup(registry.close)
         self.assertEqual(registry.declarations(), ())
+        self.assertEqual(registry.issues, ())
 
     async def test_dispatch_keeps_original_task_audience_and_receipt(self):
         host, batch, row = await self.invoke()

@@ -33,7 +33,11 @@ async def run():
     entry = importlib.import_module(package.__name__ + ".main")
     native = MultiNativeContext()
     clock = DeterministicClock.at(NOW)
-    types = NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider, SimpleNamespace, SimpleNamespace, FakeReverseApi)
+    async def session_persona_override(umo):
+        return native.selections[umo.split(":", 1)[0]]
+
+    types = NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider, SimpleNamespace, SimpleNamespace,
+                               FakeReverseApi, session_persona_override_lookup=session_persona_override)
     factory = partial(entry.AstrBotMultiController, native_types=types, now=clock.now)
     with TemporaryDirectory(prefix="companion-life-entry-") as temporary:
         with patch.object(entry.StarTools, "get_data_dir", return_value=Path(temporary)), \
@@ -54,6 +58,7 @@ async def run():
             await plugin.observe_companion_model_session(group, SimpleNamespace(role="err"))
             assert not controller.session_topology.path.exists()
             await plugin.observe_companion_model_session(group, SimpleNamespace(role="assistant"))
+            await asyncio.wait_for(asyncio.gather(*tuple(controller.session_topology._pending)), timeout=5)
             observed = json.loads(controller.session_topology.path.read_text(encoding="utf-8"))
             assert len(observed) == 1 and next(iter(observed.values()))["account_id"] == "100"
             routes = {path: handler for path, handler, _, _ in native.registered_web_apis}
@@ -89,7 +94,11 @@ async def run():
             event.stop_event = lambda: setattr(event, "stopped", True)
             with patch.object(controller.session_topology, "services", AsyncMock(return_value={"llm_enabled": False})):
                 await plugin.receive_companion_message(event)
-            assert not getattr(event, "stopped", False) and event.call_llm
+            # The wake flags select AstrBot's automatic core reply path;
+            # call_llm stays false because the plugin did not call a model itself.
+            assert not getattr(event, "stopped", False)
+            assert event.is_wake and event.is_at_or_wake_command
+            assert not getattr(event, "call_llm", False)
             assert native.provider.client.state.calls == []
             app = controller.session.application
             assert len([r for r in app.life_runtime.routines.values() if r.instruction is not None]) == 2
@@ -102,7 +111,10 @@ async def run():
             assert native.provider.client.state.calls == []
             assert all(not p.client._api._wsr_api.calls for p in native.platforms.values())
         finally:
-            await plugin.terminate()
+            try:
+                await plugin.terminate()
+            finally:
+                await db_helper.engine.dispose()
         assert controller.runtime is None and native.registered_web_apis == []
         print(json.dumps({"life_routes": len(paths), "state": report.state, "route_cleanup": True,
                           "automatic_startup": True,

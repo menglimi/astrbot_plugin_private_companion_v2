@@ -80,6 +80,53 @@ class ContactManagement:
                 subject=context.actor.subject, scope=context.scope, capability=GROUP,
                 tier=AuthorizationTier.STANDARD, valid_from=self.app.now(), expected_revision=identity.revision)
 
+    def sync_configuration_grant(self, operator, enabled, receipt):
+        """Keep the generic settings editor's enabled switch on the same grant path.
+
+        A replay may be recovering a save made by older code that stored the
+        preference without issuing its grant. Recover only a missing lineage while
+        the preference is still enabled; an existing revoked lineage stays revoked.
+        """
+        with self.runtime.transaction():
+            self._authorize(operator)
+            current = require(self.app.configuration.read(operator, target=target_for(self.context),
+                group_id=GROUP, observed_at=self.app.now()))
+            if current.values[GROUP + ".enabled"] is not enabled:
+                return
+
+            identity, context = self.app.tasks.identity, self.context
+            grants = identity.snapshot().grants
+            if any(grant.grant_id.startswith(PERSON_PERMISSION_GRANT_PREFIX)
+                   and grant.capability == GROUP and grant.scope == context.scope
+                   and grant.subject == context.actor.subject for grant in grants):
+                return
+
+            operation_id = receipt["operation_id"]
+            grant_id = GRANT_PREFIX + digest([context.key, operation_id])
+            lineage = next((grant for grant in grants if grant.grant_id == grant_id), None)
+            if receipt["replayed"]:
+                if lineage is not None:
+                    return
+                if enabled and any(grant.grant_id.startswith(GRANT_PREFIX)
+                    and grant.capability == GROUP and grant.scope == context.scope
+                    and grant.subject == context.actor.subject and grant.state is GrantState.ACTIVE
+                    for grant in grants):
+                    return
+                if enabled:
+                    identity.issue_grant(grant_id=grant_id, subject=context.actor.subject,
+                        scope=context.scope, capability=GROUP, tier=AuthorizationTier.STANDARD,
+                        valid_from=self.app.now(), expected_revision=identity.revision)
+                else:
+                    for grant in grants:
+                        if (grant.grant_id.startswith(GRANT_PREFIX) and grant.capability == GROUP
+                                and grant.scope == context.scope and grant.subject == context.actor.subject
+                                and grant.state is GrantState.ACTIVE):
+                            identity.revoke_grant(grant.grant_id, revoked_at=self.app.now(),
+                                                  expected_revision=identity.revision)
+                return
+
+            self._grants(enabled, operation_id)
+
     def _configure(self, operator, data, *, require_running):
         if (type(data) is not dict or set(data) != {"operation_key", "edit_token", "changes"}
                 or type(data["operation_key"]) is not str or not data["operation_key"].strip()

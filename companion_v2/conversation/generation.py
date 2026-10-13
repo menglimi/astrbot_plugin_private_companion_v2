@@ -3,14 +3,18 @@
 from dataclasses import replace
 import asyncio
 import json
+import sqlite3
 from logging import getLogger
 from time import perf_counter
 
 from companion_v2.execution.models import TaskError, TaskResult, digest
+from companion_v2.model_gateway.models import ModelCompletion
 from companion_v2.model_gateway.service import LocalModelGateway
+from companion_v2.expression import learning as style_learning
+from .style_context import EXPRESSION_STYLE_INSTRUCTION
 
 from .foreground import GroundedDraftReviewer, ModelDraft, PromptMaterial
-from .messages import ConversationMessages
+from .messages import ConversationMessages, DELIVERY_KIND
 from .media.reply import reply_manifest
 from .segmentation import SegmentationPolicy
 from .reply_settings import (group_safety_settings, validate as validate_settings,
@@ -24,6 +28,7 @@ from companion_v2.foundation.refs import ScopeKind
 
 
 logger = getLogger(__name__)
+MODEL_FAILURE_NOTICE = "刚刚我这边卡住了，没能接住你的消息。你再发我一次，我马上接着聊。"
 
 
 def single_part(text):
@@ -41,6 +46,38 @@ def _add_materials_before_tool_results(request, materials):
     context = replace(request.context,
                       materials=current[:insertion] + additions + current[insertion:])
     return replace(request, context=context)
+
+
+def _without_expression_style_materials(request):
+    materials = tuple(material for material in request.context.materials
+                      if material.purpose not in ("expression_style_context", "expression_style_rule"))
+    instruction = request.instruction
+    suffix = "\n" + EXPRESSION_STYLE_INSTRUCTION
+    if instruction.endswith(suffix):
+        instruction = instruction[:-len(suffix)]
+    return replace(request, instruction=instruction, context=replace(request.context, materials=materials))
+
+
+def _filter_expression_style_materials(request, decision):
+    materials = []
+    for material in request.context.materials:
+        if material.purpose != "expression_style_rule":
+            materials.append(material)
+            continue
+        try:
+            payload = json.loads(material.payload)
+            applicability = style_learning.normalize_applicability(payload.get("applicability"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if style_learning.laya_intent_matches(applicability, decision):
+            materials.append(material)
+    if not any(material.purpose == "expression_style_rule" for material in materials):
+        materials = [material for material in materials if material.purpose != "expression_style_context"]
+        suffix = "\n" + EXPRESSION_STYLE_INSTRUCTION
+        if request.instruction.endswith(suffix):
+            return replace(request, instruction=request.instruction[:-len(suffix)],
+                           context=replace(request.context, materials=tuple(materials)))
+    return replace(request, context=replace(request.context, materials=tuple(materials)))
 
 
 def _prepend_instruction(request, instruction):
@@ -142,6 +179,9 @@ class LocalReplyGenerator:
             if service is None:
                 return None
             facts = self._laya_facts(request)
+            set_trace = getattr(service, "set_trace", None)
+            if callable(set_trace):
+                set_trace(event_ref=run.task.spec.request_ref, source="conversation")
             logger.debug("[CompanionV2][开发者追踪] Laya 事件事实 batch=%s facts=%r",
                          run.task.spec.request_ref, facts)
             result = await service.decide(facts)
@@ -157,6 +197,52 @@ class LocalReplyGenerator:
                            run.task.spec.request_ref, getattr(error, "code", type(error).__name__),
                            getattr(error, "reason", str(error))[:1000])
             return None
+
+    def _commit_laya_silence(self, run, *, action):
+        if action not in ("wait", "silent"):
+            raise ValueError("only a Laya wait or silent decision can suppress a reply")
+        batch_id = run.task.spec.request_ref
+        run.validate()
+        with self.messages.runtime.transaction() as connection:
+            current = self.messages.request(run)
+            if "silent" not in current.reply_actions:
+                return None
+            row = self.messages.batch(batch_id)
+            if row["state"] != "sealed" or row["call_id"] is not None:
+                raise TaskError("message_manifest_exists", "original reply cannot be generated twice")
+            manifest = reply_manifest(batch_id, None, (), action="silent")
+            connection.execute("""UPDATE conversation_batches SET state = 'ready', revision = revision + 1,
+                call_id = NULL, manifest_hash = ?, part_count = 0, presentation_action = 'silent'
+                WHERE batch_id = ?""", (manifest, batch_id))
+        participation = getattr(self.messages.tools, "group_participation", None)
+        if participation is not None:
+            participation.record_no_reply(run.task.spec.context, batch_id)
+        logger.info("[CompanionV2] Laya 决策跳过主模型 batch=%s action=%s", batch_id, action)
+        return TaskResult("succeeded", result_ref=batch_id)
+
+    def _private_failure_notice(self, run, error, stream_reply):
+        if not (isinstance(error, sqlite3.IntegrityError)
+                or isinstance(error, TaskError) and error.code.startswith("model_")):
+            return None
+        context = run.task.spec.context
+        if context.scope.kind is not ScopeKind.PRIVATE or stream_reply is not None and stream_reply.published:
+            return None
+        run.validate()
+        batch_id = run.task.spec.request_ref
+        batch = self.messages.batch(batch_id)
+        if batch["state"] != "sealed" or batch["call_id"] is not None:
+            return None
+        if self.messages.runtime.read_one(
+                "SELECT 1 FROM conversation_parts WHERE batch_id = ? LIMIT 1", (batch_id,)):
+            return None
+        delivery = self.messages.tasks.registrations[DELIVERY_KIND].definition
+        remaining = (run.task.spec.deadline_at - self.messages.tasks.now()).total_seconds()
+        if remaining < delivery.timeout_seconds:
+            return None
+        code = error.code if isinstance(error, TaskError) else "model_settlement_failed"
+        logger.warning("[CompanionV2] 私聊模型回复未完成，改发本地收尾提示 batch=%s failure=%s",
+                       batch_id, code)
+        return ModelCompletion(None, ModelDraft(MODEL_FAILURE_NOTICE, ()), False)
 
     def _request(self, run, segmentation=None, streaming=None, voice=None, presentation=None, base_request=None,
                  image_output=None):
@@ -199,6 +285,7 @@ class LocalReplyGenerator:
         expression_review = (sealed.get("expression_style", {}).get("style_review_enabled", True)
             and expression_policy.style_review_enabled
             and any(item.purpose == "expression_style_rule" for item in base_request.context.materials))
+        streaming_before_style = streaming
         if expression_review:
             # No part may leave before the complete wording has been reviewed.
             streaming = False
@@ -208,6 +295,20 @@ class LocalReplyGenerator:
         image_output = effective_settings(self.messages.runtime, run.task.spec.context)
         request = self._request(run, segmentation, streaming, voice, presentation, base_request,
                                 image_output=image_output)
+        laya = await self._laya_decision(run, _without_expression_style_materials(request))
+        decision = laya.get("decision") if isinstance(laya, dict) and isinstance(laya.get("decision"), dict) else {}
+        laya_action = decision.get("action")
+        if laya_action in ("silent", "wait"):
+            silent_result = self._commit_laya_silence(run, action=laya_action)
+            if silent_result is not None:
+                return silent_result
+            laya = None
+        request = _filter_expression_style_materials(request, decision if laya is not None else {})
+        expression_review = (sealed.get("expression_style", {}).get("style_review_enabled", True)
+            and expression_policy.style_review_enabled
+            and any(item.purpose == "expression_style_rule" for item in request.context.materials))
+        if not expression_review:
+            streaming = streaming_before_style
         caption_material = None
         caption_service = getattr(self.messages, "context_image_caption", None)
         if caption_service is not None and captured is not None:
@@ -282,9 +383,7 @@ class LocalReplyGenerator:
                 request = replace(request,
                     instruction=request.instruction + "\n" + VIDEO_INSTRUCTION)
                 request = _promote_instruction_suffix(request, "\n" + VIDEO_INSTRUCTION)
-        laya = await self._laya_decision(run, request)
         if laya is not None:
-            decision = laya.get("decision") if isinstance(laya.get("decision"), dict) else {}
             segment_mode = decision.get("segment_mode")
             if segment_mode in ("single", "keep_together"):
                 segmentation = replace(segmentation, enabled=False, llm_controlled=False,
@@ -336,15 +435,6 @@ class LocalReplyGenerator:
                 action_guidance, tool_guidance) if value)
             if guidance:
                 request = _prepend_instruction(request, "Laya 语义分类给出的表达建议（只作为约束参考）：" + guidance)
-            if decision.get("reply_form") == "none" or decision.get("action") in ("silent", "wait"):
-                request = _prepend_instruction(request, "Laya 判断当前不应发送可见正文；如无必须完成的工具结果，请选择 silent。")
-        laya_suppress_reply = False
-        if laya is not None:
-            decision = laya.get("decision") if isinstance(laya.get("decision"), dict) else {}
-            laya_suppress_reply = (decision.get("reply_form") == "none"
-                                   or decision.get("action") in ("silent", "wait"))
-        if laya_suppress_reply:
-            streaming = False
         # Laya can change presentation policy after the first request was
         # assembled. Keep the session's sealed request aligned with the
         # continuation fields used by the generation loop.
@@ -353,19 +443,27 @@ class LocalReplyGenerator:
         participation = getattr(tools, "group_participation", None)
         tool_catalog, tool_filters = (tools.catalog_for_with_diagnostics(
             run.task.spec.context, run.task.spec.request_ref) if tools else ((), ()))
-        session = self.gateway.open_session(run, request, tools=tool_catalog, tool_filters=tool_filters)
         stream_reply = None
-        if (segmentation.enabled and segmentation.streaming_mode == "incremental" and self.send_stream_part is not None
-                and captured is not None and streaming is not False
-                and not (voice is not None and eligible(voice, input_text=input_text,
-                    kind=run.task.spec.context.scope.kind.value, batch_id=run.task.spec.request_ref))):
-            from .streaming_reply import StreamingReply
-            stream_reply = StreamingReply(self.messages, run, segmentation, presentation,
-                                          captured["settings"], self.send_stream_part)
         history = ()
         completion = None
+        local_failure_notice = False
         try:
-            while True:
+            try:
+                session = self.gateway.open_session(run, request, tools=tool_catalog, tool_filters=tool_filters)
+            except (TaskError, sqlite3.IntegrityError) as error:
+                completion = self._private_failure_notice(run, error, stream_reply)
+                if completion is None:
+                    raise
+                local_failure_notice = True
+                voice = None
+            if (not local_failure_notice and segmentation.enabled and segmentation.streaming_mode == "incremental"
+                    and self.send_stream_part is not None and captured is not None and streaming is not False
+                    and not (voice is not None and eligible(voice, input_text=input_text,
+                        kind=run.task.spec.context.scope.kind.value, batch_id=run.task.spec.request_ref))):
+                from .streaming_reply import StreamingReply
+                stream_reply = StreamingReply(self.messages, run, segmentation, presentation,
+                                              captured["settings"], self.send_stream_part)
+            while not local_failure_notice:
                 current = self._request(run, segmentation, streaming, voice, presentation,
                                         image_output=image_output)
                 if caption_material is not None:
@@ -418,12 +516,20 @@ class LocalReplyGenerator:
                         run.task.spec.context, run.task.spec.request_ref, original, request, previous, fresh)) if tools else None,
                     media_refresh=lambda original, request: self.messages.generated_images.validate_refresh(
                         run.task.spec.request_ref, run.task.spec.context, self.messages.tasks.now(), original, request))
-                completion = await stream_reply.generate(generating) if stream_reply is not None else await generating
-                if laya_suppress_reply:
-                    completion = replace(completion, draft=ModelDraft("", (), "silent"), tool_calls=())
-                logger.info("[CompanionV2] 回复模型调用结束 batch=%s round=%d elapsed_ms=%d tools=%d",
-                            run.task.spec.request_ref, round_no, round((perf_counter() - model_started) * 1000),
-                            len(completion.tool_calls))
+                try:
+                    completion = await stream_reply.generate(generating) if stream_reply is not None else await generating
+                except (TaskError, sqlite3.IntegrityError) as error:
+                    completion = self._private_failure_notice(run, error, stream_reply)
+                    if completion is None:
+                        raise
+                    local_failure_notice = True
+                    voice = None
+                if local_failure_notice:
+                    logger.info("[CompanionV2] 本地故障收尾提示已准备 batch=%s", run.task.spec.request_ref)
+                else:
+                    logger.info("[CompanionV2] 回复模型调用结束 batch=%s round=%d elapsed_ms=%d tools=%d",
+                                run.task.spec.request_ref, round_no, round((perf_counter() - model_started) * 1000),
+                                len(completion.tool_calls))
                 logger.debug("[CompanionV2][开发者追踪] 回复模型结果 batch=%s round=%d call_id=%s draft=%r action=%s claims=%r tool_calls=%r",
                              run.task.spec.request_ref, round_no, completion.call_id,
                              completion.draft.text if completion.draft is not None else None,
@@ -450,7 +556,8 @@ class LocalReplyGenerator:
                             run.task.spec.request_ref, len(stream_reply.parts), round((perf_counter() - started) * 1000))
                 return TaskResult("succeeded", result_ref=run.task.spec.request_ref)
             draft_text = completion.draft.text
-            if expression_review and getattr(completion.draft, "action", "text") in ("text", "voice_only"):
+            if (not local_failure_notice and expression_review
+                    and getattr(completion.draft, "action", "text") in ("text", "voice_only")):
                 review = getattr(self.messages, "expression_draft_review", None)
                 if review is not None:
                     before_review = draft_text
@@ -596,6 +703,6 @@ class LocalReplyGenerator:
                          run.task.spec.request_ref, type(error).__name__, exc_info=True)
             if stream_reply is not None:
                 await stream_reply.interrupt()
-            if completion is not None:
+            if completion is not None and completion.call_id:
                 self.gateway.ledger.discard(completion.call_id)
             raise

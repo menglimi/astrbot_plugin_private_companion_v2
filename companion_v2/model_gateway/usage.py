@@ -16,10 +16,11 @@ USAGE_FIELDS = (
 # The foreground reply task is the product's main chain.  It is reported beside
 # plugin work, but its model calls must not consume plugin budget accounts.
 MAIN_CHAIN_KIND = "conversation.reply"
+CORE_CHAIN_KIND = "conversation.astrbot_core"
 
 
 def usage_source(kind):
-    return "conversation" if kind == MAIN_CHAIN_KIND else "plugin"
+    return "conversation" if kind in (MAIN_CHAIN_KIND, CORE_CHAIN_KIND) else "plugin"
 
 
 def _empty():
@@ -59,7 +60,7 @@ def _recent(row):
     input_tokens, cached_tokens = row["input_tokens"], row["cached_input_tokens"]
     cache_rate = (round(cached_tokens * 100 / input_tokens, 1)
                   if cached_tokens is not None and input_tokens is not None and input_tokens > 0 else None)
-    return {"kind": row["kind"], "provider": provider_id, "state": row["state"],
+    result = {"kind": row["kind"], "provider": provider_id, "state": row["state"],
         "tokens": row["actual_tokens"], "cost_microusd": row["actual_cost"],
         "input_tokens": input_tokens, "cached_input_tokens": cached_tokens,
         "cache_creation_tokens": row["cache_creation_tokens"], "output_tokens": row["output_tokens"],
@@ -67,6 +68,16 @@ def _recent(row):
         "response_diagnostics": checked_response_diagnostics(
             row["response_summary_json"] if "response_summary_json" in row.keys() else None),
         "at": row["finished_at"] or row["started_at"] or row["created_at"]}
+    if "reserved_tokens" in row.keys():
+        result["reserved_tokens"] = row["reserved_tokens"]
+        result["held_tokens"] = row["reserved_tokens"] if row["actual_tokens"] is None else 0
+        result["usage_state"] = "settled" if row["actual_tokens"] is not None else "awaiting_receipt"
+    for name in ("execution_path", "usage_scope", "token_availability", "cost_availability", "cache_availability", "signature_scope"):
+        if name in row.keys():
+            result[name] = row[name]
+    if "execution_path" not in result:
+        result["execution_path"] = "legacy_v2_conversation" if row["kind"] == MAIN_CHAIN_KIND else "v2_background"
+    return result
 
 
 class ModelUsageReport:

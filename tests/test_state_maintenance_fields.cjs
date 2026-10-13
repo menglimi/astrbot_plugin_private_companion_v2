@@ -135,6 +135,17 @@ test("新分区都注册了标题，且字段都能读出标签",()=>{
     assert.notEqual(m.label(name),name,`${name} 缺标签`);
 });
 
+test("睡眠模拟与按角色作息自动入睡在状态设置中明确区分",()=>{
+  const m=load();
+  const form=m.form({kind:"home",values:{enabled:true,maintenance_minutes:30,sleep_enabled:true,
+    home_show_sleep:true,home_only_special_sleep:false}},String);
+  assert.match(form,/状态模拟与首页展示/);
+  assert.match(form,/睡眠状态模拟与按角色作息自动入睡是两个独立开关/);
+  assert.match(form,/自动作息需在「日记与生活」同时开启生活日程总开关和「按角色作息自动入睡」/);
+  assert.match(form,/状态模拟/);
+  assert.match(form,/首页展示/);
+});
+
 test("健康和饥饿分别暴露自己的配置字段",()=>{
   const m=load();
   assert.deepEqual([...m.fields("health")],["health_enabled","health_expression_prompt"]);

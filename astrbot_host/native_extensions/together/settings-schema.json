@@ -1,0 +1,352 @@
+{
+  "server": {
+    "description": "房间服务",
+    "type": "object",
+    "hint": "通话与观影房间使用独立顶层页面，避免 AstrBot 拓展页沙箱阻止麦克风。默认只允许本机访问。",
+    "items": {
+      "enabled": {
+        "description": "启用房间服务",
+        "type": "bool",
+        "default": true
+      },
+      "host": {
+        "description": "监听地址",
+        "type": "string",
+        "default": "127.0.0.1",
+        "hint": "默认仅本机。跨设备访问时可改为 0.0.0.0，但必须同时配置 HTTPS/WSS 反向代理。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "port": {
+        "description": "监听端口",
+        "type": "int",
+        "default": 6321,
+        "hint": "端口被占用时会自动尝试后续端口。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "public_base_url": {
+        "description": "外部访问地址",
+        "type": "string",
+        "default": "",
+        "hint": "跨设备时填写反向代理后的 HTTPS 地址，例如 https://together.example.com。留空时使用本机地址。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "ticket_ttl_minutes": {
+        "description": "房间链接有效分钟数",
+        "type": "int",
+        "default": 10,
+        "hint": "链接只用于建立当前房间连接，过期后需从拓展页重新打开。",
+        "condition": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "conversation": {
+    "description": "实时对话",
+    "type": "object",
+    "items": {
+      "primary_user_id": {
+        "description": "主要用户 ID",
+        "type": "string",
+        "default": "",
+        "hint": "V2 原生房间由当前已授权私聊对象创建；此项仅用于旧式本机房间入口。"
+      },
+      "bot_qq_id": {
+        "description": "Bot QQ 号覆盖",
+        "type": "string",
+        "default": "",
+        "hint": "V2 原生房间使用已验证的 Bot 账号；此项仅用于旧式本机房间头像。"
+      },
+      "persona_id": {
+        "description": "通话人格",
+        "type": "string",
+        "default": "",
+        "_special": "select_persona",
+        "hint": "V2 原生房间使用创建房间时 AstrBot 当前选中的人格；此项仅用于旧式本机房间。"
+      },
+      "chat_provider_id": {
+        "description": "通话与观影对话模型",
+        "type": "string",
+        "default": "",
+        "required": true,
+        "_special": "select_provider",
+        "hint": "必选。负责实时通话、观影对话和人格上下文；支持图片时会直接读取视频帧。"
+      },
+      "vision_provider_id": {
+        "description": "视觉模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "可选。对话模型支持图片时无需配置；对话模型没有视觉能力时，可选择独立视觉模型转述观影或视频通话画面，再由对话模型结合人格与上下文回复。留空还会尝试 AstrBot 默认图片描述模型。"
+      },
+      "history_turns": {
+        "description": "房间上下文轮数",
+        "type": "int",
+        "default": 12,
+        "hint": "仅保留当前房间最近的对话，不保存原始音频。"
+      },
+      "enable_memory_context": {
+        "description": "接入长期记忆",
+        "type": "bool",
+        "default": true,
+        "hint": "从当前 V2 私聊窗口读取本地长期记忆；关闭后角色、关系与生活背景仍可使用。多人邀请房间不读取房主的私人背景。"
+      },
+      "call_proactive_enabled": {
+        "description": "通话安静时主动找话题",
+        "type": "bool",
+        "default": true,
+        "hint": "语音通话持续安静一段时间后，由当前人格判断是否自然开口；用户正在说话、Bot 正在回应或没有合适话题时不会打扰。"
+      },
+      "model_hangup_enabled": {
+        "description": "允许模型自然结束通话",
+        "type": "bool",
+        "default": true,
+        "hint": "模型可结合人格、关系与对话是否自然收束，自主在一句告别播放完成后结束当前语音连接；连续多次静默且用户始终没有新输入时，也可判断用户可能已经离开并自然收尾。不会按固定倒计时强制挂断。"
+      },
+      "call_idle_seconds": {
+        "description": "通话静默判断间隔秒数",
+        "type": "int",
+        "default": 120,
+        "hint": "从用户或 Bot 最后一次说话结束后开始计算，范围 60 到 900 秒；连续静默判断会累计，用户产生新输入后重置。"
+      },
+      "sync_astrbot_conversation": {
+        "description": "同步到 AstrBot 对话记录",
+        "type": "bool",
+        "default": true,
+        "hint": "成功投递的房间文字追加到创建房间时精确匹配的现有 AstrBot 私聊会话，并标明一起房间来源。会话或人格改变后停止同步，不自动创建会话。"
+      },
+      "record_visible_turns": {
+        "description": "记录房间文字转写",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后把实际收到的用户转写与成功投递的 Bot 文字存入 V2 本地来源，供记忆整理使用。仅限原私聊窗口的单人房间，不保存原始音视频，也不生成 QQ 发送回执。"
+      },
+      "system_prompt": {
+        "description": "共处补充提示词",
+        "type": "text",
+        "default": "",
+        "editor_mode": true,
+        "editor_language": "text",
+        "hint": "附加在当前人格及共处场景提示后，立即生效，支持自然分段。"
+      }
+    }
+  },
+  "speech": {
+    "description": "语音链路",
+    "type": "object",
+    "hint": "手机原生通话使用服务端 STT，需要选择已启用的 AstrBot 语音识别提供商。网页房间也可使用 Edge/Chrome 的浏览器识别。",
+    "items": {
+      "stt_mode": {
+        "description": "默认语音识别方式",
+        "type": "string",
+        "default": "auto",
+        "options": [
+          "auto",
+          "browser",
+          "astrbot"
+        ],
+        "hint": "网页自动模式优先使用浏览器识别，不支持时回退 AstrBot STT，房间内可以临时切换。手机原生通话始终把录音交给服务端 STT。"
+      },
+      "stt_provider_id": {
+        "description": "AstrBot STT Provider",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider_stt",
+        "hint": "选择后，手机原生通话和网页房间均使用此提供商。留空时跟随房间所属 AstrBot 会话已启用的默认 STT；默认语音识别关闭时需在这里单独选择。"
+      },
+      "stt_correction_enabled": {
+        "description": "语音转写智能校对",
+        "type": "bool",
+        "default": true,
+        "hint": "优先校正 Bot 名称的近音转写；普通句子会直接进入回复，避免额外等待。不确定时保留原文，不使用生硬的全局替换。"
+      },
+      "browser_language": {
+        "description": "浏览器识别语言",
+        "type": "string",
+        "default": "zh-CN",
+        "hint": "例如 zh-CN、ja-JP、en-US。"
+      },
+      "tts_provider_id": {
+        "description": "TTS Provider",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider_tts",
+        "hint": "留空时跟随 AstrBot 当前 TTS。"
+      },
+      "browser_tts_fallback": {
+        "description": "浏览器朗读兜底",
+        "type": "bool",
+        "default": true,
+        "hint": "没有可用 TTS 或服务端合成失败时，使用浏览器 SpeechSynthesis 朗读。"
+      },
+      "direct_multilingual_tts": {
+        "description": "通话外语语音直出",
+        "type": "bool",
+        "default": true,
+        "hint": "通话接通且 V2 原生语音目标语种为日语或英语时，由主对话模型同时生成目标语种口语和可见正文，优先跳过额外翻译模型；格式不兼容时自动回退原有转换链路。"
+      },
+      "tts_timeout_seconds": {
+        "description": "TTS 最长等待时间（秒）",
+        "type": "int",
+        "default": 60,
+        "range": {
+          "min": 15,
+          "max": 180,
+          "step": 5
+        },
+        "hint": "主模型未直出目标语种时由 V2 原生语音服务完成语种转换，之后等待语音合成；超时后立即回退文字或浏览器朗读。"
+      },
+      "tts_volume_percent": {
+        "description": "TTS 播放音量百分比",
+        "type": "int",
+        "default": 100,
+        "range": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "hint": "控制房间内 Bot 语音的默认播放音量，不影响影片原声音量或 TTS 合成内容；0 表示静音。"
+      },
+      "realtime_duplex_enabled": {
+        "description": "实时流式语音与全双工（实验性）",
+        "type": "bool",
+        "default": false,
+        "hint": "为分句流式 TTS、持续监听和语音插话启用统一实验开关。当前版本先建立配置入口，关闭时保持原有稳定流程。"
+      }
+    }
+  },
+  "watch": {
+    "description": "共同观影",
+    "type": "object",
+    "items": {
+      "prepare_knowledge": {
+        "description": "观前无剧透准备",
+        "type": "bool",
+        "default": true,
+        "hint": "异步整理视频页公开标题、UP 主、分区、标签和简介，并标注来源范围；不会预读字幕或搜索分集剧情。"
+      },
+      "auto_comment": {
+        "description": "默认开启自然评论",
+        "type": "bool",
+        "default": true,
+        "hint": "在开场、明显镜头变化、普通观察和结尾时让模型判断是否自然开口，允许长时间保持安静。"
+      },
+      "comment_interval_seconds": {
+        "description": "最长观察间隔",
+        "type": "int",
+        "default": 60,
+        "hint": "画面没有明显变化时的兜底观察间隔，不代表每次都会说话。",
+        "condition": {
+          "auto_comment": true
+        }
+      },
+      "scene_min_interval_seconds": {
+        "description": "镜头观察最小间隔",
+        "type": "int",
+        "default": 18,
+        "hint": "浏览器检测到明显镜头变化后，至少间隔多久才提交下一次观察；较小会更及时，也会增加视觉模型调用。",
+        "condition": {
+          "auto_comment": true
+        }
+      },
+      "memory_refresh_seconds": {
+        "description": "临时剧情整理间隔",
+        "type": "int",
+        "default": 240,
+        "hint": "按已播放内容和证据来源整理剧情、人物关系、待确认线索与双方反应，不会读取后续剧情。临时笔记本身不直接写入长期记忆；房间结束后的单条共同经历摘要由“记录有意义的共同经历”控制。",
+        "condition": {
+          "auto_comment": true
+        }
+      },
+      "duck_video_volume": {
+        "description": "Bot 说话时降低原声",
+        "type": "bool",
+        "default": true,
+        "hint": "播放 Bot 语音时平滑降低影片音量，结束后恢复。"
+      },
+      "duck_volume_percent": {
+        "description": "说话时原声音量百分比",
+        "type": "int",
+        "default": 28,
+        "hint": "例如 28 表示暂时降到原音量的 28%。",
+        "condition": {
+          "duck_video_volume": true
+        }
+      }
+    }
+  },
+  "library": {
+    "description": "小说书库",
+    "type": "object",
+    "hint": "导入文件会统一解析为 UTF-8，并在插件数据目录中建立章节和全文检索索引。",
+    "items": {
+      "enabled": {
+        "description": "启用小说书库",
+        "type": "bool",
+        "default": true
+      },
+      "max_upload_mb": {
+        "description": "单本小说最大 MB",
+        "type": "int",
+        "default": 40,
+        "range": {
+          "min": 1,
+          "max": 200,
+          "step": 1
+        },
+        "hint": "支持 TXT、Markdown 和 EPUB。EPUB 还会检查异常解压体积和不安全路径。"
+      },
+      "import_admin_only": {
+        "description": "仅管理员允许导入",
+        "type": "bool",
+        "default": true,
+        "hint": "房间链接本身只授予当前房间访问权；建议只将阅读房间链接发给可信用户。"
+      }
+    }
+  },
+  "novel": {
+    "description": "一起阅读",
+    "type": "object",
+    "items": {
+      "retrieval_top_k": {
+        "description": "每次检索原文段数",
+        "type": "int",
+        "default": 8,
+        "range": {
+          "min": 3,
+          "max": 20,
+          "step": 1
+        },
+        "hint": "从当前已读范围召回与人物、事件和前情问题相关的原文。数值越大，上下文消耗越高。"
+      },
+      "spoiler_policy": {
+        "description": "剧透策略",
+        "type": "string",
+        "default": "strict",
+        "options": [
+          "strict",
+          "ask_first",
+          "allow"
+        ],
+        "hint": "strict 只使用已读内容；ask_first 和 allow 预留给后续显式扩展阅读边界，当前仍不会自动读取后文。"
+      },
+      "answer_with_sources": {
+        "description": "回答标注章节出处",
+        "type": "bool",
+        "default": true
+      },
+      "auto_save_progress": {
+        "description": "自动保存阅读位置",
+        "type": "bool",
+        "default": true,
+        "hint": "滚动停止后保存到当前用户，刷新或下次打开可以继续阅读。"
+      }
+    }
+  }
+}

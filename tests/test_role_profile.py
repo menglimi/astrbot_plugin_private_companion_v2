@@ -6,6 +6,7 @@ import unittest
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from companion_v2.role_profile.configuration import (
+    CONTROL_FIELDS,
     FIELD_LIMITS,
     GROUP,
     RoleProfileConfigurationOwner,
@@ -134,7 +135,8 @@ class RoleProfileConversationTests(MessageFixture, unittest.IsolatedAsyncioTestC
         unchanged = self.profile_owner.read(target, self.profile_fields)
         self.assertEqual(unchanged.fields[f"{GROUP}.world_adaptation_mode"].value, "auto")
         self.assertTrue(all(not item.value for name, item in unchanged.fields.items()
-                            if name != f"{GROUP}.world_adaptation_mode"))
+                            if name.removeprefix(GROUP + ".") not in CONTROL_FIELDS
+                            and name != f"{GROUP}.world_adaptation_mode"))
 
 
 if __name__ == "__main__":

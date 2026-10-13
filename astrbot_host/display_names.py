@@ -72,11 +72,16 @@ class PlatformDisplayNames:
             self._cache[key] = (monotonic() + (CACHE_SECONDS if result else RETRY_SECONDS), result)
             return result
 
-    async def lookup(self, platform_id, account_id, kind, native_id):
+    async def lookup(self, platform_id, account_id, kind, native_id, *, cached_only=False):
         account_id, native_id = _identifier(account_id), _identifier(native_id)
         if not platform_id or not account_id or not native_id:
             return ""
         key = (platform_id, account_id, kind, native_id)
+        if cached_only:
+            # Last-known labels are presentation only; never wait for OneBot
+            # when the caller is painting an existing local directory.
+            cached = self._cache.get(key)
+            return cached[1] if cached else ""
 
         async def read():
             if kind == "account":
@@ -105,26 +110,27 @@ class PlatformDisplayNames:
         except TimeoutError:
             return ""
 
-    async def targets(self, targets):
+    async def targets(self, targets, *, cached_only=False):
         async def enrich(target):
             row = dict(target)
             platform, account = row.get("platform_id"), row.get("account_id")
             kind = "group" if row.get("group_id") else "private"
             native_id = row.get("group_id") if kind == "group" else row.get("participant_id")
             name, account_name = await asyncio.gather(
-                self.lookup(platform, account, kind, native_id),
-                self.lookup(platform, account, "account", account))
+                self.lookup(platform, account, kind, native_id, cached_only=cached_only),
+                self.lookup(platform, account, "account", account, cached_only=cached_only))
             row.update(display_name=name or row.get("display_name") or "",
                        account_name=account_name or row.get("account_name") or "")
             return row
         return list(await asyncio.gather(*(enrich(row) for row in targets)))
 
-    async def persons(self, persons):
+    async def persons(self, persons, *, cached_only=False):
         async def enrich(person):
             row = dict(person)
             if row.get("admin_nickname") or row.get("name_basis") == "administrator":
                 return row
-            name = await self.lookup(row.get("platform"), row.get("account_id"), "private", row.get("native_account_id"))
+            name = await self.lookup(row.get("platform"), row.get("account_id"), "private",
+                                     row.get("native_account_id"), cached_only=cached_only)
             if name:
                 row.update(display_name=name, name_basis="platform")
             return row

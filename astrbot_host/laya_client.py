@@ -1,0 +1,415 @@
+"""Adapters for the official Laya Python API and its SystemOne HTTP protocol."""
+
+from __future__ import annotations
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+import json
+import logging
+from pathlib import Path
+import threading
+from time import perf_counter
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
+
+from companion_v2.decision.contract import (CONFIGURABLE_DECISION_FIELDS, DECISION_DEFAULTS, LayaDecision,
+                       DecisionContractError, deterministic_skip_reason, parse_decision)
+from companion_v2.decision.prompt import DECISION_QUESTIONS, build_state, decision_questions, facts_document, render_model_state
+from companion_v2.decision.store import cached_multilingual_model
+
+
+logger = logging.getLogger(__name__)
+_LOCAL_ROUTER_LOCK = threading.Lock()
+_LOCAL_ROUTERS: dict[str, tuple[object, threading.Lock]] = {}
+_LOCAL_WARMUP_TASKS = {}
+_LOCAL_READY = set()
+_LOCAL_INFERENCE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="companion-laya")
+_LOCAL_PREDICTION_TRACE = threading.local()
+MAX_RESPONSE_BYTES = 1024 * 1024
+DEFAULT_MODEL = "multilingual"
+
+
+from companion_v2.decision.client import LayaClientError
+
+
+def _endpoint(value: str) -> str:
+    raw = str(value or "").strip()
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise LayaClientError("laya_endpoint_invalid", "Laya 服务地址必须是 HTTP(S) 地址")
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1/systemone"):
+        path += "/systemone" if path.endswith("/v1") else "/v1/systemone"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+
+
+def _source_key(local_model_path=""):
+    return str(Path(local_model_path).expanduser().resolve()) if local_model_path.strip() else DEFAULT_MODEL
+
+
+def _local_router(local_model_path=""):
+    source = _source_key(local_model_path)
+    with _LOCAL_ROUTER_LOCK:
+        cached = _LOCAL_ROUTERS.get(source)
+        if cached is not None:
+            return cached
+        try:
+            from laya import Router
+        except ImportError as error:
+            raise LayaClientError(
+                "laya_package_missing",
+                "当前 AstrBot Python 环境未安装 Laya；请在模型页复制安装命令并重启 AstrBot",
+            ) from error
+        try:
+            installed = Path(source) if local_model_path.strip() else cached_multilingual_model()
+            if local_model_path.strip() and not all((installed / name).is_file() for name in (
+                    "rl_agent_config.json", "model.safetensors", "tokenizer/tokenizer.json", "encoder/config.json")):
+                raise LayaClientError("laya_model_path_invalid", "本地检查点缺少完整的 Laya 权重、配置或分词器")
+            options = {"models": {DEFAULT_MODEL: str(installed)}} if installed is not None else {}
+            router = Router(default=DEFAULT_MODEL, max_loaded=1, **options)
+        except LayaClientError:
+            raise
+        except Exception as error:
+            raise LayaClientError("laya_initialization_failed", f"Laya Router 初始化失败：{type(error).__name__}: {error}") from error
+        cached = (router, threading.Lock())
+        # Global settings select one model at a time. In-flight calls retain
+        # their own router, while future calls use the newly selected source.
+        _LOCAL_ROUTERS.clear()
+        _LOCAL_READY.clear()
+        _LOCAL_ROUTERS[source] = cached
+        return cached
+
+
+def _local_predict(state: str, questions: dict, *, local_model_path=""):
+    router_started = perf_counter()
+    router, lock = _local_router(local_model_path)
+    router_setup_ms = round((perf_counter() - router_started) * 1000)
+    lock_started = perf_counter()
+    try:
+        with lock:
+            lock_wait_ms = round((perf_counter() - lock_started) * 1000)
+            loader = getattr(router, "load", None)
+            model_load_started = perf_counter()
+            agent = loader(DEFAULT_MODEL) if callable(loader) else None
+            model_load_ms = round((perf_counter() - model_load_started) * 1000)
+            fallback_before = getattr(agent, "cpu_fallback_count", None)
+            device_before = str(getattr(agent, "device", "unknown"))
+            prediction_started = perf_counter()
+            # Router.default is only a language-detection fallback. JSON field
+            # names can otherwise route Chinese messages to another checkpoint.
+            result = router.predict(render_model_state(state), questions, model=DEFAULT_MODEL)
+            prediction_ms = round((perf_counter() - prediction_started) * 1000)
+            fallback_after = getattr(agent, "cpu_fallback_count", None)
+            device_after = str(getattr(agent, "device", "unknown"))
+            fallback_count = (max(0, int(fallback_after) - int(fallback_before))
+                              if isinstance(fallback_before, int) and isinstance(fallback_after, int) else None)
+            _LOCAL_PREDICTION_TRACE.value = {
+                "router_setup_ms": router_setup_ms,
+                "lock_wait_ms": lock_wait_ms,
+                "model_load_ms": model_load_ms,
+                "router_predict_ms": prediction_ms,
+                "device": device_after if device_after != "unknown" else device_before,
+                "cpu_fallback_count": fallback_count,
+                "cpu_fallback_reason_type": (type(getattr(agent, "last_fallback_reason", None)).__name__
+                                             if fallback_count else None),
+            }
+            return result
+    except Exception as error:
+        _LOCAL_PREDICTION_TRACE.value = {
+            "router_setup_ms": router_setup_ms,
+            "lock_wait_ms": round((perf_counter() - lock_started) * 1000),
+            "prediction_failed": True,
+        }
+        raise LayaClientError("laya_inference_failed", f"Laya 本地推理失败：{type(error).__name__}: {error}") from error
+
+
+async def _run_local_predict(state: str, questions: dict, *, local_model_path=""):
+    loop = asyncio.get_running_loop()
+    queued_at = perf_counter()
+    profile = {}
+
+    def run():
+        started = perf_counter()
+        _LOCAL_PREDICTION_TRACE.value = {}
+        try:
+            options = {"local_model_path": local_model_path} if local_model_path.strip() else {}
+            return _local_predict(state, questions, **options)
+        finally:
+            profile.update(getattr(_LOCAL_PREDICTION_TRACE, "value", {}))
+            profile["executor_queue_ms"] = round((started - queued_at) * 1000)
+            profile["worker_ms"] = round((perf_counter() - started) * 1000)
+            _LOCAL_PREDICTION_TRACE.value = {}
+
+    result = await loop.run_in_executor(_LOCAL_INFERENCE_EXECUTOR, run)
+    return result, profile
+
+
+async def _run_local_load(local_model_path=""):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_LOCAL_INFERENCE_EXECUTOR, _load_local_model, local_model_path)
+
+
+def _load_local_model(local_model_path=""):
+    router, lock = _local_router(local_model_path)
+    with lock:
+        agent = router.load(DEFAULT_MODEL)
+        return str(getattr(agent, "device", "unknown"))
+
+
+def local_runtime_status(*, local_model_path=""):
+    source = _source_key(local_model_path)
+    task = _LOCAL_WARMUP_TASKS.get(source)
+    if task is not None and not task.done():
+        return {"local_runtime_state": "warming"}
+    ready = source in _LOCAL_READY and source in _LOCAL_ROUTERS
+    return {"local_runtime_state": "ready" if ready else "not_loaded"}
+
+
+def start_laya_warmup(store):
+    """Load installed weights once in the background, independently of reply deadlines."""
+    try:
+        values = store.raw()
+        if not values["enabled"] or values["mode"] != "local" or not any(values["decision_fields"].values()):
+            return None
+        local_model_path = values["local_model_path"]
+        source = _source_key(local_model_path)
+        if not local_model_path.strip() and cached_multilingual_model() is None:
+            return None
+        if local_runtime_status(local_model_path=local_model_path)["local_runtime_state"] == "ready":
+            return None
+        loop = asyncio.get_running_loop()
+    except Exception as error:
+        logger.warning("[CompanionV2] Laya 预热未启动 code=%s", type(error).__name__)
+        return None
+    task = _LOCAL_WARMUP_TASKS.get(source)
+    if task is not None and not task.done():
+        return task
+
+    async def warmup():
+        logger.info("[CompanionV2] Laya 本地模型预热开始 model=%s source=%s", DEFAULT_MODEL, source)
+        try:
+            initialization_started = perf_counter()
+            device = await _run_local_load(local_model_path)
+            initialization_ms = round((perf_counter() - initialization_started) * 1000)
+            facts = {
+                "message_kind": "text",
+                "user_text": "我这边在测试连接，请按当前语义分类问题作答。",
+                "scope_kind": "test",
+                "connection_test": True,
+            }
+            enabled_fields = {name: True for name in CONFIGURABLE_DECISION_FIELDS}
+            state = build_state(facts_document(facts), enabled_fields)
+            questions = decision_questions(facts, enabled_fields)
+            inference_started = perf_counter()
+            # Prime device kernels with synthetic facts before real turns arrive.
+            options = {"local_model_path": local_model_path} if local_model_path.strip() else {}
+            result, profile = await _run_local_predict(state, questions, **options)
+            _decision_from_result(result, enabled_fields)
+            inference_warmup_ms = round((perf_counter() - inference_started) * 1000)
+            _LOCAL_READY.add(source)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning("[CompanionV2] Laya 本地模型预热失败 code=%s", getattr(error, "code", type(error).__name__))
+        else:
+            logger.info("[CompanionV2] Laya 本地模型就绪 model=%s device=%s initialization_ms=%s inference_warmup_ms=%s",
+                        DEFAULT_MODEL, device, initialization_ms, inference_warmup_ms)
+            logger.debug("[CompanionV2][开发者追踪] Laya 预热推理分段 profile=%s", profile)
+
+    task = loop.create_task(warmup(), name="companion-laya-warmup")
+    _LOCAL_WARMUP_TASKS[source] = task
+    return task
+
+
+async def cancel_laya_warmup():
+    """Retire the background waiter on unload; its read-only load may finish."""
+    tasks = tuple(_LOCAL_WARMUP_TASKS.values())
+    _LOCAL_WARMUP_TASKS.clear()
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _parse_document(raw: str) -> dict:
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise LayaClientError("laya_response_invalid", "Laya 返回的不是有效 JSON") from error
+    if type(value) is not dict:
+        raise LayaClientError("laya_response_invalid", "Laya 返回的 JSON 不是对象")
+    return value
+
+
+def _decision_from_result(document: dict, enabled_fields=None) -> LayaDecision:
+    answers = document.get("answers")
+    if type(answers) is not dict:
+        raise LayaClientError("laya_response_invalid", "Laya 响应缺少 answers 对象")
+    enabled = enabled_fields or {name: True for name in CONFIGURABLE_DECISION_FIELDS}
+    choices = dict(DECISION_DEFAULTS)
+    for name in DECISION_QUESTIONS:
+        if not enabled.get(name, True):
+            continue
+        answer = answers.get(name)
+        choice = answer.get("choice") if type(answer) is dict else None
+        if type(answer) is not dict or answer.get("type") != "choice" or type(choice) is not str:
+            raise LayaClientError("laya_response_invalid", f"Laya 响应缺少 choice 分类：{name}")
+        choices[name] = choice
+    choices["reason_codes"] = []
+    try:
+        return parse_decision(choices)
+    except DecisionContractError as error:
+        raise LayaClientError("laya_contract_invalid", str(error)) from error
+
+
+def _safe_error_text(raw: bytes, secret: str) -> str:
+    try:
+        text = raw.decode("utf-8", errors="replace")
+        document = json.loads(text)
+        if isinstance(document, dict):
+            detail = document.get("detail") or document.get("error") or document
+            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = raw.decode("utf-8", errors="replace")
+    if secret:
+        text = text.replace(secret, "<hidden>")
+    return " ".join(text.replace("\r", " ").replace("\n", " ").split())[:1000]
+
+
+class LayaDecisionClient:
+    runtime_status = staticmethod(local_runtime_status)
+
+    def __init__(self, *, mode: str = "local", endpoint: str = "", api_key: str = "",
+                 timeout_seconds: int = 8, local_model_path: str = ""):
+        if mode not in {"local", "remote"}:
+            raise LayaClientError("laya_mode_invalid", "Laya 接入方式必须是 local 或 remote")
+        self.mode = mode
+        self.local_model_path = local_model_path
+        self.endpoint = _endpoint(endpoint) if mode == "remote" else ""
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        self.last_trace = {}
+
+    async def decide(self, facts: dict, *, enabled_fields=None) -> LayaDecision:
+        self.last_trace = {}
+        skip = deterministic_skip_reason(facts)
+        if skip is not None:
+            raise LayaClientError("laya_rule_skip", skip)
+        enabled = {name: True for name in CONFIGURABLE_DECISION_FIELDS}
+        if enabled_fields is not None:
+            enabled.update({name: value for name, value in enabled_fields.items()
+                            if name in enabled and type(value) is bool})
+        if not any(enabled.values()):
+            raise LayaClientError("laya_no_decision_fields", "没有启用任何 Laya 决策分类")
+        local_runtime = None
+        state = build_state(facts_document(facts), enabled)
+        questions = decision_questions(facts, enabled)
+        model_state = render_model_state(state)
+        self.last_trace = {
+            "request": {"model": DEFAULT_MODEL, "state": model_state, "questions": questions, "sent": False},
+            "response": None,
+            "processing": {"stages": [{"name": "request_preparation", "status": "ok"}]},
+        }
+        logger.debug("[CompanionV2][开发者追踪] Laya 输入 mode=%s state=%s model_state=%s questions=%s",
+                     self.mode, state[:16000], render_model_state(state)[:16000],
+                     json.dumps(questions, ensure_ascii=False, separators=(",", ":")))
+        if self.mode == "local":
+            if local_runtime_status(local_model_path=self.local_model_path)["local_runtime_state"] == "warming":
+                raise LayaClientError("laya_initializing", "Laya 本地模型正在预热，本轮继续普通回复流程")
+            try:
+                self.last_trace["request"]["sent"] = True
+                options = {"local_model_path": self.local_model_path} if self.local_model_path.strip() else {}
+                raw_result, local_runtime = await asyncio.wait_for(
+                    _run_local_predict(state, questions, **options), timeout=self.timeout_seconds)
+            except asyncio.TimeoutError as error:
+                raise LayaClientError("laya_inference_timeout", "Laya 本地判断超时，本轮继续普通回复流程") from error
+            self.last_trace["response"] = {
+                "format": "python_object",
+                "body": _diagnostic_response_text(raw_result),
+                "value": raw_result if type(raw_result) is dict else None,
+            }
+        else:
+            self.last_trace["request"]["sent"] = True
+            raw_body = await self._post(model_state, questions)
+            self.last_trace["response"] = {"format": "json", "body": raw_body}
+            raw_result = _parse_document(raw_body)
+            self.last_trace["response"]["value"] = raw_result
+        if type(raw_result) is not dict:
+            raise LayaClientError("laya_response_invalid", "Laya predict 返回的结果不是对象")
+        logger.debug("[CompanionV2][开发者追踪] Laya 原始答案 mode=%s response=%s",
+                     self.mode, repr(raw_result)[:20000])
+        try:
+            decision = _decision_from_result(raw_result, enabled)
+        except LayaClientError:
+            self.last_trace["processing"]["stages"].append({"name": "contract_conversion", "status": "failed"})
+            raise
+        contract_decision = decision.document()
+        transformations = []
+        if self.mode == "local":
+            _LOCAL_READY.add(_source_key(self.local_model_path))
+        if facts.get("scope_kind") != "group" and decision.action == "interject":
+            decision = replace(decision, action="reply")
+            transformations.append({"name": "private_interject_to_reply", "from": "interject", "to": "reply"})
+        self.last_trace["processing"] = {
+            "stages": [
+                {"name": "inference", "status": "ok"},
+                {"name": "contract_conversion", "status": "ok"},
+                {"name": "scope_normalization", "status": "ok"},
+            ],
+            "contract_decision": contract_decision,
+            "effective_decision": decision.document(),
+            "transformations": transformations,
+        }
+        if local_runtime is not None:
+            self.last_trace["processing"]["local_runtime"] = local_runtime
+        logger.debug("[CompanionV2][开发者追踪] Laya 合同转换 result=%s",
+                     json.dumps(decision.document(), ensure_ascii=False, separators=(",", ":")))
+        return decision
+
+    async def probe(self, *, enabled_fields=None) -> LayaDecision:
+        return await self.decide({
+            "message_kind": "text",
+            "user_text": "我这边在测试连接，请按当前语义分类问题作答。",
+            "scope_kind": "test",
+            "connection_test": True,
+        }, enabled_fields=enabled_fields)
+
+    async def _post(self, model_state: str, questions: dict) -> str:
+        body = json.dumps({"state": model_state, "questions": questions, "model": DEFAULT_MODEL},
+                          ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
+        request = Request(self.endpoint, data=body, headers=headers, method="POST")
+
+        def send() -> str:
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    content = response.read(MAX_RESPONSE_BYTES + 1)
+            except HTTPError as error:
+                detail = _safe_error_text(error.read(4096), self.api_key)
+                raise LayaClientError("laya_http_error",
+                    f"Laya HTTP {error.code}" + (f"：{detail}" if detail else "")) from error
+            except (URLError, TimeoutError, OSError) as error:
+                raise LayaClientError("laya_transport_failed",
+                    f"Laya 连接失败：{type(error).__name__}: {error}") from error
+            if len(content) > MAX_RESPONSE_BYTES:
+                raise LayaClientError("laya_response_too_large", "Laya 响应超过 1 MiB")
+            try:
+                return content.decode("utf-8")
+            except UnicodeError as error:
+                raise LayaClientError("laya_response_invalid", "Laya 响应不是 UTF-8") from error
+
+        try:
+            return await asyncio.to_thread(send)
+        except LayaClientError:
+            raise
+
+
+def _diagnostic_response_text(value):
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError):
+        return repr(value)[:32768]

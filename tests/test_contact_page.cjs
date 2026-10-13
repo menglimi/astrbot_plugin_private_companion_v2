@@ -31,21 +31,6 @@ test.afterEach(() => {
   activeHarnesses.clear();
 });
 
-/* 后端 status 的 contact 分区（照 native_perception_api._status）。
-   注意 effective 上四个字段与 purposes 上每项 allowed/reason 都是页面的判据来源。 */
-function status(settings = {}, extra = {}) {
-  return {contact: {
-    settings,
-    edit_token: 'n'.repeat(64),
-    effective: {allowed: true, reason: null, automatic_allowed: true, automatic_reason: null,
-      model_registered: true, readonly_fields: [], ...(extra.effective || {})},
-    purposes: extra.purposes || {
-      chat: {label: '日常话题', allowed: true, reason: null},
-      news: {label: '外部资讯', allowed: true, reason: null},
-    },
-    host_state: extra.host_state || 'running',
-  }};
-}
 const baseSettings = () => ({
   enabled: true, automatic_enabled: true, quiet_enabled: true, quiet_start: '23:00', quiet_end: '07:00',
   quiet_timezone: 'Asia/Shanghai', proactive_intensity_preset: 'balanced',
@@ -58,16 +43,20 @@ const baseSettings = () => ({
 });
 
 /* 上界：只保留后面两条通用断言用得到的字段。 */
-function harness({nativeApi = NATIVE, configApi = CONFIG, sessionStore = new Map(), sessionStorageBlocked = false,
-  localStorageBlocked = false, historyBlocked = false, historyEntry = {current: null}} = {}) {
+function harness({nativeApi = NATIVE, configApi = CONFIG, sessionStore = new Map(), localStorageStore = new Map(),
+  sessionStorageBlocked = false, localStorageBlocked = false, historyBlocked = false,
+  historyEntry = {current: null}} = {}) {
   const requests = [];
   const clipboardWrites = [];
+  let selectedScopeKey = JSON.stringify(['install-1', 'target-1', 'role-1']);
   let gateSettingsTarget = null;
   let gateSettingsArea = null;
   const window = {
     navigator: {clipboard: {writeText: async text => clipboardWrites.push(text)}},
     CompanionProduct: {
       hosted: () => true,
+      scopeKey: () => selectedScopeKey,
+      identity: () => ({installation_id: 'install-1', operator_id: 'admin-1'}),
       role: () => ({role_id: 'role-1', perception_native_api: nativeApi, config_api: configApi}),
       bridgeNow: () => window.AstrBotPluginPage,
       bridgeFor: () => ({then: resolve => resolve(window.AstrBotPluginPage)}),
@@ -93,7 +82,7 @@ function harness({nativeApi = NATIVE, configApi = CONFIG, sessionStore = new Map
     },
     matchMedia: () => ({matches: false}),
     console, Intl, Date, JSON, Math, Number, Object, Array, String, Set, Map, Boolean, Error, Promise,
-    localStorage: (() => { const store = new Map(); return {
+    localStorage: (() => { const store = localStorageStore; return {
       getItem: k => { if (localStorageBlocked) throw new Error('SecurityError'); return store.has(k) ? store.get(k) : null; },
       setItem: (k, v) => { if (localStorageBlocked) throw new Error('SecurityError'); store.set(k, String(v)); },
       removeItem: k => { if (localStorageBlocked) throw new Error('SecurityError'); store.delete(k); }, _store:store}; })(),
@@ -134,18 +123,31 @@ function harness({nativeApi = NATIVE, configApi = CONFIG, sessionStore = new Map
   const page = window.CompanionContactPage;
   const element = root();
   const fixture = {page, element, requests, clipboardWrites, window, sessionStore, historyEntry, localStore:window.localStorage._store,
+    setScopeKey: value => {selectedScopeKey = value;},
     setGateSettingsTarget: target => {gateSettingsTarget = target;},
     setGateSettingsArea: target => {gateSettingsArea = target;},
-    reply: (request, payload) => request.resolve({status: 'ok', data: payload}),
+    reply: (request, payload) => {
+      if (request.method === 'GET' && (request.route === 'config' || request.route.endsWith('/config'))) {
+        const section = payload?.sections?.['proactive.contact'];
+        if (section && !Object.hasOwn(section, 'settings')) section.settings = baseSettings();
+        if (section && !Object.hasOwn(section, 'scope')) section.scope = 'installation';
+      }
+      request.resolve({status: 'ok', data: payload});
+    },
     fail: (request, code) => request.resolve({status: 'error', message: code, data: {code}}),
     settle};
   activeHarnesses.add(fixture);
   return fixture;
 }
 
-/* 页面挂载后要串行走三步：桥就绪 → 目标目录 → native 状态 + config 契约。
-   「谁在飞就答谁」的循环，因为后一步在前一步确认之后才发。 */
-async function boot(h, settings = baseSettings(), extra = {}) {
+/* 全局页只请求安装级配置；值和令牌来自同一接口合同。 */
+function replyGlobalConfig(h, request, settings = baseSettings(), token = 'c'.repeat(64)) {
+  h.reply(request, {sections: {'proactive.contact': {
+    edit_token: token, settings, scope: 'installation', fields: {},
+  }}});
+}
+
+async function boot(h, settings = baseSettings()) {
   const mounted = h.page.mount(h.element);
   await h.settle();
   const answered = new Set();
@@ -154,9 +156,8 @@ async function boot(h, settings = baseSettings(), extra = {}) {
     if (!pending.length) break;
     for (const request of pending) {
       answered.add(request);
-      if (request.route === 'perception-native') { h.reply(request, status(settings, extra)); continue; }
-      if (request.route.startsWith('config')) {
-        h.reply(request, {sections: {['proactive.contact']: {edit_token: 'c'.repeat(64), fields: {}}}});
+      if (request.route === 'config' || request.route.endsWith('/config')) {
+        replyGlobalConfig(h, request, settings);
         continue;
       }
       h.reply(request, {});
@@ -169,20 +170,96 @@ async function boot(h, settings = baseSettings(), extra = {}) {
 
 /* ---- 接线 ------------------------------------------------------------- */
 
-test('挂载后先读角色级状态，再读同一角色的配置契约', async () => {
+test('挂载只读取安装级配置正本，不访问宿主当前会话', async () => {
   const h = harness();
   await boot(h);
   const routes = h.requests.map(r => r.method + ' ' + r.route.split('?')[0]);
-  /* 顺序是契约：state 是判据来源，契约只提供 edit_token 与字段表。 */
-  assert.equal(routes[0], 'GET perception-native');
-  assert.equal(routes[1], 'GET config');
-  assert.equal(h.requests[1].route, 'config');
-  assert.deepEqual(JSON.parse(JSON.stringify(h.requests[1].params)), {sections: 'proactive.contact'});
+  assert.deepEqual(routes, ['GET config']);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests[0].params)), {sections: 'proactive.contact'});
   assert.equal(h.page.state.data.ready, true);
   assert.equal(h.page.state.data.settings.enabled, true);
-  /* native 与 config 是两套生效范围，令牌必须分别持有，不能互相顶替。 */
-  assert.equal(h.page.state.data.editToken, 'n'.repeat(64));
   assert.equal(h.page.state.data.configToken, 'c'.repeat(64));
+  assert.match(h.element.innerHTML, /全局设置/);
+});
+
+test('全局设置始终只来自 installation 分区', async () => {
+  const h = harness();
+  const configured = baseSettings();
+  await boot(h, configured);
+  assert.equal(h.page.state.data.configScope, 'installation');
+  assert.equal(h.page.state.data.settings.enabled, true);
+  assert.equal(h.page.state.data.settings.automatic_enabled, true);
+  assert.equal(h.requests.some(request => request.route.startsWith('perception-native')), false);
+  assert.doesNotMatch(h.element.innerHTML, /当前对象|当前私聊对象/);
+});
+
+test('契机与闸门只按全局默认计算，不宣称具体用户已经获准', async () => {
+  const h = harness();
+  const global = {...baseSettings(), enabled: true, quiet_enabled: false, 'chat.enabled': false};
+  await boot(h, global);
+  assert.equal(h.page.state.data.settings.enabled, true);
+  assert.equal(h.page.state.data.effectiveSettings, null);
+  assert.match(h.element.innerHTML, /全局默认已开启/);
+  assert.doesNotMatch(h.element.innerHTML, /此刻可以开口|当前私聊对象/);
+  h.page.openGateSettingsView();
+  assert.match(h.element.innerHTML, /全局默认配置已读取/);
+  assert.match(h.element.innerHTML, /逐用户授权与单独设置在私聊用户页管理/);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'purposes'}} : null}});
+  const row = h.element.innerHTML.split('data-purpose="chat"')[1].split('</article>')[0];
+  assert.doesNotMatch(row, /data-field="chat.enabled"[^>]* checked/);
+  assert.match(row, /已关闭/);
+  assert.doesNotMatch(row, /当前对象|授权已通过/);
+  assert.equal(h.page.state.data.touched.size, 0);
+});
+
+test('重新读取全局设置不会请求或受当前私聊会话影响', async () => {
+  const h = harness();
+  await boot(h);
+  const start = h.requests.length;
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]'
+    ? {dataset: {action: 'refresh'}} : null}});
+  await h.settle();
+  assert.equal(h.requests[start].route, 'config');
+  h.reply(h.requests[start], {sections: {['proactive.contact']: {
+    edit_token: 'd'.repeat(64), settings: {...baseSettings(), note: '安装级刷新'}, scope: 'installation', fields: {},
+  }}});
+  await h.settle();
+  assert.equal(h.page.state.data.settings.note, '安装级刷新');
+  assert.equal(h.requests.length, start + 1);
+});
+
+test('全局配置刷新失败保留上次确认值并停止保存', async () => {
+  const h = harness();
+  await boot(h);
+  const start = h.requests.length;
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]'
+    ? {dataset: {action: 'refresh'}} : null}});
+  await h.settle();
+  h.fail(h.requests[start], 'configuration_scope_denied');
+  await h.settle();
+  assert.equal(h.page.state.data.settings.enabled, true);
+  assert.equal(h.page.state.data.configToken, '');
+  assert.equal(h.page.state.data.ready, true);
+  assert.match(h.element.innerHTML, /data-field="enabled"[^>]* checked/);
+  assert.equal(h.requests.filter(request => request.method === 'POST').length, 0);
+});
+
+test('全局配置不可读时不以任何会话值回退显示或保存', async () => {
+  const h = harness();
+  const mounted = h.page.mount(h.element);
+  await h.settle();
+  assert.equal(h.requests.length, 1);
+  h.fail(h.requests[0], 'configuration_scope_denied');
+  await mounted;
+  assert.equal(h.page.state.data.ready, false);
+  assert.equal(h.page.state.data.settings, null);
+  assert.doesNotMatch(h.element.innerHTML, /data-field="enabled"/);
+  h.page.openGateSettingsView();
+  assert.match(h.element.innerHTML, /全局设置尚未读取/);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]'
+    ? {dataset: {action: 'save'}} : null}});
+  assert.equal(h.requests.filter(request => request.method === 'POST').length, 0);
 });
 
 test('从状态入口进入后切到开口闸门并聚焦设置区', async () => {
@@ -226,86 +303,91 @@ test('路径是插件相对路径：切掉插件目录名，否则宿主会拼�
   }
 });
 
-test('多目标的状态与字段契约采用同一对象角色的目录路径', async () => {
+test('多目标选择不改变安装级联系配置接口', async () => {
   const base = 'host/targets/second/roles/role-1';
   const h = harness({nativeApi: '/' + HOST + '/' + base + '/perception-native',
     configApi: '/' + HOST + '/' + base + '/config'});
   const mounted = h.page.mount(h.element);
   await h.settle();
-  assert.equal(h.requests[0].route, base + '/perception-native');
-  h.reply(h.requests[0], status(baseSettings()));
-  await h.settle();
-  assert.equal(h.requests[1].route, base + '/config');
-  assert.equal(h.requests[1].params.sections, 'proactive.contact');
-  h.reply(h.requests[1], {sections: {'proactive.contact': {edit_token: 'c'.repeat(64)}}});
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].route, 'config');
+  assert.equal(h.requests[0].params.sections, 'proactive.contact');
+  h.reply(h.requests[0], {sections: {'proactive.contact': {edit_token: 'c'.repeat(64),
+    settings: baseSettings(), scope: 'installation'}}});
   await mounted;
   assert.equal(h.page.state.data.ready, true);
   h.page.unmount();
 });
 
-test('联系状态已读到但配置契约失败时分开展示，保留草稿并允许单独重试', async () => {
+test('切换私聊窗口仍复用全局联系草稿缓存', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: selector => selector === '[data-view]'
+    ? {dataset: {view: 'sources'}} : null}});
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.page.unmount();
+
+  h.setScopeKey(JSON.stringify(['install-1', 'target-2', 'role-2']));
+  const mounted = h.page.mount(h.element);
+  await h.settle();
+  assert.equal(h.requests.at(-1).route, 'config');
+  h.reply(h.requests.at(-1), {sections: {'proactive.contact': {edit_token: 'n'.repeat(64),
+    settings: baseSettings(), scope: 'installation'}}});
+  await mounted;
+
+  assert.equal(h.page.state.data.view, 'sources');
+  assert.equal(h.page.state.data.touched.has('news.enabled'), true);
+  assert.equal(h.page.state.data.draft['news.enabled'], false);
+});
+
+test('配置响应缺少设置时保持未就绪，不用旧会话状态填充', async () => {
   const h = harness();
   const mounted = h.page.mount(h.element);
   await h.settle();
-  h.reply(h.requests[0], status(baseSettings(), {effective: {
-    allowed: false, reason: 'authorization_denied', automatic_allowed: false,
-    automatic_reason: 'authorization_denied', model_registered: true,
-  }}));
-  await h.settle();
-  h.fail(h.requests[1], 'configuration_scope_denied');
+  const request = h.requests[0];
+  assert.equal(request.route, 'config');
+  request.resolve({status: 'ok', data: {sections: {['proactive.contact']:
+    {edit_token: 'r'.repeat(64), scope: 'installation'}}}});
   await mounted;
 
-  assert.equal(h.page.state.data.ready, true, '运行状态已成功读取');
-  assert.equal(h.page.state.data.effective.reason, 'authorization_denied');
-  assert.match(h.element.innerHTML, /当前对象尚未授予联系权限/);
-  assert.match(h.element.innerHTML, /联系状态已读取；配置编辑信息未读到，保存暂不可用/);
-  assert.doesNotMatch(h.element.innerHTML, /联系条件暂时无法核对/);
-
-  h.element.dispatch('change', {target: {closest: selector => selector === '[data-field]'
-    ? {dataset: {field: 'quiet_enabled'}, type: 'checkbox', checked: false} : null}});
-  assert.equal(h.page.state.data.touched.size, 1, '契约失败时草稿仍然可编辑');
-  assert.match(h.element.innerHTML, /data-action="save" disabled/, '没有配置令牌不能提交草稿');
-
-  h.element.dispatch('click', {target: {closest: selector => selector === '[data-action]'
-    ? {dataset: {action: 'retry-contract'}} : null}});
-  await h.settle();
-  const retry = h.requests.at(-1);
-  assert.equal(retry.method, 'GET');
-  assert.equal(retry.route, 'config');
-  h.reply(retry, {sections: {'proactive.contact': {edit_token: 'r'.repeat(64)}}});
-  await h.settle();
-  assert.equal(h.page.state.data.touched.size, 1, '重新读取契约不应丢弃草稿');
-  assert.equal(h.page.state.data.configToken, 'r'.repeat(64));
-  assert.doesNotMatch(h.element.innerHTML, /配置编辑信息未能读取/);
-  assert.match(h.element.innerHTML, /data-action="save"(?! disabled)/);
+  assert.equal(h.page.state.data.ready, false);
+  assert.equal(h.page.state.data.settings, null);
+  assert.equal(h.page.state.data.effective, null);
+  assert.match(h.element.innerHTML, /全局设置尚未读取/);
+  assert.doesNotMatch(h.element.innerHTML, /当前对象尚未授予联系权限|此刻可以开口/);
+  assert.equal(h.requests.filter(item => item.method === 'POST').length, 0);
   h.page.unmount();
 });
 
-test('没有完整联系快照时不显示此刻可以开口', async () => {
+test('其他作用域不能伪装成安装级配置', async () => {
   const h = harness();
   const mounted = h.page.mount(h.element);
   await h.settle();
-  h.reply(h.requests[0], {news: {settings: {news_share_enabled: false}}});
-  await h.settle();
-  h.reply(h.requests[1], {sections: {'proactive.contact': {edit_token: 'c'.repeat(64)}}});
+  h.reply(h.requests[0], {sections: {'proactive.contact': {edit_token: 'c'.repeat(64),
+    settings: baseSettings(), scope: 'role'}}});
   await mounted;
   assert.equal(h.page.state.data.ready, false);
-  assert.match(h.element.innerHTML, /联系状态尚未读取/);
+  assert.equal(h.page.state.data.settings, null);
+  assert.match(h.element.innerHTML, /全局设置尚未读取/);
   assert.doesNotMatch(h.element.innerHTML, /此刻可以开口/);
+  assert.equal(h.requests.length, 1);
   h.page.unmount();
 });
 
-test('没有角色路由时不发请求，并说明原因', async () => {
+test('未选择角色时仍可读取安装级联系默认', async () => {
   const h = harness();
   h.window.CompanionProduct.role = () => null;
-  await h.page.mount(h.element);
+  const mounted = h.page.mount(h.element);
   await h.settle();
-  assert.equal(h.requests.length, 0, '读不到角色就不知道该读哪个对象的状态，一个请求都不该发');
-  assert.equal(h.page.state.data.ready, false);
-  /* 空态必须说清「为什么没有」——地址取不到时给的是那一句专用文案，
-     而不是一句通用的「读取失败」：前者告诉用户去选对象，后者让他去查网络。 */
-  assert.ok(h.element.innerHTML.includes('按会话生效'), '要说清是缺对象，不是缺连接');
-  assert.ok(h.page.state.data.error, '空态也要标记成错误态，否则看起来像还没读完');
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].route, 'config');
+  h.reply(h.requests[0], {sections: {'proactive.contact': {edit_token: 'c'.repeat(64),
+    settings: baseSettings(), scope: 'installation'}}});
+  await mounted;
+  assert.equal(h.page.state.data.ready, true);
+  assert.equal(h.page.state.data.configScope, 'installation');
+  assert.doesNotMatch(h.element.innerHTML, /按会话生效/, '全局设置不能标成会话配置');
 });
 
 /* ---- 环的几何 ---------------------------------------------------------
@@ -410,69 +492,49 @@ test('未启用每日问候时环上不画任何问候弧', async () => {
   assert.ok(html.includes('greeting_morning_window'), '控制区仍要能编辑窗口');
 });
 
-test('环心那句话与后端同源：后端说不允许就照实说，不自己推断', async () => {
+test('全局节律展示配置默认，不推断当前私聊对象的授权', async () => {
   const h = harness();
-  await boot(h, baseSettings(), {
-    effective: {allowed: false, reason: 'proactive_paused', automatic_allowed: false,
-      automatic_reason: 'proactive_paused', model_registered: true},
-  });
+  await boot(h, {...baseSettings(), quiet_enabled: false,
+    proactive_hour_activity_curve: new Array(24).fill(1).join(',')});
   const html = h.element.innerHTML;
-  /* 「当前不会开口」这一句必须出现，且原因用的是翻译后的文案而不是裸码。 */
-  assert.ok(html.includes('当前不会开口'), '被拦时环心要说清楚');
-  assert.ok(!html.includes('此刻可以开口'), '不能同时说可以开口');
+  assert.ok(html.includes('全局默认已开启'));
+  assert.ok(html.includes('具体用户的授权与私聊设置在私聊用户页管理'));
+  assert.equal(h.page.state.data.effective, null);
+  assert.ok(!html.includes('当前对象尚未授予联系权限'));
+  assert.ok(!html.includes('此刻可以开口'));
 });
 
-test('主动联系与后台自动联系关闭时显示具体原因，不回退到无法核对', async () => {
+test('总开关与自动联系开关分别呈现全局默认', async () => {
   const disabled = harness();
-  await boot(disabled, {...baseSettings(), enabled:false, automatic_enabled:false}, {
-    effective: {allowed:false, reason:'proactive_disabled', automatic_allowed:false,
-      automatic_reason:'proactive_disabled', model_registered:true},
-  });
-  assert.match(disabled.element.innerHTML, /主动联系总开关已关闭/);
-  assert.doesNotMatch(disabled.element.innerHTML, /联系条件暂时无法核对/);
+  await boot(disabled, {...baseSettings(), enabled:false, automatic_enabled:false,
+    quiet_enabled:false, proactive_hour_activity_curve:new Array(24).fill(1).join(',')});
+  assert.match(disabled.element.innerHTML, /全局默认已关闭/);
+  assert.doesNotMatch(disabled.element.innerHTML, /联系条件暂时无法核对|当前对象尚未授予联系权限/);
 
   const automaticOff = harness();
-  await boot(automaticOff, {...baseSettings(), automatic_enabled:false}, {
-    effective: {allowed:true, reason:null, automatic_allowed:false,
-      automatic_reason:'contact_automatic_disabled', model_registered:true},
-  });
+  await boot(automaticOff, {...baseSettings(), automatic_enabled:false, quiet_enabled:false,
+    proactive_hour_activity_curve:new Array(24).fill(1).join(',')});
+  assert.match(automaticOff.element.innerHTML, /后台自动联系默认关闭/);
   automaticOff.page.openGateSettingsView();
-  assert.match(automaticOff.element.innerHTML, /后台自动联系未开启/);
-  assert.doesNotMatch(automaticOff.element.innerHTML, /联系条件暂时无法核对/);
+  assert.match(automaticOff.element.innerHTML, /后台自动联系默认/);
+  assert.doesNotMatch(automaticOff.element.innerHTML, /当前对象尚未授予联系权限/);
 });
 
-test('授权阻断时不把后台自动联系误报成开关关闭', async () => {
+test('全局设置页不显示逐用户授权结果', async () => {
   const h = harness();
-  await boot(h, baseSettings(), {
-    effective: {allowed: false, reason: 'authorization_denied', automatic_allowed: false,
-      automatic_reason: 'authorization_denied', model_registered: true},
-  });
-  assert.match(h.element.innerHTML, /当前对象尚未授予联系权限/);
-  assert.doesNotMatch(h.element.innerHTML, /后台自动联系未开启/);
-  /* 两个开关是设置意图，授权是另一道 effective 闸门；授权被拒时仍应保持
-     已保存的开关状态可见，用户才能知道该去关系与权限处理。 */
+  await boot(h, {...baseSettings(), quiet_enabled:false,
+    proactive_hour_activity_curve:new Array(24).fill(1).join(',')});
+  assert.doesNotMatch(h.element.innerHTML, /当前对象尚未授予联系权限|前往关系与权限/);
+  assert.equal(h.page.state.data.effectiveSettings, null);
   assert.match(h.element.innerHTML, /data-field="enabled"[^>]* checked/);
   assert.match(h.element.innerHTML, /data-field="automatic_enabled"[^>]* checked/);
 });
 
-test('联系授权阻断提供关系与权限直达入口，普通暂停不显示该入口', async () => {
+test('普通全局暂停显示暂停原因，但不生成授权跳转', async () => {
   const denied = harness();
-  await boot(denied, baseSettings(), {
-    effective: {allowed: false, reason: 'authorization_denied', automatic_allowed: false,
-      automatic_reason: 'authorization_denied', model_registered: true},
-  });
-  assert.match(denied.element.innerHTML,
-    /class="ct-center-action" data-go="manage" data-manage="identity"/);
-  assert.match(denied.element.innerHTML, /前往关系与权限/);
-  assert.match(style, /\.ct-center-action\{[^}]*pointer-events:auto/);
-  assert.match(style, /\.ct-center-action:focus-visible/);
-
-  const paused = harness();
-  await boot(paused, baseSettings(), {
-    effective: {allowed: false, reason: 'proactive_paused', automatic_allowed: false,
-      automatic_reason: 'proactive_paused', model_registered: true},
-  });
-  assert.doesNotMatch(paused.element.innerHTML, /class="ct-center-action"/);
+  await boot(denied, {...baseSettings(), pause_until:'2099-01-01T12:00:00+08:00'});
+  assert.match(denied.element.innerHTML, /全局暂停中/);
+  assert.doesNotMatch(denied.element.innerHTML, /class="ct-center-action"|前往关系与权限/);
 });
 
 test('曲线未启用与曲线全为 1.0 在视觉上必须不同', async () => {
@@ -812,7 +874,26 @@ test('保存只提交动过的字段，并把两个令牌分开带上', async ()
   assert.ok(posted[0].route === undefined);
 });
 
-test('保存成功后清空草稿并重新读取状态', async () => {
+test('长目标路径使用不超过后端上限的幂等键', async () => {
+  const target = 'target-' + 'x'.repeat(80);
+  const role = 'role-' + 'y'.repeat(80);
+  const base = `${HOST}/host/targets/${target}/roles/${role}`;
+  const h = harness({nativeApi: '/' + base + '/perception-native', configApi: '/' + base + '/config'});
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]'
+    ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+
+  const post = h.requests.find(request => request.method === 'POST');
+  assert.ok(post, '长目标路径也必须提交保存');
+  assert.equal(post.route, 'config/configure', '全局写入路由与所选目标路径无关');
+  assert.ok(post.values.operation_key.length <= 128, post.values.operation_key.length);
+  assert.deepEqual(Object.keys(post.values.changes), ['news.enabled']);
+});
+
+test('保存成功后清空草稿并刷新安装级配置', async () => {
   const h = harness();
   await boot(h);
   const box = fakeInput({type: 'checkbox', checked: false, dataset: {field: 'news.enabled'}});
@@ -823,12 +904,16 @@ test('保存成功后清空草稿并重新读取状态', async () => {
   h.reply(post, {result: {operation_id: 'contact-op-1', replayed: false},
     status: {sections: {['proactive.contact']: {edit_token: 'c2'.repeat(32)}}}});
   await h.settle();
+  const refresh = h.requests.filter(r => r.method === 'GET' && r.route === 'config').at(-1);
+  replyGlobalConfig(h, refresh, {...baseSettings(), 'news.enabled': false}, 'c3'.repeat(32));
+  await h.settle();
   assert.equal(h.page.state.data.touched.size, 0, '保存成功后草稿要清空');
-  assert.equal(h.page.state.data.configToken, 'c2'.repeat(32), '要用确认里的新令牌');
+  assert.equal(h.page.state.data.configToken, 'c3'.repeat(32), '要用刷新后的配置令牌');
+  assert.equal(h.page.state.data.settings['news.enabled'], false);
   assert.ok(h.page.state.data.notice.includes('已保存'), '要有确认');
 });
 
-test('写入回执已确认但没有状态快照时，单独刷新联系配置令牌', async () => {
+test('写入回执确认后单独刷新安装级配置令牌', async () => {
   const h = harness();
   await boot(h);
   h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
@@ -840,19 +925,16 @@ test('写入回执已确认但没有状态快照时，单独刷新联系配置�
   await h.settle();
   assert.equal(h.page.state.data.pendingWrite, null, '持久回执足以确认写入');
   assert.equal(h.page.state.data.touched.size, 0);
-  const reread = h.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
-  h.reply(reread, status(baseSettings()));
-  await h.settle();
   const contract = h.requests.filter(r => r.method === 'GET' && r.route === 'config').at(-1);
-  assert.ok(contract, '联系状态刷新后还要单独刷新配置令牌');
-  h.reply(contract, {sections: {['proactive.contact']: {edit_token: 'c7'.repeat(32), fields: {}}}});
+  assert.ok(contract, '确认写入后要读取最新配置令牌');
+  replyGlobalConfig(h, contract, {...baseSettings(), 'news.enabled': false}, 'c7'.repeat(32));
   await h.settle();
   assert.equal(h.page.state.data.configToken, 'c7'.repeat(32));
   assert.match(h.page.state.data.notice, /已保存/);
   assert.doesNotMatch(h.element.innerHTML, /保存结果尚未确认/);
 });
 
-test('a saved receipt stays confirmed when the follow-up status read fails', async () => {
+test('a saved receipt stays confirmed when the follow-up global config read fails', async () => {
   const h = harness();
   await boot(h);
   h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
@@ -864,8 +946,8 @@ test('a saved receipt stays confirmed when the follow-up status read fails', asy
     ['proactive.contact']: {edit_token: 'c2'.repeat(32)},
   }}});
   await h.settle();
-  const reread = h.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
-  reread.reject(new Error('connection reset'));
+  const refresh = h.requests.filter(r => r.method === 'GET' && r.route === 'config').at(-1);
+  refresh.reject(new Error('connection reset'));
   await h.settle();
   assert.equal(h.page.state.data.pendingWrite, null);
   assert.match(h.page.state.data.notice, /已保存 1 项，但当前状态未能刷新/);
@@ -913,6 +995,9 @@ test('sandboxed storage and history keep an unknown save in the page session wit
     ['proactive.contact']: {edit_token: 'c2'.repeat(32)},
   }}});
   await h.settle();
+  const refresh = h.requests.filter(request => request.method === 'GET' && request.route === 'config').at(-1);
+  replyGlobalConfig(h, refresh);
+  await h.settle();
   assert.equal(h.page.state.data.pendingWrite, null);
 });
 
@@ -942,8 +1027,8 @@ test('blocked browser storage records an unknown save in history and restores th
     ['proactive.contact']: {edit_token: 'c4'.repeat(32)},
   }}});
   await reloaded.settle();
-  const refreshed = reloaded.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
-  reloaded.reply(refreshed, status(baseSettings()));
+  const refreshed = reloaded.requests.filter(r => r.method === 'GET' && r.route === 'config').at(-1);
+  replyGlobalConfig(reloaded, refreshed, baseSettings(), 'c4'.repeat(32));
   await reloaded.settle();
   assert.equal(reloaded.page.state.data.pendingWrite, null);
   assert.equal(JSON.stringify(historyEntry.current), JSON.stringify({router: {index: 3}}),
@@ -978,8 +1063,8 @@ test('an unknown contact save is restored after reload and retried with the iden
     ['proactive.contact']: {edit_token: 'c3'.repeat(32)},
   }}});
   await reloaded.settle();
-  const refreshed = reloaded.requests.filter(r => r.method === 'GET' && r.route === 'perception-native').at(-1);
-  reloaded.reply(refreshed, status(baseSettings()));
+  const refreshed = reloaded.requests.filter(r => r.method === 'GET' && r.route === 'config').at(-1);
+  replyGlobalConfig(reloaded, refreshed, baseSettings(), 'c3'.repeat(32));
   await reloaded.settle();
   assert.equal(reloaded.page.state.data.pendingWrite, null);
   assert.equal(sessionStore.size, 0);
@@ -1009,11 +1094,49 @@ test('the single pending notice action immediately checks the original save', as
     ['proactive.contact']: {edit_token: 'c6'.repeat(32)},
   }}});
   await h.settle();
-  const refreshed = h.requests.filter(request => request.method === 'GET' && request.route === 'perception-native').at(-1);
-  h.reply(refreshed, status(baseSettings()));
+  const refreshed = h.requests.filter(request => request.method === 'GET' && request.route === 'config').at(-1);
+  replyGlobalConfig(h, refreshed, baseSettings(), 'c6'.repeat(32));
   await h.settle();
   assert.equal(h.page.state.data.pendingWrite, null);
   assert.match(h.page.state.data.notice, /已保存/);
+});
+
+test('a bridge error without a machine code explains the pending save and keeps its receipt key', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: selector => selector === '[data-action]'
+    ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+
+  const original = h.requests.filter(request => request.method === 'POST').at(-1);
+  const operationKey = original.values.operation_key;
+  original.reject(new Error('Failed to fetch'));
+  await h.settle();
+
+  assert.equal(h.page.state.data.pendingWrite.body.operation_key, operationKey);
+  assert.match(h.element.innerHTML, /网络连接中断/);
+  assert.match(h.element.innerHTML, /原保存请求已保留/);
+});
+
+test('a machine-coded bridge rejection is confirmed and does not retry as an unknown write', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('change', fieldEvent(fakeInput({type: 'checkbox', checked: false,
+    dataset: {field: 'news.enabled'}}), 'change'));
+  h.element.dispatch('click', {target: {closest: selector => selector === '[data-action]'
+    ? {dataset: {action: 'save'}} : null}});
+  await h.settle();
+
+  const post = h.requests.find(request => request.method === 'POST');
+  post.reject(new Error('configuration_request_invalid'));
+  await h.settle();
+
+  assert.equal(h.page.state.data.pendingWrite, null, 'an explicit API rejection is not an unknown commit');
+  assert.equal(h.page.state.data.touched.size, 1, 'leave the draft for correction');
+  assert.match(h.page.state.data.notice, /请求与当前接口不匹配/);
+  assert.doesNotMatch(h.element.innerHTML, /保存结果尚未确认/);
 });
 
 test('a pending save keeps retrying automatically with one notice and the same operation', async () => {
@@ -1062,8 +1185,8 @@ test('a pending save keeps retrying automatically with one notice and the same o
     ['proactive.contact']: {edit_token: 'c5'.repeat(32)},
   }}});
   await h.settle();
-  const refreshed = h.requests.filter(request => request.method === 'GET' && request.route === 'perception-native').at(-1);
-  h.reply(refreshed, status(baseSettings()));
+  const refreshed = h.requests.filter(request => request.method === 'GET' && request.route === 'config').at(-1);
+  replyGlobalConfig(h, refreshed, baseSettings(), 'c5'.repeat(32));
   await h.settle();
   assert.equal(h.page.state.data.pendingWrite, null);
   assert.doesNotMatch(h.element.innerHTML, /保存结果尚未确认/);
@@ -1145,8 +1268,8 @@ test('七个视图都能渲染出内容', async () => {
     if (view === 'materials') {
       await h.settle();
       const request = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
-      assert.ok(request, '打开素材池时读取当前作用域的真实素材');
-      h.reply(request, {observed_at: '2026-10-07T00:00:00+00:00', count: 0, items: []});
+      assert.ok(request, '打开主动念头池时读取当前可用念头');
+      h.reply(request, {observed_at: '2026-10-07T00:00:00+00:00', state: 'ready', count: 0, items: []});
       await h.settle();
     }
     assert.ok(h.element.innerHTML.includes(marker), view + ' 视图渲染为空');
@@ -1154,45 +1277,50 @@ test('七个视图都能渲染出内容', async () => {
   /* 契机矩阵必须是 15 行——15 是 PURPOSES 的真实条数（账本曾记 12，实测 15）。 */
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'purposes'}} : null}});
   assert.equal((h.element.innerHTML.match(/data-purpose="/g) || []).length, 15);
-  /* 开口闸门七道：授权 / 自动 / 模型 / 宿主 / 免打扰 / 曲线 / 暂停。
-     模式要排除装饰用的 ct-gate-mark / ct-gate-body / ct-gate-state。 */
+  /* 全局页只画有配置来源的五道闸门，不伪造用户授权、模型或宿主状态。 */
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'gates'}} : null}});
-  assert.equal((h.element.innerHTML.match(/class="ct-gate( is-\w+)?"/g) || []).length, 7);
+  assert.equal((h.element.innerHTML.match(/class="ct-gate( is-\w+)?"/g) || []).length, 5);
+  assert.match(h.element.innerHTML, /逐用户授权与单独设置在私聊用户页管理/);
+  assert.doesNotMatch(h.element.innerHTML, /当前对象尚未授予联系权限|模型未注册|宿主未运行/);
 });
 
-test('素材池按需读取真实数据、展示来源与有效期，并支持筛选', async () => {
+test('全局素材池只展示角色共享见闻并支持分类筛选', async () => {
   const h = harness();
   await boot(h);
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
     ? {dataset: {view: 'materials'}} : null}});
   await h.settle();
   const request = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
-  assert.ok(request, '素材池应从当前私聊角色的只读端点加载');
-  h.reply(request, {observed_at: '2026-10-07T00:00:00+00:00', count: 2, items: [
-    {id: 'dialog-1', category: '对话', purpose: '日常承接、关系表达', title: '最近私聊内容',
-      detail: '我最近在准备周末的旅行', source: '当前私聊', captured_at: '2026-10-07T00:00:00+00:00',
-      expires_at: '2026-10-07T01:00:00+00:00'},
-    {id: 'news-1', category: '资讯', purpose: '外部资讯', title: '<新闻标题>',
-      detail: '一条有来源的摘要', note: '资讯源', source: '资讯源', captured_at: '2026-10-06T23:00:00+00:00',
-      expires_at: '2026-10-07T00:30:00+00:00'},
+  assert.ok(request, '主动联系页应读取角色共享素材池');
+  h.reply(request, {observed_at: '2026-10-07T00:00:00+00:00', checked_at: '2026-10-06T23:00:00+00:00',
+    state: 'ready', count: 2, items: [
+    {id: 'news-1', scope: 'role', category: '资讯', purpose: '值得和朋友分享的见闻', title: '<新闻标题>',
+      detail: '一条有来源的摘要', note: '示例媒体', source: '共享资讯池', url: 'https://news.example/item',
+      captured_at: '2026-10-06T23:00:00+00:00', expires_at: '2026-10-07T00:30:00+00:00'},
+    {id: 'fun-1', scope: 'role', category: '趣事', purpose: '值得和朋友分享的见闻', title: '一件有意思的小事',
+      detail: '公开摘要', note: '趣闻来源', source: '共享资讯池', captured_at: '2026-10-06T22:50:00+00:00',
+      expires_at: '2026-10-07T00:20:00+00:00'},
   ]});
   await h.settle();
   assert.equal(h.page.state.data.materialsLoaded, true);
   assert.equal(h.page.state.data.materialItems.length, 2);
-  assert.match(h.element.innerHTML, /最近私聊内容/);
   assert.match(h.element.innerHTML, /&lt;新闻标题&gt;/, '素材正文必须按文本转义');
+  assert.doesNotMatch(h.element.innerHTML, /当前关系|私聊|最近读完的一本书/);
+  assert.match(h.element.innerHTML, /角色共享素材池/);
+  assert.match(h.element.innerHTML, /共享资讯池/);
+  assert.match(h.element.innerHTML, /查看来源/);
   assert.match(h.element.innerHTML, /有效至/);
-  assert.match(h.element.innerHTML, /2 项素材/);
+  assert.match(h.element.innerHTML, /2 条共享素材/);
 
   const cards = [
-    {dataset: {category: '对话', search: '对话 日常承接 最近私聊内容 周末旅行'}, hidden: false},
-    {dataset: {category: '资讯', search: '资讯 外部资讯 新闻标题 摘要'}, hidden: false},
+    {dataset: {category: '资讯', search: '资讯 新闻标题 摘要'}, hidden: false},
+    {dataset: {category: '趣事', search: '趣事 有意思 小事 摘要'}, hidden: false},
   ];
   const count = {textContent: ''}, empty = {hidden: true};
   h.element.querySelectorAll = selector => selector === '[data-material-card]' ? cards : [];
   h.element.querySelector = selector => selector === '[data-material-result-count]' ? count
     : selector === '.ct-material-filter-empty' ? empty : null;
-  const filter = {value: '资讯', closest: sel => sel === '[data-material-category]' ? filter : null};
+  const filter = {value: '趣事', closest: sel => sel === '[data-material-category]' ? filter : null};
   h.element.dispatch('change', {target: filter});
   assert.deepEqual(cards.map(card => card.hidden), [true, false]);
   const search = {value: '沒有', closest: sel => sel === '[data-material-search]' ? search : null};
@@ -1201,6 +1329,60 @@ test('素材池按需读取真实数据、展示来源与有效期，并支持�
   assert.equal(empty.hidden, false);
   assert.equal(h.page.state.data.touched.size, 0, '素材篩選不應觸碰配置草稿');
   assert.equal(h.requests.filter(r => r.method === 'POST').length, 0, '素材池只能讀取');
+});
+
+test('全局素材池不显示私聊发送记录', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'materials'}} : null}});
+  await h.settle();
+  const request = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
+  h.reply(request, {state: 'ready', count: 3, history_count: 3, items: [
+    {id: 'role-1', scope: 'role', category: '资讯', purpose: '分享见闻', title: '共享见闻',
+      detail: '角色可共享的内容', source: '共享资讯池', captured_at: '2026-10-07T11:00:00+00:00'},
+    {id: 'message-1', scope: 'window', category: '主动消息', purpose: '分享见闻', title: '一件有意思的事',
+      detail: '这是实际拟发送的内容', source: '主动消息记录', captured_at: '2026-10-07T11:00:00+00:00',
+      usage: {status: 'partial', delivered_parts: 1, total_parts: 2,
+        records: [{sequence: 0, delivered_at: '2026-10-07T11:01:00+00:00', text: '<已送达的一段>'}]}},
+    {id: 'message-2', scope: 'window', category: '主动消息', purpose: '分享见闻', title: '另一件有意思的事',
+      detail: '完整确认送达的内容', source: '主动消息记录', captured_at: '2026-10-07T11:03:00+00:00',
+      usage: {status: 'delivered', delivered_parts: 1, total_parts: 1,
+        thought_origin: '情绪关怀',
+        followup_observation: {status: 'input_after_delivery', input_at: '2026-10-07T11:04:00+00:00',
+          observed_through: '2026-10-07T11:05:00+00:00'},
+        records: [{sequence: 0, delivered_at: '2026-10-07T11:03:30+00:00', text: '完整送达'}]}},
+    {id: 'thought-3', scope: 'window', category: '未发送的念头', purpose: '日常话题', title: '还没说出口的念头',
+      detail: '这条在审核后没有发送', source: '主动念头记录', captured_at: '2026-10-07T11:06:00+00:00',
+      usage: {status: 'not_sent', delivered_parts: 0, total_parts: 1,
+        thought_origin: '旧话题接续', records: []}}
+  ]});
+  await h.settle();
+  assert.equal(h.page.state.data.materialItems.length, 1);
+  assert.match(h.element.innerHTML, /共享见闻/);
+  assert.doesNotMatch(h.element.innerHTML, /主动消息记录|已送达的一段|另一件有意思的事|未发送的念头|私聊发送记录/);
+});
+
+test('首次资讯巡视完成后页面自动补读新的念头', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'materials'}} : null}});
+  await h.settle();
+  const first = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
+  h.reply(first, {state: 'refreshing', count: 0, items: []});
+  await h.settle();
+
+  await new Promise(resolve => setTimeout(resolve, 1600));
+  await h.settle();
+  const requests = h.requests.filter(r => r.method === 'GET' && r.route === 'perception-native/materials');
+  assert.equal(requests.length, 2, 'a pending patrol should trigger one bounded status refresh');
+  h.reply(requests[1], {state: 'ready', count: 1, items: [
+    {id: 'found-1', scope: 'role', category: '趣事', title: '一个有趣的发现'},
+  ]});
+  await h.settle();
+  assert.equal(h.page.state.data.materialItems[0].category, '趣事');
+  assert.match(h.element.innerHTML, /一个有趣的发现/);
 });
 
 test('消息测试支持按类别、覆盖状态和内容筛选', async () => {
@@ -1261,6 +1443,138 @@ test('复制主动消息测试指令只写入剪贴板，不调用模型或发�
   assert.ok(h.element.innerHTML.includes('没有调用模型或真实投递'));
 });
 
+test('主动消息类型卡片可确认后运行真实诊断并显示结果', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  const requestCount = h.requests.length;
+
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-run]'
+    ? {dataset: {testRun: 'news'}} : null}});
+  assert.ok(h.element.innerHTML.includes('运行「外部资讯」测试？'));
+  assert.ok(h.element.innerHTML.includes('真实投递到核心管理员私聊'));
+  assert.equal(h.requests.length, requestCount, '打开确认框时不能提前调用模型或发送接口');
+
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-action]'
+    ? {dataset: {testAction: 'confirm'}} : null}});
+  await h.settle();
+  const request = h.requests.at(-1);
+  assert.equal(request.method, 'POST');
+  assert.equal(request.route, 'setup/proactive-diagnostic');
+  assert.deepEqual(JSON.parse(JSON.stringify(request.values)), {purpose: 'news', confirm_delivery: true});
+  assert.equal(h.page.state.data.testBusy, 'news');
+
+  h.reply(request, {state: 'passed', purpose: 'news', purpose_label: '外部资讯', route: {label: '资讯生产器'},
+    delivery_state: 'delivered', receipt_ref: 'receipt-1', stages: [
+      {stage: 'trusted_candidate', state: 'passed', detail: '资讯生产器 · 当前条目'},
+      {stage: 'model_generation', state: 'passed'}, {stage: 'persona_review', state: 'passed'},
+      {stage: 'delivery', state: 'passed'}, {stage: 'receipt', state: 'passed'},
+    ]});
+  await h.settle();
+  assert.equal(h.page.state.data.testBusy, '');
+  assert.equal(h.page.state.data.testResults.news.state, 'passed');
+  assert.match(h.element.innerHTML, /测试通过 · 已投递/);
+  assert.match(h.element.innerHTML, /资讯生产器/);
+  assert.match(h.element.innerHTML, /已投递到核心管理员私聊/);
+  assert.match(h.element.innerHTML, /诊断步骤/);
+  assert.match(h.element.innerHTML, /人格复核/);
+  assert.match(h.element.innerHTML, /平台已确认投递/);
+  assert.equal(h.localStore.size, 0, 'a final result clears the durable replay guard');
+});
+
+test('失败诊断标明卡点、前序步骤、原因和下一步', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-run]'
+    ? {dataset: {testRun: 'news'}} : null}});
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-action]'
+    ? {dataset: {testAction: 'confirm'}} : null}});
+  await h.settle();
+  const request = h.requests.at(-1);
+  h.reply(request, {state: 'failed', purpose: 'news', purpose_label: '外部资讯',
+    route: {label: '资讯生产器'}, stage: 'trusted_candidate', code: 'contact_diagnostic_source_required',
+    failure_title: '当前没有所选目的的有效真实来源',
+    explanation: '没有当前来源时不会调用模型，也不会发送消息。',
+    suggestion: '配置资讯来源并读到当前条目后再测。',
+    stages: [
+      {stage: 'authorization', state: 'passed'}, {stage: 'binding', state: 'passed'},
+      {stage: 'runtime', state: 'passed'}, {stage: 'settings', state: 'passed'},
+      {stage: 'purpose', state: 'passed'}, {stage: 'trusted_candidate', state: 'failed'},
+    ]});
+  await h.settle();
+
+  assert.match(h.element.innerHTML, /测试未通过 · 卡在真实来源/);
+  assert.match(h.element.innerHTML, /失败原因/);
+  assert.match(h.element.innerHTML, /没有当前来源时不会调用模型/);
+  assert.match(h.element.innerHTML, /诊断步骤/);
+  assert.match(h.element.innerHTML, /管理员私聊绑定<\/span>\s*<strong>通过/);
+  assert.match(h.element.innerHTML, /真实来源<\/span>\s*<strong>失败/);
+  assert.match(h.element.innerHTML, /下一步/);
+  assert.match(h.element.innerHTML, /配置资讯来源并读到当前条目后再测/);
+  assert.match(h.element.innerHTML, /展开技术详情/);
+});
+
+test('主动测试结果未知时跨页面刷新保留锁，并要求核实后再解除', async () => {
+  const localStorageStore = new Map();
+  const h = harness({localStorageStore});
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-run]'
+    ? {dataset: {testRun: 'care'}} : null}});
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-action]'
+    ? {dataset: {testAction: 'confirm'}} : null}});
+  await h.settle();
+  const request = h.requests.at(-1);
+  h.reply(request, {state: 'unknown', purpose: 'care', error: 'delivery_result_unknown',
+    suggestion: '核对管理员私聊，不要重试。'});
+  await h.settle();
+
+  assert.equal(h.page.state.data.testUncertain, true);
+  assert.match(h.element.innerHTML, /结果未知 · 请勿重试/);
+  assert.match(h.element.innerHTML, /请先核对核心管理员私聊/);
+  assert.ok([...localStorageStore.keys()].some(key => key.includes('test-guard:')));
+
+  h.page.unmount();
+  const restored = harness({localStorageStore});
+  await boot(restored);
+  assert.equal(restored.page.state.data.testUncertain, true);
+  restored.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  assert.match(restored.element.innerHTML, /核实后解除测试锁/);
+  const count = restored.requests.length;
+  restored.element.dispatch('click', {target: {closest: sel => sel === '[data-test-run]'
+    ? {dataset: {testRun: 'news'}} : null}});
+  assert.equal(restored.requests.length, count, 'a reload must not allow another diagnostic request');
+
+  restored.element.dispatch('click', {target: {closest: sel => sel === '[data-test-action]'
+    ? {dataset: {testAction: 'unlock'}} : null}});
+  assert.match(restored.element.innerHTML, /解除主动测试锁？/);
+  assert.match(restored.element.innerHTML, /仍可能产生另一条真实消息/);
+  restored.element.dispatch('click', {target: {closest: sel => sel === '[data-test-action]'
+    ? {dataset: {testAction: 'confirm-unlock'}} : null}});
+  assert.equal(restored.page.state.data.testUncertain, false);
+  assert.equal(localStorageStore.size, 0);
+});
+
+test('无法持久化防重状态时不启动主动消息测试', async () => {
+  const h = harness({sessionStorageBlocked: true, localStorageBlocked: true, historyBlocked: true});
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'tests'}} : null}});
+  const count = h.requests.length;
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-run]'
+    ? {dataset: {testRun: 'news'}} : null}});
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-action]'
+    ? {dataset: {testAction: 'confirm'}} : null}});
+  await h.settle();
+  assert.equal(h.requests.length, count, 'the delivery endpoint must not run without a durable replay guard');
+  assert.match(h.page.state.data.notice, /没有启动测试/);
+});
+
 test('消息测试入口在窄屏保留直达性，列表具备响应式和键盘焦点样式', () => {
   assert.match(style, /\.ct-head-test\{[^}]*border-color:var\(--t-accent\)/,
     '页头直达入口要有稳定的视觉强调');
@@ -1268,6 +1582,11 @@ test('消息测试入口在窄屏保留直达性，列表具备响应式和键�
     '类型卡片应根据工作区宽度排布');
   assert.match(style, /\.ct-test-card\[hidden\]\{display:none!important\}/);
   assert.match(style, /\.ct-test-copy:focus-visible,[\s\S]*?outline:2px solid var\(--t-focus\)/);
+  assert.match(style, /\.ct-test-run\{[^}]*justify-content:center/);
+  assert.match(style, /\.ct-test-dialog::backdrop\{[^}]*background/);
+  assert.match(style, /\.ct-test-result\.is-unknown/);
+  assert.match(style, /\.ct-test-diagnosis li\[data-state="failed"\]/);
+  assert.match(style, /\.ct-test-technical summary/);
   assert.match(style, /@media \(max-width:880px\)[\s\S]*?\.ct-head-actions \.ct-head-test\{flex:1 1 100%\}/,
     '窄屏页头中测试入口应单独占一行，避免挤进次要操作');
   assert.match(style, /@media \(max-width:520px\)[\s\S]*?\.ct-test-tools\{grid-template-columns:minmax\(0,1fr\)\}/,
@@ -1278,9 +1597,7 @@ test('契机矩阵提供搜索、类别和状态筛选，筛选不写入配置�
   const h = harness();
   const names = ['affection','care','play','repair','chat','greeting','followup','invitation',
     'reminder','meal','life','creation','news','environment','screen'];
-  const purposes = Object.fromEntries(names.map(name => [name, {label: name, allowed: true, reason: null}]));
-  purposes.meal = {label: '饭点问候', allowed: false, reason: 'proactive_paused'};
-  await boot(h, baseSettings(), {purposes});
+  await boot(h, {...baseSettings(), 'meal.pause_until': '2099-01-01T12:00:00+08:00'});
   const rows = names.map(purpose => ({dataset: {purpose}, hidden: false}));
   const buckets = Object.fromEntries(['bond','daily','share'].map(id => [id, {hidden: false}]));
   const bucketCounts = Object.fromEntries(['bond','daily','share'].map(id => [id, {textContent: ''}]));
@@ -1329,10 +1646,10 @@ test('契机矩阵提供搜索、类别和状态筛选，筛选不写入配置�
   assert.equal(empty.hidden, false, '无结果时要显示明确空态');
 });
 
-test('当前暂缓优先显示暂缓状态，不折叠成通用受阻原因', async () => {
+test('当前暂缓优先显示全局暂缓状态，不折叠成通用受阻原因', async () => {
   const h = harness();
   const settings = {...baseSettings(), 'meal.pause_until': '2099-01-01T12:00:00+08:00'};
-  await boot(h, settings, {purposes: {meal: {label: '饭点问候', allowed: false, reason: 'proactive_paused'}}});
+  await boot(h, settings);
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'purposes'}} : null}});
   const row = h.element.innerHTML.split('data-purpose="meal"')[1].split('</article>')[0];
   assert.ok(row.includes('ct-chip is-paused'), '暂停原因应显示为暂缓状态');

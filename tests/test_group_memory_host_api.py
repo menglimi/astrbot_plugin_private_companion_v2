@@ -78,6 +78,7 @@ class GroupMemoryHostAPITests(GroupMemoryManagementFixture, unittest.IsolatedAsy
         await self.start_host()
         _, _, saved = await self.seed()
         _, _, another = await self.seed(target="group-b", wording="另一群的原话")
+        platform_calls_before_management = list(self.native.platform.client._api._wsr_api.calls)
         listed = await self.request()
         item = listed["data"]["items"][0]
         detail = await self.request("/detail", data={"memory_id": saved["memory_id"], "revision": 1, "chars": 4})
@@ -94,7 +95,7 @@ class GroupMemoryHostAPITests(GroupMemoryManagementFixture, unittest.IsolatedAsy
         self.assertEqual((await self.request("/detail", target="group-b",
             data={"memory_id": saved["memory_id"], "revision": 1}))["data"]["code"], "group_memory_unavailable")
         self.assertEqual(len(self.native.provider.client.state.calls), calls)
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assertEqual(self.native.platform.client._api._wsr_api.calls, platform_calls_before_management)
 
     async def test_group_role_and_independent_native_sessions_keep_separate_archives(self):
         await self.start_host()
@@ -128,7 +129,7 @@ class GroupMemoryHostAPITests(GroupMemoryManagementFixture, unittest.IsolatedAsy
 
     async def test_slow_request_keeps_target_and_rechecks_authority_after_body_read(self):
         await self.start_host()
-        await self.seed()
+        context, _, _ = await self.seed()
         await self.seed(target="group-b", wording="另一个群")
         first = (await self.request())["data"]["items"][0]
         ready, release = asyncio.Event(), asyncio.Event()
@@ -146,8 +147,7 @@ class GroupMemoryHostAPITests(GroupMemoryManagementFixture, unittest.IsolatedAsy
             release.set()
         self.assertEqual((await pending)["data"]["code"], "core_access_required")
         manager = self.manager("fresh-admin")
-        context = self.target((await self.conversation("继续"))[0])
-        self.assertEqual(manager.list(context).unwrap()["items"][0]["revision"], 1)
+        self.assertEqual(manager.list(self.target(context)).unwrap()["items"][0]["revision"], 1)
 
     async def test_shutdown_removes_routes_and_retained_handler_cannot_admit_late_command(self):
         await self.start_host()

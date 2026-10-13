@@ -27,17 +27,18 @@ import random
 import re
 
 from companion_v2.agenda.models import AgendaError, Schedule
+from companion_v2.agenda.records import CalendarRecords
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.refs import normalize_utc
-from companion_v2.storage.versioned_records import owner_key
+from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 
 
 GROUP = "conversation.busy_gate"
 OWNER = "conversation.busy_gate"
-LAYERS = (ConfigLayer.WINDOW,)
+LAYERS = (ConfigLayer.ROLE, ConfigLayer.WINDOW)
 # V1 hard-coded ``min(12, ...)`` for group chats and capped both delays at 900.
 # V2 keeps the 900 bound for private passive replies and records the group cap as
 # a deliberate design difference (docs/BUSY_REPLY_GATE_SLICE_20260927.md).
@@ -214,7 +215,7 @@ class Settings:
 
 
 class SettingsReader:
-    """One window read for one accept; the reader holds no per-turn state."""
+    """Read role defaults plus any explicit window override for one accept."""
 
     def __init__(self, runtime):
         self.runtime = runtime
@@ -259,17 +260,10 @@ class BusyGateConfigurationOwner(SparseConfigurationOwner):
 
 
 def calendar_items(runtime, context, *, limit=MAX_CALENDAR_RECORDS):
-    """Bounded read of this window's own calendar records; grants nothing."""
-    rows = runtime.read_all(
-        "SELECT record_json FROM calendar_records WHERE owner_key = ? ORDER BY record_id LIMIT ?",
-        (owner_key(context), limit))
-    items = []
-    for row in rows:
-        try:
-            items.append(json.loads(row["record_json"]))
-        except (ValueError, TypeError):
-            continue  # A record that cannot be read is never treated as busy.
-    return tuple(items)
+    """Read the bounded role-wide plan page used by calendar planning."""
+    records = CalendarRecords(runtime, PersistentIdentityDirectory(runtime))
+    items, _ = records.shared_role_plans(context, limit=limit)
+    return items
 
 
 def readable_items(runtime, context, *, items=None, limit=MAX_CALENDAR_RECORDS):

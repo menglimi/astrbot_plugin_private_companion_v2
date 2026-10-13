@@ -130,11 +130,35 @@ class OutputRoutingBackend:
     def operations(self):
         if self.config.get("enabled") is not True:
             return ()
-        available = {operation for backend in self._routes()
-                     for operation in getattr(backend, "operations", ())}
+        available = {operation for operation in ("generate", "edit", "mask_edit")
+                     for backend in self._routes(operation)
+                     if operation in getattr(backend, "operations", ())}
         return tuple(operation for operation in ("generate", "edit", "mask_edit") if operation in available)
 
-    def _routes(self):
+    def _routes(self, operation=None):
+        route_operation = "generate" if operation == "generate" else "edit"
+        operation_routes = self.config.get("operation_routes")
+        if operation is not None and isinstance(operation_routes, dict):
+            endpoints = {item.get("id"): item for item in self.config.get("endpoints", [])
+                         if isinstance(item, dict) and isinstance(item.get("id"), str)}
+            routes = operation_routes.get(route_operation, ())
+            if not isinstance(routes, (list, tuple)):
+                return
+            for route in routes:
+                if not isinstance(route, str):
+                    continue
+                if route.startswith("online:"):
+                    endpoint = endpoints.get(route[7:])
+                    if endpoint and endpoint.get("enabled"):
+                        yield OnlineImageBackend(endpoint)
+                    continue
+                if route in {"comfyui", "sd_webui"}:
+                    try:
+                        yield NativeTransportBackend(route, self.config.get(route, {}), self.directory / route)
+                    except NativeImageError:
+                        continue
+            return
+
         selected = self.backend
         if selected in {"auto", "online_api"}:
             for endpoint in self.config.get("endpoints", []):
@@ -153,7 +177,7 @@ class OutputRoutingBackend:
         prompt = invocation.envelope.get("image_prompt", {})
         if prompt:
             invocation = replace(invocation, prompt=prompt["positive"], negative_prompt=prompt["negative"])
-        for backend in self._routes():
+        for backend in self._routes(invocation.operation):
             if invocation.operation not in backend.operations:
                 continue
             dispatched = False

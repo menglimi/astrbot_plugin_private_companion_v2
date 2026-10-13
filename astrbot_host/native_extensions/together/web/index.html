@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>我会和你在一起</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body data-mode="call">
+  <header class="topbar">
+    <div class="brand">
+      <img id="brandAvatar" src="/avatar" alt="Bot 头像" />
+      <div>
+        <strong id="brandName">我会和你在一起</strong>
+        <span id="connectionStatus">正在进入房间</span>
+      </div>
+    </div>
+
+    <nav class="mode-tabs" aria-label="共处模式">
+      <button type="button" data-mode-tab="call" class="active" title="电话" aria-label="电话"><i data-lucide="phone"></i><span>电话</span></button>
+      <button type="button" data-mode-tab="watch" title="一起看" aria-label="一起看"><i data-lucide="play"></i><span>一起看</span></button>
+      <button type="button" data-mode-tab="novel" title="一起阅读" aria-label="一起阅读"><i data-lucide="book-open"></i><span>阅读</span></button>
+      <button type="button" data-mode-tab="work" title="工作协同" aria-label="工作协同" hidden><i data-lucide="briefcase-business"></i><span>协同</span></button>
+    </nav>
+
+    <div class="top-actions">
+      <button id="inviteButton" class="icon-button" type="button" title="生成邀请链接" aria-label="生成邀请链接" disabled>
+        <i data-lucide="user-plus"></i>
+      </button>
+      <button id="settingsButton" class="icon-button" type="button" title="通话设置" aria-label="通话设置" aria-expanded="false" aria-controls="settingsPanel">
+        <i data-lucide="settings-2"></i>
+      </button>
+    </div>
+  </header>
+
+  <aside class="settings-panel" id="settingsPanel" hidden>
+    <div class="settings-head">
+      <strong>通话设置</strong>
+      <button id="closeSettings" class="icon-button compact" type="button" title="关闭" aria-label="关闭设置"><i data-lucide="x"></i></button>
+    </div>
+    <label>语音识别</label>
+    <div class="segmented" id="sttModeControl" role="group" aria-label="语音识别方式">
+      <button type="button" data-stt-mode="auto" class="active">自动</button>
+      <button type="button" data-stt-mode="browser">浏览器</button>
+      <button type="button" data-stt-mode="astrbot">AstrBot</button>
+    </div>
+    <div class="settings-field talk-mode-field">
+      <label>讲话方式</label>
+      <div class="segmented talk-mode-control" role="group" aria-label="讲话方式">
+        <button type="button" data-talk-mode="free" class="active">自由讲话</button>
+        <button type="button" data-talk-mode="push">按键讲话</button>
+      </div>
+      <div id="talkKeySetting" class="talk-key-setting" hidden>
+        <span>讲话按键</span>
+        <button id="talkKeyCapture" class="key-capture" type="button" aria-label="修改讲话按键">
+          <kbd id="talkKeyLabel">空格</kbd>
+          <small>点击修改</small>
+        </button>
+      </div>
+    </div>
+    <div class="settings-field tts-volume-field">
+      <div class="settings-field-heading">
+        <label for="ttsVolume">TTS 音量</label>
+        <output id="ttsVolumeValue" for="ttsVolume">100%</output>
+      </div>
+      <input id="ttsVolume" type="range" min="0" max="100" step="5" value="100" aria-label="TTS 播放音量" />
+    </div>
+    <div class="settings-field camera-device-field">
+      <label for="cameraDeviceSelect">摄像头</label>
+      <select id="cameraDeviceSelect" aria-describedby="cameraDeviceHint" disabled>
+        <option value="">自动选择</option>
+      </select>
+      <span id="cameraDeviceHint">正在检测摄像头</span>
+    </div>
+    <div class="capability-list">
+      <span><b>对话</b><em id="chatCapability">检查中</em></span>
+      <span><b>画面</b><em id="visionCapability">检查中</em></span>
+      <span><b>STT</b><em id="sttCapability">检查中</em></span>
+      <span><b>TTS</b><em id="ttsCapability">检查中</em></span>
+    </div>
+  </aside>
+
+  <main class="app-shell">
+    <section class="view call-view active" id="callView" aria-label="电话房间">
+      <div class="call-presence">
+        <div class="call-visual-stage">
+          <div class="avatar-stage" id="avatarStage" data-state="idle">
+            <img id="callAvatar" src="/avatar" alt="Bot 头像" />
+            <div class="voice-bars" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i>
+            </div>
+          </div>
+          <div class="camera-stage" id="cameraStage" hidden>
+            <video id="callCamera" autoplay muted playsinline aria-label="本机摄像头预览"></video>
+            <span class="camera-live"><i data-lucide="video"></i>镜头开启</span>
+            <button id="switchCamera" class="camera-action" type="button" title="切换摄像头" aria-label="切换摄像头" hidden>
+              <i data-lucide="switch-camera"></i>
+            </button>
+            <div class="camera-companion" aria-label="通话中的 Bot">
+              <img id="cameraBotAvatar" src="/avatar" alt="" />
+              <span id="cameraBotName">Bot</span>
+            </div>
+          </div>
+        </div>
+        <div class="call-identity">
+          <span class="call-status-dot" aria-hidden="true"></span>
+          <div>
+            <h1 id="callName">Bot</h1>
+            <p id="callStatus" aria-live="polite">等待接通</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="transcript" id="callTranscript" aria-live="polite"></div>
+
+      <div class="call-controls">
+        <button id="cameraToggle" class="round-control secondary" type="button" title="开启摄像头" aria-label="开启摄像头" disabled>
+          <i data-lucide="video"></i>
+        </button>
+        <button id="holdToTalk" class="round-control secondary" type="button" title="按住说话" aria-label="按住说话" hidden>
+          <i data-lucide="mic"></i>
+        </button>
+        <button id="callTtsToggle" class="round-control secondary" type="button" title="关闭语音" aria-label="关闭语音" disabled>
+          <i data-lucide="volume-2"></i>
+        </button>
+        <button id="callToggle" class="round-control primary" type="button" title="开始通话" aria-label="开始通话">
+          <i data-lucide="phone"></i>
+        </button>
+        <button id="interruptButton" class="round-control secondary" type="button" title="打断播放" aria-label="打断播放">
+          <i data-lucide="volume-x"></i>
+        </button>
+      </div>
+      <span id="holdHint" class="hold-hint" hidden>按住空格或麦克风说话</span>
+    </section>
+
+    <section class="view work-view" id="workView" aria-label="工作协同房间">
+      <div class="work-overview">
+        <header class="work-heading">
+          <div class="work-title-row">
+            <span class="work-icon" aria-hidden="true"><i data-lucide="briefcase-business"></i></span>
+            <div>
+              <strong>工作协同</strong>
+              <span id="workStatus" aria-live="polite">等待连接屏幕伙伴</span>
+            </div>
+            <button id="refreshWorkContext" class="icon-button compact" type="button" title="刷新工作上下文" aria-label="刷新工作上下文">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+          </div>
+          <p class="work-subtitle">当前上下文</p>
+        </header>
+        <dl class="work-context-list" aria-live="polite">
+          <div class="work-goal-row"><dt>当前目标</dt><dd id="workGoal">尚未确认</dd></div>
+          <div class="work-goal-row"><dt>验收标准</dt><dd id="workCriteria">尚未确认</dd></div>
+          <div class="work-goal-row"><dt>执行状态</dt><dd id="workProgress">等待目标</dd></div>
+          <div class="work-goal-row"><dt>下一步</dt><dd id="workNextAction">先描述想完成的结果</dd></div>
+          <div class="work-goal-row"><dt>阻碍</dt><dd id="workBlockers">暂无</dd></div>
+          <div><dt>应用</dt><dd id="workApp">未读取</dd></div>
+          <div><dt>场景</dt><dd id="workScene">未读取</dd></div>
+          <div><dt>窗口</dt><dd id="workWindow">未读取</dd></div>
+          <div><dt>最近观察</dt><dd id="workObservation">暂无新观察</dd></div>
+        </dl>
+        <div class="work-presence">
+          <img id="workAvatar" src="/avatar" alt="" />
+          <div><strong id="workBotName">Bot</strong><span id="workVoiceStatus">文字协同已就绪</span></div>
+          <button id="workCallToggle" class="round-control primary" type="button" title="开始语音协同" aria-label="开始语音协同">
+            <i data-lucide="phone"></i>
+          </button>
+          <button id="workInterruptButton" class="icon-button" type="button" title="打断播放" aria-label="打断播放">
+            <i data-lucide="volume-x"></i>
+          </button>
+        </div>
+      </div>
+      <aside class="work-conversation">
+        <div class="work-conversation-heading">
+          <strong>协同记录</strong>
+          <span id="workConversationStatus">文字协同</span>
+        </div>
+        <div class="transcript" id="workTranscript" tabindex="0" aria-label="工作协同对话记录" aria-live="polite"></div>
+      </aside>
+    </section>
+
+    <section class="view watch-view" id="watchView" aria-label="共同观影房间">
+      <div class="video-column">
+        <div class="video-stage" id="videoStage" tabindex="0" aria-label="视频播放器">
+          <video id="watchVideo" playsinline preload="metadata"></video>
+          <audio id="watchAudio" preload="metadata" hidden></audio>
+          <div class="video-empty" id="videoEmpty">
+            <i data-lucide="clapperboard"></i>
+            <strong>选择一段视频</strong>
+          </div>
+          <button id="videoCenterToggle" class="video-center-toggle" type="button" title="播放" aria-label="播放">
+            <i data-lucide="play"></i>
+          </button>
+          <div id="videoSeekFeedback" class="video-seek-feedback" hidden aria-live="polite"></div>
+          <div id="videoControls" class="video-controls" aria-label="播放器控制">
+            <input id="videoProgress" class="video-progress" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度" disabled />
+            <div class="video-control-row">
+              <button id="videoSeekBack" class="video-control-button" type="button" title="后退 10 秒" aria-label="后退 10 秒">
+                <i data-lucide="rotate-ccw"></i>
+              </button>
+              <button id="videoPlayPause" class="video-control-button primary" type="button" title="播放" aria-label="播放">
+                <i data-lucide="play"></i>
+              </button>
+              <button id="videoSeekForward" class="video-control-button" type="button" title="前进 10 秒，长按 2 倍速播放" aria-label="前进 10 秒，长按 2 倍速播放">
+                <i data-lucide="rotate-cw"></i>
+              </button>
+              <span id="videoTime" class="video-time">00:00 / 00:00</span>
+              <span class="video-control-spacer"></span>
+              <button id="videoMute" class="video-control-button" type="button" title="静音" aria-label="静音">
+                <i data-lucide="volume-2"></i>
+              </button>
+              <input id="videoVolume" class="video-volume" type="range" min="0" max="1" value="1" step="0.05" aria-label="音量" />
+              <select id="videoRate" class="video-rate" aria-label="播放速度" title="播放速度">
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+              </select>
+            </div>
+          </div>
+          <button id="toggleFullscreen" class="video-fullscreen-button" type="button" title="进入全屏" aria-label="进入全屏">
+            <i data-lucide="maximize"></i>
+          </button>
+          <div class="fullscreen-companion" id="fullscreenCompanion" hidden aria-live="polite">
+            <img id="fullscreenAvatar" src="/avatar" alt="" />
+            <div class="fullscreen-speech" id="fullscreenSpeech">
+              <span id="fullscreenSpeechText"></span><i class="typing-caret" aria-hidden="true"></i>
+            </div>
+          </div>
+        </div>
+
+        <div class="video-toolbar">
+          <div class="video-title">
+            <strong id="videoTitle">尚未选择视频</strong>
+            <span id="videoMeta">00:00 / 00:00</span>
+          </div>
+          <div class="tool-actions">
+            <button id="watchCallToggle" class="icon-button" type="button" title="接通语音" aria-label="接通语音"><i data-lucide="phone"></i></button>
+            <button id="openLocalVideo" class="icon-button" type="button" title="打开本地视频" aria-label="打开本地视频"><i data-lucide="folder-open"></i></button>
+            <button id="openVideoUrl" class="icon-button" type="button" title="打开视频链接" aria-label="打开视频链接"><i data-lucide="link"></i></button>
+            <button id="observeFrame" class="icon-button" type="button" title="看看当前画面" aria-label="看看当前画面"><i data-lucide="scan-eye"></i></button>
+          </div>
+        </div>
+
+        <div class="watch-options">
+          <label class="toggle-row">
+            <input id="autoComment" type="checkbox" />
+            <span>自然评论</span>
+          </label>
+          <label class="toggle-row">
+            <input id="watchTtsEnabled" type="checkbox" />
+            <span>语音回复</span>
+          </label>
+        </div>
+      </div>
+
+      <aside class="watch-conversation">
+        <div class="watch-heading">
+          <strong>一起看着</strong>
+          <span id="watchStatus">等待视频</span>
+        </div>
+        <div class="transcript" id="watchTranscript" tabindex="0" aria-label="观影对话记录" aria-live="polite"></div>
+      </aside>
+    </section>
+
+    <section class="view novel-view" id="novelView" aria-label="一起阅读房间">
+      <aside class="novel-library" id="novelLibraryPanel" aria-label="小说书库和目录">
+        <header class="novel-panel-heading">
+          <div><strong>小说书库</strong><span id="novelLibraryMeta">选择一本书</span></div>
+          <button id="closeNovelLibrary" class="icon-button compact novel-mobile-only" type="button" title="关闭书库" aria-label="关闭书库"><i data-lucide="x"></i></button>
+        </header>
+        <div class="novel-library-actions">
+          <label class="novel-search"><i data-lucide="search"></i><input id="novelSearch" type="search" placeholder="搜索书名或作者" aria-label="搜索小说" /></label>
+          <button id="importNovel" class="icon-button compact" type="button" title="导入小说" aria-label="导入小说"><i data-lucide="upload"></i></button>
+        </div>
+        <div id="novelBookList" class="novel-book-list" aria-live="polite"></div>
+        <div class="novel-divider"></div>
+        <div class="novel-directory-heading"><strong>章节目录</strong><span id="novelChapterCount">0 章</span></div>
+        <nav id="novelChapterList" class="novel-chapter-list" aria-label="章节目录"></nav>
+      </aside>
+
+      <div class="novel-reader-column">
+        <header class="novel-reader-toolbar">
+          <button id="openNovelLibrary" class="icon-button compact novel-mobile-only" type="button" title="打开书库" aria-label="打开书库"><i data-lucide="library"></i></button>
+          <div class="novel-title-block">
+            <strong id="novelBookTitle">尚未选择小说</strong>
+            <span id="novelChapterTitle">从书库继续阅读或导入一本书</span>
+          </div>
+          <div class="novel-reader-actions">
+            <button id="novelPrevChapter" class="icon-button compact" type="button" title="上一章" aria-label="上一章" disabled><i data-lucide="chevron-left"></i></button>
+            <button id="novelNextChapter" class="icon-button compact" type="button" title="下一章" aria-label="下一章" disabled><i data-lucide="chevron-right"></i></button>
+          </div>
+        </header>
+        <div class="novel-progress-track" aria-hidden="true"><i id="novelProgressBar"></i></div>
+        <div id="novelReader" class="novel-reader" tabindex="0" aria-label="小说正文">
+          <div id="novelEmpty" class="novel-empty">
+            <i data-lucide="book-heart"></i>
+            <strong>选一本想一起读的书</strong>
+            <span>阅读进度会自动保存，下次可以接着这里继续。</span>
+            <button id="novelEmptyImport" class="text-button primary-text" type="button"><i data-lucide="upload"></i><span>导入小说</span></button>
+          </div>
+          <article id="novelContent" class="novel-content" hidden></article>
+        </div>
+        <button id="askNovelSelection" class="selection-ask" type="button" hidden><i data-lucide="message-circle-question"></i><span>问 Bot</span></button>
+      </div>
+
+      <aside class="novel-conversation">
+        <div class="novel-conversation-heading">
+          <div><strong>一起读着</strong><span id="novelStatus">等待选书</span></div>
+          <button id="askReadingProgress" class="icon-button compact" type="button" title="问上次读到哪里" aria-label="问上次读到哪里"><i data-lucide="history"></i></button>
+        </div>
+        <div class="novel-suggestions" aria-label="快捷提问">
+          <button type="button" data-novel-question="这个人是谁？">这个人是谁</button>
+          <button type="button" data-novel-question="他之前做了什么？">此前经历</button>
+          <button type="button" data-novel-question="刚才发生了什么？">回顾刚才</button>
+        </div>
+        <div class="transcript" id="novelTranscript" tabindex="0" aria-label="阅读对话记录" aria-live="polite"></div>
+      </aside>
+      <button id="novelLibraryBackdrop" class="novel-library-backdrop novel-mobile-only" type="button" aria-label="关闭书库" hidden></button>
+    </section>
+  </main>
+
+  <form class="message-composer" id="messageForm">
+    <input id="messageInput" type="text" maxlength="4000" autocomplete="off" placeholder="说点什么" aria-label="发送文字" />
+    <button id="sendMessage" class="send-button" type="submit" title="发送" aria-label="发送"><i data-lucide="send"></i></button>
+  </form>
+
+  <input id="localVideoInput" type="file" accept="video/*" hidden />
+  <input id="novelFileInput" type="file" accept=".txt,.md,.markdown,.epub,text/plain,text/markdown,application/epub+zip" hidden />
+  <canvas id="frameCanvas" hidden></canvas>
+
+  <dialog id="videoUrlDialog">
+    <form method="dialog" id="videoUrlForm">
+      <header>
+        <strong>打开视频链接</strong>
+        <button class="icon-button compact" value="cancel" type="submit" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <label for="videoUrlInput">B 站视频页，或浏览器可播放的媒体地址</label>
+      <input id="videoUrlInput" type="url" placeholder="https://www.bilibili.com/video/BV..." />
+      <footer>
+        <button class="text-button" value="cancel" type="submit">取消</button>
+        <button class="text-button primary-text" id="confirmVideoUrl" value="default" type="submit">打开</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="inviteDialog">
+    <form method="dialog">
+      <header>
+        <strong>邀请链接</strong>
+        <button class="icon-button compact" value="cancel" type="submit" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <label for="inviteUrl">一次性房间链接</label>
+      <div class="invite-link-row">
+        <input id="inviteUrl" type="text" readonly aria-label="一次性房间邀请链接" />
+        <button id="copyInviteLink" class="text-button primary-text" type="button"><i data-lucide="copy"></i><span>复制</span></button>
+      </div>
+      <footer>
+        <button class="text-button" value="cancel" type="submit">完成</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" hidden role="status"></div>
+  <script src="/assets/lucide.min.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

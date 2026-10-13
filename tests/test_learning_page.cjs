@@ -5,8 +5,7 @@
  *      页面自己按状态推断会给出一个后端一定拒绝的按钮。
  *   ② 来源不可读时后端把 title/description/progress_note 一律置 null——
  *      页面必须说"读不到"，不能显示成一张空卡。
- *   ③ 权限是一个开关加一个从属项：read 关闭时 proposals 被后端强制跟从，
- *      页面上不能留一个"开了也没用"的独立开关。
+ *   ③ 全局策略与个人授权分开；本页只管理记录，不再保存某个私聊对象的权限。
  *
  * 另外两条是别的页也踩过的：只提交动过的字段、状态动作必须先过 actions 门。
  */
@@ -130,21 +129,23 @@ async function boot(h, rows = [], reviews = [], extra = {}, selection = {}) {
     if (!pending.length) break;
     for (const request of pending) {
       answered.add(request);
-      if (request.route === 'growth') {
-        h.reply(request, {items: withActions(rows),
+      if (request.route.endsWith('/evidence')) {
+        h.reply(request, {items:[{text:'本轮可核验的原始依据',issued_at:'2026-10-07T08:00:00+00:00'}]});
+        continue;
+      }
+      if (request.route.endsWith('/progress')) {
+        const sourceReviews=extra.reviewsByRoute?.[request.route.slice(0,-'/progress'.length)]||reviews;
+        h.reply(request, {items: sourceReviews, next_cursor: extra.reviewNext || null,
+          context_key: 'ctx', role_id: 'role-1'});
+        continue;
+      }
+      if (request.route === 'growth' || request.route.endsWith('/growth')) {
+        const sourceRows=extra.rowsByRoute?.[request.route]||rows;
+        h.reply(request, {items: withActions(sourceRows),
           next_cursor: extra.next || null,
           context_key: 'ctx', role_id: 'role-1',
           profile_id: 'profile-1', operator_name: 'operator',
           access: extra.access === null ? undefined : (extra.access || access())});
-        continue;
-      }
-      if (request.route === 'growth/progress') {
-        h.reply(request, {items: reviews, next_cursor: extra.reviewNext || null,
-          context_key: 'ctx', role_id: 'role-1'});
-        continue;
-      }
-      if (request.route.endsWith('/growth/evidence') || request.route === 'growth/evidence') {
-        h.reply(request, {items:[{text:'本轮可核验的原始依据',issued_at:'2026-10-07T08:00:00+00:00'}]});
         continue;
       }
       h.reply(request, {});
@@ -158,7 +159,7 @@ async function boot(h, rows = [], reviews = [], extra = {}, selection = {}) {
 /* 桩元素：closest 按「自己命中哪些选择器」回答。 */
 function node(attrs) {
   const self = {
-    dataset: attrs, type: '', checked: false, value: '',
+    dataset: attrs, type: '', checked: attrs.checked === true, value: '',
     closest(sel) {
       const probes = {view: '[data-view]', action: '[data-action]', act: '[data-act]',
                       id: '[data-id]', open: '[data-open]', review: '[data-review]',
@@ -190,9 +191,11 @@ test('挂载后同时读列表与待审阅，路径是插件相对路径', async
   assert.equal(h.page.state.data.ready, true);
   assert.equal(h.page.state.data.items.length, 1);
   assert.equal(h.page.state.data.reviews.length, 1);
+  assert.match(h.element.innerHTML, /记录归属 · 选定角色/);
+  assert.doesNotMatch(h.element.innerHTML, /跨私聊汇总|私聊记录范围/);
 });
 
-test('成长链路在选定角色范围内读取详情凭证并使用工作台布局', async () => {
+test('成长链路读取详情凭证并使用工作台布局', async () => {
   const h = harness();
   await boot(h, [record('g-1','active')], [], {}, {layout:'chain',roleLabel:'角色 A'});
   assert.ok(h.requests.some(request => request.method === 'GET' && request.route === 'growth/evidence'
@@ -200,7 +203,7 @@ test('成长链路在选定角色范围内读取详情凭证并使用工作台�
   assert.match(h.element.innerHTML, /lea-chain-grid/);
   assert.match(h.element.innerHTML, /依据与凭证/);
   assert.match(h.element.innerHTML, /本轮可核验的原始依据/);
-  assert.match(h.element.innerHTML, /权限开关/);
+  assert.doesNotMatch(h.element.innerHTML, /权限开关/);
 });
 
 test('没有角色路由时不发请求，并说明原因', async () => {
@@ -209,7 +212,7 @@ test('没有角色路由时不发请求，并说明原因', async () => {
   await h.settle();
   assert.equal(h.requests.length, 0);
   assert.equal(h.page.state.data.ready, false);
-  assert.match(h.element.innerHTML, /还没有可管理的角色成长记录/);
+  assert.match(h.element.innerHTML, /还没有可读取的成长记录/);
 });
 
 test('成长列表使用学习工作台选定的角色路由，不读取当前聊天角色', async () => {
@@ -221,13 +224,33 @@ test('成长列表使用学习工作台选定的角色路由，不读取当前�
   assert.ok(!h.requests.some(request => request.route.includes('current-chat')));
 });
 
-test('权限随列表一起回来，不用另发一次请求', async () => {
+test('成长记录页显示当前私聊对象的两项授权，并与记录请求共用响应', async () => {
   const h = harness();
   await boot(h, [record('g-1', 'active')]);
   const gets = h.requests.filter(r => r.method === 'GET');
   assert.equal(gets.length, 2, '读取只有列表与审阅两次：' + gets.map(r => r.route).join(','));
-  click(h, {view: 'gate'});
-  assert.ok(h.element.innerHTML.includes('读取成长记录'), '权限开关要用列表里带回来的那一份');
+  assert.match(h.element.innerHTML, /私聊对象授权/);
+  assert.match(h.element.innerHTML, /data-access="read_enabled"/);
+  assert.match(h.element.innerHTML, /data-access="proposals_enabled"/);
+  assert.match(h.element.innerHTML, /选定角色/);
+});
+
+test('授权开关携带当前编辑令牌且只写入所选对象', async () => {
+  const h = harness();
+  await boot(h, [record('g-1', 'active')]);
+  change(h, {access:'read_enabled', source:'growth', checked:false});
+  await h.settle();
+  const request = h.requests.find(r => r.method === 'POST' && r.route === 'growth/command');
+  assert.ok(request, '授权变更走成长专用命令');
+  assert.equal(request.values.action, 'configure');
+  assert.equal(request.values.edit_token, 'a'.repeat(64));
+  assert.deepEqual({...request.values.changes}, {read_enabled:false});
+  assert.match(request.values.operation_key, /configure-read_enabled:/);
+  assert.ok(request.values.operation_key.length <= 128);
+  h.reply(request, {access:access({settings:{read_enabled:false}})});
+  await h.settle();
+  assert.equal(h.page.state.data.accesses.growth.settings.read_enabled, false);
+  assert.match(h.element.innerHTML, /已更新「选定角色」的成长权限/);
 });
 
 /* ---- 动作门：这一页最重要的一条 ---------------------------------------
@@ -348,41 +371,6 @@ test('审阅裁决的载荷只有那五个字段', async () => {
   assert.equal(post.values.action, 'accept');
 });
 
-/* ---- 权限：一个开关加一个从属项 --------------------------------------- */
-
-test('读取关闭时，提案那一项跟随而不是独立', async () => {
-  const h = harness();
-  await boot(h, [record('g-1', 'active')], [], {
-    access: access({settings: {read_enabled: false, proposals_enabled: false}}),
-  });
-  click(h, {view: 'gate'});
-  const html = h.element.innerHTML;
-  assert.match(html, /需先启用读取权限/);
-  assert.match(html, /data-access="proposals_enabled"[^>]*disabled/);
-  assert.ok(html.includes('is-following'), '要有专门的视觉标记');
-});
-
-test('开关保存只提交这一个布尔，并带上 edit_token', async () => {
-  const h = harness();
-  await boot(h, [record('g-1', 'active')]);
-  click(h, {view: 'gate'});
-  change(h, {access: 'proposals_enabled', checked: false});
-  await h.settle();
-  const post = h.requests.find(r => r.method === 'POST');
-  assert.equal(post.values.action, 'configure');
-  assert.equal(Object.keys(post.values.changes).join(","), 'proposals_enabled', '一次只动一项');
-  assert.equal(post.values.changes.proposals_enabled, false);
-  assert.equal(post.values.edit_token, 'a'.repeat(64));
-  post.resolve({status: 'ok', data: {access: access({settings: {read_enabled: true, proposals_enabled: false}})}});
-  await h.settle();
-  const refresh = h.requests.filter(r => r.method === 'GET' && r.route === 'growth').at(-1);
-  h.reply(refresh, {items: withActions([record('g-1', 'active')]), next_cursor: null,
-    context_key: 'ctx', role_id: 'role-1', profile_id: 'profile-1', operator_name: 'operator',
-    access: access({settings: {read_enabled: true, proposals_enabled: false}})});
-  await h.settle();
-  assert.equal(h.page.state.data.writing, false, '保存完成后权限控件必须解除写入锁');
-});
-
 /* ---- 状态与轨道 ------------------------------------------------------- */
 
 test('五段都在轨道上，空段也留着', async () => {
@@ -461,10 +449,10 @@ test('确认条的两条路径都在同一个 click 处理器里判定', async (
 
 /* ---- 渲染完整性 ------------------------------------------------------- */
 
-test('四个视图都能渲染出内容', async () => {
+test('三个记录视图都能渲染出内容', async () => {
   const h = harness();
   await boot(h, [record('g-1', 'active'), record('g-2', 'proposed')], [review('r-1')]);
-  const markers = {track: 'lea-lanes', reviews: 'lea-reviews', sources: 'lea-sources', gate: 'lea-gate'};
+  const markers = {track: 'lea-lanes', reviews: 'lea-reviews', sources: 'lea-sources'};
   for (const [view, marker] of Object.entries(markers)) {
     click(h, {view});
     assert.ok(h.element.innerHTML.includes(marker), view + ' 视图渲染为空');

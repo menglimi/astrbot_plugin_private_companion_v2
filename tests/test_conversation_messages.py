@@ -477,7 +477,8 @@ class ConversationMessageTests(MessageFixture, unittest.IsolatedAsyncioTestCase)
         self.assertEqual((await self.deliver_next(batch)).state, "failed")
         self.assertEqual(self.parts(batch)[0]["state"], "failed")
         self.assertEqual(self.history(), [])
-        self.assertFalse(self.delivery.queue_next(self.context, batch, deadline_at=self.deadline).is_success)
+        self.assertEqual(self.delivery.queue_next(self.context, batch, deadline_at=self.deadline).failure.code,
+                         "message_delivery_failed")
         self.assertIsNone((await self.runner().run_once(Lane.FOREGROUND)).unwrap().task)
 
     async def test_deadline_during_send_cancels_worker_without_claiming_delivery(self):

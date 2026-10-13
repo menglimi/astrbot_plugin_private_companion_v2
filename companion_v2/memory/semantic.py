@@ -1,7 +1,9 @@
 """Generate real query vectors and incrementally fill authorized memory documents."""
 
+import asyncio
 from contextlib import closing
 import json
+import threading
 
 from companion_v2.execution.models import TaskError
 from .models import owner_key
@@ -78,40 +80,71 @@ class MemorySemanticRecall:
         model = self.gateway.port.binding(cfg["embedding_provider"], "embedding")
         after = ""
         while True:
+            snapshot, rows, eligible = await self._offload(
+                self._scan_batch, context, namespace, kind, model, after, cfg["batch_size"])
             query.access.check(context)
-            snapshot = query.recall_index.advance(context, namespace, kind)
-            with closing(query.index._open()) as db:
-                rows = db.execute("""SELECT d.* FROM recall_documents d LEFT JOIN recall_vectors v
-                    ON v.owner=d.owner AND v.id=d.id AND v.model=? AND v.hash=d.hash
-                    WHERE d.owner=? AND d.id>? AND v.id IS NULL ORDER BY d.id LIMIT ?""",
-                    (model, snapshot["partition"], after, cfg["batch_size"])).fetchall()
-            eligible = []
-            for row in rows:
-                try:
-                    query.objects.read(context, row)
-                    eligible.append(row)
-                except TaskError:
-                    continue
             if eligible:
                 binding, vectors = await self.gateway.embed(owner_key(context),
                     [json.loads(r["document_json"])["text"][:8000] for r in eligible], cfg["embedding_provider"])
                 query.access.check(context)
                 if binding != model:
                     raise TaskError("embedding_provider_changed", "memory model changed while indexing")
-                for row, vector in zip(eligible, vectors):
-                    try:
-                        query.objects.read(context, row)
-                        query.index.put_vector(row["owner"], row["id"], model=model, values=vector, expected_hash=row["hash"])
-                    except (TaskError, ValueError):
-                        continue
+                await self._offload(self._write_batch, context, eligible, vectors, model)
             if rows:
                 after = rows[-1]["id"]
             elif snapshot["ready"]:
                 break
             else:
                 after = ""
-            import asyncio
-            await asyncio.sleep(0)
+
+    async def _offload(self, operation, *args):
+        cancelled = threading.Event()
+        try:
+            return await asyncio.to_thread(operation, *args, cancelled)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    def _scan_batch(self, context, namespace, kind, model, after, batch_size, cancelled):
+        query = self.memory.query
+        if cancelled.is_set():
+            return None, (), ()
+        query.access.check(context)
+        snapshot = query.recall_index.advance(context, namespace, kind)
+        if cancelled.is_set():
+            return snapshot, (), ()
+        with closing(query.index._open()) as db:
+            rows = db.execute("""SELECT d.* FROM recall_documents d LEFT JOIN recall_vectors v
+                ON v.owner=d.owner AND v.id=d.id AND v.model=? AND v.hash=d.hash
+                WHERE d.owner=? AND d.id>? AND v.id IS NULL ORDER BY d.id LIMIT ?""",
+                (model, snapshot["partition"], after, batch_size)).fetchall()
+        eligible = []
+        for row in rows:
+            if cancelled.is_set():
+                break
+            query.access.check(context)
+            try:
+                query.objects.read(context, row)
+                eligible.append(row)
+            except TaskError:
+                continue
+        return snapshot, rows, eligible
+
+    def _write_batch(self, context, rows, vectors, model, cancelled):
+        query = self.memory.query
+        query.access.check(context)
+        for row, vector in zip(rows, vectors):
+            if cancelled.is_set():
+                return
+            query.access.check(context)
+            try:
+                query.objects.read(context, row)
+                if cancelled.is_set():
+                    return
+                query.index.put_vector(row["owner"], row["id"], model=model, values=vector,
+                                       expected_hash=row["hash"])
+            except (TaskError, ValueError):
+                continue
 
     def remember_cursor(self, context, result, prepared):
         cursor = result.get("next_cursor")

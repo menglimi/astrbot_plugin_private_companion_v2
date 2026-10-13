@@ -6,13 +6,14 @@ import unittest
 from dataclasses import replace
 
 from companion_v2.conversation.reply_management import ReplyManagement
-from companion_v2.conversation.reply_settings import FORWARD_DEFAULTS, GROUP_AIR_DEFAULTS, validate as validate_reply_settings
+from companion_v2.conversation.reply_settings import (FORWARD_DEFAULTS, GROUP, GROUP_AIR_DEFAULTS,
+    OWNER, ROLE_PROMPT_FIELDS, validate as validate_reply_settings)
 from companion_v2.conversation.segmentation import LLM_SEGMENT_MARKER
 from companion_v2.conversation.text_processing import TEXT_DEFAULTS
 from companion_v2.model_gateway.response_diagnostics import ResponseDiagnostics, ResponseTextSummary
 from companion_v2.execution.models import encode
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError
-from companion_v2.foundation.refs import ScopeKind
+from companion_v2.foundation.refs import OperationRef, ScopeKind, VersionRef
 from companion_v2.conversation.media.understanding import SCOPE_PERMISSION_FIELDS, media_scope_enabled
 from tests.test_host_application import HostFixture
 from tests.test_role_tool_loop import answered
@@ -179,7 +180,9 @@ class ReplyManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
                          "reply_configuration_invalid")
 
     async def test_media_scope_permissions_are_role_shared_and_gate_private_or_group_work(self):
-        status = self.manager.status(self.core).unwrap()
+        from companion_v2.configuration.models import ConfigLayer
+        role_manager = ReplyManagement(self.app, self.context, layer=ConfigLayer.ROLE)
+        status = role_manager.status(self.core).unwrap()
         changes = {
             "image_understanding_private_enabled": False,
             "image_understanding_group_enabled": True,
@@ -188,12 +191,13 @@ class ReplyManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
             "file_understanding_private_enabled": False,
             "file_understanding_group_enabled": True,
         }
-        saved = self.manager.configure(self.core,
+        saved = role_manager.configure(self.core,
             self.request(status, changes, "media-scope-permissions")).unwrap()
         settings = saved["status"]["settings"]
         self.assertEqual({key: settings[key] for key in changes}, changes)
         for name in changes:
-            expected_layers = ["role", "window"] if name in SCOPE_PERMISSION_FIELDS else ["window"]
+            expected_layers = (["role", "window"] if name in SCOPE_PERMISSION_FIELDS | ROLE_PROMPT_FIELDS
+                               else ["window"])
             self.assertEqual(saved["status"]["fields"][name]["editable_layers"], expected_layers)
         self.assertFalse(media_scope_enabled(settings, "image_understanding", ScopeKind.PRIVATE))
         self.assertTrue(media_scope_enabled(settings, "image_understanding", ScopeKind.GROUP))
@@ -208,6 +212,147 @@ class ReplyManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         group_manager = ReplyManagement(self.app, target=group_target)
         group_settings = group_manager.status(self.core).unwrap()["settings"]
         self.assertEqual({key: group_settings[key] for key in changes}, changes)
+
+    async def test_role_defaults_are_inherited_and_private_windows_can_override_them(self):
+        from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+        role_manager = ReplyManagement(self.app, self.context, layer=ConfigLayer.ROLE)
+        role_status = role_manager.status(self.core).unwrap()
+        role_value = "角色默认表达，保持自然并主动接住话题。"
+        role_saved = role_manager.configure(self.core,
+            self.request(role_status, {"style_prompt": role_value}, "role-style-default")).unwrap()
+        self.assertEqual(role_saved["status"]["scope"], "role")
+        self.assertEqual(role_saved["status"]["settings"]["style_prompt"], role_value)
+
+        window_manager = ReplyManagement(self.app, self.context, layer=ConfigLayer.WINDOW)
+        inherited = window_manager.status(self.core).unwrap()
+        self.assertEqual(inherited["settings"]["style_prompt"], role_value)
+        self.assertEqual(inherited["provenance"]["style_prompt"]["layer"], "role")
+        local_value = "这个私聊里尽量简短。"
+        local_saved = window_manager.configure(self.core,
+            self.request(inherited, {"style_prompt": local_value}, "private-style-override")).unwrap()
+        self.assertEqual(local_saved["status"]["settings"]["style_prompt"], local_value)
+        self.assertEqual(local_saved["status"]["provenance"]["style_prompt"]["layer"], "window")
+        reset_status = local_saved["status"]
+        reset = window_manager.configure(self.core, {"operation_key": "private-style-reset",
+            "edit_token": reset_status["edit_token"], "changes": {}, "reset_to_inherit": ["style_prompt"]}).unwrap()
+        self.assertEqual(reset["status"]["settings"]["style_prompt"], role_value)
+        self.assertEqual(reset["status"]["provenance"]["style_prompt"]["layer"], "role")
+        self.assertFalse(reset["status"]["provenance"]["style_prompt"]["explicit"])
+        self.assertEqual(role_manager.status(self.core).unwrap()["settings"]["style_prompt"], role_value)
+
+        other_scope = replace(self.context.scope, native_scope_id="other-private-window",
+            conversation_id="other-private-conversation", session_id="other-private-session")
+        other_target = ConfigTarget(other_scope.installation_id, ConfigLayer.WINDOW,
+            self.context.role_binding.role, other_scope)
+        from companion_v2.conversation.reply_settings import GROUP, OWNER
+        owner = self.app.configuration._owners[OWNER]
+        other = owner.read(other_target, self.app.configuration.registry.group(GROUP))
+        field = other.fields[GROUP + ".style_prompt"]
+        self.assertEqual((field.value, field.source.layer.value, field.explicit), (role_value, "role", False))
+
+    async def test_group_wakeup_role_default_can_be_overridden_and_reset_per_group(self):
+        role_manager = ReplyManagement(self.app, self.context, layer=ConfigLayer.ROLE)
+        role_status = role_manager.status(self.core).unwrap()
+        self.assertEqual(role_status["fields"]["group_wakeup_enabled"]["editable_layers"], ["role", "window"])
+        self.assertEqual(role_status["fields"]["group_wakeup_enabled"]["write_layer"], "role")
+        role_manager.configure(self.core,
+            self.request(role_status, {"group_wakeup_enabled": False}, "role-group-wakeup")).unwrap()
+
+        group_scope = replace(self.context.scope, kind=ScopeKind.GROUP,
+            native_scope_id="reply-settings-group", conversation_id="reply-settings-conversation",
+            session_id="reply-settings-session")
+        group_target = ConfigTarget(group_scope.installation_id, ConfigLayer.WINDOW,
+            self.context.role_binding.role, group_scope)
+        window_manager = ReplyManagement(self.app, target=group_target)
+        window_status = window_manager.status(self.core).unwrap()
+        self.assertFalse(window_status["settings"]["group_wakeup_enabled"])
+        self.assertEqual(window_status["fields"]["group_wakeup_enabled"]["write_layer"], "window")
+        self.assertEqual(window_status["fields"]["group_wakeup_enabled"]["editable_layers"], ["role", "window"])
+        self.assertEqual(window_status["provenance"]["group_wakeup_enabled"]["layer"], "role")
+
+        overridden = window_manager.configure(self.core,
+            self.request(window_status, {"group_wakeup_enabled": True}, "group-wakeup-override")).unwrap()
+        self.assertTrue(overridden["status"]["settings"]["group_wakeup_enabled"])
+        self.assertEqual(overridden["status"]["provenance"]["group_wakeup_enabled"]["layer"], "window")
+
+        another_conversation = replace(group_scope, conversation_id="reply-settings-new-conversation")
+        stable_target = ConfigTarget(another_conversation.installation_id, ConfigLayer.WINDOW,
+            self.context.role_binding.role, another_conversation)
+        stable_status = ReplyManagement(self.app, target=stable_target).status(self.core).unwrap()
+        self.assertTrue(stable_status["settings"]["group_wakeup_enabled"])
+
+        another_group = replace(group_scope, native_scope_id="reply-settings-other-group",
+            conversation_id="reply-settings-other-conversation")
+        other_target = ConfigTarget(another_group.installation_id, ConfigLayer.WINDOW,
+            self.context.role_binding.role, another_group)
+        other_status = ReplyManagement(self.app, target=other_target).status(self.core).unwrap()
+        self.assertFalse(other_status["settings"]["group_wakeup_enabled"])
+
+        reset = ReplyManagement(self.app, target=stable_target).configure(self.core, {
+            "operation_key": "group-wakeup-reset",
+            "edit_token": stable_status["edit_token"], "changes": {},
+            "reset_to_inherit": ["group_wakeup_enabled"]}).unwrap()
+        self.assertFalse(reset["status"]["settings"]["group_wakeup_enabled"])
+        self.assertEqual(reset["status"]["provenance"]["group_wakeup_enabled"]["layer"], "role")
+        self.assertFalse(reset["status"]["provenance"]["group_wakeup_enabled"]["explicit"])
+        self.assertFalse(role_manager.status(self.core).unwrap()["settings"]["group_wakeup_enabled"])
+
+    async def test_old_group_conversation_override_is_found_and_cleared_after_stable_migration(self):
+        from companion_v2.configuration.owners import SparseConfigurationOwner
+
+        role_manager = ReplyManagement(self.app, self.context, layer=ConfigLayer.ROLE)
+        role_status = role_manager.status(self.core).unwrap()
+        role_manager.configure(self.core,
+            self.request(role_status, {"group_wakeup_direct_words": '["角色默认"]'}, "role-wakeup-word")).unwrap()
+
+        group_scope = replace(self.context.scope, kind=ScopeKind.GROUP,
+            native_scope_id="legacy-group", conversation_id="legacy-conversation",
+            session_id="stable-group-session")
+        target = ConfigTarget(group_scope.installation_id, ConfigLayer.WINDOW,
+            self.context.role_binding.role, group_scope)
+        fields = self.app.configuration.registry.group(GROUP)
+        local_fields = tuple(replace(field, layers=(ConfigLayer.WINDOW,)) for field in fields)
+        owner = self.app.configuration._owners[OWNER]
+        legacy = SparseConfigurationOwner.read(owner, target, local_fields)
+        SparseConfigurationOwner.write(owner, target, local_fields,
+            changes={GROUP + ".group_wakeup_direct_words": '["旧群配置"]'}, reset=(),
+            expected_revision=legacy.revision, observed_at=self.app.now())
+
+        current_scope = replace(group_scope, conversation_id="new-conversation")
+        current_target = ConfigTarget(current_scope.installation_id, ConfigLayer.WINDOW,
+            self.context.role_binding.role, current_scope)
+        current_manager = ReplyManagement(self.app, target=current_target)
+        inherited = current_manager.status(self.core).unwrap()
+        self.assertEqual(inherited["settings"]["group_wakeup_direct_words"], '["旧群配置"]')
+        self.assertEqual(inherited["provenance"]["group_wakeup_direct_words"]["layer"], "window")
+
+        changed = current_manager.configure(self.core,
+            self.request(inherited, {"group_wakeup_direct_words": '["新群配置"]'}, "stable-group-word")).unwrap()
+        self.assertEqual(changed["status"]["settings"]["group_wakeup_direct_words"], '["新群配置"]')
+        reset = current_manager.configure(self.core, {"operation_key": "stable-group-word-reset",
+            "edit_token": changed["status"]["edit_token"], "changes": {},
+            "reset_to_inherit": ["group_wakeup_direct_words"]}).unwrap()
+        self.assertEqual(reset["status"]["settings"]["group_wakeup_direct_words"], '["角色默认"]')
+        self.assertEqual(reset["status"]["provenance"]["group_wakeup_direct_words"]["layer"], "role")
+
+    async def test_role_change_and_inherit_reset_share_one_complete_receipt(self):
+        role_manager = ReplyManagement(self.app, self.context, layer=ConfigLayer.ROLE)
+        role_status = role_manager.status(self.core).unwrap()
+        role_manager.configure(self.core, self.request(role_status,
+            {"group_wakeup_enabled": False}, "role-wakeup-before-combined-patch")).unwrap()
+
+        window_manager = ReplyManagement(self.app, self.context)
+        status = window_manager.status(self.core).unwrap()
+        operation_id = "reply-settings:role-change-and-reset"
+        receipt = self.app.configuration.patch(self.core, target=window_manager.target, group_id=GROUP,
+            operation=OperationRef(operation_id, OWNER, window_manager.target.authorization_scope,
+                VersionRef(operation_id, 1), operation_id),
+            expected_edit_token=status["edit_token"],
+            changes={GROUP + ".group_wakeup_direct_words": '["星星"]'},
+            reset_to_inherit=(GROUP + ".group_wakeup_enabled",), observed_at=self.app.now()).unwrap()
+
+        self.assertEqual(receipt.changed_fields, tuple(sorted((
+            GROUP + ".group_wakeup_direct_words", GROUP + ".group_wakeup_enabled"))))
 
     async def test_video_and_file_understanding_controls_are_saved_per_window(self):
         status = self.manager.status(self.core).unwrap()

@@ -418,6 +418,17 @@
 /* ===== 权限开关 =====
    两个布尔，但**不是两个独立开关**：read 关闭时 proposals 会被后端强制跟从。 */
 .lea-gate{display:flex;flex-direction:column;gap:var(--sp-3)}
+.lea-gate-head{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:var(--sp-3);
+  padding-bottom:var(--sp-2);border-bottom:1px solid var(--t-line);
+}
+.lea-gate-head h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.lea-gate-head p{margin:var(--sp-1) 0 0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.6}
+.lea-gate-head>span{
+  flex:none;max-width:35ch;padding:var(--sp-1) var(--sp-2);border-radius:var(--r-sm);
+  background:var(--t-surface-soft);color:var(--t-text-soft);font-size:var(--fs-tiny);
+  overflow-wrap:anywhere;
+}
 .lea-gate-list{display:flex;flex-direction:column;gap:var(--sp-2)}
 .lea-switch{
   padding:var(--sp-3) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-md);
@@ -534,6 +545,8 @@
   display:grid;grid-template-columns:repeat(2,minmax(180px, min(320px, 1fr)));
   gap:var(--sp-3);align-items:end;padding:var(--sp-3) 0;border-bottom:1px solid var(--t-line);
 }
+.learning-record-scope{display:flex;flex-direction:column;gap:var(--sp-2);min-width:0}
+.learning-record-scope h2{margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);font-weight:650}
 .learning-scope-controls label{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0;color:var(--t-text-soft);font-size:var(--fs-tiny)}
 .learning-scope-controls select{
   width:100%;min-width:0;min-height:38px;padding:var(--sp-2) var(--sp-3);

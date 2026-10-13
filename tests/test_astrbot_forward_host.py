@@ -49,9 +49,9 @@ class AstrBotForwardHostTests(unittest.IsolatedAsyncioTestCase):
             return {"messages": [quote_raw()]}
         self.api.call_action = dispatch
 
-    async def start_host(self):
+    async def start_host(self, *, review_only=False):
         (await self.controller.initialize_profile()).unwrap()
-        (await self.controller.start()).unwrap()
+        (await self.controller.start(review_only=review_only)).unwrap()
 
     def event(self):
         event = FakeEvent(self.native, event_id="678")
@@ -108,7 +108,7 @@ class AstrBotForwardHostTests(unittest.IsolatedAsyncioTestCase):
         installed = installed_native_types()
         self.assertIs(installed.forward, Forward)
         self.assertIs(installed.forward_loader, load_native_forwards)
-        await self.start_host()
+        await self.start_host(review_only=True)
         event = self.event()
         self.assertTrue(self.controller.claims(event))
         batch = (await self.controller.receive_claimed(event)).unwrap()

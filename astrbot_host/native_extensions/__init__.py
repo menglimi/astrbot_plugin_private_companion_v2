@@ -15,6 +15,7 @@ from companion_v2.adapters.astrbot.tools import AstrBotToolPort, map_tools
 from companion_v2.capabilities.native import invocation_request, json_document, parse_result
 from companion_v2.capabilities.native_reads import READ_ACTIONS, NativeReadConsumer
 from companion_v2.capabilities.repositories import CapabilityRepository
+from companion_v2.capabilities.models import CapabilityDesiredState
 from companion_v2.conversation.external_tools import ExternalToolResponse
 from companion_v2.execution.models import TaskError, digest, encode, require
 from companion_v2.foundation.outcome import Outcome
@@ -75,6 +76,127 @@ class NativeExtensionRegistry(AstrBotToolPort):
         self.image_enabled = read_image_settings(image_settings_path)
         self._enforcing_image_settings = False
         self._closed = False
+        self._start_task = None
+        self._services_lock = asyncio.Lock()
+
+    def begin_start(self):
+        if not self._closed and (self._start_task is None or self._start_task.done()):
+            self._start_task = asyncio.create_task(self.start(), name="companion-v2:native-services")
+
+    def _lease(self, extension_id):
+        return next((lease for lease in self._bundled_extensions
+                     if lease.manifest.package.extension_id == extension_id), None)
+
+    def current_package(self, extension_id):
+        """Return the loaded package even when one of its actions is dormant.
+
+        A native package can be present while an individual action is withheld
+        by its own backend settings (for example Image before an endpoint is
+        configured).  Lifecycle management operates on the package identity;
+        invocation catalogues operate on action readiness.
+        """
+        lease = self._lease(extension_id)
+        if (self._closed or lease is None
+                or extension_id in self._blocked_extension_ids
+                or not lease.current(self.context)):
+            return None
+        return lease.manifest.package
+
+    def api(self, extension_id):
+        for lease in self._bundled_extensions:
+            if lease.manifest.package.extension_id == extension_id and lease.current(self.context):
+                return getattr(lease.instance, "extension_api", None) or lease.api or lease.port
+        return None
+
+    def service(self, extension_id):
+        for lease in self._bundled_extensions:
+            if lease.manifest.package.extension_id == extension_id and lease.current(self.context):
+                return lease.instance
+        return None
+
+    def active_service(self, extension_id):
+        lease = self._lease(extension_id)
+        if lease is not None and self._should_start(lease) and lease.state == "running":
+            return self.service(extension_id)
+        return None
+
+    def status(self, extension_id):
+        lease = self._lease(extension_id)
+        return {"state": lease.state if lease is not None else "unavailable",
+                "error_code": lease.error_code if lease is not None else "native_extension_unavailable"}
+
+    def _should_start(self, lease):
+        if (self._closed or self.runtime is None or getattr(self.application, "state", None) != "running"
+                or lease.manifest.package.extension_id in self._blocked_extension_ids):
+            return False
+        result = CapabilityRepository(self.runtime).installation(extension_id=lease.manifest.package.extension_id)
+        if not result.is_success:
+            return False
+        installation, package = result.unwrap(), lease.manifest.package
+        return installation.desired_state is CapabilityDesiredState.ACTIVE and (
+            installation.package_id, installation.package_version, installation.artifact_hash) == (
+            package.package_id, package.package_version, package.artifact_hash)
+
+    async def _replace_service(self, lease):
+        if lease.factory is None:
+            return lease
+        # Stop before rebuilding to release ports, save domain state and ensure
+        # an old provider can never adopt a replacement's result.
+        lease.close()
+        if lease._close_task is not None:
+            await lease._close_task
+        else:
+            await lease.aclose()
+        replacement = lease.factory()
+        if replacement.manifest != lease.manifest:
+            await replacement.aclose()
+            raise TaskError("native_settings_catalog_changed", "the capability catalog changed; reload the V2 host")
+        self._entries.update({entry.host_tool_id: (entry, replacement) for entry in replacement.declarations()})
+        self._bundled_extensions = tuple(replacement if item is lease else item for item in self._bundled_extensions)
+        return replacement
+
+    async def reconcile_service(self, extension_id):
+        async with self._services_lock:
+            lease = self._lease(extension_id)
+            if lease is None or self._closed:
+                return
+            if self._should_start(lease):
+                if not lease.current(self.context) or lease.state == "failed":
+                    lease = await self._replace_service(lease)
+                lease.begin_start()
+            elif lease.state != "inactive":
+                await self._replace_service(lease)
+
+    async def configure_service(self, extension_id, updates, revision):
+        async with self._services_lock:
+            lease = self._lease(extension_id)
+            if self._closed or lease is None or extension_id not in ("reality", "together", "game", "live"):
+                raise TaskError("native_settings_unavailable", "this extension has its own settings page")
+            settings = lease.instance.config
+            if revision != settings.revision():
+                raise TaskError("native_settings_conflict", "extension settings changed; reload before saving")
+            settings.update_fields(updates)
+            replacement = await self._replace_service(lease)
+            if self._should_start(replacement):
+                replacement.begin_start()
+            return {"extension_id": extension_id, "settings": settings.public(), "schema": settings.schema,
+                    "revision": settings.revision(), "runtime": self.status(extension_id), "saved": True}
+
+    async def start(self):
+        for lease in self._bundled_extensions:
+            if self._closed:
+                break
+            if self._should_start(lease):
+                lease.begin_start()
+
+    async def aclose(self):
+        self.close()
+        tasks = [lease._close_task for lease in self._bundled_extensions if lease._close_task is not None]
+        tasks.extend(lease.aclose() for lease in self._bundled_extensions if lease._close_task is None)
+        if self._start_task is not None:
+            tasks.append(self._start_task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def declarations(self):
         return tuple(entry[0] for entry in self._entries.values()
@@ -116,12 +238,19 @@ class NativeExtensionRegistry(AstrBotToolPort):
         if runtime is None or self._closed or (self.application is not None and self.application is not application):
             raise ValueError("native registry must attach to one V2 application")
         self.application, self.runtime = application, runtime
-        if self.screen is None and any(entry[0].descriptor.tool.action == SCREEN_ACTION for entry in self._entries.values()):
+        # The real V2 application always exposes ``tasks.identity``.  Keep
+        # registry attachment tolerant of a lightweight host fixture (or a
+        # partially constructed application) and defer the Screen consumer
+        # until the authorization service is available.
+        tasks = getattr(application, "tasks", None)
+        if (self.screen is None and tasks is not None and getattr(tasks, "identity", None) is not None
+                and any(entry[0].descriptor.tool.action == SCREEN_ACTION for entry in self._entries.values())):
             self.screen = ScreenAdopter(self, application)
         if self.camera is None and any(entry[0].descriptor.tool.action == REALITY_CAMERA_ACTION
                                        for entry in self._entries.values()):
             self.camera = RealityCameraGuard(self, application)
-        if self.content is None and any(entry[0].descriptor.tool.action in CONTENT_ACTIONS for entry in self._entries.values()):
+        if (self.content is None and getattr(application, "messages", None) is not None
+                and any(entry[0].descriptor.tool.action in CONTENT_ACTIONS for entry in self._entries.values())):
             self.content = ContentConsumer(self, application)
         return self
 
@@ -147,6 +276,18 @@ class NativeExtensionRegistry(AstrBotToolPort):
                         continue
                     if self.current_declaration(declaration.host_tool_id) != declaration:
                         raise TaskError("native_provider_changed", "native declaration is no longer current")
+                    if package.extension_id not in packages and package.package_id.startswith("astrbot_plugin_private_companion_v2."):
+                        from companion_v2.capabilities.native_catalog import register_native_replacement
+                        predecessors = {"content": "astrbot_plugin_content_companion", "image": "astrbot_plugin_image_companion",
+                            "reality": "astrbot_plugin_reality_companion", "together": "astrbot_plugin_together_companion",
+                            "game": "astrbot_plugin_game_companion", "live": "astrbot_plugin_live_stream_companion"}
+                        previous = predecessors.get(package.extension_id)
+                        if previous is not None:
+                            upgraded = register_native_replacement(self.runtime, package,
+                                previous_package_id=previous, observed_at=observed_at)
+                            if not upgraded.is_success:
+                                blocked[package.extension_id] = (package.package_id, upgraded.failure.code)
+                                continue
                     registered = repository.register_descriptor(package, registered_at=observed_at)
                     if registered.failure is not None and registered.failure.code in {
                             "capability_descriptor_conflict", "capability_identity_conflict"}:
@@ -173,6 +314,9 @@ class NativeExtensionRegistry(AstrBotToolPort):
     def _guard(self, host_tool_id, invocation):
         if self.current_declaration(host_tool_id) is None:
             raise TaskError("native_provider_changed", "the pinned native provider is no longer loaded")
+        lease = self._entries[host_tool_id][1]
+        if callable(getattr(lease, 'factory', None)) and lease.state != 'running':
+            raise TaskError('native_service_not_running', '此 V2 模块尚未启动完成，请稍后再调用该功能')
         if self.now() >= invocation.deadline_at:
             raise TaskError("native_deadline_expired", "the original native request has expired")
         if self.application is not None:
@@ -200,16 +344,39 @@ class NativeExtensionRegistry(AstrBotToolPort):
         if entry is None or entry[0].descriptor != invocation.descriptor:
             raise TaskError("native_provider_changed", "the original native declaration is unavailable")
         port = entry[1].port
+
+        def guard():
+            if self._entries.get(host_tool_id) is not entry:
+                raise TaskError("native_provider_changed", "the original native service was restarted")
+            self._guard(host_tool_id, invocation)
+
         await self._role(host_tool_id, invocation)
+        guard()
         action = invocation.descriptor.tool.action
         reference_lease = None
         if action == "image.mask_edit" or (action == "image.edit"
                 and "artifact_id" not in json.loads(invocation.arguments_json)):
             reference_lease = ImageReferenceLease(self, invocation)
         screen_check = self.screen.preflight(invocation) if self.screen is not None and invocation.descriptor.tool.action == SCREEN_ACTION else None
-        camera_check = (self.camera.preflight(invocation)
-                        if self.camera is not None and invocation.descriptor.tool.action == REALITY_CAMERA_ACTION
-                        else None)
+        camera_check = None
+        if self.camera is not None and action == REALITY_CAMERA_ACTION:
+            try:
+                camera_check = self.camera.preflight(invocation)
+            except TaskError as error:
+                # This host denial happens before port.execute can capture a
+                # frame. Keep its own receipt instead of poisoning later valid
+                # camera requests with an unknown device effect.
+                receipt_ref = "astrbot.camera-preflight." + invocation.invocation_id
+                document = {"invocation_id": invocation.invocation_id, "origin_key": invocation.context.key,
+                    "arguments_hash": invocation.arguments_hash, "binding": invocation.descriptor.binding,
+                    "state": "failed", "effect": "not_committed", "code": error.code,
+                    "observed_at": self.now()}
+                with self.runtime.transaction() as connection:
+                    connection.execute("INSERT OR IGNORE INTO runtime_metadata (key,value) VALUES (?,?)",
+                                       (receipt_ref, encode(document)))
+                return ExternalToolResponse(invocation.invocation_id, invocation.context.key,
+                    invocation.arguments_hash, invocation.descriptor.binding, "failed", "not_committed",
+                    receipt_ref=receipt_ref)
         request = invocation_request(invocation)
         if action in IMAGE_ACTIONS and self.runtime is not None:
             from companion_v2.conversation.media.output_settings import effective_settings, apply_prompts
@@ -222,7 +389,7 @@ class NativeExtensionRegistry(AstrBotToolPort):
             request["host_persona"] = await self.persona_guard(
                 invocation.context.scope, invocation.context.role_binding)
             request["host_execution"] = dict(self.together_execution)
-            self._guard(host_tool_id, invocation)
+            guard()
         if self.content is not None and invocation.descriptor.tool.action in CONTENT_ACTIONS:
             self.content.sources.synchronize()
         # Providers receive a copy; mutation cannot alter receipt validation.
@@ -236,7 +403,7 @@ class NativeExtensionRegistry(AstrBotToolPort):
                 nonlocal guarded
                 if not active:
                     raise TaskError("native_guard_expired", "the original native dispatch boundary has closed")
-                self._guard(host_tool_id, invocation)
+                guard()
                 if screen_check is not None:
                     self.screen.recheck(invocation, *screen_check)
                 if camera_check is not None:
@@ -245,7 +412,7 @@ class NativeExtensionRegistry(AstrBotToolPort):
                     image_references.recheck()
                 guarded = True
 
-            self._guard(host_tool_id, invocation)
+            guard()
             try:
                 binding = (self.content.bind(invocation, document, before_dispatch)
                     if self.content is not None and invocation.descriptor.tool.action in CONTENT_ACTIONS else nullcontext())
@@ -290,7 +457,7 @@ class NativeExtensionRegistry(AstrBotToolPort):
                 except ValueError as error:
                     raise TaskError("native_artifact_changed", "native bytes differ from the immutable artifact receipt") from error
             adopted = replace(native, artifacts=tuple(artifacts))
-            self._guard(host_tool_id, invocation)
+            guard()
             handler = self.result_handlers.get(invocation.descriptor.tool.action)
             if self._default_handlers and action in IMAGE_ACTIONS:
                 handler = lambda original, received: image_result_handler(
@@ -315,7 +482,7 @@ class NativeExtensionRegistry(AstrBotToolPort):
                             result.close()
                         raise TaskError("native_handler_invalid", "native adoption must be synchronous")
                 self._validate_response(invocation, adopted, result)
-                self._guard(host_tool_id, invocation)
+                guard()
                 if camera_check is not None:
                     self.camera.recheck(invocation, camera_check)
             return result
@@ -359,6 +526,8 @@ class NativeExtensionRegistry(AstrBotToolPort):
         return map_tools(runtime, self) if self.declarations() else None
 
     def close(self):
+        if self._start_task is not None and not self._start_task.done():
+            self._start_task.cancel()
         if self.content is not None:
             self.content.close()
         for lease in self._bundled_extensions:

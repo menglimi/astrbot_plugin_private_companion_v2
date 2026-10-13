@@ -10,10 +10,11 @@ const source = fs.readFileSync(path.join(__dirname, "../pages/陪伴小屋/state
 
 test("rendering a QQ status detail does not open or reopen its editor", () => {
   const window={CompanionStateMaintenance:{fields:()=>[],validField:()=>true,titles:{},canAlign:()=>false},CompanionStateContact:{}};
-  vm.runInNewContext(source,{window,structuredClone,JSON,console});
+  vm.runInNewContext(source,{window,structuredClone,JSON,crypto,console});
   const editor=window.CompanionStateEditor.create({changed(){},failed(){},refresh:async()=>null,api:async()=>({})});
   editor.setScope({installation_id:"install",operator_id:"admin",path:"role/state"});
-  editor.setStatus({edit_token:"token",settings:{typing_enabled:true,typing_refresh_seconds:3,presence_enabled:false},state:{values:{}}});
+  editor.setStatus({edit_token:"window-token",role_edit_token:"role-token",
+    settings:{typing_enabled:true,typing_refresh_seconds:3,presence_enabled:false},state:{values:{}}});
   const details=()=>editor.markup({feature:"presentation"});
   assert.match(details(),/data-state-edit="settings"/);
   assert.equal(editor.interacting,false,"render must not create a draft");
@@ -41,7 +42,8 @@ test("state drafts only block switching after a field changes", () => {
   vm.runInNewContext(source, {window, structuredClone, JSON, console});
   const editor = window.CompanionStateEditor.create({changed() {}, failed() {}, refresh:async()=>null,
     api:async()=>({})});
-  editor.setStatus({edit_token:"token", settings:{energy:50}, state:{values:{}}});
+  editor.setStatus({edit_token:"window-token", role_edit_token:"role-token",
+    settings:{energy:50}, state:{values:{}}});
   editor.open("intensity");
   assert.equal(editor.interacting, true);
   assert.equal(editor.dirty, false);
@@ -65,7 +67,7 @@ test("weather location and switches share one role-wide state command", async ()
     planning_timezone:"Asia/Shanghai",planning_horizon_days:90,planning_refine_minutes:15,planning_max_items:12,
     planning_prompt:"",planning_annual_calendars:"",planning_weather_enabled:false,planning_weather_location:"",
     planning_weather_max_age_minutes:120};
-  const status={edit_token:"role-edit",settings,state:{revision:1,values:{}},calendar:{items:[]},
+  const status={edit_token:"window-edit",role_edit_token:"role-edit",settings,state:{revision:1,values:{}},calendar:{items:[]},
     planning:{enabled:false,calendar_enabled:true,running:false,next_check:null,last_result:null}};
   const posts=[];let refreshes=0;
   const editor=window.CompanionStateEditor.create({changed(){},failed(){},refresh:async()=>{refreshes+=1;return status;},
@@ -78,8 +80,8 @@ test("weather location and switches share one role-wide state command", async ()
   editor.submit({target:{id:"state-edit-form"},preventDefault(){}});
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(posts.length,1);
-  assert.equal(posts[0].action,"configure");
-  assert.equal(posts[0].edit_token,"role-edit");
+  assert.equal(posts[0].action,"configure_role");
+  assert.equal(posts[0].role_edit_token,"role-edit");
   assert.deepEqual(JSON.parse(JSON.stringify(posts[0].changes)),{
     planning_weather_enabled:true,
     planning_weather_location:JSON.stringify({name:"札幌",latitude:43.06,longitude:141.35}),
@@ -95,7 +97,8 @@ test("perception weather controls edit the role settings through the state comma
   for(const name of ["state-maintenance.js","state-editor.js"])
     vm.runInContext(fs.readFileSync(path.join(__dirname,"../pages/陪伴小屋",name),"utf8"),context,{filename:name});
   const settings={planning_weather_enabled:false,planning_weather_location:"",planning_weather_max_age_minutes:120};
-  const status={edit_token:"role-weather-edit",settings,state:{revision:1,values:{}}};
+  const status={edit_token:"window-weather-edit",role_edit_token:"role-weather-edit",
+    settings,state:{revision:1,values:{}}};
   const posts=[];
   const editor=window.CompanionStateEditor.create({changed(){},failed(){},refresh:async()=>null,
     api:async(_method,_route,body)=>{posts.push(body);return {operation_id:"weather-config"};}});
@@ -112,12 +115,42 @@ test("perception weather controls edit the role settings through the state comma
   editor.submit({target:{id:"state-edit-form"},preventDefault(){}});
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(posts.length,1);
-  assert.equal(posts[0].action,"configure");
-  assert.equal(posts[0].edit_token,"role-weather-edit");
+  assert.equal(posts[0].action,"configure_role");
+  assert.equal(posts[0].role_edit_token,"role-weather-edit");
   assert.deepEqual(JSON.parse(JSON.stringify(posts[0].changes)),{
     planning_weather_enabled:true,
     planning_weather_location:JSON.stringify({name:"杭州",latitude:30.25,longitude:120.17}),
     planning_weather_max_age_minutes:60,
   });
+  editor.destroy();
+});
+
+test("mixed state settings keep role defaults and window controls on their own targets", async () => {
+  const window={CompanionStateMaintenance:{
+    fields:kind=>kind==="home"?["typing_enabled","maintenance_minutes"]:[],
+    validField:()=>true,
+    normalized:(_kind,values)=>({...values,maintenance_minutes:Number(values.maintenance_minutes)}),
+    titles:{home:"状态与首页展示"},
+  },CompanionStateContact:{}};
+  vm.runInNewContext(source,{window,structuredClone,JSON,crypto,console});
+  const status={edit_token:"window-edit",role_edit_token:"role-edit",
+    settings:{typing_enabled:false,maintenance_minutes:30},state:{values:{}}};
+  const posts=[];
+  const editor=window.CompanionStateEditor.create({changed(){},failed(){},refresh:async()=>status,
+    api:async(_method,_route,body)=>{posts.push(body);return {operation_id:"mixed-config"};}});
+  editor.setScope({installation_id:"install",operator_id:"admin",path:"role/state"});
+  editor.setStatus(status);
+  editor.open("home");
+  const input=(name,value,type="checkbox")=>editor.input({target:{dataset:{stateField:name},type,
+    checked:value,value:String(value),matches:()=>true,hasAttribute:()=>false,closest:()=>null}});
+  input("typing_enabled",true);
+  input("maintenance_minutes",45,"number");
+  editor.submit({target:{id:"state-edit-form"},preventDefault(){}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(posts.length,1);
+  assert.equal(posts[0].action,"configure");
+  assert.equal(posts[0].edit_token,"window-edit");
+  assert.equal(posts[0].role_edit_token,"role-edit");
+  assert.deepEqual(JSON.parse(JSON.stringify(posts[0].changes)),{typing_enabled:true,maintenance_minutes:45});
   editor.destroy();
 });

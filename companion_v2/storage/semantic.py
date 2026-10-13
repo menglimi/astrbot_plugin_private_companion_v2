@@ -21,7 +21,8 @@ DEFAULTS = {"enabled": True, "embedding_provider": "", "rerank_provider": "", "a
             "slang_learning": True, "slang_web_search_enabled": False,
             "slang_web_search_candidates": 4, "slang_web_search_results": 2,
             "vision_review": True, "timeout_seconds": 8,
-            "batch_size": 24, "learning_interval_seconds": 900}
+            "batch_size": 24, "learning_interval_seconds": 21600}
+LEGACY_LEARNING_INTERVAL_DEFAULT = 900
 INTEGER_LIMITS = {"timeout_seconds": (1, 30), "batch_size": (1, 64),
                   "learning_interval_seconds": (60, 86400), "slang_web_search_candidates": (1, 12),
                   "slang_web_search_results": (1, 5), "reactions_cooldown_seconds": (0, 3600)}
@@ -39,7 +40,7 @@ class SemanticStore:
         self.path = root / "semantic-catalog.sqlite3"
         with self.db() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8):
                 raise ValueError("unsupported semantic catalog version")
             db.execute("""CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL,
@@ -65,7 +66,17 @@ class SemanticStore:
             db.execute("""CREATE TABLE IF NOT EXISTS offers (
                 batch TEXT NOT NULL, call TEXT NOT NULL, owner TEXT NOT NULL, payload TEXT NOT NULL,
                 PRIMARY KEY(batch, call))""")
-            db.execute("CREATE TABLE IF NOT EXISTS learning (owner TEXT PRIMARY KEY, checked_at REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS learning (owner TEXT PRIMARY KEY, checked_at REAL NOT NULL, retry_after REAL NOT NULL DEFAULT 0)")
+            if version < 7:
+                columns = {row["name"] for row in db.execute("PRAGMA table_info(learning)")}
+                if "retry_after" not in columns:
+                    db.execute("ALTER TABLE learning ADD COLUMN retry_after REAL NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS slang_candidate_events (
+                owner TEXT NOT NULL, event_key TEXT NOT NULL, observed_at REAL NOT NULL,
+                PRIMARY KEY(owner, event_key))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS slang_candidates (
+                owner TEXT NOT NULL, term TEXT NOT NULL, occurrences INTEGER NOT NULL,
+                last_seen REAL NOT NULL, PRIMARY KEY(owner, term))""")
             db.execute("CREATE TABLE IF NOT EXISTS uses (owner TEXT, id TEXT, batch TEXT, used_at REAL, PRIMARY KEY(owner,id,batch))")
             db.execute("CREATE TABLE IF NOT EXISTS reaction_frames (owner TEXT, id TEXT, position INTEGER, content BLOB NOT NULL, PRIMARY KEY(owner,id,position))")
             db.execute("""CREATE TABLE IF NOT EXISTS reaction_preferences (
@@ -100,7 +111,18 @@ class SemanticStore:
             db.execute("""CREATE TABLE IF NOT EXISTS reaction_collection_totals (
                 owner TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, count INTEGER NOT NULL,
                 PRIMARY KEY(owner,scope,status))""")
-            db.execute("PRAGMA user_version=5")
+            db.execute("""CREATE TABLE IF NOT EXISTS reaction_owner_migrations (
+                source_owner TEXT NOT NULL, target_owner TEXT NOT NULL,
+                PRIMARY KEY(source_owner,target_owner))""")
+            db.execute("PRAGMA user_version=8")
+            row = db.execute("SELECT revision, payload, explicit FROM settings WHERE id=1").fetchone()
+            configured = json.loads(row["payload"])
+            explicit = set(json.loads(row["explicit"]))
+            if ("learning_interval_seconds" not in explicit
+                    and configured.get("learning_interval_seconds") == LEGACY_LEARNING_INTERVAL_DEFAULT):
+                configured["learning_interval_seconds"] = DEFAULTS["learning_interval_seconds"]
+                db.execute("UPDATE settings SET revision=revision+1,payload=? WHERE id=1 AND revision=?",
+                           (encode(configured), row["revision"]))
 
     @contextmanager
     def db(self):
@@ -182,6 +204,41 @@ class SemanticStore:
                               (owner, kind, after, limit)).fetchall()
             return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
 
+    def record_slang_candidates(self, owner, event_key, terms, *, observed_at):
+        """Accumulate bounded vocabulary counts once per authorized input source."""
+        if (type(owner) is not str or not owner or type(event_key) is not str or not event_key
+                or type(observed_at) not in (int, float) or not math.isfinite(observed_at)):
+            raise ValueError("invalid group vocabulary observation")
+        normalized = tuple(dict.fromkeys(term for term in terms
+            if type(term) is str and term.strip() and len(term) <= 64))
+        if len(normalized) > 8:
+            raise ValueError("too many group vocabulary candidates")
+        with self.db() as db:
+            inserted = db.execute("INSERT OR IGNORE INTO slang_candidate_events VALUES (?,?,?)",
+                                  (owner, event_key, float(observed_at))).rowcount
+            if inserted:
+                for term in normalized:
+                    db.execute("""INSERT INTO slang_candidates VALUES (?,?,1,?)
+                        ON CONFLICT(owner,term) DO UPDATE SET
+                        occurrences=MIN(999, slang_candidates.occurrences+1),
+                        last_seen=MAX(slang_candidates.last_seen, excluded.last_seen)""",
+                        (owner, term, float(observed_at)))
+                db.execute("""DELETE FROM slang_candidate_events WHERE owner=? AND event_key NOT IN
+                    (SELECT event_key FROM slang_candidate_events WHERE owner=?
+                     ORDER BY observed_at DESC, event_key DESC LIMIT 512)""", (owner, owner))
+                db.execute("""DELETE FROM slang_candidates WHERE owner=? AND term NOT IN
+                    (SELECT term FROM slang_candidates WHERE owner=?
+                     ORDER BY occurrences DESC, last_seen DESC, term LIMIT 80)""", (owner, owner))
+            rows = db.execute("SELECT term,occurrences FROM slang_candidates WHERE owner=?",
+                              (owner,)).fetchall()
+        return {row["term"]: row["occurrences"] for row in rows}
+
+    def slang_candidate_counts(self, owner):
+        with self.db() as db:
+            rows = db.execute("SELECT term,occurrences FROM slang_candidates WHERE owner=?",
+                              (owner,)).fetchall()
+        return {row["term"]: row["occurrences"] for row in rows}
+
     def put(self, owner, kind, identifier, payload, *, expected=0, content=None, enabled=True, frames=None):
         with self.db() as db:
             old = db.execute("SELECT * FROM items WHERE owner=? AND kind=? AND id=?", (owner, kind, identifier)).fetchone()
@@ -247,6 +304,62 @@ class SemanticStore:
                 FROM reaction_collection_runs WHERE owner=? ORDER BY updated_at DESC,run_key DESC LIMIT 8""",
                 (owner,))]
         return {"totals": summary, "recent": recent}
+
+    def promote_reaction_owner(self, source_owner, target_owner):
+        """Copy a legacy window-owned reaction catalog to its stable role owner."""
+        if source_owner == target_owner:
+            return False
+        with self.db() as db:
+            if db.execute("SELECT 1 FROM reaction_owner_migrations WHERE source_owner=? AND target_owner=?",
+                          (source_owner, target_owner)).fetchone():
+                return False
+            rows = db.execute("SELECT * FROM items WHERE owner=? AND kind='reaction' ORDER BY id",
+                              (source_owner,)).fetchall()
+            identifiers = tuple(row["id"] for row in rows)
+            for row in rows:
+                db.execute("INSERT OR IGNORE INTO items VALUES (?,?,?,?,?,?,?)",
+                    (target_owner, row["kind"], row["id"], row["revision"], row["payload"],
+                     row["content"], row["enabled"]))
+                db.execute("INSERT OR IGNORE INTO vectors SELECT ?,kind,id,revision,model,hash,vector "
+                           "FROM vectors WHERE owner=? AND kind='reaction' AND id=?",
+                           (target_owner, source_owner, row["id"]))
+                db.execute("INSERT OR IGNORE INTO reaction_frames SELECT ?,id,position,content "
+                           "FROM reaction_frames WHERE owner=? AND id=?",
+                           (target_owner, source_owner, row["id"]))
+                db.execute("INSERT OR IGNORE INTO uses SELECT ?,id,batch,used_at FROM uses "
+                           "WHERE owner=? AND id=?", (target_owner, source_owner, row["id"]))
+            for row in db.execute("SELECT batch,call,payload FROM offers WHERE owner=?", (source_owner,)).fetchall():
+                try:
+                    payload = json.loads(row["payload"])
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(payload, dict) and payload.get("kind") == "reaction":
+                    db.execute("UPDATE offers SET owner=? WHERE batch=? AND call=? AND owner=?",
+                               (target_owner, row["batch"], row["call"], source_owner))
+            db.execute("""INSERT OR IGNORE INTO reaction_collection_runs
+                SELECT ?,run_key,scope,status,code,item_id,updated_at FROM reaction_collection_runs
+                WHERE owner=?""", (target_owner, source_owner))
+            totals = db.execute("SELECT scope,status,count FROM reaction_collection_totals WHERE owner=?",
+                                (source_owner,)).fetchall()
+            for row in totals:
+                db.execute("""INSERT INTO reaction_collection_totals VALUES (?,?,?,?)
+                    ON CONFLICT(owner,scope,status) DO UPDATE SET count=count+excluded.count""",
+                    (target_owner, row["scope"], row["status"], row["count"]))
+            db.execute("INSERT INTO reaction_owner_migrations VALUES (?,?)", (source_owner, target_owner))
+        return bool(identifiers)
+
+    def unclaimed_legacy_reaction_owners(self, target_owner):
+        """Return unclaimed catalogs made entirely from explicit V1 imports."""
+        with self.db() as db:
+            rows = db.execute("""SELECT i.owner FROM items i
+                WHERE i.kind='reaction' AND i.owner<>?
+                GROUP BY i.owner
+                HAVING SUM(CASE WHEN json_extract(i.payload,'$.collection_source')='legacy_migration'
+                                THEN 1 ELSE 0 END)=COUNT(*)
+                AND NOT EXISTS (SELECT 1 FROM reaction_owner_migrations m
+                                WHERE m.source_owner=i.owner)
+                ORDER BY i.owner""", (target_owner,)).fetchall()
+        return tuple(row["owner"] for row in rows)
 
     def vector(self, item, model):
         with self.db() as db:

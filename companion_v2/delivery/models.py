@@ -54,6 +54,7 @@ class DeliveryReceipt:
     receipt_ref: str
     platform_ref: str | None = None
     delivered_at: datetime | None = None
+    failure_code: str | None = None
 
     def __post_init__(self):
         for name in ("part_id", "operation_id", "origin_key", "payload_hash", "receipt_ref"):
@@ -62,6 +63,10 @@ class DeliveryReceipt:
             raise ValueError("receipt requires a known sender and explicit outcome")
         if self.platform_ref is not None:
             _opaque(self.platform_ref, field="platform_ref")
+        if self.failure_code is not None:
+            _opaque(self.failure_code, field="failure_code")
+            if self.status != "not_sent":
+                raise ValueError("a known rejection code requires a confirmed not-sent result")
         if self.status == "delivered":
             if self.platform_ref is None or self.delivered_at is None:
                 raise ValueError("delivery confirmation needs an original platform reference and time")

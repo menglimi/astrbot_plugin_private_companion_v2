@@ -25,10 +25,12 @@ class ReflectionManagement:
         return row
 
     @outcome
-    def list(self, context, *, batch_id=None, limit=20, after_id=""):
+    def list(self, context, *, batch_id=None, limit=20, after_id="", history=False):
         self.manager.writer.access.check(context)
         if type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError("invalid reflection queue limit")
+        if type(history) is not bool:
+            raise ValueError("invalid reflection history mode")
         text(after_id, "after_id", 256, empty=True)
         if batch_id is not None and after_id:
             raise ValueError("select either a reflection or a queue page")
@@ -40,15 +42,20 @@ class ReflectionManagement:
             # The anchor survives completion/linking. Current authority and the
             # original account, role and audience are checked on every page.
             anchor = self._row(context, after_id) if after_id else None
+            history_clause = "" if history else (
+                "AND state NOT IN ('complete', 'empty') "
+                "AND json_extract(receipts_json, '$.repair_batch') IS NULL "
+            )
             rows = self.reflection.runtime.read_all("""SELECT * FROM memory_reflections
                 WHERE owner_key = ? AND json_remove(context_json, '$.actor.policy_revision') = json_remove(?, '$.actor.policy_revision')
-                AND state NOT IN ('complete', 'empty') AND json_extract(receipts_json, '$.repair_batch') IS NULL
-                AND (created_at, batch_id) > (?, ?) ORDER BY created_at, batch_id LIMIT ?""",
+                """ + history_clause + """AND (created_at, batch_id) > (?, ?)
+                ORDER BY created_at, batch_id LIMIT ?""",
                 (owner_key(context), encode(context), anchor["created_at"] if anchor else "", after_id, limit + 1))
             return {"items": [self.reflection.describe(context, row, self.manager.writer.access) for row in rows[:limit]],
                     "next_cursor": rows[limit - 1]["batch_id"] if len(rows) > limit else None,
                     "has_more": len(rows) > limit, "scope": "private_memory_reflections",
-                    "operator_id": self.manager.operator.subject.subject_id}
+                    "operator_id": self.manager.operator.subject.subject_id,
+                    "view": "history" if history else "pending"}
 
     @outcome
     def prepare_retry(self, context, *, batch_id, operation_key):

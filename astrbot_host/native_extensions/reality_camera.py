@@ -35,6 +35,17 @@ class RealityCameraGuard:
         if context.scope.kind is not ScopeKind.PRIVATE:
             raise TaskError("reality_camera_private_required", "camera observations require a private conversation")
         messages = self.application.messages
+        from companion_v2.conversation.native_tool_sources import input_row, native_invocation, native_turn
+        if native_turn(invocation.parent_task_id):
+            native_invocation(self.application.runtime, invocation)
+            row = input_row(messages, context, invocation.parent_task_id)
+            from companion_v2.conversation.messages import source_from_document
+            reference = source_from_document(json.loads(row["source_json"]))
+            source = messages._read_source(reference, context, "text", self.registry.now())
+            if not explicit_camera_request(source.payload):
+                raise TaskError("reality_camera_explicit_request_required",
+                                "the latest private message must explicitly ask for a camera observation")
+            return row["observation_id"], row["content_hash"], source.content_hash
         batches = self.application.runtime.read_all(
             "SELECT batch_id FROM conversation_batches WHERE generation_task_id = ? AND origin_key = ? LIMIT 2",
             (invocation.parent_task_id, context.key))

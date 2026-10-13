@@ -98,7 +98,7 @@ def _kind(name, value):
     return {bool: ValueKind.BOOLEAN, int: ValueKind.INTEGER, str: ValueKind.TEXT}[type(value)]
 
 
-def configuration_fields(*, provider="", dual_provider="", layers=(ConfigLayer.WINDOW,)):
+def configuration_fields(*, provider="", dual_provider="", layers=(ConfigLayer.ROLE, ConfigLayer.WINDOW)):
     """Every declared review setting, including the two vision provider slots."""
     fields = [FieldDefinition(GROUP + "." + name, GROUP, GROUP, _kind(name, value), value,
                 layers=layers, apply_mode=ApplyMode.IMMEDIATE, owner_id=OWNER,

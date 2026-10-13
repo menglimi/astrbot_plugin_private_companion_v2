@@ -2,16 +2,106 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
+import logging
+import re
+from time import perf_counter
+from uuid import uuid4
+
 from .client import LayaClientError, LayaDecisionClient
 from .store import LayaSettingsStore
 
 
+logger = logging.getLogger(__name__)
+_SAFE_SKIP_REASONS = frozenset({"facts_invalid", "robot_message_reference", "explicit_event_rule"})
+_SAFE_FAILURE_REASONS = {
+    "laya_package_missing": "当前 AstrBot Python 环境未安装 Laya。",
+    "laya_initialization_failed": "Laya Router 初始化失败。",
+    "laya_model_path_invalid": "选定的本地检查点目录不完整。",
+    "laya_inference_failed": "Laya 本地推理失败。",
+    "laya_inference_timeout": "Laya 本地判断超时，本轮继续普通回复流程。",
+    "laya_transport_failed": "Laya 服务连接失败。",
+    "laya_response_invalid": "Laya 返回格式无效。",
+    "laya_response_too_large": "Laya 响应超过允许大小。",
+    "laya_contract_invalid": "Laya 返回了插件合同之外的分类。",
+}
+
+
+def _safe_log_reason(reason_code, reason):
+    if reason_code == "laya_rule_skip":
+        return reason if reason in _SAFE_SKIP_REASONS else "程序规则跳过。"
+    if reason_code == "laya_http_error":
+        match = re.match(r"^Laya HTTP ([1-5][0-9]{2})\b", str(reason or ""))
+        return f"Laya HTTP {match.group(1)}。" if match else "Laya HTTP 服务返回错误。"
+    if reason_code == "laya_disabled":
+        return "Laya 当前未启用。"
+    if reason_code == "laya_no_decision_fields":
+        return "没有启用任何决策分类。"
+    if reason_code == "laya_initializing":
+        return "本地模型正在预热，本轮继续普通回复流程。"
+    return _SAFE_FAILURE_REASONS.get(reason_code, "Laya 调用失败；详细信息请查看 AstrBot 开发者日志。")
+
+
+def _diagnostic_json(value, limit):
+    if value is None:
+        return None
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError):
+        encoded = json.dumps({"unavailable": True}, separators=(",", ":"))
+    if len(encoded) <= limit:
+        return encoded
+    preview = encoded[:max(0, limit - 100)]
+    while True:
+        bounded = json.dumps({"truncated": True, "preview": preview},
+                             ensure_ascii=False, separators=(",", ":"))
+        if len(bounded) <= limit:
+            return bounded
+        preview = preview[:len(preview) // 2]
+
+
 class LayaDecisionService:
-    def __init__(self, store: LayaSettingsStore):
+    def __init__(self, store: LayaSettingsStore, *, runtime=None, origin_key=None, client_factory=None):
         self.store = store
+        self.runtime = runtime
+        self.origin_key = str(origin_key) if origin_key else None
+        self.event_ref = None
+        self.source = "conversation"
+        self.client_factory = client_factory
+        self._last_recorded_event_id = None
+
+    def set_trace(self, event_ref=None, source="conversation"):
+        self.event_ref = event_ref
+        self.source = source
+        self._last_recorded_event_id = None
+
+    def record_application(self, application):
+        event_id = self._last_recorded_event_id
+        if self.runtime is None or self.origin_key is None or not event_id or type(application) is not dict:
+            return
+        try:
+            with self.runtime.transaction() as connection:
+                row = connection.execute("""SELECT processing_json FROM laya_decision_events
+                    WHERE event_id = ? AND origin_key = ?""", (event_id, self.origin_key)).fetchone()
+                if row is None:
+                    return
+                try:
+                    processing = json.loads(row["processing_json"] or "{}")
+                except (TypeError, ValueError):
+                    processing = {}
+                processing["application"] = application
+                connection.execute("UPDATE laya_decision_events SET processing_json = ? WHERE event_id = ?",
+                                   (_diagnostic_json(processing, 16384), event_id))
+        except Exception as error:
+            logger.warning("Laya 决策应用结果写入失败 code=%s", type(error).__name__)
 
     def status(self) -> dict:
-        return self.store.read()
+        status = self.store.read()
+        runtime_status = getattr(self.client_factory, "runtime_status", None)
+        if status["mode"] == "local" and callable(runtime_status):
+            status.update(runtime_status(local_model_path=status["local_model_path"]))
+        return status
 
     def save(self, revision, changes) -> dict:
         return self.store.update(revision, changes)
@@ -19,26 +109,119 @@ class LayaDecisionService:
     def _client(self, values: dict) -> LayaDecisionClient:
         if values["mode"] == "remote" and not values["endpoint"].strip():
             raise LayaClientError("laya_endpoint_missing", "远程模式需要填写 Laya SystemOne 服务地址")
-        return LayaDecisionClient(mode=values["mode"], endpoint=values["endpoint"],
-                                  api_key=values["api_key"],
-                                  timeout_seconds=values["timeout_seconds"])
+        if self.client_factory is None:
+            raise LayaClientError("laya_client_unavailable", "Laya 执行适配器暂不可用，本轮继续普通回复流程")
+        return self.client_factory(mode=values["mode"], endpoint=values["endpoint"],
+                                   local_model_path=values["local_model_path"],
+                                   api_key=values["api_key"], timeout_seconds=values["timeout_seconds"])
 
     async def test(self) -> dict:
         values = self.store.raw()
-        client = self._client(values)
-        result = await client.probe()
+        started = perf_counter()
+        test_values = {**values, "decision_fields": {name: True for name in values["decision_fields"]}}
+        client = None
+        try:
+            client = self._client(values)
+            result = await client.probe(enabled_fields=test_values["decision_fields"])
+        except LayaClientError as error:
+            self._record(test_values, "failed", round((perf_counter() - started) * 1000),
+                         reason_code=error.code, reason=error.reason,
+                         trace=getattr(client, "last_trace", None))
+            raise
+        decision = result.document()
+        self._record(test_values, "ok", round((perf_counter() - started) * 1000), decision=decision,
+                     trace=getattr(client, "last_trace", None))
         return {"status": "ok", "mode": values["mode"], "default_model": "multilingual",
-                "decision": result.document()}
+                "decision": decision}
 
     async def decide(self, facts: dict) -> dict:
         values = self.store.raw()
         if not values["enabled"]:
+            self._record(values, "skipped", 0, reason_code="laya_disabled")
             return {"status": "skipped", "reason": "laya_disabled"}
-        client = self._client(values)
+        if not any(values["decision_fields"].values()):
+            self._record(values, "skipped", 0, reason_code="laya_no_decision_fields")
+            return {"status": "skipped", "reason": "laya_no_decision_fields"}
+        started = perf_counter()
+        client = None
         try:
-            result = await client.decide(facts)
+            client = self._client(values)
+            result = await client.decide(facts, enabled_fields=values["decision_fields"])
         except LayaClientError as error:
+            if error.code == "laya_initializing":
+                self._record(values, "skipped", round((perf_counter() - started) * 1000),
+                             reason_code=error.code, reason=error.reason,
+                             trace=getattr(client, "last_trace", None))
+                return {"status": "skipped", "reason": error.code}
             if error.code == "laya_rule_skip":
+                self._record(values, "skipped", round((perf_counter() - started) * 1000),
+                             reason_code=error.code, reason=_safe_log_reason(error.code, error.reason),
+                             trace=getattr(client, "last_trace", None))
                 return {"status": "skipped", "reason": error.reason}
+            self._record(values, "failed", round((perf_counter() - started) * 1000),
+                         reason_code=error.code, reason=_safe_log_reason(error.code, error.reason),
+                         trace=getattr(client, "last_trace", None))
             raise
-        return {"status": "ok", "decision": result.document()}
+        except Exception as error:
+            self._record(values, "failed", round((perf_counter() - started) * 1000),
+                         reason_code=type(error).__name__, reason=_safe_log_reason(type(error).__name__, str(error)),
+                         trace=getattr(client, "last_trace", None))
+            raise
+        decision = result.document()
+        elapsed_ms = round((perf_counter() - started) * 1000)
+        self._record(values, "ok", elapsed_ms, decision=decision, trace=getattr(client, "last_trace", None))
+        return {"status": "ok", "decision": decision, "mode": values["mode"],
+                "elapsed_ms": elapsed_ms, "enabled_fields": dict(values["decision_fields"])}
+
+    def recent(self, limit=50) -> dict:
+        if self.runtime is None or self.origin_key is None:
+            return {"events": []}
+        rows = self.runtime.read_all("""SELECT event_id, batch_id, source, status, mode, reason_code,
+                reason, elapsed_ms, decision_json, enabled_fields_json, request_json, response_json,
+                processing_json, observed_at
+            FROM laya_decision_events WHERE origin_key = ?
+            ORDER BY observed_at DESC, rowid DESC LIMIT ?""", (self.origin_key, limit))
+        events = []
+        for row in rows:
+            item = dict(row)
+            for source, target in (("decision_json", "decision"), ("enabled_fields_json", "enabled_fields"),
+                                   ("request_json", "request"), ("response_json", "response"),
+                                   ("processing_json", "processing")):
+                try:
+                    item[target] = json.loads(item.pop(source))
+                except (TypeError, ValueError):
+                    item[target] = None if target in {"decision", "request", "response"} else {}
+            events.append(item)
+        return {"events": events}
+
+    def _record(self, values, status, elapsed_ms, *, reason_code=None, reason=None, decision=None, trace=None):
+        if self.runtime is None or self.origin_key is None:
+            return
+        try:
+            decision_json = json.dumps(decision, ensure_ascii=False, separators=(",", ":")) if decision else None
+            enabled_fields_json = json.dumps(values["decision_fields"], sort_keys=True, separators=(",", ":"))
+            safe_reason = _safe_log_reason(reason_code, reason) if reason_code else None
+            trace = trace if isinstance(trace, dict) else {}
+            processing = dict(trace.get("processing") or {})
+            processing.update({"status": status, "reason_code": reason_code})
+            if safe_reason:
+                processing["reason"] = safe_reason
+            request_json = _diagnostic_json(trace.get("request"), 131072)
+            response_json = _diagnostic_json(trace.get("response"), 65536)
+            processing_json = _diagnostic_json(processing, 16384)
+            with self.runtime.transaction() as connection:
+                event_id = uuid4().hex
+                connection.execute("""INSERT INTO laya_decision_events
+                    (event_id, origin_key, batch_id, source, status, mode, reason_code, reason, elapsed_ms,
+                     decision_json, enabled_fields_json, request_json, response_json, processing_json, observed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (event_id, self.origin_key, self.event_ref, self.source, status, values["mode"],
+                     str(reason_code)[:96] if reason_code else None, str(safe_reason)[:1000] if safe_reason else None,
+                     elapsed_ms, decision_json, enabled_fields_json, request_json, response_json, processing_json,
+                     datetime.now(timezone.utc).isoformat()))
+                connection.execute("""DELETE FROM laya_decision_events WHERE event_id IN (
+                    SELECT event_id FROM laya_decision_events WHERE origin_key = ?
+                    ORDER BY observed_at DESC, rowid DESC LIMIT -1 OFFSET 2000)""", (self.origin_key,))
+            self._last_recorded_event_id = event_id
+        except Exception as error:
+            logger.warning("Laya 决策记录写入失败 code=%s", type(error).__name__)

@@ -1,0 +1,225 @@
+"""Run native AstrBot dispatch, decoration and response with local model/IO doubles."""
+
+from copy import deepcopy
+from dataclasses import asdict
+from types import SimpleNamespace as NS
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from tests.test_main_no_reply import ENTRY
+from astrbot.core.config import DEFAULT_CONFIG
+from astrbot.core.message.components import Image, Plain, Record
+from astrbot.core.message.message_event_result import MessageEventResult, ResultContentType
+from astrbot.core.pipeline.process_stage.stage import ProcessStage
+from astrbot.core.pipeline.respond.stage import RespondStage
+from astrbot.core.pipeline.result_decorate import stage as decorate_module
+from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.provider.entities import ProviderRequest
+from companion_v2.conversation.segmentation import SegmentationPolicy
+from companion_v2.foundation.outcome import Outcome
+from astrbot_host.core_reply import sent_core_text
+
+
+class PipelineEvent(AstrMessageEvent):
+    def __init__(self):
+        message = AstrBotMessage()
+        message.type = MessageType.FRIEND_MESSAGE
+        message.self_id = "100"
+        message.sender = MessageMember("200", "测试用户")
+        message.message_id = "core-pipeline-1"
+        message.message = [Plain("摸摸")]
+        message.raw_message = {"post_type": "message"}
+        super().__init__("摸摸", message, NS(id="qq-main", name="aiocqhttp"), "200")
+        self.sent, self.streams = [], []
+        self.set_extra("activated_handlers", [])
+
+    async def send(self, message):
+        self.sent.append(list(message.chain))
+        self._has_send_oper = True
+
+    async def send_streaming(self, generator, use_fallback=False):
+        async for chunk in generator:
+            self.streams.append(chunk.get_plain_text())
+        self._has_send_oper = True
+
+
+class CoreAgentFixture:
+    def __init__(self, plugin, *, streaming=False):
+        self.plugin, self.streaming = plugin, streaming
+        self.requests = []
+
+    async def process(self, event):
+        req = ProviderRequest(prompt=event.message_str, system_prompt="AstrBot 当前人格")
+        await self.plugin.prepare_companion_core_request(event, req)
+        self.requests.append(req)
+        if event.is_stopped():
+            return
+        if self.streaming and event.get_extra("enable_streaming") is not False:
+            async def chunks():
+                yield MessageEventResult().message("嘿嘿，")
+                yield MessageEventResult().message("再摸一下！")
+            result = MessageEventResult().set_result_content_type(ResultContentType.STREAMING_RESULT)
+            result.set_async_stream(chunks())
+        else:
+            result = MessageEventResult().message("嘿嘿！\n\n再摸一下！")
+            result.set_result_content_type(ResultContentType.LLM_RESULT)
+        event.set_result(result)
+        yield
+
+
+class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def run_pipeline(self, *, streaming=False, authorize=None, segmented=False, tts=False, dual=False,
+                           presentation=None, companion_segmenting=False):
+        plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
+        target = NS(key="target", target_id="target")
+        observed = []
+        prepared = {
+            "context": object(), "instruction": "V2 人格资料", "prompt_instruction": "自然分段",
+            "target_id": "target", "channel": "private", "event_id": "core-pipeline-1",
+            "presentation_settings": presentation,
+        }
+        if companion_segmenting:
+            policy = SegmentationPolicy(rule_mode="paragraphs", min_segment_chars=1, max_segments=3)
+            prepared["segmentation_settings"] = {
+                **asdict(policy), "streaming": streaming, "part_gap_mode": "fixed", "part_gap_ms": 0}
+        plugin.staging = NS(
+            claims=lambda event: True, target_for_event=lambda event: target,
+            persona_mapping_for_event=AsyncMock(return_value=NS(role_id="role")),
+            session_topology=NS(reply_enabled=AsyncMock(return_value=True), schedule_observe=lambda _: None),
+            prepare_core_reply=AsyncMock(return_value=Outcome.success(prepared)),
+            authorize_core_reply=authorize or AsyncMock(return_value=Outcome.success(True)),
+            receive_claimed=AsyncMock(), runtime=None, now=lambda: None,
+            session=NS(core_reply_observations=NS(outputs=observed,
+                output=lambda prepared, text, **kwargs: observed.append((text, kwargs.get("state"))))),
+        )
+        event = PipelineEvent()
+        await plugin.receive_companion_message(event)
+
+        config = deepcopy(DEFAULT_CONFIG)
+        config["t2i"] = False
+        config["provider_tts_settings"].update(enable=tts, dual_output=dual, use_file_service=False)
+        config["platform_settings"]["reply_with_mention"] = False
+        config["platform_settings"]["reply_with_quote"] = False
+        config["platform_settings"]["reply_prefix"] = ""
+        config["platform_settings"]["segmented_reply"].update(
+            enable=segmented, split_mode="regex", regex=r"[^\n]+", interval="0,0", interval_method="random",
+        )
+        pipeline_context = NS(astrbot_config=config,
+                              plugin_manager=NS(context=NS(get_using_tts_provider=lambda _: NS(
+                                  get_audio=AsyncMock(return_value="native-test-speech.wav")) if tts else None)))
+        process = ProcessStage()
+        process.ctx = pipeline_context
+        agent = CoreAgentFixture(plugin, streaming=streaming)
+        process.agent_sub_stage = agent
+        decorate = decorate_module.ResultDecorateStage()
+        await decorate.initialize(pipeline_context)
+        respond = RespondStage()
+        await respond.initialize(pipeline_context)
+
+        async def add_native_image(current):
+            current.get_result().chain.append(Image.fromURL("https://example.invalid/image.png"))
+
+        handlers = [NS(handler_module_path="core_test", handler_name="native_image", handler=add_native_image),
+                    NS(handler_module_path="core_test", handler_name="v2_guard", handler=plugin.guard_companion_core_delivery)]
+        async def after_send(current, *_):
+            await plugin.observe_companion_core_reply_sent(current)
+            return False
+
+        with patch.object(decorate_module.star_handlers_registry, "get_handlers_by_event_type", return_value=handlers), \
+                patch.dict(decorate_module.star_map, {"core_test": NS(name="core_test")}), \
+                patch("astrbot.core.pipeline.respond.stage.call_event_hook", side_effect=after_send):
+            async for _ in process.process(event):
+                async for _ in decorate.process(event):
+                    pass
+                await respond.process(event)
+        return plugin, event, agent
+
+    async def test_default_core_dispatch_preserves_plain_reply_and_other_plugin_image(self):
+        plugin, event, agent = await self.run_pipeline()
+        self.assertEqual(len(agent.requests), 1)
+        self.assertIn("AstrBot 当前人格", agent.requests[0].system_prompt)
+        self.assertNotIn("V2 人格资料", agent.requests[0].system_prompt)
+        self.assertEqual([c.text for c in event.sent[0] if isinstance(c, Plain)], ["嘿嘿！\n\n再摸一下！"])
+        self.assertEqual(sum(isinstance(c, Image) for c in event.sent[0]), 1)
+        self.assertEqual(plugin.staging.authorize_core_reply.await_count, 2)
+        plugin.staging.receive_claimed.assert_not_awaited()
+
+    async def test_native_segmentation_keeps_each_paragraph_and_image(self):
+        plugin, event, agent = await self.run_pipeline(segmented=True, companion_segmenting=True)
+        self.assertEqual([[c.text for c in chain if isinstance(c, Plain)] for chain in event.sent],
+                         [["嘿嘿！"], ["再摸一下！"], []])
+        self.assertTrue(any(isinstance(c, Image) for c in event.sent[-1]))
+        plugin.staging.receive_claimed.assert_not_awaited()
+
+    async def test_native_tts_only_observes_actually_sent_record_text(self):
+        plugin, event, agent = await self.run_pipeline(tts=True, companion_segmenting=True)
+        self.assertEqual([c.text for c in event.sent[0] if isinstance(c, Record)], ["嘿嘿！\n\n再摸一下！"])
+        self.assertFalse(any(isinstance(c, Plain) for c in event.sent[0]))
+        self.assertEqual(plugin.staging.session.core_reply_observations.outputs,
+                         [("嘿嘿！\n\n再摸一下！", "send_returned")])
+
+    async def test_plugin_segmentation_splits_complete_private_reply_before_each_authorized_send(self):
+        plugin, event, agent = await self.run_pipeline(companion_segmenting=True)
+        bodies = [next(c.text.strip() for c in chain if isinstance(c, Plain))
+                  for chain in event.sent if any(isinstance(c, Plain) for c in chain)]
+        self.assertEqual(bodies, ["嘿嘿！", "再摸一下！"])
+        self.assertTrue(any(isinstance(c, Image) for c in event.sent[-1]))
+        self.assertEqual(plugin.staging.authorize_core_reply.await_count, 3)
+
+    async def test_plugin_segmentation_reserves_complete_body_when_host_streaming_is_enabled(self):
+        plugin, event, agent = await self.run_pipeline(streaming=True, companion_segmenting=True)
+        self.assertIs(event.get_extra("enable_streaming"), False)
+        self.assertEqual(event.streams, [])
+        bodies = [next(c.text.strip() for c in chain if isinstance(c, Plain))
+                  for chain in event.sent if any(isinstance(c, Plain) for c in chain)]
+        self.assertEqual(bodies, ["嘿嘿！", "再摸一下！"])
+
+    async def test_native_pipeline_cleans_each_segmented_text_bubble_before_send(self):
+        plugin, event, agent = await self.run_pipeline(segmented=True, presentation={
+            "content_cleanup_enabled": True, "content_cleanup_scope": "trailing",
+            "content_cleanup_words": '["！"]', "content_replacement_enabled": True,
+            "content_replacements": '["嘿嘿 => 哈哈"]'})
+        self.assertEqual([[c.text for c in chain if isinstance(c, Plain)] for chain in event.sent],
+                         [["哈哈"], ["再摸一下"], []])
+        self.assertEqual(plugin.staging.session.core_reply_observations.outputs,
+                         [("哈哈", "send_returned"), ("再摸一下", "send_returned")])
+        self.assertEqual(plugin.staging.authorize_core_reply.await_count, 4)
+        self.assertIs(event.send.__func__, PipelineEvent.send)
+
+    async def test_native_tts_dual_output_keeps_one_observation_for_the_same_body(self):
+        plugin, event, agent = await self.run_pipeline(tts=True, dual=True, companion_segmenting=True)
+        components = [c for chain in event.sent for c in chain]
+        self.assertTrue(any(isinstance(c, Record) for c in components))
+        self.assertTrue(any(isinstance(c, Plain) for c in components))
+        self.assertEqual(sent_core_text(MessageEventResult(chain=components)), "嘿嘿！\n\n再摸一下！")
+        # AstrBot sends Record separately from Plain. Both successful sends
+        # carry the same body; the observation owner upgrades the same row.
+        self.assertEqual(plugin.staging.session.core_reply_observations.outputs,
+                         [("嘿嘿！\n\n再摸一下！", "send_returned"), ("嘿嘿！\n\n再摸一下！", "send_returned")])
+
+    async def test_native_segmented_tts_observes_each_spoken_paragraph(self):
+        plugin, event, agent = await self.run_pipeline(tts=True, segmented=True, companion_segmenting=True)
+        self.assertEqual(plugin.staging.session.core_reply_observations.outputs,
+                         [("嘿嘿！", "send_returned"), ("再摸一下！", "send_returned")])
+
+    async def test_native_streaming_without_decoration_still_checks_permission_and_restores(self):
+        plugin, event, agent = await self.run_pipeline(streaming=True)
+        self.assertEqual(event.streams, ["嘿嘿，", "再摸一下！"])
+        self.assertEqual(event.sent, [])
+        self.assertEqual(plugin.staging.authorize_core_reply.await_count, 2)
+        self.assertIs(event.send.__func__, PipelineEvent.send)
+        self.assertIs(event.send_streaming.__func__, PipelineEvent.send_streaming)
+
+    async def test_revoked_permission_stops_core_generation_before_any_response(self):
+        plugin, event, agent = await self.run_pipeline(
+            authorize=AsyncMock(return_value=Outcome.failed("private_access_dialogue_denied", "revoked")))
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(event.sent, [])
+        self.assertEqual(event.streams, [])
+        plugin.staging.receive_claimed.assert_not_awaited()
+
+
+if __name__ == "__main__":
+    unittest.main()

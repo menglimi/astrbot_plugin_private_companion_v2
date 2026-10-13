@@ -1,11 +1,11 @@
-"""Window-scoped growth grants, written atomically with unified configuration."""
+"""Role growth defaults and participant-scoped grants."""
 
 import json
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
+from companion_v2.configuration.migrations import promote_values_to_installation
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
-from companion_v2.configuration.role_settings import RoleSharedSettingsOwner
 from companion_v2.execution.models import digest
 from companion_v2.foundation.refs import ScopeKind, SubjectKind
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
@@ -14,15 +14,13 @@ from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 
 
 GROUP = "role.growth"
-# Skill content is a property of the role, not of one conversation window: the same
-# role talking to the same person in two windows must not lose its skill domains.
-# The permissions below stay window-scoped because a grant is issued per participant,
-# and one group cannot mix layers, so the content lives in its own group.
+# Skill defaults follow the role; installation values remain a fallback for
+# upgrades. The permissions below stay window-scoped because grants are per person.
 SKILLS_GROUP = "role.growth.skills"
 OWNER = "role.growth.access"
 SKILLS_OWNER = "role.growth.skills.settings"
 PERMISSIONS = {"read_enabled": "role.growth.read", "proposals_enabled": "role.growth.propose"}
-SKILL_LAYERS = (ConfigLayer.WINDOW, ConfigLayer.ROLE)
+SKILL_LAYERS = (ConfigLayer.INSTALLATION, ConfigLayer.ROLE)
 
 SKILL_FIELDS = (
     FieldDefinition(SKILLS_GROUP + ".enabled", SKILLS_GROUP, SKILLS_GROUP, ValueKind.BOOLEAN, True,
@@ -66,11 +64,7 @@ def custom_skills(value):
 
 
 def skill_settings(runtime, context):
-    """The role's skill domains and schedule-influence strength.
-
-    Read through the shared owner, so a role value set in any window applies to the
-    role, while a window that set its own value first keeps it.
-    """
+    """Read one role's skill defaults, inheriting older installation values."""
     snapshot = SkillConfigurationOwner(runtime).read(skill_target_for(context), SKILL_FIELDS)
     if snapshot.fields[SKILLS_GROUP + ".enabled"].value is not True:
         return (), 0
@@ -89,55 +83,20 @@ def target_for(context):
 
 
 def skill_target_for(context):
-    """Same window target; the shared owner handles the role side itself."""
-    return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
+    """Role preferences remain stable across that role's conversations."""
+    return ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE,
+                        context.role_binding.role, bot_id=context.scope.bot_id)
 
 
-class SkillConfigurationOwner(RoleSharedSettingsOwner):
-    """Skill content is shared across the role's windows; the window may override it.
+def migrate_legacy_skill_values(runtime):
+    """Keep old window values as an installation fallback without globalizing roles."""
+    return promote_values_to_installation(runtime, SKILL_FIELDS,
+                                          source_layers=(ConfigLayer.WINDOW,))
 
-    ``RoleSharedSettingsOwner`` promotes every change onto the role once the role has
-    a value, because a window field resolves through the role layer and so *reads* as
-    if the window owned it. That makes a window override impossible. Here a value is
-    promoted only while the role is still unset; afterwards a write stays in the
-    window layer, where the read merge lets it win without changing the role.
-    """
 
+class SkillConfigurationOwner(SparseConfigurationOwner):
+    """Role skill preferences with a read-only installation fallback."""
     owner_id = SKILLS_OWNER
-
-    def is_shared(self, field):
-        return True
-
-    def write(self, target, fields, *, changes, reset, expected_revision, observed_at):
-        if target.layer is ConfigLayer.ROLE:
-            return super().write(target, fields, changes=changes, reset=reset,
-                                 expected_revision=expected_revision, observed_at=observed_at)
-        window_fields = self.window_fields(fields)
-        role_fields = self.role_fields(fields)
-        role_ids = {field.field_id for field in role_fields}
-        local = SparseConfigurationOwner(self.runtime)
-        # The merged revision is what callers hold, so every branch below must be
-        # entered against it; ``super().write`` checks that same merged value.
-        merged = self.read(target, fields).revision
-        if merged != expected_revision:
-            raise ConfigurationError("configuration_revision_conflict",
-                                     "role settings changed in another window")
-        role = local.read(self.role_target(target), role_fields)
-        # Promote onto the role only while the role has no value of its own. Afterwards
-        # the write belongs to this window, where the read merge lets it win.
-        promoting = any(key in role_ids and role.fields[key].source is None for key in changes)
-        if not promoting:
-            window = local.read(target, window_fields)
-            return local.write(target, window_fields, changes=changes, reset=reset,
-                               expected_revision=window.revision, observed_at=observed_at)
-        super().write(target, fields, changes=changes, reset=reset,
-                      expected_revision=merged, observed_at=observed_at)
-        # The value now lives on the role. Drop this window's own copy, or it would
-        # shadow the role for this window alone and make the two disagree.
-        window = local.read(target, window_fields)
-        return local.write(target, window_fields, changes={},
-                           reset=tuple(key for key in changes if key in role_ids),
-                           expected_revision=window.revision, observed_at=observed_at)
 
 
 class GrowthConfigurationOwner(SparseConfigurationOwner):

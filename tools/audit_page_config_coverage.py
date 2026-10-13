@@ -30,6 +30,7 @@ MODULES = {
     "recall": "companion_v2.conversation.recall_settings",
     "screen": "companion_v2.screen.configuration",
     "person": "companion_v2.memory.person.configuration",
+    "person.learning": "companion_v2.memory.person.configuration:learning_configuration_fields",
     # 私聊用户权限的默认值与拒绝文案；按人的权限本身是 grant，不在这张表里。
     "private_access": "companion_v2.relationships.private_access",
     "role_growth": "companion_v2.role_work.growth.configuration",
@@ -53,6 +54,10 @@ MODULES = {
 # 有意不接的字段：值写明理由。**不要**为了「让自检通过」把它们加进页面，
 # 也不要为了消掉噪音把它们从这里删掉——两件事都会掩盖真实的疏漏。
 INTENTIONAL = {
+    "knowledge": {
+        "import_enabled": "旧世界书导入设置保留在后端合同中；当前页面只管理官方知识库来源",
+        "import_paths": "当前页面不接收原始文件路径，避免保存后没有可用的导入管理入口",
+    },
     "role.state": {
         "mood_cross_window": "跨窗口共享，操作员难以判断实际影响",
         "mood_interest_window_minutes": "与更新概率高度耦合，单独调反而更难预期",
@@ -65,7 +70,11 @@ INTENTIONAL = {
 # 在其他页面单独维护的字段。审计时确认它们仍由指定页面承接，避免把
 # 拆分后的成员编辑器误报成通用工作台缺少控件。
 EXTERNAL_CONTROLS = {
-    "person": {
+    "role_growth": {
+        "read_enabled": "pages/陪伴小屋/learning-page.js",
+        "proposals_enabled": "pages/陪伴小屋/learning-page.js",
+    },
+    "person.learning": {
         "acquaintance_learning_enabled": "pages/关系与权限/member-editor.js",
     },
 }
@@ -81,7 +90,8 @@ vm.runInContext(fs.readFileSync(root+'workbench-page.js','utf8'),c);
 vm.runInContext(fs.readFileSync(root+'config-editor.js','utf8'),c);
 process.stdout.write(JSON.stringify(c.window.CompanionConfigEditors.spec));
 """
-    result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True)
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
+                            encoding="utf-8")
     if result.returncode != 0:
         raise SystemExit("前端 spec 加载失败（先确认 workbench-page.js 在 config-editor.js 之前）:\n"
                          + result.stderr)
@@ -105,33 +115,42 @@ def backend_fields(module_name):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     sys.path.insert(0, str(ROOT))
     spec = page_spec()
     problems = []
     counted = {}
 
-    missing_sections = [kind for kind in MODULES if kind not in spec]
+    missing_sections = [kind for kind in MODULES if kind not in spec and kind not in EXTERNAL_CONTROLS]
     for kind in missing_sections:
         problems.append(f"分区 {kind} 在注册表里有、前端 spec 里没有")
 
     for kind, module_name in MODULES.items():
-        if kind not in spec:
-            continue
         group, short = backend_fields(module_name)
         if not short:
             problems.append(f"分区 {kind}: {module_name} 没声明字段")
             continue
         counted[kind] = short
+        external = EXTERNAL_CONTROLS.get(kind, {})
+        for name, owner in external.items():
+            owner_path = ROOT / owner
+            source = owner_path.read_text(encoding="utf-8") if owner_path.is_file() else ""
+            if name not in short or name not in source:
+                problems.append(f"{kind} ({group}): 外部控件声明 {name} 未在 {owner} 中找到")
+            if kind == "role_growth" and 'data-access="${field}"' not in source:
+                problems.append(f"{kind} ({group}): {owner} 缺少专用授权控件绑定")
+        excused = set(INTENTIONAL.get(group, {})) | (set(external) & short)
+
+        if kind not in spec:
+            for name in sorted(short - excused):
+                problems.append(f"分区 {kind} ({group}): 字段 {name} 没有专用控件声明")
+            continue
+
         entry = spec[kind]
         order = set(entry.get("order", []))
         labels = set(entry.get("labels", {}))
         sections = {name for section in entry.get("sections", []) for name in section["fields"]}
-        external = EXTERNAL_CONTROLS.get(kind, {})
-        for name, owner in external.items():
-            owner_path = ROOT / owner
-            if name not in short or not owner_path.is_file() or name not in owner_path.read_text(encoding="utf-8"):
-                problems.append(f"{kind} ({group}): 外部控件声明 {name} 未在 {owner} 中找到")
-        excused = set(INTENTIONAL.get(group, {})) | (set(external) & short)
 
         for name in sorted(short - order - excused):
             problems.append(f"{kind} ({group}): 字段 {name} 没有控件声明（order 缺）")

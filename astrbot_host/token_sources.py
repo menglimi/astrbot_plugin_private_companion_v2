@@ -1,4 +1,4 @@
-"""Read bounded token summaries from already-loaded companion integrations."""
+"""Read bounded token summaries from the V2 services and public memory bridge."""
 
 from __future__ import annotations
 
@@ -16,9 +16,16 @@ SOURCE_SPECS = {
         "display_name": "记忆插件",
     },
     "together": {
-        "plugins": {"astrbot_plugin_together_companion"},
-        "getters": ("get_together_companion_bridge",),
         "display_name": "一起房间",
+    },
+    "reality": {
+        "display_name": "现实观察",
+    },
+    "live": {
+        "display_name": "直播与表演",
+    },
+    "game": {
+        "display_name": "共同游玩",
     },
 }
 
@@ -40,7 +47,8 @@ def _text(value: Any, limit: int = 160) -> str:
 def _bucket(value: Any) -> dict[str, Any]:
     row = value if isinstance(value, Mapping) else {}
     calls = _integer(row.get("calls"))
-    tokens = _integer(row.get("total_tokens", row.get("tokens")))
+    token_value = row.get("total_tokens", row.get("tokens"))
+    tokens = _integer(token_value) if token_value is not None else None
     elapsed = _integer(row.get("elapsed_ms"))
     latency = row.get("avg_latency_ms")
     try:
@@ -51,12 +59,14 @@ def _bucket(value: Any) -> dict[str, Any]:
         latency = round(elapsed / calls) if elapsed else None
     reported = row.get("reported_tokens")
     estimated = _integer(row.get("estimated_tokens"))
-    if reported is None:
-        reported = max(0, tokens - estimated)
+    if "estimated_tokens" not in row and row.get("estimated") is True:
+        estimated = tokens or 0
+    if "reported_tokens" not in row:
+        reported = max(0, tokens - estimated) if tokens is not None else None
 
     input_value = row.get("prompt_tokens", row.get("input_tokens"))
     input_present = input_value is not None
-    input_tokens = _integer(input_value)
+    input_tokens = _integer(input_value) if input_present else None
     cache_read_key = next((key for key in ("cache_read_tokens", "cached_tokens", "cached_input_tokens")
                            if row.get(key) is not None), None)
     cache_write_key = next((key for key in ("cache_write_tokens", "cache_creation_tokens")
@@ -66,15 +76,20 @@ def _bucket(value: Any) -> dict[str, Any]:
     explicit_reported_calls = row.get("cache_reported_calls")
     explicit_telemetry_calls = row.get("cache_telemetry_calls")
     explicit_hit = row.get("cache_hit_reported")
+    if estimated and explicit_hit is None and explicit_telemetry_calls is None:
+        # Old estimates contain synthesized zero cache fields; they are no receipt.
+        cache_read_key = cache_write_key = None
+        explicit_hit = False
+        explicit_reported_calls = explicit_telemetry_calls = 0
     cache_read = _integer(row.get(cache_read_key)) if cache_read_key else 0
     cache_write = _integer(row.get(cache_write_key)) if cache_write_key else 0
     cache_other = _integer(row.get("cache_other_input_tokens"))
     has_cache_receipt = (cache_read_key is not None or cache_write_key is not None or cache_other_present
-                         or explicit_cache_input is not None or explicit_reported_calls is not None
-                         or explicit_telemetry_calls is not None or type(explicit_hit) is bool)
+                         or explicit_cache_input is not None or _integer(explicit_reported_calls) > 0
+                         or _integer(explicit_telemetry_calls) > 0 or explicit_hit is True)
     cache_hit_reported = explicit_hit if type(explicit_hit) is bool else bool(input_present and cache_read_key is not None)
     cache_input_tokens = _integer(explicit_cache_input) if explicit_cache_input is not None else (
-        input_tokens if input_present and has_cache_receipt else 0)
+        input_tokens if input_present and cache_hit_reported else 0)
     cache_reported_calls = _integer(explicit_reported_calls) if explicit_reported_calls is not None else (
         calls if cache_hit_reported else 0)
     cache_telemetry_calls = _integer(explicit_telemetry_calls) if explicit_telemetry_calls is not None else (
@@ -83,15 +98,18 @@ def _bucket(value: Any) -> dict[str, Any]:
         "calls": calls,
         "tokens": tokens,
         "input_tokens": input_tokens,
-        "output_tokens": _integer(row.get("completion_tokens", row.get("output_tokens"))),
+        "output_tokens": (_integer(row.get("completion_tokens", row.get("output_tokens")))
+                          if row.get("completion_tokens", row.get("output_tokens")) is not None else None),
         "failures": _integer(row.get("errors", row.get("failures"))),
-        "reported_tokens": _integer(reported),
+        "reported_tokens": _integer(reported) if reported is not None else None,
         "estimated_tokens": estimated,
+        "unconfirmed_calls": _integer(row.get("unconfirmed_calls")),
+        "usage_reported_calls": _integer(row.get("usage_reported_calls")),
         "cache_reported_calls": cache_reported_calls,
         "cache_telemetry_calls": cache_telemetry_calls,
         "cache_input_tokens": cache_input_tokens,
-        "cached_input_tokens": cache_read,
-        "cache_creation_tokens": cache_write,
+        "cached_input_tokens": cache_read if cache_read_key else None,
+        "cache_creation_tokens": cache_write if cache_write_key else None,
         "cache_other_input_tokens": cache_other,
         "cache_hit_reported": cache_hit_reported,
         "avg_latency_ms": latency,
@@ -112,7 +130,7 @@ def _rows(value: Any) -> list[tuple[str, Mapping[str, Any]]]:
 
 def _ranked(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
     rows = [{"key": key, **_bucket(bucket)} for key, bucket in _rows(value)]
-    rows.sort(key=lambda row: (row["tokens"], row["calls"], row["key"]), reverse=True)
+    rows.sort(key=lambda row: (row["tokens"] or 0, row["calls"], row["key"]), reverse=True)
     return rows[:limit]
 
 
@@ -136,12 +154,8 @@ def _recent(value: Any) -> list[dict[str, Any]]:
                 timestamp = datetime.fromtimestamp(float(item["ts"])).isoformat(timespec="seconds")
             except (TypeError, ValueError, OverflowError, OSError):
                 timestamp = ""
-        bucket = _bucket(item)
-        input_reported = any(item.get(key) is not None for key in ("prompt_tokens", "input_tokens"))
-        cached_key = next((key for key in ("cache_read_tokens", "cached_tokens", "cached_input_tokens")
-                           if item.get(key) is not None), None)
-        explicit_hit = item.get("cache_hit_reported")
-        hit_reported = explicit_hit if type(explicit_hit) is bool else (input_reported and cached_key is not None)
+        bucket = _bucket({**item, "calls": 1})
+        hit_reported = bucket["cache_hit_reported"]
         result.append({
             "at": _text(timestamp, 32),
             "kind": _text(item.get("task"), 80) or "外部模型任务",
@@ -153,12 +167,14 @@ def _recent(value: Any) -> list[dict[str, Any]]:
             "cached_input_tokens": bucket["cached_input_tokens"],
             "cache_creation_tokens": bucket["cache_creation_tokens"],
             "cache_hit_rate": (round(bucket["cached_input_tokens"] * 100 / bucket["input_tokens"], 1)
-                               if hit_reported and bucket["input_tokens"] else None),
+                               if hit_reported and bucket["input_tokens"] and bucket["cached_input_tokens"] is not None else None),
             "cache_hit_reported": hit_reported,
             "latency_ms": bucket["avg_latency_ms"],
             "failure": "provider_request_failed" if not success else None,
             "estimated_tokens": bucket["estimated_tokens"],
             "reported_tokens": bucket["reported_tokens"],
+            "usage_availability": _text(item.get("usage_availability"), 32) or (
+                "estimated" if bucket["estimated_tokens"] else "reported" if bucket["tokens"] is not None else "unavailable"),
         })
     return result[::-1]
 
@@ -233,15 +249,32 @@ def _loaded_summary(source: str) -> tuple[dict[str, Any] | None, bool]:
     return None, installed
 
 
-def read_token_sources() -> dict[str, dict[str, Any]]:
-    """Read only the public token summary bridge of loaded companion plugins."""
+def _native_summary(controller, source) -> tuple[dict[str, Any] | None, bool]:
+    registry = getattr(controller, "native_extensions", None)
+    lookup = getattr(registry, "service", None)
+    service = lookup(source) if callable(lookup) else None
+    if service is None:
+        return None, False
+    tracker = getattr(service, "token_usage", None)
+    summary = getattr(tracker, "summary", None)
+    try:
+        raw = summary() if callable(summary) else None
+    except Exception:
+        return None, True
+    return (dict(raw) if isinstance(raw, Mapping) else None), True
+
+
+def read_token_sources(controller=None) -> dict[str, dict[str, Any]]:
+    """Internal services count their own calls; ordinary core replies stay separate."""
     result = {}
     for source in SOURCE_SPECS:
         try:
-            raw, installed = _loaded_summary(source)
+            raw, installed = (_loaded_summary(source) if source == "memory"
+                              else _native_summary(controller, source))
             if raw is None:
                 raw = {"available": False, "installed": installed,
-                       "reason": "插件未运行或没有可用的 Token 统计桥"}
+                       "reason": (SOURCE_SPECS[source]["display_name"] + "内部统计暂不可用" if source != "memory"
+                                  else "插件未运行或没有可用的 Token 统计桥")}
             result[source] = _summary(raw, source, installed=installed)
         except Exception:
             spec = SOURCE_SPECS[source]

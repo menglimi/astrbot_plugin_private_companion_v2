@@ -5,8 +5,15 @@ window.CompanionExpressionSignalsPage = (() => {
     sentence_rhythm: "句读节奏", emoji: "表情符号", punctuation: "标点",
     directness: "直接程度", diction: "措辞", formatting: "排版", other: "其他",
   };
+  const CHANNEL = {private:"私聊", group:"群聊", proactive:"主动消息", qzone:"QQ 空间", tts:"语音"};
+  const RELATIONSHIP = {stranger:"陌生", familiar:"熟悉", close:"亲近", any:"不限"};
+  const EMOTION = {normal:"常态", positive:"积极", low:"低落", guarded:"谨慎", any:"不限"};
+  const INTENT = {acknowledgement:"确认接话", question:"提问", request:"请求", help:"求助", comfort:"安慰",
+    play:"玩笑", tease:"打趣", intimacy:"亲昵", boundary:"边界", emotion:"情绪表达", casual:"闲聊",
+    proactive:"主动联系", any:"不限"};
+  const STATE_FILTERS = [["pending", "待审"], ["active", "已启用"], ["retired", "已停用"]];
   const FILTERS = [
-    ["all", "全部"], ["sentence_rhythm", "句读节奏"], ["diction", "措辞"], ["retired", "停用"],
+    ["all", "全部"], ["sentence_rhythm", "句读节奏"], ["diction", "措辞"],
   ];
   const ERRORS = {
     bridge_unavailable: "页面连接暂不可用，请重新读取。",
@@ -14,7 +21,7 @@ window.CompanionExpressionSignalsPage = (() => {
     expression_query_invalid: "规则筛选条件无效，请重新读取。",
     expression_view_stale: "规则已有变化，请重新读取后再操作。",
     expression_sample_changed: "依据已变化，规则暂不能恢复。",
-    expression_signal_unavailable: "规则已不在当前角色范围内。",
+    expression_signal_unavailable: "表达规则已不在原数据来源内。",
     expression_decided: "规则状态已经改变，请重新读取。",
     expression_pack_invalid: "分享包格式无效或版本不受支持。",
     expression_import_stale: "导入目标或规则库已变化，请重新预览。",
@@ -40,10 +47,14 @@ window.CompanionExpressionSignalsPage = (() => {
   let readTicket = 0;
   let apiBase = "";
   let scopeKey = "";
+  let sources = [];
+  let importSourceKey = "";
   let filter = "all";
+  let stateFilter = "active";
   let pages = {};
   let items = [];
   let capacity = null;
+  let capacityBySource = {};
   let busy = false;
   let writing = false;
   let notice = "";
@@ -59,9 +70,12 @@ window.CompanionExpressionSignalsPage = (() => {
   let selectedExportIds = new Set();
 
   function pageState() {
-    const states = filter === "retired" ? ["retired"] : ["adopted", "retired"];
-    return Object.fromEntries(states.map(state => [state, {items: [], cursor: "", done: false, loaded: false}]));
+    const states = [stateFilter === "active" ? "adopted" : stateFilter];
+    return Object.fromEntries(sources.map(source => [source.key,
+      Object.fromEntries(states.map(state => [state, {items: [], cursor: "", done: false, loaded: false}]))]));
   }
+  const sourceLabel = source => source?.label || "未命名范围";
+  const selectedImportSource = () => sources.find(source => source.key === importSourceKey) || sources[0] || null;
   function mounted(current = mountTicket) { return !!root?.isConnected && current === mountTicket; }
   async function bounded(promise) {
     let timer;
@@ -94,14 +108,14 @@ window.CompanionExpressionSignalsPage = (() => {
   }
   function queryFor(state, cursor) {
     const query = {state, limit: 50};
-    if (filter !== "all" && filter !== "retired") query.dimension = filter;
+    if (filter !== "all") query.dimension = filter;
     if (cursor) query.after_id = cursor;
     return query;
   }
   function rebuildItems() {
     const seen = new Set();
-    items = Object.values(pages).flatMap(page => page.items).filter(item => {
-      const id = String(item?.signal_id || "");
+    items = Object.values(pages).flatMap(page => Object.values(page).flatMap(state => state.items)).filter(item => {
+      const id = String(item?._key || item?.signal_id || "");
       if (!id || seen.has(id)) return false;
       seen.add(id); return true;
     }).sort((left, right) => {
@@ -110,69 +124,96 @@ window.CompanionExpressionSignalsPage = (() => {
       return b - a || String(right.signal_id).localeCompare(String(left.signal_id));
     });
   }
-  function hasMore() { return Object.values(pages).some(page => page.cursor && !page.done); }
+  function hasMore() { return Object.values(pages).some(page => Object.values(page).some(value => value.cursor && !value.done)); }
   async function read(current = mountTicket, {append = false} = {}) {
-    if (!mounted(current) || !apiBase || writing || (append && busy)) return false;
+    if (!mounted(current) || !sources.length || writing || (append && busy)) return false;
     const request = ++readTicket;
     const requestedFilter = filter;
-    if (!append) { pages = pageState(); items = []; capacity = null; confirming = null; notice = ""; error = false; selectedExportIds = new Set(); }
-    const states = Object.keys(pages).filter(state => !pages[state].loaded || (append && pages[state].cursor && !pages[state].done));
-    if (!states.length) { busy = false; rebuildItems(); render(); return true; }
+    const requestedStateFilter = stateFilter;
+    if (!append) { pages = pageState(); items = []; capacity = null; capacityBySource = {}; confirming = null; notice = ""; error = false; selectedExportIds = new Set(); }
+    const requestsToRead = sources.flatMap(source => Object.keys(pages[source.key] || {})
+      .filter(state => !pages[source.key][state].loaded
+        || append && pages[source.key][state].cursor && !pages[source.key][state].done)
+      .map(state => ({source,state})));
+    if (!requestsToRead.length) { busy = false; rebuildItems(); render(); return true; }
     busy = true; render();
-    const results = await Promise.allSettled(states.map(async state => {
-      const page = await api("GET", apiBase + "/style", queryFor(state, pages[state].cursor));
+    const results = await Promise.allSettled(requestsToRead.map(async ({source,state}) => {
+      const page = await api("GET", source.apiBase + "/style", queryFor(state, pages[source.key][state].cursor));
       if (!Array.isArray(page.items)) throw Object.assign(new Error("invalid_response"), {code: "invalid_response"});
-      return {state, page};
+      return {source,state,page};
     }));
-    if (!mounted(current) || request !== readTicket || requestedFilter !== filter) return false;
+    if (!mounted(current) || request !== readTicket || requestedFilter !== filter
+        || requestedStateFilter !== stateFilter) return false;
     const failures = [];
     results.forEach((result, index) => {
-      const state = states[index];
+      const {source,state} = requestsToRead[index];
       if (result.status === "rejected") { failures.push(reason(result.reason?.code)); return; }
       const page = result.value.page;
       if (page.capacity && Number.isInteger(page.capacity.active) && Number.isInteger(page.capacity.limit)) {
-        capacity = page.capacity;
+        capacityBySource[source.key] = page.capacity;
       }
-      const target = pages[state] || (pages[state] = {items: [], cursor: "", done: false, loaded: false});
-      const incoming = page.items.map(item => ({...item, _state: state}));
+      const target = pages[source.key][state];
+      const incoming = page.items.map(item => ({...item, _state: state, _source:source,
+        _key:source.key + "::" + item.signal_id}));
       target.items = append ? target.items.concat(incoming) : incoming;
       target.cursor = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
       target.done = !target.cursor;
       target.loaded = true;
     });
+    const capacities=Object.values(capacityBySource);
+    capacity=capacities.length?capacities.reduce((total,value)=>({active:total.active+value.active,limit:total.limit+value.limit}),{active:0,limit:0}):null;
     rebuildItems(); busy = false;
-    if (failures.length) { notice = failures.length === states.length ? "规则暂时无法读取，请重新读取。" : "部分规则暂时无法读取，已显示可用记录。"; error = true; }
-    render(); return failures.length < states.length;
+    if (failures.length) { notice = failures.length === requestsToRead.length ? "规则暂时无法读取，请重新读取。" : "部分规则暂时无法读取，已显示可用记录。"; error = true; }
+    render(); return failures.length < requestsToRead.length;
   }
   function renderEvidence(item) {
     const evidence = Array.isArray(item.evidence) ? item.evidence : [];
     if (!evidence.length || item.unavailable_reason) return "";
     return `<details class="lh-signal-evidence"><summary>依据 · ${evidence.length} 条</summary><ol>${evidence.slice(0, 8).map(entry => `<li>${e(entry)}</li>`).join("")}</ol></details>`;
   }
+  function renderApplicability(app) {
+    if (!app || typeof app !== "object") return "";
+    const list = (value, labels) => Array.isArray(value) && value.length
+      ? value.map(item => labels[item] || item).join("、") : "不限";
+    const conditions = [
+      ["频道", list(app.channels, CHANNEL)],
+      ["关系", list(app.relationship_stages, RELATIONSHIP)],
+      ["情绪", list(app.emotion_gates, EMOTION)],
+      ["意图", INTENT[app.intent] || app.intent || "不限"],
+    ];
+    if (Array.isArray(app.keywords) && app.keywords.length) {
+      conditions.push(["关键词", app.keywords.join("、")]);
+    }
+    return `<div class="lh-signal-applicability" aria-label="适用条件"><span class="lh-signal-applicability-label">适用条件</span>${conditions.map(([label, value]) => `<span class="lh-signal-condition"><b>${e(label)}</b>${e(value)}</span>`).join("")}</div>`;
+  }
   function renderItem(item) {
     const adopted = item.state === "adopted";
+    const pending = item.state === "pending";
     const unavailable = !!item.unavailable_reason;
     const actions = Array.isArray(item.actions) ? item.actions : [];
-    const confirm = confirming === item.signal_id ? `<div class="lh-signal-confirm" role="alertdialog">
-      <span>停用这条规则？</span><button type="button" data-signal-confirm="yes" data-id="${e(item.signal_id)}">确认</button>
+    const confirm = confirming === item._key ? `<div class="lh-signal-confirm" role="alertdialog">
+      <span>停用这条规则？</span><button type="button" data-signal-confirm="yes" data-id="${e(item._key)}">确认</button>
       <button type="button" data-signal-confirm="no">取消</button></div>` : "";
     const title = unavailable ? "依据已失效" : (item.proposal || item.observation || "表达规则");
     const body = unavailable ? "" : (item.observation || "");
-    const exportChoice = adopted ? `<label class="lh-signal-export-choice"><input type="checkbox" data-signal-export="${e(item.signal_id)}"${selectedExportIds.has(item.signal_id) ? " checked" : ""} ${transferBusy ? "disabled" : ""}><span>导出</span></label>` : "";
+    const exportChoice = adopted ? `<label class="lh-signal-export-choice"><input type="checkbox" data-signal-export="${e(item._key)}"${selectedExportIds.has(item._key) ? " checked" : ""} ${transferBusy ? "disabled" : ""}><span>导出</span></label>` : "";
     const source = item.source_kind === "shared_pack" ? "分享包"
       : item.source_kind === "conversation_input" ? "对话表达" : "角色表达";
-    const action = adopted && actions.includes("retire")
-      ? `<button type="button" class="lh-command" data-signal-action="retire" data-id="${e(item.signal_id)}" ${busy ? "disabled" : ""}>停用</button>`
+    const action = pending
+      ? `${actions.includes("adopt") ? `<button type="button" class="lh-command is-primary" data-signal-action="adopt" data-id="${e(item._key)}" ${busy ? "disabled" : ""}>采纳</button>` : ""}${actions.includes("reject") ? `<button type="button" class="lh-command" data-signal-action="reject" data-id="${e(item._key)}" ${busy ? "disabled" : ""}>拒绝</button>` : ""}`
+      : adopted && actions.includes("retire")
+      ? `<button type="button" class="lh-command" data-signal-action="retire" data-id="${e(item._key)}" ${busy ? "disabled" : ""}>停用</button>`
       : !adopted && actions.includes("restore")
-        ? `<button type="button" class="lh-command is-primary" data-signal-action="restore" data-id="${e(item.signal_id)}" ${busy ? "disabled" : ""}>恢复启用</button>` : "";
+        ? `<button type="button" class="lh-command is-primary" data-signal-action="restore" data-id="${e(item._key)}" ${busy ? "disabled" : ""}>恢复启用</button>` : "";
     const positive = Number.isInteger(item.positive_feedback) ? item.positive_feedback : 0;
     const negative = Number.isInteger(item.negative_feedback) ? item.negative_feedback : 0;
     const feedback = positive || negative ? `<p class="lh-signal-feedback">明确反馈 · 认可 ${positive} / 不喜欢 ${negative}</p>` : "";
-    return `<article class="lh-signal-card ${adopted ? "is-adopted" : "is-retired"}${unavailable ? " is-unavailable" : ""}">
+    return `<article class="lh-signal-card ${pending ? "is-pending" : adopted ? "is-adopted" : "is-retired"}${unavailable ? " is-unavailable" : ""}">
       <header class="lh-signal-card-head"><div class="lh-signal-card-meta"><span class="lh-signal-dimension">${e(DIMENSION[item.dimension] || item.dimension || "表达规则")}</span>
-        <span class="lh-signal-source">${source}</span>
-        <span class="lh-signal-state">${adopted ? "已启用" : "已停用"}</span></div><div class="lh-signal-card-tools">${exportChoice}<span class="lh-signal-uses">${e(item.injections || 0)} 次注入</span></div></header>
+        <span class="lh-signal-source">${source}</span><span class="lh-signal-scope">记录来源 · ${e(sourceLabel(item._source))}</span>
+        <span class="lh-signal-state">${pending ? "待审" : adopted ? "已启用" : "已停用"}</span></div><div class="lh-signal-card-tools">${exportChoice}<span class="lh-signal-uses">${e(item.injections || 0)} 次注入</span></div></header>
       <h3>${e(title)}</h3>${body ? `<p class="lh-signal-observation">${e(body)}</p>` : ""}
+      ${!unavailable ? renderApplicability(item.applicability) : ""}
       ${item.source_kind === "shared_pack" ? `<p class="lh-signal-import-origin">分享包 · ${e(item.source_title || "导入规则")}</p>` : ""}
       ${feedback}
       ${unavailable ? `<p class="lh-signal-unavailable">依据已失效，暂不可恢复</p>` : renderEvidence(item)}
@@ -181,11 +222,16 @@ window.CompanionExpressionSignalsPage = (() => {
   }
   function render() {
     if (!root) return;
-    const counts = Object.fromEntries(FILTERS.map(([key]) => [key, key === "all" ? items.length : items.filter(item => key === "retired" ? item.state === "retired" : item.dimension === key).length]));
+    const counts = Object.fromEntries(FILTERS.map(([key]) => [key, key === "all" ? items.length : items.filter(item => item.dimension === key).length]));
     const filters = FILTERS.map(([key, label]) => `<button type="button" class="lh-signal-filter${filter === key ? " is-active" : ""}" data-signal-filter="${key}" aria-pressed="${filter === key}"${writing ? " disabled" : ""}>${label}${filter === "all" || key === filter ? `<span>${counts[key] || 0}</span>` : ""}</button>`).join("");
+    const stateTabs = STATE_FILTERS.map(([key, label]) => {
+      const count = items.filter(item => key === "active" ? item.state === "adopted" : item.state === key).length;
+      return `<button type="button" class="lh-signal-state-tab${stateFilter === key ? " is-active" : ""}" data-signal-state="${key}" aria-pressed="${stateFilter === key}"${writing ? " disabled" : ""}>${label}<span>${count}</span></button>`;
+    }).join("");
     const rows = items.map(renderItem).join("");
     const more = hasMore() ? `<button type="button" class="lh-signal-more lh-command" data-signal-more ${busy ? "disabled" : ""}>加载更多</button>` : "";
     const cap = capacity ? `待审与启用 ${capacity.active} / ${capacity.limit}` : `${items.length} 条`;
+    const importTargets=sources.length>1?`<label class="lh-expression-transfer-target"><span>导入目标</span><select data-share-target aria-label="规则导入目标">${sources.map(source=>`<option value="${e(source.key)}" ${source.key===importSourceKey?"selected":""}>${e(sourceLabel(source))}</option>`).join("")}</select></label>`:"";
     const transfer = transferOpen ? `<section class="lh-expression-transfer" aria-label="表达规则分享与导入">
       <div class="lh-expression-transfer-head"><strong>表达规则分享</strong><button type="button" class="lh-refresh" data-share-close aria-label="收起" title="收起"><i data-lucide="chevron-up"></i></button></div>
       <div class="lh-expression-transfer-export"><div class="lh-expression-transfer-actions">
@@ -193,31 +239,33 @@ window.CompanionExpressionSignalsPage = (() => {
         ${selectedExportIds.size ? `<button type="button" class="lh-command" data-share-clear-selection ${transferBusy ? "disabled" : ""}>清除所选</button>` : ""}
         ${exportPackage ? `<button type="button" class="lh-command" data-share-copy ${transferBusy ? "disabled" : ""}>复制 JSON</button><button type="button" class="lh-command" data-share-download ${transferBusy ? "disabled" : ""}>下载 JSON</button>` : ""}
       </div>${exportPackage ? `<p class="lh-expression-transfer-status" role="status">已生成 ${e(exportPackage.rule_count)} 条${exportPackage.excluded_count ? ` · ${e(exportPackage.excluded_count)} 条因原始依据失效而跳过` : ""}</p><textarea class="lh-expression-transfer-json" data-share-export-json readonly aria-label="导出的表达分享包">${e(JSON.stringify(exportPackage.package, null, 2))}</textarea>` : ""}</div>
-      <div class="lh-expression-transfer-import"><label for="expressionShareFile">导入 V1 / V2 表达分享包</label><div class="lh-expression-transfer-file"><input id="expressionShareFile" type="file" accept=".json,application/json" data-share-file ${transferBusy ? "disabled" : ""}><span>JSON · 最大 250 KB</span></div>
+      <div class="lh-expression-transfer-import">${importTargets}<label for="expressionShareFile">导入 V1 / V2 表达分享包</label><div class="lh-expression-transfer-file"><input id="expressionShareFile" type="file" accept=".json,application/json" data-share-file ${transferBusy ? "disabled" : ""}><span>JSON · 最大 250 KB</span></div>
         <textarea class="lh-expression-transfer-json" data-share-import-json placeholder="粘贴分享包 JSON" aria-label="待导入的表达分享包" ${transferBusy ? "disabled" : ""}>${e(importJSON)}</textarea>
         <div class="lh-expression-transfer-actions"><button type="button" class="lh-command" data-share-preview ${transferBusy || !importJSON.trim() ? "disabled" : ""}>预览导入</button><button type="button" class="lh-command is-primary" data-share-apply ${transferBusy || !importPreview?.importable_rule_count ? "disabled" : ""}>加入待审队列</button></div>
-        ${importPreview ? `<div class="lh-expression-import-preview" role="status"><div><strong>${e(importPreview.title || "表达分享包")}</strong><span>${e(importPreview.importable_rule_count)} 条待导入 / ${e(importPreview.duplicate_rule_count)} 条重复 / ${e(importPreview.capacity_blocked_count)} 条超出容量</span></div>${importPreview.candidates?.length ? `<ul>${importPreview.candidates.slice(0, 6).map(item => `<li><b>${e(DIMENSION[item.dimension] || item.dimension)}</b><span>${e(item.observation)}</span><small>${e(item.proposal)}</small></li>`).join("")}</ul>` : ""}${importPreview.rejected_count ? `<details><summary>${e(importPreview.rejected_count)} 项未通过</summary><ul>${(importPreview.rejected || []).slice(0, 10).map(item => `<li>第 ${e(Number(item.group_index) + 1)} 组${item.rule_index == null ? "" : `第 ${e(Number(item.rule_index) + 1)} 条`}：${e(item.reason)}</li>`).join("")}</ul></details>` : ""}<small>确认后进入审阅中心，采纳后才会用于回复。</small></div>` : ""}
+        ${importPreview ? `<div class="lh-expression-import-preview" role="status"><div><strong>${e(importPreview.title || "表达分享包")}</strong><span>${e(importPreview.importable_rule_count)} 条待导入 / ${e(importPreview.duplicate_rule_count)} 条重复 / ${e(importPreview.capacity_blocked_count)} 条超出容量</span></div>${importPreview.candidates?.length ? `<ul>${importPreview.candidates.slice(0, 6).map(item => `<li><b>${e(DIMENSION[item.dimension] || item.dimension)}</b><span>${e(item.observation)}</span><small>${e(item.proposal)}</small>${renderApplicability(item.applicability)}</li>`).join("")}</ul>` : ""}${importPreview.rejected_count ? `<details><summary>${e(importPreview.rejected_count)} 项未通过</summary><ul>${(importPreview.rejected || []).slice(0, 10).map(item => `<li>第 ${e(Number(item.group_index) + 1)} 组${item.rule_index == null ? "" : `第 ${e(Number(item.rule_index) + 1)} 条`}：${e(item.reason)}</li>`).join("")}</ul></details>` : ""}<small>确认后进入待审列表，采纳后才会用于回复。</small></div>` : ""}
       </div>${transferNotice ? `<p class="lh-inline-status ${transferError ? "is-error" : ""}" role="status">${e(transferNotice)}</p>` : ""}</section>` : "";
     root.innerHTML = `<section class="lh-signal-list" aria-label="表达规则库"><header class="lh-signal-head"><div><h3>表达规则库</h3><span class="lh-signal-capacity">${e(cap)}</span></div>
       <div class="lh-signal-head-tools"><button type="button" class="lh-command" data-share-toggle aria-expanded="${transferOpen}">${transferOpen ? "收起分享" : "分享 / 导入"}</button><button type="button" class="lh-refresh" data-signal-refresh aria-label="重新读取" title="重新读取" ${busy || transferBusy ? "disabled" : ""}><i data-lucide="refresh-cw"></i></button></div></header>
+      <div class="lh-signal-state-filters" role="group" aria-label="规则状态">${stateTabs}</div>
       <div class="lh-signal-toolbar"><div class="lh-signal-filters" role="group" aria-label="表达规则筛选">${filters}</div></div>
       ${transfer}
       ${notice ? `<p class="lh-inline-status ${error ? "is-error" : ""}" role="status">${e(notice)}</p>` : ""}
-      ${rows || `<div class="lh-signal-empty">${busy ? "正在读取…" : filter === "retired" ? "还没有停用的表达规则" : "还没有表达规则"}</div>`}${more}</section>`;
+      ${rows || `<div class="lh-signal-empty">${busy ? "正在读取…" : stateFilter === "pending" ? "还没有待审候选" : stateFilter === "retired" ? "还没有停用的表达规则" : "还没有已启用表达规则"}</div>`}${more}</section>`;
     window.lucide?.createIcons({attrs: {"aria-hidden": "true"}});
   }
   async function command(id, action) {
-    const item = items.find(row => row.signal_id === id);
+    const item = items.find(row => row._key === id);
     if (!item || !Array.isArray(item.actions) || !item.actions.includes(action) || busy) return;
     const current = mountTicket;
     const request = ++readTicket;
     busy = true; writing = true; notice = ""; error = false; render();
     let resultNotice = "", resultError = false;
     try {
-      await api("POST", apiBase + "/style/command", {
-        signal_id: id, action, view_token: item.view_token, operation_key: operationKey(action),
+      await api("POST", item._source.apiBase + "/style/command", {
+        signal_id: item.signal_id, action, view_token: item.view_token, operation_key: operationKey(action),
       });
-      resultNotice = action === "retire" ? "规则已停用。" : "规则已恢复启用。";
+      resultNotice = action === "adopt" ? "规则已采纳并启用。" : action === "reject" ? "候选已拒绝。"
+        : action === "retire" ? "规则已停用。" : "规则已恢复启用。";
     } catch (problem) {
       resultNotice = ERRORS[errorCode(problem?.code)] || "操作结果未确认，请重新读取。";
       resultError = true;
@@ -230,14 +278,31 @@ window.CompanionExpressionSignalsPage = (() => {
     render();
   }
   async function exportRules() {
-    if (transferBusy || busy || !apiBase) return;
+    if (transferBusy || busy || !sources.length) return;
     const current = mountTicket;
     transferBusy = true; transferNotice = ""; transferError = false; exportPackage = null; render();
     try {
-      const payload = selectedExportIds.size
-        ? {signal_ids: [...selectedExportIds]} : {};
-      exportPackage = await api("POST", apiBase + "/style/export", payload);
-      transferNotice = "分享包已生成。";
+      const grouped=new Map();
+      if(selectedExportIds.size){
+        for(const id of selectedExportIds){
+          const item=items.find(row=>row._key===id);
+          if(!item)continue;
+          const group=grouped.get(item._source.key)||{source:item._source,ids:[]};
+          group.ids.push(item.signal_id);grouped.set(item._source.key,group);
+        }
+      }else for(const source of sources)grouped.set(source.key,{source,ids:null});
+      const requests=[...grouped.values()];
+      if(requests.length>200)throw {code:"expression_export_limit"};
+      const results=await Promise.allSettled(requests.map(({source,ids})=>api("POST",source.apiBase+"/style/export",ids?{signal_ids:ids}:{})));
+      const valid=results.filter(result=>result.status==="fulfilled").map(result=>result.value);
+      if(!valid.length)throw results.find(result=>result.status==="rejected")?.reason||{code:"expression_export_empty"};
+      const groups=valid.flatMap(value=>Array.isArray(value.package?.rule_groups)?value.package.rule_groups:[]);
+      if(groups.length>200)throw {code:"expression_export_limit"};
+      groups.forEach((group,index)=>{group.id=`group-${String(index+1).padStart(3,"0")}`;});
+      exportPackage={package:{...valid[0].package,title:"陪伴表达分享",exported_at:new Date().toISOString(),rule_groups:groups},
+        rule_count:valid.reduce((sum,value)=>sum+Number(value.rule_count||0),0),
+        excluded_count:valid.reduce((sum,value)=>sum+Number(value.excluded_count||0),0)};
+      transferNotice=results.some(result=>result.status==="rejected")?"分享包已生成，部分来源没有可导出的规则。":"分享包已生成。";
     } catch (problem) {
       transferNotice = ERRORS[errorCode(problem?.code)] || "分享包生成失败，请重新读取。";
       transferError = true;
@@ -246,7 +311,8 @@ window.CompanionExpressionSignalsPage = (() => {
     transferBusy = false; render();
   }
   async function previewImport() {
-    if (transferBusy || busy || !apiBase || !importJSON.trim()) return;
+    const destination=selectedImportSource();
+    if (transferBusy || busy || !destination || !importJSON.trim()) return;
     const current = mountTicket;
     try { JSON.parse(importJSON); } catch (_) { transferNotice = "JSON 格式无效。"; transferError = true; render(); return; }
     if (new TextEncoder().encode(importJSON).length > 250000) {
@@ -254,7 +320,7 @@ window.CompanionExpressionSignalsPage = (() => {
     }
     transferBusy = true; transferNotice = ""; transferError = false; importPreview = null; render();
     try {
-      importPreview = await api("POST", apiBase + "/style/import/preview", {package_json: importJSON});
+      importPreview = await api("POST", destination.apiBase + "/style/import/preview", {package_json: importJSON});
       transferNotice = "预览已更新；确认后将加入待审队列。";
     } catch (problem) {
       transferNotice = ERRORS[errorCode(problem?.code)] || "预览失败，请检查分享包。";
@@ -264,11 +330,12 @@ window.CompanionExpressionSignalsPage = (() => {
     transferBusy = false; render();
   }
   async function applyImport() {
-    if (transferBusy || busy || !importPreview?.preview_token || !importPreview.importable_rule_count) return;
+    const destination=selectedImportSource();
+    if (transferBusy || busy || !destination || !importPreview?.preview_token || !importPreview.importable_rule_count) return;
     const current = mountTicket;
     transferBusy = true; transferNotice = ""; transferError = false; render();
     try {
-      const result = await api("POST", apiBase + "/style/import/apply", {
+      const result = await api("POST", destination.apiBase + "/style/import/apply", {
         package_json: importJSON, preview_token: importPreview.preview_token, operation_key: operationKey("import"),
       });
       const imported = Number(result.imported_count || 0);
@@ -310,6 +377,8 @@ window.CompanionExpressionSignalsPage = (() => {
     if (event.target.closest("[data-share-apply]")) { void applyImport(); return; }
     if (event.target.closest("[data-share-copy]")) { void copyExport(); return; }
     if (event.target.closest("[data-share-download]")) { downloadExport(); return; }
+    const stateButton = event.target.closest("[data-signal-state]");
+    if (stateButton) { const next = STATE_FILTERS.some(([key]) => key === stateButton.dataset.signalState) ? stateButton.dataset.signalState : "active"; if (next !== stateFilter) { stateFilter = next; void read(mountTicket); } return; }
     const filterButton = event.target.closest("[data-signal-filter]");
     if (filterButton) { const next = FILTERS.some(([key]) => key === filterButton.dataset.signalFilter) ? filterButton.dataset.signalFilter : "all"; if (next !== filter) { filter = next; void read(mountTicket); } return; }
     if (event.target.closest("[data-signal-refresh]")) { void read(mountTicket); return; }
@@ -321,6 +390,8 @@ window.CompanionExpressionSignalsPage = (() => {
   }
   function onChange(event) {
     if (writing || transferBusy) return;
+    const destination=event.target.closest("[data-share-target]");
+    if(destination){importSourceKey=destination.value;importPreview=null;transferNotice="";transferError=false;return;}
     const checkbox = event.target.closest("[data-signal-export]");
     if (checkbox) {
       if (checkbox.checked) selectedExportIds.add(checkbox.dataset.signalExport);
@@ -352,18 +423,22 @@ window.CompanionExpressionSignalsPage = (() => {
     if (apply) apply.disabled = true;
   }
   function onUpdated(event) {
-    if (event.detail?.scopeKey === scopeKey) void read(mountTicket);
+    if (sources.some(source=>source.scopeKey===event.detail?.scopeKey)) void read(mountTicket);
   }
   function mount(host, options = {}) {
-    unmount(); root = host; apiBase = relative(options.replyApi); scopeKey = options.scopeKey || "";
+    unmount(); root = host;
+    const candidates=Array.isArray(options.sources)?options.sources:options.replyApi?[{replyApi:options.replyApi,scopeKey:options.scopeKey,label:"当前来源"}]:[];
+    sources=candidates.map((source,index)=>{const value=relative(source.replyApi);return value?{...source,
+      key:String(source.key||source.scopeKey||value||index),scopeKey:source.scopeKey||source.key||"",apiBase:value}:null;}).filter(Boolean);
+    apiBase=sources[0]?.apiBase||"";scopeKey=sources[0]?.scopeKey||"";importSourceKey=sources[0]?.key||"";
     filter = FILTERS.some(([key]) => key === options.state) ? options.state : "all";
     items = []; pages = {}; capacity = null; notice = ""; busy = false; writing = false; error = false; confirming = null;
     transferOpen = false; transferBusy = false; transferNotice = ""; transferError = false; importJSON = ""; importPreview = null;
     exportPackage = null; selectedExportIds = new Set();
     root?.addEventListener("click", onClick); root?.addEventListener("change", onChange); root?.addEventListener("input", onInput);
     window.addEventListener?.("companion-expression-updated", onUpdated); const current = ++mountTicket;
-    if (apiBase) void read(current); else { notice = "当前角色没有表达规则路由。"; error = true; render(); }
+    if (sources.length) void read(current); else { notice = "没有可读取的表达规则来源。"; error = true; render(); }
   }
-  function unmount() { mountTicket++; readTicket++; root?.removeEventListener("click", onClick); root?.removeEventListener("change", onChange); root?.removeEventListener("input", onInput); window.removeEventListener?.("companion-expression-updated", onUpdated); root = null; apiBase = ""; scopeKey = ""; items = []; pages = {}; capacity = null; busy = false; writing = false; transferBusy = false; confirming = null; }
-  return {mount, unmount, get state() { return {items, busy, notice, scopeKey, filter, capacity}; }};
+  function unmount() { mountTicket++; readTicket++; root?.removeEventListener("click", onClick); root?.removeEventListener("change", onChange); root?.removeEventListener("input", onInput); window.removeEventListener?.("companion-expression-updated", onUpdated); root = null; apiBase = ""; scopeKey = ""; sources=[];items = []; pages = {}; capacity = null;capacityBySource={}; busy = false; writing = false; transferBusy = false; confirming = null; }
+  return {mount, unmount, get state() { return {items, busy, notice, scopeKey, filter, capacity,sources}; }};
 })();

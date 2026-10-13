@@ -1,0 +1,517 @@
+{
+  "enabled": {
+    "description": "启用现实触及",
+    "type": "bool",
+    "hint": "总开关。开启不等于用户授权；音频和摄像头仍需分别在私聊中完成知情确认。",
+    "default": false
+  },
+  "authorized_user_ids": {
+    "description": "额外授权用户 ID",
+    "type": "list",
+    "hint": "在 V2 当前私聊窗口中额外允许发起现实设备授权的用户；音频和摄像头仍需本人分别确认。V2 核心管理员可直接发起确认。",
+    "default": []
+  },
+  "vision_provider_id": {
+    "description": "摄像头视觉模型",
+    "type": "string",
+    "hint": "选择支持图片输入的 Provider ID。留空时只返回本地亮度和分辨率，不进行场景理解。",
+    "default": ""
+  },
+  "audio": {
+    "description": "本机音频",
+    "type": "object",
+    "items": {
+      "default_playback_volume": {
+        "description": "默认播放音量",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "default": 35
+      }
+    }
+  },
+  "home": {
+    "description": "家居控制",
+    "type": "object",
+    "hint": "独立的家居模块配置。这里只保存连接信息和默认目标，不会自动执行设备操作。",
+    "items": {
+      "enabled": {
+        "description": "启用家居模块",
+        "type": "bool",
+        "default": false
+      },
+      "provider": {
+        "description": "家居服务",
+        "type": "string",
+        "default": "home_assistant",
+        "hint": "当前支持 Home Assistant REST 兼容入口；米家设备可先通过 Home Assistant 暴露。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "base_url": {
+        "description": "家居服务地址",
+        "type": "string",
+        "default": "",
+        "hint": "填写 Home Assistant 地址，例如 http://127.0.0.1:8123。不要填写带 token 的完整 URL。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "access_token": {
+        "description": "家居访问令牌",
+        "type": "string",
+        "password": true,
+        "default": "",
+        "hint": "仅保存在现实触及配置中，不会下发给手机端或注入模型。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "default_area": {
+        "description": "默认区域",
+        "type": "string",
+        "default": "",
+        "hint": "可填写客厅、卧室等区域名，作为页面请求的默认目标。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "request_timeout_seconds": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "default": 5,
+        "condition": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "health": {
+    "description": "健康数据",
+    "type": "object",
+    "hint": "健康是独立的数据接收模块，只读取手机端主动上报的结构化数据。",
+    "items": {
+      "enabled": {
+        "description": "启用健康数据接收",
+        "type": "bool",
+        "default": false
+      },
+      "ttl_seconds": {
+        "description": "健康数据有效期（秒）",
+        "type": "int",
+        "slider": {
+          "min": 60,
+          "max": 604800,
+          "step": 60
+        },
+        "default": 3600,
+        "condition": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "camera": {
+    "description": "摄像头单帧",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用摄像头单帧",
+        "type": "bool",
+        "default": false
+      },
+      "index": {
+        "description": "摄像头索引",
+        "type": "int",
+        "default": 0,
+        "condition": {
+          "enabled": true
+        }
+      },
+      "min_interval_seconds": {
+        "description": "同一用户最小读取间隔（秒）",
+        "type": "int",
+        "slider": {
+          "min": 10,
+          "max": 3600,
+          "step": 10
+        },
+        "default": 60,
+        "condition": {
+          "enabled": true
+        }
+      },
+      "capture_timeout_seconds": {
+        "description": "设备读取超时（秒）",
+        "type": "int",
+        "slider": {
+          "min": 2,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5,
+        "condition": {
+          "enabled": true
+        }
+      },
+      "analysis_timeout_seconds": {
+        "description": "视觉分析超时（秒）",
+        "type": "int",
+        "slider": {
+          "min": 5,
+          "max": 90,
+          "step": 5
+        },
+        "default": 25,
+        "condition": {
+          "enabled": true
+        }
+      },
+      "proactive_curiosity_enabled": {
+        "description": "允许主动视觉好奇",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "enabled": true
+        }
+      },
+      "proactive_min_tier": {
+        "description": "允许直接主动单帧的最低陪伴档位",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 5,
+          "step": 1
+        },
+        "default": 4,
+        "condition": {
+          "proactive_curiosity_enabled": true
+        }
+      },
+      "proactive_max_daily": {
+        "description": "主动单帧每日上限",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 10,
+          "step": 1
+        },
+        "default": 1,
+        "condition": {
+          "proactive_curiosity_enabled": true
+        }
+      },
+      "proactive_cooldown_minutes": {
+        "description": "主动单帧冷却（分钟）",
+        "type": "int",
+        "slider": {
+          "min": 10,
+          "max": 1440,
+          "step": 10
+        },
+        "default": 240,
+        "condition": {
+          "proactive_curiosity_enabled": true
+        }
+      }
+    }
+  },
+  "mihome": {
+    "description": "内置米家控制",
+    "type": "object",
+    "hint": "米家登录、凭证、设备缓存和控制能力由现实触及插件内置运行时负责，不依赖 astrbot_plugin_mihome。",
+    "items": {
+      "enabled": {
+        "description": "启用米家控制",
+        "type": "bool",
+        "default": true
+      },
+      "device_map": {
+        "description": "设备别名映射",
+        "type": "string",
+        "default": "{}",
+        "hint": "内部 JSON 映射，建议通过现实触及页面管理。"
+      },
+      "device_category_map": {
+        "description": "设备类别映射",
+        "type": "string",
+        "default": "{}"
+      },
+      "control_tool": {
+        "description": "设备控制策略",
+        "type": "object",
+        "items": {
+          "enable": {
+            "description": "允许模型控制设备",
+            "type": "bool",
+            "default": true
+          },
+          "admin_only": {
+            "description": "仅允许管理员使用",
+            "type": "bool",
+            "default": true
+          },
+          "allowed_devices": {
+            "description": "允许控制的设备别名",
+            "type": "list",
+            "default": []
+          }
+        },
+        "default": {
+          "enable": true,
+          "admin_only": true,
+          "allowed_devices": []
+        }
+      },
+      "enable_readonly_tool": {
+        "description": "允许米家只读查询",
+        "type": "bool",
+        "default": true
+      },
+      "enable_scene_tool": {
+        "description": "允许米家场景",
+        "type": "bool",
+        "default": false
+      },
+      "scene_tool_admin_only": {
+        "description": "场景仅管理员",
+        "type": "bool",
+        "default": true
+      },
+      "scene_tool": {
+        "description": "场景策略",
+        "type": "object",
+        "items": {
+          "enable": {
+            "description": "允许模型调用场景",
+            "type": "bool",
+            "default": false
+          },
+          "admin_only": {
+            "description": "仅允许管理员使用",
+            "type": "bool",
+            "default": true
+          }
+        },
+        "default": {
+          "enable": false,
+          "admin_only": true
+        }
+      }
+    }
+  },
+  "timezone": {
+    "description": "提醒时区",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "mobile": {
+    "description": "陪伴终端 Android 联动",
+    "type": "object",
+    "hint": "默认关闭。开启后会启动独立移动端网关，Android 可配对并获取通话房间、上报前台位置和屏幕共享状态。位置与会话只保留在内存中。请仅监听可信的组网地址。",
+    "items": {
+      "enabled": {
+        "description": "启用移动端网关",
+        "type": "bool",
+        "default": false
+      },
+      "pairing_token": {
+        "description": "移动端配对令牌",
+        "type": "string",
+        "default": "",
+        "hint": "请使用至少 24 位随机长令牌。配对成功后 App 会换用短期会话令牌。不要把令牌发布到群聊或截图中。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "host": {
+        "description": "移动端网关监听地址",
+        "type": "string",
+        "default": "0.0.0.0",
+        "hint": "0.0.0.0 可从所有网卡访问；更稳妥的做法是填写电脑在组网工具中的 100.x 地址。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "port": {
+        "description": "移动端网关端口",
+        "type": "int",
+        "default": 6322,
+        "hint": "Android 端 AstrBot 地址应填写为 http://电脑组网地址:此端口。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "public_base_url": {
+        "description": "移动端外部访问地址",
+        "type": "string",
+        "default": "",
+        "hint": "Docker + Caddy/Nginx 反向代理时填写完整外部地址，例如 https://companion.example.com。留空时自动读取 X-Forwarded-Host/X-Forwarded-Proto，最后才回退到监听地址。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "allowed_user_id": {
+        "description": "绑定的 AstrBot 用户 ID",
+        "type": "string",
+        "default": "",
+        "hint": "留空时只在 V2 恰好存在一个匹配的私聊用户时自动绑定；多个用户时需要明确填写当前用户。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "session_ttl_hours": {
+        "description": "移动端会话有效期（小时）",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 720,
+          "step": 1
+        },
+        "default": 168,
+        "hint": "会话只存在于内存，插件或 AstrBot 重启后仍需重新配对。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "location_ttl_seconds": {
+        "description": "位置上下文有效期（秒）",
+        "type": "int",
+        "slider": {
+          "min": 60,
+          "max": 86400,
+          "step": 60
+        },
+        "default": 900,
+        "condition": {
+          "enabled": true
+        }
+      },
+      "amap_reverse_geocode_enabled": {
+        "description": "启用高德逆地理编码",
+        "type": "bool",
+        "default": false,
+        "hint": "可选。将手机坐标转换为城市/城区级场景背景，辅助判断通勤、区域天气和生活节点。默认关闭；不会把精确地址写入陪伴提示词。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "amap_api_key": {
+        "description": "高德地图 Web 服务 API Key",
+        "type": "string",
+        "password": true,
+        "default": "",
+        "hint": "在高德开放平台创建 Web 服务 API Key。仅由现实触及服务端调用逆地理编码，不会下发到手机端、保存到位置记录或注入模型。",
+        "condition": {
+          "enabled": true,
+          "amap_reverse_geocode_enabled": true
+        }
+      },
+      "amap_cache_ttl_seconds": {
+        "description": "高德区域结果缓存时间（秒）",
+        "type": "int",
+        "slider": {
+          "min": 60,
+          "max": 604800,
+          "step": 60
+        },
+        "default": 1800,
+        "hint": "相同约百米网格内的位置会复用结果，降低请求频率和隐私暴露面。",
+        "condition": {
+          "enabled": true,
+          "amap_reverse_geocode_enabled": true
+        }
+      },
+      "amap_request_timeout_seconds": {
+        "description": "高德请求超时（秒）",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5,
+        "hint": "请求失败时继续使用手机上报的地点和本地认知地图，不会阻塞位置上报主链。",
+        "condition": {
+          "enabled": true,
+          "amap_reverse_geocode_enabled": true
+        }
+      },
+      "telemetry_enabled": {
+        "description": "允许接收外部身体与活动数据",
+        "type": "bool",
+        "default": false,
+        "hint": "仅接收经过结构化校验的数值和活动状态；默认关闭，不会因为安装更新而自动读取健康数据。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "telemetry_ttl_seconds": {
+        "description": "身体数据上下文有效期（秒）",
+        "type": "int",
+        "slider": {
+          "min": 60,
+          "max": 604800,
+          "step": 60
+        },
+        "default": 3600,
+        "hint": "数据只保留在内存中，超过有效期或重启插件后自动失效。",
+        "condition": {
+          "enabled": true,
+          "telemetry_enabled": true
+        }
+      },
+      "activity_enabled": {
+        "description": "允许手机上报前台应用摘要",
+        "type": "bool",
+        "default": false,
+        "hint": "伪窥屏模式：只接收用户在手机端明确开启后上报的应用类别和脱敏名称，不接收截图、窗口标题或消息内容。数据只保留在内存中。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "activity_ttl_seconds": {
+        "description": "手机活动摘要有效期（秒）",
+        "type": "int",
+        "slider": {
+          "min": 60,
+          "max": 86400,
+          "step": 60
+        },
+        "default": 900,
+        "hint": "超过有效期后不会再注入陪伴上下文。",
+        "condition": {
+          "enabled": true,
+          "activity_enabled": true
+        }
+      },
+      "proxy_rooms": {
+        "description": "统一房间代理",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，手机创建的房间链接指向移动网关，由网关转发页面、接口、媒体与 WebSocket。V2 内置共处和游戏服务只需在本机可达。",
+        "condition": {
+          "enabled": true
+        }
+      },
+      "screen_upload_enabled": {
+        "description": "允许手机屏幕共享上报",
+        "type": "bool",
+        "default": true,
+        "hint": "接收手机屏幕共享的状态上报，不上传屏幕图像给模型。实际识屏权限与能力在 V2 的识屏设置中配置。",
+        "condition": {
+          "enabled": true
+        }
+      }
+    }
+  }
+}

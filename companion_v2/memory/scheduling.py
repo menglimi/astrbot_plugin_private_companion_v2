@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, time, timedelta, timezone
 import json
+import logging
 from zoneinfo import ZoneInfo
 
 from companion_v2.execution.models import TaskContext, TaskError, encode, require, stamp
@@ -12,6 +13,10 @@ from .models import owner_key, text, timestamp
 from .configuration import validate_schedule
 from .checkpoints import MemoryCheckpointRecovery
 from .reflection_jobs import MemoryReflectionJobs
+
+
+logger = logging.getLogger(__name__)
+_CONFIGURATION_REFRESH_INTERVAL_SECONDS = 60
 
 
 def next_due(now, zone_name, local_time):
@@ -32,6 +37,10 @@ class MemorySchedule:
         self.reflection, self.notify, self.runtime = reflection, notify, reflection.runtime
         self.workers, self.results = {}, {}
         self.closed = False
+        self._configuration_tasks = set()
+        self._configuration_locks = {}
+        self._configuration_refresh_task = None
+        self._next_configuration_refresh = 0.0
         self.recovery = MemoryCheckpointRecovery(reflection, self._settle)
         self.continuations = MemoryReflectionJobs(reflection, notify)
 
@@ -40,6 +49,88 @@ class MemorySchedule:
 
     def sync_configuration(self, context, role_instruction):
         """Derive a durable schedule from the same configuration seen by management."""
+        actions = self._sync_configuration(context, role_instruction)
+        if actions is not None:
+            self._apply_runtime_actions(*actions)
+
+    async def sync_configuration_async(self, context, role_instruction):
+        """Move optional schedule IO off the loop, then cancel/wake on the loop."""
+        if self.closed:
+            return
+        key = "memory-daily-" + owner_key(context)
+        lock = self._configuration_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if self.closed:
+                return
+            actions = await asyncio.to_thread(self._sync_configuration, context, role_instruction)
+            if actions is not None:
+                self._apply_runtime_actions(*actions)
+
+    def schedule_configuration(self, context, role_instruction):
+        """Queue optional schedule persistence after the current intake transaction."""
+        if self.closed:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                self.sync_configuration(context, role_instruction)
+            except (TaskError, ValueError, KeyError):
+                self.results["configuration"] = {"state": "blocked", "code": "memory_schedule_configuration"}
+            except Exception as error:
+                logger.warning("Memory schedule configuration sync failed error_type=%s", type(error).__name__)
+                self.results["configuration"] = {"state": "failed", "code": "memory_schedule_configuration"}
+            return None
+        task = loop.create_task(self._sync_configuration_safely(context, role_instruction),
+                                name="companion:memory-schedule-configuration")
+        self._configuration_tasks.add(task)
+        task.add_done_callback(self._configuration_tasks.discard)
+        return task
+
+    async def _sync_configuration_safely(self, context, role_instruction):
+        try:
+            await self.sync_configuration_async(context, role_instruction)
+        except (TaskError, ValueError, KeyError):
+            self.results["configuration"] = {"state": "blocked", "code": "memory_schedule_configuration"}
+        except Exception as error:
+            logger.warning("Memory schedule configuration sync failed error_type=%s", type(error).__name__)
+            self.results["configuration"] = {"state": "failed", "code": "memory_schedule_configuration"}
+
+    def _schedule_configuration_refresh(self):
+        if self.closed:
+            return
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if now < self._next_configuration_refresh:
+            return
+        self._next_configuration_refresh = now + _CONFIGURATION_REFRESH_INTERVAL_SECONDS
+        task = self._configuration_refresh_task
+        if task is None or task.done():
+            self._configuration_refresh_task = loop.create_task(
+                self._refresh_configurations(), name="companion:memory-schedule-refresh")
+
+    async def _refresh_configurations(self):
+        try:
+            rows = await asyncio.to_thread(self.runtime.read_all,
+                "SELECT context_json, settings_json FROM memory_schedules WHERE schedule_id LIKE 'memory-daily-%'", ())
+        except Exception as error:
+            logger.warning("Memory schedule configuration scan failed error_type=%s", type(error).__name__)
+            self.results["configuration"] = {"state": "failed", "code": "memory_schedule_configuration"}
+            return
+        for configured in rows:
+            if self.closed:
+                return
+            try:
+                context = TaskContext.restore(json.loads(configured["context_json"]))
+                instruction = json.loads(configured["settings_json"])["role_instruction"]
+                await self._sync_configuration_safely(context, instruction)
+            except (TaskError, ValueError, KeyError):
+                self.results["configuration"] = {"state": "blocked", "code": "memory_schedule_configuration"}
+            except Exception as error:
+                logger.warning("Memory schedule configuration row failed error_type=%s", type(error).__name__)
+                self.results["configuration"] = {"state": "failed", "code": "memory_schedule_configuration"}
+
+    def _sync_configuration(self, context, role_instruction):
         settings = self.reflection.memory.settings
         if settings is None:
             return
@@ -54,25 +145,33 @@ class MemorySchedule:
             if row["enabled"]:
                 with self.runtime.transaction() as connection:
                     connection.execute("UPDATE memory_schedules SET enabled = 0, revision = revision + 1 WHERE schedule_id = ?", (key,))
-                if key in self.workers:
-                    self.workers[key].cancel()
+                return key, False
             return
         if row and (json.loads(row["settings_json"]).get("configuration_token") == token
                     and TaskContext.restore(json.loads(row["context_json"])).key == context.key
                     and json.loads(row["settings_json"])["role_instruction"] == role_instruction):
             return
-        result = self.configure(context, schedule_id=key, expected_revision=row["revision"] if row else 0,
+        result = self._configure(context, schedule_id=key, expected_revision=row["revision"] if row else 0,
             role_instruction=role_instruction, zone=values["memory.reflection_timezone"],
-            local_time=values["memory.reflection_time"], enabled=enabled)
+            local_time=values["memory.reflection_time"], enabled=enabled, configuration_token=token)
         if result.is_success:
-            with self.runtime.transaction() as connection:
-                current = connection.execute("SELECT settings_json FROM memory_schedules WHERE schedule_id = ?", (key,)).fetchone()
-                saved = json.loads(current["settings_json"])
-                saved["configuration_token"] = token
-                connection.execute("UPDATE memory_schedules SET settings_json = ? WHERE schedule_id = ?", (encode(saved), key))
+            return key, enabled
 
     @outcome
     def configure(self, context, *, schedule_id, expected_revision, role_instruction, zone="Asia/Shanghai", local_time="23:50", enabled=True):
+        receipt = require(self._configure(context, schedule_id=schedule_id, expected_revision=expected_revision,
+            role_instruction=role_instruction, zone=zone, local_time=local_time, enabled=enabled))
+        self._apply_runtime_actions(schedule_id, enabled)
+        return receipt
+
+    def _apply_runtime_actions(self, schedule_id, enabled):
+        if not enabled and schedule_id in self.workers:
+            self.workers[schedule_id].cancel()
+        self.notify()
+
+    @outcome
+    def _configure(self, context, *, schedule_id, expected_revision, role_instruction, zone="Asia/Shanghai",
+                   local_time="23:50", enabled=True, configuration_token=None):
         self.reflection.memory.writer.access.check(context, "memory.reflect")
         text(schedule_id, "schedule_id", 256)
         text(role_instruction, "role_instruction", 65536)
@@ -88,14 +187,15 @@ class MemorySchedule:
                 raise TaskError("memory_schedule_conflict", "schedule was changed")
             start = stamp(datetime.combine(now.astimezone(ZoneInfo(zone)).date(), time(), ZoneInfo(zone)))
             settings = {"zone": zone, "local_time": local_time, "role_instruction": role_instruction, "gap_policy": "shift_forward", "fold": 0}
+            if configuration_token is not None:
+                if type(configuration_token) is not str or not 1 <= len(configuration_token) <= 256:
+                    raise ValueError("configuration token must be bounded text")
+                settings["configuration_token"] = configuration_token
             connection.execute("""INSERT INTO memory_schedules VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(schedule_id) DO UPDATE SET revision = excluded.revision, context_json = excluded.context_json,
                 settings_json = excluded.settings_json, enabled = excluded.enabled, next_at = excluded.next_at""",
                 (schedule_id, owner_key(context), expected_revision + 1, encode(context), encode(settings), int(enabled),
                  stamp(due), row["covered_until"] if row else start))
-        if not enabled and schedule_id in self.workers:
-            self.workers[schedule_id].cancel()
-        self.notify()
         return {"schedule_id": schedule_id, "revision": expected_revision + 1, "enabled": enabled, "next_at": stamp(due)}
 
     def advance(self):
@@ -104,11 +204,7 @@ class MemorySchedule:
         self.recovery.advance()
         if self.recovery.state == "running":
             return
-        for configured in self.runtime.read_all("SELECT context_json, settings_json FROM memory_schedules WHERE schedule_id LIKE 'memory-daily-%'", ()):
-            try:
-                self.sync_configuration(TaskContext.restore(json.loads(configured["context_json"])), json.loads(configured["settings_json"])["role_instruction"])
-            except (TaskError, ValueError, KeyError):
-                self.results["configuration"] = {"state": "blocked", "code": "memory_schedule_configuration"}
+        self._schedule_configuration_refresh()
         for key, worker in tuple(self.workers.items()):
             if worker.done():
                 del self.workers[key]
@@ -221,5 +317,11 @@ class MemorySchedule:
         self.closed = True
         self.cancel_running()
         await self.continuations.close()
+        pending_configuration = tuple(task for task in self._configuration_tasks if not task.done())
+        refresh = self._configuration_refresh_task
+        if refresh is not None and not refresh.done():
+            pending_configuration += (refresh,)
+        if pending_configuration:
+            await asyncio.gather(*pending_configuration, return_exceptions=True)
         if self.workers:
             await asyncio.wait(tuple(self.workers.values()), timeout=0.25)

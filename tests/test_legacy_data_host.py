@@ -102,6 +102,66 @@ class LegacyJournalMigrationHostTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
 
+    async def test_wardrobe_only_import_writes_native_role_item_without_importing_gallery(self):
+        source = TemporaryDirectory(prefix="companion-v2-legacy-wardrobe-v1-")
+        target = TemporaryDirectory(prefix="companion-v2-legacy-wardrobe-v2-")
+        self.addCleanup(source.cleanup)
+        self.addCleanup(target.cleanup)
+        v1_root = Path(source.name)
+        (v1_root / "companions.json").write_text("{}\n", encoding="utf-8", newline="\n")
+        image_directory = v1_root / "photo_reference_images"
+        image_directory.mkdir()
+        from io import BytesIO
+        from PIL import Image
+        payload = BytesIO()
+        Image.new("RGB", (12, 12), (24, 80, 140)).save(payload, format="PNG")
+        image_directory.joinpath("scarf.png").write_bytes(payload.getvalue())
+        migration = LegacyMigration(v1_root=v1_root, v1_configuration={"wardrobe_items": [{
+            "id": "red-scarf", "name": "红围巾", "description": "羊毛，冬季佩戴",
+            "tags": ["冬季"], "source": "photo_reference_images/scarf.png",
+        }]})
+        native = MultiNativeContext()
+        native_types = NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider, SimpleNamespace,
+            SimpleNamespace, FakeReverseApi)
+        clock = DeterministicClock.at(NOW)
+        controller = AstrBotMultiController(native, multi_config(), Path(target.name) / "data",
+            native_types=native_types, now=clock.now)
+        try:
+            (await controller.initialize_profile()).unwrap()
+            (await controller.start()).unwrap()
+            context = controller.session.authority.context("first", "role-a")
+            session = SimpleNamespace(profile=SimpleNamespace(target=context),
+                                      application=controller.session.application)
+            api = LegacyMigrationWebAPI.__new__(LegacyMigrationWebAPI)
+            api.controller = SimpleNamespace(runtime=controller.runtime, now=clock.now,
+                                             data_root=Path(target.name) / "data")
+            preview = api._data_plan(migration, v1_root, session,
+                reference_slots_available=24, reference_bytes_available=24 * 20 * 1024 * 1024,
+                wardrobe_slots_available=24).unwrap()
+            self.assertEqual(preview["wardrobe_items"]["image_count"], 1)
+            from astrbot_host.management_identity import dashboard_operator
+            api._operator = lambda: dashboard_operator(
+                controller.runtime, "migration-test-admin", at=clock.now())
+
+            imported = api._data_apply_sync(migration, v1_root, session,
+                plan_token=preview["plan_token"], source_group_id="", source_persona_id="",
+                import_reactions=False, import_group_network=False, confirm_member_ids=False,
+                import_journals=False, confirm_persona_mapping=False, import_worldbook=False,
+                import_wardrobe_items=True, confirm_reference_persona_mapping=True)
+
+            self.assertTrue(imported.is_success, imported.failure if not imported.is_success else "")
+            receipt = imported.unwrap()["reference_images"]
+            self.assertEqual((receipt["reference_created"], receipt["wardrobe_created"],
+                              receipt["wardrobe_remaining"]), (1, 1, 0))
+            application = controller.session.application
+            owner = application.references.owner(context)
+            repository = application.references.assets
+            items = repository.list_items(owner)
+            self.assertEqual([(item.name, item.description, item.asset_id is not None) for item in items],
+                             [("红围巾", "羊毛，冬季佩戴", True)])
+        finally:
+            await controller.terminate()
+
     async def test_memory_database_snapshot_uses_data_apply_and_survives_host_restart(self):
         source = TemporaryDirectory(prefix="companion-v2-legacy-memory-v1-")
         target = TemporaryDirectory(prefix="companion-v2-legacy-memory-v2-")

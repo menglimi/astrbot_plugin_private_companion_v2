@@ -36,9 +36,9 @@ class AstrBotAudioHostTests(unittest.IsolatedAsyncioTestCase):
             native_types=self.types, now=lambda: NOW)
         self.addAsyncCleanup(self.controller.terminate)
 
-    async def start_host(self):
+    async def start_host(self, *, review_only=False):
         (await self.controller.initialize_profile()).unwrap()
-        (await self.controller.start()).unwrap()
+        (await self.controller.start(review_only=review_only)).unwrap()
 
     def event(self, identifier="voice-1", *, transcribed=False):
         event = FakeEvent(self.native, event_id=identifier)
@@ -54,7 +54,7 @@ class AstrBotAudioHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(installed.audio, Record)
         self.assertIs(installed.audio_loader, load_native_audio)
         self.assertIs(installed.component_reader, private_components)
-        await self.start_host()
+        await self.start_host(review_only=True)
         batch = (await self.controller.receive_claimed(self.event(transcribed=True))).unwrap()
         await wait_for_batch(self.controller.session, batch)
         preview = (await self.controller.preview(batch)).unwrap()

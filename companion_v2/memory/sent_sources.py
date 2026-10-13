@@ -1,6 +1,7 @@
 """Confirmed reply quotes offered by the conversation owner to memory."""
 
 import json
+import threading
 
 from companion_v2.execution.models import TaskContext, TaskError, require, stamp
 from companion_v2.foundation.refs import SourceRef, VersionRef
@@ -18,7 +19,7 @@ OWNER = "conversation.confirmed_reply"
 class ConfirmedReplySources:
     def __init__(self, memory, messages):
         self.memory, self.messages, self.runtime = memory, messages, messages.runtime
-        self._reading = set()
+        self._reading = threading.local()
 
     def reference(self, row):
         original = TaskContext.restore(json.loads(row["context_json"]))
@@ -94,13 +95,17 @@ class ConfirmedReplySources:
     def _resolve(self, context, reference, *, publish):
         if reference.owner != OWNER or reference.version.revision != 1:
             raise TaskError("memory_source_unavailable", "not an original confirmed reply")
-        if reference.source_id in self._reading or len(self._reading) >= 32:
+        reading = getattr(self._reading, "source_ids", None)
+        if reading is None:
+            reading = set()
+            self._reading.source_ids = reading
+        if reference.source_id in reading or len(reading) >= 32:
             raise TaskError("memory_source_cycle", "reply provenance is cyclic or exceeds the read budget")
-        self._reading.add(reference.source_id)
+        reading.add(reference.source_id)
         try:
             return self._read(context, reference, publish=publish)
         finally:
-            self._reading.remove(reference.source_id)
+            reading.remove(reference.source_id)
 
     def _read(self, context, reference, *, publish):
         row = self.runtime.read_one("""SELECT h.*, b.context_json, p.text, p.payload_hash, p.sequence,

@@ -13,7 +13,11 @@ from typing import Any
 from companion_v2.product import CORE_COMPONENTS, PRODUCT_DISPLAY_NAME, PRODUCT_ID, PRODUCT_VERSION
 from companion_v2.capabilities.models import CapabilityDesiredState
 from companion_v2.capabilities.repositories import CapabilityRepository
-from .integration_catalog import OPTIONAL_PROVIDERS
+from .integration_catalog import BUNDLED_EXTENSIONS, EXTERNAL_PROVIDERS
+
+# Deprecated import surface for older host tests/extensions. It contains only
+# genuine external providers; bundled modules are never placed here.
+OPTIONAL_PROVIDERS = EXTERNAL_PROVIDERS
 
 
 STATUS_SCHEMA = "companion.provider-status.v1"
@@ -35,17 +39,16 @@ class IntegrationRegistry:
             # Match exact directory metadata, never a display-name substring.
             identifier = getattr(star, "root_dir_name", None) or getattr(star, "name", None)
             installed.setdefault(identifier, []).append(star)
-        providers = [
-            self._bundled_provider(spec, application, native_extensions, terminated)
-            if spec.get("owner") == "companion_v2" else
-            self._provider(spec, installed.get(spec["plugin_id"], []), discovery, terminated)
-            for spec in OPTIONAL_PROVIDERS
-        ]
+        extensions = [self._bundled_extension(spec, application, native_extensions, terminated)
+                      for spec in BUNDLED_EXTENSIONS]
+        providers = [self._provider(spec, installed.get(spec["plugin_id"], []), discovery, terminated)
+                     for spec in OPTIONAL_PROVIDERS]
         conflicts = {plugin_id for plugin_id, code in native_issues if code == "capability_descriptor_conflict"}
-        for provider in providers:
-            if provider["plugin_id"] in conflicts:
-                provider.update(integration_state="degraded", execution_issue="capability_descriptor_conflict",
-                    reason="能力声明与保留版本冲突，当前不能在对话中调用。请更新提供方的包版本后重新确认启用。")
+        for item in (*extensions, *providers):
+            identity = {item.get("plugin_id"), item.get("package_id"), item.get("extension_id")}
+            if conflicts.intersection(value for value in identity if value):
+                item.update(integration_state="degraded", execution_issue="capability_descriptor_conflict",
+                    reason="能力声明与保留版本冲突，当前不能在对话中调用。请更新模块版本后重新确认启用。")
         host = dict(host_status or {})
         core = [{**item, "routes": list(item["routes"]), "owner": "companion_v2",
                  "implementation": "included", "runtime_state": getattr(application, "state", "unloaded")}
@@ -54,34 +57,46 @@ class IntegrationRegistry:
             "product": {"id": PRODUCT_ID, "display_name": PRODUCT_DISPLAY_NAME, "version": PRODUCT_VERSION,
                         "release_channel": "integrated", "direct_replacement": False,
                         "data_policy": "V2 独立运行库；旧版资料尚未迁移。"},
-            "host": host, "core": core, "providers": providers, "discovery": discovery,
-            "summary": {"core_count": len(core), "provider_count": len(providers),
+            "host": host, "core": core, "extensions": extensions, "providers": providers,
+            "discovery": discovery,
+            "summary": {"core_count": len(core), "extension_count": len(extensions),
+                        "provider_count": len(providers),
                         "connected_count": sum(p["status_connected"] for p in providers),
+                        "extension_ready_count": sum(p["runtime_ready"] is True for p in extensions),
                         "installed_count": sum(p["installed"] for p in providers),
-                        "missing_count": sum(p["integration_state"] == "missing" for p in providers)},
+                        "missing_count": sum(p["integration_state"] == "missing" for p in providers),
+                        "unassembled_extension_count": sum(
+                            p["integration_state"] == "unassembled" for p in extensions)},
         }
 
     @staticmethod
-    def _bundled_provider(spec, application, native_extensions, terminated):
-        item = {**spec, "owner": "companion_v2", "installed": False, "activated": True,
+    def _bundled_extension(spec, application, native_extensions, terminated):
+        item = {**spec, "kind": "native_extension", "owner": "companion_v2",
+                "host_plugin_id": "astrbot_plugin_private_companion_v2", "assembled": False,
                 "version": PRODUCT_VERSION, "status_connected": True, "enabled": False,
-                "runtime_ready": False, "execution_owner": "astrbot_plugin_private_companion_v2",
-                "execution_integrated": True, "integration_state": "missing",
-                "reason": "尚未装配", "pages": [], "update_available": False,
-                "installed_package_version": None}
+                "runtime_ready": False, "integration_state": "unassembled",
+                "reason": "V2 本体拓展尚未装配", "pages": [], "update_available": False,
+                "package_id": None, "installed_package_version": None}
         if terminated:
             item.update(integration_state="stopped", reason="V2 宿主已停止")
             return item
         extension_id = spec["extension_id"]
+        # Lifecycle metadata is package-scoped.  A package may be loaded while
+        # one or more of its actions are dormant (Image has no current action
+        # before an output endpoint is configured), so action-level catalog
+        # readiness must not make the package look missing.
         declarations = [entry[0] for entry in getattr(native_extensions, "_entries", {}).values()
                         if entry[0].descriptor.package.extension_id == extension_id]
-        current = bool(declarations and all(
-            native_extensions.current_declaration(declaration.host_tool_id) == declaration
-            for declaration in declarations))
-        item["runtime_ready"] = current
-        if declarations:
-            item["package_id"] = declarations[0].descriptor.package.package_id
-            item["version"] = declarations[0].descriptor.package.package_version
+        package = (native_extensions.current_package(extension_id)
+                   if native_extensions is not None and callable(getattr(native_extensions, "current_package", None))
+                   else None)
+        current = package is not None
+        runtime_status = native_extensions.status(extension_id) if native_extensions is not None else {"state": "unavailable"}
+        item["runtime"] = runtime_status
+        item["runtime_ready"] = current and runtime_status["state"] == "running"
+        if package is not None:
+            item["package_id"] = package.package_id
+            item["version"] = package.package_version
         if not current:
             item.update(integration_state="degraded", reason="V2 拓展执行器未就绪")
             return item
@@ -95,16 +110,15 @@ class IntegrationRegistry:
                 item.update(integration_state="degraded", reason="拓展安装状态无法读取")
             return item
         installed = installation.unwrap()
-        same_package = bool(declarations and (installed.package_id, installed.package_version,
-            installed.artifact_hash) == (declarations[0].descriptor.package.package_id,
-            declarations[0].descriptor.package.package_version,
-            declarations[0].descriptor.package.artifact_hash))
-        item.update(installed=installed.desired_state is not CapabilityDesiredState.DISCARDED,
+        same_package = bool(package and (installed.package_id, installed.package_version,
+            installed.artifact_hash) == (package.package_id, package.package_version,
+            package.artifact_hash))
+        item.update(assembled=installed.desired_state is not CapabilityDesiredState.DISCARDED,
                     enabled=installed.desired_state is CapabilityDesiredState.ACTIVE,
                     installed_revision=installed.revision, desired_state=installed.desired_state.value,
                     installed_package_version=installed.package_version)
         if installed.desired_state is CapabilityDesiredState.DISCARDED:
-            item.update(integration_state="missing", reason="拓展已卸载；V2 数据保留，可重新装配")
+            item.update(integration_state="unassembled", reason="拓展已卸载；V2 数据保留，可重新装配")
         elif not same_package:
             update_available = installed.desired_state in (
                 CapabilityDesiredState.ACTIVE, CapabilityDesiredState.PAUSED,
@@ -112,12 +126,23 @@ class IntegrationRegistry:
             item.update(integration_state="degraded", update_available=update_available,
                 reason="已装配内容与当前 V2 内置版不同；可同步内置版，拓展数据会保留")
         elif installed.desired_state is CapabilityDesiredState.ACTIVE:
-            item.update(integration_state="connected", reason="V2 拓展已装配")
+            if runtime_status["state"] == "failed":
+                item.update(integration_state="degraded", execution_issue=runtime_status.get("error_code"),
+                            reason="模块启动失败，请检查该模块设置后保存并重试")
+            elif runtime_status["state"] == "starting":
+                item.update(integration_state="connected", reason="模块正在后台启动")
+            elif getattr(application, "state", None) != "running":
+                item.update(integration_state="stopped", reason="模块已装配，等待 V2 启动")
+            else:
+                item.update(integration_state="connected", reason="V2 原生模块已启用")
         elif installed.desired_state is CapabilityDesiredState.PAUSED:
             item.update(integration_state="disabled", reason="拓展已暂停")
         else:
             item.update(integration_state="degraded", reason="拓展正在移除")
         return item
+
+    # Compatibility for code that called the old private helper directly.
+    _bundled_provider = _bundled_extension
 
     @staticmethod
     def _provider(spec, matches, discovery, terminated):
@@ -198,9 +223,107 @@ class UnifiedCompanionExtensionAPI:
         self.controller = controller
         from .mobile_together import MobileTogetherBridge
         self._mobile_together = MobileTogetherBridge(controller)
+        from .mobile_game import MobileGameBridge
+        self._mobile_game = MobileGameBridge(controller)
+        from .native_extensions.reality.host_context import RealityHostContext
+        from .native_extensions.reality.host_delivery import RealityHostDelivery
+        self._reality_context = RealityHostContext(controller, self._mobile_together)
+        self._reality_delivery = RealityHostDelivery(self._reality_context)
+
+    async def generate_reality_touch_text(self, prompt, **kwargs):
+        return await self._reality_context.generate(prompt, **kwargs)
+
+    async def get_realtime_context(self, user_id, **kwargs):
+        return await self._reality_context.realtime(user_id, **kwargs)
+
+    async def get_scene_context(self, user_id, **kwargs):
+        return await self._reality_context.realtime(user_id, **kwargs)
+
+    async def send_reality_touch_chat(self, umo, text, **kwargs):
+        return await self._reality_delivery.send(umo, text, **kwargs)
+
+    async def record_reality_touch_output(self, user_id, text, **kwargs):
+        return await self._reality_delivery.record(user_id, text, **kwargs)
+
+    def get_reality_touch_cron_manager(self):
+        return self._reality_context.cron()
+
+    async def delete_reality_touch_cron_job(self, job_id):
+        return await self._reality_context.delete_job(job_id)
+
+    async def synthesize_realtime_voice(self, text, **kwargs):
+        return await self._reality_context.synthesize(text, **kwargs)
+
+    async def notify_mobile_location_update(self, user_id):
+        return await self._reality_delivery.location(user_id)
+
+    def mobile_target_context(self, user_id):
+        return self._mobile_together._target_context(user_id)
+
+    def mobile_pairing_candidates(self):
+        return self._mobile_together.pairing_candidates()
+
+    def reality_mobile_context(self, user_id):
+        """Return the verified V2 identity used by the native Reality gateway.
+
+        The mobile bridge may retain this attestation for a session, but it
+        must resolve the exact active private target every time it is checked.
+        No legacy plugin object or mutable user record crosses this boundary.
+        """
+        if type(user_id) is not str or not user_id.strip() or len(user_id) > 160:
+            return None
+        try:
+            resolved = self.mobile_target_context(user_id.strip())
+        except Exception:
+            return None
+        if not isinstance(resolved, tuple) or len(resolved) != 3:
+            return None
+        _session, application, context = resolved
+        scope = getattr(context, "scope", None)
+        actor = getattr(context, "actor", None)
+        principal = getattr(actor, "principal", None)
+        subject = getattr(actor, "subject", None)
+        if (getattr(scope, "kind", None) is None
+                or getattr(scope.kind, "value", None) != "private"
+                or getattr(scope, "native_scope_id", None) != user_id.strip()
+                or getattr(principal, "native_account_id", None) != user_id.strip()
+                or not getattr(subject, "subject_id", None)):
+            return None
+        registry = getattr(self.controller, "native_extensions", None)
+        snapshot_authorized = False
+        camera_authorized = False
+        if registry is not None and getattr(registry, "application", None) is application:
+            external = getattr(application, "external", None)
+            if external is not None:
+                try:
+                    actions = {tool.action for tool in external.catalog_for(context)}
+                    snapshot_authorized = "reality.snapshot.read" in actions
+                    camera_authorized = "reality.camera.observe" in actions
+                except Exception:
+                    pass
+        return {
+            "schema": "companion.reality-mobile-context.v1",
+            "user_id": user_id.strip(),
+            "context_key": getattr(context, "key", ""),
+            "scope_key": getattr(scope, "key", ""),
+            "subject_ref": f"{getattr(subject.kind, 'value', 'subject')}:{subject.subject_id}",
+            "snapshot_authorized": snapshot_authorized,
+            "camera_authorized": camera_authorized,
+        }
+
+    def companion_v2_mobile_game_status(self, session_token):
+        return self._mobile_game.status(session_token)
+
+    async def companion_v2_mobile_game_create(self, session_token, request_id, game_type,
+                                              *, via_mobile_gateway=False):
+        return await self._mobile_game.create(session_token, request_id, game_type,
+                                             via_mobile_gateway=via_mobile_gateway)
 
     def companion_v2_mobile_session_user(self, session_token: str) -> dict[str, str]:
         return self._mobile_together.mobile_session_user(session_token)
+
+    async def companion_v2_mobile_reality_snapshot(self, session_token: str):
+        return await self._reality_context.mobile_snapshot(session_token)
 
     def companion_v2_mobile_together_status(self, session_token: str, *, via_mobile_gateway: bool = False):
         return self._mobile_together.status(session_token)
@@ -243,6 +366,11 @@ class UnifiedCompanionExtensionAPI:
                 "lifecycle_state": "stopped" if self.controller._terminated else "ready"}
 
     def room_furniture_catalog(self):
-        return {"items": [{**item["furniture"], "plugin_id": item["plugin_id"],
-                           "integration_state": item["integration_state"]}
-                          for item in self.manifest()["providers"]]}
+        manifest = self.manifest()
+        items = [{**item["furniture"],
+                  "plugin_id": "astrbot_plugin_private_companion_v2",
+                  "extension_id": item["extension_id"],
+                  "integration_state": item["integration_state"],
+                  "owner": "companion_v2"}
+                 for item in manifest.get("extensions", [])]
+        return {"items": items}

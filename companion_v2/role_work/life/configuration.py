@@ -1,4 +1,4 @@
-"""Window-private routines with role-wide automatic sleep preferences."""
+"""Role-wide sleep defaults with explicit window overrides for routines."""
 
 from dataclasses import replace
 from datetime import time

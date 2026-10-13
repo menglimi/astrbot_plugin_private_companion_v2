@@ -14,9 +14,14 @@ class FixedDate extends Date {
   static now() { return fixedNow.getTime(); }
 }
 
-function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnabled=true,automaticAllowed=true,balanceConfigured=false,otherInjections=[{label:"参考资料",detail:"本轮加入 1 项"}],recallEnabled=true,recallEntries=[{local_time:"17:42",withdrawn_at:"2026-10-01T09:42:00Z",author:"user-1",text:"周末去公园走走"}]}={}) {
-  let listener = null, intervalCallback = null, cleared = false, requested = [], fetchRequests = [], bridgeRequests = [];
+function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnabled=true,automaticAllowed=true,balanceConfigured=false,balanceResponse=null,otherInjections=[{label:"参考资料",detail:"本轮加入 1 项"}],recallEnabled=true,recallEntries=[{local_time:"17:42",withdrawn_at:"2026-10-01T09:42:00Z",author:"user-1",text:"周末去公园走走"}]}={}) {
+  let listener = null, intervalCallback = null, cleared = false, requested = [], bridgeRequests = [];
   const failedRequests = new Set(), tabActivations = [], focused = [];
+  const currentBalance = balanceResponse || (balanceConfigured
+    ? {configured:true,available:true,provider:"newapi",provider_label:"NewAPI",currency_label:"额度",
+      amount:"123.45",observed_at:"2026-10-01T09:59:00Z",state:"available"}
+    : {configured:false,available:false,provider:"newapi",provider_label:"NewAPI",currency_label:"额度",
+      amount:null,observed_at:null,state:"not_configured"});
   const parentNodes = {
     '[data-perception-tab="config-injection"]': {hidden:false},
     "#perception-detail-mihome": {hidden:true},
@@ -77,6 +82,7 @@ function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnab
       requested.push(route);
       if (failedRequests.has(route)) throw new Error("读取超时");
       if (route.endsWith("/runtime")) return runtime;
+      if (route.endsWith("/balance")) return currentBalance;
       if (route.endsWith("/voice")) return {languages:[{k:"zh-CN",n:"中文",bind:"tts-main"}],
         providers:[{id:"tts-main",label:"TTS 主路由",model:"tts-live"}],catalog_state:"ready",voice_enabled:true};
       if (route.endsWith("/image")) return {actions:[{action:"image.generate",enabled:true,
@@ -85,7 +91,12 @@ function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnab
     },
     bridgeNow:() => ({apiGet:async route => {
       bridgeRequests.push(["GET", route]);
+      if (failedRequests.has(route)) throw new Error("读取超时");
       if (route === "semantic") return {settings:{analysis_provider:"vision-analysis"}};
+      if (route === "extensions") return {extensions:{reality:{settings:{enabled:true,mihome:{enabled:true}},management:{mihome:{
+        tool_settings:{enable_readonly_tool:mihomeEnabled},snapshot_at:"2026-10-01 17:55",devices:[
+          {did:"sensitive-device-id-1",configured:true,name:"客厅灯",aliases:["living_light"],online:true},
+          {did:"sensitive-device-id-2",configured:true,name:"书房插座",aliases:["study_plug"],online:false}]}}}}};
       if (route === "host-options/balance") return {service_balance:{source:balanceConfigured?"plugin":"none",source_state:balanceConfigured?"configured":"not_configured",
         provider:"newapi",url:balanceConfigured?"https://newapi.example.com":"",user_id:"",value_divisor:"500000",has_api_key:balanceConfigured},
         edit_tokens:{balance:"b".repeat(64)}};
@@ -103,14 +114,7 @@ function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnab
     refresh() {}};
   const window = {CompanionProduct:product,CompanionNativePerceptionPage:native,
     CompanionPerceptionTabs:{activate(...args) {tabActivations.push(args);window.CompanionPerceptionOverviewPage.select(...args);}},
-    fetch:async url => {
-      fetchRequests.push(url);
-      const value = url.endsWith("/status") ? {ok:true,tools:{enable_readonly_tool:mihomeEnabled}}
-        : {ok:true,snapshot_at:"2026-10-01 17:55",devices:[
-          {configured:true,name:"客厅灯",aliases:["living_light"],online:true},
-          {configured:true,name:"书房插座",aliases:["study_plug"],online:false}]};
-      return {ok:true,json:async()=>value};
-    }};
+    };
   const intervals = new Map(); let intervalId=0;
   vm.runInNewContext(source, {window, Date:FixedDate, Intl, JSON, Number, String, Array, Object, RegExp,
     AbortController, setInterval(callback) { intervalCallback=callback; intervals.set(++intervalId,callback); return intervalId; },
@@ -118,7 +122,7 @@ function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnab
   return {page:window.CompanionPerceptionOverviewPage, root, runtime, snapshot, intervals,parentNodes,tabActivations,focused,
     balanceWorkspace:parentNodes["#perceptionBalanceSourceWorkspace"],
     failRequest(route) {failedRequests.add(route);}, recoverRequests() {failedRequests.clear();},
-    emit(next) { snapshot=next; listener?.(next); }, get requested(){return requested;}, get fetchRequests(){return fetchRequests;},
+    emit(next) { snapshot=next; listener?.(next); }, get requested(){return requested;},
     get bridgeRequests(){return bridgeRequests;},
     get intervalCallback(){return intervalCallback;}, get cleared(){return cleared;}};
 }
@@ -130,6 +134,7 @@ test("overview shows the requested context, live routes, authorized devices and 
 
   assert.deepEqual(page.requested.sort(), [
     "/astrbot_plugin_private_companion_v2/model",
+    "/astrbot_plugin_private_companion_v2/model/balance",
     "/astrbot_plugin_private_companion_v2/model/image",
     "/astrbot_plugin_private_companion_v2/model/voice",
     "/astrbot_plugin_private_companion_v2/perception-native/runtime",
@@ -186,11 +191,10 @@ test("overview shows the requested context, live routes, authorized devices and 
   assert.match(page.parentNodes["#perceptionRecallWorkspace"].innerHTML, /周末去公园走走/);
   assert.match(page.parentNodes["#mihomeStatusWorkspace"].innerHTML, /客厅灯/);
   assert.match(page.parentNodes["#mihomeStatusWorkspace"].innerHTML, /离线/);
+  assert.doesNotMatch(page.parentNodes["#mihomeStatusWorkspace"].innerHTML, /sensitive-device-id/);
   assert.match(page.parentNodes["#perceptionInjectionWorkspace"].innerHTML, /参考资料/);
-  assert.deepEqual(page.fetchRequests.sort(), [
-    "/api/plugin/astrbot_plugin_mihome/devices",
-    "/api/plugin/astrbot_plugin_mihome/status",
-  ]);
+  assert.deepEqual(page.bridgeRequests.filter(([method, route]) => method === "GET" && route === "extensions"),
+    [["GET", "extensions"]]);
   assert.match(page.root.clockNodes.time.textContent, /18:00:00/);
   /* 今天是工作日就不该挂节假日标签：不是节日就空着，不替它找一个标签。 */
   assert.equal(page.root.clockNodes.tag.textContent, "");
@@ -242,13 +246,15 @@ test("the two lower cards show source-backed readings and explain absent snapsho
   page.page.unmount();
 });
 
-test("a configured balance source is pending until queried and failed queries clear the amount", async () => {
+test("configured balance is read through the model balance route and failed reads clear the amount", async () => {
   const page=harness({balanceConfigured:true});
   page.page.mount(page.root);
   await new Promise(resolve=>setImmediate(resolve));
-  assert.match(page.root.innerHTML,/perception-feature is-balance is-pending/);
-  assert.match(page.root.innerHTML,/尚未查询/);
-  assert.equal(page.bridgeRequests.some(([method])=>method==="POST"),false,"打开仪表盘只读取配置，不查询外部余额");
+  assert.match(page.root.innerHTML,/perception-feature is-balance is-ready/);
+  assert.match(page.root.innerHTML,/perception-balance-unit">额度<\/span> 123\.45/);
+  assert.ok(page.requested.includes("/astrbot_plugin_private_companion_v2/model/balance"));
+  assert.equal(page.bridgeRequests.some(([method,route])=>method==="POST"&&route==="host-options/balance/test"),false,
+    "打开仪表盘复用 Token 页的模型余额接口");
   page.page.select("config-balance:perception-detail-balance-source");
   const controls={url:{value:"https://newapi.example.com"},api_key:{value:""},user_id:{value:""},value_divisor:{value:"500000"},clear_configuration:{checked:false}};
   const resultStatus={hidden:false};
@@ -261,16 +267,16 @@ test("a configured balance source is pending until queried and failed queries cl
   await query();
   assert.match(page.root.innerHTML,/最近一次查询/);
   assert.match(page.root.innerHTML,/perception-balance-unit">额度<\/span> 123\.45/);
-  page.failRequest("host-options/balance/test");
+  page.failRequest("/astrbot_plugin_private_companion_v2/model/balance");
   await query();
-  assert.match(page.root.innerHTML,/连接失败，请检查令牌权限、用户 ID 和地址/);
+  assert.match(page.root.innerHTML,/读取超时/);
   assert.doesNotMatch(page.root.innerHTML,/123\.45/);
   page.recoverRequests();
   await query();
   const field={dataset:{balanceField:"url"},value:"https://other.example.com",closest(){return form;}};
   page.balanceWorkspace.handlers.input({target:{closest(selector){return selector==="[data-balance-field]"?field:null;}}});
-  assert.doesNotMatch(page.root.innerHTML,/123\.45/,"更换地址后，旧查询结果立即从仪表盘移除");
-  assert.equal(resultStatus.hidden,true,"编辑配置后，表单中的上次测试金额也隐藏");
+  assert.match(page.root.innerHTML,/123\.45/,"编辑草稿配置不影响已保存数据源的当前余额");
+  assert.equal(resultStatus.hidden,false,"当前数据源读数与草稿测试结果分开维护");
   page.page.unmount();
 });
 
@@ -480,7 +486,7 @@ test("balance form keeps an unsaved token through redraw and tests the draft wit
       user_id:"1234",value_divisor:"1000000"},
   }]);
   assert.equal(page.bridgeRequests.some(([method, route]) => method === "POST" && route === "host-options/balance"), false);
-  assert.match(page.balanceWorkspace.innerHTML, /连接成功：当前余额 123\.45 额度/);
+  assert.match(page.balanceWorkspace.innerHTML, /草稿测试成功：123\.45 额度/);
   assert.match(page.balanceWorkspace.innerHTML, /value="draft-token-kept"/);
   assert.match(page.root.innerHTML, /草稿测试结果/);
   assert.match(page.root.innerHTML, /perception-balance-unit">额度<\/span> 123\.45/);
@@ -503,8 +509,14 @@ test("readiness count reflects available signals, and optional rows stay absent"
   assert.match(page.root.innerHTML, /米家 · 未启用/);
   assert.doesNotMatch(page.root.innerHTML, /id="perception-channel-device-mihome"/);
   assert.equal(page.parentNodes["#perception-detail-mihome"].hidden, true);
-  assert.deepEqual(page.fetchRequests, ["/api/plugin/astrbot_plugin_mihome/status"]);
+  assert.deepEqual(page.bridgeRequests.filter(([method, route]) => method === "GET" && route === "extensions"),
+    [["GET", "extensions"]]);
   page.page.unmount();
+});
+
+test("the MiHome dashboard uses the authenticated V2 page bridge", () => {
+  assert.doesNotMatch(source, /window\.fetch\s*\(/);
+  assert.doesNotMatch(source, /\/api\/plugin\/astrbot_plugin_mihome\//);
 });
 
 test("the weather off state names its conversation and planning behavior", async () => {

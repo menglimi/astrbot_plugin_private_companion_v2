@@ -140,6 +140,10 @@ class ScreenContactEvents:
         return datetime.fromisoformat(row["latest"]) if row is not None and row["latest"] else None
 
     def _user_spoke_after(self, context, moment):
+        if self.contacts.history is not None:
+            latest = self.contacts.history.interaction(context, self.contacts.tasks.now(), action="proactive.contact")
+            if latest.get("last_input_at") is not None and datetime.fromisoformat(latest["last_input_at"]) > moment:
+                return True
         row = self.runtime.read_one("""SELECT MAX(b.created_at) AS latest FROM conversation_inputs i
             JOIN conversation_batches b ON b.batch_id = i.batch_id
             JOIN conversation_flows f ON f.batch_id = b.batch_id
@@ -155,6 +159,17 @@ class ScreenContactEvents:
             JOIN conversation_flows f ON f.batch_id = b.batch_id
             WHERE f.route_key = ? AND p.state = 'delivered' AND p.delivered_at IS NOT NULL
             ORDER BY p.delivered_at DESC, p.sequence DESC LIMIT 8""", (context.scope.key,))
+        history = self.contacts.history
+        if history is not None and history.messages is not None:
+            from companion_v2.conversation.native_history import body, reference, rows as native_rows
+            native = []
+            for observed in native_rows(self.runtime, context, end=stamp(at), kind="assistant", limit=8):
+                try:
+                    item = body(history.messages, reference(observed), context, at)
+                except TaskError:
+                    continue
+                native.append({"part_id": observed["observation_id"], "text": item["text"], "delivered_at": item["delivered_at"]})
+            rows = sorted((*rows, *native), key=lambda row: row["delivered_at"], reverse=True)[:8]
         for row in rows:
             delivered = datetime.fromisoformat(row["delivered_at"])
             if delivered > at or at - delivered > GOODNIGHT_MAX_AGE:

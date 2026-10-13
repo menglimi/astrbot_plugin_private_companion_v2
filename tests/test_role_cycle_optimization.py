@@ -279,7 +279,7 @@ class CycleReplyTests(CycleOptimizationFixture, unittest.IsolatedAsyncioTestCase
         batch = self.host1.receive(self.event()).unwrap()
         self.advance(self.app)
         self.assertEqual((await self.done(self.app, batch))["state"], "complete")
-        self.assertEqual([part.text for part in self.sent], ["第一段\n", "第二段"])
+        self.assertEqual([part.text for part in self.sent], ["第一段", "第二段"])
 
     async def reject_change(self, action):
         await self.ready()

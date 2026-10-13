@@ -122,6 +122,19 @@ class CalendarRecords(VersionedRecords):
             records.setdefault(record["id"], record)
         return tuple(records[key] for key in sorted(records)[:limit])
 
+    def shared_role_plans(self, context, *, limit=100):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise TaskError("record_page_invalid", "invalid shared role-plan page")
+        role_key = self.role_key(context)
+        records = {item["id"]: item for item in super().list(context, limit=limit,
+            storage_key=role_key, kinds=("role_plan",))}
+        for item in self._legacy_role_plans(context):
+            record = item["record"]
+            if record["id"]:
+                records.setdefault(record["id"], record)
+        ordered = tuple(records[key] for key in sorted(records))
+        return ordered[:limit], len(ordered) > limit
+
     def version(self, context, identifier, revision, *, storage_key=None):
         if storage_key is not None:
             return super().version(context, identifier, revision, storage_key=storage_key)

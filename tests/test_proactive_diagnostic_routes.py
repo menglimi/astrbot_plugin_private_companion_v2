@@ -37,7 +37,8 @@ class ProactiveDiagnosticRouteTests(unittest.IsolatedAsyncioTestCase):
     def schedule(self):
         schedule = ContactSchedule.__new__(ContactSchedule)
         schedule.tasks = NS(now=lambda: NOW)
-        schedule.runtime = NS(read_one=Mock(return_value={"batch_id": "latest-batch"}))
+        schedule.runtime = NS(read_one=Mock(side_effect=lambda query, parameters:
+            None if "conversation_native_turns" in query else {"batch_id": "latest-batch"}))
         schedule.contacts = NS(preferences=NS(read=Mock(return_value=Outcome.success(object()))), history=None)
         schedule._origin = lambda _context, _batch_id, _at: ({"batch_id": "latest-batch"}, self.batch, self.event)
         schedule._diagnostic_preferences = lambda preferences: preferences

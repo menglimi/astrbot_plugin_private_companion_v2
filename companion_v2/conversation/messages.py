@@ -564,6 +564,9 @@ class ConversationMessages:
         sealed = self.assembler.seal(primary=primary, contributions=tuple(contributions))
         request = self.compiler.compile(event=events[0], role_instruction=row["role_instruction"],
                                         role_binding=context.role_binding, context=sealed)
+        if any(item.owner == "role.expression" and item.purpose == "expression_style_rule"
+               and item.state is ContributionState.READY for item in contributions):
+            request = replace(request, instruction=request.instruction + "\n" + EXPRESSION_STYLE_INSTRUCTION)
         file_payloads = (primary.payload, *(item.payload for item in contributions
                           if item.state is ContributionState.READY and item.payload is not None))
         if any("[文件阅读材料]" in payload for payload in file_payloads):

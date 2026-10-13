@@ -46,7 +46,8 @@ class PersonAcquaintance:
         configuration read stays outside the intake transaction."""
         if not self.available(context):
             return None
-        return self.observe if self.settings.read(context).get("person.acquaintance_learning_enabled", True) else None
+        return self.observe if self.settings.read(context).get(
+            "person.learning.acquaintance_learning_enabled", True) else None
 
     def observe(self, context, event, connection):
         """Count one admitted input. Optional derived data never rejects intake."""

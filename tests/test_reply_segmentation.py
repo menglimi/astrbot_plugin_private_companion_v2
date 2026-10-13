@@ -121,6 +121,8 @@ class ReplySegmentationTests(unittest.TestCase):
         self.assertIn(f"只在需要时用 {MARKER}。", policy.instruction)
         self.assertNotIn("{{", policy.instruction)
         self.assertIn("各自读得通", self.policy.instruction)
+        self.assertIn("称呼要和所在的完整句子放在一起", self.policy.instruction)
+        self.assertIn("简短不等于只说几个字或一句就结束", self.policy.instruction)
         self.assertIn("不能借此删改、概括或重排原文", self.policy.instruction)
         self.assertIn("代码、引用、列表、表格、链接", self.policy.instruction)
         for changes in ({"enabled": 1}, {"max_segments": True}, {"max_segments": 65},

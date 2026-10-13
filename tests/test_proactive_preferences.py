@@ -4,7 +4,7 @@ import unittest
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, fingerprint
 from companion_v2.diagnostics.models import restore_target
-from companion_v2.foundation.refs import ReferenceValidationError, SubjectKind, SubjectRef
+from companion_v2.foundation.refs import OperationRef, ReferenceValidationError, SubjectKind, SubjectRef, VersionRef
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.proactive.configuration import GROUP, PURPOSES, target_for
 from tests.proactive_support import ContactFixture
@@ -107,6 +107,48 @@ class ContactPreferenceTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prefs.reason("news"), "proactive_paused")
         self.assertIsNone(prefs.reason("chat"))
         self.assertIsNone(self.preferences(app, at=NOW + timedelta(minutes=10)).reason("news"))
+
+    async def test_public_legacy_rhythm_uses_the_last_field_save_not_an_unrelated_note_update(self):
+        app = self.host().application
+        first = target_for(self.contact_context())
+        second = target_for(self.other_window_context())
+        def old_public_save(target, changes, key):
+            op_id = "proactive.contact-config:" + key
+            before = app.configuration.read(self.core, target=target, group_id=GROUP,
+                                            observed_at=self.clock.now()).unwrap()
+            app.configuration.patch(self.core, target=target, group_id=GROUP, expected_edit_token=before.edit_token,
+                changes={GROUP + "." + name: value for name, value in changes.items()}, observed_at=self.clock.now(),
+                operation=OperationRef(op_id, GROUP, target.authorization_scope, VersionRef(op_id, 1), op_id)).unwrap()
+        old_public_save(first, {"enabled": True}, "first-on")
+        public_target = first.chain()[0]
+        self.assertTrue(app.configuration.read(self.core, target=public_target, group_id=GROUP,
+                                             observed_at=self.clock.now()).unwrap().values[GROUP + ".enabled"])
+        self.clock.advance(timedelta(seconds=1))
+        old_public_save(second, {"enabled": False}, "second-off")
+        self.clock.advance(timedelta(seconds=1))
+        old_public_save(first, {"note": "后来更新的私人备注"}, "first-note")
+        public = app.configuration.read(self.core, target=public_target, group_id=GROUP,
+                                        observed_at=self.clock.now()).unwrap()
+        self.assertFalse(public.values[GROUP + ".enabled"])
+        self.assertEqual(public.values[GROUP + ".note"], "")
+
+    async def test_temporary_window_switch_cannot_override_saved_global_or_personal_rhythm(self):
+        from companion_v2.proactive.management import ContactManagement
+
+        app = await self.enabled()
+        manager = ContactManagement(app, self.contact_context())
+        def temporary_switch(enabled, key):
+            return manager.configure(self.core, {"operation_key": key,
+                "edit_token": manager.status(self.core).unwrap()["edit_token"],
+                "changes": {"enabled": enabled}}).unwrap()
+        temporary_switch(False, "old-setup-restoration")
+        global_target, _, personal_target, _ = target_for(self.contact_context()).chain()
+        self.settings(app, {"enabled": True}, target=global_target, actor=self.core).unwrap()
+        self.assertTrue(self.preferences(app).values["enabled"])
+        self.settings(app, {"enabled": False}, target=personal_target).unwrap()
+        temporary_switch(True, "new-diagnostic-switch")
+        self.assertFalse(self.preferences(app).values["enabled"])
+        self.assertEqual(self.preferences(app).snapshot.fields[GROUP + ".enabled"].source, personal_target)
 
     async def test_quiet_hours_use_local_zone_inclusive_start_and_exclusive_end(self):
         app = self.host().application

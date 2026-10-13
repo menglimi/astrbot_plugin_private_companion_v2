@@ -70,6 +70,24 @@ function section(kind, changes = {}, token = TOKEN('a')) {
 /* 2026-09-28 新接入的四个分区。默认值、类型与边界都照真实注册表抄，
    否则夹具给出与后端不一致的合同，就测不出「页面按后端下发的范围校验」这件事。 */
 const NEW_KINDS = {
+  'expression.learning': {
+    group: 'expression.learning', scope: 'installation', layers: ['installation'],
+    settings: {scan_interval_minutes: 1440, group_scan_interval_minutes: 180, group_daily_batch_limit: 6},
+    fields: {scan_interval_minutes: ['integer', 5, 10080],
+      group_scan_interval_minutes: ['integer', 5, 10080], group_daily_batch_limit: ['integer', 1, 50]},
+  },
+  reaction: {
+    group: 'expression.reaction', scope: 'installation', layers: ['installation'],
+    settings: {low_latency_enabled: true, candidate_limit: 6, embedding_weight: 1.0,
+      embedding_score_threshold: 0.42, embedding_candidate_limit: 1200,
+      embedding_backfill_enabled: true, embedding_backfill_batch_size: 24,
+      embedding_backfill_interval_seconds: 300, vision_verify_mode: 'embedding'},
+    fields: {low_latency_enabled: ['boolean'], candidate_limit: ['integer', 1, 24],
+      embedding_weight: ['weight', 0.05, 3], embedding_score_threshold: ['probability', 0, 1],
+      embedding_candidate_limit: ['integer', 20, 5000], embedding_backfill_enabled: ['boolean'],
+      embedding_backfill_batch_size: ['integer', 1, 100],
+      embedding_backfill_interval_seconds: ['integer', 0, 86400], vision_verify_mode: ['text']},
+  },
   recall: {
     group: 'conversation.recall',
     settings: {transcribe_enabled: false, transcribe_max_items: 5, transcribe_text_chars: 500,
@@ -89,18 +107,12 @@ const NEW_KINDS = {
     settings: {acquaintance_enabled: true, acquaintance_card_chars: 1024},
     fields: {acquaintance_enabled: ['boolean'], acquaintance_card_chars: ['integer', 256, 4096]},
   },
-  role_growth: {
-    group: 'role.growth',
-    settings: {read_enabled: false, proposals_enabled: false},
-    fields: {read_enabled: ['boolean'], proposals_enabled: ['boolean']},
-  },
   'role.growth.skills': {
     group: 'role.growth.skills',
+    scope: 'installation',
+    layers: ['installation'],
     settings: {enabled: true, custom_skills: '[]', schedule_influence_strength: 0},
     fields: {enabled: ['boolean'], custom_skills: ['text'], schedule_influence_strength: ['integer', 0, 3]},
-    /* 双层组：窗口为默认落点，角色级可写，最后一段仍是 window。 */
-    layers: ['installation', 'role', 'window'],
-    scope: 'window',
   },
   /* 自我页的子集夹具：只放吃到专用控件的字段，其余字段按 order 过滤后不渲染。
      生日/性别等在注册表里都是 TEXT——专用控件不改变值形状。 */
@@ -110,10 +122,14 @@ const NEW_KINDS = {
     settings: {name: '澄汐', birthday: '4月17日', gender: '女', species: '人类',
       first_person: '我', voice_examples: '今天的风有点像海边的。\n你先说，我听着。',
       signature_phrases: '慢慢来、我在呢', hobbies: '植物随笔、听雨',
-      world_adaptation_mode: 'auto'},
+      world_adaptation_mode: 'auto', main_companion_subject: '',
+      expression_private_source_mode: 'owner', expression_private_source_subject_ids: '[]',
+      expression_private_application_mode: 'all', expression_private_application_subject_ids: '[]'},
     fields: {name: ['text'], birthday: ['text'], gender: ['text'], species: ['text'],
       first_person: ['text'], voice_examples: ['text'], signature_phrases: ['text'],
-      hobbies: ['text'], world_adaptation_mode: ['text']},
+      hobbies: ['text'], world_adaptation_mode: ['text'], main_companion_subject: ['text'],
+      expression_private_source_mode: ['text'], expression_private_source_subject_ids: ['text'],
+      expression_private_application_mode: ['text'], expression_private_application_subject_ids: ['text']},
   },
   knowledge: {
     group: 'knowledge',
@@ -131,6 +147,17 @@ const NEW_KINDS = {
   },
   life: {
     group: 'role.life',
+    scope: 'role',
+    layers: ['installation', 'role'],
+    editable: Object.fromEntries(['enabled', 'diary_enabled', 'diary_time', 'timezone',
+      'sleep_enabled', 'sleep_time', 'sleep_timezone', 'sleep_variation_minutes', 'sleep_minutes',
+      'reading_enabled', 'derive_enabled', 'diary_style_prompt', 'dream_theme_candidates',
+      'dream_mixed_themes_enabled', 'dream_intimate_theme_enabled', 'dream_afterglow_mode',
+      'enable_rest_reply_simulation', 'rest_reply_mode', 'rest_reply_probability',
+      'rest_reply_llm_threshold', 'rest_reply_active_windows', 'rest_reply_awake_grace_minutes',
+      'enable_rest_backlog_reply', 'rest_backlog_max_messages'].map(name => [name,
+      ['sleep_enabled', 'sleep_time', 'sleep_timezone', 'sleep_variation_minutes', 'sleep_minutes'].includes(name)
+        ? ['role', 'window'] : ['window']])),
     settings: {enabled: false, diary_enabled: true, diary_time: '23:50', timezone: 'Asia/Shanghai',
       sleep_enabled: false, sleep_time: '00:30', sleep_timezone: 'Asia/Shanghai', sleep_variation_minutes: 20, sleep_minutes: 480,
       reading_enabled: false, derive_enabled: true,
@@ -196,7 +223,7 @@ const NEW_KINDS = {
       enable_group_repeat_follow: true, group_repeat_count_distinct_users_only: false,
       group_repeat_trigger_threshold: 4, group_repeat_follow_probability: 0.18,
       group_repeat_interrupt_probability: 0.1, group_repeat_interrupt_probability_step: 0.12,
-      group_repeat_interrupt_text: '禁止复读', group_repeat_window_seconds: 120},
+      group_repeat_interrupt_text: '禁止复读', group_repeat_interrupt_image_path: '', group_repeat_window_seconds: 120},
     /* 概率字段注册成 probability（0–1 的小数），与 role.growth 的整数档位不同。 */
     fields: {enable_group_social_context: ['boolean'], enable_group_mood_detection: ['boolean'],
       enable_group_roleplay_strength: ['boolean'], enable_group_moments: ['boolean'],
@@ -211,15 +238,15 @@ const NEW_KINDS = {
       group_repeat_follow_probability: ['probability', 0, 1],
       group_repeat_interrupt_probability: ['probability', 0, 1],
       group_repeat_interrupt_probability_step: ['probability', 0, 1],
-      group_repeat_interrupt_text: ['text'], group_repeat_window_seconds: ['integer', 10, 600]},
+      group_repeat_interrupt_text: ['text'], group_repeat_interrupt_image_path: ['text'],
+      group_repeat_window_seconds: ['integer', 10, 600]},
   },
 };
 
 function newSection(kind, changes = {}, token = TOKEN('a')) {
   const spec = NEW_KINDS[kind];
   const settings = {...spec.settings, ...changes};
-  /* 层不是所有分区都一样：书架按角色(installation+role)保存，其余新分区按会话。
-     夹具写死 window 会让页面把书架标成「当前会话」。 */
+  /* Groups with an explicit role scope must not inherit the window fallback. */
   const layers = spec.layers || ['installation', 'role', 'window'];
   const scope = spec.scope || 'window';
   const fields = Object.fromEntries(Object.entries(spec.fields).map(([name, [type, low, high]]) => {
@@ -256,7 +283,7 @@ const payload = (kind, changes, token) => {
 };
 
 function harness(kinds = ['quota', 'image_review'], views = {}, endpointOverride = '', options = {}) {
-  const requests = [], store = options.store || new Map(), holders = {}, painted = {};
+  const requests = [], store = options.store || new Map(), holders = {}, painted = {}, windowListeners = new Map();
   const root = {
     isConnected: true, dataset: {}, textContent: '', classList: {add() {}},
     appendChild(node) {
@@ -276,9 +303,16 @@ function harness(kinds = ['quota', 'image_review'], views = {}, endpointOverride
     setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key),
   };
   const window = {
-    addEventListener() {}, removeEventListener() {},
+    addEventListener(name, listener) {
+      const listeners = windowListeners.get(name) || new Set();
+      listeners.add(listener); windowListeners.set(name, listeners);
+    },
+    removeEventListener(name, listener) { windowListeners.get(name)?.delete(listener); },
+    dispatchEvent(event) { for (const listener of windowListeners.get(event.type) || []) listener(event); },
     CompanionProduct: {
-      hosted: () => true, role: () => ({reply_api: PREFIX + 'reply'}),
+      hosted: () => true, role: () => ({role_id: 'role-a', reply_api: PREFIX + 'reply'}),
+      roleTarget: () => ({bot_id: 'bot-a'}),
+      acquaintanceDirectory: options.people ? async () => ({persons: options.people}) : undefined,
       identity: () => ({installation_id: 'inst', operator_id: 'admin'}),
       scopeKey: () => options.scopeKey || 'scope-a',
     },
@@ -301,7 +335,7 @@ function harness(kinds = ['quota', 'image_review'], views = {}, endpointOverride
     querySelector: () => null, querySelectorAll: () => [],
     hidden: false,
   };
-  const sandbox = {window, sessionStorage, document, crypto: {randomUUID: () => 'config-key'},
+  const sandbox = {window, sessionStorage, document, Event: class Event {constructor(type) {this.type = type;}}, crypto: {randomUUID: () => 'config-key'},
     setTimeout, clearTimeout, URLSearchParams, Math, Number, Object, JSON, Array, String};
   vm.runInNewContext(workbench, sandbox);
   vm.runInNewContext(adapter, sandbox);
@@ -333,7 +367,7 @@ test('the role dossier exposes the V1 character and world detail fields in one g
   const {window} = harness(['role_profile']);
   const profile = window.CompanionConfigEditors.spec.role_profile;
   const grouped = plain(profile.sections.flatMap(section => section.fields));
-  assert.equal(profile.sections.length, 8);
+  assert.equal(profile.sections.length, 9);
   assert.equal(new Set(grouped).size, grouped.length, 'each field belongs to one dossier group');
   assert.deepEqual(grouped.slice().sort(), plain(profile.order).slice().sort());
   assert.deepEqual(grouped.slice().sort(), Object.keys(profile.labels).sort());
@@ -406,6 +440,16 @@ test('the server publishes the inheritance chain and per-field provenance', asyn
   assert.equal(instance.state.container.fields.group_max_daily.maximum, 100);
 });
 
+test('role life defaults keep window-only fields disabled in the role editor', async () => {
+  const harnessed = harness(['life']);
+  const [instance] = await loaded(harnessed, ['life']);
+  assert.equal(instance.state.container.writeLayer, 'role');
+  assert.deepEqual(plain(instance.state.container.fields.sleep_enabled.editable), ['role', 'window']);
+  assert.deepEqual(plain(instance.state.container.fields.diary_enabled.editable), ['window']);
+  assert.match(harnessed.painted.life, /data-wb-field="diary_enabled"[^>]* disabled/);
+  assert.match(harnessed.painted.life, /data-wb-field="sleep_enabled"[^>]*>/);
+});
+
 test('a section the route never answered is refused instead of half-applied', async () => {
   const harnessed = harness(['quota']);
   harnessed.editors.paint();
@@ -433,6 +477,28 @@ test('a machine code delivered only in message is translated on read failure', a
   assert.match(instance.state.notice, /角色数据尚未加载/);
   assert.doesNotMatch(String(instance.state.notice), /staging_not_initialized/);
   assert.doesNotMatch(harnessed.painted.quota || '', /staging_not_initialized/);
+});
+
+test('a timed out read retries in place and clears its transient notice after recovery', async () => {
+  const harnessed = harness(['quota']);
+  harnessed.editors.restore();
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+  const [instance] = harnessed.editors.state.instances;
+  harnessed.requests[0].reject(Object.assign(new Error('request timed out'), {code: 'bridge_timeout'}));
+  await drains();
+  assert.equal(instance.state.loading, true);
+  assert.equal(instance.state.denied, false);
+  assert.match(instance.state.notice, /自动重试读取（1\/2）/);
+  await new Promise(resolve => setTimeout(resolve, 450));
+  await drains();
+  assert.equal(harnessed.requests.length, 2);
+  assert.equal(harnessed.requests[1].method, 'GET');
+  harnessed.requests[1].resolve(payload('quota'));
+  await drains();
+  assert.ok(instance.state.status);
+  assert.equal(instance.state.notice, '');
 });
 
 test('a reason sentence that is not a machine code is kept verbatim', async () => {
@@ -617,6 +683,23 @@ test('a save the server answered but refused stops being pending', async () => {
   assert.equal(harnessed.store.size, 0, 'the draft receipt must not survive a refusal');
 });
 
+test('a coded revision conflict from the bridge is a confirmed refusal', async () => {
+  const harnessed = harness(['image_review']);
+  const [instance] = await loaded(harnessed, ['image_review']);
+  instance.state.draft.group_nsfw_image_review_mode = 'dual';
+  const saving = instance.save(false);
+  await drains();
+  harnessed.requests[1].reject(Object.assign(new Error('configuration_revision_conflict'), {
+    code: 'configuration_revision_conflict',
+  }));
+  await saving;
+  await drains();
+  assert.equal(instance.state.pending, null);
+  assert.equal(instance.state.stale, true);
+  assert.equal(harnessed.store.size, 0);
+  assert.match(instance.state.notice, /配置已经更新/);
+});
+
 test('an unconfirmed save is automatically replayed once with the original request', async () => {
   const harnessed = harness(['image_review']);
   const [instance] = await loaded(harnessed, ['image_review']);
@@ -711,22 +794,38 @@ test('the endpoint falls back to the reply route family when the manifest has no
   assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct, '/other/config'), null);
 });
 
-test('a selected learning role config route overrides the active chat route', async () => {
-  const endpoint = PREFIX + 'targets/profile-b/roles/role-b/config';
-  const harnessed = harness(['role.growth.skills'], {}, endpoint);
+test('learning policies are global and scoped selectors only filter records', () => {
+  const start = app.indexOf('function renderLearningPage(){');
+  const end = app.indexOf('/* 2026-09-30 接回：', start);
+  assert.ok(start >= 0 && end > start, 'the active learning page renderer must exist');
+  const page = app.slice(start, end);
+  assert.match(page, /\['strategy','全局策略'\]/);
+  assert.match(page, /configEditors\('growthConfigWorkspace',\['role\.growth\.skills'\]/);
+  assert.match(page, /configEditors\('expressionLearningConfigWorkspace',\['expression\.learning'\]/);
+  assert.doesNotMatch(page, /strategyRole|learningRoleControls\('strategy'|roleConfigApiFor\(strategy/);
+  assert.doesNotMatch(page, /role_growth/,
+    'per-person growth permissions belong to the private member editor');
+  assert.match(page, /learningTab==='strategy'/);
+  assert.match(page, /const scopeControls=scopeKey\?learningScopeControls/,
+    'object selection is rendered only by the record tabs');
+  assert.match(page, /learningRoleControls\(scopeKey,'筛选记录',scopeControls\)/);
+});
+
+test('global learning policy editors use the shared config route', async () => {
+  const harnessed = harness(['role.growth.skills']);
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
   await drains();
   assert.equal(harnessed.requests.length, 1);
-  assert.equal(harnessed.requests[0].route, 'targets/profile-b/roles/role-b/config');
+  assert.equal(harnessed.requests[0].route, 'config');
   harnessed.requests[0].resolve(payload('role.growth.skills'));
   await drains();
 });
 
 /* ==== 2026-09-28 新接入的四个分区 ==== */
 
-test('the four new sections each read their own group under the shared route family', async () => {
+test('new sections use their registered scope and read their own group under the shared route', async () => {
   const kinds = Object.keys(NEW_KINDS);
   const harnessed = harness(kinds);
   harnessed.editors.restore();
@@ -750,6 +849,32 @@ test('the four new sections each read their own group under the shared route fam
   /* 层由各分区自己的契约决定，不是一律 window。 */
   assert.deepEqual(plain(instances.map(item => item.state.status.scope)),
     kinds.map(kind => NEW_KINDS[kind].scope || 'window'));
+});
+
+test('reaction retrieval settings render as installation-wide and do not use window draft keys', async () => {
+  const harnessed = harness(['reaction']);
+  harnessed.editors.restore();
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+  harnessed.requests[0].resolve(payload('reaction'));
+  await drains();
+  const painted = harnessed.painted.reaction;
+  assert.match(painted, /插件安装全局/);
+  assert.match(painted, /视觉复核/);
+  const instance = harnessed.editors.state.instances[0];
+  instance.state.draft.candidate_limit = 7;
+  const saving = instance.save(false);
+  await drains();
+  assert.equal(harnessed.requests[1].method, 'POST');
+  harnessed.requests[1].reject(new Error('temporary timeout'));
+  await saving;
+  await drains();
+  const storedKeys = [...harnessed.store.keys()];
+  assert.equal(storedKeys.length, 1);
+  const keyParts = JSON.parse(storedKeys[0].slice('companion-workbench.v1:'.length));
+  assert.equal(keyParts[2], 'installation');
+  assert.equal(keyParts[3], 'reaction');
 });
 
 test('a new section saves only the changed fields with its own token', async () => {
@@ -790,23 +915,22 @@ test('a value outside the published bounds never reaches the network', async () 
   assert.equal(instance.state.bad, true);
 });
 
-test('the growth skill list is edited as text because the parser is lenient', async () => {
-  const harnessed = harness(['role_growth']);
+test('the role skill list is edited as text because the parser is lenient', async () => {
+  const harnessed = harness(['role.growth.skills']);
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
   await drains();
-  harnessed.requests[0].resolve(payload('role_growth'));
+  harnessed.requests[0].resolve(payload('role.growth.skills'));
   await drains();
   const [instance] = harnessed.editors.state.instances;
-  /* 后端 custom_skills() 同时接受 JSON 数组与逗号分隔，超限只是截断，
-     所以页面不做 JSON 校验，原样提交。 */
+  /* The domain parser accepts JSON arrays and comma-separated text. */
   instance.state.draft.custom_skills = '写作, 植物学';
   const saving = instance.save(false);
   await drains();
   assert.equal(harnessed.requests[1].body.changes.custom_skills, '写作, 植物学');
   harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
-    status: newSection('role_growth', {custom_skills: '写作, 植物学'}, TOKEN('b'))});
+    status: newSection('role.growth.skills', {custom_skills: '写作, 植物学'}, TOKEN('b'))});
   await saving;
   await drains();
   assert.equal(instance.state.bad, false);
@@ -1116,7 +1240,7 @@ test('the reference section keeps the daily outfit switch independent', async ()
   assert.deepEqual(rendered.sort(), plain(Object.keys(NEW_KINDS['photo.reference'].settings)).sort());
 });
 
-test('the skill group is its own section and says it is shared across the role', async () => {
+test('the skill group is installation-wide and has no role or window override', async () => {
   const harnessed = harness(['role.growth.skills']);
   harnessed.editors.restore();
   harnessed.editors.paint();
@@ -1127,16 +1251,11 @@ test('the skill group is its own section and says it is shared across the role',
   const painted = harnessed.painted['role.growth.skills'];
   assert.ok(painted, 'the skills section must paint into its own host, keys: '
     + JSON.stringify(Object.keys(harnessed.painted)));
-  /* 角色共享的组不能只标「当前会话」——那会让人以为设置只属于这一次对话。 */
-  assert.match(painted, /角色共享/, 'scope label was: '
+  /* Installation-wide policy must not expose role or window layers. */
+  assert.match(painted, /插件安装全局/, 'scope label was: '
     + (/<span class="wb-scope">([^<]*)</.exec(painted) || [])[1]);
-  /* 技能按角色共享，页面必须说清这一点，否则用户会以为它是某个会话的私有设置。
-     单分段的分组标题按内核约定不渲染（单段不强加小标题），所以生效范围要靠卡片标题与说明。 */
   assert.match(painted, /<h3>技能领域<\/h3>/);
-  assert.match(painted, /技能属于角色本身/);
-  assert.match(painted, /会话之间共享|不随会话改变/);
-  assert.match(painted, /第一次设置会把这份清单记为角色级/);
-  /* 双层组会公布 role 层；标签不该退化成「当前会话」独占的说法。 */
+  assert.doesNotMatch(painted, /当前会话可覆盖|data-layer="window"|data-layer="role"/);
   assert.doesNotMatch(painted, /scope_key|binding_revision|operation_id/);
   /* 两个字段都不能在分组里弄丢。 */
   const container = harnessed.editors.state.instances[0].state.container;
@@ -1144,18 +1263,27 @@ test('the skill group is its own section and says it is shared across the role',
   assert.deepEqual(rendered.sort(), plain(Object.keys(NEW_KINDS['role.growth.skills'].settings)).sort());
 });
 
-test('the permissions group no longer claims the skill fields', async () => {
-  const harnessed = harness(['role_growth']);
+test('expression learning exposes separate private and group cadence with a shared group budget', async () => {
+  const harnessed = harness(['expression.learning']);
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
   await drains();
-  harnessed.requests[0].resolve(payload('role_growth'));
+  harnessed.requests[0].resolve(payload('expression.learning'));
   await drains();
-  const container = harnessed.editors.state.instances[0].state.container;
-  const rendered = plain(container.groups.flatMap(group => group.fields));
-  /* 拆组后权限组只剩两个开关；技能字段若仍在这里就是漏迁。 */
-  assert.deepEqual(rendered.sort(), ['proposals_enabled', 'read_enabled']);
+  const painted = harnessed.painted['expression.learning'];
+  assert.match(painted, /私聊学习扫描间隔/);
+  assert.match(painted, /群聊学习扫描间隔/);
+  assert.match(painted, /全局群聊每日学习批次/);
+  assert.match(painted, /插件安装全局/);
+  const rendered = plain(harnessed.editors.state.instances[0].state.container.groups
+    .flatMap(group => group.fields)).sort();
+  assert.deepEqual(rendered, Object.keys(NEW_KINDS['expression.learning'].settings).sort());
+});
+
+test('window growth permissions are absent from the shared configuration editor', () => {
+  assert.doesNotMatch(adapter, /role_growth\s*:/);
+  assert.doesNotMatch(app, /mountConfigEditor\('growthConfigWorkspace',\s*\[[^\]]*role_growth/);
 });
 
 test('the wardrobe note states its bound because the registry cannot enforce one', async () => {
@@ -1186,8 +1314,11 @@ test('the group participation section splits the three independent chains', asyn
     assert.match(painted, new RegExp(`data-wb-group="${id}"`), id);
   assert.match(painted, /玩笑护栏/);
   assert.doesNotMatch(painted, /关闭这一项时，下面五项都不起作用|关闭总闸时下面四项不起作用|关闭总闸时下面七项都不起作用/);
-  /* 分组不能把没提到的字段弄丢：全部 20 项都要在界面上。 */
+  /* 分组不能把没提到的字段弄丢，打断图也必须进入复读设置区。 */
   const container = harnessed.editors.state.instances[0].state.container;
+  assert.ok(container.groups.find(group => group.id === 'repeat').fields.includes('group_repeat_interrupt_image_path'));
+  assert.match(painted, /打断复读时发的图片/);
+  assert.match(painted, /复读只会跟读原句或打断/);
   const rendered = plain(container.groups.flatMap(group => group.fields));
   assert.deepEqual(rendered.sort(), plain(Object.keys(NEW_KINDS.group_participation.settings)).sort());
 });
@@ -1404,6 +1535,68 @@ function fieldRow(markup, name) {
   return markup.slice(start, end === -1 ? markup.length : end);
 }
 
+test('inherited contact values render once and show the old value only after a draft override', async () => {
+  const harnessed = harness(['proactive.contact']);
+  harnessed.editors.restore();
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+  const response = payload('proactive.contact', {
+    screen_glance_daily_limit: 1, screen_glance_goodnight_enabled: false,
+  }, TOKEN('a'));
+  const section = response.sections['proactive.contact'];
+  for (const name of ['screen_glance_daily_limit', 'screen_glance_goodnight_enabled']) {
+    section.provenance[name] = {layer: 'installation', explicit: false, revision: 1};
+  }
+  harnessed.requests[0].resolve(response);
+  await drains();
+
+  const [instance] = harnessed.editors.state.instances;
+  let row = fieldRow(harnessed.painted['proactive.contact'], 'screen_glance_daily_limit');
+  assert.doesNotMatch(row, /wb-ghost|wb-live/);
+  assert.match(row, /data-wb-field="screen_glance_daily_limit"[^>]*value="1"/);
+  row = fieldRow(harnessed.painted['proactive.contact'], 'screen_glance_goodnight_enabled');
+  assert.doesNotMatch(row, /wb-ghost|wb-live/);
+  assert.match(row, /已关闭/);
+
+  instance.state.draft.screen_glance_daily_limit = 2;
+  instance.attach();
+  row = fieldRow(harnessed.painted['proactive.contact'], 'screen_glance_daily_limit');
+  assert.match(row, /class="wb-ghost"[^>]*>继承值 1/);
+  assert.doesNotMatch(row, /wb-live/);
+});
+
+test('a legacy pending revision conflict restores its draft without replaying the rejected write', async () => {
+  const key = `companion-workbench.v1:${JSON.stringify(['inst', 'admin', 'scope-a', 'proactive.contact'])}`;
+  const store = new Map([[key, JSON.stringify({operation_key: 'old-conflict', edit_token: TOKEN('b'),
+    changes: {screen_glance_daily_limit: 2}, reset_to_inherit: [],
+    pending_reason: '配置已经更新。草稿已保留，读取新版本后再核对。'})]]);
+  const harnessed = harness(['proactive.contact'], {}, '', {store});
+  harnessed.editors.restore();
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+  harnessed.requests[0].resolve(payload('proactive.contact'));
+  await drains();
+
+  const [instance] = harnessed.editors.state.instances;
+  assert.equal(instance.state.pending, null);
+  assert.equal(instance.state.draft.screen_glance_daily_limit, 2);
+  assert.equal(store.size, 0, 'a known refusal is removed from pending storage');
+  assert.match(instance.state.notice, /服务端没有写入；草稿已恢复/);
+  await new Promise(resolve => setTimeout(resolve, 450));
+  assert.equal(harnessed.requests.length, 1, 'a confirmed refusal must not be replayed');
+
+  const saving = instance.save(false);
+  await drains();
+  assert.equal(harnessed.requests[1].body.operation_key, 'config-key', 'a manual save uses a new operation');
+  assert.deepEqual(plain(harnessed.requests[1].body.changes), {screen_glance_daily_limit: 2});
+  harnessed.requests[1].resolve({result: {operation_id: 'new-save', replayed: false},
+    status: payload('proactive.contact', {screen_glance_daily_limit: 2}, TOKEN('c'))});
+  await saving;
+  await drains();
+});
+
 test('the contact section renders all 164 fields exactly once', async () => {
   const harnessed = await contactLoaded();
   const painted = harnessed.painted['proactive.contact'];
@@ -1429,32 +1622,17 @@ test('the contact section renders all 164 fields exactly once', async () => {
   assert.match(painted, /<b>窗口<\/b>/);
 });
 
-test('the contact card says the relationship budgets are not per-conversation', async () => {
+test('the contact card clearly identifies global defaults and personal overrides', async () => {
   const harnessed = await contactLoaded();
   const painted = harnessed.painted['proactive.contact'];
-  /* 四层组不能只标「角色共享」：真正管着这一段关系的是关系层。 */
-  assert.match(painted, /安装 \/ 角色 \/ 关系共享 · 本会话可覆盖/);
-  assert.doesNotMatch(painted, /<span class="wb-scope">当前会话/);
-  assert.match(painted, /不是这一次会话/);
-  assert.match(painted, /在窗口层保存会被拒绝/);
-  /* 层轨上这两个字段的窗口节点是锁定态，鼠标悬停说「不适用于这一字段」；
-     其余字段仍然可以在窗口层覆盖。 */
-  for (const name of CONTACT_RELATIONSHIP_BUDGET) {
-    assert.match(fieldRow(painted, name), /窗口层不适用于这一字段/, name);
-    assert.match(fieldRow(painted, name), /is-locked/, name);
-  }
-  /* 其余字段在窗口层照旧可写：层轨上该节点不是锁定态。
-     别去断言「窗口层可写」这句话——页面从来没输出过它（只输出
-     「当前生效值来自这里」或「X 层不适用于这一字段」），那样的断言恒假。 */
-  const ordinary = fieldRow(painted, 'interval_seconds');
-  assert.match(ordinary, /data-layer="window"/, '普通字段应有窗口层节点');
-  assert.doesNotMatch(ordinary, /is-locked/, '普通字段的窗口节点不该锁');
-  assert.match(fieldRow(painted, CONTACT_RELATIONSHIP_BUDGET[0]), /is-locked/,
-    '关系级额度字段的窗口节点必须锁');
-  assert.match(fieldRow(painted, CONTACT_RELATIONSHIP_BUDGET[0]), /窗口层不适用于这一字段/);
-  assert.match(fieldRow(painted, 'interval_seconds'), /is-editable/);
-  /* 暂停的继承语义要写清楚：祖先层更晚的到期时间在本层清空后仍然生效。 */
-  assert.match(painted, /祖先层更晚的到期时间仍然生效/);
+  assert.match(painted, /<span class="wb-scope">全局默认设置/);
+  assert.match(painted, /全局默认；个人偏好在私聊用户页调整/);
+  assert.match(painted, /每个会话 24 小时内最多联系/);
+  assert.match(fieldRow(painted, 'max_relationship_contacts_24h'), /同一用户与角色的所有会话合计/);
+  assert.doesNotMatch(painted, /默认写在窗口层|本会话可覆盖|当前生效值来自窗口/);
+  /* 公共入口说明全局暂停，个人暂停仍由私聊用户设置控制。 */
+  assert.match(painted, /全局暂停与个人暂停取较晚的结束时间/);
+  assert.doesNotMatch(painted, /默认写在窗口层|同步管理当前窗口的主动联系授权/);
   /* 内部名词不能漏到界面上。 */
   assert.doesNotMatch(painted, /scope_key|binding_revision|operation_id|provider_id/);
 });
@@ -1517,12 +1695,18 @@ test('the role dossier maps profile fields onto the purpose-built controls', () 
       hair: 'line', eyes: 'line', clothing: 'line', image_identity_hint: 'line',
       world_name: 'line', era: 'line', tone: 'line',
       platform_group_chat: 'line', platform_screen: 'line', platform_bilibili: 'line',
-      platform_qzone: 'line', platform_library: 'line'});
+      platform_qzone: 'line', platform_library: 'line', main_companion_subject: 'catalog-select',
+      expression_private_source_subject_ids: 'identity-checklist',
+      expression_private_application_subject_ids: 'identity-checklist'});
   assert.equal(profile.chipOptions.gender.mode, 'single');
   assert.deepEqual(plain(profile.chipOptions.gender.options), ['女', '男', '无性别']);
   assert.deepEqual(plain(profile.chipOptions.species.options),
     ['人类', '精灵', '仿生人', 'AI', '兽人']);
-  assert.deepEqual(plain(profile.segmentedChoices), ['world_adaptation_mode']);
+  assert.deepEqual(plain(profile.segmentedChoices), ['world_adaptation_mode',
+    'expression_private_source_mode', 'expression_private_application_mode']);
+  assert.deepEqual(plain(profile.choices.expression_private_source_mode),
+    {owner: '主要陪伴对象', selected: '指定对象', all: '所有获准私聊'});
+  assert.equal(profile.sections.at(-1).id, 'expression_learning');
   const relationship = window.CompanionConfigEditors.spec.relationship_profile;
   assert.equal(relationship.inputs.user_birthday, 'date');
   assert.equal(relationship.inputs.user_gender, 'chips');
@@ -1556,6 +1740,30 @@ test('role profile controls render as date, chips, quotes, tags and a segmented 
   assert.match(html, /name="wb-world_adaptation_mode" value="auto" checked/);
   assert.match(html, /name="wb-world_adaptation_mode" value="off"/);
   assert.match(html, /现代日常/);
+  assert.match(html, /data-wb-section-panel="expression_learning"/);
+  assert.match(html, /data-wb-field="main_companion_subject"/);
+  assert.match(html, /name="wb-expression_private_source_mode" value="owner"/);
+  assert.match(html, /wb-identity-picker/);
+});
+
+test('role learning scope choices use only private identities bound to the active role', async () => {
+  const harnessed = harness(['role_profile'], {}, '', {people: [
+    {subject_id: 'owner-a', display_name: '主要对象', role_id: 'role-a', bot_id: 'bot-a', private_target: true},
+    {subject_id: 'group-a', display_name: '群成员', role_id: 'role-a', bot_id: 'bot-a', private_target: false},
+    {subject_id: 'other-role', display_name: '其他角色', role_id: 'role-b', bot_id: 'bot-a', private_target: true},
+    {subject_id: 'other-bot', display_name: '其他机器人', role_id: 'role-a', bot_id: 'bot-b', private_target: true},
+  ]});
+  const [instance] = await loaded(harnessed, ['role_profile']);
+  await drains();
+  instance.state.draft.main_companion_subject = 'owner-a';
+  instance.state.draft.expression_private_source_subject_ids = '["owner-a"]';
+  harnessed.editors.paint();
+  const html = harnessed.painted.role_profile;
+  assert.match(html, /<option value="owner-a"[^>]*>主要对象/);
+  assert.match(html, /data-wb-identity-id="owner-a" checked/);
+  assert.doesNotMatch(html, /data-wb-identity-id="group-a"/);
+  assert.doesNotMatch(html, /data-wb-identity-id="other-role"/);
+  assert.doesNotMatch(html, /data-wb-identity-id="other-bot"/);
 });
 
 test('journal presentation swaps chapter panels without repainting or losing the draft', async () => {

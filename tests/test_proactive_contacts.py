@@ -7,13 +7,15 @@ from unittest.mock import patch
 
 from companion_v2.agenda.models import AgendaTarget, Schedule
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.conversation.delivery import DeliveryReceipt
 from companion_v2.conversation.reply_settings import GROUP as PRESENTATION_GROUP
 from companion_v2.conversation.text_processing import TEXT_DEFAULTS
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.delivery.service import DeliveryRequest
-from companion_v2.execution.models import TaskError
+from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from companion_v2.identity_policy.personas import ConversationRoute
+from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.proactive.configuration import GROUP, target_for
 from companion_v2.proactive.prompts import contact_output
 from companion_v2.proactive.service import CONTACT_KIND
@@ -408,6 +410,52 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         await self.delivery_state(app, task.task_id, "failed")
         self.assertEqual(wire_calls, [])
 
+    async def test_two_eventchecker_refusals_pause_contact_generation_for_the_account(self):
+        app = await self.enabled()
+        context = self.contact_context()
+        now = self.clock.now()
+        for index in range(2):
+            payload = f"eventchecker refusal {index}"
+            request = DeliveryRequest(GROUP, f"eventchecker-{index}", context,
+                f"eventchecker-source-{index}", digest(payload), now, now + timedelta(minutes=5))
+            receipt = DeliveryReceipt(request.delivery_id, f"eventchecker-operation-{index}", context.key,
+                request.payload_hash, self.sender.binding, "not_sent", f"eventchecker-receipt-{index}",
+                failure_code="qq_eventchecker_1200")
+            app.outbound.on_receipt(request, receipt)
+            if index == 0:
+                app.outbound.on_receipt(request, replace(receipt, status="unknown",
+                    receipt_ref="eventchecker-unknown-receipt", failure_code=None))
+
+        generated_before_pause = len(self.called)
+        paused = await self.contact(app, self.opportunity("eventchecker-paused"))
+
+        self.assertEqual(paused.failure.code, "proactive_platform_cooldown")
+        self.assertEqual(len(self.called), generated_before_pause)
+        expected_until = now + timedelta(hours=2)
+        self.assertEqual(app.proactive.platform_circuit.cooldown_until(
+            self.contact_context(), at=self.clock.now()), expected_until)
+        other_window = self.other_window_context()
+        paused_other_window = await self.contact(app, self.opportunity(
+            "eventchecker-cross-window", scope=other_window.scope), context=other_window)
+        self.assertEqual(paused_other_window.failure.code, "proactive_platform_cooldown")
+        self.clock.advance(timedelta(hours=2))
+        self.assertIsNone(app.proactive.platform_circuit.cooldown_until(
+            self.contact_context(), at=self.clock.now()))
+
+    async def test_unknown_and_other_not_sent_receipts_do_not_trip_platform_circuit(self):
+        app = await self.enabled()
+
+        async def refused(envelope):
+            return replace(self.receipt(envelope, "not_sent"), failure_code="authorization_revoked")
+
+        self.send_behavior = refused
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, "failed")
+
+        self.assertIsNone(app.proactive.platform_circuit.cooldown_until(
+            self.contact_context(), at=self.clock.now()))
+        self.assertEqual(len(self.called), 1)
+
     async def test_queued_draft_is_cancelled_on_pause_and_does_not_return_when_pause_expires(self):
         app = await self.enabled()
         opportunity = self.opportunity()
@@ -624,6 +672,37 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("只用标为 dedup_candidate", prompt.instruction)
         self.assertIn("不要把缺少这些材料判为重复", prompt.instruction)
         self.assertIn("除程序负责的授权和安全检查外，请选择 send", prompt.instruction)
+
+    async def test_confirmed_administrator_test_does_not_enable_the_saved_global_default(self):
+        app = await self.enabled()
+        global_target = target_for(self.contact_context()).chain()[0]
+        self.settings(app, {"enabled": False, "automatic_enabled": True}, target=global_target, actor=self.core).unwrap()
+        ordinary = await self.contact(app, self.opportunity("ordinary-master-off"))
+        self.assertEqual(ordinary.failure.code, "no_feasible_thought")
+        task = (await self.contact(app, self.opportunity("confirmed-master-off"),
+                                   administrator_test=True)).unwrap().task
+        await self.delivery_state(app, task.task_id, "delivered")
+        self.assertEqual(len(self.sent), 1)
+        public = app.configuration.read(self.core, target=global_target, group_id=GROUP,
+                                        observed_at=self.clock.now()).unwrap()
+        self.assertFalse(public.values[GROUP + ".enabled"])
+        self.assertEqual(self.preferences(app).reason("chat"), "proactive_disabled")
+        self.settings(app, {"chat.enabled": False}).unwrap()
+        purpose_off = await self.contact(app, self.opportunity("test-purpose-off"), administrator_test=True)
+        self.assertEqual(purpose_off.failure.code, "no_feasible_thought")
+        self.settings(app, {"chat.enabled": True}).unwrap()
+        self.grant(self.important, self.contact_context().scope, GROUP)
+        self.policy.set_tier(self.important.subject, AuthorizationTier.STANDARD,
+            expected_revision=self.policy.revision, observed_at=self.clock.now())
+        self.assertTrue(app.tasks.check_context_access(self.contact_context(), action=GROUP,
+                                                      observed_at=self.clock.now()).is_success)
+        for grant in self.identity.snapshot().grants:
+            if grant.capability == GROUP and grant.scope == self.contact_context().scope:
+                self.identity.revoke_grant(grant.grant_id,
+                    expected_revision=self.identity.revision, revoked_at=self.clock.now())
+        denied = await self.contact(app, self.opportunity("test-revoked"), administrator_test=True)
+        self.assertEqual(denied.failure.code, "authorization_revoked")
+        self.assertEqual(len(self.sent), 1)
 
     async def test_accepted_receipt_is_not_reported_as_delivered(self):
         app = await self.enabled()

@@ -15,17 +15,28 @@ test("学习工作台按六页导航并加载每个真实数据模块", () => {
   const review = fs.readFileSync(path.join(PAGE, "self-review-page.js"), "utf8");
   const learningReview = fs.readFileSync(path.join(PAGE, "learning-review-page.js"), "utf8");
   const overview = fs.readFileSync(path.join(PAGE, "learning-overview.js"), "utf8");
-  for (const section of ["overview", "review", "chain", "expression", "semantic", "reflection"]) {
+  for (const section of ["overview", "strategy", "review", "chain", "expression", "semantic", "reflection"]) {
     assert.match(app, new RegExp(`\\['${section}',`));
   }
   assert.match(app, /id="selfReviewWorkspace"/);
   assert.match(app, /CompanionSelfReviewPage\?\.mount\(selfReviewHost,\{sources:reviewSources,state:'active'\}\)/);
-  assert.match(app, /growthApi:skillScope\.role\.growth_api/);
+  const rendererStart = app.indexOf('function renderLearningPage(){');
+  const rendererEnd = app.indexOf('/* 2026-09-30 接回：', rendererStart);
+  const renderer = app.slice(rendererStart, rendererEnd);
+  assert.match(renderer, /const scopeControls=scopeKey\?learningScopeControls/);
+  assert.match(renderer, /learningRoleControls\(scopeKey,'筛选记录',scopeControls\)/);
+  const strategyStart = renderer.indexOf("learningTab==='strategy'");
+  const reviewStart = renderer.indexOf("learningTab==='review'", strategyStart);
+  assert.ok(strategyStart >= 0 && reviewStart > strategyStart);
+  assert.doesNotMatch(renderer.slice(strategyStart, reviewStart),
+    /learningScopeControls|learningRoleControls|roleConfigApi/);
+  assert.doesNotMatch(app, /growthApi:skillScope\.role\.growth_api/);
   assert.match(app, /learningReviewSources\(\)/);
-  assert.doesNotMatch(app, /learningScopeControls\('reflection'/);
+  assert.match(app, /sources:learningReviewSources\(\{includeGroups:true\}\),semantic:\{global:true\}/);
   assert.match(app, /CompanionLearningOverviewPage\?\.mount/);
   assert.match(app, /CompanionLearningReviewPage\?\.mount/);
-  assert.match(app, /CompanionSemanticPage\?\.mount\(semanticHost/);
+  assert.match(app, /globalSettingsOnly:true/);
+  assert.match(app, /'\/astrbot_plugin_private_companion_v2\/config',true/);
   assert.match(review, /state:"active"/);
   assert.match(review, /state:"decided"/);
   assert.doesNotMatch(review, /CompanionProduct\.role|CompanionProduct\.target/);
@@ -39,7 +50,7 @@ test("学习工作台按六页导航并加载每个真实数据模块", () => {
   assert.doesNotMatch(overview, /session_id=/);
 });
 
-test("每日复盘只展示多角色范围中仍有效的指导及真实运行参数", async () => {
+test("每日复盘汇总多个数据来源中仍有效的指导及真实运行参数", async () => {
   const pageSource = fs.readFileSync(path.join(PAGE, "self-review-page.js"), "utf8");
   const makeReview = (id, state = "accepted", extra = {}) => ({
     item_id:id, run_id:"run-" + id, kind:"try_next_time", state,
@@ -94,9 +105,11 @@ test("每日复盘只展示多角色范围中仍有效的指导及真实运行�
   ]);
   assert.match(root.innerHTML, /对象 A · 角色 A/);
   assert.match(root.innerHTML, /对象 B · 角色 B/);
-  assert.match(root.innerHTML, /复盘窗口/);
+  assert.match(root.innerHTML, /复盘周期/);
+  assert.match(root.innerHTML, /记录归属/);
+  assert.doesNotMatch(root.innerHTML, /复盘窗口|角色范围/);
   assert.match(root.innerHTML, /至少 1 条/);
-  assert.match(root.innerHTML, /无可复盘时/);
+  assert.match(root.innerHTML, /空结果重查/);
   assert.match(root.innerHTML, /生效中的自我指导/);
   assert.match(root.innerHTML, /自动应用/);
   assert.match(root.innerHTML, /已过期/);

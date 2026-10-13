@@ -1,31 +1,20 @@
-"""Real optional Image owner with local bytes and an ordinary native registry."""
+"""Real internal Image owner and bundled lease with local backend bytes."""
 
-import importlib
-from pathlib import Path
-import sys
 from types import SimpleNamespace as NS
-import unittest
 
 from astrbot_host.native_extensions import NativeExtensionRegistry
+from astrbot_host.native_extensions.builtins import MANAGED_EXTENSIONS
 from astrbot_host.native_extensions.images import image_result_handler
+from astrbot_host.native_extensions.image_native.owner import NativeImageOwner
+from astrbot_host.native_extensions.image_native.adapter import NativeImageProvider
+from astrbot_host.native_extensions.image_native.types import BackendResult
+from companion_v2.product import PRODUCT_VERSION
 from tests.test_conversation_images import image_bytes
+from tests.native_internal_support import internal_lease
 
 
 def image_types():
-    plugin_parent = str(Path(__file__).resolve().parents[2])
-    sys.path.insert(0, plugin_parent)
-    try:
-        prefix = "astrbot_plugin_image_companion.image_companion.native_v2."
-        owner = importlib.import_module(prefix + "owner").NativeImageOwner
-        provider = importlib.import_module(prefix + "adapter").NativeImageProvider
-        result = importlib.import_module(prefix + "types").BackendResult
-        return owner, provider, result
-    except ModuleNotFoundError as error:
-        if error.name and error.name.startswith("astrbot_plugin_image_companion"):
-            raise unittest.SkipTest("native integration requires the optional Image package") from error
-        raise
-    finally:
-        sys.path.remove(plugin_parent)
+    return NativeImageOwner, NativeImageProvider, BackendResult
 
 
 class ImageBackend:
@@ -56,13 +45,13 @@ class NativeImageFixture:
         self.image_backend = ImageBackend(result_type)
         self.image_owner = owner_type(directory, self.image_backend)
         self.addAsyncCleanup(self.image_owner.close)
-        self.image_port = provider_type(self.image_owner, package_version="0.5.0", artifact_hash="synthetic-image-package")
-        self.image_star = NS(root_dir_name="astrbot_plugin_image_companion", name="astrbot_plugin_image_companion",
-            version="0.5.0", activated=True, star_cls=NS(extension_api=NS(companion_v2_native=lambda: self.image_port)))
-        self.image_context = NS(get_all_stars=lambda: [self.image_star])
+        self.image_port = provider_type(self.image_owner, package_version=PRODUCT_VERSION, artifact_hash="synthetic-image-package")
+        self.image_lease = internal_lease(self.image_port)
+        self.image_context = NS(get_all_stars=lambda: ())
         handlers = {action: lambda invocation, result: image_result_handler(invocation, result, observed_at=now())
                     for action in ("image.generate", "image.edit", "image.mask_edit")}
-        registry = NativeExtensionRegistry(self.image_context, result_handlers=handlers, now=now)
-        self.addCleanup(registry.close)
+        registry = NativeExtensionRegistry(self.image_context, result_handlers=handlers, now=now,
+            bundled_extensions=(self.image_lease,), managed_extensions=MANAGED_EXTENSIONS)
+        self.addAsyncCleanup(registry.aclose)
         self.assertEqual(len(registry.declarations()), 3, registry.issues)
         return registry

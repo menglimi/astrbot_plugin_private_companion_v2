@@ -1,10 +1,60 @@
 """Remove newer tables when constructing historical upgrade fixtures."""
 
-from companion_v2.storage.schema import MEMORY_TABLES, V10_MIGRATION_STATEMENTS, V15_MIGRATION_STATEMENTS
+from companion_v2.storage.schema import (
+    MEMORY_TABLES, V10_MIGRATION_STATEMENTS, V15_MIGRATION_STATEMENTS, V36_MIGRATION_STATEMENTS,
+)
+
+
+def remove_v60(connection):
+    connection.execute('DROP TABLE IF EXISTS "proactive_schedule_diagnostics"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v59-to-v60'")
+
+
+def remove_v59(connection):
+    remove_v60(connection)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(laya_decision_events)")}
+    for column in ("processing_json", "response_json", "request_json"):
+        if column in columns:
+            connection.execute(f'ALTER TABLE laya_decision_events DROP COLUMN "{column}"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v58-to-v59'")
+
+
+def remove_v58(connection):
+    remove_v59(connection)
+    connection.execute('ALTER TABLE expression_style_signals DROP COLUMN applicability_json')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v57-to-v58'")
+
+
+def remove_v57(connection):
+    remove_v58(connection)
+    connection.execute('DROP TABLE IF EXISTS "proactive_platform_circuits"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v56-to-v57'")
+
+
+def remove_v56(connection):
+    remove_v57(connection)
+    connection.execute('DROP TABLE IF EXISTS "laya_decision_events"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v55-to-v56'")
+
+
+def remove_v55(connection):
+    """Restore the v54 failure-code constraint for historical schema fixtures."""
+    remove_v56(connection)
+    connection.execute("PRAGMA foreign_keys = OFF")
+    if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_call_failures'").fetchone():
+        connection.execute("CREATE TEMP TABLE model_call_failures_v54_saved AS SELECT * FROM model_call_failures")
+        connection.execute('DROP TABLE "model_call_failures"')
+        connection.execute(V36_MIGRATION_STATEMENTS[0])
+        connection.execute("INSERT INTO model_call_failures_v36 SELECT * FROM model_call_failures_v54_saved")
+        connection.execute("DROP TABLE model_call_failures_v54_saved")
+        connection.execute("ALTER TABLE model_call_failures_v36 RENAME TO model_call_failures")
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v54-to-v55'")
 
 
 def remove_v54(connection):
     """Undo incremental reply publication records before older fixtures."""
+    remove_v55(connection)
     connection.execute('DROP TABLE IF EXISTS "conversation_reply_streams"')
     connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v53-to-v54'")
 

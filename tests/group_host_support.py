@@ -36,6 +36,11 @@ class GroupFixture(MultiFixture):
     def setUp(self):
         super().setUp()
         self.native = GroupContext()
+        self.window_personas.update({
+            "qq-main:GroupMessage:300": "original",
+            "qq-main:GroupMessage:301": "original",
+            "qq-second:GroupMessage:300": "original",
+        })
         self.controller = self.make_controller(group_config())
 
     def group_event(self, target="group-a", identifier="group-message", sender="200", *, unique=False, text="大家好"):
@@ -48,6 +53,7 @@ class GroupFixture(MultiFixture):
         event.message_obj.session_id = target.group_id
         event.session.session_id = sender + "_" + target.group_id if unique else target.group_id
         event.unified_msg_origin = f"{target.platform_id}:GroupMessage:{event.session.session_id}"
+        self.window_personas.setdefault(event.unified_msg_origin, "original")
         event.message_obj.raw_message = dict(post_type="message", message_type="group", self_id=int(target.account_id),
             user_id=int(sender), sender={"user_id": int(sender)}, group_id=int(target.group_id), message_id=identifier)
         event.created_at = self.clock.now().timestamp()

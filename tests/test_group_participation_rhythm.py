@@ -208,7 +208,7 @@ class RepeatFollowTests(GroupRhythmFixture):
     def test_the_reference_appears_only_for_a_real_burst(self):
         turn = self.turn(["哈哈"], recent=burst_history("哈哈", count=3))
         self.assertIn("群聊复读参考", turn["hints"])
-        self.assertIn("跟随一句同样的内容", turn["hints"])
+        self.assertIn("参与跟读时只原样发送这一句", turn["hints"])
         self.assertEqual(turn["act"], REPEAT_FOLLOW)
         self.assertEqual(turn["act_signature"], "哈哈")
         for texts, recent in ((["哈哈"], burst_history("哈哈", count=1)),
@@ -236,7 +236,7 @@ class RepeatFollowTests(GroupRhythmFixture):
         # The next repeat arrives while the joined burst is still running.
         second_at = NOW + timedelta(seconds=60)
         second = self.turn(["哈哈"], recent=burst_at(second_at), at=second_at, batch="batch-stop")
-        self.assertIn("停止跟读", second["hints"])
+        self.assertIn("参与打断时只发送管理员配置的打断语", second["hints"])
         self.assertIn("禁止复读", second["hints"])
         self.assertEqual(second["act"], REPEAT_INTERRUPT)
         self.participation._record(self.context, "batch-stop", replied=False)
@@ -255,7 +255,7 @@ class RepeatFollowTests(GroupRhythmFixture):
                        group_repeat_interrupt_probability=0.4)
         late = NOW + timedelta(minutes=200)
         preferred = self.turn(["哈哈"], recent=burst_at(late), at=late)
-        self.assertIn("停止跟读", preferred["hints"])
+        self.assertIn("参与打断时只发送管理员配置的打断语", preferred["hints"])
         self.assertEqual(preferred["act"], REPEAT_INTERRUPT)
         # The shared V1 daily budget closes rememberable bursts as well.
         self.configure(group_interject_max_daily=1)
@@ -272,8 +272,13 @@ class RepeatFollowTests(GroupRhythmFixture):
                           ("group_interject_feedback_window_seconds", 30)):
             with self.subTest(name=name), self.assertRaises(Exception):
                 fields[CONFIG_GROUP + "." + name].validate(bad)
-        # A value written outside the registry is still refused by its consumer.
-        self.configure(group_repeat_interrupt_text="x" * 81)
+        with self.assertRaises(Exception):
+            self.configure(group_repeat_interrupt_text="x" * 81)
+        # A value written outside the owner is still refused by its consumer.
+        self.configure(group_repeat_interrupt_text="正常打断语")
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE configuration_values SET value_json = ? WHERE target_key = ? AND field_id = ?",
+                (json.dumps("x" * 81), self.target().key, CONFIG_GROUP + ".group_repeat_interrupt_text"))
         with self.assertRaises(Exception):
             self.turn(["在吗"])
 

@@ -5,7 +5,7 @@ window.CompanionScreenAccess = (() => {
   const messages = {
     screen_provider_unavailable:"未检测到可用的 Screen 原生扩展。请在 Screen 插件配置中启用 native_v2 并重载该插件后重试。",
     screen_provider_changed:"屏幕陪伴扩展已变化，请重新加载 V2 运行实例。",
-    screen_package_changed:"屏幕陪伴版本已变化，请重新读取能力状态。",
+    screen_package_changed:"屏幕陪伴包版本已变化。请升级已装配版本后再调整私聊授权。",
     screen_access_changed:"授权状态已变化，请重新读取后再保存。",
     capability_not_installed:"当前尚未启用屏幕陪伴。",
     capability_not_active:"屏幕陪伴能力已暂停或移除，需要先恢复能力。",
@@ -19,6 +19,10 @@ window.CompanionScreenAccess = (() => {
     staging_host_terminated:"V2 已停止，请重新加载插件。",
     core_access_required:"当前账号没有管理此授权的权限。",
     dashboard_identity_required:"请从已登录的 AstrBot 管理界面打开。",
+    staging_screen_session_active:"V2 仍在运行。请先停止当前运行实例，再回来升级屏幕陪伴包。",
+    staging_screen_upgrade_conflict:"屏幕陪伴安装状态已变化，请点击重新读取后核对。",
+    staging_screen_upgrade_invalid:"当前安装版本不能直接升级，请检查 V2 屏幕陪伴包版本。",
+    staging_screen_upgrade_failed:"屏幕陪伴升级未完成，请重新读取状态后再试。",
     bridge_timeout:"连接超时。可用同一个操作编号核对原请求。",
   };
   let node = null, path = "", status = null, pending = null, busy = false, notice = "", generation = 0;
@@ -49,8 +53,14 @@ window.CompanionScreenAccess = (() => {
     const canManage = status?.can_manage !== false;
     const command = pending;
     const issue = scopeIssue();
+    const packageChanged = status?.reason === "screen_package_changed";
+    const packageNotice = packageChanged
+      ? status.upgrade_available
+        ? `已装配版本 ${status.installed_package_version}，当前版本 ${status.package_version}。升级会保留当前私聊的屏幕授权。`
+        : "已发现屏幕陪伴包版本变化，但当前安装状态不能直接升级。请在宿主管理核对屏幕陪伴能力后重新读取。"
+      : "";
     const text = notice || issue || (!canManage ? messages.core_access_required : ready ? "屏幕工具已进入当前私聊；只有本轮确实需要桌面画面时才会采集。"
-      : status ? messages[status.reason] || "当前私聊尚未允许屏幕读取。" : "正在读取屏幕授权…");
+      : packageNotice || (status ? messages[status.reason] || "当前私聊尚未允许屏幕读取。" : "正在读取屏幕授权…"));
     const action = issue || !canManage ? "" : command ? "retry" : status ? (status.consented ? "disable" : "enable") : "";
     const label = command ? (busy ? "正在核对…" : "核对原请求")
       : status?.consented ? "撤回当前私聊授权" : "允许当前私聊按需看屏";
@@ -61,7 +71,8 @@ window.CompanionScreenAccess = (() => {
         <header><span class="reality-consent-mark"><i data-lucide="monitor-dot"></i></span><div><h4>按需采集当前桌面</h4><small>只在明确需要时调用一次；屏幕原件只进入本轮理解，不会变成出站图片。</small></div>
           <span class="reality-consent-state ${ready ? "is-ready" : ""}">${stateLabel}</span></header>
         <p role="status" aria-live="polite">${escapeHTML(text)}</p>
-        <div class="dialog-actions">${action ? `<button class="button small ${status?.consented ? "secondary" : "primary"}" type="button" data-screen-access-action="${action}" ${busy ? "disabled" : ""}>${busy ? "正在保存…" : label}</button>` : ""}</div>
+        <div class="dialog-actions">${action ? `<button class="button small ${status?.consented ? "secondary" : "primary"}" type="button" data-screen-access-action="${action}" ${busy ? "disabled" : ""}>${busy ? "正在保存…" : label}</button>` : ""}
+          ${!issue && canManage && status?.upgrade_available ? `<button class="button small primary" type="button" data-screen-access-action="upgrade" ${busy ? "disabled" : ""}>升级屏幕陪伴</button>` : ""}</div>
       </article>`;
     window.lucide?.createIcons({attrs:{"aria-hidden":"true"}});
   }
@@ -110,11 +121,54 @@ window.CompanionScreenAccess = (() => {
       }
     } finally { if (current(ticket)) { busy = false; render(); } }
   }
+  async function upgrade() {
+    if (!current(generation) || busy || !status?.upgrade_available || !status.can_manage
+        || typeof status.installed_package_version !== "string"
+        || typeof status.installed_artifact_hash !== "string"
+        || !Number.isInteger(status.installed_revision)) return;
+    const ticket = generation;
+    const confirmed = await window.CompanionConfirm?.({
+      title: "升级屏幕陪伴",
+      message: `将屏幕陪伴从 ${status.installed_package_version} 升级到 ${status.package_version}。当前私聊授权会保留；升级期间不会启动 V2。确认继续？`,
+      confirmText: "确认升级",
+    });
+    if (!confirmed || !current(ticket) || busy) return;
+    const previous = {
+      previous_version: status.installed_package_version,
+      previous_hash: status.installed_artifact_hash,
+      expected_revision: status.installed_revision,
+    };
+    busy = true; notice = "正在升级屏幕陪伴…"; render();
+    try {
+      const result = await product.request("POST", "staging/upgrade-screen", previous);
+      if (!current(ticket)) return;
+      if (result?.upgraded !== true || result.package_version !== status.package_version) throw {code:"invalid_response"};
+      busy = false;
+      status = null;
+      statusByScope.delete(statusKey(product.scopeKey(), path));
+      await load(ticket);
+      if (!current(ticket)) return;
+      if (status?.package_version === result.package_version && !status.upgrade_available) {
+        notice = `屏幕陪伴已升级到 ${result.package_version}。`;
+      } else if (!notice) {
+        notice = "升级已提交，但新版本状态还未确认；请重新读取后核对。";
+      }
+    } catch (error) {
+      if (current(ticket)) {
+        status = null;
+        statusByScope.delete(statusKey(product.scopeKey(), path));
+        notice = (error?.code === "bridge_timeout" || error?.message === "bridge_timeout")
+          ? "没有收到升级回执。请重新读取状态；如果版本已更新，就不需要再次升级。"
+          : errorText(error);
+      }
+    } finally { if (current(ticket)) { busy = false; render(); } }
+  }
   function click(event) {
     const action = event.target.closest("[data-screen-access-action]")?.dataset.screenAccessAction;
     if (!action) return;
     if (action === "refresh") { void load(); return; }
     if (action === "retry") { void save(pending?.enabled); return; }
+    if (action === "upgrade") { void upgrade(); return; }
     if (action === "enable" || action === "disable") void save(action === "enable");
   }
   function unmount() { ++generation; node?.removeEventListener("click", click); node = null; path = ""; status = null; pending = null; busy = false; notice = ""; }

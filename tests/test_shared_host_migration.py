@@ -8,6 +8,30 @@ from companion_v2.execution.models import digest
 
 
 class SharedHostMigrationTests(unittest.TestCase):
+    def test_existing_multi_host_rows_get_template_metadata_idempotently(self):
+        original = {
+            "staging": {"enabled": False},
+            "multi_host": {
+                "enabled": True,
+                "targets": [{"target_id": "p1", "platform_id": "default", "account_id": "100",
+                             "bot_id": "bot-1", "participant_id": "200"}],
+                "personas": [{"bot_id": "bot-1", "persona_id": "default", "role_id": "role-1"}],
+                "group_targets": [{"target_id": "g1", "platform_id": "default", "account_id": "100",
+                                   "bot_id": "bot-1", "group_id": "300"}],
+            },
+        }
+
+        migrated, changed = migrate_single_target_config(original)
+
+        self.assertTrue(changed)
+        self.assertEqual(migrated["multi_host"]["targets"][0]["__template_key"], "private_target")
+        self.assertEqual(migrated["multi_host"]["personas"][0]["__template_key"], "persona_mapping")
+        self.assertEqual(migrated["multi_host"]["group_targets"][0]["__template_key"], "group_target")
+        self.assertNotIn("__template_key", original["multi_host"]["targets"][0])
+        repeated, changed = migrate_single_target_config(migrated)
+        self.assertFalse(changed)
+        self.assertEqual(repeated, migrated)
+
     def test_enabled_single_target_becomes_a_shared_private_mapping(self):
         original = {
             "staging": {"enabled": True, "profile_id": "main"},
@@ -23,7 +47,9 @@ class SharedHostMigrationTests(unittest.TestCase):
         self.assertTrue(migrated["multi_host"]["enabled"])
         self.assertEqual(len(migrated["multi_host"]["targets"]), 1)
         self.assertEqual(migrated["multi_host"]["targets"][0]["participant_id"], "200")
+        self.assertEqual(migrated["multi_host"]["targets"][0]["__template_key"], "private_target")
         self.assertEqual(migrated["multi_host"]["personas"][0]["role_id"], "staging-role")
+        self.assertEqual(migrated["multi_host"]["personas"][0]["__template_key"], "persona_mapping")
         self.assertTrue(original["staging"]["enabled"])
         self.assertEqual(original["multi_host"]["targets"], [])
 
@@ -62,7 +88,14 @@ class SharedHostMigrationTests(unittest.TestCase):
                              "bot_id": "current-bot", "participant_id": "*"}], "group_targets": [],
                 "personas": [{"bot_id": "current-bot", "persona_id": "current-persona", "role_id": "current-role"}]},
         }
-        for _ in range(3):
+        migrated, changed = migrate_single_target_config(original)
+        self.assertTrue(changed)
+        self.assertEqual(migrated["multi_host"]["targets"][0]["__template_key"], "private_target")
+        self.assertEqual(migrated["multi_host"]["personas"][0]["__template_key"], "persona_mapping")
+        self.assertEqual(migrated["multi_host"]["targets"][0]["target_id"], "private-all")
+        self.assertEqual(len(migrated["multi_host"]["targets"]), 1)
+        original = migrated
+        for _ in range(2):
             migrated, changed = migrate_single_target_config(original)
             self.assertFalse(changed)
             self.assertEqual(migrated, original)
@@ -88,7 +121,8 @@ class SharedHostMigrationTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(migrated["multi_host"]["accounts"], [registered])
         self.assertEqual(migrated["multi_host"]["targets"][0]["bot_id"], "reviewed-bot")
-        self.assertEqual(migrated["multi_host"]["personas"], [persona])
+        self.assertEqual(migrated["multi_host"]["personas"],
+                         [{**persona, "__template_key": "persona_mapping"}])
         self.assertEqual(MultiHostSettings.parse(migrated).accounts[0].bot_id, "reviewed-bot")
 
     def test_disabled_single_target_with_no_shared_mapping_can_be_imported_once(self):
@@ -119,7 +153,7 @@ class SharedHostMigrationTests(unittest.TestCase):
         before = deepcopy(damaged)
         recovered, changed = recover_repeated_single_target(damaged, pinned)
         self.assertTrue(changed)
-        self.assertEqual(recovered, reviewed)
+        self.assertEqual(recovered, migrate_single_target_config(reviewed)[0])
         self.assertEqual(damaged, before)
         repeated, changed = recover_repeated_single_target(recovered, pinned)
         self.assertFalse(changed)

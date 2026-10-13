@@ -1,4 +1,4 @@
-"""Atomic, role-scoped Laya configuration stored under the V2 data root."""
+"""Atomic global Laya configuration with read-only legacy settings adoption."""
 
 from __future__ import annotations
 
@@ -9,19 +9,28 @@ import json
 import os
 import shlex
 import sys
+import threading
 from pathlib import Path
 from uuid import uuid4
+
+from .contract import CONFIGURABLE_DECISION_FIELDS
+
+
+DEFAULT_DECISION_FIELDS = {name: True for name in CONFIGURABLE_DECISION_FIELDS}
 
 
 DEFAULTS = {
     "enabled": False,
     "mode": "local",
+    "local_model_path": "",
     "endpoint": "",
     "api_key": "",
     "timeout_seconds": 20,
+    "decision_fields": DEFAULT_DECISION_FIELDS,
 }
 ALLOWED_CHANGES = frozenset(DEFAULTS)
 MODEL_REPOSITORY = "models--convaiinnovations--laya"
+_SETTINGS_LOCK = threading.RLock()
 
 
 class LayaSettingsError(ValueError):
@@ -45,7 +54,10 @@ def _model_cache_dir() -> Path:
 
 
 def _has_multilingual_model(snapshot: Path) -> bool:
-    model = snapshot / "multilingual"
+    return checkpoint_ready(snapshot / "multilingual")
+
+
+def checkpoint_ready(model: Path) -> bool:
     required_files = (
         model / "rl_agent_config.json",
         model / "model.safetensors",
@@ -53,6 +65,27 @@ def _has_multilingual_model(snapshot: Path) -> bool:
         model / "encoder" / "config.json",
     )
     return all(path.is_file() for path in required_files)
+
+
+def cached_multilingual_model() -> Path | None:
+    """Find complete installed weights without contacting the model repository."""
+    repository = _model_cache_dir() / MODEL_REPOSITORY
+    snapshots = repository / "snapshots"
+    try:
+        reference = repository / "refs" / "main"
+        if reference.is_file():
+            revision = reference.read_text(encoding="utf-8").strip()
+            if revision and Path(revision).name == revision:
+                preferred = snapshots / revision
+                if _has_multilingual_model(preferred):
+                    return preferred / "multilingual"
+        complete = [snapshot for snapshot in snapshots.iterdir()
+                    if snapshot.is_dir() and _has_multilingual_model(snapshot)]
+        if complete:
+            return max(complete, key=lambda path: (path.stat().st_mtime_ns, path.name)) / "multilingual"
+    except (OSError, UnicodeError):
+        pass
+    return None
 
 
 def _install_command() -> str:
@@ -90,24 +123,41 @@ def _package_status() -> tuple[bool, str]:
 class LayaSettingsStore:
     def __init__(self, root: Path, target_id: object = "installation", role_id: object = "default"):
         self.root = Path(root).resolve()
-        self.directory = self.root / "decision" / "roles"
-        self.path = self.directory / (role_storage_key(target_id, role_id) + ".json")
+        # Historical arguments remain accepted; every target and persona uses
+        # one installation-wide configuration.
+        self.directory = self.root / "decision"
+        self.path = self.directory / "settings.json"
+
+    def _source_path(self):
+        if self.path.exists():
+            return self.path
+        legacy = tuple((self.directory / "roles").glob("*.json"))
+        # Select the last saved user choice consistently for every caller.
+        # Legacy originals are kept intact, including any older overrides.
+        return max(legacy, key=lambda path: (path.stat().st_mtime_ns, path.name)) if legacy else None
 
     def _read(self) -> dict:
-        if not self.path.exists():
-            return {**DEFAULTS, "revision": "initial"}
+        source = self._source_path()
+        if source is None:
+            return {**DEFAULTS, "decision_fields": dict(DEFAULT_DECISION_FIELDS), "revision": "initial"}
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(source.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as error:
             raise LayaSettingsError("laya_config_unreadable", "Laya 配置不可读取") from error
         if type(data) is not dict:
             raise LayaSettingsError("laya_config_invalid", "Laya 配置格式无效")
-        values = {**DEFAULTS, **{key: data.get(key, default) for key, default in DEFAULTS.items()}}
+        raw_fields = data.get("decision_fields", {})
+        if type(raw_fields) is not dict or set(raw_fields) - set(DEFAULT_DECISION_FIELDS):
+            raise LayaSettingsError("laya_config_invalid", "decision_fields 配置无效")
+        values = {**DEFAULTS, **{key: data.get(key, default) for key, default in DEFAULTS.items()
+                                 if key != "decision_fields"}}
+        values["decision_fields"] = {**DEFAULT_DECISION_FIELDS, **raw_fields}
         # Read the first integration's mode-less settings as a remote endpoint setup.
         if "mode" not in data and values["endpoint"]:
             values["mode"] = "remote"
         revision = data.get("revision")
-        values["revision"] = revision if type(revision) is str and revision else uuid4().hex
+        values["revision"] = revision if type(revision) is str and revision else hashlib.sha256(
+            json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         self._validate(values)
         return values
 
@@ -117,31 +167,32 @@ class LayaSettingsStore:
             raise LayaSettingsError("laya_config_invalid", "enabled 必须是布尔值")
         if values["mode"] not in {"local", "remote"}:
             raise LayaSettingsError("laya_config_invalid", "mode 必须是 local 或 remote")
-        for key in ("endpoint", "api_key"):
+        for key in ("endpoint", "api_key", "local_model_path"):
             if type(values[key]) is not str or len(values[key]) > 4096:
                 raise LayaSettingsError("laya_config_invalid", f"{key} 配置无效")
         if type(values["timeout_seconds"]) is not int or isinstance(values["timeout_seconds"], bool) or not 1 <= values["timeout_seconds"] <= 120:
             raise LayaSettingsError("laya_config_invalid", "timeout_seconds 超出范围")
+        fields = values["decision_fields"]
+        if type(fields) is not dict or set(fields) != set(DEFAULT_DECISION_FIELDS) or any(
+                type(value) is not bool for value in fields.values()):
+            raise LayaSettingsError("laya_config_invalid", "decision_fields 必须为每项决策提供布尔值")
 
     def read(self) -> dict:
         values = self._read()
         installed, version = _package_status()
         cache_dir = _model_cache_dir()
-        snapshots = cache_dir / MODEL_REPOSITORY / "snapshots"
-        try:
-            model_cache_ready = snapshots.is_dir() and any(
-                snapshot.is_dir() and _has_multilingual_model(snapshot)
-                for snapshot in snapshots.iterdir())
-        except OSError:
-            model_cache_ready = False
+        model_cache_ready = checkpoint_ready(Path(values["local_model_path"]).expanduser()) if values["local_model_path"].strip() else cached_multilingual_model() is not None
         remote_install_command, remote_start_command = _remote_commands()
         return {
+            "configuration_scope": "global",
             "enabled": values["enabled"],
             "mode": values["mode"],
+            "local_model_path": values["local_model_path"],
             "endpoint": values["endpoint"],
             "default_model": "multilingual",
             "api_key_set": bool(values["api_key"]),
             "timeout_seconds": values["timeout_seconds"],
+            "decision_fields": dict(values["decision_fields"]),
             "package_installed": installed,
             "package_version": version,
             "model_cache_ready": model_cache_ready,
@@ -157,12 +208,20 @@ class LayaSettingsStore:
         return self._read()
 
     def update(self, revision: object, changes: object) -> dict:
+        with _SETTINGS_LOCK:
+            return self._update(revision, changes)
+
+    def _update(self, revision: object, changes: object) -> dict:
         current = self._read()
         if type(revision) is not str or revision != current["revision"]:
             raise LayaSettingsError("laya_config_conflict", "Laya 配置已变化，请刷新后再保存")
         if type(changes) is not dict or not changes or set(changes) - ALLOWED_CHANGES:
             raise LayaSettingsError("laya_config_invalid", "Laya 配置字段无效")
         next_values = {**current, **changes}
+        if "decision_fields" in changes:
+            if type(changes["decision_fields"]) is not dict:
+                raise LayaSettingsError("laya_config_invalid", "decision_fields 配置无效")
+            next_values["decision_fields"] = {**current["decision_fields"], **changes["decision_fields"]}
         if "api_key" in changes and changes["api_key"] == "":
             next_values["api_key"] = current["api_key"]
         self._validate(next_values)

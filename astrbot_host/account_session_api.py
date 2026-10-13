@@ -12,6 +12,7 @@ from astrbot.core import sp
 from companion_v2.adapters.astrbot.native import account_number
 from companion_v2.execution.models import TaskError, digest
 from .multi_settings import MultiHostSettings
+from .native import remember_session_settings
 from .settings import HostControlError
 
 
@@ -112,7 +113,8 @@ class AccountSessionWebAPI:
                             for item in self._view()["personas"]):
                         raise TaskError("account_session_persona_unmapped", "add this persona to the Bot bindings first")
                 umo = row["unified_msg_origin"]
-                services = dict(await self.controller.session_topology.services(umo))
+                services = dict(await sp.get_async(scope="umo", scope_id=umo,
+                                                   key="session_service_config", default={}) or {})
                 for field in ("llm_enabled", "session_enabled"):
                     if field in body:
                         services[field] = body[field]
@@ -122,6 +124,7 @@ class AccountSessionWebAPI:
                     else:
                         services.pop("persona_id", None)
                 await sp.put_async(scope="umo", scope_id=umo, key="session_service_config", value=services)
+                remember_session_settings(umo, services)
             return {"status": "ok", "data": {"saved": True, "requires_reload": False}}
         except (TaskError, HostControlError) as error:
             return self._error(error.code, str(error))

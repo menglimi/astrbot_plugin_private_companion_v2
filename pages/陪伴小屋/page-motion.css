@@ -1,0 +1,144 @@
+/* 动效只补充呈现，尺寸与颜色继续由各页面及主题令牌负责。 */
+:root {
+  --ease-control: cubic-bezier(.22, .72, .24, 1);
+  --control-hover-y: -2px;
+  --control-press-y: 1px;
+  --control-press-scale: .985;
+  --control-icon-x: 2px;
+}
+
+#shellNav { position: relative; isolation: isolate; }
+#homeShell #shellNav .shell-nav-link { position: relative; z-index: 1; }
+.shell-nav-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  border-radius: var(--r-sm);
+  background: var(--t-accent-quiet);
+  box-shadow: inset 3px 0 var(--t-accent);
+  transform-origin: top left;
+  pointer-events: none;
+}
+#homeShell #shellNav[data-motion-nav] .shell-nav-link[aria-pressed="true"] {
+  background: transparent;
+  box-shadow: none;
+}
+#homeShell .shell-nav-link svg {
+  transition: transform var(--dur-fast) var(--ease-control), opacity var(--dur-fast);
+}
+
+:where(#homeShell, #detailDialog, #searchDialog, #navigationDialog)
+  :is(.button, .memory-button, .icon-button, .stage-overlay-button, .shell-nav-link,
+      .stage-furniture-strip button, .home-side-action, [role="tab"], .ap-seg button) {
+  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+  transition-timing-function: var(--ease-control);
+  transition-duration: var(--dur-fast) !important;
+}
+:where(#homeShell, #detailDialog, #searchDialog, #navigationDialog)
+  :is(.button, .memory-button, .icon-button, .stage-overlay-button, .shell-nav-link,
+      .stage-furniture-strip button, .home-side-action, [role="tab"], .ap-seg button):focus-visible {
+  outline: 2px solid var(--t-focus, var(--t-accent));
+  outline-offset: 3px;
+}
+:where(#homeShell, #detailDialog, #searchDialog, #navigationDialog)
+  :is(.button, .memory-button, .icon-button, .stage-overlay-button, .shell-nav-link,
+      .stage-furniture-strip button, .home-side-action, [role="tab"], .ap-seg button):is(:disabled, [aria-disabled="true"]) { cursor: default; }
+:where(#homeShell, #detailDialog, #searchDialog, #navigationDialog)
+  :is(.button, .memory-button, .icon-button, .stage-overlay-button, .shell-nav-link,
+      .stage-furniture-strip button, .home-side-action, [role="tab"], .ap-seg button)[aria-busy="true"] { cursor: progress; }
+:where(#homeShell, #detailDialog, #searchDialog, #navigationDialog)
+  :is(.button, .memory-button, .icon-button, .stage-overlay-button, .shell-nav-link,
+      .stage-furniture-strip button, .home-side-action, [role="tab"], .ap-seg button)[aria-disabled="true"] { opacity: .55; }
+@media (hover: hover) and (pointer: fine) {
+  #homeShell .shell-nav-link:hover:not(:disabled) svg { transform: translateX(var(--control-icon-x)); opacity: 1; }
+  #homeShell .stage-furniture-strip button:hover:not(:disabled):not(:active),
+  #homeShell .stage-overlay-button:hover:not(:disabled):not(:active) { transform: translateY(var(--control-hover-y)); box-shadow: var(--t-shadow); }
+  :where(#homeShell, #detailDialog, #searchDialog)
+    :is(.button, .memory-button):hover:not(:disabled):not(.primary):not(.danger) {
+    border-color: var(--t-accent);
+  }
+}
+:where(#homeShell, #detailDialog, #searchDialog, #navigationDialog)
+  :is(.button, .memory-button, .icon-button, .stage-overlay-button, .shell-nav-link,
+      .stage-furniture-strip button, .home-side-action, [role="tab"], .ap-seg button):active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  transform: translateY(var(--control-press-y)) scale(var(--control-press-scale));
+  transition-duration: .08s !important;
+}
+
+#homeShell details > summary {
+  transition: background-color var(--dur-fast), color var(--dur-fast);
+  cursor: pointer;
+}
+#homeShell details > summary:focus-visible { outline: 2px solid var(--t-focus, var(--t-accent)); outline-offset: 2px; }
+#homeShell details > summary > svg:last-child { transition: transform var(--dur) var(--ease-control); }
+@supports (interpolate-size: allow-keywords) and selector(details::details-content) {
+  #homeShell details::details-content {
+    interpolate-size: allow-keywords;
+    height: 0;
+    overflow: clip;
+    opacity: 0;
+    content-visibility: hidden;
+    transition: height var(--dur) var(--ease-control), opacity var(--dur-fast),
+      content-visibility var(--dur) allow-discrete;
+  }
+  #homeShell details[open]::details-content { height: auto; opacity: 1; content-visibility: visible; }
+}
+
+:is(#detailDialog, #searchDialog, #navigationDialog) {
+  opacity: 0;
+  transform: translateY(10px) scale(.985);
+  transition: opacity var(--dur-fast), transform var(--dur) var(--ease-control),
+    display var(--dur) allow-discrete, overlay var(--dur) allow-discrete;
+}
+#detailDialog { transform: translateX(14px); }
+:is(#detailDialog, #searchDialog, #navigationDialog)[open] { opacity: 1; transform: none; }
+:is(#detailDialog, #searchDialog, #navigationDialog):not([open]),
+:is(#detailDialog, #searchDialog, #navigationDialog):not([open])::backdrop { pointer-events: none; }
+:is(#detailDialog, #searchDialog, #navigationDialog)::backdrop {
+  opacity: 0;
+  transition: opacity var(--dur), display var(--dur) allow-discrete, overlay var(--dur) allow-discrete;
+}
+:is(#detailDialog, #searchDialog, #navigationDialog)[open]::backdrop { opacity: 1; }
+@starting-style {
+  :is(#detailDialog, #searchDialog, #navigationDialog)[open] { opacity: 0; transform: translateY(10px) scale(.985); }
+  #detailDialog[open] { transform: translateX(14px); }
+  :is(#detailDialog, #searchDialog, #navigationDialog)[open]::backdrop { opacity: 0; }
+}
+@media (max-width: 760px) {
+  #detailDialog { transform: translateY(16px); }
+  #detailDialog[open] { transform: none; }
+  @starting-style { #detailDialog[open] { transform: translateY(16px); } }
+}
+
+/* 减弱只保留短淡入；关闭或系统减少动效立即提交最终状态。 */
+:root:is([data-motion="low"], [data-motion="off"]), body.reduce-motion {
+  --control-hover-y: 0px;
+  --control-press-y: 0px;
+  --control-press-scale: 1;
+  --control-icon-x: 0px;
+}
+:root[data-motion="low"] #homeShell :is(.shell-nav-link, .stage-overlay-button, .stage-furniture-strip button):is(:hover, :active),
+:root[data-motion="low"] #homeShell .shell-nav-link:hover svg,
+:root[data-motion="low"] :is(#detailDialog, #searchDialog, #navigationDialog) { transform: none; }
+:root[data-motion="off"] :is(#homeShell, #detailDialog, #searchDialog, #navigationDialog) *,
+body.reduce-motion :is(#homeShell, #detailDialog, #searchDialog, #navigationDialog) * {
+  transition: none !important;
+  animation: none !important;
+}
+:root:is([data-motion="low"], [data-motion="off"]) #homeShell details::details-content,
+body.reduce-motion #homeShell details::details-content { transition: none; }
+:root[data-motion="off"] :is(#detailDialog, #searchDialog, #navigationDialog),
+body.reduce-motion :is(#detailDialog, #searchDialog, #navigationDialog) { transition: none !important; transform: none; }
+:root[data-motion="off"] :is(#detailDialog, #searchDialog, #navigationDialog)::backdrop,
+body.reduce-motion :is(#detailDialog, #searchDialog, #navigationDialog)::backdrop { transition: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  :root { --control-hover-y: 0px; --control-press-y: 0px; --control-press-scale: 1; --control-icon-x: 0px; }
+  :is(#homeShell, #detailDialog, #searchDialog, #navigationDialog) *,
+  #homeShell details::details-content,
+  :is(#detailDialog, #searchDialog, #navigationDialog),
+  :is(#detailDialog, #searchDialog, #navigationDialog)::backdrop { transition: none !important; animation: none !important; }
+  #homeShell :is(.shell-nav-link, .stage-overlay-button, .stage-furniture-strip button):is(:hover, :active),
+  #homeShell .shell-nav-link:hover svg,
+  :is(#detailDialog, #searchDialog, #navigationDialog) { transform: none; }
+}

@@ -1,10 +1,7 @@
-"""Group timing rules: short-fragment waits and deterministic repeat following.
+"""Pure short-input timing and repeat signatures over admitted group material.
 
-Both rules are pure functions over already-admitted material and neither owns a
-clock, a store or a send path. The repeat rule is V1's ``group_repeat_follow``
-state machine -- a same-content burst from several members inside a short window
-makes joining in natural -- resolved deterministically instead of by dice, so
-one burst always adjudicates the same way and a replay cannot change it.
+The legacy repeat reference remains for old batch prompts. Live literal actions
+use the persisted V1 probability draw in repeat_actions, not that comparison.
 """
 
 from dataclasses import dataclass
@@ -31,15 +28,15 @@ MEDIA_PLACEHOLDERS = frozenset((
     "[图片]", "【图片】", "图片", "[语音]", "【语音】", "语音", "[视频]", "【视频】", "视频",
     "[文件]", "【文件】", "文件", "[合并转发]", "[分享卡片]"))
 MEDIA_PLACEHOLDER_PATTERN = re.compile(
-    r"(?:\[(?:图片|语音|音频|视频|文件|合并转发|引用消息|分享卡片)(?:不可用|\s+\d+)?\]"
-    r"|【(?:图片|语音|音频|视频|文件|合并转发|引用消息|分享卡片)(?:不可用|\s+\d+)?】)")
+    r"(?:\[(?:图片|语音|音频|视频|文件|合并转发|引用消息|分享卡片)(?:不可用|\s*\d+)?\]"
+    r"|【(?:图片|语音|音频|视频|文件|合并转发|引用消息|分享卡片)(?:不可用|\s*\d+)?】)")
 TRAILING_MARKS = re.compile(r"[!！?？。.,，~～…]+$")
 
 
 def clean_group_text(text):
     """Remove adapter media labels before deriving any group text signal."""
     compact = " ".join(MEDIA_PLACEHOLDER_PATTERN.sub(" ", str(text or "")).split())
-    return "" if compact in MEDIA_PLACEHOLDERS else compact
+    return "" if TRAILING_MARKS.sub("", compact).strip() in MEDIA_PLACEHOLDERS else compact
 
 
 @dataclass(frozen=True)
@@ -85,7 +82,7 @@ def repeat_signature(text):
     compact = clean_group_text(str(text or "").replace(ADDRESS_MARKER, " "))
     if not compact or compact in MEDIA_PLACEHOLDERS:
         return ""
-    compact = TRAILING_MARKS.sub("", compact).strip()
+    compact = clean_group_text(TRAILING_MARKS.sub("", compact).strip())
     return compact if 1 <= len(compact) <= MAX_SIGNATURE_CHARS else ""
 
 
@@ -99,7 +96,7 @@ def repeat_burst(signature, items, *, at, window_seconds):
     """
     if not signature:
         return None
-    speakers, count, first, last, text = [], 0, None, None, ""
+    speakers, events, count, first, last, text = [], [], 0, None, None, ""
     for item in items:
         if item.get("kind") not in (None, "member"):
             continue  # only members repeat each other; the role's own copy is the act, not the burst
@@ -111,8 +108,11 @@ def repeat_burst(signature, items, *, at, window_seconds):
         if when is None or when > at or (at - when).total_seconds() > max(1, window_seconds):
             continue
         if repeat_signature(item.get("text")) != signature:
+            speakers, events, count, first, last, text = [], [], 0, None, None, ""
             continue
         count += 1
+        if item.get("event_id") is not None:
+            events.append(item["event_id"])
         speaker = str(item.get("speaker_id") or "")
         if speaker and speaker not in speakers:
             speakers.append(speaker)
@@ -123,7 +123,7 @@ def repeat_burst(signature, items, *, at, window_seconds):
         return None
     return {"version": REPEAT_VERSION, "signature": signature, "text": text[:MAX_SIGNATURE_CHARS],
             "count": count, "distinct": len(speakers), "speakers": tuple(speakers[:MAX_BURST_SPEAKERS]),
-            "first_at": first, "last_at": last}
+            "first_at": first, "last_at": last, "event_ids": tuple(events)}
 
 
 def repeat_decision(policy, burst, *, acts=0, same_burst=False, cooled=True, used_today=0):

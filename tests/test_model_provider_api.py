@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from tests import test_astrbot_staging_host as support
+from tests.multi_host_support import MultiFixture
 from astrbot_host.model_api import PREFIX
 from astrbot.api.web import PluginRequest, bind_request_context
 from starlette.requests import Request
@@ -38,6 +39,12 @@ class FakeImageExtensionAPI:
             "endpoints": [], "sd_webui": {"base_url": "", "api_key_set": False, "timeout_seconds": 300},
             "comfyui": {"base_url": "", "api_key_set": False, "timeout_seconds": 300}}
         self.saved = None
+        self.tested = None
+
+    async def test_output_endpoint(self, endpoint_id, operation_key, *, before_dispatch):
+        before_dispatch()
+        self.tested = (endpoint_id, operation_key)
+        return {"status": "succeeded", "operation_id": "test-operation", "elapsed_ms": 42, "error": ""}
 
     def output_configuration(self):
         return {"revision": self.revision, "settings": deepcopy(self.configuration), "live": False,
@@ -57,6 +64,62 @@ class FakeImageExtensionAPI:
 
 async def body(payload):
     return payload
+
+
+async def assert_core_reply_prompt_roundtrip(test, prefix):
+    listed = await test.call(prefix)
+    test.assertEqual(listed["status"], "ok", listed)
+    task = next(item for item in listed["data"]["tasks"] if item["kind"] == "conversation.reply")
+    test.assertEqual(task["configuration_layer"], "role")
+    test.assertEqual(task["execution_path"], "astrbot_core")
+    test.assertEqual(task["editable_fields"], ["prompt"])
+    test.assertIn("provider", task["core_managed_fields"])
+    test.assertNotIn("output_contract", {layer["key"] for layer in task["prompt_layers"]})
+    payload = {"kind": task["kind"], "operation_key": "core-prompt-route", "edit_token": task["edit_token"],
+               "changes": {"prompt": "像聊天一样自然接话，按语意分段。"}, "reset": []}
+    saved = await test.call(prefix + "/configure", payload=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    test.assertEqual(saved["status"], "ok", saved)
+    test.assertEqual(saved["data"]["task"]["configuration_layer"], "role")
+    test.assertEqual(saved["data"]["task"]["execution_path"], "astrbot_core")
+    test.assertEqual(saved["data"]["task"]["fields"]["prompt"]["value"], payload["changes"]["prompt"])
+    for key, prompt in (("style", "语气轻快，像刚看到好消息那样。"),
+                        ("humanized", "兴冲冲地分享自己的发现，给对方接话的余地。")):
+        sections = {item["key"]: item for item in saved["data"]["task"]["prompt_sections"] if item["editable"]}
+        test.assertEqual(set(sections), {"style", "humanized"})
+        section = sections[key]
+        expected_field = "style_prompt" if key == "style" else "humanized_expression_prompt"
+        test.assertEqual(section["config_field"], "conversation.presentation." + expected_field)
+        section_payload = {"kind": task["kind"], "section": key, "layer": "role",
+            "operation_key": "core-expression-" + key,
+            "edit_token": section["edit_token"], "changes": {"prompt": prompt}, "reset": []}
+        saved = await test.call(prefix + "/configure", payload=json.dumps(section_payload, ensure_ascii=False).encode("utf-8"))
+        test.assertEqual(saved["status"], "ok", saved)
+        changed = next(item for item in saved["data"]["task"]["prompt_sections"] if item["key"] == key)
+        test.assertEqual(changed["prompt"], prompt)
+        test.assertEqual(changed["field"]["source"], "role")
+        test.assertEqual(changed["configuration_layer"], "role")
+    window_status = await test.call(prefix, query={"layer": "window"})
+    window_task = next(item for item in window_status["data"]["tasks"] if item["kind"] == task["kind"])
+    window_section = next(item for item in window_task["prompt_sections"] if item["key"] == "style")
+    test.assertEqual(window_section["prompt"], "语气轻快，像刚看到好消息那样。")
+    test.assertEqual(window_section["field"]["source"], "role")
+    local_prompt = "只在这个私聊里使用更简洁的口吻。"
+    section_payload = {"kind": task["kind"], "section": "style", "layer": "window",
+        "operation_key": "core-expression-style-window", "edit_token": window_section["edit_token"],
+        "changes": {"prompt": local_prompt}, "reset": []}
+    saved_window = await test.call(prefix + "/configure",
+        payload=json.dumps(section_payload, ensure_ascii=False).encode("utf-8"))
+    test.assertEqual(saved_window["status"], "ok", saved_window)
+    window_changed = next(item for item in saved_window["data"]["task"]["prompt_sections"] if item["key"] == "style")
+    test.assertEqual(window_changed["prompt"], local_prompt)
+    test.assertEqual(window_changed["field"]["source"], "window")
+    role_status = await test.call(prefix, query={"layer": "role"})
+    role_task = next(item for item in role_status["data"]["tasks"] if item["kind"] == task["kind"])
+    role_section = next(item for item in role_task["prompt_sections"] if item["key"] == "style")
+    test.assertEqual(role_section["prompt"], "语气轻快，像刚看到好消息那样。")
+    payload.update(operation_key="core-route-not-consumed", changes={"provider": "unused-route"})
+    refused = await test.call(prefix + "/configure", payload=json.dumps(payload).encode("utf-8"))
+    test.assertEqual(refused["message"], "model_configuration_host_managed")
 
 
 class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
@@ -86,12 +149,13 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.native.get_provider_by_id = lambda provider_id: providers.get(provider_id)
         return providers
 
-    async def call(self, route, *, payload=None, username="admin"):
+    async def call(self, route, *, payload=None, username="admin", query=None):
         prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion_v2/astrbot_host.model_api"
         import astrbot_host.model_api as model_api
         request = Request({"type": "http", "method": "POST" if payload is not None else "GET",
                            "path": route, "headers": [], "query_string": b""})
-        fake_request = NS(username=username, query={}, body=(lambda: body(payload)) if payload is not None else None)
+        fake_request = NS(username=username, path=route, query=query or {},
+                          body=(lambda: body(payload)) if payload is not None else None)
         with patch.object(model_api, "request", fake_request):
             with bind_request_context(PluginRequest(request, username=username)):
                 return await self.routes[route]()
@@ -100,6 +164,15 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         methods = {path: methods for path, _, methods, _ in self.native.registered_web_apis}
         self.assertEqual(methods[PREFIX + "/maintenance"], ["GET"])
         self.assertEqual(methods[PREFIX + "/balance"], ["GET"])
+
+    async def test_maintenance_reads_the_current_internal_together_statistics(self):
+        (await self.controller.initialize_profile()).unwrap()
+        sources = {"together": {"available": True, "totals": {"tokens": 87}}}
+        with patch("astrbot_host.model_api.read_token_sources", return_value=sources) as read_sources:
+            response = await self.call(PREFIX + "/maintenance")
+        self.assertEqual(response["status"], "ok", response)
+        read_sources.assert_called_once_with(self.controller)
+        self.assertEqual(response["data"]["external_token_sources"], sources)
 
     async def test_business_prompt_section_roundtrip_uses_the_original_model_route(self):
         (await self.controller.initialize_profile()).unwrap()
@@ -113,6 +186,39 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         changed = next(item for item in saved["data"]["task"]["prompt_sections"] if item["key"] == "news_sharing")
         self.assertEqual(changed["prompt"], payload["changes"]["prompt"])
         self.assertEqual(changed["field"]["source"], "window")
+
+    async def test_core_reply_prompt_roundtrip_exposes_only_effective_configuration(self):
+        (await self.controller.initialize_profile()).unwrap()
+        await assert_core_reply_prompt_roundtrip(self, PREFIX)
+
+    async def test_staging_reopen_prepares_legacy_reaction_settings_before_read_only_assembly(self):
+        from dataclasses import replace
+        from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+        from companion_v2.configuration.owners import SparseConfigurationOwner
+        from companion_v2.expression.reaction_configuration import GROUP, configuration_fields, read_snapshot
+
+        (await self.controller.initialize_profile()).unwrap()
+        context = self.controller.session.profile.target
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
+                              context.role_binding.role, context.scope)
+        fields = tuple(replace(field, layers=(ConfigLayer.WINDOW,)) for field in configuration_fields())
+        SparseConfigurationOwner(self.controller.runtime).write(target, fields,
+            changes={GROUP + ".candidate_limit": 11}, reset=(), expected_revision=0, observed_at=support.NOW)
+        data_root = self.controller.data_root
+        await self.controller.terminate()
+        self.controller = support.AstrBotStagingController(self.native, support.host_config(), data_root,
+            native_types=support.NativeAdapterTypes("4.27.2", support.FakeEvent, support.FakeProvider, NS, NS,
+                                                   support.FakeReverseApi), now=lambda: support.NOW)
+        self.addAsyncCleanup(self.controller.terminate)
+
+        loaded = (await self.controller.load_existing()).unwrap()
+
+        self.assertTrue(loaded["loaded"])
+        settings, revision = read_snapshot(self.controller.runtime, self.controller.session.profile.target)
+        self.assertEqual((settings.candidate_limit, revision), (11, 1))
+        self.assertIsNotNone(self.controller.runtime.read_one(
+            "SELECT 1 FROM configuration_values WHERE target_key=? AND field_id=?",
+            (target.key, GROUP + ".candidate_limit")))
 
     async def test_catalog_reads_loaded_astrbot_text_providers_without_a_registration_route(self):
         self.install_text_provider_catalog()
@@ -326,6 +432,29 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
             missing = await self.call(model_api.PREFIX + "/image/output")
         self.assertEqual(missing["data"]["code"], "model_image_output_unavailable")
 
+    async def test_image_output_test_rechecks_authority_and_calls_the_saved_endpoint(self):
+        (await self.controller.initialize_profile()).unwrap()
+        import astrbot_host.model_api as model_api
+        fake = FakeImageExtensionAPI()
+        payload = b'{"endpoint_id":"primary","operation_key":"image-test-key"}'
+        with patch.object(model_api.ModelWebAPI, "_image_extension_api", lambda self: fake):
+            result = await self.call(PREFIX + "/image/output/test", payload=payload)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["status"], "succeeded")
+        self.assertEqual(fake.tested, ("primary", "image-test-key"))
+
+    async def test_image_status_exposes_the_module_startup_diagnostic(self):
+        (await self.controller.initialize_profile()).unwrap()
+        registry = NS(
+            image_enabled={"image.generate": True, "image.edit": True, "image.mask_edit": True},
+            declarations=lambda: (), status=lambda _extension: {"state": "unavailable", "error_code": "native_extension_unavailable"},
+            issues=(("astrbot_plugin_private_companion_v2.image", "native_configuration_invalid"),),
+        )
+        with patch.object(self.controller, "native_extensions", registry):
+            response = await self.call(PREFIX + "/image")
+        self.assertEqual(response["data"]["module"]["issue_code"], "native_configuration_invalid")
+        self.assertEqual(response["data"]["actions"][0]["diagnostic_code"], "native_configuration_invalid")
+
     async def test_image_output_save_roundtrip_and_conflict(self):
         (await self.controller.initialize_profile()).unwrap()
         import astrbot_host.model_api as model_api
@@ -345,3 +474,19 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
             conflict_payload = json.dumps({"revision": "a" * 64, "changes": {"enabled": False}}).encode("utf-8")
             conflict = await self.call(model_api.PREFIX + "/image/output/save", payload=conflict_payload)
             self.assertEqual(conflict["data"]["code"], "model_image_output_conflict")
+
+
+class MultiCoreReplyConfigurationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    call = ProviderRouteTests.call
+
+    def setUp(self):
+        super().setUp()
+        self.controller.register_routes()
+        self.routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
+
+    async def test_core_reply_prompt_roundtrip_uses_the_production_target_route(self):
+        (await self.controller.initialize_profile()).unwrap()
+        inventory = self.controller.web_api.target_inventory()
+        target = next(item for item in inventory if item["target_id"] == "first")
+        role = next(item for item in target["roles"] if item["role_id"] == "role-a")
+        await assert_core_reply_prompt_roundtrip(self, role["model_api"])

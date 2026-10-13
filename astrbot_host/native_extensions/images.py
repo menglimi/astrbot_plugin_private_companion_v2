@@ -33,14 +33,21 @@ class ImageReferenceLease:
         self._tickets, self._by_handle, self._used = [], {}, []
         if (self.messages is None or invocation.context.scope.kind not in (ScopeKind.PRIVATE, ScopeKind.GROUP)):
             return
-        row = registry.runtime.read_one("""SELECT batch_id FROM extension_tool_invocations
-            WHERE invocation_id=? AND parent_task_id=? AND tool_call_id=?""",
-            (invocation.invocation_id, invocation.parent_task_id, invocation.tool_call_id))
-        if row is None:
-            return
-        self.batch_id = row["batch_id"]
-        batch = self.messages.generated_images._batch(self.batch_id, invocation.context, registry.now())
-        _, _, events = self.messages.generated_images._inputs(batch, invocation.context, registry.now())
+        from companion_v2.conversation.native_tool_sources import native_input_images, native_invocation, native_turn
+        self.native = native_turn(invocation.parent_task_id)
+        if self.native:
+            native_invocation(registry.runtime, invocation)
+            event = native_input_images(self.messages, invocation.context, invocation.parent_task_id, optional=True)
+            self.batch_id, events = invocation.parent_task_id, (event,) if event is not None else ()
+        else:
+            row = registry.runtime.read_one("""SELECT batch_id FROM extension_tool_invocations
+                WHERE invocation_id=? AND parent_task_id=? AND tool_call_id=?""",
+                (invocation.invocation_id, invocation.parent_task_id, invocation.tool_call_id))
+            if row is None:
+                return
+            self.batch_id = row["batch_id"]
+            batch = self.messages.generated_images._batch(self.batch_id, invocation.context, registry.now())
+            _, _, events = self.messages.generated_images._inputs(batch, invocation.context, registry.now())
         for event in events:
             from companion_v2.conversation.media.models import ImageConversationEvent
             if not isinstance(event, ImageConversationEvent):
@@ -163,12 +170,18 @@ class ImageReferenceLease:
                     or ticket["role"] not in roles):
                 raise TaskError("reference_asset_changed", "the saved role reference changed during image editing")
             return
-        batch = messages.generated_images._batch(self.batch_id, context, at)
-        row = messages.runtime.read_one("SELECT event_json,event_hash,withdrawn FROM conversation_inputs WHERE event_key=?",
-                                        (ticket["event"].scoped_key,))
-        if (row is None or row["withdrawn"] or row["event_json"] != encode(ticket["event"])
-                or row["event_hash"] != digest([ticket["event"], context.key, batch["role_instruction"]])):
-            raise TaskError("message_withdrawn", "the input image is no longer part of its original active turn")
+        if self.native:
+            from companion_v2.conversation.native_tool_sources import native_input_images, native_invocation
+            native_invocation(messages.runtime, self.invocation)
+            if native_input_images(messages, context, self.batch_id) != ticket["event"]:
+                raise TaskError("message_withdrawn", "the native image no longer belongs to its original turn")
+        else:
+            batch = messages.generated_images._batch(self.batch_id, context, at)
+            row = messages.runtime.read_one("SELECT event_json,event_hash,withdrawn FROM conversation_inputs WHERE event_key=?",
+                                            (ticket["event"].scoped_key,))
+            if (row is None or row["withdrawn"] or row["event_json"] != encode(ticket["event"])
+                    or row["event_hash"] != digest([ticket["event"], context.key, batch["role_instruction"]])):
+                raise TaskError("message_withdrawn", "the input image is no longer part of its original active turn")
         parent = messages._read_source(ticket["parent"], context, ticket["event"].capability, at)
         if parent.content_hash != ticket["event"].input_hash:
             raise TaskError("message_input_changed", "the original input image source has changed")

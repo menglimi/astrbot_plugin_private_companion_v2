@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>V2 原生对局</title>
+  <link rel="stylesheet" href="/native-assets/native.css" />
+</head>
+<body>
+  <main class="game-shell">
+    <header class="game-topbar">
+      <a class="game-brand" href="/" aria-label="游戏伴侣">
+        <span class="brand-mark"><i></i><i></i><i></i><i></i></span>
+        <span>GAME / V2</span>
+      </a>
+      <div class="connection-state" id="connectionBadge" role="status" aria-live="polite">
+        <i></i><span>正在连接</span>
+      </div>
+    </header>
+
+    <div class="game-layout">
+      <section class="playfield" aria-labelledby="gameTitle">
+        <header class="playfield-heading">
+          <div>
+            <p class="eyebrow" id="gameCode">NATIVE GAME</p>
+            <h1 id="gameTitle">正在载入对局</h1>
+          </div>
+          <div class="round-state" id="roundState">连接中</div>
+        </header>
+        <div id="gameBoard" class="game-board" aria-live="polite" aria-busy="true"></div>
+        <div id="pieceTray" class="piece-tray" hidden aria-label="棋子棋盒"></div>
+        <div id="actionControls" class="action-controls"></div>
+      </section>
+
+      <aside class="game-rail" aria-label="对局状态">
+        <section class="score-panel">
+          <p class="eyebrow">LIVE TABLE</p>
+          <div id="gameSummary" class="game-summary"><span class="summary-placeholder">等待棋局状态</span></div>
+        </section>
+        <section class="history-panel">
+          <header><h2>最近行动</h2><span id="actionCount">0</span></header>
+          <ol id="gameHistory" class="game-history"></ol>
+        </section>
+        <p id="notice" class="game-notice" role="status" aria-live="polite"></p>
+      </aside>
+    </div>
+  </main>
+  <script src="/assets/lucide.min.js" defer></script>
+  <script src="/native-assets/native.js" defer></script>
+</body>
+</html>

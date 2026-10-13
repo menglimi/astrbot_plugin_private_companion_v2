@@ -13,29 +13,10 @@ const drains = async (times = 8) => { for (let index = 0; index < times; index +
 const TOKEN = 'a'.repeat(64);
 const PREFIX = '/astrbot_plugin_private_companion_v2/';
 const plain = value => JSON.parse(JSON.stringify(value));
-const DEFAULTS = {
-  private_learning_enabled: true, group_learning_enabled: false, window_hours: 168,
-  sample_limit: 24, min_samples: 5, group_min_samples: 20, sample_chars: 800, active_signal_limit: 60,
-  rules_per_turn: 8, payload_chars: 4000, rotation_candidate_limit: 24, rotation_decay_hours: 336,
-  scan_interval_minutes: 1440,
-  learning_mode: 'balanced', private_application_enabled: true, group_application_enabled: true,
-  sample_review_enabled: false, style_review_enabled: true, group_daily_batch_limit: 6,
-  group_new_messages: 20, group_member_mode: 'all', group_member_ids: '',
-};
-/* The registered contract: kinds and bounds mirror expression/configuration.py. */
-const LIMITS = {
-  window_hours: [1, 720], sample_limit: [4, 64], min_samples: [1, 16], group_min_samples: [5, 64],
-  sample_chars: [40, 4000], active_signal_limit: [12, 240],
-  rules_per_turn: [1, 16], payload_chars: [500, 16000], rotation_candidate_limit: [1, 64],
-  rotation_decay_hours: [1, 8760], scan_interval_minutes: [5, 10080],
-  group_daily_batch_limit: [1, 50], group_new_messages: [5, 80],
-};
-const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) => {
-  const entry = {kind: typeof value === 'boolean' ? 'boolean' : typeof value === 'string' ? 'text' : 'integer', default: value,
-    apply_mode: 'immediate', editable_layers: ['installation', 'role', 'window']};
-  if (LIMITS[name]) [entry.minimum, entry.maximum] = LIMITS[name];
-  return [name, entry];
-}));
+const DEFAULTS = {private_learning_enabled: true};
+const FIELDS = {private_learning_enabled: {
+  kind: 'boolean', default: true, apply_mode: 'immediate', editable_layers: ['relationship'],
+}};
 
 /* This section answers flat (no `sections` wrapper) because it lives on the
    reply route family rather than the config route. */
@@ -44,10 +25,9 @@ function status(changes = {}, token = TOKEN) {
   return {
     settings, defaults: {...DEFAULTS}, edit_token: token, revision: 1,
     configuration_token: 'configuration', apply_mode: 'next_sealed_reply',
-    group_id: 'expression.learning', scope: 'window',
-    layers: ['installation', 'role', 'window'],
-    provenance: Object.fromEntries(Object.keys(settings).map(name =>
-      [name, {layer: 'window', explicit: true, revision: 1}])),
+    group_id: 'expression.learning.private', scope: 'relationship',
+    layers: ['installation', 'role', 'relationship'],
+    provenance: {private_learning_enabled: {layer: 'relationship', explicit: true, revision: 1}},
     fields: FIELDS,
   };
 }
@@ -92,7 +72,7 @@ function harness({hosted = true, replyApi = PREFIX + 'reply'} = {}) {
 
 /* Mounts and answers the initial read, the way app.js drives it. */
 async function loaded(harnessed) {
-  harnessed.page.mount(harnessed.node);
+  harnessed.page.mount(harnessed.node, {scopeKind: 'private', scopeKey: 'private:42'});
   await drains();
   assert.equal(harnessed.requests.length, 1, 'mounting reads the section exactly once');
   harnessed.requests[0].resolve(status());
@@ -112,34 +92,31 @@ test('the section reads and saves through the reply route family', async () => {
   /* The bridge supplies the plugin prefix; the page supplies only the relative route. */
   assert.equal(harnessed.requests[0].route, 'reply/expression');
   const live = instance(harnessed);
-  live.state.draft.rotation_decay_hours = 48;
-  live.state.draft.group_learning_enabled = true;
+  live.state.draft.private_learning_enabled = false;
   const saving = live.save(false);
   await drains();
   assert.equal(harnessed.requests[1].route, 'reply/expression/configure');
   assert.deepEqual(plain(harnessed.requests[1].body), {
     operation_key: 'expression-key', edit_token: TOKEN,
-    changes: {rotation_decay_hours: 48, group_learning_enabled: true},
+    changes: {private_learning_enabled: false},
   });
   harnessed.requests[1].resolve({result: {operation_id: 'op', replayed: false},
-    status: status({rotation_decay_hours: 48, group_learning_enabled: true}, 'b'.repeat(64))});
+    status: status({private_learning_enabled: false}, 'b'.repeat(64))});
   await saving;
   await drains();
-  assert.equal(live.state.base.rotation_decay_hours, 48);
+  assert.equal(live.state.base.private_learning_enabled, false);
   assert.equal(live.state.pending, null);
 });
 
-test('bounds come from the published contract, not a page-local copy', async () => {
+test('field kind and target layers come from the published contract', async () => {
   const harnessed = harness();
   await loaded(harnessed);
   const live = instance(harnessed);
-  assert.equal(live.state.container.fields.window_hours.maximum, 720);
-  assert.equal(live.state.container.fields.window_hours.minimum, 1);
-  assert.equal(live.state.container.fields.group_learning_enabled.kind, 'bool');
   assert.equal(live.state.container.fields.private_learning_enabled.kind, 'bool');
-  assert.deepEqual(plain(live.state.container.layers), ['installation', 'role', 'window']);
-  assert.equal(live.state.container.writeLayer, 'window');
-  assert.equal(live.state.status.provenance.scan_interval_minutes.layer, 'window');
+  assert.deepEqual(plain(live.state.container.fields.private_learning_enabled.editable), ['relationship']);
+  assert.deepEqual(plain(live.state.container.layers), ['installation', 'role', 'relationship']);
+  assert.equal(live.state.container.writeLayer, 'relationship');
+  assert.equal(live.state.status.provenance.private_learning_enabled.layer, 'relationship');
 });
 
 test('the workbench preserves the selected target and role in its relative request', async () => {
@@ -148,36 +125,20 @@ test('the workbench preserves the selected target and role in its relative reque
   await loaded(harnessed);
   assert.equal(harnessed.requests[0].route, base + '/expression');
   const live = instance(harnessed);
-  live.state.draft.rotation_decay_hours = 48;
+  live.state.draft.private_learning_enabled = false;
   const saving = live.save(false);
   await drains();
   assert.equal(harnessed.requests[1].route, base + '/expression/configure');
-  harnessed.requests[1].resolve({status: status({rotation_decay_hours: 48})});
+  harnessed.requests[1].resolve({status: status({private_learning_enabled: false})});
   await saving;
   harnessed.page.unmount();
 });
 
-test('an impossible combination and out-of-range values never dispatch', async () => {
+test('a value with the wrong field type never dispatches', async () => {
   const harnessed = harness();
   await loaded(harnessed);
   const live = instance(harnessed);
-  /* 单批取样条数 < 最低样本数：两者各自都在范围内，组合不合法。 */
-  live.state.draft.sample_limit = 4;
-  live.state.draft.min_samples = 9;
-  await live.save(false);
-  assert.equal(harnessed.requests.length, 1, 'the impossible pair must not reach the network');
-  assert.match(live.state.notice, /组合不合法/);
-  /* 候选池 < 每轮注入规则数：同一条规则的另一半。 */
-  live.state.draft.sample_limit = 24;
-  live.state.draft.min_samples = 4;
-  live.state.draft.rotation_candidate_limit = 2;
-  live.state.draft.rules_per_turn = 8;
-  await live.save(false);
-  assert.equal(harnessed.requests.length, 1);
-  /* 单字段越界同样拦下。 */
-  live.state.draft.rotation_candidate_limit = 24;
-  live.state.draft.rules_per_turn = 8;
-  live.state.draft.window_hours = 721;
+  live.state.draft.private_learning_enabled = 'false';
   await live.save(false);
   assert.equal(harnessed.requests.length, 1);
   assert.match(live.state.notice, /范围/);
@@ -187,7 +148,7 @@ test('an unconfirmed save is kept for retry and no second operation is minted', 
   const harnessed = harness();
   await loaded(harnessed);
   const live = instance(harnessed);
-  live.state.draft.scan_interval_minutes = 30;
+  live.state.draft.private_learning_enabled = false;
   const saving = live.save(false);
   await drains();
   const original = plain(harnessed.requests[1].body);
@@ -201,7 +162,7 @@ test('an unconfirmed save is kept for retry and no second operation is minted', 
   assert.deepEqual(plain(harnessed.requests[2].body), original,
     'the retry must reuse the original operation key');
   harnessed.requests[2].resolve({result: {operation_id: 'op', replayed: true},
-    status: status({scan_interval_minutes: 30}, 'c'.repeat(64))});
+    status: status({private_learning_enabled: false}, 'c'.repeat(64))});
   await retrying;
   await drains();
   assert.equal(harnessed.store.size, 0);
@@ -212,17 +173,14 @@ test('reset restores the saved values instead of the draft', async () => {
   const harnessed = harness();
   await loaded(harnessed);
   const live = instance(harnessed);
-  live.state.draft.window_hours = 24;
-  live.state.draft.payload_chars = 2000;
   /* 「使用已保存配置」把草稿拉回已保存值。 */
   live.state.draft = {...live.state.status.settings};
-  assert.equal(live.state.draft.window_hours, 168);
-  assert.equal(live.state.draft.payload_chars, 4000);
+  assert.equal(live.state.draft.private_learning_enabled, true);
 });
 
 test('a host without the reply route refuses instead of showing an empty editor', () => {
   const harnessed = harness({replyApi: '/somewhere-else/reply'});
-  harnessed.page.mount(harnessed.node);
+  harnessed.page.mount(harnessed.node, {scopeKind: 'private', scopeKey: 'private:42'});
   assert.equal(harnessed.requests.length, 0);
   assert.match(harnessed.html, /没有可用的表达学习工作区/);
   const offline = harness({hosted: false});

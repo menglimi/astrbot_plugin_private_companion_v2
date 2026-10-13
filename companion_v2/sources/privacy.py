@@ -15,7 +15,7 @@ from companion_v2.execution.models import encode
 
 PROFILE = "redacted-text.v1"
 REDACTED = "[REDACTED]"
-_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])")
+_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:abk_[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])")
 _SERVICE_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_])(?:xox[baprs]-[A-Za-z0-9-]{10,}|mfa\.[A-Za-z0-9_-]{20,}|"
     r"[0-9]{6,}:[A-Za-z0-9_-]{25,}|(?:AKIA|ASIA)[A-Z0-9]{16})(?![A-Za-z0-9_-])"

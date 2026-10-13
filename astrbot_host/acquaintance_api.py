@@ -313,7 +313,29 @@ class AcquaintanceWebAPI:
         return settings if hasattr(settings, "all_targets") else self.controller.resolved_settings()
 
     def _participants(self):
-        return _authorization_participants(self.controller.runtime, self._settings(), observed_at=self.controller.now())
+        controller = self.controller
+        participants = _authorization_participants(controller.runtime, self._settings(), observed_at=controller.now())
+        # Old conversation routes stay in the history. Select the host's current
+        # registered window when it has one, so opening a fresh conversation
+        # does not make one person's stable settings route look ambiguous.
+        current_scopes = set()
+        if getattr(controller, "_multi_host", False):
+            prefix = "host.multi.context:"
+            for row in controller.runtime.read_all(
+                    "SELECT value FROM runtime_metadata WHERE substr(key, 1, ?) = ?", (len(prefix), prefix)):
+                try:
+                    current_scopes.add(ScopeRef.restore(json.loads(row["value"])))
+                except (TypeError, ValueError, KeyError):
+                    continue
+        else:
+            session = getattr(controller, "session", None) or getattr(controller, "last_session", None)
+            scope = getattr(getattr(getattr(session, "profile", None), "target", None), "scope", None)
+            if scope is not None:
+                current_scopes.add(scope)
+        family = lambda scope: (scope.platform, scope.bot_id, scope.account_id, scope.native_scope_id)
+        current_families = {family(scope) for scope in current_scopes}
+        return [entry for entry in participants if family(entry["scope"]) not in current_families
+                or entry["scope"] in current_scopes]
 
     def _members(self, result, settings):
         """Configured people stay selectable before an acquaintance card exists."""
@@ -431,7 +453,9 @@ class AcquaintanceWebAPI:
         from .web_api import outcome_response
         controller = self.controller
         try:
-            if request.query:
+            query = self._query(("read_mode",))
+            stored_only = query.get("read_mode") == "stored"
+            if query and not stored_only:
                 raise TaskError("acquaintance_request_invalid", "the directory does not accept query overrides")
             async with controller._control_lock:
                 username, _ = await self._operator()
@@ -441,9 +465,9 @@ class AcquaintanceWebAPI:
                 routes, groups = _directory_routes(settings)
                 result = self._members(PersonAcquaintanceDirectory(controller.runtime).directory(routes), settings)
             topology = getattr(controller, "session_topology", None)
-            if topology is not None:
+            if topology is not None and not stored_only:
                 try:
-                    _include_native_groups(groups, await topology.inventory())
+                    _include_native_groups(groups, await topology.inventory(scope_kind="group"))
                 except Exception as error:
                     logger.exception("AstrBot native group directory read failed")
                     detail = " ".join(str(error).split())
@@ -484,7 +508,9 @@ class AcquaintanceWebAPI:
                                        "msg_count": sum(member["group_observation"]["message_count"]
                                                          for member in network["members"])})
             names = display_names(controller)
-            persons, groups = await asyncio.gather(names.persons(result["persons"]), names.targets(groups))
+            name_options = {"cached_only": True} if stored_only else {}
+            persons, groups = await asyncio.gather(names.persons(result["persons"], **name_options),
+                                                  names.targets(groups, **name_options))
             async with controller._control_lock:
                 await self._operator()
                 if controller.runtime is not runtime or controller.settings is not settings_snapshot:
@@ -496,6 +522,7 @@ class AcquaintanceWebAPI:
                     "groups": groups, "counts": result["counts"],
                     "group_access": group_access,
                     "group_networks": list(group_networks),
+                    "directory_refresh_pending": stored_only,
                     # The page must not keep its own copy of which capabilities this
                     # page owns: a second list would drift and start offering a
                     # control for a capability that cannot be changed here.

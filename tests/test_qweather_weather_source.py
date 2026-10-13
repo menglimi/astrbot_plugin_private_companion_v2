@@ -141,22 +141,20 @@ class QWeatherWeatherPortTests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, *_):
                 return None
 
-            def get(self, url, *, headers, allow_redirects):
-                calls.append(("request", url, headers, allow_redirects))
+            def get(self, url, *, params, headers, allow_redirects):
+                calls.append(("request", url, params, headers, allow_redirects))
                 return Reply()
 
         with patch("astrbot_host.qweather_weather.aiohttp.ClientSession", Session):
             snapshot = await port.fetch(LOCATION)
         return snapshot, calls
 
-    async def test_longitude_precedes_latitude_and_the_body_is_bounded(self):
+    async def test_location_uses_longitude_first_query_parameter_and_bounded_body(self):
         snapshot, calls = await self._fetch(self._port(), body())
         request = next(item for item in calls if item[0] == "request")
-        # QWeather orders this endpoint as longitude,latitude -- the reverse of the
-        # alert endpoint. Getting it backwards silently returns the wrong city.
-        self.assertEqual(request[1],
-                         "https://example.xy.qweatherapi.com/v7/weather/now/121.47,31.23")
-        self.assertFalse(request[3])
+        self.assertEqual(request[1], "https://example.xy.qweatherapi.com/v7/weather/now")
+        self.assertEqual(request[2], {"location": "121.47,31.23"})
+        self.assertFalse(request[4])
         self.assertEqual(next(item for item in calls if item[0] == "options")[1:], (6, False))
         self.assertEqual(next(item for item in calls if item[0] == "limit")[1], 65537)
         self.assertEqual(snapshot.weather_code, 61)
@@ -166,7 +164,7 @@ class QWeatherWeatherPortTests(unittest.IsolatedAsyncioTestCase):
             api_host="example.xy.qweatherapi.com", api_key=API_KEY), now=lambda: NOW)
         _, calls = await self._fetch(port, body())
         request = next(item for item in calls if item[0] == "request")
-        self.assertEqual(request[2], {"X-QW-Api-Key": API_KEY})
+        self.assertEqual(request[3], {"X-QW-Api-Key": API_KEY})
 
     async def test_non_qweather_destination_is_refused(self):
         with self.assertRaises(ValueError):

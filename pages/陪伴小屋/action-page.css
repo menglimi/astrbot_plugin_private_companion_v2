@@ -441,7 +441,7 @@ body.reduce-motion .action-page *::after{animation:none!important;transition-dur
 .action-capability-icon{display:grid;width:36px;height:36px;place-items:center;border-radius:var(--r-sm);background:color-mix(in srgb,var(--action-node) 13%,var(--t-surface));color:var(--action-node)}
 .action-capability-icon svg{width:18px;height:18px}
 .action-capability-row h3{min-width:0;margin:0;color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650;line-height:1.4;overflow-wrap:anywhere}
-.action-capability-status{display:inline-flex;max-width:140px;align-items:center;gap:var(--sp-1);padding:5px 8px;border:1px solid var(--t-line);border-radius:var(--r-pill);background:var(--t-surface-soft);color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.35;overflow-wrap:anywhere}
+.action-capability-status{display:inline-flex;max-width:140px;align-items:center;gap:var(--sp-1);padding:calc(var(--sp-1) * 1.25) var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-pill);background:var(--t-surface-soft);color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.35;overflow-wrap:anywhere}
 .action-capability-status i{width:6px;height:6px;flex:none;border-radius:50%;background:currentColor}
 .action-capability-status.action-status--connected{border-color:color-mix(in srgb,var(--t-ok) 34%,transparent);background:var(--t-ok-quiet);color:var(--t-ok-ink)}
 .action-capability-status:is(.action-status--degraded,.action-status--missing,.action-status--disabled,.action-status--waiting,.action-status--conflict,.action-status--unknown){border-color:color-mix(in srgb,var(--t-warn) 30%,transparent);background:var(--t-warn-quiet);color:var(--t-warn-ink)}

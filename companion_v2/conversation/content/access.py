@@ -94,6 +94,20 @@ class ContentAccess:
             if external is None or row["state"] != "succeeded" or digest(record) != row["result_hash"]:
                 raise TaskError("content_source_unavailable", "the original tool material is unavailable")
             external._admit(external._descriptor(row), TaskContext.restore(json.loads(row["context_json"])), at)
+        native = self.runtime.read_one("""SELECT value FROM runtime_metadata
+            WHERE key LIKE 'astrbot.core-tool.%' AND json_extract(value, '$.source.source_id')=?
+            AND json_extract(value, '$.source.version.lineage_id')=?
+            AND json_extract(value, '$.source.version.revision')=?""",
+            (reference.source_id, reference.version.lineage_id, reference.version.revision))
+        if native is not None:
+            from companion_v2.execution.models import TaskContext
+            saved = json.loads(native["value"])
+            external = self.application.external
+            provider = external.providers.get(saved["action"]) if external is not None else None
+            if (provider is None or saved["state"] != "succeeded" or digest(record) != saved["source_hash"]
+                    or saved["provider_json"] != encode(provider.descriptor)):
+                raise TaskError("content_source_unavailable", "the original native tool material is unavailable")
+            external.admit(provider.descriptor, TaskContext.restore(json.loads(saved["context_json"])), at)
         return record
 
     def reference(self, value, context, *, observed_at=None):
@@ -111,6 +125,18 @@ class ContentAccess:
     def target(self, invocation):
         context = invocation.context
         owner = owner_for(context)
+        from companion_v2.conversation.native_tool_sources import input_row, native_invocation, native_turn
+        if native_turn(invocation.parent_task_id):
+            native_invocation(self.runtime, invocation)
+            references = ()
+            if invocation.descriptor.tool.action in ("content.work.create", "content.work.save_candidate"):
+                original = input_row(self.messages, context, invocation.parent_task_id)
+                references = (source_from_document(json.loads(original["source_json"])),)
+            sources = [{**document(reference), "content_hash": self.read_source(reference, context).content_hash}
+                       for reference in references]
+            return {"schema": "content.host-context.v1", "owner": owner,
+                    "contributor": {"kind": "role_output", "role": document(context.role_binding.role),
+                                    "requested_by": document(context.actor.subject)}, "sources": sources}
         row = self.runtime.read_one("SELECT * FROM extension_tool_invocations WHERE invocation_id=?",
                                     (invocation.invocation_id,))
         if row is None or (row["parent_task_id"], row["tool_call_id"], row["arguments_json"]) != (

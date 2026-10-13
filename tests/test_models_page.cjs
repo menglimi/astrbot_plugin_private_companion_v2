@@ -20,6 +20,7 @@ function task(kind, provider, capabilities = ['text'], lane = 'foreground') {
       timeout_seconds: {value: 60, inherited_value: 60, source: 'default', inherited_source: 'default', explicit: false},
       replacement_rules: {value: '[]', inherited_value: '[]', source: 'default', inherited_source: 'default', explicit: false},
       fallback_on_refusal: {value: false, inherited_value: false, source: 'default', inherited_source: 'default', explicit: false},
+      refusal_terms: {value: '很抱歉，我无法\nrequest could not be submitted', inherited_value: '很抱歉，我无法\nrequest could not be submitted', source: 'default', inherited_source: 'default', explicit: false},
       replacement_scope: {value: 'all', inherited_value: 'all', source: 'default', inherited_source: 'default', explicit: false},
     },
   };
@@ -35,6 +36,7 @@ function baseFields(provider) {
     timeout_seconds: {value: 60, inherited_value: 60, source: 'default', inherited_source: 'default', explicit: false},
     replacement_rules: {value: '[]', inherited_value: '[]', source: 'window', inherited_source: 'default', explicit: false},
     fallback_on_refusal: {value: false, inherited_value: false, source: 'default', inherited_source: 'default', explicit: false},
+    refusal_terms: {value: '很抱歉，我无法\nrequest could not be submitted', inherited_value: '很抱歉，我无法\nrequest could not be submitted', source: 'default', inherited_source: 'default', explicit: false},
     replacement_scope: {value: 'all', inherited_value: 'all', source: 'default', inherited_source: 'default', explicit: false},
   };
 }
@@ -124,6 +126,34 @@ function harness() {
   }
   return {page: window.CompanionModelsPage, requests, root, store, audioBlobs, revokedAudioUrls};
 }
+
+test('core reply uses AstrBot routing and saves only its effective extra prompt', async () => {
+  const h = harness(), node = h.root(), data = status();
+  const core = data.tasks[0];
+  core.execution_path = 'astrbot_core';
+  core.editable_fields = ['prompt'];
+  core.routing_note = '由 AstrBot 当前会话选择模型。';
+  h.page.mount(node);
+  h.requests[0].resolve(data);
+  await flush();
+  node.click('[data-model-open]', {modelOpen: 'conversation.reply'});
+  const card = node.innerHTML.split('data-fncard="conversation.reply"')[1].split('</article>')[0];
+  assert.match(card, /AstrBot 当前会话/);
+  assert.match(card, /data-model-field="prompt"/);
+  assert.doesNotMatch(card, /data-model-field="provider"|data-provider-test/);
+  node.change('[data-model-field]', {modelField: 'provider', modelKind: core.kind, value: 'secondary'});
+  node.change('[data-model-field]', {modelField: 'prompt', modelKind: core.kind, value: '自然分段，直接聊天。'});
+  node.click('[data-model-action]', {modelAction: 'save-one', modelKind: core.kind});
+  const post = h.requests.find(request => request.method === 'POST');
+  assert.deepEqual(JSON.parse(JSON.stringify(post.values.changes)), {prompt: '自然分段，直接聊天。'});
+  assert.deepEqual(JSON.parse(JSON.stringify(post.values.reset)), []);
+  post.resolve({replayed: false, task: core});
+  await flush();
+  node.click('[data-model-sub]', {modelSub: 'pol'});
+  assert.doesNotMatch(node.innerHTML, /<option value="conversation.reply"/);
+  assert.match(node.innerHTML, /<option value="memory.reflect"/);
+  h.page.unmount();
+});
 
 test('the routing matrix lists every registered task with its provider', async () => {
   const {page, requests, root} = harness();
@@ -278,7 +308,7 @@ test('provider search narrows tasks and a routed task opens its editor', async (
   assert.match(node.innerHTML, /model-fncard open/);
   assert.match(node.innerHTML, /任务附加提示词/);
   node.click('[data-model-sub]', {modelSub: 'pol'});
-  assert.match(node.innerHTML, /任务路由/);
+  assert.match(node.innerHTML, /data-model-pol-task/);
   assert.doesNotMatch(node.innerHTML, /\bProvider\b|MODEL ROUTING/);
 });
 
@@ -526,7 +556,7 @@ test('a provider shared across languages warns and can unbind the others before 
   assert.ok(!Object.hasOwn(post.values.changes, 'voice_ja_provider_id'), 'untouched language must not be re-sent');
 });
 
-test('image actions retain controls and send backend editing to the output workspace', async () => {
+test('image page separates generation and editing model queues and saves parameters', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
@@ -542,17 +572,80 @@ test('image actions retain controls and send backend editing to the output works
   ], enabled: {'image.generate': true, 'image.edit': true, 'image.mask_edit': true}, authorization: 'checked_for_each_invocation'};
   get.resolve(image);
   await flush();
-  assert.match(node.innerHTML, /生图能力与连接/);
-  assert.match(node.innerHTML, /内置生图动作/);
-  assert.match(node.innerHTML, /扩展未加载/);
-  assert.match(node.innerHTML, /data-go="manage" data-manage="output" data-output-target="capabilities"[^>]*>配置生图后端/);
-  assert.doesNotMatch(node.innerHTML, /data-img-config|data-imgcfg-save/);
+
+  const configRequest = requests.find(r => r.method === 'GET' && r.route.endsWith('/image/output'));
+  assert.ok(configRequest, 'the model page reads the configuration used by the image backend');
+  const config = {revision: 'image-r1', limits: {max_endpoints: 24}, settings: {
+    enabled: true, backend: 'auto',
+    endpoints: [
+      {id: 'primary', name: '主用模型', enabled: true, platform: 'openai', model: 'image-v1', width: 1024, height: 1024,
+        base_url: 'https://api.example.test/v1', timeout_seconds: 180, api_key_set: true},
+      {id: 'secondary', name: '备用模型', enabled: true, platform: 'openai', model: 'image-v2', width: 1024, height: 1024,
+        base_url: 'https://backup.example.test/v1', timeout_seconds: 180, api_key_set: false},
+    ],
+    sd_webui: {base_url: 'http://127.0.0.1:7860', timeout_seconds: 300, parameters: {}},
+    comfyui: {base_url: '', timeout_seconds: 300, workflows: {}},
+    operation_routes: {generate: ['online:primary', 'sd_webui'], edit: ['online:secondary', 'online:primary']},
+  }};
+  configRequest.resolve(config);
+  await flush();
+  assert.match(node.innerHTML, /文生图与改图/);
+  assert.match(node.innerHTML, /data-img-endpoint-test="primary"/,
+    'saved enabled online models expose a real generation test');
+  assert.equal((node.innerHTML.match(/class="model-imgconfig"/g) || []).length, 1,
+    'the model editor stays inside one framed section');
+  assert.match(node.innerHTML, /data-img-view="generate"/);
+  assert.match(node.innerHTML, /data-img-view="edit"/);
+  assert.match(node.innerHTML, /data-img-config-field="endpoints\.0\.model"/);
+  assert.match(node.innerHTML, /data-img-config-json="sd\.generate"/);
+  assert.doesNotMatch(node.innerHTML, /data-img-view="mask_edit"/,
+    'masked editing belongs to the edit workflow, not a third navigation item');
+
+  node.click('[data-img-endpoint-test]', {imgEndpointTest: 'primary'});
+  const outputTest = requests.find(r => r.method === 'POST' && r.route.endsWith('/image/output/test'));
+  assert.ok(outputTest, 'the button calls the saved endpoint generation test');
+  assert.equal(outputTest.values.endpoint_id, 'primary');
+  assert.equal(typeof outputTest.values.operation_key, 'string');
+  assert.ok(outputTest.values.operation_key.length > 0);
+  outputTest.resolve({status: 'succeeded', elapsed_ms: 1250, error: ''});
+  await flush();
+  assert.match(node.innerHTML, /测试成功 · 1250 ms/);
+
+  node.click('[data-img-view]', {imgView: 'edit'});
+  assert.match(node.innerHTML, /普通改图与蒙版局部改图共用模型队列/);
+  assert.match(node.innerHTML, /image\.edit/);
+  assert.match(node.innerHTML, /image\.mask_edit/);
+  assert.match(node.innerHTML, /改图模型与优先级/);
+  node.click('[data-img-route-move]', {imgRouteMove: 'up', imgRouteIndex: '1'});
+  node.change('[data-img-config-field]', {imgConfigField: 'endpoints.0.model', value: 'image-v3'});
+  node.click('[data-img-view]', {imgView: 'generate'});
+  node.input('[data-img-config-json]', {imgConfigJson: 'sd.generate', value: '{"steps":24,"cfg_scale":6.5}'});
+  node.click('[data-img-config-save]');
+  const configSave = requests.find(r => r.method === 'POST' && r.route.endsWith('/image/output/save'));
+  assert.ok(configSave, 'saving model configuration uses the native image configuration API');
+  assert.deepEqual(JSON.parse(JSON.stringify(configSave.values.changes.operation_routes.edit)),
+    ['online:primary', 'online:secondary'], 'editing priority is independent and reorderable');
+  assert.equal(configSave.values.changes.endpoints[0].model, 'image-v3');
+  assert.deepEqual(JSON.parse(JSON.stringify(configSave.values.changes.sd_webui.parameters.generate)),
+    {steps: 24, cfg_scale: 6.5}, 'function-specific image parameters are saved with the model configuration');
+  configSave.resolve({...config, revision: 'image-r2', settings: configSave.values.changes});
+  await flush();
+  assert.match(node.innerHTML, /生图模型与优先级已保存/);
+
+  node.click('[data-img-endpoint-test]', {imgEndpointTest: 'primary'});
+  const uncertainTest = requests.filter(r => r.method === 'POST' && r.route.endsWith('/image/output/test')).at(-1);
+  uncertainTest.resolve({status: 'unknown', elapsed_ms: 8400, error: 'backend_result_unconfirmed'});
+  await flush();
+  assert.match(node.innerHTML, /结果未知 · backend_result_unconfirmed/,
+    'an uncertain provider result is surfaced without an automatic retry');
+
+  node.click('[data-img-view]', {imgView: 'edit'});
   node.click('[data-img-test]', {imgTest: 'image.mask_edit'});
   const maskCheck = requests.find(r => r.route === 'model/image/test');
   assert.equal(maskCheck.values.action, 'image.mask_edit');
   maskCheck.resolve({...image.actions[2], check: 'registration_only'});
   await flush();
-  assert.match(node.innerHTML, /局部改图已注册，可由后续真实任务调用/);
+  assert.match(node.innerHTML, /蒙版局部改图已注册，可由后续真实任务调用/);
   node.change('[data-img-toggle]', {imgToggle: 'image.edit', checked: false});
   node.change('[data-img-toggle]', {imgToggle: 'image.mask_edit', checked: false});
   node.click('[data-img-save]');
@@ -569,7 +662,6 @@ test('image actions retain controls and send backend editing to the output works
   check.resolve({...image.actions[0], check: 'registration_only'});
   await flush();
   assert.match(node.innerHTML, /已注册，可由后续真实任务调用/);
-  assert.equal(requests.filter(r => r.route.startsWith('model/image/config')).length, 0);
 });
 
 test('switching tabs round-trip keeps the functional matrix without reloading', async () => {
@@ -703,15 +795,40 @@ test('the refusal switch saves fallback_on_refusal for the task', async () => {
   requests[0].resolve(status());
   await flush();
   node.click('[data-model-sub]', {modelSub: 'pol'});
+  assert.match(node.innerHTML, /class="model-policy-bar"/);
+  assert.doesNotMatch(node.innerHTML, /替换策略工作台|model-policy-layout|class="model-policy-mode"/);
+  assert.doesNotMatch(node.innerHTML, /已读取当前任务配置/);
   node.click('[data-model-pm]', {modelPm: 'refuse'});
   assert.match(node.innerHTML, /拒答替代/);
   node.change('[data-refusal-switch]', {checked: true});
+  assert.match(node.innerHTML, /data-refusal-provider/);
+  assert.match(node.innerHTML, /data-refusal-terms/);
+  node.change('[data-refusal-provider]', {value: 'secondary'});
+  node.change('[data-refusal-terms]', {value: 'model says no\nrequest rejected'});
+  assert.match(node.innerHTML, /已识别 <b data-refusal-count>2<\/b> 条/);
   node.click('[data-policy-save]', {policySave: 'conversation.reply'});
   const post = requests.find(request => request.method === 'POST');
-  assert.deepEqual({...post.values.changes}, {fallback_on_refusal: true});
+  assert.deepEqual({...post.values.changes}, {fallback: 'secondary', fallback_on_refusal: true,
+    refusal_terms: 'model says no\nrequest rejected'});
   post.resolve({replayed: false, task: editable('conversation.reply', 'primary')});
   await flush();
   assert.match(node.innerHTML, /已保存 1 项/);
+});
+
+test('replacement policy keeps ordinary AstrBot replies out of the task selector', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  const data = status();
+  data.tasks[0].execution_path = 'astrbot_core';
+  requests[0].resolve(data);
+  await flush();
+  node.click('[data-model-sub]', {modelSub: 'pol'});
+  const selectorStart = node.innerHTML.indexOf('<select data-model-pol-task');
+  const selectorEnd = node.innerHTML.indexOf('</select>', selectorStart);
+  const selector = selectorStart >= 0 && selectorEnd >= 0 ? node.innerHTML.slice(selectorStart, selectorEnd + 9) : '';
+  assert.doesNotMatch(selector, /conversation\.reply/);
+  assert.match(selector, /memory\.reflect/);
 });
 
 test('the high-price preset writes two keyword-free time rules with a timezone', async () => {
@@ -867,18 +984,57 @@ test('Laya page exposes official local install, first-run download, and SystemOn
   assert.ok(statusRequest);
   statusRequest.resolve({enabled: false, mode: 'local', endpoint: '', default_model: 'multilingual',
     api_key_set: false, timeout_seconds: 20, package_installed: true, package_version: '0.4.0',
+    decision_fields: {turn_state: true, action: true, reply_intent: true, reply_style: true,
+      reply_form: true, segment_mode: true, tool_need: true},
     model_cache_ready: false, model_cache_path: 'C:/cache/huggingface/hub',
     python_executable: 'C:/AstrBot/python.exe',
     install_command: "& 'C:/AstrBot/python.exe' -m pip install 'laya==0.4.0'",
     remote_install_command: "& 'C:/AstrBot/python.exe' -m pip install 'laya[serve]==0.4.0'",
     remote_start_command: "$env:LAYA_DEFAULT_MODEL='multilingual'; & 'C:/AstrBot/python.exe' -m laya.serve",
     revision: 'laya-revision'});
+  requests.find(item => item.method === 'GET' && item.route === 'model/laya/logs').resolve({events: [
+    {status: 'failed', source: 'conversation', mode: 'local', elapsed_ms: 1200,
+      reason_code: 'laya_inference_failed', reason: 'Laya 本地推理失败：RuntimeError',
+      request: {model: 'multilingual', sent: true, state: '{"facts":{"user_text":"hello"}}',
+        questions: {action: {type: 'choice'}}},
+      response: {format: 'python_object', body: '{"answers":{}}', value: {answers: {}}},
+      processing: {status: 'failed', reason_code: 'laya_response_invalid',
+        stages: [{name: 'contract_conversion', status: 'failed'}]},
+      enabled_fields: {turn_state: true, action: false, reply_intent: true, reply_style: false,
+        reply_form: false, segment_mode: false, tool_need: false}, observed_at: new Date().toISOString()},
+  ]});
   await flush();
   assert.match(node.innerHTML, /本地 Python 包/);
+  assert.match(node.innerHTML, /配置全局生效/);
+  assert.match(node.innerHTML, /本地检查点目录/);
   assert.match(node.innerHTML, /下载并验证模型/);
   assert.match(node.innerHTML, /C:\/AstrBot\/python.exe/);
   assert.match(node.innerHTML, /pip install .*laya==0\.4\.0/);
   assert.doesNotMatch(node.innerHTML, /GGUF|OpenAI 兼容|chat\/completions/);
+  assert.match(node.innerHTML, /判断回复形式/);
+  assert.match(node.innerHTML, /判断分段倾向/);
+  assert.match(node.innerHTML, /Laya 调用日志/);
+  assert.match(node.innerHTML, /模型输入 · state 与分类问题/);
+  assert.match(node.innerHTML, /模型原始响应/);
+  assert.match(node.innerHTML, /合同解析、范围修正与实际应用/);
+  assert.match(node.innerHTML, /contract_conversion/);
+  assert.match(node.innerHTML, /实际对话/);
+  assert.match(node.innerHTML, /失败/);
+  assert.match(node.innerHTML, /当时启用：判断是否说完 · 判断回复意图/);
+
+  node.change('[data-laya-decision]', {layaDecision: 'tool_need', checked: false});
+  node.change('[data-laya-field]', {layaField: 'local_model_path', value: 'C:/models/laya-finetuned'});
+  node.click('[data-laya-save]');
+  const saveRequest = requests.find(item => item.method === 'POST' && item.route === 'model/laya/save');
+  assert.equal(saveRequest.values.changes.decision_fields.tool_need, false);
+  assert.equal(saveRequest.values.changes.local_model_path, 'C:/models/laya-finetuned');
+  saveRequest.resolve({enabled: false, mode: 'local', endpoint: '', default_model: 'multilingual',
+    local_model_path: 'C:/models/laya-finetuned',
+    api_key_set: false, timeout_seconds: 20, decision_fields: {...saveRequest.values.changes.decision_fields},
+    package_installed: true, package_version: '0.4.0', model_cache_ready: false,
+    model_cache_path: 'C:/cache/huggingface/hub', python_executable: 'C:/AstrBot/python.exe',
+    install_command: "& 'C:/AstrBot/python.exe' -m pip install 'laya==0.4.0'", revision: 'laya-revision-2'});
+  await flush();
 
   node.change('[data-laya-field]', {layaField: 'mode', value: 'remote'});
   assert.match(node.innerHTML, /SystemOne 服务地址/);

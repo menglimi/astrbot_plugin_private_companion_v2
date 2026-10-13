@@ -14,8 +14,8 @@ const source = fs.readFileSync(path.join(__dirname, "../pages/陪伴小屋/produ
 const relationshipApi = "host/targets/first/roles/role-first/relationships";
 const groupMemoryApi = "host/targets/first/roles/role-first/group-memory";
 
-async function harness(savedTheme = null, providers = [], options = {}) {
-  const events = {}, calls = [], frames = [], timers = [], warnings = [];
+async function harness(savedTheme = null, extensions = [], options = {}) {
+  const events = {}, calls = [], frames = [], timers = [], warnings = [], loadedScripts = [], fetchCalls = [];
   const contextHandlers = new Set();
   let pending = null;
   let nextDirectory = null;
@@ -57,7 +57,8 @@ async function harness(savedTheme = null, providers = [], options = {}) {
     addEventListener(type, handler) { events[type] = handler; },
     navigate: (...route) => navigations.push(route),
     matchMedia: () => ({matches: false}),
-    CompanionWorkspaceBundle: {host: "<p>host</p>", identity: "<p>directory</p>", relationships: "<p>relationship</p>", persona: "<p>persona</p>"},
+    CompanionWorkspaceBundle: options.lazyBundles ? undefined
+      : {host: "<p>host</p>", identity: "<p>directory</p>", relationships: "<p>relationship</p>", persona: "<p>persona</p>"},
     AstrBotPluginPage: {
       ready: async () => ({pluginName: options.pluginName || HOST}),
       onContext(handler) { contextHandlers.add(handler); return () => contextHandlers.delete(handler); },
@@ -70,9 +71,11 @@ async function harness(savedTheme = null, providers = [], options = {}) {
         if (options.summaryErrors?.[endpoint]) {
           return {status: "error", data: {code: options.summaryErrors[endpoint]}};
         }
+        if (endpoint === "page/workspace-entry") return options.workspaceEntry || {content_path:
+          "/api/plugin/page/content/astrbot_plugin_private_companion_v2/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh"};
         if (endpoint === "page/targets") return options.directoryUnavailable
           ? {status: "error", data: {code: options.directoryError || "staging_not_initialized"}} : nextDirectory || catalog;
-        if (endpoint === "integration/manifest") return {providers, summary: {connected_count: 0}};
+        if (endpoint === "integration/manifest") return {extensions, providers:[], summary: {connected_count: 0}};
         return {items: []};
       },
       apiPost: async (endpoint, body) => {
@@ -85,8 +88,25 @@ async function harness(savedTheme = null, providers = [], options = {}) {
   const stageRole = {innerHTML: ""};
   const document = {
     readyState: "interactive", documentElement: {dataset: {}},
-    head: {appendChild() {}}, body: {classList: {add() {}, remove() {}}},
-    querySelector: () => null,
+    head: {appendChild(script) {
+      loadedScripts.push(script);
+      if (options.lazyBundles) {
+        if (options.failWorkspaceLoads > 0) {
+          options.failWorkspaceLoads -= 1;
+          script.onerror?.();
+          return;
+        }
+        const name = script.src.match(/workspace-bundles\/([^/.]+)\.js/)?.[1];
+        window.CompanionWorkspaceBundle ||= {};
+        window.CompanionWorkspaceBundle[name] = `<p>${name} lazy</p>`;
+        script.onload?.();
+      }
+    }}, body: {classList: {add() {}, remove() {}}},
+    querySelector: selector => {
+      const name = selector.match(/workspace-bundle="([a-z]+)"/)?.[1];
+      return options.lazyBundles && name ? {content: {querySelector: () =>
+        ({src: options.workspaceAssetUrl || `http://localhost/workspace-bundles/${name}.js?v=test`})}} : null;
+    },
     getElementById: id => id === "stageRole" ? stageRole : null,
     querySelectorAll: selector => selector === ".product-workspace-frame" ? frames : [],
     createElement: () => ({addEventListener() {}, setAttribute() {}}), addEventListener() {},
@@ -99,8 +119,10 @@ async function harness(savedTheme = null, providers = [], options = {}) {
     ? timer => { if (timer) timer.cleared = true; }
     : clearTimeout;
   const pageConsole = options.captureWarnings ? {warn: (...args) => warnings.push(args)} : console;
+  const pageFetch = options.fetch || (async (...args) => {fetchCalls.push(args); return {ok: true, json: async () => ({})};});
   vm.runInNewContext(source, {window, document, URL, navigator: {language: "zh-CN"},
     setTimeout: pageSetTimeout, clearTimeout: pageClearTimeout, console: pageConsole,
+    fetch: pageFetch,
     matchMedia: () => ({matches: false}),
     localStorage: {getItem: key => key === "companion-v2-theme" ? savedTheme : null, setItem() {}, removeItem() {}}});
   const product = window.CompanionProduct;
@@ -109,8 +131,15 @@ async function harness(savedTheme = null, providers = [], options = {}) {
   calls.length = 0;
   function addFrame(kind) {
     const messages = [];
+    const workspaceStatus = {textContent: ""};
+    const workspaceRetry = {hidden: true};
+    const section = {dataset: {workspace: kind, workspaceTab: ""}, setAttribute() {},
+      querySelector(selector) {
+        return selector === "[data-workspace-status]" ? workspaceStatus
+          : selector === "[data-workspace-load-retry]" ? workspaceRetry : null;
+      }, workspaceStatus, workspaceRetry};
     const owner = {isConnected: true, style: {}, srcdoc: "",
-      parentElement: {dataset: {workspace: kind, workspaceTab: ""}},
+      parentElement: section,
       contentWindow: {postMessage: message => messages.push(message)}, messages};
     frames.push(owner);
     return owner;
@@ -120,7 +149,7 @@ async function harness(savedTheme = null, providers = [], options = {}) {
     return events.message({source: owner.contentWindow, data: {channel: "companion-workspace",
       kind: "request", requestId, method, path: endpoint, body: {}, timeoutMs}});
   }
-  return {product, calls, timers, warnings, identity, relationships, host, persona, events, request, document, stageRole, navigations, updates, catalog,
+  return {product, calls, timers, warnings, loadedScripts, fetchCalls, frames, addFrame, identity, relationships, host, persona, events, request, document, stageRole, navigations, updates, catalog,
     setDirectory(directory) {nextDirectory = directory;},
     hostTheme(isDark) {
       document.documentElement.dataset.theme = isDark ? "dark" : "light";
@@ -144,6 +173,79 @@ test("directory and relationship workspaces both mount and receive appearance up
   h.product.setAppearance("motion", "off");
   assert.equal(h.identity.messages.at(-1).name, "motion");
   assert.equal(h.relationships.messages.at(-1).name, "motion");
+});
+
+test("workspace bundles load only when that workspace is mounted", async () => {
+  const h = await harness(null, [], {lazyBundles: true});
+  h.frames.splice(0);
+  const host = h.addFrame("host");
+  assert.match(h.product.workspace("host"), /data-workspace-loading|product-workspace-loading/);
+  assert.equal(h.loadedScripts.length, 0);
+  h.product.mountWorkspace();
+  assert.equal(h.loadedScripts.length, 1);
+  assert.match(h.loadedScripts[0].src, /workspace-bundles\/host\.js/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.srcdoc, "<p>host lazy</p>");
+  assert.equal(h.loadedScripts.length, 1, "unvisited workspace bundles stay unloaded");
+  await h.events.message({source: host.contentWindow, data: {channel: "companion-workspace", kind: "ready"}});
+});
+
+test("a rejected lazy bundle token refreshes once through AstrBot's authenticated page bridge", async () => {
+  const h = await harness(null, [], {
+    lazyBundles: true,
+    failWorkspaceLoads: 1,
+    workspaceAssetUrl: "http://localhost/workspace-bundles/host.js?v=test&asset_token=stale",
+  });
+  h.frames.splice(0);
+  const host = h.addFrame("host");
+  h.product.mountWorkspace();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.loadedScripts.length, 2);
+  assert.equal(new URL(h.loadedScripts[0].src).searchParams.get("asset_token"), "stale");
+  assert.equal(new URL(h.loadedScripts[1].src).searchParams.get("asset_token"), "fresh");
+  assert.equal(h.calls.filter(call => call.endpoint === "page/workspace-entry").length, 1);
+  assert.equal(h.fetchCalls.length, 0, "opaque-origin pages must not fetch Dashboard endpoints directly");
+  assert.equal(host.srcdoc, "<p>host lazy</p>");
+});
+
+test("a denied workspace token refresh explains that the dashboard session must be renewed", async () => {
+  const h = await harness(null, [], {lazyBundles: true, failWorkspaceLoads: 1,
+    workspaceAssetUrl: "http://localhost/workspace-bundles/host.js?v=test&asset_token=stale",
+    getFailureEndpoint: "page/workspace-entry",
+    getFailure: Object.assign(new Error("dashboard_identity_required"), {code: "dashboard_identity_required"})});
+  h.frames.splice(0);
+  const host = h.addFrame("host");
+  h.product.mountWorkspace();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.parentElement.dataset.loadState, "error");
+  assert.match(host.parentElement.workspaceStatus.textContent, /重新登录控制台/);
+  assert.doesNotMatch(host.parentElement.workspaceStatus.textContent, /asset_token|stale/);
+});
+
+test("a failed bundle without an asset token explains the missing authorization", async () => {
+  const h = await harness(null, [], {lazyBundles: true, failWorkspaceLoads: 1});
+  h.frames.splice(0);
+  const host = h.addFrame("host");
+  h.product.mountWorkspace();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.parentElement.dataset.loadState, "error");
+  assert.match(host.parentElement.workspaceStatus.textContent, /缺少访问授权/);
+  assert.equal(h.calls.some(call => call.endpoint === "page/workspace-entry"), false);
+});
+
+test("a bundle that still fails after token refresh identifies the remaining resource failure", async () => {
+  const h = await harness(null, [], {lazyBundles: true, failWorkspaceLoads: 2,
+    workspaceAssetUrl: "http://localhost/workspace-bundles/host.js?v=test&asset_token=stale",
+    workspaceEntry: {content_path:
+      "/api/plugin/page/content/astrbot_plugin_private_companion_v2/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh"}});
+  h.frames.splice(0);
+  const host = h.addFrame("host");
+  h.product.mountWorkspace();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.parentElement.dataset.loadState, "error");
+  assert.match(host.parentElement.workspaceStatus.textContent, /授权已刷新/);
+  assert.match(host.parentElement.workspaceStatus.textContent, /插件资源加载日志/);
+  assert.doesNotMatch(host.parentElement.workspaceStatus.textContent, /asset_token|fresh/);
 });
 
 test("a late home summary cannot replace a newer refresh in the same role", async () => {
@@ -563,25 +665,28 @@ test("account editor cannot relay manual runtime operations or native window edi
   assert.equal(h.calls.length, 0);
 });
 
-test("provider links use discovered plugin and page names, including renamed pages", async () => {
+test("the seven V2 capabilities stay in the cottage even with legacy plugin page metadata", async () => {
   const h = await harness(null, [
     {capability_id: "screen", installed: true, plugin_id: "installed_screen", pages: ["屏幕工作台", "观察记录"]},
     {capability_id: "image", installed: true, plugin_id: "installed_image", pages: []},
     {capability_id: "game", installed: false, plugin_id: "missing_game", pages: ["游戏"]},
   ]);
-  const address = h.product.providerAddress("screen", "屏幕伴侣");
-  assert.equal(new URL(address).hash, "#/plugin-page/installed_screen/" + encodeURIComponent("屏幕工作台"));
-  assert.equal(new URL(h.product.providerAddress("screen", "观察记录")).hash,
-    "#/plugin-page/installed_screen/" + encodeURIComponent("观察记录"));
-  assert.equal(new URL(h.product.providerAddress("image")).hash, "#/extension/plugins");
+  assert.equal(h.product.providerAddress("screen", "屏幕伴侣"), "");
+  assert.equal(h.product.providerAddress("screen", "观察记录"), "");
+  assert.equal(h.product.providerAddress("image"), "");
   assert.equal(h.product.providerAddress("game"), "");
   assert.equal(h.product.providerAddress("unknown"), "");
   const detail=h.product.providerDetail("screen").body;
-  assert.ok(detail.includes(address), "furniture details offer the discovered page address");
-  assert.match(detail, /data-copy-address="provider-page-screen-0"/);
+  assert.doesNotMatch(detail, /installed_screen|data-copy-address|plugin-page|extension\/plugins/);
   assert.doesNotMatch(detail, /target="_blank"/, "the Dashboard sandbox blocks popup navigation");
   assert.match(h.product.providerDetail("image").body, /data-output-target="materials"/,
     "an image provider without an independent page opens the existing materials workspace");
+  for (const capability of ["content", "reality", "together", "game", "live"]) {
+    const native = await harness(null, [{capability_id:capability, installed:true,
+      plugin_id:"legacy_" + capability, pages:["旧插件页"]}]);
+    assert.equal(native.product.providerAddress(capability), "");
+    assert.doesNotMatch(native.product.providerDetail(capability).body, /legacy_|plugin-page|extension\/plugins/);
+  }
 });
 
 test("workspace links remain inside the cottage and preserve embedded tab destinations", async () => {
@@ -594,17 +699,17 @@ test("workspace links remain inside the cottage and preserve embedded tab destin
 });
 
 test("bundled Image and Screen furniture use the V2 lifecycle route and never link to provider plugins", async () => {
-  const providers = [
-    {capability_id: "image", owner: "companion_v2", extension_id: "image", plugin_id: "v2.image",
-      installed: false, installed_revision: 0, integration_state: "missing", reason: "尚未装配"},
-    {capability_id: "screen", owner: "companion_v2", extension_id: "companion.screen.native", plugin_id: "v2.screen",
-      installed: true, installed_revision: 4, version: "2.0.0", installed_package_version: "1.9.9",
+  const extensions = [
+    {capability_id: "image", owner: "companion_v2", extension_id: "image",
+      assembled: false, installed_revision: 0, integration_state: "unassembled", reason: "尚未装配"},
+    {capability_id: "screen", owner: "companion_v2", extension_id: "companion.screen.native",
+      assembled: true, installed_revision: 4, version: "2.0.0", installed_package_version: "1.9.9",
       update_available: true, integration_state: "degraded", reason: "已装配内容与当前 V2 内置版不同"},
   ];
-  const h = await harness(null, providers);
+  const h = await harness(null, extensions);
   assert.equal(h.product.providerAddress("image"), "");
   assert.equal(h.product.providerAddress("screen"), "");
-  assert.match(h.product.providerDetail("screen").body, /V2 内置版本[\s\S]*2\.0\.0[\s\S]*已装配版本[\s\S]*1\.9\.9/);
+  assert.match(h.product.providerDetail("screen").body, /V2 内置版本[\s\S]*2\.0\.0[\s\S]*装配版本[\s\S]*1\.9\.9/);
   await h.product.manageExtension("image", "assemble", 0, "image-assemble");
   const lifecycle = h.calls.find(call => call.endpoint === "integration/lifecycle");
   assert.equal(lifecycle.method, "POST");
@@ -615,6 +720,18 @@ test("bundled Image and Screen furniture use the V2 lifecycle route and never li
   assert.equal(JSON.stringify(update.body), JSON.stringify({extension_id: "companion.screen.native", action: "update",
     expected_revision: 4, operation_key: "screen-sync"}));
   assert.equal(h.calls.at(-1).endpoint, "integration/manifest", "家具状态来自真实 V2 manifest 刷新");
+});
+
+test("Content, Reality, Together, Game and Live share the V2 lifecycle route", async () => {
+  const names = ["content", "reality", "together", "game", "live"];
+  const h = await harness(null, names.map(name => ({capability_id:name, owner:"companion_v2",
+    extension_id:name, assembled:true, desired_state:"active", installed_revision:3})));
+  for (const name of names) {
+    await h.product.manageExtension(name, "pause", 3, name + "-pause");
+    const command = h.calls.filter(call => call.endpoint === "integration/lifecycle").at(-1);
+    assert.equal(JSON.stringify(command.body), JSON.stringify({extension_id:name, action:"pause",
+      expected_revision:3, operation_key:name + "-pause"}));
+  }
 });
 
 /* 相识详情页的授权面板要写，而这一页的主要通道是只读的。放行的必须是**它自己的

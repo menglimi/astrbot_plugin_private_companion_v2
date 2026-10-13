@@ -241,6 +241,13 @@ class NativeGroupBridge(NativePrivateBridge):
         self.target_for_scope(scope)
         return super().client(scope)
 
+    def _verified_persona_umo(self, scope, binding, account):
+        parts = scope.session_id.split("_")
+        if (len(parts) not in (1, 2) or any(account_number(part) != part for part in parts)
+                or parts[-1] != scope.native_scope_id or binding.scope != scope):
+            raise TaskError("host_route_changed", "original group session is inconsistent")
+        return self._umo(account.platform_id, scope.session_id)
+
     async def verify_role(self, scope, binding, instruction=None):
         self.client(scope)
         parts = scope.session_id.split("_")

@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -16,12 +17,16 @@ from tests.test_management_access import NOW
 from tests.group_host_support import GroupFixture
 from astrbot_host.account_session_api import AccountSessionWebAPI
 from astrbot_host.controller import AstrBotStagingController
+from astrbot_host import native as native_host
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.execution.models import TaskError
 
 
 class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        native_host._session_settings_cache.clear()
+        native_host._session_settings_reads.clear()
+        native_host._session_settings_versions.clear()
         self.temporary = TemporaryDirectory(prefix="companion-session-directory-")
         self.root = Path(self.temporary.name)
         self.native = WebContext()
@@ -51,16 +56,17 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
             self.preferences[kwargs["scope_id"]] = deepcopy(kwargs["value"])
 
         async def resolve(**kwargs):
-            selected = self.preferences.get(kwargs["umo"], {}).get("persona_id") or kwargs.get("conversation_persona_id") or "original"
+            selected = kwargs.get("conversation_persona_id") or "original"
             return selected, {"name": selected}, None, False
 
         self.native.conversation_manager = NS(get_curr_conversation_id=current,
             db=NS(get_session_conversations=metadata),
             get_conversation=AsyncMock(side_effect=AssertionError("history must not be loaded")))
         self.native.persona_manager = NS(resolve_selected_persona=resolve,
-                                        personas={"original": {}, "second": {}})
+                                        personas={"original": {}, "second": {}},
+                                        personas_v3=[{"name": "original"}, {"name": "second"}])
         self.addCleanup(patch.stopall)
-        patch("astrbot_host.session_topology.sp.get_async", preferences_get).start()
+        patch("astrbot_host.native.sp.get_async", preferences_get).start()
         patch("astrbot_host.account_session_api.sp.put_async", preferences_put).start()
 
     async def asyncTearDown(self):
@@ -85,13 +91,16 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
         return event
 
     async def test_existing_group_and_member_sessions_appear_without_model_calls_or_history_reads(self):
-        response = await self.call("get")
+        with patch.object(self.native.persona_manager, "resolve_selected_persona",
+                          side_effect=AssertionError("session topology must use V2 bindings")):
+            response = await self.call("get")
         self.assertEqual(response["status"], "ok", response)
         targets = response["data"]["discovered"]["targets"]
         groups = [row for row in targets if row["scope_kind"] == "group"]
         self.assertEqual(len(groups), 2)
         self.assertEqual({row["group_id"] for row in groups}, {"300"})
         self.assertEqual({row["account_id"] for row in groups}, {"100"})
+        self.assertEqual({row["persona_id"] for row in groups}, {""})
         self.assertEqual(len({row["session_key"] for row in groups}), 2)
         self.assertTrue(all(not row["managed"] for row in groups))
         self.assertFalse(self.controller.session_topology.path.exists())
@@ -115,23 +124,19 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(discovered["directory"]["issues"][0]["stage"], "session_directory")
         self.assertTrue(any(row.get("participant_id") == "200" for row in discovered["targets"]))
 
-    async def test_one_persona_timeout_keeps_other_sessions_and_does_not_guess_identity(self):
+    async def test_one_session_settings_timeout_keeps_other_sessions_and_does_not_guess_identity(self):
         failing = "qq-main:GroupMessage:300"
 
         async def services(umo):
+            if umo == failing:
+                await asyncio.Event().wait()
             return {}
 
-        async def resolve(**kwargs):
-            if kwargs["umo"] == failing:
-                raise asyncio.TimeoutError("synthetic private host details")
-            return "original", {"name": "original"}, None, False
-
         with patch.object(self.controller.session_topology, "services", services), \
-                patch.object(self.native.persona_manager, "resolve_selected_persona", resolve), \
                 patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.01):
             report = await self.controller.session_topology.inventory_report()
         self.assertFalse(report["complete"])
-        self.assertIn("host_native_lookup_timeout__persona", {item["code"] for item in report["issues"]})
+        self.assertIn("host_native_lookup_timeout__session_settings", {item["code"] for item in report["issues"]})
         partial = next(row for row in report["targets"] if row.get("unified_msg_origin") == failing)
         self.assertEqual(partial["scope_kind"], "group")
         self.assertEqual(partial["group_id"], "300")
@@ -144,7 +149,7 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
         complete = next(row for row in report["targets"]
                         if row.get("unified_msg_origin") == "qq-main:GroupMessage:200_300")
         self.assertTrue(complete["details_available"])
-        self.assertEqual(complete["persona_id"], "original")
+        self.assertEqual(complete["persona_id"], "")
 
     async def test_multiple_logins_require_event_evidence_and_observation_survives_reload(self):
         self.native.platform.client._wsr_api_clients["101"] = object()
@@ -169,6 +174,59 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
         rows = await self.controller.session_topology.inventory()
         self.assertFalse(any(row.get("unified_msg_origin") == event.unified_msg_origin for row in rows))
 
+    async def test_background_writes_are_serial_off_thread_and_termination_drains_them(self):
+        topology = self.controller.session_topology
+        entered, release = threading.Event(), threading.Event()
+        loop_thread = threading.get_ident()
+        writer_threads = []
+        original = topology._store_observation
+
+        def slow_store(key, row):
+            writer_threads.append(threading.get_ident())
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("test did not release the directory writer")
+            original(key, row)
+
+        topology._store_observation = slow_store
+        first = topology.schedule_observe(self.group_event())
+        second = topology.schedule_observe(self.group_event(unique=True))
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            self.assertEqual(len(writer_threads), 1)
+            closing = asyncio.create_task(self.controller.terminate())
+            await asyncio.sleep(0)
+            self.assertFalse(closing.done())
+            self.assertFalse(first.done())
+            self.assertFalse(second.done())
+            self.assertIsNone(topology.schedule_observe(self.group_event()))
+        finally:
+            release.set()
+        await asyncio.wait_for(closing, 2)
+
+        self.assertEqual(len(writer_threads), 2)
+        self.assertTrue(all(identifier != loop_thread for identifier in writer_threads))
+        stored = json.loads(topology.path.read_text(encoding="utf-8"))
+        self.assertEqual(len(stored), 2)
+        self.assertEqual({row["conversation_id"] for row in stored.values()},
+                         {"group-conversation", "member-conversation"})
+        self.assertFalse(topology._pending)
+
+    async def test_background_native_lookup_timeout_does_not_leave_an_observation(self):
+        topology = self.controller.session_topology
+
+        async def blocked(umo):
+            await asyncio.Event().wait()
+
+        with patch.object(self.native.conversation_manager, "get_curr_conversation_id", blocked), \
+                patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.01):
+            pending = topology.schedule_observe(self.group_event())
+            await asyncio.wait_for(topology.close(), 2)
+
+        self.assertTrue(pending.done())
+        self.assertFalse(topology.path.exists())
+        self.assertFalse(topology._pending)
+
     async def test_session_controls_change_native_settings_and_preserve_other_services(self):
         row = next(row for row in await self.controller.session_topology.inventory() if row["scope_kind"] == "group")
         umo = row["unified_msg_origin"]
@@ -192,9 +250,25 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("persona_id", self.preferences[umo])
         restored = next(item for item in await self.controller.session_topology.inventory() if item["session_key"] == row["session_key"])
         self.assertEqual(restored["persona_override"], "")
-        self.assertEqual(restored["persona_id"], "original")
+        self.assertEqual(restored["persona_id"], "")
         self.assertTrue(await self.controller.session_topology.reply_enabled(event))
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+
+    async def test_session_directory_does_not_replace_v2_persona_override_with_astrbot_persona(self):
+        row = next(row for row in await self.controller.session_topology.inventory() if row["scope_kind"] == "group")
+        umo = row["unified_msg_origin"]
+        self.preferences[umo] = {"persona_id": "second"}
+        native_host.remember_session_settings(umo, self.preferences[umo])
+
+        async def unexpected_resolver(**kwargs):
+            raise AssertionError("an explicit V2 window persona must be authoritative")
+
+        with patch.object(self.native.persona_manager, "resolve_selected_persona", unexpected_resolver):
+            current = next(item for item in await self.controller.session_topology.inventory()
+                           if item.get("unified_msg_origin") == umo)
+
+        self.assertEqual(current["persona_id"], "second")
+        self.assertEqual(current["persona_override"], "second")
 
     async def test_invalid_identity_target_and_persona_never_write_native_settings(self):
         row = next(row for row in await self.controller.session_topology.inventory() if row["scope_kind"] == "group")
@@ -210,7 +284,13 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
 
 class SharedTopologyBindingTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        native_host._session_settings_cache.clear()
+        native_host._session_settings_reads.clear()
+        native_host._session_settings_versions.clear()
         super().setUp()
+        self.addCleanup(native_host._session_settings_cache.clear)
+        self.addCleanup(native_host._session_settings_reads.clear)
+        self.addCleanup(native_host._session_settings_versions.clear)
         self.api = AccountSessionWebAPI(self.controller)
         self.native.persona_manager.personas = self.native.persona_records
 
@@ -275,8 +355,8 @@ class SharedTopologyBindingTests(GroupFixture, unittest.IsolatedAsyncioTestCase)
         private = self.event()
         group = self.group_event()
 
-        self.native.selections[private.unified_msg_origin] = "second"
-        self.native.selections[group.unified_msg_origin] = "second"
+        self.window_personas[private.unified_msg_origin] = "second"
+        self.window_personas[group.unified_msg_origin] = "second"
 
         private_mapping = await self.controller.persona_mapping_for_event(private)
         group_mapping = await self.controller.persona_mapping_for_event(group)
@@ -315,9 +395,17 @@ class SharedTopologyBindingTests(GroupFixture, unittest.IsolatedAsyncioTestCase)
         private = self.event()
         group = self.group_event()
         unmapped = self.group_event(identifier="other-persona", unique=True)
-        self.native.selections[unmapped.unified_msg_origin] = "second"
+        self.window_personas[unmapped.unified_msg_origin] = "second"
         self.native.conversation_manager.session_conversations = {
             event.unified_msg_origin: self.native.conversations["qq-main"] for event in (private, group, unmapped)}
+        async def read_sessions(*, page, page_size, platform, **_filters):
+            rows = [{"session_id": umo, "conversation_id": cid,
+                     "persona_id": self.native.selections.get(umo, self.native.selections[platform])}
+                    for umo, cid in self.native.conversation_manager.session_conversations.items()
+                    if umo.startswith(platform + ":")]
+            return rows, len(rows)
+
+        self.native.conversation_manager.db = NS(get_session_conversations=read_sessions)
         personas = [{"bot_id": "bot-a", "persona_id": "original", "role_id": "星缘"}]
         discovered = {"accounts": self.controller.session_topology.accounts(),
                       "personas": original["personas"], "targets": []}
@@ -332,7 +420,8 @@ class SharedTopologyBindingTests(GroupFixture, unittest.IsolatedAsyncioTestCase)
         self.assertEqual([(target.target_id, target.participant_id) for target in self.controller.settings.targets],
                          [("first", "200")])
         self.assertTrue(all(row["bot_id"] == "bot-a" for row in saved["personas"]))
-        with patch("astrbot_host.session_topology.sp.get_async", AsyncMock(return_value={})):
+        native_host.remember_session_settings(unmapped.unified_msg_origin, {"persona_id": "second"})
+        with patch("astrbot_host.native.sp.get_async", AsyncMock(return_value={})):
             rows = [row for row in await self.controller.session_topology.inventory() if row["native"]]
         self.assertTrue(next(row for row in rows if row["unified_msg_origin"] == private.unified_msg_origin)["managed"])
         self.assertTrue(next(row for row in rows if row["unified_msg_origin"] == group.unified_msg_origin)["managed"])

@@ -54,6 +54,7 @@ class NewsItem:
     url: str
     summary: str
     published_at: datetime | None
+    category: str = ""
 
 
 def _text(value: object, field: str, *, optional: bool = False) -> str:
@@ -185,7 +186,13 @@ def _news_row(raw: object, default_source: str) -> tuple[NewsItem, str, str]:
                     "summary", optional=True)
     published = _timestamp(raw.get("published_at", raw.get("published", raw.get("date_published"))),
                            "published_at", optional=True)
-    item = NewsItem(source, identifier, title, url, summary, published)
+    category_value = raw.get("category", raw.get("section", raw.get("categories", "")))
+    if isinstance(category_value, Mapping):
+        category_value = category_value.get("name", "")
+    elif isinstance(category_value, (list, tuple)):
+        category_value = next((value for value in category_value if type(value) is str and value.strip()), "")
+    category = " ".join(category_value.split())[:48] if type(category_value) is str else ""
+    item = NewsItem(source, identifier, title, url, summary, published, category)
     source_key = source.casefold()
     url_key = canonical
     fallback = _fold(title) + "|" + (published.date().isoformat() if published else source_key)

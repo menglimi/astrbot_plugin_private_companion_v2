@@ -34,7 +34,7 @@ MAX_SAMPLE_LIMIT = 64
 MAX_SAMPLE_CHARS = 4000
 MAX_WINDOW_HOURS = 720
 MIN_SAMPLES = 1
-DEFAULT_SAMPLE_LIMIT = 24
+DEFAULT_SAMPLE_LIMIT = 60
 DEFAULT_SAMPLE_CHARS = 800
 
 
@@ -79,7 +79,7 @@ def _trim(value, maximum=DEFAULT_SAMPLE_CHARS):
 class ExpressionSampleCatalog:
     """Recheckable expression samples from one exact private or group scope."""
 
-    def __init__(self, runtime, *, window_hours=168):
+    def __init__(self, runtime, *, window_hours=720):
         if type(window_hours) is not int or not 1 <= window_hours <= MAX_WINDOW_HOURS:
             raise ValueError("expression sample window must stay inside its bounded range")
         self.runtime = runtime
@@ -151,13 +151,29 @@ class ExpressionSampleCatalog:
             clause = "AND json_extract(b.context_json, '$.role_binding') = ? "
             values.append(encode(context.role_binding))
         values.append(limit)
-        return self.runtime.read_all("""SELECT i.rowid AS input_sequence, i.event_key, i.event_json, b.context_json
+        legacy = self.runtime.read_all("""SELECT COALESCE(s.rowid, i.rowid) AS input_sequence,
+            i.event_key, i.event_json, b.context_json
             FROM conversation_inputs i JOIN conversation_batches b ON b.batch_id = i.batch_id
+            LEFT JOIN sources s ON s.source_id = json_extract(i.event_json, '$.source.source_id')
+                AND s.lineage_id = json_extract(i.event_json, '$.source.version.lineage_id')
+                AND s.source_revision = json_extract(i.event_json, '$.source.version.revision')
             WHERE i.withdrawn = 0 AND json_extract(i.event_json, '$.received_at') >= ?
               AND json_extract(i.event_json, '$.received_at') <= ?
               AND json_extract(i.event_json, '$.scope.kind') = ?
               """ + clause + "ORDER BY json_extract(i.event_json, '$.received_at') DESC, i.rowid DESC LIMIT ?",
             tuple(values))
+        from companion_v2.conversation.native_observations import inbound_event, input_rows_for_context
+        native = input_rows_for_context(self.runtime, context, start=stamp(opened_at), end=stamp(at), limit=limit)
+        if not native:
+            return legacy
+        rows = [dict(row) for row in legacy]
+        for row in native:
+            event = inbound_event(row)
+            rows.append({"input_sequence": row["input_sequence"], "event_key": event.scoped_key,
+                         "event_json": encode(event), "context_json": row["context_json"],
+                         "native_observation": row})
+        rows.sort(key=lambda row: (json.loads(row["event_json"])["received_at"], row["input_sequence"]), reverse=True)
+        return tuple(rows[:limit])
 
     def _input_text(self, row, context, at):
         from companion_v2.conversation.messages import event_from_document
@@ -176,6 +192,12 @@ class ExpressionSampleCatalog:
         self._authorize(original, at)
         messages = self._owner()
         messages.authorize(original, at)
+        if "native_observation" in row.keys():
+            from companion_v2.conversation.native_observations import validate_observation
+            from companion_v2.conversation.reset import source_current
+            validate_observation(self.runtime, row["native_observation"], original, event.source)
+            if not source_current(self.runtime, event.source):
+                raise TaskError("conversation_context_reset", "the native sample precedes this window's reset")
         record = messages._read_source(event.source, original, event.capability, at)
         if record.content_hash != event.input_hash:
             raise TaskError("expression_sample_changed", "original conversation sample changed")
@@ -254,7 +276,7 @@ class ExpressionSampleCatalog:
                     samples.append(StyleSample(self.sample_handle(context, row["part_id"]), text))
             return SampleSet(opened_at, at, tuple(samples), source_kind)
 
-    def new_inputs(self, context, at, *, after_sequence=0, window_hours=168, member_ids=None):
+    def new_inputs(self, context, at, *, after_sequence=0, window_hours=720, member_ids=None):
         """Count source-readable new messages, before the smaller learning sample cap."""
         rows = self._input_rows(context, at - timedelta(hours=window_hours), at, limit=512)
         count, latest = 0, after_sequence
@@ -338,13 +360,62 @@ class ExpressionSampleCatalog:
             if context.scope.kind is ScopeKind.PRIVATE:
                 return context
             raise TaskError("expression_sample_changed", "original group sample context is unavailable")
-        row = self.runtime.read_one("""SELECT context_json FROM conversation_batches
-            WHERE origin_key = ? ORDER BY rowid DESC LIMIT 1""", (key,))
-        try:
-            original = TaskContext.restore(json.loads(row["context_json"])) if row else None
-        except (TypeError, ValueError, KeyError):
-            original = None
-        if (original is None or original.key != key or original.scope != context.scope
-                or original.role_binding != context.role_binding):
+        if context.scope.kind is ScopeKind.GROUP:
+            if type(key) is not str or len(key) != 64:
+                raise TaskError("expression_sample_changed", "original group sample context is invalid")
+            rows = self.runtime.read_all("""SELECT context_json FROM conversation_batches
+                WHERE origin_key = ? ORDER BY rowid DESC LIMIT 1""", (key,))
+            if not rows:
+                try:
+                    rows = self.runtime.read_all("""SELECT context_json FROM conversation_native_observations
+                        WHERE context_key = ? AND kind = 'input' ORDER BY observed_at DESC, rowid DESC LIMIT 1""",
+                        (key,))
+                except Exception:
+                    rows = ()
+            for row in rows:
+                try:
+                    original = TaskContext.restore(json.loads(row["context_json"]))
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if (original.key == key and original.scope == context.scope
+                        and original.role_binding == context.role_binding):
+                    return original
+            raise TaskError("expression_sample_changed", "original sample belongs to another group or role")
+        from .private_scope import current_private_context
+        original = current_private_context(self.runtime, key, context.role_binding)
+        same_role = (original is not None
+            and original.scope.installation_id == context.scope.installation_id
+            and original.scope.bot_id == context.scope.bot_id
+            and original.role_binding.role == context.role_binding.role)
+        if not same_role or original.scope.kind is not ScopeKind.PRIVATE:
             raise TaskError("expression_sample_changed", "original sample belongs to another role or window")
         return original
+
+    def private_source_available(self, source, destination, at):
+        """Recheck source authority and role selection before cross-relationship use."""
+        if (source.scope.kind is not ScopeKind.PRIVATE
+                or destination.scope.kind is not ScopeKind.PRIVATE
+                or source.scope.installation_id != destination.scope.installation_id
+                or source.scope.bot_id != destination.scope.bot_id
+                or source.role_binding.role != destination.role_binding.role
+                or source.actor.subject.kind is not SubjectKind.HUMAN):
+            return False
+        identity = self._owner().tasks.identity
+        resolved = identity.resolve_authenticated(source.actor.principal, observed_at=at)
+        role = identity.resolve_role(source.scope, observed_at=at)
+        if (not resolved.is_success or not role.is_success
+                or resolved.unwrap().subject != source.actor.subject
+                or resolved.unwrap().binding_id != source.actor.binding_id
+                or resolved.unwrap().binding_revision != source.actor.binding_revision
+                or role.unwrap() != source.role_binding):
+            return False
+        try:
+            self._owner().authorize(source, at)
+            from .configuration import (application_subject_allowed_for_context, read_settings,
+                                        source_subject_allowed_for_context)
+            source_policy = read_settings(self.runtime, source)
+            return (source_policy.private_learning_enabled
+                    and source_subject_allowed_for_context(self.runtime, source)
+                    and application_subject_allowed_for_context(self.runtime, destination))
+        except Exception:
+            return False

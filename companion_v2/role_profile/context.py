@@ -3,12 +3,16 @@
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.execution.models import TaskError
 
-from .configuration import FIELD_LIMITS, GROUP, RoleProfileConfigurationOwner, configuration_fields, target_for, validate_values
+from .configuration import (CONTROL_FIELDS, FIELD_DEFAULTS, FIELD_LIMITS, GROUP, RoleProfileConfigurationOwner,
+                             configuration_fields, target_for, validate_values)
 
 
 ADDED_PROFILE_FIELDS = frozenset({"birthday", "first_person", "emotional_style", "social_distance",
                                  "reaction_patterns", "voice_examples", "signature_phrases",
-                                 "world_adaptation_mode", "world_adaptation"})
+                                 "world_adaptation_mode", "world_adaptation",
+                                 "main_companion_subject", "expression_private_source_mode",
+                                 "expression_private_source_subject_ids", "expression_private_application_mode",
+                                 "expression_private_application_subject_ids"})
 
 
 FIELD_LABELS = {
@@ -58,6 +62,7 @@ FIELD_LABELS = {
     "platform_names": "平台称呼补充",
     "world_adaptation_mode": "世界观适配模式",
     "world_adaptation": "世界观适配指引",
+    "main_companion_subject": "主要陪伴对象",
 }
 INSTRUCTION = (
     "下面是当前角色的稳定档案。它描述角色自身及其世界，帮助延续身份、性格、边界和场景；"
@@ -88,7 +93,7 @@ class ConversationRoleProfileContext:
         snapshot = self.owner.read(target_for(context), self.fields)
         values = {
             name: snapshot.fields[f"{GROUP}.{name}"].value.strip()
-            for name in FIELD_LIMITS
+            for name in FIELD_LIMITS if name not in CONTROL_FIELDS
         }
         if not any(value for name, value in values.items() if name != "world_adaptation_mode"):
             return None
@@ -110,16 +115,14 @@ class ConversationRoleProfileContext:
             if (type(fields) is dict and set(fields).issubset(FIELD_LIMITS)
                     and set(FIELD_LIMITS).difference(fields).issubset(ADDED_PROFILE_FIELDS)):
                 missing = set(FIELD_LIMITS).difference(fields)
-                fields = {**dict.fromkeys(missing, ""), **fields}
-                if "world_adaptation_mode" in missing:
-                    fields["world_adaptation_mode"] = "auto"
+                fields = {**{name: FIELD_DEFAULTS.get(name, "") for name in missing}, **fields}
             values = validate_values(fields)
         except (ConfigurationError, TypeError, ValueError) as error:
             raise TaskError("role_profile_snapshot_invalid", "the sealed role profile is invalid") from error
         lines = [
             f"- {FIELD_LABELS[name]}：{value.strip()}"
             for name, value in values.items()
-            if value.strip()
+            if name not in CONTROL_FIELDS and value.strip()
         ]
         if not lines:
             return ""

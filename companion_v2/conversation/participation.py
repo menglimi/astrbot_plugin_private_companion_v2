@@ -5,10 +5,9 @@ This owner performs no model or platform I/O and does not invent an empty reply.
 
 It also owns the registered ``conversation.group_participation`` settings group:
 the group observation family, the self-initiated interjection budget and the
-repeat-follow rules are all read here and folded into the same participation
-instruction. None of them creates a send path -- a group turn still exists only
-because an admitted member message opened it, and anything the role says still
-leaves through the ordinary authorized delivery chain.
+repeat settings are read here. Ordinary participation contributes references to
+the role prompt; literal follow/interrupt actions are decided in repeat_actions
+and sent by the AstrBot host after authorization, without ordinary generation.
 """
 
 from dataclasses import replace
@@ -81,6 +80,7 @@ CONFIG_DEFAULTS = {
     "group_repeat_interrupt_probability": 0.10,
     "group_repeat_interrupt_probability_step": 0.12,
     "group_repeat_interrupt_text": "禁止复读",
+    "group_repeat_interrupt_image_path": "",
     "group_repeat_window_seconds": 120,
     "group_context_max_age_hours": 12,
 }
@@ -94,7 +94,9 @@ CONFIG_SWITCHES = tuple(key for key, value in CONFIG_DEFAULTS.items() if type(va
 CONFIG_COUNTS = tuple(key for key, value in CONFIG_DEFAULTS.items() if type(value) is int)
 CONFIG_PROBABILITIES = tuple(key for key, value in CONFIG_DEFAULTS.items() if type(value) is float)
 CONFIG_INTERRUPT_TEXT = "group_repeat_interrupt_text"
+CONFIG_INTERRUPT_IMAGE = "group_repeat_interrupt_image_path"
 MAX_INTERRUPT_TEXT = 80
+MAX_INTERRUPT_IMAGE_PATH = 4096
 
 
 def configuration_fields():
@@ -124,6 +126,15 @@ def validate_interrupt_text(text):
     return text
 
 
+def validate_interrupt_image_path(path):
+    """An optional local host path, never a URL or a member-provided attachment."""
+    if (type(path) is not str or len(path) > MAX_INTERRUPT_IMAGE_PATH
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+        raise ConfigurationError("group_participation_configuration",
+                                 "the repeat interrupt image must be a printable local path")
+    return path
+
+
 class GroupParticipationConfigurationOwner(SparseConfigurationOwner):
     """Window-scoped group participation settings.
 
@@ -151,10 +162,13 @@ class GroupParticipationConfigurationOwner(SparseConfigurationOwner):
 
 
 def _check_interrupt_text(fields):
-    """Apply ``validate_interrupt_text`` to a field snapshot, if it carries the field."""
+    """Validate both literal interruption settings before storing a snapshot."""
     item = fields.get(CONFIG_GROUP + "." + CONFIG_INTERRUPT_TEXT)
     if item is not None:
         validate_interrupt_text(item.value)
+    image = fields.get(CONFIG_GROUP + "." + CONFIG_INTERRUPT_IMAGE)
+    if image is not None:
+        validate_interrupt_image_path(image.value)
 
 
 def group_participation_settings(runtime, context):
@@ -179,6 +193,7 @@ def group_participation_settings(runtime, context):
         if type(value) not in (int, float) or isinstance(value, bool) or not 0 <= value <= 1:
             raise ConfigurationError("group_participation_configuration", f"{name} must be a fraction between 0 and 1")
     validate_interrupt_text(settings[CONFIG_INTERRUPT_TEXT])
+    validate_interrupt_image_path(settings[CONFIG_INTERRUPT_IMAGE])
     return settings
 
 
@@ -296,7 +311,7 @@ class GroupParticipation:
                 "mentioned": any(ADDRESS_MARKER in text for text in texts),
                 "day": day_key(at, self.messages.timezone_name), "act": act, "act_signature": signature}
 
-    def observe_early(self, context, *, text, speaker_id, received_at):
+    def observe_early(self, context, *, text, speaker_id, received_at, event_id=None):
         """Fold one authenticated group message before reply admission.
 
         V1's observation hook ran even when its later reply path chose to stay
@@ -309,7 +324,7 @@ class GroupParticipation:
         if context.scope.kind is not ScopeKind.GROUP:
             return False
         text = clean_group_text(text)
-        if not text or type(speaker_id) is not str or not speaker_id.strip():
+        if type(speaker_id) is not str or not speaker_id.strip():
             return False
         if not isinstance(received_at, datetime) or received_at.tzinfo is None:
             return False
@@ -317,7 +332,9 @@ class GroupParticipation:
         reset = boundary(self.runtime, context.scope)
         if reset is not None and stamp(received_at) <= reset["reset_at"]:
             return False
-        self.admission.observe(context, text=text, speaker_id=speaker_id, received_at=received_at)
+        self.admission.observe(context, text=text, speaker_id=speaker_id, received_at=received_at, event_id=event_id)
+        if not text:
+            return False  # media-only messages break the burst, without becoming expression evidence
         try:
             settings = group_participation_settings(self.runtime, context)
             item = history_items(({
@@ -414,6 +431,10 @@ class GroupParticipation:
         except Exception:
             return  # optional derived material never rejects a decided group turn
         self._frozen_turns.pop(batch_id, None)
+
+    def record_no_reply(self, context, batch_id):
+        """Persist a completed silent group turn without counting bot speech."""
+        self._record(context, batch_id, replied=False)
 
     def diagnostics(self, scope, role, limit):
         """Projection for an authorized manager; never trims receipts or exposes message bodies."""

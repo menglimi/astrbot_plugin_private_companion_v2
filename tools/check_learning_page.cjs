@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix="learning-page-qa-") as data_root:
         {target_id:"first",scope_kind:"private",participant_id:"200",platform_id:"qq-main",account_id:"100",bot_id:"bot-a",roles:[{role_id:"role-a",role_name:"星缘",growth_api:"/"+HOST+"/"+ROLE+"/growth",reply_api:"/"+HOST+"/"+ROLE+"/reply",config_api:"/"+HOST+"/"+ROLE+"/config"}]},
         {target_id:"group-a",scope_kind:"group",group_id:"group-a",platform_id:"qq-main",account_id:"100",bot_id:"bot-a",roles:[{role_id:"role-a",role_name:"星缘",reply_api:"/"+HOST+"/"+GROUP_ROLE+"/reply",group_memory_api:"/"+HOST+"/"+GROUP_ROLE+"/memory"}]},
       ]});
-      if(route==="integration/manifest")return ok({providers:[],core:[],summary:{connected_count:0}});
+      if(route==="integration/manifest")return ok({extensions:[],providers:[],core:[],summary:{connected_count:0,extension_ready_count:0,provider_count:0}});
       if(failRead&&route.endsWith("/style"))return fail("staging_not_initialized");
       if(route.endsWith("/growth/evidence"))return ok({items:[{text:"今天已经完成了一次和面，发酵还需要再练习",issued_at:now}]});
       if(route.endsWith("/growth/progress"))return ok({items:progress.filter(row=>row.state==="pending"),next_cursor:null});

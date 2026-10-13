@@ -35,11 +35,12 @@ class ScreenAccess:
                 or set(self.package.dataset_owners) != {"screen"}):
             raise TaskError("screen_provider_changed", "the loaded Screen package changed")
 
-    def _access(self, operator, at, *, action="capability.view"):
+    def _access(self, operator, at, *, action="capability.view", require_active_context=True):
         if self.context.scope.kind is not ScopeKind.PRIVATE:
             raise TaskError("screen_private_required", "Screen access is available for private conversations")
-        require(self.application.tasks.authorize_context(
-            self.context, action="conversation.reply", observed_at=at))
+        if require_active_context:
+            require(self.application.tasks.authorize_context(
+                self.context, action="conversation.reply", observed_at=at))
         require(self.policy.authorize(operator, scope=self.context.scope,
             action=action, owner=self.context.actor.subject, observed_at=at))
 
@@ -75,13 +76,17 @@ class ScreenAccess:
             state[2], self.identities.revision, self.policy.revision])
 
     def status(self, operator, at):
-        self._access(operator, at)
+        self._access(operator, at, require_active_context=False)
         with self.runtime.read_snapshot():
             state = self._state()
             installed, selection, consents = state
             same_package = installed is not None and (
                 installed.package_id, installed.package_version, installed.artifact_hash
             ) == (self.package.package_id, self.package.package_version, self.package.artifact_hash)
+            upgrade_available = bool(installed is not None
+                and installed.package_id == self.package.package_id
+                and installed.package_version != self.package.package_version
+                and installed.desired_state is CapabilityDesiredState.ACTIVE)
             active = bool(same_package and installed.desired_state is CapabilityDesiredState.ACTIVE)
             role_enabled = bool(selection and selection.enabled)
             read_consented = consents.get("screen.read", (None, 0))[0] == CapabilityAuthorizationState.ACTIVE.value
@@ -98,6 +103,10 @@ class ScreenAccess:
                 "screen_process_consent_missing" if not process_consented else
                 "screen_tool_unavailable" if not invokable else "")
             return {"action": ACTION, "package_version": self.package.package_version,
+                "upgrade_available": upgrade_available,
+                "installed_package_version": installed.package_version if installed else None,
+                "installed_artifact_hash": installed.artifact_hash if installed else None,
+                "installed_revision": installed.revision if installed else None,
                 "installed": installed is not None, "active": active, "role_enabled": role_enabled,
                 "read_consented": read_consented, "process_consented": process_consented,
                 "consented": read_consented and process_consented,

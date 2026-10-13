@@ -18,11 +18,16 @@ from tests.test_daily_token_soft_limit import ModelFixture
 from tests.test_management_access import NOW
 
 
+SYNTHETIC_IMAGE_PLUGIN = "synthetic.image_provider"
+
+
 class Port:
     def __init__(self):
         self.before = 0
         self.content = b"PNG"
         self.document = manifest()
+        self.document["plugin_id"] = SYNTHETIC_IMAGE_PLUGIN
+        self.document["package"]["package_id"] = SYNTHETIC_IMAGE_PLUGIN
         self.prepare = self.after = self.prepare_read = None
         self.saved_guard = None
         self.with_artifact = True
@@ -76,7 +81,7 @@ class StarClass:
 
 
 class Star:
-    root_dir_name = "astrbot_plugin_image_companion"
+    root_dir_name = SYNTHETIC_IMAGE_PLUGIN
     name = root_dir_name
     version = "0.5.0"
     activated = True
@@ -211,7 +216,7 @@ class NativeRegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_discovery_is_metadata_only_and_missing_adopter_revokes_material(self):
         self.assertEqual([item.host_tool_id for item in self.registry.declarations()],
-                         ["native:astrbot_plugin_image_companion:image.generate"])
+                         ["native:synthetic.image_provider:image.generate"])
         declaration, invocation = self._invocation()
         result = await self.registry.invoke(declaration.host_tool_id, invocation)
         self.assert_unavailable(result, "native_artifact_unadopted")

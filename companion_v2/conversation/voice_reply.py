@@ -297,6 +297,27 @@ class VoiceReplyDelivery:
             plan["cooldown_key"] = key
             return plan
 
+    def claim_core_route(self, context, event_id, cooldown_seconds):
+        """Claim the same durable route cooldown for AstrBot-owned replies."""
+        owner = "core:" + digest([context.key, event_id])
+        if not cooldown_seconds:
+            return {"part_id": owner, "cooldown_key": ""}
+        key = digest([context.scope.installation_id, context.scope.platform, context.scope.kind.value,
+                      context.scope.bot_id, context.scope.account_id, context.scope.conversation_id,
+                      context.role_binding.role])
+        with self.runtime.transaction() as connection:
+            old = connection.execute(
+                "SELECT part_id, until_at FROM conversation_voice_cooldowns WHERE route_key = ?", (key,)
+            ).fetchone()
+            at = self.now()
+            if old is not None and old["until_at"] > stamp(at) and old["part_id"] != owner:
+                return None
+            connection.execute("""INSERT INTO conversation_voice_cooldowns(route_key, part_id, until_at)
+                VALUES (?, ?, ?) ON CONFLICT(route_key) DO UPDATE SET part_id = excluded.part_id,
+                until_at = excluded.until_at""",
+                (key, owner, stamp(at + timedelta(seconds=cooldown_seconds))))
+        return {"part_id": owner, "cooldown_key": key}
+
     def release(self, plan, part_id):
         if plan is not None and plan.get("cooldown_key"):
             with self.runtime.transaction() as connection:

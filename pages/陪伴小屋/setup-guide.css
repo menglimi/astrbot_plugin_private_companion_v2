@@ -50,7 +50,7 @@
 .setup-connection-state.is-stopped { border-left-color: var(--amber, var(--t-warn-ink)); }
 .setup-legacy { margin-top:var(--sp-5); padding-top:var(--sp-5); border-top: 1px solid var(--line); }
 .setup-legacy-data { margin-top:var(--sp-4); padding-top:var(--sp-4); border-top:1px solid var(--line); }
-.setup-legacy-data h4 { margin:0 0 var(--sp-2); color:var(--ink); font-size:var(--fs-section); }
+.setup-legacy-data h4 { margin:0 0 var(--sp-2); color:var(--ink); font-size:var(--fs-title); }
 .setup-legacy-data > p { color:var(--muted); font-size:var(--fs-tiny); line-height:1.5; }
 .setup-legacy-data-controls { display:grid; grid-template-columns:minmax(0, 1fr); max-width:620px; }
 .setup-legacy-data-checks { display:flex; flex-wrap:wrap; gap:var(--sp-3); margin:var(--sp-2) 0; }
@@ -185,4 +185,82 @@
   .setup-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .setup-progress li { flex-direction: row; justify-content: flex-start; text-align: left; }
   .setup-model-default { grid-template-columns:minmax(0,1fr); gap:var(--sp-1); }
+}
+
+.setup-legacy { margin:0; padding:0; border:0; }
+.setup-migration-header { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--sp-4); padding:0 0 var(--sp-4); border-bottom:1px solid var(--line); }
+.setup-migration-header h3 { margin:0; color:var(--ink); font-size:var(--fs-head); line-height:1.35; }
+.setup-migration-header > div > p:last-child { margin:var(--sp-1) 0 0; color:var(--muted); font-size:var(--fs-tiny); line-height:1.45; }
+.setup-migration-badge { flex:0 0 auto; padding:var(--sp-1) var(--sp-2); border:1px solid var(--line-strong); border-radius:var(--r-xs); color:var(--accent); font-size:var(--fs-tiny); font-weight:700; }
+.setup-migration-context { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:var(--sp-2); padding:var(--sp-3) 0; border-bottom:1px solid var(--line); }
+.setup-migration-step { display:grid; grid-template-columns:24px minmax(0,1fr); align-items:start; gap:var(--sp-2); min-width:0; padding:var(--sp-2); border-left:1px solid var(--line); }
+.setup-migration-step:first-child { border-left:0; }
+.setup-migration-step-index { display:grid; place-items:center; width:24px; height:24px; border:1px solid var(--line-strong); border-radius:50%; color:var(--accent); font-size:var(--fs-micro); font-variant-numeric:tabular-nums; }
+.setup-migration-step > div { min-width:0; }
+.setup-migration-step h4 { margin:2px 0 var(--sp-2); color:var(--ink); font-size:var(--fs-body); line-height:1.35; }
+.setup-migration-context .setup-legacy-path { max-width:none; margin:0; font-size:var(--fs-tiny); }
+.setup-migration-context .setup-legacy-path input,
+.setup-migration-context .setup-legacy-path select,
+.setup-migration-context .setup-legacy-scope select { min-height:40px; }
+.setup-migration-context .setup-legacy-scope { grid-template-columns:minmax(0,1fr); gap:var(--sp-2); max-width:none; margin:0; }
+.setup-migration-context .setup-legacy-scope label { font-size:var(--fs-tiny); }
+.setup-migration-context .setup-legacy-scope-note { margin:var(--sp-1) 0 0; line-height:1.45; }
+.setup-migration-prompt { margin:var(--sp-3) 0 0 !important; color:var(--muted) !important; font-size:var(--fs-tiny) !important; }
+.setup-migration-review { margin-top:var(--sp-3); padding-bottom:var(--sp-3); border-bottom:1px solid var(--line); }
+.setup-legacy-root { margin:var(--sp-3) 0 0; padding:var(--sp-2) 0; border-top:1px solid var(--line); color:var(--muted); font-size:var(--fs-tiny); overflow-wrap:anywhere; }
+.setup-legacy-findings { margin-top:0; }
+.setup-legacy-findings li { align-items:start; }
+.setup-legacy-findings li > span { padding:2px var(--sp-2); border:1px solid var(--line); border-radius:var(--r-xs); color:var(--accent); font-size:var(--fs-tiny); white-space:nowrap; }
+.setup-migration-review > .setup-actions { margin-top:var(--sp-3); }
+.setup-legacy-data { margin-top:var(--sp-4); padding-top:var(--sp-4); border-top:1px solid var(--line); }
+.setup-migration-section-head { display:flex; align-items:flex-start; gap:var(--sp-3); margin-bottom:var(--sp-3); }
+.setup-migration-section-head > span { display:grid; place-items:center; flex:0 0 28px; width:28px; height:28px; border:1px solid var(--line-strong); border-radius:50%; color:var(--accent); font-size:var(--fs-micro); font-variant-numeric:tabular-nums; }
+.setup-migration-section-head > div { min-width:0; }
+.setup-migration-section-head h4 { margin:0 !important; color:var(--ink); font-size:var(--fs-title) !important; }
+.setup-migration-section-head p { margin:var(--sp-1) 0 0; color:var(--muted); font-size:var(--fs-tiny); line-height:1.5; }
+.setup-legacy-data-controls { grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--sp-3); max-width:none; margin:var(--sp-3) 0; }
+.setup-legacy-data-controls > .setup-legacy-scope-note { align-self:end; margin:0 0 var(--sp-2); }
+.setup-legacy-data-checks { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--sp-2); margin:var(--sp-3) 0; }
+.setup-legacy-data-checks label { min-width:0; padding:var(--sp-2); border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface); }
+.setup-legacy-data-checks label:has(input:disabled) { opacity:.65; }
+.setup-legacy-data-checks label span { min-width:0; overflow-wrap:anywhere; }
+.setup-legacy-data .setup-legacy-plan { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 var(--sp-3); margin:var(--sp-3) 0; padding:var(--sp-2) var(--sp-3); border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:var(--r-xs); background:var(--surface); }
+.setup-legacy-data .setup-legacy-plan > p { margin:0; padding:var(--sp-2) 0; border-bottom:1px solid var(--line); font-size:var(--fs-tiny); line-height:1.55; }
+.setup-legacy-data .setup-legacy-plan > p:first-child { grid-column:1 / -1; color:var(--ink); font-size:var(--fs-body); font-weight:700; }
+.setup-legacy-data .setup-legacy-plan > details { grid-column:1 / -1; }
+.setup-legacy-data .setup-legacy-plan > .setup-inline-error { grid-column:1 / -1; margin:var(--sp-2) 0; }
+.setup-legacy-persona-batch { margin-top:var(--sp-4); padding-top:var(--sp-4); border-top:1px solid var(--line); }
+.setup-legacy-persona-batch > h5 { margin:0 0 var(--sp-2); color:var(--ink); font-size:var(--fs-body); }
+.setup-legacy-persona-batch > p { margin:0 0 var(--sp-3); color:var(--muted); font-size:var(--fs-tiny); line-height:1.55; }
+.setup-legacy-persona-row { background:var(--surface); }
+.setup-legacy-persona-destination { padding-top:var(--sp-3); }
+.setup-legacy-persona-options { padding:var(--sp-2) 0; border-top:1px solid var(--line); }
+.setup-legacy-persona-options label { min-width:160px; }
+.setup-legacy-persona-batch .setup-legacy-persona-list + .setup-actions { padding-top:var(--sp-2); }
+.setup-legacy-values { min-width:0; }
+.setup-legacy-values > summary { min-height:40px; line-height:1.45; overflow-wrap:anywhere; }
+.setup-legacy-values li > label { display:grid; grid-template-columns:18px minmax(0,1fr); align-items:start; gap:var(--sp-1) var(--sp-2); min-width:0; }
+.setup-legacy-values li > label > input { grid-row:1 / span 2; margin:2px 0 0; accent-color:var(--accent); }
+.setup-legacy-values li > label > small { grid-column:2; }
+
+@media (max-width: 860px) {
+  .setup-migration-context { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .setup-migration-step:last-child { grid-column:1 / -1; border-top:1px solid var(--line); border-left:0; }
+}
+
+@media (max-width: 700px) {
+  .setup-migration-header { gap:var(--sp-2); }
+  .setup-migration-context { grid-template-columns:minmax(0,1fr); gap:0; }
+  .setup-migration-step,
+  .setup-migration-step:first-child,
+  .setup-migration-step:last-child { grid-column:1; padding:var(--sp-3) 0; border-top:1px solid var(--line); border-left:0; }
+  .setup-migration-step:first-child { border-top:0; }
+  .setup-legacy-data-controls,
+  .setup-legacy-data-checks,
+  .setup-legacy-data .setup-legacy-plan { grid-template-columns:minmax(0,1fr); }
+  .setup-legacy-data .setup-legacy-plan > p:first-child,
+  .setup-legacy-data .setup-legacy-plan > details,
+  .setup-legacy-data .setup-legacy-plan > .setup-inline-error { grid-column:1; }
+  .setup-legacy-findings li { grid-template-columns:minmax(0,1fr); }
+  .setup-legacy-findings li > span { justify-self:start; }
 }

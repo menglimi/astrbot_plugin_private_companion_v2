@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import timedelta
 import json
 import os
+import threading
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
@@ -12,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 from astrbot.core.message.components import Video
 from astrbot_host.media_components import private_components
 from astrbot_host.video.loader import load_native_video
-from companion_v2.execution.models import stamp
+from companion_v2.execution.models import TaskError, stamp
 from companion_v2.memory.models import AtomRef, owner_key
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from tests.multi_host_support import MultiFixture, multi_config
@@ -92,6 +93,56 @@ class LegacyStagingReceiptTests(unittest.TestCase):
 
 
 class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_profile_open_does_not_block_host_event_loop(self):
+        started, release = threading.Event(), threading.Event()
+        original = StorageRuntime._open_connection
+
+        def slow_open(runtime):
+            started.set()
+            release.wait(timeout=5)
+            return original(runtime)
+
+        try:
+            with patch.object(StorageRuntime, "_open_connection", slow_open):
+                initializing = asyncio.create_task(self.controller.initialize_profile())
+                self.assertTrue(await asyncio.to_thread(started.wait, 2))
+                await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.1)
+                release.set()
+                result = await asyncio.wait_for(initializing, timeout=10)
+            self.assertTrue(result.is_success, result.failure)
+        finally:
+            release.set()
+
+    async def test_verified_persona_uses_v2_binding_and_keeps_current_prompt(self):
+        await self.start_host()
+        context, _ = await self.accepted()
+        prompt = "当前的人格表达已经更新。"
+        self.native.persona_records["original"]["prompt"] = prompt
+        lookups = self.native.role_lookups
+
+        current = await self.controller.session.bridge.verified_persona(context.scope, context.role_binding)
+
+        self.assertEqual(current["prompt"], prompt)
+        self.assertEqual(self.native.role_lookups - lookups, 0)
+
+    async def test_verified_runtime_change_is_acknowledged_once_across_authority_recreation(self):
+        (await self.controller.initialize_profile()).unwrap()
+        authority = self.controller.authority
+        original = authority.require_manifest()
+        changed = {**original, "fingerprint": "new-runtime-fingerprint"}
+        with self.assertLogs("astrbot_host.multi_authority", level="INFO") as captured:
+            self.assertEqual(authority.require_manifest(changed), original)
+            authority.require_manifest(changed)
+            recreated = MultiAuthority(authority.runtime, authority.settings, now=authority.now)
+            recreated.require_manifest(changed)
+        self.assertEqual(len(captured.records), 1)
+        self.assertEqual(captured.records[0].levelname, "INFO")
+        rejected = deepcopy(changed)
+        rejected["binding_contract"]["personas"] = []
+        with self.assertRaises(TaskError) as error:
+            recreated.require_manifest(rejected)
+        self.assertEqual(error.exception.code, "host_binding_changed")
+
     async def test_existing_profile_reports_retryable_error_until_platform_loads(self):
         (await self.controller.initialize_profile()).unwrap()
         await self.controller.terminate()
@@ -303,24 +354,26 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         dashboard_request = NS(username="dashboard-admin", query={})
 
         probe_entered, allow_probe = asyncio.Event(), asyncio.Event()
+        conversation_manager = self.native.conversation_manager
+        original_lookup = conversation_manager.get_curr_conversation_id
 
-        async def hold_probe(_count):
+        async def hold_probe(umo):
             probe_entered.set()
             await allow_probe.wait()
+            return await original_lookup(umo)
 
-        self.native.before_resolve = hold_probe
         with patch("astrbot_host.memory_api.request", dashboard_request):
-            starting = asyncio.create_task(self.controller.start())
-            try:
-                await asyncio.wait_for(probe_entered.wait(), timeout=2)
-                response = await asyncio.wait_for(memory_settings(), timeout=1)
-                self.assertEqual(response["status"], "ok", response)
-            finally:
-                allow_probe.set()
-            started = await starting
-            self.assertTrue(started.is_success, started.failure)
+            with patch.object(conversation_manager, "get_curr_conversation_id", hold_probe):
+                starting = asyncio.create_task(self.controller.start())
+                try:
+                    await asyncio.wait_for(probe_entered.wait(), timeout=2)
+                    response = await asyncio.wait_for(memory_settings(), timeout=1)
+                    self.assertEqual(response["status"], "ok", response)
+                finally:
+                    allow_probe.set()
+                started = await starting
+                self.assertTrue(started.is_success, started.failure)
 
-            self.native.before_resolve = None
             session = self.controller.session
             original_close = session.close
             close_entered, allow_close = asyncio.Event(), asyncio.Event()
@@ -342,32 +395,62 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             stopped = await stopping
             self.assertTrue(stopped.is_success, stopped.failure)
 
-    async def test_unresponsive_astrbot_persona_lookup_fails_within_its_budget(self):
+    async def test_global_probe_does_not_read_window_persona_override(self):
         entered = asyncio.Event()
 
-        async def unresponsive(_count):
+        async def unavailable(_umo):
             entered.set()
-            await asyncio.Event().wait()
+            raise AssertionError("global startup must not depend on a window persona override")
 
-        self.native.before_resolve = unresponsive
-        try:
-            with patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.01):
-                result = await self.controller.probe()
-            self.assertTrue(entered.is_set())
-            self.assertEqual(result.failure.code, "host_native_lookup_timeout__persona")
-            self.assertIn("会话生效人格", result.failure.reason)
-            self.assertEqual(self.controller.last_failure["operation"], "probe")
-            self.assertFalse(self.controller._lifecycle_lock.locked())
-        finally:
-            self.native.before_resolve = None
+        self.controller.native_types = replace(
+            self.controller.native_types, session_persona_override_lookup=unavailable)
+        result = await self.controller.probe()
+        self.assertTrue(result.is_success, result.failure)
+        self.assertFalse(entered.is_set())
+        self.assertFalse(self.controller._lifecycle_lock.locked())
+
+    async def test_start_uses_the_current_host_persona_when_no_v2_override_exists(self):
+        async def no_override(_umo):
+            return None
+
+        self.controller.native_types = replace(
+            self.controller.native_types, session_persona_override_lookup=no_override)
+        initialized = await self.controller.initialize_profile()
+        self.assertTrue(initialized.is_success, initialized.failure)
+
+        started = await self.controller.start()
+        self.assertTrue(started.is_success, started.failure)
+        self.assertEqual(self.controller.session.application.state, "running")
+
+    async def test_wal_checkpoint_runs_on_a_worker_thread_and_finishes_before_shutdown(self):
+        initialized = await self.controller.initialize_profile()
+        self.assertTrue(initialized.is_success, initialized.failure)
+        application = self.controller.session.application
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        checkpoint_finished = asyncio.Event()
+        checkpoint_threads = []
+
+        def checkpoint():
+            checkpoint_threads.append(threading.get_ident())
+            loop.call_soon_threadsafe(checkpoint_finished.set)
+            return (0, 0, 0)
+
+        application.runtime.checkpoint_passive = checkpoint
+        started = await self.controller.start()
+        self.assertTrue(started.is_success, started.failure)
+        await asyncio.wait_for(checkpoint_finished.wait(), timeout=2)
+        stopped = await self.controller.stop()
+
+        self.assertTrue(stopped.is_success, stopped.failure)
+        self.assertNotEqual(checkpoint_threads[0], loop_thread)
 
     async def test_lookup_failure_identifies_the_native_read_that_stalled(self):
         async def unresponsive(*args, **kwargs):
             await asyncio.Event().wait()
 
         manager = self.native.conversation_manager
-        for method, stage in (("get_curr_conversation_id", "conversation_id"),
-                              ("get_conversation", "conversation")):
+        for method, stage in (("get_curr_conversation_id", "conversation_id"),):
             with self.subTest(stage=stage), patch.object(manager, method, AsyncMock(side_effect=unresponsive)), \
                     patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.01):
                 result = await self.controller.probe()
@@ -407,14 +490,15 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.native.conversation_manager.session_conversations["qq-main:GroupMessage:300"] = "conversation-a"
         lookups = []
 
-        async def resolve(**kwargs):
-            self.assertIn(":FriendMessage:", kwargs["umo"])
-            lookups.append(kwargs["umo"])
+        async def services(umo):
+            self.assertIn(":FriendMessage:", umo)
+            lookups.append(umo)
             await asyncio.sleep(0.1)
-            return "original", self.native.persona, None, False
+            return {"persona_id": "original"}
 
-        with patch.object(self.native.persona_manager, "resolve_selected_persona", resolve), \
-                patch.object(controller.session_topology, "services", AsyncMock(return_value={})), \
+        with patch.object(self.native.persona_manager, "resolve_selected_persona",
+                          side_effect=AssertionError("AstrBot persona resolution must not choose a V2 role")), \
+                patch.object(controller.session_topology, "services", services), \
                 patch("companion_v2.adapters.astrbot.native.NATIVE_LOOKUP_TIMEOUT_SECONDS", 0.3):
             _, conversations = await controller._probe()
         self.assertEqual(len(conversations), 16)
@@ -423,7 +507,10 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_probe_is_read_only_and_first_start_prepares_one_shared_runtime(self):
         before = list(self.root.iterdir())
-        self.assertTrue((await self.controller.probe()).is_success)
+        with patch.object(self.native.conversation_manager, "get_conversation",
+                          AsyncMock(side_effect=AssertionError("probe must not read full host conversation state"))) as conversation:
+            self.assertTrue((await self.controller.probe()).is_success)
+        conversation.assert_not_awaited()
         self.assertEqual(list(self.root.iterdir()), before)
         started = await self.controller.start()
         self.assertTrue(started.is_success, started.failure)
@@ -443,7 +530,8 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(platform.client._api._wsr_api.calls), 1)
 
     async def test_unregistered_private_persona_does_not_block_start_or_claim(self):
-        self.native.selections["qq-main"] = "unregistered"
+        self.native.persona_records["unregistered"] = {"name": "unregistered", "prompt": "未绑定的人格。"}
+        self.window_personas["qq-main:FriendMessage:200"] = "unregistered"
         initialized = await self.controller.initialize_profile()
         self.assertTrue(initialized.is_success, initialized.failure)
         started = await self.controller.start()
@@ -490,7 +578,8 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             records[(target, "role-a")] = self.remember(app, context, batch)
         for target in ("first", "second"):
             self.clock.advance(timedelta(seconds=1))
-            self.native.selections[self.controller.settings.target(target).platform_id] = "second"
+            configured = self.controller.settings.target(target)
+            self.window_personas[f"{configured.platform_id}:FriendMessage:{configured.participant_id}"] = "second"
             context, batch = await self.accepted(target, "persona-b")
             records[(target, "role-b")] = self.remember(app, context, batch)
             original = records[(target, "role-a")]
@@ -501,7 +590,8 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({item["atom_id"] for item in records.values()}), 4)
         for target in ("first", "second"):
             self.clock.advance(timedelta(seconds=1))
-            self.native.selections[self.controller.settings.target(target).platform_id] = "original"
+            configured = self.controller.settings.target(target)
+            self.window_personas[f"{configured.platform_id}:FriendMessage:{configured.participant_id}"] = "original"
             context, _ = await self.accepted(target, "back-a")
             for (record_target, role), record in records.items():
                 result = app.memory.writer.read(context, AtomRef(record["atom_id"], 1))
@@ -608,12 +698,10 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         renamed = multi_config()
         renamed["multi_host"]["personas"][0]["persona_id"] = "renamed"
         self.native.persona_records["renamed"] = {"name": "renamed", "prompt": self.native.persona["prompt"]}
-        self.native.selections["qq-main"] = "renamed"
         renamed_controller = self.make_controller(renamed)
         # 人格映射也在绑定契约里：换绑人格同样要重走绑定（见 page-designs/16-setup.md）。
         self.assertEqual((await renamed_controller.initialize_profile()).failure.code, "host_binding_changed")
         await renamed_controller.terminate()
-        self.native.selections["qq-main"] = "original"
         self.controller = self.make_controller(multi_config())
         app = await self.start_host()
         current = self.controller.authority.context("first", "role-a")
@@ -677,7 +765,8 @@ class MultiHostVideoTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         MultiFixture.setUp(self)
         self.types = NativeAdapterTypes("4.27.2", self.types.event, self.types.provider,
             self.types.function_tool, self.types.tool_set, self.types.reverse_api,
-            video=Video, video_loader=load_native_video, component_reader=private_components)
+            video=Video, video_loader=load_native_video, component_reader=private_components,
+            session_persona_override_lookup=self.types.session_persona_override_lookup)
         self.controller = self.make_controller()
 
     def video_event(self, target):
@@ -689,6 +778,7 @@ class MultiHostVideoTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self_id=int(config.account_id), user_id=int(config.participant_id),
             sender={"user_id": int(config.participant_id)}, message_id="same-message-id",
             message=[{"type": "video", "data": {"file": locator}}])
+        self.window_personas.setdefault(event.unified_msg_origin, "original")
         return event
 
     async def test_same_native_message_id_keeps_video_sources_isolated_by_account_target(self):

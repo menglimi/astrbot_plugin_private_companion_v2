@@ -81,10 +81,16 @@ async function inspectBoot(page, url) {
   });
   try {
     const page = await browser.newPage({viewport: {width: 390, height: 844}});
+    const bootGifRequests = [];
+    const workspaceRequests = [];
+    page.on("request", request => {
+      if (/room-loading-(tea-coffee|mug)\.gif/.test(request.url())) bootGifRequests.push(request.url());
+      if (/workspace-bundle\.js|workspace-bundles\//.test(request.url())) workspaceRequests.push(request.url());
+    });
     const visible = await inspectBoot(page, url);
     assert.match(visible.source, /room-loading-(tea-coffee|mug)\.gif/);
     const expectedSource = new URL(visible.source, url).href;
-    assert.equal(visible.preload, expectedSource);
+    assert.match(visible.preload, /room-loading-tea-coffee\.gif/);
     assert.equal(visible.imageSrc, expectedSource);
     assert.equal(visible.ready, false);
     assert.equal(visible.visibility, "visible");
@@ -92,6 +98,11 @@ async function inspectBoot(page, url) {
     assert.equal(visible.hidden, false);
     assert.equal(visible.width, 300);
     assert.equal(visible.height, 300);
+    await page.waitForFunction(() => document.documentElement.dataset.roomBootGif.includes("room-loading-mug.gif"),
+      undefined, {timeout: 6000});
+    assert(bootGifRequests.some(source => source.includes("room-loading-tea-coffee.gif")));
+    assert(bootGifRequests.some(source => source.includes("room-loading-mug.gif")));
+    assert.deepEqual(workspaceRequests, [], "workspace scripts are not fetched during cottage startup");
 
     const output = process.argv[2];
     if (output) {
@@ -118,7 +129,7 @@ async function inspectBoot(page, url) {
     }));
     assert.deepEqual(reducedState, {selected: "", hidden: true, preload: false});
     assert.deepEqual(gifRequests, []);
-    console.log(JSON.stringify({visible, reduced: reducedState, gifRequests}, null, 2));
+    console.log(JSON.stringify({visible, bootGifRequests, workspaceRequests, reduced: reducedState, gifRequests}, null, 2));
     await reduced.close();
   } finally {
     await browser.close();
