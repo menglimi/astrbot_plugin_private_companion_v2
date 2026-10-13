@@ -28,7 +28,13 @@ def install_native_reset_marker(native_context):
     active = ContextVar("companion_v2_native_context_reset", default=None)
     commands = native.ConversationCommands
     original_clear = native._clear_third_party_agent_runner_state
-    originals = {name: getattr(commands, name) for name in ("reset", "new_conv")}
+    if callable(getattr(commands, "reset", None)):
+        bindings = ((commands, "reset"), (commands, "new_conv"))
+    else:
+        from astrbot.builtin_stars.builtin_commands.main import Main
+
+        bindings = ((Main, "reset"), (commands, "new_conv"))
+    originals = {binding: getattr(*binding) for binding in bindings}
 
     @wraps(original_clear)
     async def clear(context, umo, agent_runner_type):
@@ -47,17 +53,17 @@ def install_native_reset_marker(native_context):
                 active.reset(token)
         return command
 
-    replacements = {name: decorate(original) for name, original in originals.items()}
+    replacements = {binding: decorate(original) for binding, original in originals.items()}
     native._clear_third_party_agent_runner_state = clear
-    for name, command in replacements.items():
-        setattr(commands, name, command)
+    for (owner, name), command in replacements.items():
+        setattr(owner, name, command)
 
     def retire():
         if native._clear_third_party_agent_runner_state is clear:
             native._clear_third_party_agent_runner_state = original_clear
-        for name, command in replacements.items():
-            if getattr(commands, name) is command:
-                setattr(commands, name, originals[name])
+        for (owner, name), command in replacements.items():
+            if getattr(owner, name) is command:
+                setattr(owner, name, originals[(owner, name)])
 
     return retire
 

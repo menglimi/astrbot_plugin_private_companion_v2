@@ -1,4 +1,4 @@
-"""AstrBot 4.27.2 private capture, with explicit account/persona projections.
+"""AstrBot 4.27.2/4.28.2 private capture, with explicit account/persona projections.
 
 Native classes are supplied by trusted assembly. Importing V2 never boots AstrBot.
 Async host reads finish before the SQLite intake transaction starts.
@@ -25,7 +25,7 @@ from companion_v2.conversation.media.video.models import CapturedVideo, MAX_VIDE
 from .files import file_locator, prepare_file_text, MAX_FILES
 
 
-SUPPORTED_VERSION = "4.27.2"
+SUPPORTED_VERSIONS = frozenset(("4.27.2", "4.28.2"))
 NATIVE_LOOKUP_TIMEOUT_SECONDS = 20
 NATIVE_LOOKUP_SLOW_SECONDS = 2
 NATIVE_LOOKUP_SLOW_LOG_INTERVAL_SECONDS = 60
@@ -93,8 +93,9 @@ MEDIA_PREPARE_TIMEOUT = 25
 
 
 def check_version(version):
-    if version != SUPPORTED_VERSION:
-        raise ValueError("AstrBot native adapters require the verified 4.27.2 contract")
+    if type(version) is not str or version not in SUPPORTED_VERSIONS:
+        supported = ", ".join(sorted(SUPPORTED_VERSIONS))
+        raise ValueError("AstrBot native adapters require a verified contract (supported: " + supported + ")")
 
 
 def native_id(value):

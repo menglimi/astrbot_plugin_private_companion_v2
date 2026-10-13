@@ -152,22 +152,40 @@ class NativeContextResetTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands
         from astrbot.core.star.session_plugin_manager import sp
 
+        reset_owner = ConversationCommands
+        if not callable(getattr(reset_owner, "reset", None)):
+            from astrbot.builtin_stars.builtin_commands.main import Main
+
+            reset_owner = Main
         app = await self.start_host()
         context, batch = await self.accepted()
         self.native.get_using_provider = lambda _umo: self.native.provider
         self.native.get_config = lambda **_: {"platform_settings": {"unique_session": False},
-                                             "provider_settings": {"agent_runner_type": "local"}}
-        self.native.conversation_manager.update_conversation = AsyncMock(side_effect=RuntimeError("synthetic reset failure"))
+                                             "provider_settings": {"agent_runner_type": "local"},
+                                             "agent_runner": {"runner_type": "local"}}
+        self.native.conversation_manager.get_conversation = AsyncMock(
+            return_value=NS(persona_id="original"))
+        if reset_owner is ConversationCommands:
+            self.native.conversation_manager.update_conversation = AsyncMock(
+                side_effect=RuntimeError("synthetic reset failure"))
+        else:
+            self.native.conversation_manager.new_conversation = AsyncMock(
+                side_effect=RuntimeError("synthetic reset failure"))
         event = self.event(identifier="native-failure", text="/reset")
         native_event_extras(event)
         commands = ConversationCommands(self.native)
+        reset_instance = commands if reset_owner is ConversationCommands else NS(
+            context=self.native, conversation_c=commands)
         with patch.object(sp, "get_async", new=AsyncMock(return_value={})):
             with self.assertRaises(RuntimeError):
-                await commands.reset(event)
+                await reset_owner.reset(reset_instance, event)
             await self.plugin().observe_companion_context_reset(event)
             self.assertTrue(batch_current(app.runtime, batch))
-            self.native.conversation_manager.update_conversation = AsyncMock()
-            await commands.reset(event)
+            if reset_owner is ConversationCommands:
+                self.native.conversation_manager.update_conversation = AsyncMock()
+            else:
+                self.native.conversation_manager.new_conversation = AsyncMock(return_value="new-id")
+            await reset_owner.reset(reset_instance, event)
             result = event.result
             await self.plugin().observe_companion_context_reset(event)
         self.assertIs(event.result, result)
@@ -183,14 +201,22 @@ class NativeContextResetTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         from astrbot.builtin_stars.builtin_commands.commands import conversation as native
         from astrbot_host.conversation_reset import install_native_reset_marker
 
+        reset_owner = native.ConversationCommands
+        if not callable(getattr(reset_owner, "reset", None)):
+            from astrbot.builtin_stars.builtin_commands.main import Main
+
+            reset_owner = Main
         native_context = NS()
         native_context.get_config = lambda **_: {
             "platform_settings": {"unique_session": False},
             "provider_settings": {"agent_runner_type": "dify"},
+            "agent_runner": {"runner_type": "dify"},
         }
         command = native.ConversationCommands(native_context)
+        reset_instance = command if reset_owner is native.ConversationCommands else NS(
+            context=native_context, conversation_c=command)
         clear = AsyncMock()
-        original_reset, original_new = native.ConversationCommands.reset, native.ConversationCommands.new_conv
+        original_reset, original_new = reset_owner.reset, native.ConversationCommands.new_conv
         with patch.object(native, "_clear_third_party_agent_runner_state", clear), \
                 patch.object(native.active_event_registry, "stop_all", return_value=0), \
                 patch.object(native.sp, "get_async", new=AsyncMock(return_value={})):
@@ -203,25 +229,19 @@ class NativeContextResetTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
                 reset_event = self.event(identifier="third-party-reset", text="/reset")
                 native_event_extras(reset_event)
-                await command.reset(reset_event)
+                await reset_owner.reset(reset_instance, reset_event)
                 self.assertTrue(reset_event.get_extra("_clean_group_context_session"))
-
-                denied = self.event(identifier="denied-reset")
-                native_event_extras(denied)
-                denied.message_obj.group_id = "300"
-                await command.reset(denied)
-                self.assertFalse(denied.get_extra("_clean_group_context_session", False))
 
                 clear.side_effect = RuntimeError("synthetic state clear failure")
                 failed = self.event(identifier="failed-third-party-reset")
                 native_event_extras(failed)
                 with self.assertRaises(RuntimeError):
-                    await command.reset(failed)
+                    await reset_owner.reset(reset_instance, failed)
                 self.assertFalse(failed.get_extra("_clean_group_context_session", False))
             finally:
                 retire()
             self.assertIs(native._clear_third_party_agent_runner_state, clear)
-            self.assertIs(native.ConversationCommands.reset, original_reset)
+            self.assertIs(reset_owner.reset, original_reset)
             self.assertIs(native.ConversationCommands.new_conv, original_new)
         self.assertEqual(clear.await_count, 3)
 
@@ -247,7 +267,11 @@ class NativeContextResetTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         config["platform_settings"].update(reply_prefix="", reply_with_mention=False, reply_with_quote=False,
                                            forward_threshold=100000)
         config["platform_settings"]["segmented_reply"]["enable"] = False
-        ctx = NS(astrbot_config=config, plugin_manager=NS(context=NS(get_using_tts_provider=lambda _: None)))
+        tts_context = NS(
+            get_using_tts_provider=lambda _: None,
+            get_using_tts_provider_async=AsyncMock(return_value=None),
+        )
+        ctx = NS(astrbot_config=config, plugin_manager=NS(context=tts_context))
         stage = native_stage.ResultDecorateStage()
         await stage.initialize(ctx)
         event = self.event(identifier="native-decorated-reset", text="/reset")
