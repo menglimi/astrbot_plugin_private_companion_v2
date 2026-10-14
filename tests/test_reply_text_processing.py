@@ -51,11 +51,11 @@ class ReplyTextProcessingTests(unittest.TestCase):
             validate({**asdict(SegmentationPolicy()), "streaming": True, "part_gap_ms": 0,
                       **fields, "recall_forbidden_scope": "invalid"})
 
-    def test_cleanup_and_replacement_are_disabled_by_default(self):
+    def test_cleanup_is_enabled_by_default_while_replacement_stays_disabled(self):
         presentation = ReplyTextPolicy()
-        self.assertFalse(presentation.content_cleanup_enabled)
+        self.assertTrue(presentation.content_cleanup_enabled)
         self.assertFalse(presentation.content_replacement_enabled)
-        self.assertEqual(presentation.clean_parts(("原文。\n",)), ("原文。\n",))
+        self.assertEqual(presentation.clean_parts(("原文。\n",)), ("原文。",))
 
     def test_configured_trailing_punctuation_cleanup_preserves_internal_punctuation(self):
         presentation = ReplyTextPolicy(content_cleanup_enabled=True, content_cleanup_scope="trailing",

@@ -1961,6 +1961,87 @@ MIGRATION_V59_TO_V60_FINGERPRINT = hashlib.sha256(
     "\n".join(V60_MIGRATION_STATEMENTS).encode("utf-8")
 ).hexdigest()
 
+V61_MIGRATION_STATEMENTS = (
+    "ALTER TABLE laya_decision_events RENAME TO laya_decision_events_v60",
+    """CREATE TABLE laya_decision_events (
+        event_id TEXT PRIMARY KEY NOT NULL CHECK(length(event_id) = 32),
+        origin_key TEXT NOT NULL CHECK(length(origin_key) BETWEEN 1 AND 256),
+        batch_id TEXT CHECK(batch_id IS NULL OR length(batch_id) BETWEEN 1 AND 128),
+        source TEXT NOT NULL CHECK(source IN ('conversation', 'dashboard_preview', 'probe', 'role_intervention')),
+        status TEXT NOT NULL CHECK(status IN ('ok', 'skipped', 'failed')),
+        mode TEXT NOT NULL CHECK(mode IN ('local', 'remote')),
+        reason_code TEXT CHECK(reason_code IS NULL OR length(reason_code) BETWEEN 1 AND 96),
+        reason TEXT CHECK(reason IS NULL OR length(reason) <= 1000),
+        elapsed_ms INTEGER CHECK(elapsed_ms IS NULL OR elapsed_ms >= 0),
+        decision_json TEXT CHECK(decision_json IS NULL OR (json_valid(decision_json) AND length(decision_json) <= 4096)),
+        enabled_fields_json TEXT NOT NULL CHECK(json_valid(enabled_fields_json) AND length(enabled_fields_json) <= 2048),
+        observed_at TEXT NOT NULL,
+        request_json TEXT CHECK(request_json IS NULL OR (json_valid(request_json) AND length(request_json) <= 131072)),
+        response_json TEXT CHECK(response_json IS NULL OR (json_valid(response_json) AND length(response_json) <= 65536)),
+        processing_json TEXT CHECK(processing_json IS NULL OR (json_valid(processing_json) AND length(processing_json) <= 16384))
+    )""",
+    """INSERT INTO laya_decision_events (
+        event_id, origin_key, batch_id, source, status, mode, reason_code, reason, elapsed_ms,
+        decision_json, enabled_fields_json, observed_at, request_json, response_json, processing_json
+    ) SELECT
+        event_id, origin_key, batch_id, source, status, mode, reason_code, reason, elapsed_ms,
+        decision_json, enabled_fields_json, observed_at, request_json, response_json, processing_json
+    FROM laya_decision_events_v60""",
+    "DROP TABLE laya_decision_events_v60",
+    "CREATE INDEX laya_decision_events_role_recent_idx ON laya_decision_events(origin_key, observed_at DESC)",
+    "CREATE INDEX laya_decision_events_batch_idx ON laya_decision_events(origin_key, batch_id, observed_at)",
+)
+V61_REQUIRED_TABLES = V60_REQUIRED_TABLES
+V61_SCHEMA_STATEMENTS = V60_SCHEMA_STATEMENTS + V61_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V61_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V61_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V61 = "companion-v2.storage.v61"
+SCHEMA_VERSION = SCHEMA_VERSION_V61
+MIGRATION_V60_TO_V61_ID = "companion-v2.storage.v60-to-v61"
+MIGRATION_V60_TO_V61_FINGERPRINT = hashlib.sha256(
+    "\n".join(V61_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V62_MIGRATION_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS conversation_inputs_scope_received_idx ON conversation_inputs(json_extract(event_json, '$.scope.kind'), json_extract(event_json, '$.received_at') DESC, batch_id) WHERE withdrawn = 0",
+    "CREATE INDEX IF NOT EXISTS conversation_batches_role_binding_idx ON conversation_batches(json_extract(context_json, '$.role_binding'), batch_id)",
+)
+V62_REQUIRED_TABLES = V61_REQUIRED_TABLES
+V62_SCHEMA_STATEMENTS = V61_SCHEMA_STATEMENTS + V62_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V62_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V62_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V62 = "companion-v2.storage.v62"
+SCHEMA_VERSION = SCHEMA_VERSION_V62
+MIGRATION_V61_TO_V62_ID = "companion-v2.storage.v61-to-v62"
+MIGRATION_V61_TO_V62_FINGERPRINT = hashlib.sha256(
+    "\n".join(V62_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
+V63_MIGRATION_STATEMENTS = (
+    """
+    CREATE TABLE agenda_open_loop_activity (
+        memo_id TEXT PRIMARY KEY NOT NULL,
+        last_context_at TEXT,
+        context_count INTEGER NOT NULL DEFAULT 0 CHECK (context_count >= 0),
+        last_followup_at TEXT,
+        followup_count INTEGER NOT NULL DEFAULT 0 CHECK (followup_count >= 0),
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(memo_id) REFERENCES agenda_memos(memo_id)
+    )
+    """,
+    "CREATE INDEX agenda_open_loop_activity_followup_idx ON agenda_open_loop_activity(followup_count, last_followup_at)",
+)
+V63_REQUIRED_TABLES = V62_REQUIRED_TABLES.union({"agenda_open_loop_activity"})
+V63_SCHEMA_STATEMENTS = V62_SCHEMA_STATEMENTS + V63_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V63_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V63_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V63 = "companion-v2.storage.v63"
+SCHEMA_VERSION = SCHEMA_VERSION_V63
+MIGRATION_V62_TO_V63_ID = "companion-v2.storage.v62-to-v63"
+MIGRATION_V62_TO_V63_FINGERPRINT = hashlib.sha256(
+    "\n".join(V63_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
 
 def migration_count() -> int:
     """How many ordered migrations a fully upgraded data root records.

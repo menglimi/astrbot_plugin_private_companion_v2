@@ -60,6 +60,14 @@
     voice_foreign_text_mode: {original: "原文", translation: "中文译文", bilingual: "双语"},
     image_position: {after_text: "文字后", before_text: "文字前"},
   };
+  const contactPurposeGroups = [
+    ["关系", [["affection", "想念与亲近"], ["care", "情绪关怀"], ["play", "轻松互动"],
+      ["repair", "关系修复"], ["chat", "日常话题"]]],
+    ["日程", [["greeting", "问候与纪念"], ["followup", "接回旧话题"], ["invitation", "共同活动邀请"],
+      ["reminder", "约定与提醒"], ["meal", "饭点问候"]]],
+    ["分享", [["life", "分享自己的生活"], ["creation", "作品与阅读"], ["news", "外部资讯"],
+      ["environment", "环境与状态变化"], ["screen", "已授权屏幕观察"]]],
+  ];
   const replyGroups = [
     {title: "表达风格", fields: ["style_prompt", "enable_humanized_expression", "humanized_expression_prompt"]},
     {title: "分段与节奏", fields: ["enabled", "streaming", "streaming_mode", "llm_controlled", "rule_mode",
@@ -97,9 +105,15 @@
     : person.display_name && person.display_name !== person.native_account_id ? "platform" : "account");
   const tierHelp = {standard: "普通用户，没有管理员权限。", important: "重要用户，可用普通功能；管理操作仍需核心身份。",
     core: "核心管理员，可管理本体配置、记忆及能力授权。"};
-  const permissionLabels = {"conversation.reply": "允许私聊对话", "proactive.contact": "允许主动联系"};
-  const permissionsHelp = {"conversation.reply": "关闭后按当前拒绝文案处理私聊。", "proactive.contact": "按该成员的联系偏好与节奏主动开口。"};
-  const permissionIcons = {"conversation.reply": "message-circle", "proactive.contact": "bell-ring"};
+  const permissionLabels = {"conversation.reply": "允许私聊对话", "proactive.contact": "允许主动联系",
+    "role.state.intervene": "允许影响角色状态", "calendar.intervene": "允许调整角色日程",
+    "role.rest.wake": "允许休息时执行干预"};
+  const permissionsHelp = {"conversation.reply": "关闭后按当前拒绝文案处理私聊。", "proactive.contact": "按该成员的联系偏好与节奏主动开口。",
+    "role.state.intervene": "允许此窗口请求复核角色自己的即时状态；仍按人格与实际回执判断。",
+    "calendar.intervene": "允许此窗口请求创建、移动或取消角色自己的计划。",
+    "role.rest.wake": "与状态或日程干预授权同时开启时，可在角色休息期间执行干预。"};
+  const permissionIcons = {"conversation.reply": "message-circle", "proactive.contact": "bell-ring",
+    "role.state.intervene": "heart-pulse", "calendar.intervene": "calendar-clock", "role.rest.wake": "alarm-clock"};
   const tierIcons = {standard: "user", important: "star", core: "shield-check"};
   const capabilityLabels = {text: "文本模型", "message.delivery": "旧投递授权", "configuration.read": "读取配置",
     "screen.read": "读取屏幕", "screen.process": "处理屏幕", "extension.tool.invoke": "调用拓展工具"};
@@ -177,6 +191,7 @@
   function stateFor(person) {
     const key = keyOf(person);
     if (!states.has(key)) states.set(key, {pane: "access", drafts: {}, sections: {}, authorization: null, resetToRole: new Set(),
+      contactResetToInherit: new Set(),
       settingsError: "", authError: "", loading: false, loaded: false, busy: false, dirty: new Set(),
       nickname: person.admin_nickname || "", tier: person.identity_tier || "standard", message: "", failed: false});
     return states.get(key);
@@ -194,7 +209,7 @@
       state.sections[section] = value;
       state.drafts[section] = {...value.settings, ...retained};
     }
-    if (!preserve) { state.dirty.clear(); state.resetToRole.clear(); }
+    if (!preserve) { state.dirty.clear(); state.resetToRole.clear(); state.contactResetToInherit.clear(); }
   }
   async function load(person, {preserve = true} = {}) {
     const state = stateFor(person), services = current.services;
@@ -301,6 +316,7 @@
     state.drafts[section][field] = value;
     const token = section + "." + field;
     if (["reply", "person", "person_learning"].includes(section)) state.resetToRole.delete(field);
+    if (section === "contact") state.contactResetToInherit.delete(field);
     if (value === state.sections[section]?.settings?.[field]) state.dirty.delete(token);
     else state.dirty.add(token);
     state.pendingSave = null;
@@ -313,7 +329,17 @@
       if (focusedName) findNamedControl(current?.panel, focusedName)?.focus?.({preventScroll: true});
     }
   }
-  function field(state, section, name, label, {rows = 0, placeholder = "", suffix = "", choices = null} = {}) {
+  function localDateTimeValue(value) {
+    const date = new Date(value);
+    if (!value || Number.isNaN(date.getTime())) return "";
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  }
+  function absoluteDateTimeValue(value) {
+    const date = new Date(value);
+    return value && !Number.isNaN(date.getTime()) ? date.toISOString() : "";
+  }
+  function field(state, section, name, label, {rows = 0, placeholder = "", suffix = "", choices = null,
+    inputType = ""} = {}) {
     const definition = state.sections[section]?.fields?.[name] || {};
     const value = state.drafts[section]?.[name] ?? "";
     const boolean = definition.kind === "boolean" || typeof value === "boolean";
@@ -336,18 +362,20 @@
         const option = element("option", String(value)); option.value = String(value); option.selected = true; input.append(option);
       }
     } else {
-      if (!rows) input.type = ["integer", "probability", "weight"].includes(definition.kind) || typeof value === "number" ? "number"
-        : ["quiet_start", "quiet_end"].includes(name) ? "time" : "text";
-      input.value = value;
+      if (!rows) input.type = inputType || (["integer", "probability", "weight"].includes(definition.kind) || typeof value === "number" ? "number"
+        : ["quiet_start", "quiet_end"].includes(name) ? "time" : "text");
+      input.value = inputType === "datetime-local" ? localDateTimeValue(value) : value;
       input.placeholder = placeholder;
       if (rows) input.rows = rows;
       if (definition.maximum_chars) input.maxLength = definition.maximum_chars;
       if (definition.minimum != null) input.min = definition.minimum;
       if (definition.maximum != null) input.max = definition.maximum;
       if (input.type === "number") input.step = definition.decimal_places != null ? String(10 ** -definition.decimal_places) : "1";
+      if (input.type === "datetime-local") input.step = "60";
     }
     input.addEventListener(boolean || options ? "change" : "input", () => updateDraft(state, section, name,
-      boolean ? input.checked : input.type === "number" ? (input.value === "" ? "" : Number(input.value)) : input.value));
+      boolean ? input.checked : input.type === "number" ? (input.value === "" ? "" : Number(input.value))
+        : input.type === "datetime-local" ? absoluteDateTimeValue(input.value) : input.value));
     wrapper.append(caption, input);
     return wrapper;
   }
@@ -647,7 +675,7 @@
     const identityBlock = block("身份级别", "当前运行实例内通用；核心用户即核心管理员");
     identityBlock.body.append(cards, actions);
     pane.append(administratorBlock.root, identityBlock.root);
-    const permissionBlock = block("私聊权限", person.account_name || "当前 Bot 账号");
+    const permissionBlock = block("窗口权限", person.account_name || "当前 Bot 账号");
     pane.append(permissionBlock.root);
     if (state.authError) permissionBlock.body.append(retry(state, person, state.authError));
     else if (!state.authorization) permissionBlock.body.append(element("p", "正在读取权限…", "muted"));
@@ -664,7 +692,7 @@
         const details = element("details", undefined, "member-advanced-authority");
         details.open = false;
         details.append(element("summary", "展开查看全部"),
-          element("p", "这里显示的是运行实例和拓展能力的统一授权。成员页只配置私聊对话与主动联系；要调整下面的能力，请使用对应入口。", "member-authority-note"));
+          element("p", "这里显示运行实例和拓展能力的统一授权。上方列出的窗口权限可按当前 Bot、账号、角色和成员单独配置；其他能力请使用对应入口。", "member-authority-note"));
         for (const item of advanced) details.append(advancedAuthorityRow(item));
         advancedBlock.body.append(details);
         pane.append(advancedBlock.root);
@@ -686,19 +714,87 @@
     pane.append(contactScheduleDiagnostic(state));
     const switchesBlock = block("主动联系", "仅此用户");
     const switches = element("div", undefined, "member-switches");
-    switches.append(field(state, "contact", "enabled", "启用主动计划"),
-      field(state, "contact", "automatic_enabled", "自动寻找联系契机"),
-      field(state, "contact", "quiet_enabled", "免打扰时段"));
+    for (const [name, label] of [["enabled", "启用主动计划"],
+      ["automatic_enabled", "自动寻找联系契机"], ["quiet_enabled", "免打扰时段"]])
+      switches.append(contactFieldBlock(state, name, label, {switchField: true}));
     switchesBlock.body.append(switches);
     const rhythmBlock = block("联系节奏与时段", "数值按这位成员单独生效");
     const grid = element("div", undefined, "member-fields");
-    for (const [name, label, suffix] of [["max_contacts_24h", "24 小时联系上限", "次"], ["interval_seconds", "最小联系间隔", "秒"],
-      ["idle_seconds", "空闲后联系", "秒"], ["quiet_start", "免打扰开始", ""], ["quiet_end", "免打扰结束", ""],
-      ["quiet_timezone", "时区", ""]]) grid.append(field(state, "contact", name, label, {suffix}));
-    grid.append(field(state, "contact", "style_prompt", "主动相处偏好", {rows: 3}));
+    for (const [name, label, suffix] of [["max_contacts_24h", "24 小时联系上限", "次"],
+      ["max_attempts_24h", "24 小时尝试上限", "次"], ["interval_seconds", "最小联系间隔", "秒"],
+      ["idle_seconds", "空闲后联系", "秒"], ["unanswered_slowdown_start", "开始降频的未回应次数", "次"],
+      ["unanswered_pause_after", "暂停联系的未回应次数（0 表示不暂停）", "次"],
+      ["unanswered_max_interval_multiplier", "降频后的最大间隔倍数", "倍"],
+      ["quiet_start", "免打扰开始", ""], ["quiet_end", "免打扰结束", ""],
+      ["quiet_timezone", "时区", ""]])
+      grid.append(contactFieldBlock(state, name, label, {suffix}));
+    grid.append(contactFieldBlock(state, "pause_until", "临时暂停到（本地时间）", {inputType: "datetime-local"}));
+    grid.append(contactFieldBlock(state, "note", "联系补充偏好", {rows: 3}));
+    grid.append(contactFieldBlock(state, "style_prompt", "主动表达方式偏好", {rows: 3}));
     rhythmBlock.body.append(grid);
+    rhythmBlock.body.append(element("p", "未回应会逐步延长间隔；达到暂停次数后，等对方再次发消息再恢复评估。", "member-block-note"));
+    rhythmBlock.body.append(element("p", "暂停时间按浏览器本地时区录入；清空只清除本窗口的暂停，上级仍生效的暂停不会被覆盖。", "member-block-note"));
     pane.append(switchesBlock.root, rhythmBlock.root);
+    pane.append(contactPurposesBlock(state));
     return pane;
+  }
+  function contactPurposesBlock(state) {
+    const purposesBlock = block("联系契机", "15 类 · 仅此私聊窗口");
+    purposesBlock.body.append(element("p",
+      "关闭单项会跳过这类联系；权重只影响多个合适候选之间的选择，暂缓只作用于该类。",
+      "member-block-note"));
+    for (const [title, purposes] of contactPurposeGroups) {
+      const category = element("details", undefined, "member-contact-purpose-category");
+      category.append(element("summary", `${title} · ${purposes.length} 类`));
+      const rows = element("div", undefined, "member-contact-purpose-list");
+      for (const [name, label] of purposes) {
+        const row = element("div", undefined, "member-contact-purpose-row");
+        row.append(contactFieldBlock(state, name + ".enabled", label, {switchField: true}));
+        const tuning = element("details", undefined, "member-contact-purpose-tuning");
+        tuning.append(element("summary", "细调"));
+        const fields = element("div", undefined, "member-contact-purpose-tuning-fields");
+        fields.append(contactFieldBlock(state, name + ".weight", "相对权重"));
+        fields.append(contactFieldBlock(state, name + ".pause_until", "暂缓到（本地时间）",
+          {inputType: "datetime-local"}));
+        tuning.append(fields);
+        row.append(tuning);
+        rows.append(row);
+      }
+      category.append(rows);
+      purposesBlock.body.append(category);
+    }
+    return purposesBlock.root;
+  }
+  function contactFieldBlock(state, name, label, options = {}) {
+    const provenance = state.sections.contact?.provenance?.[name] || {};
+    const explicit = provenance.explicit === true;
+    const pendingReset = state.contactResetToInherit.has(name);
+    const wrapper = element("div", undefined, options.switchField ? "member-contact-switch" : "member-contact-field");
+    if (explicit) wrapper.dataset.explicit = "true";
+    wrapper.append(field(state, "contact", name, label, options));
+    wrapper.append(element("small", pendingReset ? "保存后恢复继承"
+      : explicit ? "此私聊窗口覆盖" : "跟随上级设置", "member-contact-source"));
+    if (explicit) {
+      const reset = element("button", pendingReset ? "取消恢复" : "恢复继承", "member-contact-reset");
+      reset.type = "button";
+      reset.disabled = state.busy || state.loading || !!state.settingsError;
+      reset.setAttribute("aria-label", pendingReset ? `取消恢复${label}的继承值` : `恢复${label}的继承值`);
+      reset.addEventListener("click", () => {
+        const token = "contact." + name;
+        if (pendingReset) {
+          state.contactResetToInherit.delete(name);
+          if (state.drafts.contact[name] === state.sections.contact.settings[name]) state.dirty.delete(token);
+          else state.dirty.add(token);
+        } else {
+          state.contactResetToInherit.add(name);
+          state.dirty.add(token);
+        }
+        state.pendingSave = null;
+        redraw(state);
+      });
+      wrapper.append(reset);
+    }
+    return wrapper;
   }
   const scheduleReasons = {
     never_evaluated: ["此窗口还没有自动评估记录", "确认插件正在运行，并等待本窗口进入下一轮调度评估。"],
@@ -1088,9 +1184,11 @@
     if (state.busy || !state.dirty.size) return;
     const sections = {};
     for (const token of state.dirty) {
-      const [section, field] = token.split(".");
+      const separator = token.indexOf(".");
+      const section = token.slice(0, separator), field = token.slice(separator + 1);
       sections[section] ||= {edit_token: state.sections[section].edit_token, changes: {}};
-      if (["reply", "person", "person_learning"].includes(section) && state.resetToRole.has(field)) {
+      if ((["reply", "person", "person_learning"].includes(section) && state.resetToRole.has(field))
+          || (section === "contact" && state.contactResetToInherit.has(field))) {
         sections[section].reset_to_inherit ||= [];
         sections[section].reset_to_inherit.push(field);
       } else sections[section].changes[field] = state.drafts[section][field];

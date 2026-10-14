@@ -295,13 +295,13 @@ def read_settings(runtime, context):
 
 
 def sleep_receipts(runtime, context, *, limit=MAX_SLEEP_RECEIPTS):
-    """Bounded read of this role's active physical sleeps; grants nothing.
+    """Bounded read of this role's sleeping or recently interrupted receipts; grants nothing.
 
     The owner key and the record shape are the ones ``RoleBodyClock.active``
     uses, so the gate can only ever see the same execution receipts the shared
     body already reads.
     """
-    rows = runtime.read_all("""SELECT record_json FROM role_activities WHERE owner_key = ? AND state = 'active'
+    rows = runtime.read_all("""SELECT record_json FROM role_activities WHERE owner_key = ? AND state IN ('active','paused')
           AND json_extract(record_json, '$.scope.kind') = 'private'
           AND json_extract(record_json, '$.work.kind') = 'sleep'
         ORDER BY updated_at, activity_id LIMIT ?""", (digest(role_owner(context)), limit))
@@ -326,6 +326,9 @@ def sleep_context(runtime, context, *, now, settings=None):
         return {"resting": False, "reason": "not_sleeping", "sleep": None, "wake_at": None, "until_seconds": None}
     activity = receipts[-1]
     wake_at = activity.work.due_at if activity.work else None
+    if activity.state is ActivityState.PAUSED:
+        return {"resting": False, "reason": "sleep_interrupted", "sleep": activity.activity_id,
+                "wake_at": wake_at, "until_seconds": 0.0}
     if activity.state is not ActivityState.ACTIVE:
         return {"resting": False, "reason": "not_sleeping", "sleep": None, "wake_at": None, "until_seconds": None}
     if wake_at is not None and wake_at <= now:
@@ -506,7 +509,7 @@ def mark_awake(state, *, now, settings, sleep):
 
 
 def deferral(runtime, context, *, text="", now, event_key="", source=None, capability="",
-             settings=None, judge=None):
+             settings=None, judge=None, body_clock=None):
     """The one accept-path entry: judge once, record it, return a bounded delay.
 
     The host calls this immediately before ``flow.accept`` so the delay it returns
@@ -515,10 +518,13 @@ def deferral(runtime, context, *, text="", now, event_key="", source=None, capab
     drawing again (V1's "same batch is judged once").
     """
     settings = settings or read_settings(runtime, context)
+    sleep = sleep_context(runtime, context, now=now, settings=settings)
     if not settings.enable_rest_reply_simulation:
+        if body_clock is not None and sleep.get("resting"):
+            body_clock.interrupt(context, sleep["sleep"], observed_at=now,
+                                 grace_minutes=settings.rest_reply_awake_grace_minutes)
         return 0.0
     state = document(runtime, context)
-    sleep = sleep_context(runtime, context, now=now, settings=settings)
     last = state.get("last")
     if event_key and isinstance(last, dict) and last.get("event") == event_key:
         value = last.get("defer")
@@ -529,8 +535,12 @@ def deferral(runtime, context, *, text="", now, event_key="", source=None, capab
         state = append_backlog(state, now=now, settings=settings,
                                entry=backlog_entry(now=now, reason=decision["reason"], source=source,
                                                    capability=capability, sleep=sleep.get("sleep")))
-    elif decision["reason"] != "awake_grace":
-        state = mark_awake(state, now=now, settings=settings, sleep=sleep.get("sleep"))
+    else:
+        if body_clock is not None and sleep.get("resting"):
+            body_clock.interrupt(context, sleep["sleep"], observed_at=now,
+                                 grace_minutes=settings.rest_reply_awake_grace_minutes)
+        if decision["reason"] != "awake_grace":
+            state = mark_awake(state, now=now, settings=settings, sleep=sleep.get("sleep"))
     if event_key:
         state = dict(state)
         state["last"] = {"event": event_key, "defer": float(decision["defer"]), "reason": decision["reason"]}

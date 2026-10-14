@@ -15,6 +15,7 @@ from astrbot_host.news import (DEFAULT_AI_NEWS_FEED_LABEL, DEFAULT_AI_NEWS_FEED_
 from astrbot_host.news_parsing import parse_rss_news
 from companion_v2.proactive.external_materials import parse_news_response
 from companion_v2.proactive.news_events import SOURCE_OWNER
+from companion_v2.proactive.diagnostic_models import DiagnosticSourceError
 from companion_v2.proactive.inspirations import SNAPSHOT_KEY
 from companion_v2.conversation.messages import source_from_document
 from companion_v2.conversation.reply_management import ReplyManagement
@@ -46,6 +47,32 @@ class NewsPort:
 
 
 class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_real_diagnostic_refetches_without_consuming_poll_or_seen(self):
+        article = self.article("real-test")
+        port = NewsPort(self.clock, [[article], [article]])
+        app, context = await self.setup_news(port)
+        events = app.contact_schedule.news_events
+        preferences = self.preferences(app, context)
+        events._save(context, events._settings(context, preferences), self.clock.now(), checked=True, seen=("already-seen",))
+        before = dict(events._row(context))
+        for identifier in ("test-1", "test-2"):
+            candidate, stages = await events.diagnostic_candidate(context, preferences, test_id=identifier)
+            self.assertEqual(stages[0]["state"], "passed")
+            events.validate(context, candidate[2], self.clock.now())
+        self.assertEqual(port.calls, 2)
+        self.assertEqual(dict(events._row(context)), before)
+
+    async def test_failed_real_diagnostic_does_not_use_previous_cached_articles(self):
+        port = NewsPort(self.clock, [[self.article()], OSError("offline")])
+        app, context = await self.setup_news(port)
+        events = app.contact_schedule.news_events
+        preferences = self.preferences(app, context)
+        await events.probe(context, preferences)
+        with self.assertRaises(DiagnosticSourceError) as caught:
+            await events.diagnostic_candidate(context, preferences, test_id="failed-fetch")
+        self.assertEqual((caught.exception.stage, caught.exception.state), ("news_fetch", "failed"))
+        self.assertEqual(self.contact_calls(), [])
+
     def article(self, identifier="story-a", *, age=timedelta(minutes=10)):
         return {"id": identifier, "title": "有日期的资讯 " + identifier,
                 "url": "https://news.example/" + identifier + "?utm_source=feed",
@@ -109,6 +136,10 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         article["category"] = "趣事"
         port = NewsPort(self.clock, [[article]])
         app, context = await self.setup_news(port, enabled=False)
+        # Isolate news opt-in from autonomous relationship expressions that no
+        # longer need a matching phrase in the preceding user message.
+        self.settings(app, {purpose + ".enabled": False for purpose in
+                            ("affection", "care", "play", "repair", "invitation")}).unwrap()
         self.advance(app, 60)
         app.contact_schedule.advance()
         self.assertEqual(port.calls, 0)

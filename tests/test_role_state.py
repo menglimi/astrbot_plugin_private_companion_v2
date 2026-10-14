@@ -392,6 +392,22 @@ class StateMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.sent), 0)
         self.assertEqual(self.runtime.read_one("SELECT COUNT(*) AS n FROM model_calls", ())["n"], 1)
 
+    async def test_new_private_input_fences_a_stale_state_intervention_before_dispatch(self):
+        _, app, context, _ = await self.ready()
+        self.identity.issue_grant(grant_id="state-intervention-window", subject=context.actor.subject,
+            scope=context.scope, capability="role.state.intervene", tier=AuthorizationTier.STANDARD,
+            valid_from=NOW, expected_revision=self.identity.revision)
+        expected_epoch = app.state_maintenance._input_epochs.get(context.key, 0)
+        app.state_maintenance.note_input(context, "new-message")
+
+        with self.assertRaises(TaskError) as raised:
+            await app.state_maintenance.run(context, "原角色人格提示", "stale-intervention",
+                intervention=True, expected_input_epoch=expected_epoch)
+
+        self.assertEqual(raised.exception.code, "state_inputs_changed")
+        self.assertEqual(self.runtime.read_all("SELECT task_id FROM execution_tasks", ()), ())
+        self.assertEqual(self.called, [])
+
     async def test_known_model_budget_failure_is_returned_for_maintenance_status(self):
         _, app, context, _ = await self.ready()
         async def exhausted(_envelope):

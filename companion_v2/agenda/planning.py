@@ -12,6 +12,8 @@ from companion_v2.execution.models import (Lane, ProviderBinding, SideEffect, Ta
 from companion_v2.execution.runner import ExactTaskRunner
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import OperationRef, VersionRef
+from companion_v2.identity_policy.interventions import (CALENDAR_INTERVENTION,
+    REST_WAKE_INTERVENTION, require_capability)
 from companion_v2.model_gateway.models import ModelTaskProfile
 from companion_v2.role_work.state.ownership import role_schedule_key
 from companion_v2.storage.models import OperationState
@@ -19,7 +21,7 @@ from companion_v2.storage.repositories import OperationRepository
 from companion_v2.storage.versioned_records import owner_key
 from .planning_config import SCHEDULE_MODE_ORCHESTRATED, configured_weather_location, planning_values
 from .planning_inputs import capture, validate
-from .planning_output import INSTRUCTION, parse_output
+from .planning_output import INSTRUCTION, INTERVENTION_INSTRUCTION, parse_output
 from .models import AgendaError
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,13 @@ class CalendarPlanning:
         for context, _, _ in bindings:
             self.next_checks[context.key] = deadline
 
+    def _check_intervention(self, context, at):
+        require_capability(self.tasks, context, CALENDAR_INTERVENTION, at=at)
+        from companion_v2.role_work.life import rest_gate
+        settings = rest_gate.read_settings(self.runtime, context)
+        if rest_gate.sleep_context(self.runtime, context, now=at, settings=settings)["resting"]:
+            require_capability(self.tasks, context, REST_WAKE_INTERVENTION, at=at)
+
     def _automatic_marker_key(self, context, slot):
         role_key = self.app.calendar.records.role_key(context)
         return "calendar.automatic-slot.v1:" + digest([role_key, slot])
@@ -242,22 +251,35 @@ class CalendarPlanning:
         return True
 
     async def run(self, context, instruction, *, mode, slot, occurrence=None, manual=False, refresh=False,
-                  automatic=False):
+                  automatic=False, intervention=False, expected_input_epoch=None):
         invocation = asyncio.current_task()
         self.invocations.add(invocation)
         try:
             return await self._run(context, instruction, mode=mode, slot=slot, occurrence=occurrence,
-                                   manual=manual, refresh=refresh, automatic=automatic)
+                                   manual=manual, refresh=refresh, automatic=automatic,
+                                   intervention=intervention, expected_input_epoch=expected_input_epoch)
         finally:
             self.invocations.discard(invocation)
 
+    async def run_intervention(self, context, instruction, request_id, *, expected_input_epoch=None):
+        slot = "intervention:" + digest([context.key, request_id])
+        return await self.run(context, instruction, mode="intervention", slot=slot,
+                              manual=True, intervention=True, expected_input_epoch=expected_input_epoch)
+
     async def _run(self, context, instruction, *, mode, slot, occurrence=None, manual=False, refresh=False,
-                   automatic=False):
-        if mode not in ("daily", "horizon", "refine") or mode == "refine" and occurrence is None:
+                   automatic=False, intervention=False, expected_input_epoch=None):
+        if (mode not in ("daily", "horizon", "refine", "intervention")
+                or mode == "refine" and occurrence is None
+                or (mode == "intervention") != bool(intervention)):
             raise ValueError("select an explicit planning mode and original period")
         if self.closed:
             raise TaskError("planning_closed", "planning worker is closed")
         self.app.require_running()
+        if intervention:
+            self._check_intervention(context, self.tasks.now())
+            if (expected_input_epoch is not None
+                    and self.app.state_maintenance._input_epochs.get(context.key, 0) != expected_input_epoch):
+                raise TaskError("planning_inputs_changed", "new conversation input superseded this schedule intervention")
         self.app.calendar.access.check(context, "calendar.write")
         identifier = self.identifier(context, slot)
         prior_task_id = (self._automatic_task_id(context, slot) if automatic else
@@ -274,7 +296,7 @@ class CalendarPlanning:
         await self.guard(context, instruction)
         settings = planning_values(self.app.role_state.settings(context)[0])
         location = (configured_weather_location(settings["planning_weather_location"])
-                    if (manual or settings["planning_enabled"]) and settings["calendar_enabled"]
+                    if not intervention and (manual or settings["planning_enabled"]) and settings["calendar_enabled"]
                     and settings["planning_weather_enabled"] else None)
         weather = None
         if location is not None and self.weather_port is not None:
@@ -291,6 +313,10 @@ class CalendarPlanning:
             job = capture(self, context, instruction, mode, slot, occurrence,
                           weather=weather, weather_location=location, manual=manual, refresh=refresh,
                           role_global=automatic)
+            if intervention:
+                job["intervention"] = True
+                job["input_epoch"] = (expected_input_epoch if expected_input_epoch is not None
+                                       else self.app.state_maintenance._input_epochs.get(context.key, 0))
             role_key = self.app.calendar.records.role_key(context)
             reservation = require(self.operations.reserve(OperationRef(identifier, OWNER, context.scope,
                 VersionRef(identifier, 1), identifier), parameter_hash=digest([role_key, mode, slot]),
@@ -333,9 +359,10 @@ class CalendarPlanning:
         await self.guard(context, job["instruction"])
         run.validate()
         trigger = BackgroundPromptTrigger(job["slot"], context.actor.principal, context.scope, at)
+        prompt_instruction = INTERVENTION_INSTRUCTION if job.get("intervention") else INSTRUCTION
         request = PromptRequest(trigger, job["instruction"], SealedForegroundContext(
             (PromptMaterial(OWNER, "planning_material", encode(job["material"])),), (), ()),
-            INSTRUCTION, context.role_binding, output_format="calendar_planning")
+            prompt_instruction, context.role_binding, output_format="calendar_planning")
         completion = await self.gateway.generate(run, request)
         try:
             if completion.draft is None:
@@ -347,7 +374,21 @@ class CalendarPlanning:
             with self.runtime.transaction():
                 run.validate()
                 run.begin_effect()
-                if job["mode"] == "refine":
+                if job.get("intervention"):
+                    for index, change in enumerate(items):
+                        if change["action"] == "create":
+                            identifier = "planned-intervention-" + digest([run.task.task_id, index])
+                            self.app.calendar.command(context, identifier=identifier, action="create",
+                                expected_revision=0, operation_key=run.task.task_id + ":" + str(index),
+                                data=change["data"], sources=job["sources"],
+                                planning={"mode": "intervention", "slot": job["slot"]})
+                        else:
+                            self.app.calendar.command(context, identifier=change["id"],
+                                action={"move": "exception", "refine": "refine", "cancel": "cancel"}[change["action"]],
+                                expected_revision=change["expected_revision"],
+                                operation_key=run.task.task_id + ":" + str(index),
+                                data=change["data"], sources=job["sources"])
+                elif job["mode"] == "refine":
                     selected = job["occurrence"]
                     receipts.append(self.app.calendar.command(context, identifier=selected["id"], action="refine",
                         expected_revision=selected["revision"], operation_key=run.task.task_id + ":detail",

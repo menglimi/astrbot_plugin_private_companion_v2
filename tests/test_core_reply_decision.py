@@ -64,6 +64,9 @@ class CoreReplyDecisionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                 raise self.prediction
             return self.prediction
 
+        cuda_available = patch("astrbot_host.laya_client._cuda_available", return_value=True)
+        cuda_available.start()
+        self.addCleanup(cuda_available.stop)
         mocked = self.predict_patch = patch("astrbot_host.laya_client._local_predict", side_effect=predict)
         mocked.start()
         self.addCleanup(mocked.stop)
@@ -143,10 +146,14 @@ class CoreReplyDecisionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                 prepared = await self.intake(event)
                 self.assertTrue(event.is_at_or_wake_command)
                 self.assertFalse(getattr(event, "call_llm", False))
-                req = NS(system_prompt="AstrBot 人格")
+                req = NS(system_prompt="AstrBot 人格", extra_user_content_parts=[])
                 await self.plugin.prepare_companion_core_request(event, req)
-                self.assertIn("Laya 本轮语义判断", req.system_prompt)
-                self.assertIn("步骤、列表、引用或代码应保持完整", req.system_prompt)
+                context_text = "\n".join(
+                    part.text for part in req.extra_user_content_parts
+                    if isinstance(getattr(part, "text", None), str))
+                self.assertIn("Laya 本轮语义判断", context_text)
+                self.assertIn("步骤、列表、引用或代码应保持完整", context_text)
+                self.assertNotIn("Laya 本轮语义判断", req.system_prompt)
                 self.assertEqual(prepared["laya_decision"]["applied_decision"]["action"], action)
                 self.assert_no_provider_or_send(event)
 

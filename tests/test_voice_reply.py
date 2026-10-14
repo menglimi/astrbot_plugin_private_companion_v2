@@ -11,8 +11,9 @@ import unittest
 from companion_v2.conversation.segmentation import LLM_SEGMENT_MARKER, SegmentationPolicy
 from companion_v2.conversation.voice_reply import (
     VoiceReplyDelivery, VoiceReplyPolicy, capability_instruction, eligible, planned_speech,
-    requested_voice_language, separate_spoken, speech_decisions, voice_policy_for_turn,
+    requested_voice_language, separate_spoken, speech_chunks, speech_decisions, voice_policy_for_turn,
 )
+from companion_v2.conversation.voice_markup import visible_speech
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectKind, SubjectRef
 from companion_v2.storage.runtime import StorageRuntime
 from tests.test_management_access import NOW
@@ -72,6 +73,21 @@ class VoicePolicyTests(unittest.TestCase):
         self.assertIn("每个语音标签后紧接", policy.instruction)
         self.assertIn("完整对应", policy.instruction)
 
+    def test_selected_always_and_request_modes_do_not_revert_to_optional_voice(self):
+        for mode in ("always", "request"):
+            policy = VoiceReplyPolicy(generation_mode="model_tag", trigger_mode=mode)
+            self.assertIn("完整", policy.instruction)
+            self.assertNotIn("没有合适内容就不用标签", policy.instruction)
+            self.assertNotIn("可选语音", capability_instruction(policy))
+        self.assertIn("没有适合朗读", VoiceReplyPolicy(trigger_mode="adaptive").instruction)
+
+    def test_v1_voice_tags_keep_foreign_speech_and_chinese_translation(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        for source in ("<tts>おやすみ。</tts>晚安。", "&lt;tts lang='ja'&gt;おやすみ。&lt;/tts&gt;晚安。"):
+            self.assertEqual(separate_spoken(source, policy), ("晚安。", ((0, "おやすみ。"),)))
+            self.assertEqual(separate_spoken(source, None), ("おやすみ。晚安。", ()))
+        self.assertEqual(separate_spoken("<tts>保留正文", None), ("保留正文", ()))
+
     def test_model_tag_translation_keeps_spoken_spans_with_explicit_boundaries(self):
         policy = VoiceReplyPolicy(trigger_mode="adaptive", language="ja", foreign_text_mode="translation")
         source = (f"<pc_tts>こんにちは。</pc_tts>你好。\n{LLM_SEGMENT_MARKER}\n"
@@ -129,6 +145,27 @@ class VoicePolicyTests(unittest.TestCase):
             VoiceReplyPolicy(probability=2)
         with self.assertRaises(ValueError):
             VoiceReplyPolicy(timeout_seconds=True)
+
+    def test_performance_cues_stay_in_speech_and_leave_ordinary_body_untouched(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag")
+        source = "数组[0]：<pc_tts>[温柔地]别急，<soft>慢慢来。</soft></pc_tts>参考 <soft> 的说明。"
+        visible, spans = separate_spoken(source, policy)
+        self.assertEqual(visible, "数组[0]：别急，慢慢来。参考 <soft> 的说明。")
+        self.assertEqual(spans, ((6, "[温柔地]别急，<soft>慢慢来。</soft>"),))
+        self.assertEqual(separate_spoken(source, None)[0], visible)
+        translated = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        self.assertEqual(separate_spoken(
+            "<pc_tts>[優しく]おやすみ。<whisper>また明日。</whisper></pc_tts>晚安，明天见。", translated),
+            ("晚安，明天见。", ((0, "[優しく]おやすみ。<whisper>また明日。</whisper>"),)))
+
+    def test_speech_chunks_balance_nested_tags_without_splitting_directions(self):
+        speech = "[轻声，慢一点]今天辛苦了。<soft>好好休息。<slow>明天见。</slow></soft>"
+        chunks = speech_chunks(speech, 6)
+        self.assertEqual("".join(visible_speech(chunk) for chunk in chunks), visible_speech(speech))
+        self.assertEqual(chunks, ("[轻声，慢一点]今天辛苦了。", "<soft>好好休息。</soft>",
+                                  "<soft><slow>明天见。</slow></soft>"))
+        unbroken = speech_chunks("[温柔地]你好，<soft>晚安。</soft>", 20)
+        self.assertEqual(unbroken, ("[温柔地]你好，<soft>晚安。</soft>",))
 
 
 class VoiceCooldownTests(unittest.TestCase):

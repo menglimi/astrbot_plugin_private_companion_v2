@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 
@@ -46,6 +47,7 @@ class SessionTopology:
         self._pending = set()
         self._closed = False
         self._write_lock = asyncio.Lock()
+        self._persona_role_snapshot = {}
 
     def schedule_observe(self, event):
         """Keep optional directory IO outside native reply hooks."""
@@ -126,6 +128,117 @@ class SessionTopology:
     async def services(self, umo):
         return await load_session_settings(umo)
 
+    def persona_selection_snapshot(self, umo, account_id):
+        """Return the last installed window-to-persona/role mapping."""
+        snapshot = self._persona_role_snapshot.get((umo, account_id))
+        if snapshot is not None:
+            return snapshot
+        route = session_route(umo)
+        if route is None:
+            return None
+        platform, kind, _peer = route
+        native_kind = "FriendMessage" if kind == "private" else "GroupMessage"
+        return self._persona_role_snapshot.get((f"{platform}:{native_kind}:*", account_id))
+
+    def update_persona_selection_snapshot(self, umo, account_id, bot_id, persona_id, role_id, conversation_id):
+        """Refresh one verified live window after a native lookup or conversation reset."""
+        controller = self.controller
+        settings = controller.settings if controller._multi_host else None
+        route = session_route(umo)
+        if settings is None or route is None:
+            return
+        platform, kind, peer = route
+        target = (settings.private_target(platform, account_id, peer) if kind == "private"
+                  else settings.group_target(platform, account_id, peer))
+        mapping = next((item for item in settings.personas
+                        if item.bot_id == bot_id and item.persona_id == persona_id and item.role_id == role_id), None)
+        if (target is None or target.bot_id != bot_id or mapping is None
+                or not any(item.self_id == account_id and item.bot_id == bot_id for item in settings.accounts)):
+            return
+        self._persona_role_snapshot[(umo, account_id)] = {
+            "bot_id": bot_id, "persona_id": persona_id, "role_id": role_id,
+            "conversation_id": conversation_id, "selection_source": "verified",
+        }
+
+    def persona_mapping_snapshot(self, umo, account_id, bot_id):
+        snapshot = self.persona_selection_snapshot(umo, account_id)
+        settings = self.controller.settings
+        if snapshot is None or settings is None or snapshot["bot_id"] != bot_id:
+            return None
+        return next((item for item in settings.personas
+                     if item.bot_id == bot_id and item.persona_id == snapshot["persona_id"]
+                     and item.role_id == snapshot["role_id"]), None)
+
+    def _publish_persona_role_snapshot(self, targets, *, complete, scope_kind=None):
+        discovered = {}
+        for row in targets:
+            if (row.get("native") is not True or row.get("details_available") is not True
+                    or not row.get("unified_msg_origin") or not row.get("account_id")
+                    or not row.get("bot_id") or not row.get("persona_id")):
+                continue
+            role = next((item for item in row.get("roles", ())
+                         if row["persona_id"] in item.get("persona_ids", ())), None)
+            if not role or not role.get("role_id"):
+                continue
+            discovered[(row["unified_msg_origin"], row["account_id"])] = {
+                "bot_id": row["bot_id"], "persona_id": row["persona_id"],
+                "role_id": role["role_id"], "conversation_id": row.get("conversation_id"),
+                "selection_source": "conversation",
+            }
+
+        if complete:
+            retained = {key: value for key, value in self._persona_role_snapshot.items()
+                        if scope_kind is not None and (session_route(key[0]) is None
+                                                       or session_route(key[0])[1] != scope_kind)}
+            retained.update(discovered)
+            self._persona_role_snapshot = retained
+        else:
+            self._persona_role_snapshot.update(discovered)
+
+    async def _seed_configured_persona_snapshot(self, settings, *, scope_kind=None):
+        if settings is None:
+            return
+        mappings = tuple(settings.personas)
+        lookup = getattr(self.controller.native_types, "persona_selection_lookup", None)
+        windows = []
+        windows.extend((target, f"{target.platform_id}:FriendMessage:{target.participant_id}", "private")
+                       for target in settings.targets if target.participant_id != "*")
+        windows.extend((target, f"{target.platform_id}:GroupMessage:{target.group_id}", "group")
+                       for target in settings.group_targets if target.group_id != "*")
+        windows.extend((target, f"{target.platform_id}:FriendMessage:*", "private")
+                       for target in settings.targets if target.participant_id == "*")
+        windows.extend((target, f"{target.platform_id}:GroupMessage:*", "group")
+                       for target in settings.group_targets if target.group_id == "*")
+        for target, umo, kind in windows:
+            if scope_kind is not None and kind != scope_kind:
+                continue
+            key = (umo, target.account_id)
+            if key in self._persona_role_snapshot:
+                continue
+            candidates = [item for item in mappings if item.bot_id == target.bot_id]
+            override_lookup = getattr(self.controller.native_types, "session_persona_override_lookup", None)
+            try:
+                selected = (await bounded_native_lookup(override_lookup(umo), operation="session_settings")
+                            if callable(override_lookup) and not umo.endswith(":*") else None)
+                if selected == "":
+                    selected = None
+                if selected is None and len(candidates) == 1:
+                    selected = candidates[0].persona_id
+                elif selected is None and callable(lookup):
+                    resolved = lookup(self.controller.context, umo, None)
+                    selected = (await bounded_native_lookup(resolved, operation="persona", report_slow=False)
+                                if inspect.isawaitable(resolved) else resolved)
+            except TaskError:
+                continue
+            mapping = next((item for item in candidates if item.persona_id == selected), None)
+            if mapping is None:
+                continue
+            self._persona_role_snapshot[key] = {
+                "bot_id": target.bot_id, "persona_id": mapping.persona_id,
+                "role_id": mapping.role_id, "conversation_id": None,
+                "selection_source": "configured",
+            }
+
     async def reply_enabled(self, event):
         try:
             services = await asyncio.wait_for(
@@ -167,6 +280,11 @@ class SessionTopology:
         key = digest([platform_id, login, event.unified_msg_origin])
         row = {"unified_msg_origin": event.unified_msg_origin, "account_id": login,
                "conversation_id": cid, "last_seen_at": controller.now().isoformat()}
+        if kind == "group":
+            group = getattr(message, "group", None)
+            group_name = getattr(group, "group_name", None)
+            if isinstance(group_name, str) and group_name.strip():
+                row["group_name"] = group_name.strip()[:128]
         async with self._write_lock:
             await asyncio.to_thread(self._store_observation, key, row)
 
@@ -234,8 +352,10 @@ class SessionTopology:
             route = session_route(umo)
             if route and route[0] in platforms and (scope_kind is None or route[1] == scope_kind):
                 observed.setdefault(umo, []).append(row)
-                native.setdefault(umo, {"unified_msg_origin": umo,
+                native_row = native.setdefault(umo, {"unified_msg_origin": umo,
                                        "conversation_id": row.get("conversation_id")})
+                if row.get("group_name") and not native_row.get("group_name"):
+                    native_row["group_name"] = row["group_name"]
         mappings = ([vars(row) for row in settings.personas] if settings is not None else
                     self.controller.config.get("multi_host", {}).get("personas", []) if self.controller._multi_host else [])
         slots = asyncio.Semaphore(4)
@@ -275,7 +395,12 @@ class SessionTopology:
                                     "persona_ids": [row["persona_id"]]}
                                    for row in mappings if row.get("bot_id") == binding["bot_id"]]})
         targets = sorted(result, key=lambda row: (not row["managed"], row["platform_id"], row["account_id"], row["session_key"]))
-        return {"targets": targets, "complete": not issues, "issues": self._unique_issues(issues)}
+        complete = not issues
+        self._publish_persona_role_snapshot(targets, complete=complete, scope_kind=scope_kind)
+        snapshot_settings = settings if settings is not None else (
+            self.controller.settings if self.controller._multi_host else None)
+        await self._seed_configured_persona_snapshot(snapshot_settings, scope_kind=scope_kind)
+        return {"targets": targets, "complete": complete, "issues": self._unique_issues(issues)}
 
     @staticmethod
     def _directory_issue(error, *, platform_id="", default_stage="details"):
@@ -315,6 +440,10 @@ class SessionTopology:
             selected = [{"platform_id": platform, "account_id": "", "bot_id": ""}]
 
         result = []
+        observed_name = next((row.get("group_name") or row.get("display_name")
+                              for row in observed.get(umo, [])
+                              if isinstance(row.get("group_name") or row.get("display_name"), str)
+                              and (row.get("group_name") or row.get("display_name")).strip()), "")
         for account in selected:
             account_id = account.get("account_id", "")
             binding = next((row for row in bindings if row.get("account_id") == account_id), None)
@@ -322,6 +451,7 @@ class SessionTopology:
             result.append({**account, "session_key": session_key,
                 "target_id": binding["target_id"] if binding else session_key,
                 "scope_kind": kind, peer_field: peer, "unified_msg_origin": umo,
+                **({"display_name": observed_name, "group_name": observed_name} if kind == "group" and observed_name else {}),
                 "conversation_id": "", "managed": False, "native": True,
                 "details_available": False, "persona_id": "", "persona_override": "",
                 "llm_enabled": True, "session_enabled": True, "persona_pinned": False, "roles": []})
@@ -350,6 +480,11 @@ class SessionTopology:
                 return result
         if not candidates:
             candidates = [{"platform_id": platform, "account_id": "", "bot_id": ""}]
+        observed_name = next((row.get("group_name") or row.get("display_name")
+                              for row in observed.get(umo, [])
+                              if isinstance(row.get("group_name") or row.get("display_name"), str)
+                              and (row.get("group_name") or row.get("display_name")).strip()), "")
+        native_name = item.get("group_name") or item.get("display_name") or observed_name
         cid = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
         if cid != item.get("conversation_id") or cid is None and umo not in observed:
             return result
@@ -372,21 +507,29 @@ class SessionTopology:
                               if row.get("bot_id") == account["bot_id"]}
                 if len(mapped_ids) == 1:
                     selected = next(iter(mapped_ids))
+                elif self.controller._multi_host:
+                    native_persona = item.get("persona_id")
+                    lookup = getattr(self.controller.native_types, "persona_selection_lookup", None)
+                    if callable(lookup):
+                        resolved = lookup(self.controller.context, umo, native_persona)
+                        native_persona = (await bounded_native_lookup(
+                            resolved, operation="persona", report_slow=False)
+                            if inspect.isawaitable(resolved) else resolved)
+                    selected = native_persona if type(native_persona) is str and native_persona in mapped_ids else ""
                 elif not self.controller._multi_host:
                     configured_ids = {persona_id for row in matches for role_row in row.get("roles", [])
                                       for persona_id in role_row.get("persona_ids", []) if persona_id}
                     selected = next(iter(configured_ids)) if len(configured_ids) == 1 else ""
-                else:
-                    selected = ""
             role = next((row["role_id"] for row in mappings if row.get("bot_id") == account["bot_id"]
                          and row.get("persona_id") == selected), None)
             if binding and not self.controller._multi_host:
                 role = binding["roles"][0]["role_id"]
             key = "session-" + digest([platform, account["account_id"], umo])[:24]
-            role_name = role_display_name(role or (derive_role_id(account["account_id"], selected)
-                                                    if account["account_id"] else selected), [selected])
+            roles = ([{"role_id": role, "role_name": role_display_name(role, [selected]),
+                       "persona_ids": [selected]}] if role else [])
             result.append({**account, "session_key": key, "target_id": binding["target_id"] if binding else key,
                 "scope_kind": kind, "group_id" if kind == "group" else "participant_id": peer,
+                **({"display_name": native_name, "group_name": native_name} if kind == "group" and native_name else {}),
                 "unified_msg_origin": umo, "conversation_id": cid,
                 "managed": binding is not None and (not self.controller._multi_host or role is not None),
                 "native": True, "details_available": True,
@@ -394,8 +537,7 @@ class SessionTopology:
                 "llm_enabled": services.get("llm_enabled", True),
                 "session_enabled": services.get("session_enabled", True),
                 "persona_pinned": bool(binding and not self.controller._multi_host),
-                "roles": [{"role_id": role or (derive_role_id(account["account_id"], selected) if account["account_id"] else selected),
-                           "role_name": role_name, "persona_ids": [selected]}]})
+                "roles": roles})
         return result
 
     async def select(self, session_key):

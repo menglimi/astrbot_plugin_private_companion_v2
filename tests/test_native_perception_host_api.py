@@ -103,7 +103,7 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         state = StateManagement(app, context)
         state_status = state.status(operator).unwrap()
         state.command(operator, {"action":"configure", "operation_key":"planning-weather-1",
-            "edit_token":state_status["edit_token"], "changes":{
+            "edit_token":state_status["edit_token"], "role_edit_token":state_status["role_edit_token"], "changes":{
                 "planning_weather_location":location, "planning_weather_enabled":True,
             }}).unwrap()
         updated = (await self.call())["data"]["environment"]["settings"]
@@ -173,23 +173,36 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native.registered_web_apis, [])
         self.assertEqual((await self.call())["data"]["code"], "staging_host_terminated")
 
-    async def test_role_material_pool_uses_global_settings_without_private_history(self):
+    async def test_material_pool_combines_shared_items_with_proactive_message_traces(self):
         (await self.controller.initialize_profile()).unwrap()
         events = self.controller.session.application.contact_schedule.news_events
         item = {"id": "role-news-1", "category": "资讯", "title": "角色共享见闻",
                 "captured_at": support.NOW.isoformat(), "source": "共享资讯池"}
+        trace = {"id": "trace-1", "scope": "window", "category": "主动消息", "title": "早上问候",
+                 "captured_at": support.NOW.isoformat(),
+                 "source": "主动消息记录", "usage": {"status": "pending"},
+                 "trace_target": "user-17", "trace_role": "澄溪"}
         with patch.object(events, "maintain_role", side_effect=RuntimeError("refresh unavailable")) as maintain:
             with patch.object(events, "role_materials", return_value={"state": "ready",
                 "checked_at": support.NOW.isoformat(), "failure": None, "items": [item]}) as reader:
-                with patch("astrbot_host.native_perception_api.ContactManagement.status",
-                           side_effect=AssertionError("global materials must not read one private window")):
-                    with patch("astrbot_host.native_perception_api.logger.exception") as log_error:
-                        response = await self.call(route=PREFIX + "/materials")
+                with patch("astrbot_host.native_perception_api.read_proactive_contact_traces",
+                           return_value={"items": [trace], "count": 1, "total_count": 4,
+                                         "contexts_read": 1}) as trace_reader:
+                    with patch("astrbot_host.native_perception_api.ContactManagement.status",
+                               side_effect=AssertionError("global materials must not require private settings")):
+                        with patch("astrbot_host.native_perception_api.logger.exception") as log_error:
+                            response = await self.call(route=PREFIX + "/materials")
 
         self.assertEqual(response["status"], "ok", response)
-        self.assertEqual(response["data"]["items"], [{**item, "scope": "role"}])
-        self.assertEqual(response["data"]["history_count"], 0)
+        self.assertEqual([row["scope"] for row in response["data"]["items"]], ["window", "role"])
+        self.assertEqual(response["data"]["items"][0]["trace_target"], "user-17")
+        self.assertEqual(response["data"]["items"][0]["usage"]["status"], "pending")
+        self.assertEqual(response["data"]["shared_count"], 1)
+        self.assertEqual(response["data"]["history_count"], 4)
+        self.assertEqual(response["data"]["trace_count"], 1)
+        self.assertEqual(response["data"]["trace_state"], "ready")
         maintain.assert_called_once()
+        trace_reader.assert_called_once()
         log_error.assert_called_once()
         settings = reader.call_args.args[0]
         self.assertIn("news_source_kind", settings)
@@ -254,7 +267,7 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         state = StateManagement(app, context)
         state_status = state.status(operator).unwrap()
         state.command(operator, {"action": "configure", "operation_key": "runtime-weather",
-            "edit_token": state_status["edit_token"], "changes": {
+            "edit_token": state_status["edit_token"], "role_edit_token": state_status["role_edit_token"], "changes": {
                 "planning_weather_location": location, "planning_weather_enabled": True,
             }}).unwrap()
         configured = (await self.call())["data"]["environment"]["settings"]

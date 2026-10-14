@@ -397,7 +397,7 @@ class AstrBotMultiController:
             self.last_failure["operation"] = operation
         return Outcome.failed(code, reason)
 
-    async def _probe(self, settings=None, *, include_conversations=True):
+    async def _probe(self, settings=None, *, include_conversations=True, include_window_personas=True):
         settings = settings or self._settings()
         personas = []
         for mapping in settings.personas:
@@ -411,7 +411,8 @@ class AstrBotMultiController:
             installation_id=settings.installation_id, host_id=HOST_ID, identities=None,
             accounts=settings.accounts, personas=tuple(personas), now=self.now,
             session_persona_override_lookup=self.native_types.session_persona_override_lookup,
-            persona_snapshot_lookup=self.native_types.persona_snapshot_lookup)
+            persona_snapshot_lookup=self.native_types.persona_snapshot_lookup,
+            persona_selection_lookup=self.native_types.persona_selection_lookup)
         conversations = {}
         for account in settings.accounts:
             platform = self.context.get_platform_inst(account.platform_id)
@@ -441,8 +442,15 @@ class AstrBotMultiController:
                 }
             # Groups resolve the actual event's UMO, including member sessions,
             # at admission. No human speaker is fabricated during startup.
-        if include_conversations and any(target.participant_id == "*" for target in settings.targets):
-            inventory = await self.session_topology.inventory(settings=settings, scope_kind="private")
+        persona_inventory = []
+        if include_conversations and include_window_personas:
+            try:
+                persona_inventory = (await self.session_topology.inventory_report(settings=settings))["targets"]
+            except Exception as error:
+                logger.warning("[CompanionV2] 启动时人格快照未完整刷新 error_type=%s", type(error).__name__)
+        if (include_conversations and include_window_personas
+                and any(target.participant_id == "*" for target in settings.targets)):
+            inventory = [row for row in persona_inventory if row.get("scope_kind") == "private"]
             for window in inventory:
                 if window.get("native") is not True or window.get("scope_kind") != "private":
                     continue
@@ -525,6 +533,8 @@ class AstrBotMultiController:
         self.session = MultiHostSession(self.runtime, self.context, settings=self.settings, personas=personas,
             authority=self.authority, native_types=self.native_types, provider_fingerprint=manifest["provider_fingerprint"],
             runtime_instance_id="astrbot-multi-" + uuid4().hex, native_tool_port=self.native_extensions, now=self.now,
+            persona_window_snapshot_lookup=self.session_topology.persona_selection_snapshot,
+            persona_window_snapshot_update=self.session_topology.update_persona_selection_snapshot,
             news_port=configured_news_port(self.config),
             balance_port=configured_balance_port(self.config),
             weather_ports=configured_weather_ports(self.config),
@@ -556,7 +566,7 @@ class AstrBotMultiController:
     async def probe(self):
         async with self._lifecycle_lock:
             try:
-                manifest, _ = await self._probe()
+                manifest, _ = await self._probe(include_conversations=True, include_window_personas=False)
                 return Outcome.success({"installation_id": self.settings.installation_id,
                     "configuration_fingerprint": manifest["fingerprint"], "targets": len(self.settings.all_targets),
                     "group_targets": len(self.settings.group_targets),
@@ -812,7 +822,7 @@ class AstrBotMultiController:
             return None
 
     async def persona_mapping_for_event(self, event):
-        """Return the registered character for this event's current AstrBot persona."""
+        """Return the registered character from the installed window snapshot."""
         target = self.target_for_event(event)
         session = self.session
         if target is None or session is None:

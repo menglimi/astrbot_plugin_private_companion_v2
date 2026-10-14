@@ -280,13 +280,21 @@ class NativeExtensionRegistry(AstrBotToolPort):
                         from companion_v2.capabilities.native_catalog import register_native_replacement
                         predecessors = {"content": "astrbot_plugin_content_companion", "image": "astrbot_plugin_image_companion",
                             "reality": "astrbot_plugin_reality_companion", "together": "astrbot_plugin_together_companion",
-                            "game": "astrbot_plugin_game_companion", "live": "astrbot_plugin_live_stream_companion"}
+                            "game": "astrbot_plugin_game_companion", "live": "astrbot_plugin_live_stream_companion",
+                            "companion.screen.native": package.package_id}
                         previous = predecessors.get(package.extension_id)
                         if previous is not None:
-                            upgraded = register_native_replacement(self.runtime, package,
-                                previous_package_id=previous, observed_at=observed_at)
-                            if not upgraded.is_success:
-                                blocked[package.extension_id] = (package.package_id, upgraded.failure.code)
+                            # Bundled modules can already have a V2 owner without
+                            # ever having installed the independent predecessor.
+                            # Advance that pinned version too, retaining its state
+                            # and existing grants rather than silently hiding it.
+                            for predecessor in dict.fromkeys((previous, package.package_id)):
+                                upgraded = register_native_replacement(self.runtime, package,
+                                    previous_package_id=predecessor, observed_at=observed_at)
+                                if not upgraded.is_success:
+                                    blocked[package.extension_id] = (package.package_id, upgraded.failure.code)
+                                    break
+                            if package.extension_id in blocked:
                                 continue
                     registered = repository.register_descriptor(package, registered_at=observed_at)
                     if registered.failure is not None and registered.failure.code in {

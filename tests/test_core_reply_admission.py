@@ -27,7 +27,7 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
         self.assertIn("context", prepared)
         self.assertIn("instruction", prepared)
         self.assertIn("prompt_instruction", prepared)
-        self.assertFalse(prepared["presentation_settings"]["content_cleanup_enabled"])
+        self.assertTrue(prepared["presentation_settings"]["content_cleanup_enabled"])
 
         authorized = await self.controller.authorize_core_reply(event, target, prepared)
         self.assertTrue(authorized.is_success, authorized.failure)
@@ -159,18 +159,18 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
             content_cleanup_enabled=True, content_cleanup_words='["旧正文清理规则"]')
         self.app.reply_settings.capture = Mock(side_effect=AssertionError("core expression must not validate old delivery settings"))
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-expression-on"))).unwrap()
-        self.assertIn("把新鲜发现兴冲冲地说给熟人听。", prepared["prompt_instruction"])
-        self.assertIn("留一点接话的余地，别机械地汇报。", prepared["prompt_instruction"])
+        self.assertIn("把新鲜发现兴冲冲地说给熟人听。", prepared["stable_prompt_instruction"])
+        self.assertIn("留一点接话的余地，别机械地汇报。", prepared["stable_prompt_instruction"])
         self.assertIn("expression_preferences", prepared["context_sections"])
-        self.assertNotIn("旧正文清理规则", prepared["prompt_instruction"])
+        self.assertNotIn("旧正文清理规则", prepared["stable_prompt_instruction"])
         self.assertEqual(prepared["presentation_settings"]["content_cleanup_words"], '["旧正文清理规则"]')
         self.assertTrue(prepared["presentation_settings"]["content_cleanup_enabled"])
 
         configure(enable_humanized_expression=False)
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-humanized-off"))).unwrap()
-        self.assertIn("把新鲜发现兴冲冲地说给熟人听。", prepared["prompt_instruction"])
-        self.assertNotIn("留一点接话的余地，别机械地汇报。", prepared["prompt_instruction"])
-        self.assertNotIn("日常表达要求", prepared["prompt_instruction"])
+        self.assertIn("把新鲜发现兴冲冲地说给熟人听。", prepared["stable_prompt_instruction"])
+        self.assertNotIn("留一点接话的余地，别机械地汇报。", prepared["stable_prompt_instruction"])
+        self.assertNotIn("日常表达要求", prepared["stable_prompt_instruction"])
 
         configure(style_prompt="")
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-expression-off"))).unwrap()
@@ -203,8 +203,15 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
             self.event(identifier="core-voice-settings-active", text="Tell me a small story"))).unwrap()
 
         self.assertEqual(prepared["voice_reply_policy"], policy)
-        self.assertIn("<pc_tts>", prepared["prompt_instruction"])
-        self.assertIn("语气自然亲切", prepared["prompt_instruction"])
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
+        from tests.test_core_reply_voice import FakeEvent
+
+        event = FakeEvent()
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": prepared})
+        request = NS(system_prompt="原生角色", prompt="Tell me a small story")
+        inject_core_reply_prompt(event, request)
+        self.assertIn("<pc_tts>", request.system_prompt)
+        self.assertIn("语气自然亲切", request.system_prompt)
 
     async def test_global_voice_policy_is_used_when_reply_page_snapshot_fails(self):
         from dataclasses import replace
@@ -223,6 +230,24 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
 
         self.assertEqual(prepared["voice_reply_policy"], policy)
 
+    async def test_drama_direction_is_prepared_for_the_actual_selected_voice(self):
+        from dataclasses import replace
+        from astrbot_host.fish_audio import DRAMA_DIRECTION
+        from companion_v2.conversation.voice_reply import VoiceReplyPolicy
+
+        policy = VoiceReplyPolicy(generation_mode="model_tag", provider_id="fish-selected")
+        settings = replace(self.controller.settings, common=replace(self.controller.settings.common,
+            voice_reply_enabled=True, voice_reply_policy=policy))
+        self.controller.settings = self.controller.session.settings = settings
+        self.app.reply_settings.snapshot = Mock(side_effect=RuntimeError("settings unavailable"))
+        voice = NS(provider_config={"type": "fishaudio_tts_api", "model": "drama-3"},
+                   get_model=lambda: "drama-3")
+        self.native.get_provider_by_id = lambda identifier: voice if identifier == "fish-selected" else self.native.provider
+        self.native.get_all_tts_providers = lambda: [voice]
+        prepared = (await self.controller.prepare_core_reply(
+            self.event(identifier="core-drama-direction"))).unwrap()
+        self.assertEqual(prepared["voice_provider_instruction"], DRAMA_DIRECTION)
+
     async def test_effective_task_prompt_is_used_without_resolving_model_route(self):
         group = self.app.router.profiles["conversation.reply"].group
         configuration_read = self.app.router.configuration.read
@@ -237,7 +262,7 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
 
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-task-prompt"))).unwrap()
 
-        self.assertIn("读到喜欢的东西时兴冲冲地分享", prepared["prompt_instruction"])
+        self.assertIn("读到喜欢的东西时兴冲冲地分享", prepared["stable_prompt_instruction"])
         self.assertIn("task_prompt", prepared["context_sections"])
         self.app.router._route_selection.assert_not_called()
 
@@ -257,7 +282,6 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(prepared["text"], "下午做什么了")
         self.assertIn("在书房读了一章小说", prepared["prompt_instruction"])
         self.assertIn("喜欢轻松地聊书", prepared["prompt_instruction"])
-        self.assertIn("AstrBot", prepared["prompt_instruction"])
         self.assertEqual(set(prepared["context_sections"]) & {"life", "relationship"}, {"life", "relationship"})
         self.assertEqual(self.app.runtime.read_all("SELECT batch_id FROM conversation_batches", ()), ())
         self.assertEqual(self.native.provider.client.state.calls, [])
@@ -303,9 +327,10 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
 
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-calendar"))).unwrap()
 
-        self.assertIn('"timezone":"UTC"', prepared["prompt_instruction"])
-        self.assertIn(self.clock.now().strftime("%H:%M"), prepared["prompt_instruction"])
-        self.assertIn("自然地说起当下的时间", prepared["prompt_instruction"])
+        self.assertIn('"timezone":"UTC"', prepared["perception_context"])
+        self.assertIn(self.clock.now().strftime("%H:%M"), prepared["perception_context"])
+        self.assertEqual(prepared["perception_guidance"], "自然地说起当下的时间")
+        self.assertTrue(any("current_local_time" in item for item in prepared["perception_instructions"]))
         self.assertIn("perception", prepared["context_sections"])
         external.assert_not_called()
 
@@ -319,8 +344,8 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-no-calendar"))).unwrap()
 
         self.assertIn("perception", prepared["context_sections"])
-        self.assertIn("本轮本地时间", prepared["prompt_instruction"])
-        self.assertNotIn("当前日期与时间", prepared["prompt_instruction"])
+        self.assertIn("current_local_time", prepared["perception_context"])
+        self.assertNotIn("local_calendar_context", prepared["perception_context"])
         self.assertNotIn("proactive_inspirations", prepared["context_sections"])
         contribution.assert_called_once()
 
@@ -369,7 +394,7 @@ class GroupCoreReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCas
         self.assertTrue(prepared.is_success, prepared.failure)
         self.assertEqual(prepared.unwrap()["channel"], "group")
         self.assertEqual(prepared.unwrap()["target_id"], "group-a")
-        self.assertFalse(prepared.unwrap()["presentation_settings"]["content_cleanup_enabled"])
+        self.assertTrue(prepared.unwrap()["presentation_settings"]["content_cleanup_enabled"])
 
         authorized = await self.controller.authorize_core_reply(event, prepared.unwrap())
         self.assertTrue(authorized.is_success, authorized.failure)

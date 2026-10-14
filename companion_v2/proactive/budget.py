@@ -6,6 +6,7 @@ from companion_v2.execution.models import TaskError, stamp
 
 
 DIAGNOSTIC_TASK_PREFIX = "contact-diagnostic-task-"
+_COUNTED_TASK_STATES = "'created', 'admitted', 'running', 'retry_scheduled', 'cancelling', 'succeeded', 'uncertain'"
 
 
 class ContactBudget:
@@ -28,17 +29,21 @@ class ContactBudget:
         return (context.scope.installation_id, context.scope.bot_id, context.role_binding.role.subject_id,
                 context.actor.subject.installation_id, context.actor.subject.subject_id)
 
+    @staticmethod
+    def _attempt_count_predicate(alias):
+        return f"{alias}.state IN ({_COUNTED_TASK_STATES})"
+
     def attempts(self, context, preferences, at, *, exclude_task_id=""):
         cutoff = stamp(at - timedelta(hours=24))
-        count = self.runtime.read_one("""SELECT COUNT(*) FROM execution_tasks
-            WHERE origin_key = ? AND kind = 'proactive.compose' AND created_at > ? AND task_id != ?
-            AND task_id NOT LIKE ?""",
+        count = self.runtime.read_one("""SELECT COUNT(*) FROM execution_tasks t
+            WHERE t.origin_key = ? AND t.kind = 'proactive.compose' AND t.created_at > ? AND t.task_id != ?
+            AND t.task_id NOT LIKE ? AND """ + self._attempt_count_predicate("t"),
             (context.key, cutoff, exclude_task_id, DIAGNOSTIC_TASK_PREFIX + "%"))[0]
         if count >= preferences.values["max_attempts_24h"]:
             raise TaskError("contact_attempt_budget", "contact decision allowance is exhausted")
         relation_count = self.runtime.read_one("""SELECT COUNT(*) FROM execution_tasks t
             WHERE t.kind = 'proactive.compose' AND t.created_at > ? AND t.task_id != ?
-            AND t.task_id NOT LIKE ? AND """
+            AND t.task_id NOT LIKE ? AND """ + self._attempt_count_predicate("t") + " AND "
             + self._relationship_predicate("t"),
             (cutoff, exclude_task_id, DIAGNOSTIC_TASK_PREFIX + "%", *self._relationship_values(context)))[0]
         if relation_count >= preferences.values["max_relationship_attempts_24h"]:
@@ -47,12 +52,13 @@ class ContactBudget:
     def attempt_usage(self, context, preferences, at):
         """Return the same rolling-window counts used by admission checks."""
         cutoff = stamp(at - timedelta(hours=24))
-        session_count = self.runtime.read_one("""SELECT COUNT(*) FROM execution_tasks
-            WHERE origin_key = ? AND kind = 'proactive.compose' AND created_at > ? AND task_id NOT LIKE ?""",
+        session_count = self.runtime.read_one("""SELECT COUNT(*) FROM execution_tasks t
+            WHERE t.origin_key = ? AND t.kind = 'proactive.compose' AND t.created_at > ?
+            AND t.task_id NOT LIKE ? AND """ + self._attempt_count_predicate("t"),
             (context.key, cutoff, DIAGNOSTIC_TASK_PREFIX + "%"))[0]
         relationship_count = self.runtime.read_one("""SELECT COUNT(*) FROM execution_tasks t
             WHERE t.kind = 'proactive.compose' AND t.created_at > ? AND t.task_id NOT LIKE ? AND """
-            + self._relationship_predicate("t"),
+            + self._attempt_count_predicate("t") + " AND " + self._relationship_predicate("t"),
             (cutoff, DIAGNOSTIC_TASK_PREFIX + "%", *self._relationship_values(context)))[0]
         return {
             "session": {"used": session_count, "limit": preferences.values["max_attempts_24h"], "window_hours": 24},

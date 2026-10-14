@@ -27,16 +27,28 @@ from starlette.requests import Request
 
 
 class FixtureManager(PluginManager):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fail_next_controller_init = False
+
     async def _import_plugin_with_dependency_recovery(self, path, module_str, **_):
         # Use the host's exact import semantics, with synthetic native ports and
         # no package installation or external providers in the test process.
         entry = __import__(path, fromlist=[module_str])
         if not getattr(entry, "_reload_fixture", False):
             adapter = importlib.import_module("companion_v2.adapters.astrbot.staging")
-            types = adapter.NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider,
+            types = adapter.NativeAdapterTypes("4.28.2", FakeEvent, FakeProvider,
                                               SimpleNamespace, SimpleNamespace, FakeReverseApi)
-            entry.AstrBotMultiController = partial(entry.AstrBotMultiController,
-                                                  native_types=types, now=lambda: NOW)
+            controller = partial(entry.AstrBotMultiController, native_types=types, now=lambda: NOW)
+            if self.fail_next_controller_init:
+                self.fail_next_controller_init = False
+
+                def fail_once(*_args, **_kwargs):
+                    raise ValueError("synthetic native adapter contract mismatch")
+
+                entry.AstrBotMultiController = fail_once
+            else:
+                entry.AstrBotMultiController = controller
             entry._reload_fixture = True
         return entry
 
@@ -137,10 +149,25 @@ async def run():
             assert sys.modules[foreign.__name__] is foreign
             assert not hasattr(sys.modules["data.plugins"], plugin_name)
 
+        def check_failed_initialization_cleanup():
+            assert entry_name not in sys.modules
+            assert not any(name == "companion_v2" or name.startswith("companion_v2.")
+                           for name in sys.modules if name != foreign.__name__)
+            assert not any(name == "astrbot_host" or name.startswith("astrbot_host.")
+                           for name in sys.modules)
+            assert str(source) not in sys.path
+            assert not hasattr(sys.modules["data.plugins"], plugin_name)
+            assert native.registered_web_apis == []
+            assert sys.modules[foreign.__name__] is foreign
+
         with patch.object(StarTools, "get_data_dir", return_value=root / "v2"):
             try:
                 platforms = native.platforms
                 native.platforms = {}
+                manager.fail_next_controller_init = True
+                success, error = await manager.load(specified_module_path=entry_name)
+                assert not success, error
+                check_failed_initialization_cleanup()
                 success, error = await manager.load(specified_module_path=entry_name)
                 assert success, error
                 await asyncio.sleep(0.05)
@@ -187,6 +214,7 @@ async def run():
                       "active_reload": True, "saved_profile_restored": True, "same_role_owner": True,
                       "state_routes_readable": True, "duplicate_handlers": 0, "duplicate_routes": 0,
                       "foreign_modules_preserved": True, "deferred_drain_imports": True,
+                      "failed_constructor_reload": True,
                       "model_calls": 0, "platform_sends": 0,
                       "astrbot_root_isolated": str(db_helper.db_path).startswith(str(ASTRBOT_ROOT))}))
 

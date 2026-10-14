@@ -22,6 +22,7 @@ class CoreReplyEvent:
         self._has_send_oper = False
         self.extra = {}
         self.sent = []
+        self.unified_msg_origin = "qq-main:FriendMessage:200"
         self.send = self._send
         self.send_streaming = self._send_streaming
 
@@ -54,6 +55,7 @@ class MainCoreReplyTests(unittest.IsolatedAsyncioTestCase):
             "context": object(),
             "instruction": "Use this companion persona.",
             "prompt_instruction": "Reply conversationally.",
+            "stable_prompt_instruction": "Use the configured companion voice.",
             "target_id": "target",
             "channel": "private",
             "event_id": "event-1",
@@ -89,9 +91,13 @@ class MainCoreReplyTests(unittest.IsolatedAsyncioTestCase):
         staging.session.core_reply_observations.phase.assert_called_once()
         self.assertEqual(staging.session.core_reply_observations.phase.call_args.args[1], "running")
         self.assertNotIn(prepared["instruction"], request.system_prompt)
-        self.assertIn(prepared["prompt_instruction"], request.system_prompt)
+        self.assertIn(prepared["stable_prompt_instruction"], request.system_prompt)
+        self.assertNotIn(prepared["prompt_instruction"], request.system_prompt)
+        self.assertIn(prepared["prompt_instruction"], request.extra_user_content_parts[-1].text)
+        self.assertTrue(request.extra_user_content_parts[-1]._no_save)
         steps = event.get_extra(ENTRY.CORE_REPLY_CONTEXT_EXTRA)["_preparation_steps"]
-        self.assertEqual([item["name"] for item in steps], ["request_authorization", "prompt_injection", "send_tool_injection"])
+        self.assertEqual([item["name"] for item in steps], ["request_authorization", "prompt_injection",
+            "send_tool_injection", "perception_injection"])
         self.assertTrue(all(type(item["elapsed_ms"]) is int and item["elapsed_ms"] >= 0 for item in steps))
         staging.authorize_core_reply.assert_awaited_once()
         authorization_args = staging.authorize_core_reply.await_args.args
@@ -111,6 +117,51 @@ class MainCoreReplyTests(unittest.IsolatedAsyncioTestCase):
         await plugin.observe_companion_core_reply_sent(event)
         self.assertIs(event.send.__self__, event)
         self.assertIs(event.send.__func__, CoreReplyEvent._send)
+
+    async def test_core_request_injects_configured_model_route_perception(self):
+        plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
+        event = CoreReplyEvent()
+        event.extra["selected_provider"] = "chat-route"
+        target = NS(key="target", target_id="target")
+        provider = NS(provider_config={"id": "chat-route", "modalities": ["text", "image"]},
+                      meta=lambda: NS(id="chat-route"), get_model=lambda: "qwen-chat-alias")
+        observations = NS(phase=Mock())
+        staging = NS(
+            runtime=None,
+            now=lambda: None,
+            claims=lambda _event: True,
+            target_for_event=lambda _event: target,
+            settings=NS(enabled=True),
+            context=NS(get_provider_by_id=Mock(return_value=provider), get_using_provider_async=AsyncMock()),
+            session=NS(profile=NS(target=target), core_reply_observations=observations),
+            session_topology=NS(reply_enabled=AsyncMock(return_value=True), schedule_observe=Mock()),
+            prepare_core_reply=AsyncMock(return_value=Outcome.success({
+                "context": NS(scope=NS(platform="qq-main")),
+                "instruction": "Use this companion persona.",
+                "prompt_instruction": "Reply conversationally.",
+                "stable_prompt_instruction": "Use the configured companion voice.",
+                "perception_options": (True, True, True),
+                "target_id": "target", "channel": "private", "event_id": "event-1",
+            })),
+            authorize_core_reply=AsyncMock(return_value=Outcome.success(True)),
+        )
+        plugin.staging = staging
+
+        await plugin.receive_companion_message(event)
+        request = NS(system_prompt="AstrBot base prompt", model=None, image_urls=[], audio_urls=[], func_tool=None)
+        await plugin.prepare_companion_core_request(event, request)
+
+        self.assertIn("自然地陪伴和交流", request.system_prompt)
+        self.assertIn("Use the configured companion voice.", request.system_prompt)
+        self.assertNotIn("Reply conversationally.", request.system_prompt)
+        self.assertNotIn("chat-route", request.system_prompt)
+        perception = request.extra_user_content_parts[-1].text
+        self.assertIn("Reply conversationally.", perception)
+        self.assertIn('"platform":"qq-main"', perception)
+        self.assertIn('"provider_id":"chat-route"', perception)
+        self.assertIn('"model":"qwen-chat-alias"', perception)
+        self.assertIn('"values":["text","image"]', perception)
+        staging.context.get_using_provider_async.assert_not_awaited()
 
     async def test_native_runner_completion_observes_assistant_empty_and_error_phases_without_awaiting_storage(self):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)

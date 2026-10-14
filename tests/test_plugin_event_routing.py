@@ -62,6 +62,8 @@ class PluginEventRoutingTests(unittest.IsolatedAsyncioTestCase):
             group_reply_candidate=AsyncMock(return_value=NS(failure=None, unwrap=lambda: {"admitted": False})),
             session_topology=NS(reply_enabled=AsyncMock(return_value=True), observe=AsyncMock()),
             receive_claimed=AsyncMock(return_value=NS(failure=None, unwrap=lambda: "synthetic-batch")),
+            prepare_core_reply=AsyncMock(return_value=NS(failure=None, unwrap=lambda: {
+                "event_id": "synthetic-event", "turn_id": "synthetic-core-turn"})),
         )
         self.plugin.staging = self.staging
         self.registry = StarHandlerRegistry()
@@ -74,7 +76,7 @@ class PluginEventRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.context = NS(astrbot_config={
             "platform_settings": {}, "admins_id": [], "wake_prefix": ["/"],
             "provider_settings": {"enable": True},
-        })
+        }, db_helper=None, astrbot_config_id="synthetic-test")
         self.waking_stage = waking.WakingCheckStage()
         self.process_stage = ProcessStage()
         self.process_stage.ctx = self.context
@@ -169,7 +171,7 @@ class PluginEventRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.model_requests, [])
         self.staging.receive_claimed.assert_not_awaited()
 
-    async def test_claimed_private_reply_preserves_later_detection_without_default_model(self):
+    async def test_claimed_private_reply_preserves_later_detection_and_uses_core_model(self):
         async def private_observer(event):
             self.peers.append(event.get_message_str())
 
@@ -178,9 +180,12 @@ class PluginEventRoutingTests(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(event)
         self.assertEqual(self.peers, ["在吗"])
         self.assertFalse(event.is_stopped())
-        self.assertTrue(event.call_llm)
-        self.staging.receive_claimed.assert_awaited_once()
-        self.assertEqual(self.model_requests, [])
+        self.assertTrue(event.is_wake)
+        self.assertTrue(event.is_at_or_wake_command)
+        self.assertFalse(event.call_llm)
+        self.staging.prepare_core_reply.assert_awaited_once()
+        self.staging.receive_claimed.assert_not_awaited()
+        self.assertEqual(self.model_requests, [event])
 
     async def test_native_command_keeps_its_normal_dispatch(self):
         async def native_command(event):

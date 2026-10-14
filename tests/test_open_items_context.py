@@ -1,6 +1,7 @@
 """Open personal agenda items enter private replies through the existing agenda owner."""
 
 import json
+from datetime import timedelta
 import unittest
 
 from companion_v2.agenda.models import AgendaTarget
@@ -29,7 +30,8 @@ class OpenItemsFixture(MessageFixture):
         super().setUp()
         self.agenda = self.messages.open_items_context.reader.agenda
 
-    def add_item(self, item_id="item-a", *, actor=None, owner=None, title="准备周末旅行", body="看看车票和天气"):
+    def add_item(self, item_id="item-a", *, actor=None, owner=None, title="准备周末旅行", body="看看车票和天气",
+                 purpose="open_loop"):
         actor = actor or self.important
         owner = owner or actor.subject
         binding = self.identity.resolve_role(SCOPE, observed_at=self.clock.now()).unwrap()
@@ -37,7 +39,8 @@ class OpenItemsFixture(MessageFixture):
         operation = OperationRef("create-" + item_id, "agenda", SCOPE,
                                  VersionRef("create-" + item_id, 1), "create-" + item_id)
         return self.agenda.create_memo(actor, target=target, memo_id=item_id, title=title, body=body,
-            operation=operation, expected_role_revision=binding.revision, observed_at=self.clock.now()).unwrap()
+            operation=operation, expected_role_revision=binding.revision, observed_at=self.clock.now(),
+            purpose=purpose).unwrap()
 
     def change_item(self, item_id, *, action="edit", revision=1, actor=None, changes=None):
         actor = actor or self.important
@@ -64,6 +67,7 @@ class OpenItemsContextTests(OpenItemsFixture, unittest.IsolatedAsyncioTestCase):
         request = self.called[-1][1].original
         self.assertIn(INSTRUCTION, request.instruction)
         self.assertEqual([item["memo_id"] for item in self.item_payloads(request)], ["item-a"])
+        self.assertEqual(self.agenda.repository.memo("item-a").context_count, 1)
         self.assertEqual(request.context.evidence_sources, (self.event().source,))
         saved = self.messages.batch(batch)["contributions_json"]
         self.assertNotIn("准备周末旅行", saved)
@@ -154,6 +158,58 @@ class OpenItemsContextTests(OpenItemsFixture, unittest.IsolatedAsyncioTestCase):
             consumer.reader.validate_snapshot({**snapshot, "references": [snapshot["references"][0]] * 2},
                                                self.context)
 
+    async def test_context_exposure_has_a_persistent_cooldown_and_lifetime_cap(self):
+        self.add_item()
+        reader = self.messages.open_items_context.reader
+        first = reader.capture(self.context, self.clock.now())
+        self.assertEqual(len(first["references"]), 1)
+        self.assertEqual(self.agenda.repository.memo("item-a").context_count, 0)
+        with self.runtime.read_snapshot():
+            materials = self.messages.open_items_context.contributions(first, self.context, self.clock.now())
+        self.assertEqual(self.agenda.repository.memo("item-a").context_count, 0)
+        self.assertEqual(self.messages.open_items_context.record_exposure(
+            first, self.context, self.clock.now(), materials), frozenset({"item-a"}))
+        self.assertEqual(self.agenda.repository.memo("item-a").context_count, 1)
+        self.assertEqual(reader.capture(self.context, self.clock.now())["references"], [])
+        for _ in range(2):
+            self.clock.advance(timedelta(days=4))
+            snapshot = reader.capture(self.context, self.clock.now())
+            self.assertEqual(len(snapshot["references"]), 1)
+            materials = self.messages.open_items_context.contributions(snapshot, self.context, self.clock.now())
+            self.assertEqual(self.messages.open_items_context.record_exposure(
+                snapshot, self.context, self.clock.now(), materials), frozenset({"item-a"}))
+        self.clock.advance(timedelta(days=4))
+        self.assertEqual(reader.capture(self.context, self.clock.now())["references"], [])
+
+    async def test_exposure_cooldown_removes_stale_optional_material_from_request(self):
+        self.add_item()
+        batch = self.accept()
+        self.messages.seal(self.context, batch, deadline_at=self.deadline).unwrap()
+        claimed = self.agenda.repository.claim_open_loop_context(
+            "item-a", at=self.clock.now(), cooldown=timedelta(days=3), max_count=3)
+        self.assertTrue(claimed)
+        self.clock.advance(timedelta(seconds=1))
+
+        await self.runner().run_once(Lane.FOREGROUND)
+
+        task = self.tasks.read(self.context, "generate-" + batch).unwrap()
+        self.assertEqual(task.state, "succeeded")
+        request = self.called[-1][1].original
+        self.assertEqual(self.item_payloads(request), [])
+        self.assertNotIn(INSTRUCTION, request.instruction)
+
+    async def test_expired_open_loop_is_not_captured_or_injected(self):
+        self.add_item()
+        self.clock.advance(timedelta(days=31))
+        snapshot = self.messages.open_items_context.capture(self.context, self.clock.now())
+        self.assertEqual(snapshot["references"], [])
+        self.assertEqual(self.messages.open_items_context.contributions(snapshot, self.context, self.clock.now()), ())
+
+    async def test_ordinary_note_is_not_exposed_as_an_open_loop(self):
+        self.add_item(purpose="note")
+        snapshot = self.messages.open_items_context.capture(self.context, self.clock.now())
+        self.assertEqual(snapshot["references"], [])
+
 
 class OpenItemsHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_composition_root_injects_open_items_through_the_ordinary_host_reply(self):
@@ -167,7 +223,7 @@ class OpenItemsHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         target = AgendaTarget(SCOPE, binding.role, self.important.subject)
         app.agenda.create_memo(self.important, target=target, memo_id=identifier, title="周末整理花园",
             body="先给薄荷换个花盆", operation=operation, expected_role_revision=binding.revision,
-            observed_at=self.clock.now()).unwrap()
+            observed_at=self.clock.now(), purpose="open_loop").unwrap()
 
         async def model(envelope):
             self.called.append(envelope)

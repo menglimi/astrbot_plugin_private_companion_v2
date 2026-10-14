@@ -88,6 +88,7 @@ class NativeAdapterTypes:
     video_provider_factory: object | None = None
     session_persona_override_lookup: object | None = None
     persona_snapshot_lookup: object | None = None
+    persona_selection_lookup: object | None = None
 
     def __post_init__(self):
         check_version(self.version)
@@ -102,6 +103,8 @@ class NativeAdapterTypes:
             raise ValueError("session persona override lookup must be supplied by trusted host assembly")
         if self.persona_snapshot_lookup is not None and not callable(self.persona_snapshot_lookup):
             raise ValueError("persona snapshot lookup must be supplied by trusted host assembly")
+        if self.persona_selection_lookup is not None and not callable(self.persona_selection_lookup):
+            raise ValueError("persona selection lookup must be supplied by trusted host assembly")
         if (self.video is None) != (self.video_loader is None) or (self.video is not None and (
                 not isinstance(self.video, type) or not callable(self.video_loader))):
             raise ValueError("video intake requires an explicit native type and loader")
@@ -238,6 +241,7 @@ class AstrBotStagingSession:
             file_type=native_types.file, file_loader=native_types.file_loader,
             session_persona_override_lookup=native_types.session_persona_override_lookup,
             persona_snapshot_lookup=native_types.persona_snapshot_lookup,
+            persona_selection_lookup=native_types.persona_selection_lookup,
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
         self.identity = PersistentIdentityDirectory(runtime)
         # These identities are stable across a restart of the same native config.

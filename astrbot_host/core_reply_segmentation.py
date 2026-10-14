@@ -23,11 +23,13 @@ logger = logging.getLogger(__name__)
 MARKED = "_companion_v2_segmented"
 NATIVE_PROMPT = (
     "群聊正文按语意自然停顿；一两句通常就够，不为凑段数扩写。只有清楚的主题转折才拆开长文。"
+    "连续标点（例如 ...？、？！）保持在同一条消息里，不要生成以孤立标点开头的气泡；称呼或短分句跟随完整回应。"
     "需要主动指定独立气泡时，边界只用完整标记 {{split_marker}} 单独占一行。"
     "标记不是正文；不要放进代码、引用或链接。直接输出聊天正文，不输出 JSON 或 claims。"
 )
 PRIVATE_PROMPT = (
     "普通私聊正文按自然停顿组织，完整接住对方的话；不要为凑条数扩写或拆散一句话、称呼与回应、因果解释。"
+    "连续标点（例如 ...？、？！）保持在同一条消息里，不要生成以孤立标点开头的气泡。"
     "需要指定独立气泡时，边界只用完整标记 {{split_marker}} 单独占一行。"
     "标记不是正文；不要放进代码、引用或链接。直接输出聊天正文，不输出 JSON 或内部字段。"
 )
@@ -172,6 +174,10 @@ def prepare_core_reply_segmentation(event):
             return await state["send"](message, *args, **kwargs)
         if state["stopped"]:
             return None
+        from .core_reply_reaction_delivery import capture_core_reaction_intent
+        capture_core_reaction_intent(event, message)
+        from .core_reply_voice import capture_core_voice_message
+        message = capture_core_voice_message(event, message)
         if prepared.get("channel") == "private" and is_core_reply_stream(event):
             try:
                 return await state["send"](message, *args, **kwargs)
@@ -215,6 +221,12 @@ def prepare_core_reply_segmentation(event):
                               tool_names=core.get("_native_tool_names", ()))
         if not parts and presentation is not None:
             note_removed_text(event)
+        if core.get("_voice_authored") and presentation is not None:
+            raw_parts = split_message(message, policy)
+            if len(raw_parts) == len(parts):
+                for raw, part in zip(raw_parts, parts):
+                    if hasattr(part, "chain"):
+                        object.__setattr__(part, "_companion_v2_voice_source", sent_core_text(raw))
         first_text_segment = next((index for index, part in enumerate(parts)
                                    if sent_core_text(part).strip()), 0)
         for index, part in enumerate(parts):

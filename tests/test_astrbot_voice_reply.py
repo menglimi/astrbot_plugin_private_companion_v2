@@ -5,11 +5,14 @@ import base64
 from dataclasses import replace
 import hashlib
 import json
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+import struct
 from types import SimpleNamespace as NS
 import unittest
+import wave
 from unittest.mock import patch
 
 from astrbot_host.voice import NativeVoiceReply
@@ -221,3 +224,21 @@ class NativeVoiceProviderTests(unittest.IsolatedAsyncioTestCase):
                 return str(self.audio)
             context.get_using_tts_provider = lambda _: NS(get_audio=slow)
             self.assertIsNone(await native.render(task_context, "hello", timeout_seconds=0.001))
+
+    async def test_streamed_wav_lengths_are_finalized_before_returning_the_record(self):
+        pcm = b"\x00\x00" * 4410
+        header = (b"RIFF" + struct.pack("<I", 0xFFFFFF24) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16,
+                  1, 1, 44100, 88200, 2, 16) + b"data" + struct.pack("<I", 0xFFFFFF00))
+        self.audio.write_bytes(header + pcm)
+        provider = NS(get_audio=lambda _: str(self.audio))
+        context = NS(get_using_tts_provider=lambda _: provider)
+        task = NS(scope=NS(kind=NS(value="private"), platform="test", session_id="private"))
+        with patch("astrbot_host.voice.get_astrbot_temp_path", return_value=str(self.root)):
+            result = await NativeVoiceReply(context).render(task, "晚安")
+        audio = base64.b64decode(result["data"]["file"].removeprefix("base64://"))
+        self.assertEqual(struct.unpack_from("<I", audio, 4)[0], len(audio) - 8)
+        self.assertEqual(audio[44:], pcm)
+        with wave.open(io.BytesIO(audio), "rb") as wav:
+            self.assertEqual(wav.getnframes(), 4410)
+            self.assertAlmostEqual(wav.getnframes() / wav.getframerate(), 0.1)
+        self.assertEqual(self.audio.read_bytes(), header + pcm)

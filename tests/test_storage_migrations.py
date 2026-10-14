@@ -30,8 +30,11 @@ from companion_v2.storage.schema import (
     MIGRATION_V57_TO_V58_FINGERPRINT, MIGRATION_V57_TO_V58_ID, SCHEMA_VERSION_V58,
     MIGRATION_V58_TO_V59_FINGERPRINT, MIGRATION_V58_TO_V59_ID, SCHEMA_VERSION_V59,
     MIGRATION_V59_TO_V60_FINGERPRINT, MIGRATION_V59_TO_V60_ID, SCHEMA_VERSION_V60,
+    MIGRATION_V60_TO_V61_FINGERPRINT, MIGRATION_V60_TO_V61_ID, SCHEMA_VERSION_V61,
+    MIGRATION_V61_TO_V62_FINGERPRINT, MIGRATION_V61_TO_V62_ID, SCHEMA_VERSION_V62,
+    MIGRATION_V62_TO_V63_FINGERPRINT, MIGRATION_V62_TO_V63_ID, SCHEMA_VERSION_V63,
 )
-from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36, remove_v52, remove_v53, remove_v55, remove_v57, remove_v58, remove_v59
+from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36, remove_v52, remove_v53, remove_v55, remove_v57, remove_v58, remove_v59, remove_v60, remove_v61, remove_v62, remove_v63
 
 
 class StorageMigrationTests(unittest.TestCase):
@@ -102,6 +105,14 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertIsNotNone(runtime.read_one(
             "SELECT * FROM sqlite_master WHERE type = 'table' AND name = 'laya_decision_events'", (),
         ))
+        self.assertIsNotNone(runtime.read_one(
+            "SELECT * FROM sqlite_master WHERE type = 'table' AND name = 'agenda_open_loop_activity'", (),
+        ))
+        migration = runtime.read_one(
+            "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V60_TO_V61_ID,),
+        )
+        self.assertEqual(migration["fingerprint"], MIGRATION_V60_TO_V61_FINGERPRINT)
+        self.assertEqual(migration["to_version"], SCHEMA_VERSION_V61)
 
     def assert_v1_unchanged(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection:
@@ -128,6 +139,41 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertIsNotNone(runtime.read_one(
             "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V51_TO_V52_ID,),
         ))
+
+
+        self.assertEqual(runtime.read_one("SELECT * FROM inbox", ())['event_id'], "existing-event")
+        self.assertEqual(runtime.read_one("SELECT * FROM operations", ())['commit_state'], "unknown")
+        self.assertEqual(runtime.read_one("SELECT * FROM outbox", ())['state'], "unknown")
+        migrations = tuple(tuple(r) for r in runtime.read_all("SELECT * FROM schema_migrations ORDER BY migration_id", ()))
+        runtime.close()
+        reopened = self.open_runtime()
+        self.assertEqual(tuple(tuple(r) for r in reopened.read_all("SELECT * FROM schema_migrations ORDER BY migration_id", ())), migrations)
+
+    def test_v60_upgrade_preserves_laya_events_and_accepts_role_interventions(self) -> None:
+        runtime = self.open_runtime()
+        with runtime.transaction() as connection:
+            connection.execute("""INSERT INTO laya_decision_events
+                (event_id, origin_key, source, status, mode, enabled_fields_json, observed_at)
+                VALUES (?, ?, 'conversation', 'ok', 'remote', '{}', '2026-10-14T00:00:00+00:00')""",
+                ("a" * 32, "role-key"))
+        runtime.close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v61(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V60,))
+            connection.commit()
+
+        upgraded = self.open_runtime()
+        existing = upgraded.read_one("SELECT * FROM laya_decision_events WHERE event_id = ?", ("a" * 32,))
+        self.assertEqual(existing["source"], "conversation")
+        with upgraded.transaction() as connection:
+            connection.execute("""INSERT INTO laya_decision_events
+                (event_id, origin_key, source, status, mode, enabled_fields_json, observed_at)
+                VALUES (?, ?, 'role_intervention', 'ok', 'remote', '{}', '2026-10-14T00:00:01+00:00')""",
+                ("b" * 32, "role-key"))
+        new_event = upgraded.read_one("SELECT * FROM laya_decision_events WHERE event_id = ?", ("b" * 32,))
+        self.assertEqual(new_event["source"], "role_intervention")
+        runtime = upgraded
         self.assertEqual(runtime.read_one("SELECT * FROM inbox", ())["event_id"], "existing-event")
         self.assertEqual(runtime.read_one("SELECT * FROM operations", ())["commit_state"], "unknown")
         self.assertEqual(runtime.read_one("SELECT * FROM outbox", ())["state"], "unknown")
@@ -312,9 +358,7 @@ class StorageMigrationTests(unittest.TestCase):
     def test_v59_upgrade_adds_bounded_per_window_contact_schedule_diagnostics(self):
         self.open_runtime().close()
         with closing(sqlite3.connect(self.database)) as connection:
-            connection.execute("DROP TABLE proactive_schedule_diagnostics")
-            connection.execute("DELETE FROM schema_migrations WHERE migration_id = ?",
-                               (MIGRATION_V59_TO_V60_ID,))
+            remove_v60(connection)
             connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
                                (SCHEMA_VERSION_V59,))
             connection.commit()
@@ -326,6 +370,40 @@ class StorageMigrationTests(unittest.TestCase):
                          (SCHEMA_VERSION_V59, SCHEMA_VERSION_V60, MIGRATION_V59_TO_V60_FINGERPRINT))
         self.assertIsNotNone(upgraded.read_one(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proactive_schedule_diagnostics'", ()))
+
+    def test_v61_upgrade_adds_indexes_for_bounded_input_sample_queries(self):
+        self.open_runtime().close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v62(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V61,))
+            connection.commit()
+
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V61_TO_V62_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V61, SCHEMA_VERSION_V62, MIGRATION_V61_TO_V62_FINGERPRINT))
+        names = {row["name"] for row in upgraded.read_all(
+            "SELECT name FROM sqlite_master WHERE type = 'index'", ())}
+        self.assertTrue({"conversation_inputs_scope_received_idx", "conversation_batches_role_binding_idx"}
+                        .issubset(names))
+
+    def test_v62_upgrade_adds_persistent_open_loop_activity(self):
+        self.open_runtime().close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v63(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V62,))
+            connection.commit()
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V62_TO_V63_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V62, SCHEMA_VERSION_V63, MIGRATION_V62_TO_V63_FINGERPRINT))
+        columns = {row["name"] for row in upgraded.read_all("PRAGMA table_info(agenda_open_loop_activity)", ())}
+        self.assertTrue({"memo_id", "last_context_at", "context_count", "last_followup_at",
+                         "followup_count", "updated_at"}.issubset(columns))
 
     def test_v52_upgrade_adds_response_diagnostics_and_rolls_back_on_failure(self):
         runtime = self.open_runtime()

@@ -31,8 +31,10 @@ class AppointmentFixture(ContactScheduleFixture):
         manager = StateManagement(self.app, self.origin)
         before = manager.status(self.core).unwrap()
         manager.command(self.core, dict(action="configure", operation_key="enable-calendar",
-            edit_token=before["edit_token"], changes={"calendar_enabled": True})).unwrap()
-        self.settings(self.app, settings).unwrap()
+            edit_token=before["edit_token"], role_edit_token=before["role_edit_token"],
+            changes={"calendar_enabled": True})).unwrap()
+        self.settings(self.app, {**{purpose + ".enabled": False
+            for purpose in ("affection", "care", "play", "repair", "invitation")}, **settings}).unwrap()
         return host
 
     def commitment(self, identifier="appointment", *, due, schedule=None):
@@ -169,7 +171,8 @@ class JudgeFixture(ContactScheduleFixture):
     async def judged_host(self, **settings):
         host, _ = await self.scheduled()
         self.settings(host.application, {"enable_llm_proactive_persona_judge": True,
-                                         "max_contacts_24h": 5, **settings}).unwrap()
+            "max_contacts_24h": 5, **{purpose + ".enabled": False
+                for purpose in ("affection", "care", "play", "repair", "invitation")}, **settings}).unwrap()
         self.advance(host.application, 60)
         return host
 

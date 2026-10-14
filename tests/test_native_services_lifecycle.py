@@ -1,6 +1,7 @@
 """Bundled services start independently and release their owned resources."""
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
@@ -45,6 +46,28 @@ class NativeServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.repository.acquire(extension_id=name, package_id=package.package_id,
             package_version=package.package_version, expected_revision=0, observed_at=NOW).unwrap()
         return lease
+
+    async def test_existing_v2_owner_advances_without_independent_predecessor(self):
+        for name in ("together", "reality", "image"):
+            package = self.registry._lease(name).manifest.package
+            previous = replace(package, package_version="2.1.0", artifact_hash="previous-v2-" + name)
+            self.repository.register_descriptor(previous, registered_at=NOW).unwrap()
+            self.repository.acquire(extension_id=name, package_id=previous.package_id,
+                package_version=previous.package_version, expected_revision=0, observed_at=NOW).unwrap()
+        before = tuple(dict(row) for row in self.runtime.read_all("SELECT * FROM capability_authorizations", ()))
+        reloaded = NativeExtensionRegistry(self.context, bundled_extensions=self.registry._bundled_extensions,
+                                           managed_extensions=MANAGED_EXTENSIONS)
+        self.addAsyncCleanup(reloaded.aclose)
+        reloaded.attach(self.application)
+        reloaded.register_catalog(observed_at=NOW).unwrap()
+        for name in ("together", "reality", "image"):
+            installed = self.repository.installation(extension_id=name).unwrap()
+            current = self.registry._lease(name).manifest.package
+            self.assertEqual((installed.package_version, installed.artifact_hash),
+                             (current.package_version, current.artifact_hash))
+        self.assertEqual(before, tuple(dict(row) for row in self.runtime.read_all(
+            "SELECT * FROM capability_authorizations", ())))
+        self.assertEqual(reloaded.issues, ())
 
     async def test_seven_modules_need_no_companion_stars_and_close_idempotently(self):
         self.assertEqual(len(self.registry._bundled_extensions), 7)

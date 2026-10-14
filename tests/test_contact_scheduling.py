@@ -16,6 +16,26 @@ from tests.test_role_tool_loop import answered
 
 
 class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_synthetic_diagnostic_uses_ephemeral_event_and_keeps_real_persona_anchor(self):
+        host, batch_id = await self.scheduled(automatic=False)
+        app = host.application
+        context = self.contact_context()
+        input_count = app.runtime.read_one(
+            "SELECT COUNT(*) FROM conversation_inputs WHERE batch_id = ?", (batch_id,))[0]
+        at = self.clock.now()
+
+        candidate = await app.contact_schedule.synthetic_diagnostic_candidate(
+            context, "news", at=at, test_id="attempt-synthetic-news")
+
+        self.assertEqual(candidate["intents"][0].purpose, "news")
+        self.assertIn("合成测试事件", candidate["intents"][0].thought.summary)
+        self.assertEqual(candidate["intents"][0].thought.evidence.sources, ())
+        self.assertEqual(candidate["route"]["id"], "synthetic_event")
+        self.assertEqual(app.runtime.read_one(
+            "SELECT COUNT(*) FROM conversation_inputs WHERE batch_id = ?", (batch_id,))[0], input_count)
+        app.contact_schedule.validate_diagnostic_origin(
+            context, candidate["diagnostic_origin"], at, purpose="news")
+
     async def test_legacy_group_flows_are_not_considered_for_private_contact(self):
         host, batch_id = await self.scheduled()
         app = host.application
@@ -76,6 +96,28 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(diagnostic["evaluation"]["reason_code"], "automatic_contact_disabled")
         self.assertNotIn("conversation_ref", diagnostic["evaluation"])
 
+    async def test_scheduler_heartbeat_coalesces_unchanged_diagnostic_writes(self):
+        host, _ = await self.scheduled(automatic=False)
+        app = host.application
+        schedule = app.contact_schedule
+        with app.runtime.transaction() as connection:
+            connection.execute("DELETE FROM proactive_schedule_diagnostics")
+        schedule._diagnostics_cleaned_at = self.clock.now()
+        start = self.clock.now()
+        schedule._note_coordinator(start, "running", "contact_schedule_running")
+        first = app.runtime.read_one("SELECT observed_at FROM proactive_schedule_diagnostics WHERE diagnostic_key = ?",
+            (schedule._diagnostic_key("coordinator"),))["observed_at"]
+
+        schedule._note_coordinator(start + timedelta(seconds=15), "running", "contact_schedule_running")
+        unchanged = app.runtime.read_one("SELECT observed_at FROM proactive_schedule_diagnostics WHERE diagnostic_key = ?",
+            (schedule._diagnostic_key("coordinator"),))["observed_at"]
+        self.assertEqual(unchanged, first)
+
+        schedule._note_coordinator(start + timedelta(seconds=30), "running", "contact_schedule_running")
+        refreshed = app.runtime.read_one("SELECT observed_at FROM proactive_schedule_diagnostics WHERE diagnostic_key = ?",
+            (schedule._diagnostic_key("coordinator"),))["observed_at"]
+        self.assertNotEqual(refreshed, first)
+
     async def test_unanswered_slowdown_applies_to_ordinary_check_in_and_new_input_resets_pause(self):
         host, _ = await self.scheduled(automatic=False)
         app = host.application
@@ -120,7 +162,7 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(len(self.contact_calls()), 1)
 
     async def test_automatic_requires_its_own_opt_in_and_completed_idle_conversation(self):
-        host, _ = await self.scheduled(automatic=False)
+        host, batch = await self.scheduled(automatic=False)
         app = host.application
         self.advance(app, 60)
         app.contact_schedule.advance()
@@ -130,8 +172,10 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         await self.automatic_delivery(app)
         request = self.contact_calls()[0].original
         self.assertEqual(request.role_instruction, "原角色人格提示")
-        evidence = [m.payload for m in request.context.materials if m.purpose == "contact_evidence"]
-        self.assertEqual(evidence, ["输入 event-1"])
+        # A completed window supplies trusted identity and role context; an
+        # autonomous expression need not quote the user's last message.
+        saved = json.loads(self.contacts(app)[0]["record_json"])
+        self.assertEqual(saved["automatic_origin"]["batch_id"], batch)
         self.assertEqual(self.contacts(app)[0]["origin_key"], self.contact_context().key)
 
     async def test_repeated_ticks_and_restart_do_not_repeat_current_opportunity(self):
@@ -358,6 +402,51 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(usage["session"]["used"], 0)
         self.assertEqual((await self.contact(app, self.opportunity("next"))).unwrap().task.state, "succeeded")
         self.assertEqual(self.sent, [])
+
+    async def test_failed_generation_does_not_consume_attempt_allowance(self):
+        from companion_v2.model_gateway.failures import ModelFailure
+        from companion_v2.model_gateway.models import Amount, ProviderResponse
+        from companion_v2.proactive.configuration import target_for
+
+        app = await self.enabled()
+        first_context = self.contact_context()
+        other_context = self.other_window_context()
+        relationship = target_for(first_context).chain()[2]
+        self.settings(app, {"max_attempts_24h": 1}).unwrap()
+        self.settings(app, {"max_relationship_attempts_24h": 1}, target=relationship).unwrap()
+
+        async def not_started(_envelope):
+            return ProviderResponse("not_started", usage=Amount(0, 0), receipt_ref="test-not-started",
+                                    failure=ModelFailure.PREPARATION)
+
+        self.model_behavior = not_started
+        failed = (await self.contact(app, context=first_context)).unwrap().task
+        self.assertEqual(failed.state, "failed")
+        usage = app.proactive.budget.attempt_usage(first_context, self.preferences(app), self.clock.now())
+        self.assertEqual(usage["session"]["used"], 0)
+        self.assertEqual(usage["relationship"]["used"], 0)
+
+        async def unknown(_envelope):
+            return ProviderResponse("unknown", failure=ModelFailure.TRANSPORT)
+
+        self.model_behavior = unknown
+        failed = (await self.contact(app, self.opportunity("unknown-provider-result"), context=first_context)).unwrap().task
+        self.assertEqual(failed.state, "failed")
+        calls = app.runtime.read_all("SELECT state FROM model_calls WHERE task_id = ?", (failed.task_id,))
+        self.assertEqual([call["state"] for call in calls], ["unknown"])
+        usage = app.proactive.budget.attempt_usage(first_context, self.preferences(app), self.clock.now())
+        self.assertEqual(usage["session"]["used"], 0)
+        self.assertEqual(usage["relationship"]["used"], 0)
+
+        async def skip(_envelope):
+            return answered('{"decision":"skip","text":""}')
+
+        self.model_behavior = skip
+        decided = (await self.contact(app, self.opportunity("successful-skip"), context=first_context)).unwrap().task
+        self.assertEqual(decided.state, "succeeded")
+        blocked = await self.contact(app, self.opportunity("other-window", scope=other_context.scope),
+                                     context=other_context)
+        self.assertEqual(blocked.failure.code, "contact_relationship_attempt_budget")
 
     async def test_numeric_controls_inherit_and_zero_budget_blocks_without_model_usage(self):
         app = await self.enabled()

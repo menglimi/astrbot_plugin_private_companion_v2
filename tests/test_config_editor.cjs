@@ -9,6 +9,13 @@ const workbench = fs.readFileSync(path.resolve(__dirname, PAGE + 'workbench-page
 const adapter = fs.readFileSync(path.resolve(__dirname, PAGE + 'config-editor.js'), 'utf8');
 const selfStyle = fs.readFileSync(path.resolve(__dirname, PAGE + 'self-page.css'), 'utf8');
 const app = fs.readFileSync(path.resolve(__dirname, PAGE + 'app.js'), 'utf8');
+const birthdayHelpers = (() => {
+  const start = workbench.indexOf('  const CHINESE_DIGITS');
+  const end = workbench.indexOf('  const fireInput', start);
+  return vm.runInNewContext(`() => { ${workbench.slice(start, end)}
+    return {parseBirthday, birthdayText, birthdayPartsError, lunarDateIndex};
+  }` )();
+})();
 const flush = () => new Promise(resolve => setImmediate(resolve));
 /* 每次 await 只推进一层微任务；refresh 里有多层 await，用 drains 让它走完。 */
 const drains = async (times = 6) => { for (let index = 0; index < times; index += 1) await flush(); };
@@ -122,11 +129,13 @@ const NEW_KINDS = {
     settings: {name: '澄汐', birthday: '4月17日', gender: '女', species: '人类',
       first_person: '我', voice_examples: '今天的风有点像海边的。\n你先说，我听着。',
       signature_phrases: '慢慢来、我在呢', hobbies: '植物随笔、听雨',
+      avatar_data_url: '',
       world_adaptation_mode: 'auto', main_companion_subject: '',
       expression_private_source_mode: 'owner', expression_private_source_subject_ids: '[]',
       expression_private_application_mode: 'all', expression_private_application_subject_ids: '[]'},
     fields: {name: ['text'], birthday: ['text'], gender: ['text'], species: ['text'],
       first_person: ['text'], voice_examples: ['text'], signature_phrases: ['text'],
+      avatar_data_url: ['text'],
       hobbies: ['text'], world_adaptation_mode: ['text'], main_companion_subject: ['text'],
       expression_private_source_mode: ['text'], expression_private_source_subject_ids: ['text'],
       expression_private_application_mode: ['text'], expression_private_application_subject_ids: ['text']},
@@ -150,16 +159,16 @@ const NEW_KINDS = {
     scope: 'role',
     layers: ['installation', 'role'],
     editable: Object.fromEntries(['enabled', 'diary_enabled', 'diary_time', 'timezone',
-      'sleep_enabled', 'sleep_time', 'sleep_timezone', 'sleep_variation_minutes', 'sleep_minutes',
+      'sleep_enabled', 'sleep_time', 'sleep_timezone', 'sleep_variation_minutes', 'sleep_window_minutes', 'sleep_minutes',
       'reading_enabled', 'derive_enabled', 'diary_style_prompt', 'dream_theme_candidates',
       'dream_mixed_themes_enabled', 'dream_intimate_theme_enabled', 'dream_afterglow_mode',
       'enable_rest_reply_simulation', 'rest_reply_mode', 'rest_reply_probability',
       'rest_reply_llm_threshold', 'rest_reply_active_windows', 'rest_reply_awake_grace_minutes',
       'enable_rest_backlog_reply', 'rest_backlog_max_messages'].map(name => [name,
-      ['sleep_enabled', 'sleep_time', 'sleep_timezone', 'sleep_variation_minutes', 'sleep_minutes'].includes(name)
+      ['sleep_enabled', 'sleep_time', 'sleep_timezone', 'sleep_variation_minutes', 'sleep_window_minutes', 'sleep_minutes'].includes(name)
         ? ['role', 'window'] : ['window']])),
     settings: {enabled: false, diary_enabled: true, diary_time: '23:50', timezone: 'Asia/Shanghai',
-      sleep_enabled: false, sleep_time: '00:30', sleep_timezone: 'Asia/Shanghai', sleep_variation_minutes: 20, sleep_minutes: 480,
+      sleep_enabled: false, sleep_time: '00:30', sleep_timezone: 'Asia/Shanghai', sleep_variation_minutes: 20, sleep_window_minutes: 120, sleep_minutes: 480,
       reading_enabled: false, derive_enabled: true,
       diary_style_prompt: '', dream_theme_candidates: '', dream_mixed_themes_enabled: false,
       dream_intimate_theme_enabled: false, dream_afterglow_mode: 'auto',
@@ -169,7 +178,7 @@ const NEW_KINDS = {
       rest_backlog_max_messages: 4},
     fields: {enabled: ['boolean'], diary_enabled: ['boolean'], diary_time: ['text'],
       timezone: ['text'], sleep_enabled: ['boolean'], sleep_time: ['text'],
-      sleep_timezone: ['text'], sleep_variation_minutes: ['integer', 0, 120], sleep_minutes: ['integer', 1, 1440], reading_enabled: ['boolean'],
+      sleep_timezone: ['text'], sleep_variation_minutes: ['integer', 0, 120], sleep_window_minutes: ['integer', 0, 360], sleep_minutes: ['integer', 1, 1440], reading_enabled: ['boolean'],
       derive_enabled: ['boolean'],
       diary_style_prompt: ['text'], dream_theme_candidates: ['text'],
       dream_mixed_themes_enabled: ['boolean'], dream_intimate_theme_enabled: ['boolean'],
@@ -1691,7 +1700,7 @@ test('the role dossier maps profile fields onto the purpose-built controls', () 
   assert.deepEqual(plain(profile.inputs),
     {birthday: 'date', gender: 'chips', species: 'chips', first_person: 'chips',
       voice_examples: 'quotes', signature_phrases: 'tags', hobbies: 'tags',
-      name: 'line', age: 'line', occupation: 'line', appearance_points: 'line',
+      name: 'line', avatar_data_url: 'line', age: 'line', occupation: 'line', appearance_points: 'line',
       hair: 'line', eyes: 'line', clothing: 'line', image_identity_hint: 'line',
       world_name: 'line', era: 'line', tone: 'line',
       platform_group_chat: 'line', platform_screen: 'line', platform_bilibili: 'line',
@@ -1725,10 +1734,13 @@ test('role profile controls render as date, chips, quotes, tags and a segmented 
   await drains();
   const html = harnessed.painted['role_profile'];
   assert.match(html, /data-wb-date-group="birthday"/);
+  assert.match(html, /data-wb-date-text="birthday"/);
   assert.match(html, /data-wb-date-role="picker"[^>]*>/);
   /* “4月17日”没有年份：选择器落在占位年份上，「不确定年份」默认勾选。 */
   assert.match(html, /value="2000-04-17"/);
   assert.match(html, /data-wb-date-role="noyear"[^>]* checked/);
+  assert.match(html, /data-wb-date-role="month"/);
+  assert.match(html, /data-wb-date-role="leap"/);
   assert.match(html, /class="wb-chip-opt is-on" data-wb-chip="gender" data-wb-chip-value="女"/);
   assert.match(html, /class="wb-chip-opt" data-wb-chip="gender" data-wb-chip-value="男"/);
   assert.match(html, /data-wb-quotes="voice_examples"/);
@@ -1744,6 +1756,65 @@ test('role profile controls render as date, chips, quotes, tags and a segmented 
   assert.match(html, /data-wb-field="main_companion_subject"/);
   assert.match(html, /name="wb-expression_private_source_mode" value="owner"/);
   assert.match(html, /wb-identity-picker/);
+});
+
+test('lunar birthday values retain calendar, year and leap-month fields', async () => {
+  for (const [birthday, expectedMonth, expectedDay, leap] of [
+    ['2025年农历闰六月初五', '6', '5', true],
+    ['2025年4月17日 · 农历', '4', '17', false],
+  ]) {
+    const harnessed = harness(['role_profile']);
+    const [instance] = await loaded(harnessed, ['role_profile']);
+    instance.state.draft.birthday = birthday;
+    instance.state.status.settings.birthday = birthday;
+    harnessed.editors.paint();
+    const html = harnessed.painted.role_profile;
+    assert.match(html, /data-wb-date-role="lunar" checked/);
+    assert.match(html, /data-wb-date-role="year" value="2025"/);
+    assert.match(html, new RegExp('<option value="' + expectedMonth + '" selected>'));
+    assert.match(html, new RegExp('<option value="' + expectedDay + '" selected>'));
+    assert.equal(/data-wb-date-role="leap" checked/.test(html), leap);
+  }
+});
+
+test('lunar birthdays parse legacy values and validate real leap-month dates', () => {
+  const parsed = birthdayHelpers.parseBirthday('生日是：农历二〇二五年闰六月初五');
+  assert.deepEqual(plain(parsed), {year: '2025', month: '6', day: '5', lunar: true, leap: true});
+  assert.equal(birthdayHelpers.birthdayText(parsed, true, false), '2025年农历闰六月初五');
+  const legacy = birthdayHelpers.parseBirthday('2025年4月17日 · 农历');
+  assert.equal(legacy.lunar, true);
+  assert.equal(legacy.month, '4');
+  assert.equal(legacy.day, '17');
+  const commonLunar = birthdayHelpers.parseBirthday('阴历五月廿三');
+  assert.deepEqual(plain(commonLunar), {year: '', month: '5', day: '23', lunar: true, leap: false});
+  assert.deepEqual(plain(birthdayHelpers.parseBirthday('2025農曆閏六月初五號')),
+    {year: '2025', month: '6', day: '5', lunar: true, leap: true});
+  assert.deepEqual(plain(birthdayHelpers.parseBirthday('农历4/17/2025')),
+    {year: '2025', month: '4', day: '17', lunar: true, leap: false});
+  assert.deepEqual(plain(birthdayHelpers.parseBirthday('公历2024年2月29日')),
+    {year: '2024', month: '2', day: '29', lunar: false, leap: false});
+  assert.deepEqual(plain(birthdayHelpers.parseBirthday('五月初八（农历）')),
+    {year: '', month: '5', day: '8', lunar: true, leap: false});
+  assert.equal(birthdayHelpers.birthdayPartsError(birthdayHelpers.parseBirthday('公历2025年2月29日')),
+    '这个公历日期不存在，请核对月份和日期。');
+  assert.equal(birthdayHelpers.birthdayPartsError(birthdayHelpers.parseBirthday('农历十三月初八')),
+    '请核对生日的月份和日期。');
+  assert.match(birthdayHelpers.birthdayPartsError(
+    birthdayHelpers.parseBirthday('2025年农历闰六月三十')), /对应的农历日期/);
+  assert.equal(birthdayHelpers.parseBirthday('每年冬至'), null);
+  assert.equal(birthdayHelpers.lunarDateIndex(2025).has('6:1:5'), true);
+  assert.equal(birthdayHelpers.lunarDateIndex(2025).has('6:1:30'), false);
+  assert.equal(birthdayHelpers.lunarDateIndex(2026).has('6:1:5'), false);
+});
+
+test('an invalid but recognizable stored birthday is surfaced on the editor', async () => {
+  const harnessed = harness(['role_profile']);
+  const [instance] = await loaded(harnessed, ['role_profile']);
+  instance.state.draft.birthday = '公历2025年2月29日';
+  instance.state.status.settings.birthday = instance.state.draft.birthday;
+  harnessed.editors.paint();
+  assert.match(harnessed.painted.role_profile, /data-wb-date-invalid="true"/);
+  assert.match(harnessed.painted.role_profile, /这个公历日期不存在/);
 });
 
 test('role learning scope choices use only private identities bound to the active role', async () => {
@@ -1808,12 +1879,16 @@ test('the self journal reflows to its container width and wraps long controls', 
 });
 
 test('the live self profile uses journal panels and its chapter navigation stays connected', () => {
-  assert.match(app, /roleProfileConfigMount=mountConfigEditor\('roleProfileConfigWorkspace',\['role_profile'\],\{\s*role_profile:\{presentation:'journal',sectionTabPrefix:'self-chapter-',initialSection:selfProfileSection\}/);
+  assert.match(app, /roleProfileConfigMount=mountConfigEditor\('roleProfileConfigWorkspace',\['role_profile'\],\{\s*role_profile:\{presentation:'journal',sectionTabPrefix:'self-chapter-',initialSection:selfProfileSection,navigationLimit:9\}/);
   assert.match(app, /function selectSelfProfileSection\(section\)\{[\s\S]*?roleProfileConfigMount\?\.selectSection\?\.\(section\)/);
   assert.match(app, /id="self-chapter-tab-\$\{id\}" aria-controls="self-chapter-panel-\$\{id\}"/);
   assert.match(app, /<button type="button" class="section-chip" data-role-profile-organize-jump><span class="section-chip-no">✦<\/span>通过已有人格整理<\/button>/);
   assert.match(app, /<h3>通过已有人格整理<\/h3>/);
   assert.match(app, /data-role-profile-draft-open="role_profile"/);
   assert.match(app, /从当前人格整理角色档案/);
+  assert.match(app, /data-profile-avatar-file/);
+  assert.match(selfStyle, /data-wb-row="avatar_data_url"/);
+  assert.match(workbench, /lunarDateIndex/);
+  assert.match(workbench, /这个年份没有对应的农历日期/);
   assert.doesNotMatch(app, /selfwriteCanvas|data-selfwrite-source|角色自述/);
 });

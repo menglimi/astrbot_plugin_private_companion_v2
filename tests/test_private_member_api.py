@@ -18,6 +18,9 @@ from companion_v2.proactive.management import ContactManagement
 from companion_v2.configuration.management import AcquaintanceManagement, ProactiveContactManagement
 from companion_v2.configuration.models import ConfigLayer
 from companion_v2.expression.configuration import read_settings as expression_settings
+from companion_v2.agenda.models import AgendaTarget
+from companion_v2.agenda.service import AgendaService
+from companion_v2.foundation.refs import OperationRef, VersionRef
 from companion_v2.proactive.configuration import target_for
 from companion_v2.proactive.rhythm_configuration import relationship_target_for
 from companion_v2.conversation.reply_management import ReplyManagement
@@ -250,13 +253,24 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(inherited["provenance"]["enabled"]["explicit"])
         self.assertEqual(inherited["provenance"]["enabled"]["layer"], "installation")
         saved = await self.configure({"contact": {"enabled": False, "interval_seconds": 1200,
-                                                "max_contacts_24h": 5}}, key="individual-contact")
+            "max_contacts_24h": 5, "max_attempts_24h": 8, "unanswered_slowdown_start": 2,
+            "unanswered_pause_after": 5, "unanswered_max_interval_multiplier": 3.5,
+            "note": "尽量避开工作时间联系", "news.enabled": False, "news.weight": 1.5,
+            "news.pause_until": "2026-10-21T18:00:00+00:00"}},
+            key="individual-contact")
         self.assertEqual(saved["status"], "ok", saved)
         self.assertTrue(saved["data"]["results"]["contact"]["operation_id"].startswith(
             "proactive.contact-window-config:"))
         personal = (await self.settings())["contact"]
         self.assertTrue(personal["provenance"]["enabled"]["explicit"])
         self.assertEqual(personal["provenance"]["enabled"]["layer"], "window")
+        self.assertEqual(personal["settings"]["unanswered_slowdown_start"], 2)
+        self.assertEqual(personal["settings"]["unanswered_pause_after"], 5)
+        self.assertEqual(personal["settings"]["unanswered_max_interval_multiplier"], 3.5)
+        self.assertEqual(personal["settings"]["note"], "尽量避开工作时间联系")
+        self.assertFalse(personal["settings"]["news.enabled"])
+        self.assertEqual(personal["settings"]["news.weight"], 1.5)
+        self.assertEqual(personal["settings"]["news.pause_until"], "2026-10-21T18:00:00+00:00")
         self.assertFalse(ContactManagement(app, context).status(operator).unwrap()["settings"]["enabled"])
         for person in (self.person("third"), self.person("second"),
                        {**self.person(), "route": {**self.person()["route"], "role_id": "role-b"}}):
@@ -277,6 +291,22 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after["settings"], personal["settings"])
         self.assertTrue(after["provenance"]["enabled"]["explicit"])
         self.assertEqual(after["provenance"]["enabled"]["layer"], "window")
+        reset = await self.configure({"contact": {}}, key="reset-personal-contact",
+            resets={"contact": ["max_attempts_24h", "unanswered_slowdown_start", "unanswered_pause_after",
+                                 "unanswered_max_interval_multiplier", "note", "news.enabled", "news.weight",
+                                 "news.pause_until"]})
+        self.assertEqual(reset["status"], "ok", reset)
+        restored = (await self.settings())["contact"]
+        self.assertEqual(restored["settings"]["max_attempts_24h"], 12)
+        self.assertEqual(restored["settings"]["unanswered_slowdown_start"], 1)
+        self.assertEqual(restored["settings"]["unanswered_pause_after"], 0)
+        self.assertEqual(restored["settings"]["unanswered_max_interval_multiplier"], 2.2)
+        self.assertEqual(restored["settings"]["note"], "")
+        self.assertTrue(restored["settings"]["news.enabled"])
+        self.assertEqual(restored["settings"]["news.weight"], 1.0)
+        self.assertEqual(restored["settings"]["news.pause_until"], "")
+        self.assertFalse(restored["provenance"]["unanswered_pause_after"]["explicit"])
+        self.assertFalse(restored["provenance"]["news.enabled"]["explicit"])
 
         await self.controller.terminate()
         self.native.conversations["qq-main"] = "conversation-after-restart"
@@ -591,6 +621,30 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         (await self.controller.load_existing()).unwrap()
         self.api = AcquaintanceWebAPI(self.controller)
         self.assertEqual((await self.send("authorization", person=person))["data"]["identity_tier"], "important")
+
+    async def test_open_loop_detail_reads_and_mutates_only_the_selected_person_and_role(self):
+        await self.ready()
+        person = self.person()
+        context = self.controller.authority.context("first", "role-a")
+        target = AgendaTarget(context.scope, context.role_binding.role, context.actor.subject)
+        operator = dashboard_operator(self.controller.runtime, "member-admin", at=self.clock.now())
+        agenda = AgendaService(self.controller.runtime)
+        created = agenda.create_memo(operator, target=target, memo_id="profile-open-loop",
+            title="等面试结果", body="用户说下周收到通知后继续聊",
+            operation=OperationRef("open-loop-create", "agenda", context.scope,
+                                   VersionRef("open-loop-create", 1), "open-loop-create"),
+            expected_role_revision=context.role_binding.revision, observed_at=self.clock.now(),
+            purpose="open_loop").unwrap()
+
+        listed = await self.send("open_loops", person=person)
+        self.assertEqual(listed["status"], "ok", listed)
+        item = next(value for value in listed["data"]["active"] if value["memo_id"] == created.object_id)
+        completed = await self.send("change_open_loop", person=person, command={**person,
+            "memo_id": created.object_id, "expected_revision": item["revision"], "action": "complete",
+            "operation_key": "profile-open-loop-complete"})
+        self.assertEqual(completed["status"], "ok", completed)
+        listed = await self.send("open_loops", person=person)
+        self.assertEqual([value["memo_id"] for value in listed["data"]["completed"]], [created.object_id])
 
 
 if __name__ == "__main__":

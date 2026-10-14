@@ -16,6 +16,13 @@
   let dragState = null;
   let dragClickGuardUntil = 0;
   let requestSequence = 0;
+  let loading = false;
+  let renderedSignature = "";
+  const gomoku = window.CompanionGomokuRoom.create({node, $, getGame: () => game,
+    isBusy: () => busy, getSelectedPiece: () => selectedPiece,
+    clearSelectedPiece: () => { selectedPiece = null; },
+    setSelectedPiece: source => { selectedPiece = source; },
+    sendAction, render, setNotice, refreshControls: () => renderControls(game.state || {})});
 
   function node(tag, className = "", text = "") {
     const element = document.createElement(tag);
@@ -60,10 +67,13 @@
 
   function pointerTarget(event, stage, size) {
     const rect = stage.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.left + rect.width
+        || event.clientY < rect.top || event.clientY > rect.top + rect.height) return null;
     const boardX = clamp((event.clientX - rect.left) / rect.width, 0, .999999);
     const boardY = clamp((event.clientY - rect.top) / rect.height, 0, .999999);
     const column = Math.min(size - 1, Math.floor(boardX * size));
     const row = Math.min(size - 1, Math.floor(boardY * size));
+    if (game.game_type === "gomoku") return {row, column, x: .5, y: .5};
     return {
       row,
       column,
@@ -87,7 +97,7 @@
   }
 
   function selectPiece(source) {
-    if (busy || game?.status !== "active") return;
+    if (busy || game?.status !== "active" || Date.now() < dragClickGuardUntil) return;
     selectedPiece = source;
     setNotice(source.kind === "tray" ? "已取子，点击棋盘落点" : "已拿起棋子，点击新的落点");
     render();
@@ -96,7 +106,7 @@
   function pieceVisual(element, color, kind, human) {
     element.classList.add(color === human ? "piece-player" : "piece-bot");
     if (kind === "gomoku") {
-      element.appendChild(node("span", `stone ${color === human ? "stone-player" : "stone-bot"}`));
+      element.appendChild(node("span", `stone ${color === 1 ? "stone-black" : "stone-white"}`));
     } else {
       element.textContent = color === human ? "×" : "○";
     }
@@ -104,7 +114,8 @@
 
   function beginPiecePointer(event, source, element) {
     if (busy || game?.status !== "active") return;
-    const stage = $("gameBoard").querySelector(".board-stage");
+    const stage = $("gameBoard").querySelector(".gomoku-intersections")
+      || $("gameBoard").querySelector(".board-stage");
     if (!stage) return;
     event.preventDefault();
     const ghost = node("div", "drag-ghost");
@@ -138,8 +149,10 @@
         return;
       }
       dragClickGuardUntil = Date.now() + 260;
+      const target = pointerTarget(finishEvent, current.stage, boardSize(game.game_type));
+      if (!target) { setNotice("已取消拖动，棋子未移动"); return; }
       sendAction({action: "interact", source,
-        target: pointerTarget(finishEvent, current.stage, boardSize(game.game_type)),
+        target,
         interaction: "drag"});
     };
     const cancel = (cancelEvent) => {
@@ -220,6 +233,7 @@
   }
 
   function renderPieceTray(state) {
+    if (game.game_type === "gomoku") { gomoku.renderTray(state); return; }
     const tray = $("pieceTray");
     tray.replaceChildren();
     const isBoardGame = ["tictactoe", "gomoku"].includes(game.game_type);
@@ -301,9 +315,13 @@
     summary.replaceChildren();
     if (game.game_type === "tictactoe" || game.game_type === "gomoku") {
       const pair = node("div", "score-pair");
-      pair.append(scoreItem("你", state.human_mark === 1 || state.human_color === 1 ? "●" : "×", "player"));
-      pair.append(scoreItem("陪伴者", state.bot_mark === 2 || state.bot_color === 2 ? "●" : "○", "bot"));
-      summary.append(pair, node("p", "summary-line", `已落子 ${state.move_count || 0} 手 · ${turnIsHuman(state) ? "轮到你了" : "对方思考中"}`));
+      const isGomoku = game.game_type === "gomoku";
+      pair.append(scoreItem("你", isGomoku ? (state.human_color === 1 ? "黑棋" : "白棋") : "×", "player"));
+      pair.append(scoreItem("陪伴者", isGomoku ? (state.bot_color === 1 ? "黑棋" : "白棋") : "○", "bot"));
+      const phase = game.status !== "active" ? stateLabel[game.status]
+        : (isGomoku ? gomoku.phase() : (turnIsHuman(state) ? "轮到你了" : "对方思考中"));
+      summary.append(pair, node("p", "summary-line", `已落子 ${state.move_count || 0} 手 · ${phase}`));
+      if (isGomoku && state.last_move) summary.append(node("p", "summary-line", `最后一手：第 ${state.last_move[0] + 1} 行，第 ${state.last_move[1] + 1} 列`));
     } else if (game.game_type === "pig_dice") {
       const pair = node("div", "score-pair");
       pair.append(scoreItem("你", state.human_score, "player"), scoreItem("陪伴者", state.bot_score, "bot"));
@@ -316,7 +334,8 @@
     } else if (game.game_type === "xiangqi") {
       const pair = node("div", "score-pair");
       pair.append(scoreItem("你执", state.human_side === "red" ? "红" : "黑", "player"), scoreItem("已走", state.move_count || 0, "bot"));
-      summary.append(pair, node("p", "summary-line", turnIsHuman(state) ? "轮到你落子" : "对方正在应手"));
+      summary.append(pair, node("p", "summary-line", game.status === "active"
+        ? (turnIsHuman(state) ? "轮到你落子" : "对方正在应手") : stateLabel[game.status]));
     } else if (game.game_type === "turtle_soup") {
       const pair = node("div", "score-pair");
       pair.append(scoreItem("已提问", state.question_count || 0, "player"), scoreItem("已发现", `${state.discovered_fact_count || 0}/${state.key_fact_count || 0}`, "bot"));
@@ -325,6 +344,12 @@
       const pair = node("div", "score-pair");
       pair.append(scoreItem("已猜", state.guess_count || 0, "player"), scoreItem("还可猜", Math.max(0, (state.max_guesses || 0) - (state.guess_count || 0)), "bot"));
       summary.append(pair, node("p", "summary-line", `剩余 ${state.remaining_seconds ?? 0} 秒`));
+    }
+    if (game.status === "finished") {
+      const isPuzzle = ["turtle_soup", "draw_guess"].includes(game.game_type);
+      const result = isPuzzle ? (game.outcome === "player" ? "你解答成功了" : "本局未解答成功")
+        : ({player: "你赢了", bot: "陪伴者赢了", draw: "本局平局"}[game.outcome] || "本局结束");
+      summary.append(node("p", "summary-line game-outcome", result));
     }
   }
 
@@ -358,7 +383,9 @@
     const host = $("gameBoard");
     host.replaceChildren();
     host.setAttribute("aria-busy", "false");
-    if (["tictactoe", "gomoku"].includes(game.game_type)) {
+    if (game.game_type === "gomoku") {
+      gomoku.renderBoard(state);
+    } else if (game.game_type === "tictactoe") {
       renderGridBoard(state.board || [], game.game_type, state);
     } else if (game.game_type === "xiangqi") {
       renderXiangqi(state);
@@ -388,7 +415,9 @@
     const controls = $("actionControls");
     controls.replaceChildren();
     if (game.status === "active") {
-      if (game.game_type === "pig_dice") {
+      if (game.game_type === "gomoku") {
+        gomoku.renderControls(controls, state);
+      } else if (game.game_type === "pig_dice") {
         controls.append(iconButton("dices", "桌面掷骰", {action: "roll"}, "primary"));
         controls.append(iconButton("glass-water", "推骰盅", {action: "roll", method: "cup"}));
         controls.append(iconButton("save", "存下分数", {action: "hold"}));
@@ -438,9 +467,14 @@
       let action = "落子";
       let actor = `第 ${events.length - index} 手`;
       if (Array.isArray(event)) {
-        actor = event[0] === "human" ? "你" : "陪伴者";
-        action = event[1] === "cup_roll" ? `骰盅 ${event[2]?.[0]} → ${event[2]?.[1]}`
-          : event[1] === "roll" ? `掷出 ${event[2]}` : event[1] === "hold" ? "存分" : String(event[1]);
+        if (["tictactoe", "gomoku"].includes(game.game_type)) {
+          actor = event[2] === (game.state.human_mark ?? game.state.human_color) ? "你" : "陪伴者";
+          action = `第 ${event[0] + 1} 行，第 ${event[1] + 1} 列`;
+        } else {
+          actor = event[0] === "human" ? "你" : "陪伴者";
+          action = event[1] === "cup_roll" ? `骰盅 ${event[2]?.[0]} → ${event[2]?.[1]}`
+            : event[1] === "roll" ? `掷出 ${event[2]}` : event[1] === "hold" ? "存分" : String(event[1]);
+        }
       } else if (event && typeof event === "object") {
         actor = event.guess ? "你" : (event.action || "进展");
         action = event.guess ? `${event.guess}${event.correct ? " · 命中" : " · 未命中"}`
@@ -449,22 +483,35 @@
         action = event;
       }
       const item = node("li");
+      if (game.game_type === "gomoku") {
+        item.appendChild(node("small", "history-step", String(events.length - index)));
+        item.classList.add("gomoku-history-item");
+      }
       item.append(node("span", "", actor), node("span", "", action));
       list.appendChild(item);
     });
     if (!events.length) list.append(node("li", "", "等待第一步"));
   }
 
-  function render() {
+  function render({force = true} = {}) {
     if (!game) return;
+    const signature = JSON.stringify([game, busy, selected, game.game_type === "gomoku" ? null : selectedPiece]);
+    if (!force && signature === renderedSignature) return;
+    renderedSignature = signature;
+    const focusKey = document.activeElement?.dataset?.focusKey;
     const label = labels[game.game_type] || "V2 原生对局";
     $("gameTitle").textContent = label;
-    $("gameCode").textContent = `NATIVE / ${game.game_type.toUpperCase()}`;
+    $("gameCode").textContent = game.game_type === "gomoku" ? "15 × 15 · 黑棋先行 · 无禁手" : "一起玩 · 游戏房间";
     $("roundState").textContent = stateLabel[game.status] || game.status;
+    if (game.game_type === "gomoku") {
+      gomoku.renderToolbar(game.state || {});
+      $("roundState").textContent = game.status === "active" ? gomoku.phase() : (stateLabel[game.status] || game.status);
+    } else { $("boardToolbar").hidden = true; }
     renderBoard(game.state || {});
     renderPieceTray(game.state || {});
     renderControls(game.state || {});
     renderHistory();
+    if (focusKey) document.querySelector?.(`[data-focus-key="${focusKey}"]`)?.focus({preventScroll: true});
   }
 
   async function fetchJSON(url, options = {}) {
@@ -474,25 +521,43 @@
     return result.data ?? result;
   }
 
-  async function load({quiet = true} = {}) {
+  const errors = {
+    game_illegal_move: "这一步未落下，棋盘已同步，请重新选择空位",
+    game_target_occupied: "这个交叉点已有棋子，请选择空位",
+    game_web_link_expired: "对局链接已失效，请在聊天中重新打开房间",
+    game_not_found: "这局已不可用，请在聊天中打开当前房间",
+    game_not_active: "本局已结束，棋盘已同步",
+    game_not_found_in_scope: "这局已不可用，请在聊天中打开当前房间",
+    invalid_game_arguments: "落子信息未被接受，请同步棋盘后重新选择",
+  };
+  const errorMessage = (error, fallback) => errors[error.message]
+    || (/[\u3400-\u9fff]/.test(error.message || "") ? error.message : fallback);
+
+  async function load({quiet = true, recovery = false} = {}) {
+    if (loading || dragState || gomoku.isInteracting() || (busy && !recovery)) return;
+    loading = true;
     const sequence = ++requestSequence;
     try {
       const result = await fetchJSON(`/api/native/${encodeURIComponent(token)}/state`);
-      if (sequence !== requestSequence) return;
+      if (sequence !== requestSequence || dragState || gomoku.isInteracting()) return;
       game = result.game;
       $("connectionBadge").dataset.state = "online";
       $("connectionBadge").querySelector("span").textContent = "实时同步";
-      render();
+      render({force: false});
       if (!quiet) setNotice("");
     } catch (error) {
-      if (!quiet || !game) setNotice(error.message || "对局暂时无法读取", true);
+      if (sequence !== requestSequence) return;
+      if (!quiet || !game) setNotice(errorMessage(error, "对局暂时无法读取"), true);
       $("connectionBadge").dataset.state = "error";
       $("connectionBadge").querySelector("span").textContent = "连接中断";
+    } finally {
+      loading = false;
     }
   }
 
   async function sendAction(payload) {
     if (busy || !token) return;
+    gomoku.clearPending();
     if (payload?.action === "interact") selectedPiece = null;
     busy = true;
     requestSequence += 1;
@@ -506,8 +571,8 @@
       game = result.game;
       setNotice("");
     } catch (error) {
-      setNotice(error.message || "这一步没有完成", true);
-      await load({quiet: true});
+      setNotice(errorMessage(error, "这一步未收到确认，请以同步后的棋盘为准"), true);
+      await load({quiet: true, recovery: true});
     } finally {
       busy = false;
       render();

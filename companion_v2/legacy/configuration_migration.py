@@ -170,6 +170,7 @@ def automatically_handled_configuration_sources() -> frozenset[str]:
     sources.update(_WEATHER_CONVERTER_SOURCES)
     sources.update((_SCHEDULE_INFLUENCE_ENABLED, _SCHEDULE_INFLUENCE_STRENGTH))
     sources.update(_SEGMENT_SPECIALIZED_SOURCES)
+    sources.add("voice_action_config.tts_frequency_control_mode")
     return frozenset(sources)
 
 
@@ -370,7 +371,10 @@ def _contract_value(rule: dict, value: object):
             raise ValueError("旧语音转换范围不是可识别的全量/混合模式")
         converted = aliases[value.strip().lower()]
     elif transform == "percent":
-        converted = _number(value, integer=False) / 100
+        number = _number(value, integer=False)
+        inherited_voice_probability = (rule["target"] in {
+            "voice_reply.private_probability", "voice_reply.group_probability"} and number == -1)
+        converted = -1.0 if inherited_voice_probability else number / 100
     elif transform == "integer":
         number = _number(value, integer=False)
         if not float(number).is_integer():
@@ -439,7 +443,29 @@ def _contract_value(rule: dict, value: object):
     return converted
 
 
-def _convert_contract_configuration(config, rules, *, label: str) -> ConfigurationMigration:
+def _voice_trigger_value(config, raw, *, window_kind=None):
+    """V1's global 100% frequency also enabled conversion with auto voice off."""
+    if _boolean(raw):
+        return "always"
+    mode_present, mode = _source_value(config, "voice_action_config.tts_frequency_control_mode")
+    probability_present, probability = _source_value(config, "voice_action_config.tts_trigger_probability")
+    if not mode_present and not probability_present:
+        return "request"
+    if mode_present and mode not in {"global", "legacy"}:
+        raise ValueError("旧语音频控模式不可识别")
+    if mode == "legacy":
+        return "request"
+    chance = _number(probability, integer=False) if probability_present else 100
+    kinds = (window_kind,) if window_kind else ("private", "group")
+    chances = []
+    for kind in kinds:
+        present, override = _source_value(config, f"voice_action_config.tts_{kind}_trigger_probability")
+        override = _number(override, integer=False) if present else -1
+        chances.append(override if override >= 0 else chance)
+    return "always" if all(value >= 100 for value in chances) else "request"
+
+
+def _convert_contract_configuration(config, rules, *, label: str, window_kind=None) -> ConfigurationMigration:
     if not isinstance(config, dict):
         return ConfigurationMigration({}, {}, {}, (
             ConfigurationDifference("", "invalid_source", "V1 配置不是键值映射。"),
@@ -462,6 +488,8 @@ def _convert_contract_configuration(config, rules, *, label: str) -> Configurati
             ))
         try:
             converted = _contract_value(rule, raw)
+            if rule.get("transform") == "bool_to_voice_trigger":
+                converted = _voice_trigger_value(config, raw, window_kind=window_kind)
         except (TypeError, ValueError, OverflowError) as error:
             differences.append(ConfigurationDifference(
                 rule["target"], "invalid_value", f"值未迁移：{error}。", source,
@@ -485,6 +513,13 @@ def _convert_contract_configuration(config, rules, *, label: str) -> Configurati
         changes[target] = values[0][1]
         confidence[target] = "medium" if any(rule["confidence"] == "medium" for rule, _ in values) else "high"
         sources[target] = source_keys
+        if target == "voice_reply.trigger_mode" and values[0][1] == "always":
+            frequency_sources = ("voice_action_config.tts_frequency_control_mode",
+                "voice_action_config.tts_trigger_probability",
+                "voice_action_config.tts_private_trigger_probability",
+                "voice_action_config.tts_group_trigger_probability")
+            sources[target] += tuple(source for source in frequency_sources
+                                     if _source_value(config, source)[0] and source not in source_keys)
 
     return ConfigurationMigration(changes, confidence, sources, tuple(differences))
 
@@ -498,7 +533,7 @@ def convert_plugin_configuration(config, *, rules=None, window_kind=None) -> Con
         source_rules = tuple(rule for rule in source_rules
                              if rule["source"] != "legacy_compat_config.segmented_proactive_interval_max")
     return _convert_contract_configuration(
-        config, source_rules, label="插件",
+        config, source_rules, label="插件", window_kind=window_kind,
     )
 
 

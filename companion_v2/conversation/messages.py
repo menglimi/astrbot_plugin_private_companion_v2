@@ -808,6 +808,65 @@ class ConversationMessages:
         self._request(row, spec.context, at, include_tools=False)
         return True
 
+    def _record_open_items_exposure(self, row, context, request):
+        if self.open_items_context is None or context.scope.kind is not ScopeKind.PRIVATE:
+            return request
+        saved = json.loads(row["contributions_json"])
+        snapshot = saved.get("open_items") if isinstance(saved, dict) else None
+        if snapshot is None:
+            return request
+        candidates = tuple(material for material in request.context.materials
+                           if material.owner == "agenda.memo" and material.purpose == "participant_open_item")
+        if not candidates:
+            return request
+        try:
+            exposed = self.open_items_context.record_exposure(snapshot, context, self.tasks.now(), candidates)
+        except Exception as error:
+            logger.warning("V2 open-item exposure could not be persisted; omitting optional context error_type=%s",
+                           type(error).__name__)
+            exposed = frozenset()
+
+        omitted_items = False
+        for material in candidates:
+            try:
+                payload = json.loads(material.payload)
+                memo_id = payload.get("memo_id") if isinstance(payload, dict) else None
+            except (TypeError, ValueError):
+                memo_id = None
+            if type(memo_id) is not str or memo_id not in exposed:
+                omitted_items = True
+                break
+        materials = []
+        for material in request.context.materials:
+            if material.owner == "agenda.memo" and material.purpose == "participant_open_item":
+                try:
+                    payload = json.loads(material.payload)
+                    memo_id = payload.get("memo_id") if isinstance(payload, dict) else None
+                except (TypeError, ValueError):
+                    memo_id = None
+                if type(memo_id) is not str or memo_id not in exposed:
+                    continue
+            if material.owner == "agenda.memo" and material.purpose == "open_items":
+                if not exposed:
+                    continue
+                try:
+                    details = json.loads(material.payload)
+                except (TypeError, ValueError):
+                    details = {}
+                if not isinstance(details, dict):
+                    details = {}
+                if omitted_items:
+                    details["selection_partial"] = True
+                    material = replace(material, payload=json.dumps(details, separators=(",", ":")))
+            materials.append(material)
+        if not omitted_items:
+            return request
+        instruction = request.instruction
+        if not exposed:
+            instruction = instruction.replace("\n" + OPEN_ITEMS_INSTRUCTION, "")
+        return replace(request, instruction=instruction,
+                       context=replace(request.context, materials=tuple(materials)))
+
     def request(self, run, *, include_tools=True):
         run.validate()
         at = self.tasks.now()
@@ -817,7 +876,8 @@ class ConversationMessages:
             run.validate()
             row = self.batch(run.task.spec.request_ref)
             require(self.validate_generation(run.task.spec, self.tasks.now()))
-            return self._request(row, run.task.spec.context, at, include_tools=include_tools)
+            request = self._request(row, run.task.spec.context, at, include_tools=include_tools)
+        return self._record_open_items_exposure(row, run.task.spec.context, request)
 
     @staticmethod
     def optional_guidance(material):

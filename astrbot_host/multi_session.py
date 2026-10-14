@@ -319,7 +319,8 @@ class ReviewFallbackRoutes:
 class MultiHostSession:
     def __init__(self, runtime, native_context, *, settings, personas, authority, native_types,
                  provider_fingerprint, runtime_instance_id, now, native_tool_port=None, news_port=None,
-                 solar_term_port=None, qzone_transport=None, balance_port=None, weather_ports=None):
+                 solar_term_port=None, qzone_transport=None, balance_port=None, weather_ports=None,
+                 persona_window_snapshot_lookup=None, persona_window_snapshot_update=None):
         self.runtime, self.settings, self.authority, self.types, self.now = runtime, settings, authority, native_types, now
         self.native_tool_port = native_tool_port
         common = settings.common
@@ -340,6 +341,10 @@ class MultiHostSession:
             video_type=native_types.video, video_loader=native_types.video_loader,
             file_type=native_types.file, file_loader=native_types.file_loader,
             session_persona_override_lookup=native_types.session_persona_override_lookup,
+            persona_snapshot_lookup=native_types.persona_snapshot_lookup,
+            persona_selection_lookup=native_types.persona_selection_lookup,
+            persona_window_snapshot_lookup=persona_window_snapshot_lookup,
+            persona_window_snapshot_update=persona_window_snapshot_update,
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
         self.model = AstrBotTextProvider(native_context, bridge=self.bridge,
             binding=ProviderBinding("model.text", common.provider_id, native_types.version, provider_fingerprint),
@@ -756,16 +761,25 @@ class MultiHostSession:
                         voice_settings_available = True
                     except Exception as error:
                         logger.warning("[CompanionV2] 核心回复文字设置暂不可读，保留宿主发送 error_type=%s", type(error).__name__)
-                prompt_instruction, context_sections, expression_signal_ids = "", (), ()
+                prompt_instruction, stable_prompt_instruction = "", ""
+                context_sections, expression_signal_ids = (), ()
+                perception_options = None
+                perception_context, perception_instructions, perception_guidance = "", (), ""
                 context_materials, preparation_steps = (), ()
                 try:
                     from .core_reply_context import build_core_reply_prompt
                     if not group_admission or group_admission.get("reason") != "repeat":
                         build_started_at = self.now()
                         prompt = build_core_reply_prompt(self.application, context, captured, at=self.now())
-                        prompt_instruction, context_sections = prompt.instruction, prompt.sections
+                        prompt_instruction = getattr(prompt, "context_instruction", prompt.instruction)
+                        stable_prompt_instruction = getattr(prompt, "stable_instruction", "")
+                        context_sections = prompt.sections
                         expression_signal_ids = getattr(prompt, "expression_signal_ids", ())
                         context_materials = getattr(prompt, "materials", ())
+                        perception_options = getattr(prompt, "perception_options", None)
+                        perception_context = getattr(prompt, "perception_context", "")
+                        perception_instructions = getattr(prompt, "perception_instructions", ())
+                        perception_guidance = getattr(prompt, "perception_guidance", "")
                         preparation_steps = ({"name": "context_build", "state": "returned",
                             "started_at": stamp(build_started_at), "finished_at": stamp(self.now()),
                             "elapsed_ms": getattr(prompt, "build_ms", None)},)
@@ -774,6 +788,14 @@ class MultiHostSession:
                                    target.target_id, type(error).__name__)
                 channel = "group" if context.scope.kind is ScopeKind.GROUP else "private"
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
+                reaction_reply_enabled = False
+                if not group_admission or group_admission.get("reason") != "repeat":
+                    try:
+                        from .core_reply_reaction_delivery import prepare_reaction_turn
+                        reaction_reply_enabled = prepare_reaction_turn(
+                            getattr(self.application.tools, "semantic", None), context, captured, turn_id)
+                    except Exception as error:
+                        logger.warning("[CompanionV2] 表情回复准备降级 error_type=%s", type(error).__name__)
                 voice_policy = None
                 is_group_repeat = group_admission and group_admission.get("reason") == "repeat"
                 if not is_group_repeat:
@@ -788,11 +810,8 @@ class MultiHostSession:
                         candidate = voice_policy_for_turn(configured_voice_policy, captured.text)
                         if eligible(candidate, input_text=captured.text, kind=channel, batch_id=turn_id):
                             voice_policy = candidate
-                            from .core_reply_voice import voice_prompt_instruction
-                            voice_instruction = voice_prompt_instruction(voice_policy)
-                            if voice_instruction:
-                                prompt_instruction = "\n\n".join(
-                                    part for part in (prompt_instruction, voice_instruction) if part)
+                from .fish_audio import provider_direction
+                voice_direction = await provider_direction(self.bridge.context, voice_policy, event.unified_msg_origin)
                 source_future = None
                 if self.core_reply_observations is not None:
                     try:
@@ -808,11 +827,16 @@ class MultiHostSession:
                     "context": context,
                     "instruction": captured.instruction,
                     "prompt_instruction": prompt_instruction,
+                    "stable_prompt_instruction": stable_prompt_instruction,
                     "target_id": target.target_id,
                     "channel": channel,
                     "event_id": captured.event_id,
                     "text": captured.text,
                     "context_sections": context_sections,
+                    "perception_options": perception_options,
+                    "perception_context": perception_context,
+                    "perception_instructions": perception_instructions,
+                    "perception_guidance": perception_guidance,
                     "context_materials": context_materials,
                     "preparation_steps": preparation_steps,
                     "expression_signal_ids": expression_signal_ids,
@@ -823,6 +847,8 @@ class MultiHostSession:
                     "presentation_settings": presentation_settings,
                     "outbound_settings": captured_outbound_settings,
                     "voice_reply_policy": voice_policy,
+                    "voice_provider_instruction": voice_direction,
+                    "reaction_reply_enabled": reaction_reply_enabled,
                 })
             except TaskError as error:
                 return Outcome.failed(error.code, str(error))

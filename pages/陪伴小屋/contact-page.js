@@ -63,30 +63,30 @@ window.CompanionContactPage = (() => {
     bucket.purposes.map(([name, label]) => [name, {label, bucket}])));
   const TEST_INSTRUCTIONS = [
     {id:"affection", label:"想念与亲近", bucket:"关系", coverage:"ready",
-      source:"近期双方有来有回、明确表达亲近的私聊",
-      setup:"合成双方近期互相回应并明确表达亲近的对话；另备一组只有单向旧消息的负例。",
-      instruction:"只根据双方真实表达的亲近感，判断是否适合留一句自然、不索取回应的话；不能凭沉默声称想念。",
-      expect:"正文锚定原对话；没有明确亲近证据时选择 skip。"},
+      source:"已确认私聊窗口与当前关系联系节律；不要求近期关键词",
+      setup:"普通日常语境即可验证主动表达；另测明确边界和重复消息，不自然时允许跳过。",
+      instruction:"允许角色主动表达自己的亲近与想念，不推断用户也有同样感受、不虚构共同经历或索取回应。",
+      expect:"表达来自角色自身；不合适或显得突兀时选择 skip。"},
     {id:"care", label:"情绪关怀", bucket:"关系", coverage:"ready",
-      source:"对方明确说出的感受",
-      setup:"合成对方明确表达疲惫或难过的对话；另备普通沉默和情绪不明的负例。",
-      instruction:"回应对方实际说出的感受，不诊断原因，不提供未经请求的方案，也不把沉默解释成低落。",
-      expect:"不夸大情绪、不连续追问；缺少明确感受时选择 skip。"},
+      source:"已确认私聊窗口与当前关系联系节律；旧情绪不作当前事实",
+      setup:"普通日常语境也可验证低压力问候；另测旧情绪和明确边界。",
+      instruction:"可以主动轻轻问候近况或表达愿意倾听；不把旧情绪当成当前状态，不诊断、不盘问、不催回复。",
+      expect:"关心不预设对方正在难过或需要帮助；不自然时选择 skip。"},
     {id:"play", label:"轻松互动", bucket:"关系", coverage:"ready",
-      source:"双方都参与过的玩笑或共同话题",
-      setup:"合成双方都接受的玩笑或共同梗；另备单方玩笑及严肃语境的负例。",
-      instruction:"只有原语境确实轻松且双方都参与时，才延续一个低压力的小互动；不编造共同梗。",
-      expect:"互动可自然结束；紧张、严肃或单方玩笑素材必须选择 skip。"},
+      source:"已确认私聊窗口与当前关系联系节律；不要求已有共同梗",
+      setup:"普通日常语境即可验证角色发起的轻互动；另测严肃话题和明确边界。",
+      instruction:"由角色先带来轻松的问题、俏皮念头或可立即参与的小游戏切口；不只表示可以陪聊，不假定用户兴趣或编造共同经历。",
+      expect:"互动可自然结束；不合适时选择 skip。"},
     {id:"repair", label:"关系修复", bucket:"关系", coverage:"ready",
-      source:"角色可核验的失误及对方指出的不适",
-      setup:"合成角色具体失误和对方明确指出不适的对话；另备没有具体失误的负例。",
-      instruction:"准确承认自己做错的具体部分，简短表达理解；不辩解、不要求原谅、不把修复责任推给对方。",
-      expect:"只回应证据支持的失误；对方要求停止联系时必须选择 skip。"},
+      source:"最近一轮真实私聊原文，由模型判断是否有可核验的失误线索",
+      setup:"分别用有明确失误线索和普通日常语境验收；责任不清时允许跳过。",
+      instruction:"只有来源能说明角色具体做错什么时才简短承认并表达理解；不辩解、不要求原谅、不把责任推给对方。",
+      expect:"不凭用途标签认错；责任或语境不清时选择 skip。"},
     {id:"chat", label:"日常话题", bucket:"关系", coverage:"ready",
-      source:"已完成的最近一轮私聊与原始消息来源",
-      setup:"构造已完成的真实私聊批次，推进到配置的空闲窗口；另备刚有新输入和重复话题的负例。",
-      instruction:"从最近实际谈过的话题承接一点内容；避免“在吗”、空泛问候和复述刚发过的话。",
-      expect:"授权、空闲、额度、活动曲线和去重按真实配置生效；不合适时选择 skip。"},
+      source:"已确认私聊窗口与主动联系节律；最近对话只作可选语境",
+      setup:"用普通日常私聊验证角色主动开启话题，不限定关键词或具体事件；另测刚有新输入、明确边界和重复话题。",
+      instruction:"可以从角色自己的想法、兴趣或真实对话里自然开口；事实才需要来源支持，不要求复述最近消息。",
+      expect:"授权、空闲、额度、活动曲线和去重按真实配置生效；不合适或显得突兀时选择 skip。"},
     {id:"greeting", label:"问候与纪念", bucket:"日程", coverage:"ready",
       source:"本地问候窗口、夜间窗口或管理员配置的纪念日期",
       setup:"分别构造早/午/晚窗口、夜间窗口和重要日期样例，并验证窗口边界。",
@@ -98,10 +98,10 @@ window.CompanionContactPage = (() => {
       instruction:"只承接原记录中仍有意义且未被新输入取代的话题，不暗示已读或催回复。",
       expect:"只在原话仍有效、等待期已过且无新输入时起草；跟进生产器会再次校验原始投递与冷却。"},
     {id:"invitation", label:"共同活动邀请", bucket:"日程", coverage:"ready",
-      source:"对方明确提出的共同活动邀请与活动素材",
-      setup:"合成包含明确共同活动邀请的私聊；另测只有共同兴趣、空闲未知及已拒绝的样例。",
-      instruction:"把活动说成可商量的邀请，不伪造双方空闲、预约或承诺，不要求接受。",
-      expect:"不把提议说成已预约；明确邀请才产生候选，只有共同兴趣或对方已拒绝时不发送。"},
+      source:"已确认私聊窗口与当前关系联系节律；活动由角色主动提出",
+      setup:"验证一起玩游戏、打语音电话、一起看或听等具体邀请；另测明确拒绝和重复邀请，不假设共同兴趣或空闲。",
+      instruction:"由角色挑一项具体活动主动邀请，例如玩一局五子棋、海龟汤或打个语音电话；说清想一起做什么，不只说陪聊。邀请不代表已经约好、开局或拨通，执行另走已有能力与授权。",
+      expect:"邀请具体、口吻自然，给对方留出拒绝或改期空间；边界明确时选择 skip。"},
     {id:"reminder", label:"约定与提醒", bucket:"日程", coverage:"ready",
       source:"当前有效、已接受且即将开始的日历约定",
       setup:"构造已接受且即将开始的约定；对照待确认、取消、过期和修订过的记录。",
@@ -124,19 +124,19 @@ window.CompanionContactPage = (() => {
       expect:"只有完成且回执有效时触发；不补写未提供的书名、章节或情节。"},
     {id:"news", label:"外部资讯", bucket:"分享", coverage:"ready",
       source:"带标题、原链接和发布时间的当前资讯条目",
-      setup:"使用隔离资讯源返回当前条目；另测过期、重复、抓取失败及来源配置变化。",
+      setup:"即时抓取当前配置的真实资讯源（默认 AI 早报），使用有效条目生成消息。",
       instruction:"只根据给定条目判断是否与关系语境相关；保留原发布时间，不声称亲历、看完全文或独立核实。",
-      expect:"来源不完整或失效时不触发；准确归因由程序追加一次。"},
+      expect:"实际抓取、条目校验、模型生成和 QQ 回执全部完成；出处留存供追问。"},
     {id:"environment", label:"环境与状态变化", bucket:"分享", coverage:"ready",
       source:"当前天气、天气变化、官方预警或 Bot 服务余额来源",
       setup:"分测当前观测、两次观测的变化、官方预警覆盖范围和服务余额；再测过期或范围不明素材。",
       instruction:"天气观测不等于预报，变化不等于灾害；预警只按官方原文与覆盖范围，余额不是用户欠款，不催充值。",
       expect:"严格使用来源地点、时效、覆盖范围和金额；依据不足时选择 skip。"},
     {id:"screen", label:"已授权屏幕观察", bucket:"分享", coverage:"ready",
-      source:"同一私聊中仍有效的授权屏幕分析回执",
-      setup:"构造同一私聊且授权有效的屏幕分析回执；另测撤权、来源撤回和冷却。",
+      source:"本次已授权设备的新截图及对应视觉模型分析回执",
+      setup:"实际调用窥屏设备，保存截图原件并调用视觉模型，再用这次分析生成主动消息。",
       instruction:"只提及分析明确支持且适合分享的一点观察；不暴露无关屏幕内容，不推断用户意图或身份。",
-      expect:"授权、来源、窗口和每日上限复核通过才进入模型；撤权或来源变化后立即失效。"},
+      expect:"新截图、该截图的视觉分析、消息生成与 QQ 回执全部完成；撤权或来源变化后失效。"},
   ];
   const TEST_COVERAGE = {ready:"生产器已接通", partial:"只有资格检查", missing:"尚无独立生产器"};
   const TEST_BUCKET_IDS = {关系:"bond", 日程:"daily", 分享:"share"};
@@ -476,16 +476,19 @@ window.CompanionContactPage = (() => {
   function blank() {
     return {view:"dial", purposeQuery:"", purposeBucket:"all", purposeFilter:"all",
       testQuery:"", testBucket:"all", testCoverage:"all", materialQuery:"", materialCategory:"all",
+      materialKind:"all",
       nativePath:"", configPath:"",
       settings:null, effective:null, effectiveSettings:null, purposes:{}, hostState:"",
       materialItems:[], materialsLoaded:false, materialsLoading:false, materialsError:"",
       materialsState:"not_checked", materialsCheckedAt:"", materialsPatrolPolls:0,
+      materialsSharedCount:0, materialsTraceCount:0, materialsTraceTotal:0,
+      materialsTraceState:"not_checked", materialsTraceContexts:0, materialsTraceUnavailable:0,
        editToken:"", configToken:"", configScope:"", configurationLoaded:false,
        contractLoading:false, contractError:"", contractErrorCode:"",
       /* 草稿：只放用户真的改过的字段。提交时只发这些，未动的字段一个都不发——
          避免把「没看过的字段」当成「要保持的值」写回去。 */
       draft:{}, touched:new Set(), tierDraft:null, pendingWrite:null,
-      confirmTest:"", testBusy:"", testUncertain:false, testGuard:null, testResults:{},
+      confirmTest:"", testBusy:"", testUncertain:false, testGuard:null, testResults:{}, testModes:{}, testVariants:{},
       /* pulse 是「下一次渲染要闪哪几片盘面」，pulseNow 是这一帧真正在闪的。
          两者分开是因为 render() 每次都会重写 DOM，类必须由渲染时的状态决定，
          当场往节点上加类会被紧接着的重写丢掉（切档位那次动画就是这么消失的）。 */
@@ -592,10 +595,22 @@ window.CompanionContactPage = (() => {
       if (!live(ticket)) return;
       if (!Array.isArray(payload?.items)) throw problem("invalid_response");
       data.materialItems = payload.items.filter(item => item && typeof item === "object"
-        && item.scope === "role" && !item.usage
-        && typeof item.id === "string" && typeof item.title === "string");
+        && typeof item.id === "string" && typeof item.title === "string"
+        && (item.scope === "role" && !item.usage
+          || item.scope === "window" && item.usage && typeof item.usage.status === "string"));
       data.materialsState = typeof payload.state === "string" ? payload.state : "ready";
       data.materialsCheckedAt = typeof payload.checked_at === "string" ? payload.checked_at : "";
+      data.materialsSharedCount = Number.isInteger(payload.shared_count)
+        ? payload.shared_count : data.materialItems.filter(item => item.scope === "role").length;
+      data.materialsTraceCount = Number.isInteger(payload.trace_count)
+        ? payload.trace_count : data.materialItems.filter(item => item.scope === "window").length;
+      data.materialsTraceTotal = Number.isInteger(payload.history_count)
+        ? payload.history_count : data.materialsTraceCount;
+      data.materialsTraceState = typeof payload.trace_state === "string" ? payload.trace_state : "unavailable";
+      data.materialsTraceContexts = Number.isInteger(payload.trace_context_count)
+        ? payload.trace_context_count : 0;
+      data.materialsTraceUnavailable = Number.isInteger(payload.trace_context_unavailable)
+        ? payload.trace_context_unavailable : 0;
       data.materialsLoaded = true;
       receivedStatus = true;
     } catch (error) {
@@ -872,7 +887,7 @@ window.CompanionContactPage = (() => {
   const VIEWS = [["dial","节律盘",ICON.dial],["tests","消息测试",ICON.test],
                  ["purposes","契机矩阵",ICON.seed],
                  ["gates","开口闸门",ICON.gate],["budgets","额度与去重",ICON.quota],
-                 ["sources","外部触发源",ICON.source],["materials","素材池",ICON.seed]];
+                 ["sources","外部触发源",ICON.source],["materials","主动检视",ICON.seed]];
   function headMarkup() {
     const v = verdict();
     const label = VIEWS.find(([id]) => id === data.view)?.[1] || "节律盘";
@@ -1137,15 +1152,38 @@ window.CompanionContactPage = (() => {
     </div>`;
   }
   function testInstructionText(item) {
+    const synthetic = testUsesSynthetic(item.id);
     return [
-      `这是一条「${item.label}」主动联系候选。`,
-      `素材来源：${item.source}`,
-      `样例准备：${item.setup}`,
-      "只使用本次提供的已核验素材，不把候选摘要当事实，不推断对方情绪、行程或需要。没有自然且值得发送的内容时返回 skip。",
+      `这是一条「${item.label}」主动消息类型的${synthetic ? "合成测试" : "真实来源功能测试"}。`,
+      synthetic ? "使用管理员已知的一次性合成情境，只在本轮演练中将给定场景作为表达前提；不扩写经历、承诺或声称取得真实采集来源。"
+        : "即时获取当前配置的真实来源；屏幕须实际截图并分析。只使用本次取得的来源，失败时报告具体阶段。",
+      `生产器来源：${item.source}`,
+      `生产器验收场景：${item.setup}`,
+      synthetic ? "按角色身处该情境时会主动发出的消息生成正文；除边界或安全要求不适合外，选择 send。"
+        : "根据本次真实来源生成自然、符合角色的消息；内容受实际来源支持，报告 QQ 真实投递回执。",
       `类型要求：${item.instruction}`,
-      "若发送，保持当前角色口吻，正文简短、不索取回复、不提测试或内部流程；严格遵守通用 JSON 合同，并给出 decision_confidence。",
+      "测试状态与合成标识只在管理端呈现；QQ 正文按正式效果表达，不加入测试、模拟、演练或链路说明。",
+      "保持当前角色口吻和称呼，由角色先带来内容；可以自然提问或发出具体邀请，不催促回复。严格遵守通用 JSON 合同，并给出 decision_confidence。",
       `通过条件：${item.expect}`,
     ].join("\n");
+  }
+  const REAL_SOURCE_TESTS = new Set(["news", "environment", "screen"]);
+  const TEST_ENVIRONMENT_SOURCES = {weather:"当前真实天气", weather_change:"真实天气变化",
+    official_alert:"当前官方预警", service_balance:"真实服务余额", external_news:"当前真实资讯"};
+  function testUsesSynthetic(id) {
+    return !REAL_SOURCE_TESTS.has(id) || data.testModes?.[id] === "synthetic";
+  }
+  function testModeMarkup(id) {
+    if (!REAL_SOURCE_TESTS.has(id)) return "";
+    const synthetic = testUsesSynthetic(id);
+    return `<label class="ct-test-material"><span>测试素材</span><select data-test-mode="${e(id)}" aria-label="测试素材"
+      ${data.testBusy || data.testUncertain ? " disabled" : ""}>
+      <option value="real"${!synthetic ? " selected" : ""}>真实来源 · 完整功能测试</option>
+      <option value="synthetic"${synthetic ? " selected" : ""}>合成事件 · 生成与投递演练</option>
+    </select></label>${id === "environment" ? `<label class="ct-test-material"><span>环境来源</span>
+      <select data-test-variant="environment" aria-label="环境来源"${data.testBusy || data.testUncertain ? " disabled" : ""}>
+      ${Object.entries(TEST_ENVIRONMENT_SOURCES).map(([key, label]) => `<option value="${key}"${(data.testVariants?.environment || "weather") === key ? " selected" : ""}>${e(label)}</option>`).join("")}
+      </select></label>` : ""}`;
   }
   function testsView() {
     const counts = Object.fromEntries(["ready", "partial", "missing"].map(coverage => [
@@ -1159,12 +1197,14 @@ window.CompanionContactPage = (() => {
         <span class="ct-test-coverage is-${e(item.coverage)}">${e(TEST_COVERAGE[item.coverage])}</span>
       </header>
       <dl class="ct-test-details">
-        <div><dt>测试素材</dt><dd>${e(item.source)}</dd></div>
-        <div><dt>样例准备</dt><dd>${e(item.setup)}</dd></div>
+        <div><dt>生产器来源</dt><dd>${e(item.source)}</dd></div>
+        <div><dt>生产器验收场景</dt><dd>${e(item.setup)}</dd></div>
       </dl>
       <section class="ct-test-prompt"><h4>类型指令</h4><p>${e(item.instruction)}</p></section>
       <p class="ct-test-expect"><strong>通过条件</strong>${e(item.expect)}</p>
+      ${testModeMarkup(item.id)}
       ${testResultMarkup(item.id)}
+      ${item.id === "screen" ? '<div data-screen-observation></div>' : ""}
       <footer class="ct-test-actions">
         <button type="button" class="ct-btn is-primary ct-test-run" data-test-run="${e(item.id)}"
           ${data.testBusy || data.testUncertain || item.coverage !== "ready" ? " disabled" : ""}>
@@ -1183,7 +1223,7 @@ window.CompanionContactPage = (() => {
           <span><i class="is-partial"></i>只有资格检查 <strong>${counts.partial}</strong></span>
           <span><i class="is-missing"></i>尚无独立生产器 <strong>${counts.missing}</strong></span>
         </div>
-        <p class="ct-test-boundary">运行测试会调用对应的真实来源和角色模型；若通过人格复核，会真实投递到核心管理员私聊。每次发送前都会再次确认。</p>
+        <p class="ct-test-boundary">资讯、天气和屏幕默认即时获取真实来源；屏幕会实际截图并调用视觉模型。其他类型使用一次性合成事件。测试调用角色模型并经 QQ 投递到核心管理员私聊，单独显示来源获取、分析、生成和回执结果。</p>
       </div>
       ${data.testUncertain ? `<div class="ct-test-lock" role="alert">
         <span>${data.testGuard?.state === "pending" ? "上次测试没有收到最终回执。" : "上次测试结果未确认。"}请先核对核心管理员私聊；确认前不能再次启动测试，以免重复投递。</span>
@@ -1216,7 +1256,8 @@ window.CompanionContactPage = (() => {
   }
   const TEST_STAGE_LABELS = {
     request:"诊断请求", authorization:"管理员身份", binding:"管理员私聊绑定", runtime:"运行环境",
-    settings:"主动联系设置", purpose:"联系目的", trusted_candidate:"真实来源", contact_admission:"主动联系准入",
+    settings:"主动联系设置", purpose:"联系目的", trusted_candidate:"联系机会/来源", contact_admission:"主动联系准入",
+    news_fetch:"真实资讯抓取", weather_fetch:"真实天气获取", screen_capture:"本次真实截图", screen_interpretation:"本次视觉分析",
     attempt_budget:"本私聊 24 小时尝试额度", relationship_attempt_budget:"关系级 24 小时尝试额度",
     delivery_budget:"本私聊 24 小时投递额度", relationship_delivery_budget:"关系级 24 小时投递额度",
     model_route:"主动联系模型路由", model_generation:"模型生成", persona_review:"人格复核",
@@ -1278,6 +1319,8 @@ window.CompanionContactPage = (() => {
       ${result.explanation ? `<p class="ct-test-explanation">${e(result.explanation)}</p>` : ""}
       ${result.route?.label || result.variant?.label ? `<p>来源：${e(result.route?.label || result.variant.label)}</p>` : ""}
       ${result.purpose_label ? `<p>测试用途：${e(result.purpose_label)} · 收件人：核心管理员</p>` : ""}
+      ${result.event_mode === "synthetic_event" ? `<p>输入：一次性合成事件（未写入普通聊天记录）</p>` : ""}
+      ${result.event_mode === "source_backed" ? `<p>输入：本次取得的真实来源</p>` : ""}
       ${delivery ? `<p>投递状态：${e(delivery)}</p>` : ""}
       ${skipReason ? `<p class="ct-test-cause"><b>未发送原因</b>${e(skipReason)}${modelSkipReason ? `：${e(modelSkipReason)}` : ""}</p>` : ""}
       ${budget ? `<p class="ct-test-budget">当前额度：${e(budget)}</p>` : ""}
@@ -1301,11 +1344,16 @@ window.CompanionContactPage = (() => {
     </dialog>`;
     const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === data.confirmTest);
     if (!item) return "";
+    const synthetic = testUsesSynthetic(item.id);
+    const realAction = item.id === "screen" ? "调用当前已授权的窥屏设备取得一张新截图，并调用视觉模型分析该截图"
+      : item.id === "news" || data.testVariants?.environment === "external_news" ? "即时抓取当前配置的真实资讯源，使用带日期和原链接的有效条目"
+      : item.id === "environment" && (data.testVariants?.environment || "weather") === "weather" ? "即时获取已配置角色所在地的真实天气观测"
+      : "读取所选环境来源的当前真实事件";
     return `<dialog class="ct-test-dialog" data-test-confirm-dialog aria-labelledby="ct-test-confirm-title">
       <div class="ct-test-dialog-body">
-        <p class="ct-test-dialog-kicker">真实投递测试</p>
+        <p class="ct-test-dialog-kicker">${synthetic ? "合成事件" : "真实来源"} · 真实投递</p>
         <h2 id="ct-test-confirm-title">运行「${e(item.label)}」测试？</h2>
-        <p>将读取当前有效来源，调用角色配置的模型并执行人格复核。只有模型决定发送且复核通过时，才会真实投递到核心管理员私聊。</p>
+        <p>${synthetic ? `将为「${e(item.label)}」构造一次性合成事件；合成事件不会写入聊天记录。` : `将${realAction}。来源获取失败会显示失败阶段。`}之后调用角色配置的消息模型，按配置执行人格复核，并真实投递到核心管理员 QQ 私聊。QQ 正文按正式效果呈现，测试标识只保留在本页。</p>
         <p class="ct-test-dialog-warning">测试不占日常联系额度。若结果未知，请先核对管理员私聊，不要重新运行。</p>
         <div class="ct-test-dialog-actions">
           <button type="button" class="ct-btn" data-test-action="cancel">取消</button>
@@ -1643,7 +1691,7 @@ window.CompanionContactPage = (() => {
     return `<div class="ct-sources">
       <section class="ct-source-guide"><div><strong>触发条件可在本页直接调整</strong><p>下面每张卡片的开关、时间、来源和阈值会直接写入主动联系设置。感知页提供按职责查看的状态汇总与更细的授权配置，可以从这里跳过去核对，两边不是单一入口。</p></div><div class="ct-source-guide-links">${entries.map(([title, detail, target, icon]) => `<button type="button" class="ct-source-guide-link" data-go="manage" data-manage="perception" data-perception-tab-target="${e(target)}"><span class="ct-src-icon">${icon}</span><span><b>${e(title)}</b><small>${e(detail)}</small></span><span class="ct-source-guide-arrow">查看感知状态 ${ICON.arrow}</span></button>`).join("")}</div></section>
       <div class="ct-source-summary" role="status">${fields} 项触发配置 · ${on}/${toggles} 个开关当前开启</div>
-      ${groups}</div>`;
+      ${groups}<div data-screen-observation></div></div>`;
   }
   function sourceGroup(group) {
     const body = group.body;
@@ -1705,13 +1753,13 @@ window.CompanionContactPage = (() => {
     const records = Array.isArray(item.usage?.records) ? item.usage.records : [];
     const search = [item.category, item.purpose, item.title, item.detail, item.note, item.source, item.url,
       item.usage?.status, item.usage?.thought_origin, item.usage?.followup_observation?.status,
-      ...records.map(record => record.text)]
+      item.trace_target, item.trace_role, ...records.map(record => record.text)]
       .filter(Boolean).join(" ").toLocaleLowerCase();
     const source = item.source || "已核验来源";
     const href = materialLink(item.url);
     const usage = item.usage && typeof item.usage === "object" ? item.usage : null;
     const usageLabels = {delivered:"已送达", partial:"部分送达", unconfirmed:"结果待确认", not_sent:"未发送",
-      pending:"等待投递", failed:"投递失败", cancelled:"已取消", reviewing:"等待审核"};
+      pending:"等待投递", failed:"投递失败", cancelled:"已取消", reviewing:"等待检视"};
     const usageHistory = records;
     const thoughtOrigin = typeof usage?.thought_origin === "string" ? usage.thought_origin : "";
     const followup = usage?.status === "delivered" ? usage.followup_observation : null;
@@ -1722,66 +1770,87 @@ window.CompanionContactPage = (() => {
         ? " · 截至 " + materialTime(followup.observed_through) : "";
     const followupMarkup = followup && typeof followup === "object" ? `<span title="仅表示时间上出现后续输入，不代表这条消息已读或得到回应。">
       ${e(followupLabels[followup.status] || "后续输入状态未知")}${e(followupTime)}</span>` : "";
+    const contextMarkup = item.scope === "window" ? `<p class="ct-material-trace-context">
+      <span>接收目标</span><b>${e(item.trace_target || "私聊目标")}</b>
+      <span>角色</span><b>${e(item.trace_role || "角色")}</b>
+    </p>` : "";
     const usageMarkup = usage ? `<div class="ct-material-usage">
-      <strong>使用记录 · ${e(usageLabels[usage.status] || "状态未知")}</strong>
+      <strong>发送前检视 · ${e(usageLabels[usage.status] || "状态未知")}</strong>
       ${thoughtOrigin ? `<span>念头来由 · ${e(thoughtOrigin)}</span>` : ""}
       <span>${e(usage.delivered_parts ?? 0)} / ${e(usage.total_parts ?? 0)} 段已确认送达</span>
       ${followupMarkup}
       ${usageHistory.length ? `<ol>${usageHistory.map(record => `<li><time datetime="${e(record.delivered_at || "")}">
         第 ${e(Number.isInteger(record.sequence) ? record.sequence + 1 : "-")} 段 · ${e(materialTime(record.delivered_at))}</time><span>${e(record.text || "")}</span></li>`).join("")}</ol>` : ""}
     </div>` : "";
-    return `<article class="ct-material-card" data-material-card data-category="${e(item.category || "")}" data-search="${e(search)}">
+    return `<article class="ct-material-card" data-material-card data-scope="${e(item.scope || "role")}"
+      data-category="${e(item.category || "")}" data-search="${e(search)}">
       <header class="ct-material-card-head"><span class="ct-material-category">${e(item.category || "素材")}</span>
         <span class="ct-material-purpose">${e(item.purpose || "")}</span></header>
       <h3>${e(item.title || "主动念头")}</h3>
       ${item.detail ? `<p class="ct-material-detail">${e(item.detail)}</p>` : ""}
+      ${contextMarkup}
       ${usageMarkup}
       ${item.note ? `<p class="ct-material-note">${e(item.note)}</p>` : ""}
-      <footer><span>${e(source)}</span><time datetime="${e(item.captured_at || "")}">${e(materialTime(item.captured_at))}</time>
-        <span>${usage ? "历史记录" : item.expires_at ? "有效至 " + e(materialTime(item.expires_at)) : "有效期未设"}</span>
+      <footer><span>${e(source)}</span><span>${usage ? "生成于 " : "采集于 "}${e(materialTime(item.captured_at))}</span>
+        <span>${usage ? "发送轨迹" : item.expires_at ? "有效至 " + e(materialTime(item.expires_at)) : "有效期未设"}</span>
         ${href ? `<a class="ct-material-source-link" href="${e(href)}" target="_blank" rel="noopener noreferrer">查看来源</a>` : ""}</footer>
     </article>`;
   }
   function materialsView() {
     const items = Array.isArray(data.materialItems) ? data.materialItems : [];
     const count = items.length;
+    const sharedCount = data.materialsSharedCount;
+    const traceCount = data.materialsTraceCount;
+    const traceTotal = data.materialsTraceTotal;
+    const traceCountLabel = traceTotal > traceCount ? `${traceCount} / 共 ${traceTotal}` : String(traceCount);
     const categories = [...new Set(items.map(item => item.category).filter(value => typeof value === "string" && value))];
     let content = "";
     if (data.materialsLoading && !data.materialsLoaded) {
-      content = `<div class="ct-material-empty"><span class="ct-spinner"></span><strong>正在读取角色共享素材</strong></div>`;
+      content = `<div class="ct-material-empty"><span class="ct-spinner"></span><strong>正在读取外部素材与主动记录</strong></div>`;
     } else if (data.materialsError && !data.materialsLoaded) {
-      content = `<div class="ct-material-empty is-error">${ICON.alert}<strong>素材读取失败</strong><p>${e(data.materialsError)}</p>
+      content = `<div class="ct-material-empty is-error">${ICON.alert}<strong>检视记录读取失败</strong><p>${e(data.materialsError)}</p>
         <button type="button" class="ct-btn" data-action="refresh-materials"${data.materialsLoading ? " disabled" : ""}>${ICON.refresh}<span>重试</span></button></div>`;
     } else if (!count) {
       const messages = {refreshing:"正在获取角色共享资讯", not_checked:"正在等待首次巡视",
         not_configured:"尚未启用角色共享资讯来源", failed:"最近一次巡视失败，暂无有效素材",
         unavailable:"角色共享素材当前不可用",
-        ready:"暂时没有仍在有效期内的角色共享素材"};
+        ready:"当前没有外部素材或主动消息记录"};
       const message = messages[data.materialsState] || messages.ready;
       content = `<div class="ct-material-empty${data.materialsState === "failed" ? " is-error" : ""}">${ICON.source}<strong>${e(message)}</strong>
         ${data.materialsError ? `<p>${e(data.materialsError)}</p>` : ""}</div>`;
     } else {
       content = `<div class="ct-material-grid">${items.map(materialCard).join("")}</div>
-        <p class="ct-material-filter-empty" hidden>没有匹配的素材</p>`;
+        <p class="ct-material-filter-empty" hidden>当前筛选没有匹配记录</p>`;
     }
     const refreshed = data.materialsCheckedAt ? `最近巡视 ${e(materialTime(data.materialsCheckedAt))}` : "";
-    const stale = data.materialsState === "stale" ? "最近一次巡视未成功，当前仍显示有效素材"
-      : data.materialsState === "failed" && count ? "资讯巡视失败，当前仍显示有效共享素材" : "";
+    const stale = data.materialsState === "stale" ? "最近一次资讯巡视未成功，仍显示已采集的有效外部素材"
+      : data.materialsState === "failed" && sharedCount ? "资讯巡视失败，仍显示已采集的有效外部素材" : "";
+    const traceWarning = data.materialsTraceState === "failed"
+      ? "主动消息检视记录读取失败；外部素材仍可查看"
+      : data.materialsTraceState === "partial"
+        ? `${data.materialsTraceUnavailable} 个私聊目标无法读取主动记录，其余记录仍可查看` : "";
     return `<div class="ct-materials">
-      <div class="ct-material-heading"><strong>角色共享素材池</strong></div>
+      <div class="ct-material-heading"><strong>素材与主动检视</strong>
+        <span>${sharedCount} 条外部素材 · ${traceCountLabel} 条主动记录</span></div>
+      <div class="ct-material-kinds" role="group" aria-label="按记录类型筛选">
+        ${[["all","全部",count],["role","外部素材",sharedCount],["window","主动记录",traceCount]].map(([kind,label,total]) =>
+          `<button type="button" data-material-kind-filter="${kind}" aria-pressed="${data.materialKind === kind}">
+            <span>${label}</span><b>${total}</b></button>`).join("")}
+      </div>
       <div class="ct-material-tools">
-        <label class="ct-material-search"><span>查找素材</span>
-          <input type="search" data-material-search aria-label="搜索角色共享素材" value="${e(data.materialQuery)}" placeholder="名称、内容或来源">
+        <label class="ct-material-search"><span>查找记录</span>
+          <input type="search" data-material-search aria-label="搜索外部素材与主动记录" value="${e(data.materialQuery)}" placeholder="内容、目标、角色或状态">
         </label>
-        <label><span>素材类别</span><select data-material-category aria-label="按素材类别筛选">
+        <label><span>类别</span><select data-material-category aria-label="按记录类别筛选">
           <option value="all"${data.materialCategory === "all" ? " selected" : ""}>全部类别</option>
           ${categories.map(category => `<option value="${e(category)}"${data.materialCategory === category ? " selected" : ""}>${e(category)}</option>`).join("")}
         </select></label>
-        <span class="ct-material-count" data-material-result-count>${count} 条共享素材</span>
-        <button type="button" class="ct-btn ct-material-refresh" data-action="refresh-materials" title="刷新共享素材" aria-label="刷新共享素材"${data.materialsLoading ? " disabled" : ""}>${ICON.refresh}</button>
+        <span class="ct-material-count" data-material-result-count>${count} 条记录</span>
+        <button type="button" class="ct-btn ct-material-refresh" data-action="refresh-materials" title="刷新外部素材与主动记录" aria-label="刷新检视记录"${data.materialsLoading ? " disabled" : ""}>${ICON.refresh}</button>
       </div>
       ${refreshed ? `<p class="ct-material-updating">${refreshed}</p>` : ""}
       ${stale ? `<p class="ct-material-updating is-error" role="status">${e(stale)}</p>` : ""}
+      ${traceWarning ? `<p class="ct-material-updating${data.materialsTraceState === "failed" ? " is-error" : ""}" role="status">${e(traceWarning)}</p>` : ""}
       ${data.materialsLoading && data.materialsLoaded ? `<p class="ct-material-updating" role="status">正在读取更新</p>` : ""}
       ${data.materialsError && data.materialsLoaded ? `<p class="ct-material-updating is-error" role="status">${e(data.materialsError)}</p>` : ""}
       ${content}
@@ -1792,15 +1861,20 @@ window.CompanionContactPage = (() => {
     const query = data.materialQuery.trim().toLocaleLowerCase();
     const category = data.materialCategory;
     const cards = [...root.querySelectorAll("[data-material-card]")];
+    const candidates = cards.filter(card => data.materialKind === "all" || card.dataset.scope === data.materialKind);
+    const candidateSet = new Set(candidates);
     let visible = 0;
     for (const card of cards) {
-      const matches = (category === "all" || card.dataset.category === category)
+      const matches = candidateSet.has(card) && (category === "all" || card.dataset.category === category)
         && (!query || String(card.dataset.search || "").includes(query));
       card.hidden = !matches;
       if (matches) visible++;
     }
     const count = root.querySelector("[data-material-result-count]");
-    if (count) count.textContent = visible + " / " + cards.length + " 条共享素材";
+    if (count) count.textContent = visible + " / " + candidates.length + " 条记录";
+    for (const button of root.querySelectorAll("[data-material-kind-filter]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.materialKindFilter === data.materialKind));
+    }
     const empty = root.querySelector(".ct-material-filter-empty");
     if (empty) empty.hidden = visible > 0 || cards.length === 0;
   }
@@ -1842,6 +1916,9 @@ window.CompanionContactPage = (() => {
     if (data.view === "purposes") updatePurposeFilters();
     if (data.view === "tests") updateTestFilters();
     if (data.view === "materials") updateMaterialFilters();
+    const screenObservationHost = root.querySelector?.("[data-screen-observation]");
+    if (screenObservationHost) window.CompanionScreenObservation?.mount(screenObservationHost);
+    else window.CompanionScreenObservation?.unmount();
     const testDialog = root.querySelector?.("[data-test-confirm-dialog]");
     if (testDialog && typeof testDialog.showModal === "function" && !testDialog.open) testDialog.showModal();
     if (data.scanning && data.ready) {
@@ -1874,6 +1951,11 @@ window.CompanionContactPage = (() => {
       switchView(view.dataset.view); render();
       if (view.dataset.view === "materials") void loadMaterials();
       return;
+    }
+    const materialKind = event.target.closest("[data-material-kind-filter]")?.dataset.materialKindFilter;
+    if (["all", "role", "window"].includes(materialKind)) {
+      data.materialKind = materialKind;
+      render(); return;
     }
     const testAction = event.target.closest("[data-test-action]")?.dataset.testAction;
     if (testAction === "cancel") { data.confirmTest = ""; render(); return; }
@@ -1933,6 +2015,10 @@ window.CompanionContactPage = (() => {
     }
   }
   function changed(event) {
+    const testMode = event.target.closest("[data-test-mode]");
+    if (testMode) { data.testModes = {...data.testModes, [testMode.dataset.testMode]:testMode.value}; render(); return; }
+    const testVariant = event.target.closest("[data-test-variant]");
+    if (testVariant) { data.testVariants = {...data.testVariants, [testVariant.dataset.testVariant]:testVariant.value}; render(); return; }
     const materialCategory = event.target.closest("[data-material-category]");
     if (materialCategory) {
       data.materialCategory = materialCategory.value;
@@ -2036,11 +2122,13 @@ window.CompanionContactPage = (() => {
     data.testBusy = id;
     data.testGuard = guard;
     data.testResults[id] = null;
-    notice("正在检查真实来源、生成主动消息并等待投递回执…");
+    const synthetic = testUsesSynthetic(id);
+    notice(synthetic ? "正在生成合成事件并等待模型与 QQ 投递回执…" : "正在获取真实来源、运行分析与消息模型，并等待 QQ 投递回执…");
     render();
     try {
       const result = await api("POST", "setup/proactive-diagnostic",
-        {purpose: id, confirm_delivery: true}, 180000);
+        {purpose: id, confirm_delivery: true, synthetic_event: synthetic,
+          ...(id === "environment" ? {variant:data.testVariants?.environment || "weather"} : {})}, id === "screen" && !synthetic ? 300000 : 180000);
       if (!live(ticket)) return;
       if (!["passed", "skipped", "failed", "unknown", "pending"].includes(result.state)) {
         throw problem("invalid_response");
@@ -2199,6 +2287,7 @@ window.CompanionContactPage = (() => {
     }
   }
   function unmount() {
+    window.CompanionScreenObservation?.unmount();
     ++version;
     if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
     autoRecoveryTimer = null;

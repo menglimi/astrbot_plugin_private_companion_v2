@@ -28,7 +28,6 @@ from typing import Callable
 
 from PIL import Image
 
-from companion_v2.capabilities import CapabilityRepository
 from companion_v2.conversation.foreground import (BackgroundPromptTrigger, PromptMaterial,
                                                    PromptRequest, SealedForegroundContext)
 from companion_v2.conversation.media.models import CapturedImage, ImageDescriptor, PromptImage
@@ -40,10 +39,11 @@ from companion_v2.foundation.refs import ScopeKind
 from companion_v2.model_gateway.models import ModelTaskProfile
 from companion_v2.storage.repositories import OperationRepository
 
-from .models import SCREEN_EXTENSION, SCREEN_OWNER, ScreenCaptureRef, ScreenFeedbackKind, ScreenInterpretation
+from .models import SCREEN_OWNER, ScreenCaptureRef, ScreenFeedbackKind, ScreenInterpretation
 from .models import ScreenProcessingRequest
 from .pipeline import SCREEN_INSTRUCTION, ScreenProcessingPipeline
 from .repositories import ScreenRepository
+from .proactive_access import proactive_allowed
 
 
 KIND = "screen.interpretation"
@@ -52,7 +52,9 @@ ACTION = "extension.tool.invoke"
 PROFILE_KIND = KIND
 PROCESSOR_ID = "screen-interpretation-v1"
 TIMEOUT_SECONDS = 60
-MAX_OUTPUT_TOKENS = 384
+# Reasoning-capable vision providers count reasoning in this limit as well.
+# Keep the visible interpretation short through PROMPT instead of truncating JSON.
+MAX_OUTPUT_TOKENS = 2048
 MAX_INTERPRETATION_CHARS = 4096
 MAX_CONCURRENCY = 1
 # Only these purposes exist; every one of them is chosen by a trusted caller, never
@@ -173,6 +175,19 @@ class ScreenInterpretationService:
 
     # -- submission ----------------------------------------------------
 
+    def check_model_route(self, context: TaskContext, *, role_instruction: str = ""):
+        """Check the vision provider chain locally, before collecting an original."""
+        if self._closed or self.gateway is None or self.tasks is None:
+            raise TaskError("screen_interpretation_unavailable", "Screen interpretation is not ready")
+        at = self.tasks.now()
+        prompt = PromptRequest(
+            BackgroundPromptTrigger(digest([context.key, "screen-route-check"]),
+                                    context.actor.principal, context.scope, at),
+            role_instruction if role_instruction.strip() else NEUTRAL_INSTRUCTION,
+            SealedForegroundContext((), (), ()), PROMPT, context.role_binding,
+            output_format="screen_interpretation")
+        return self.gateway.router.selected_route(context, KIND, prompt, at=at)
+
     def _role_instruction(self, parent_task_id: str) -> str:
         """Reuse the original task's captured role instruction when it still exists."""
         if not parent_task_id:
@@ -213,7 +228,7 @@ class ScreenInterpretationService:
         if self.runtime.read_one("SELECT 1 FROM execution_tasks WHERE task_id = ?", (task_id,)):
             return None
         job = {"context": context, "capture": capture, "purpose": purpose, "input_units": units,
-               "extra_feedback": extra, "role_instruction": instruction.strip() or NEUTRAL_INSTRUCTION,
+               "extra_feedback": extra, "role_instruction": instruction if instruction.strip() else NEUTRAL_INSTRUCTION,
                "request_id": task_id}
         self.pending[task_id] = job
         try:
@@ -228,10 +243,8 @@ class ScreenInterpretationService:
 
     def _proactive_allowed(self, context):
         """A proactive anchor is refused by the repository unless the window allows it."""
-        projection = CapabilityRepository(self.runtime).projection(extension_id=SCREEN_EXTENSION,
-                                                                   scope=context.scope)
-        return projection.is_success and projection.unwrap().settings is not None \
-            and projection.unwrap().settings.proactive_enabled
+        return proactive_allowed(self.runtime, scope=context.scope, role=context.role_binding.role,
+                                 subject=context.actor.subject)
 
     @outcome
     def validate(self, spec, at):
@@ -265,17 +278,28 @@ class ScreenInterpretationService:
                 break
             if task_id in self._workers:
                 continue
-            if self.tasks.read(job["context"], task_id) is None:
+            task = self.tasks.read(job["context"], task_id)
+            if task.is_success and task.unwrap().state in ("succeeded", "failed", "cancelled", "expired", "uncertain", "dead_letter"):
+                continue
+            if task.failure is not None:
                 # A retired or cancelled original request is never resubmitted.
                 self.pending.pop(task_id, None)
                 continue
-            worker = asyncio.create_task(self.runner.run(job["context"], task_id),
+            worker = asyncio.create_task(self._run(job["context"], task_id),
                                          name="companion:screen-interpretation:" + task_id)
             self._workers[task_id] = worker
             worker.add_done_callback(lambda done: self.notify())
             capacity -= 1
             started += 1
         return started > 0
+
+    async def _run(self, context, task_id):
+        result = await self.runner.run(context, task_id)
+        if result.is_success and result.unwrap().failure_code:
+            self.pending[task_id]["error_code"] = result.unwrap().failure_code
+        if result.failure is not None or result.unwrap().task is not None:
+            self.notify()
+        return result
 
     # -- execution -----------------------------------------------------
 
@@ -287,8 +311,10 @@ class ScreenInterpretationService:
         at = self.tasks.now()
         if not self.settings.read(context, at)["interpretation_enabled"]:
             raise TaskError("screen_interpretation_disabled", "Screen interpretation is no longer enabled here")
+        self.check_model_route(context, role_instruction=job["role_instruction"])
         self._active_run = run
         try:
+            run.begin_effect()
             result = await self.pipeline.process(
                 request_id=job["request_id"], capture=job["capture"], role=context.role_binding.role,
                 role_instruction=job["role_instruction"], purpose=job["purpose"],
@@ -297,10 +323,18 @@ class ScreenInterpretationService:
         finally:
             self._active_run = None
         if not result.is_success:
+            if result.failure.code == "model_not_started":
+                calls = self.runtime.read_all("""SELECT state, receipt_ref, actual_tokens, actual_cost
+                    FROM model_calls WHERE task_id = ? ORDER BY position""", (run.task.task_id,))
+                if calls and all(row["state"] == "not_started" and row["receipt_ref"]
+                                 and row["actual_tokens"] == 0 and row["actual_cost"] == 0 for row in calls):
+                    job["error_code"] = result.failure.code
+                    return TaskResult("failed", "not_committed", receipt_ref=calls[-1]["receipt_ref"])
             raise TaskError(result.failure.code, result.failure.reason)
         receipt = result.unwrap()
         self.results[run.task.task_id] = receipt.result.analysis.analysis_id
-        return TaskResult("succeeded", result_ref=receipt.result.analysis.analysis_id)
+        return TaskResult("succeeded", "committed", result_ref=receipt.result.analysis.analysis_id,
+                          operation_id=receipt.operation.operation_id, receipt_ref=receipt.operation.operation_id)
 
     async def interpret(self, request: ScreenProcessingRequest) -> ScreenInterpretation:
         """The pipeline's role port: one bounded vision call on the original."""

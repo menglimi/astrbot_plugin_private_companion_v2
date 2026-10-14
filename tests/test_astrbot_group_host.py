@@ -24,15 +24,12 @@ from astrbot_host.settings import HostControlError
 
 
 class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
-    async def test_unregistered_group_persona_is_not_mapped_to_a_character(self):
+    async def test_group_mapping_uses_explicit_window_persona_over_native_default(self):
         await self.start_host()
         event = self.group_event()
         self.native.selections["qq-main"] = "unregistered"
-        self.assertIsNone(await self.controller.persona_mapping_for_event(event))
-
-        self.native.selections["qq-main"] = "original"
         mapping = await self.controller.persona_mapping_for_event(event)
-        self.assertEqual(mapping.role_id, "role-a")
+        self.assertEqual((mapping.persona_id, mapping.role_id), ("original", "role-a"))
 
     async def accept_group(self, *args, **kwargs):
         event = self.group_event(*args, **kwargs)

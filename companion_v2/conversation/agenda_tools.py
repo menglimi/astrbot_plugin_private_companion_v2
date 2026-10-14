@@ -22,9 +22,9 @@ from .foreground import GroundedDraftReviewer, LocalModelTransport, ModelDraft, 
 
 
 TOOL_FIELDS = {
-    "memo.create": (frozenset({"title", "body"}), frozenset({"schedule"})),
+    "memo.create": (frozenset({"title", "body"}), frozenset({"schedule", "purpose"})),
     "memo.read": (frozenset({"memo_id"}), frozenset()),
-    "memo.list": (frozenset(), frozenset({"limit", "after", "search", "state"})),
+    "memo.list": (frozenset(), frozenset({"limit", "after", "search", "state", "purpose"})),
     "memo.edit": (frozenset({"memo_id", "expected_revision", "changes"}), frozenset()),
     **{f"memo.{action}": (frozenset({"memo_id", "expected_revision"}), frozenset())
        for action in ("complete", "reopen", "pin", "unpin")},

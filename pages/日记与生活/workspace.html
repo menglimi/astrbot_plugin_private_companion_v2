@@ -25,6 +25,12 @@
       <div><span>下次入睡 / 计划唤醒</span><strong id="sleep-next">—</strong></div>
       <div><span>当前睡眠唤醒</span><strong id="sleep-active-wake">—</strong></div>
     </section>
+    <section class="sleep-physiology" aria-label="角色睡眠状态">
+      <div><span>睡眠压力</span><strong id="sleep-pressure">—</strong></div>
+      <div><span>欠睡</span><strong id="sleep-debt">—</strong></div>
+      <div><span>近 24 小时负荷</span><strong id="sleep-workload">—</strong></div>
+      <div><span>推荐睡眠时长</span><strong id="sleep-recommended">—</strong></div>
+    </section>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <details id="settings"><summary>日程与偏好</summary>
       <form id="config-form">
@@ -38,6 +44,7 @@
           <label>入睡时区<input id="sleep_timezone" type="text" value="Asia/Shanghai" required></label>
           <label>自然浮动上限（分钟）<input id="sleep_variation_minutes" type="number" min="0" max="120" value="20" required>
             <small class="muted">实际入睡时刻沿近期趋势逐日平缓变化，同一天保持一致。</small></label>
+          <label>入睡观察窗口（分钟）<input id="sleep_window_minutes" type="number" min="0" max="360" value="120" required></label>
           <label>睡眠时长（分钟）<input id="sleep_minutes" type="number" min="1" max="1440" value="480" required></label>
           <label class="check"><input id="reading_enabled" type="checkbox">自动阅读书架中的待读片段</label>
           <label class="check"><input id="derive_enabled" type="checkbox">正文保存后提取摘要与梦境碎片</label>

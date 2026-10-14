@@ -86,6 +86,12 @@ class RoleLifeManagement:
             "started_at": a.started_at.isoformat(), "updated_at": a.updated_at.isoformat(),
             "due_at": a.work.due_at.isoformat() if a.work.due_at else None,
             "start_offset": a.work.start_offset, "end_offset": a.work.end_offset,
+            "sleep": ({"kind": a.sleep.kind, "target_minutes": a.sleep.target_minutes,
+                "slept_seconds": a.sleep.slept_seconds, "interruptions": a.sleep.interruptions,
+                "early_interruptions": a.sleep.early_interruptions,
+                "quality_range": [a.sleep.quality_min, a.sleep.quality_max],
+                "wake_until": a.sleep.wake_until.isoformat() if a.sleep.wake_until else None,
+                "oversleep_minutes": a.sleep.oversleep_minutes} if a.sleep else None),
             "reflection": a.reading.reflection if a.reading and unavailable is None else None,
             "unavailable_reason": unavailable, "task": task,
             "view_token": self.token(operator, access, a.activity_id, a.revision)}
@@ -385,8 +391,13 @@ class RoleLifeManagement:
                                     operation_id=op_id + ":" + digest(related.activity_id), observed_at=self.app.now())
                                 self.app.life_runtime.cancel_activity(related.activity_id)
                     if a.state not in (State.COMPLETED, State.CANCELLED):
-                        self.app.role_life.transition_activity(identifier, owner=self.owner, expected_revision=revision,
-                            state=State.CANCELLED, operation_id=op_id + ":cancel", observed_at=self.app.now())
+                        if action == "cancel" and a.work.kind == "sleep":
+                            self.app.role_state.body_clock.finish(self.context, a, operation_id=op_id + ":cancel",
+                                observed_at=self.app.now(), checkpoint="睡眠被手动结束并保留实际睡眠时长",
+                                state=State.CANCELLED)
+                        else:
+                            self.app.role_life.transition_activity(identifier, owner=self.owner, expected_revision=revision,
+                                state=State.CANCELLED, operation_id=op_id + ":cancel", observed_at=self.app.now())
                     self.app.life_runtime.cancel_activity(identifier)
                 elif action in ("edit", "delete", "restore"):
                     old = self._journal(journal_target.key, operator, access)

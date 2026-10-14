@@ -1,6 +1,7 @@
 """Final and streaming group text keep native sends and per-part authorization."""
 
 from dataclasses import asdict
+import json
 from types import SimpleNamespace as NS
 import unittest
 
@@ -11,6 +12,7 @@ from astrbot_host.core_reply import (CORE_REPLY_CONTEXT_EXTRA, activate_core_rep
 from astrbot_host.core_reply_segmentation import (
     prepare_core_reply_segmentation, prepare_core_reply_streaming_boundary, split_message,
 )
+from astrbot_host.core_reply_perception import inject_core_reply_perception_context
 from companion_v2.conversation.segment_control import LLM_SEGMENT_MARKER as MARKER
 from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.foundation.outcome import Outcome
@@ -178,31 +180,49 @@ class CoreGroupSegmentationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([part.get_plain_text() for part in parts], [FIRST, SECOND])
         self.assertEqual(chain.chain, [quote, mention, Plain(FIRST), Plain(SECOND), image])
 
-    def test_native_group_prompt_uses_free_text_segmentation_instructions(self):
-        event = self.prepare(policy=SegmentationPolicy(llm_controlled=True))
-        request = NS(system_prompt="原人格")
-        inject_core_reply_prompt(event, request)
-        self.assertIn(MARKER, request.system_prompt)
-        self.assertIn("直接输出聊天正文", request.system_prompt)
+    def test_group_rule_boundaries_keep_short_comma_clauses_and_ellipsis_together(self):
+        policy = SegmentationPolicy(
+            split_words=json.dumps(["。", "？", "！", "?", ".", "!", "，"], ensure_ascii=False),
+            min_segment_chars=5, max_segments=5)
+        source = "笨蛋比折大人，大半夜的突然说什么呢...？真那么想看的话，真就只能看一眼哦？"
+        parts = split_message(MessageChain(chain=[Plain(source)]), policy)
+        self.assertEqual([part.get_plain_text() for part in parts], [
+            "笨蛋比折大人，大半夜的突然说什么呢...？",
+            "真那么想看的话，真就只能看一眼哦？",
+        ])
 
-    def test_private_prompt_uses_private_wording_and_streaming_omits_markers(self):
-        event = self.prepare(channel="private", policy=SegmentationPolicy(llm_controlled=True))
-        request = NS(system_prompt="原人格")
+    async def test_native_group_turn_context_uses_free_text_segmentation_instructions(self):
+        event = self.prepare(policy=SegmentationPolicy(llm_controlled=True))
+        request = NS(system_prompt="原人格", extra_user_content_parts=[])
         inject_core_reply_prompt(event, request)
-        self.assertIn(MARKER, request.system_prompt)
-        self.assertIn("普通私聊正文", request.system_prompt)
+        self.assertNotIn(MARKER, request.system_prompt)
+        await inject_core_reply_perception_context(event, request)
+        context = request.extra_user_content_parts[0].text
+        self.assertIn(MARKER, context)
+        self.assertIn("直接输出聊天正文", context)
+
+    async def test_private_turn_context_uses_private_wording_and_streaming_omits_markers(self):
+        event = self.prepare(channel="private", policy=SegmentationPolicy(llm_controlled=True))
+        request = NS(system_prompt="原人格", extra_user_content_parts=[])
+        inject_core_reply_prompt(event, request)
+        await inject_core_reply_perception_context(event, request)
+        context = request.extra_user_content_parts[0].text
+        self.assertIn(MARKER, context)
+        self.assertIn("普通私聊正文", context)
 
         streamed = self.prepare(channel="private", policy=SegmentationPolicy(llm_controlled=True),
                                 streaming=True)
-        request = NS(system_prompt="原人格")
+        request = NS(system_prompt="原人格", extra_user_content_parts=[])
         inject_core_reply_prompt(streamed, request)
-        self.assertIn(MARKER, request.system_prompt)
+        await inject_core_reply_perception_context(streamed, request)
+        self.assertIn(MARKER, request.extra_user_content_parts[0].text)
 
         external_stream = self.prepare(channel="private", policy=SegmentationPolicy(llm_controlled=True))
         external_stream.set_extra("enable_streaming", True)
-        request = NS(system_prompt="原人格")
+        request = NS(system_prompt="原人格", extra_user_content_parts=[])
         inject_core_reply_prompt(external_stream, request)
-        self.assertNotIn(MARKER, request.system_prompt)
+        await inject_core_reply_perception_context(external_stream, request)
+        self.assertNotIn(MARKER, request.extra_user_content_parts[0].text)
 
 
 if __name__ == "__main__":

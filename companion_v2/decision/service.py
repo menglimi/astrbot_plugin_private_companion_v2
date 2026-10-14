@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 _SAFE_SKIP_REASONS = frozenset({"facts_invalid", "robot_message_reference", "explicit_event_rule"})
 _SAFE_FAILURE_REASONS = {
     "laya_package_missing": "当前 AstrBot Python 环境未安装 Laya。",
+    "laya_gpu_unavailable": "AstrBot 的 PyTorch 未启用 CUDA，本地 Laya 已跳过。",
     "laya_initialization_failed": "Laya Router 初始化失败。",
     "laya_model_path_invalid": "选定的本地检查点目录不完整。",
     "laya_inference_failed": "Laya 本地推理失败。",
@@ -59,6 +60,20 @@ def _diagnostic_json(value, limit):
         if len(bounded) <= limit:
             return bounded
         preview = preview[:len(preview) // 2]
+
+
+def _intervention_trace(client):
+    trace = getattr(client, "last_trace", None)
+    if not isinstance(trace, dict):
+        return None
+    request = trace.get("request") if isinstance(trace.get("request"), dict) else {}
+    response = trace.get("response") if isinstance(trace.get("response"), dict) else None
+    processing = trace.get("processing") if isinstance(trace.get("processing"), dict) else {}
+    return {
+        "request": {"model": request.get("model"), "sent": request.get("sent") is True},
+        "response": {"format": response.get("format")} if response else None,
+        "processing": processing,
+    }
 
 
 class LayaDecisionService:
@@ -148,7 +163,7 @@ class LayaDecisionService:
             client = self._client(values)
             result = await client.decide(facts, enabled_fields=values["decision_fields"])
         except LayaClientError as error:
-            if error.code == "laya_initializing":
+            if error.code in {"laya_initializing", "laya_gpu_unavailable"}:
                 self._record(values, "skipped", round((perf_counter() - started) * 1000),
                              reason_code=error.code, reason=error.reason,
                              trace=getattr(client, "last_trace", None))
@@ -172,6 +187,36 @@ class LayaDecisionService:
         self._record(values, "ok", elapsed_ms, decision=decision, trace=getattr(client, "last_trace", None))
         return {"status": "ok", "decision": decision, "mode": values["mode"],
                 "elapsed_ms": elapsed_ms, "enabled_fields": dict(values["decision_fields"])}
+
+    async def classify_intervention(self, facts: dict) -> dict:
+        """Use one bounded Laya question after the host has checked permission."""
+        values = self.store.raw()
+        if not values["enabled"]:
+            self._record(values, "skipped", 0, reason_code="laya_disabled")
+            return {"status": "skipped", "reason": "laya_disabled"}
+        started = perf_counter()
+        client = None
+        try:
+            client = self._client(values)
+            choice = await client.classify_intervention(facts)
+        except LayaClientError as error:
+            if error.code in {"laya_initializing", "laya_gpu_unavailable"}:
+                self._record(values, "skipped", round((perf_counter() - started) * 1000),
+                    reason_code=error.code, reason=error.reason, trace=_intervention_trace(client))
+                return {"status": "skipped", "reason": error.code}
+            self._record(values, "failed", round((perf_counter() - started) * 1000),
+                reason_code=error.code, reason=_safe_log_reason(error.code, error.reason),
+                trace=_intervention_trace(client))
+            raise
+        except Exception as error:
+            self._record(values, "failed", round((perf_counter() - started) * 1000),
+                reason_code=type(error).__name__, reason=_safe_log_reason(type(error).__name__, str(error)),
+                trace=_intervention_trace(client))
+            raise
+        elapsed_ms = round((perf_counter() - started) * 1000)
+        result = {"intervention_need": choice}
+        self._record(values, "ok", elapsed_ms, decision=result, trace=_intervention_trace(client))
+        return {"status": "ok", **result, "mode": values["mode"], "elapsed_ms": elapsed_ms}
 
     def recent(self, limit=50) -> dict:
         if self.runtime is None or self.origin_key is None:

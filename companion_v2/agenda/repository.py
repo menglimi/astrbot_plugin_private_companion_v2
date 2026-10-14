@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import sqlite3
 
 from companion_v2.storage.runtime import StorageRuntime
 
-from .models import AgendaError, AgendaTarget, Memo, Reminder, Schedule, encode, fingerprint, restore_identity, stamp
+from .models import (AgendaError, AgendaTarget, Memo, Reminder, Schedule, encode, fingerprint,
+                     open_item_expiry, restore_identity, stamp)
 
 
 class AgendaRepository:
@@ -21,9 +22,23 @@ class AgendaRepository:
         if row is None:
             return None
         data = json.loads(row["record_json"])
+        created_at = datetime.fromisoformat(row["created_at"])
+        purpose = data.get("purpose", "note")
+        schedule = Schedule.restore(data.get("schedule"))
+        expires_at = data.get("expires_at")
+        if expires_at is not None:
+            expires_at = datetime.fromisoformat(expires_at)
+        elif purpose == "open_loop":
+            expires_at = open_item_expiry(created_at, schedule, data.get("sequence", 0))
+        activity = self.runtime.read_one("SELECT * FROM agenda_open_loop_activity WHERE memo_id = ?", (memo_id,))
         return Memo(memo_id, AgendaTarget.restore(json.loads(row["target_json"])), row["revision"], row["state"],
-                    data["title"], data["body"], bool(row["pinned"]), Schedule.restore(data["schedule"]),
-                    data["sequence"], data["completion_count"], restore_identity(data["creator"]), data["content_revision"])
+                    data["title"], data["body"], bool(row["pinned"]), schedule,
+                    data["sequence"], data["completion_count"], restore_identity(data["creator"]),
+                    data.get("content_revision", 1), purpose, expires_at, created_at,
+                    datetime.fromisoformat(activity["last_context_at"]) if activity and activity["last_context_at"] else None,
+                    datetime.fromisoformat(activity["last_followup_at"]) if activity and activity["last_followup_at"] else None,
+                    activity["context_count"] if activity else 0,
+                    activity["followup_count"] if activity else 0)
 
     def reminder(self, reminder_id: str) -> Reminder | None:
         row = self.runtime.read_one("SELECT * FROM agenda_reminders WHERE reminder_id = ?", (reminder_id,))
@@ -38,6 +53,44 @@ class AgendaRepository:
     def linked_reminder(self, memo_id: str) -> Reminder | None:
         row = self.runtime.read_one("SELECT reminder_id FROM agenda_reminders WHERE memo_id = ?", (memo_id,))
         return self.reminder(row["reminder_id"]) if row else None
+
+    def claim_open_loop_context(
+        self, memo_id: str, *, at: datetime, cooldown: timedelta, max_count: int, force: bool = False,
+    ) -> bool:
+        cutoff = stamp(at - cooldown)
+        timestamp = stamp(at)
+        with self.runtime.transaction() as connection:
+            row = connection.execute("SELECT last_context_at, context_count FROM agenda_open_loop_activity WHERE memo_id = ?",
+                                     (memo_id,)).fetchone()
+            if row is not None and row["last_context_at"] == timestamp:
+                return True
+            if row is not None and row["context_count"] >= max_count:
+                return False
+            if (not force and row is not None and row["last_context_at"] is not None
+                    and row["last_context_at"] > cutoff):
+                return False
+            connection.execute("""INSERT INTO agenda_open_loop_activity
+                (memo_id, last_context_at, context_count, last_followup_at, followup_count, updated_at)
+                VALUES (?, ?, 1, NULL, 0, ?)
+                ON CONFLICT(memo_id) DO UPDATE SET last_context_at = excluded.last_context_at,
+                    context_count = agenda_open_loop_activity.context_count + 1,
+                    updated_at = excluded.updated_at""", (memo_id, timestamp, timestamp))
+            return True
+
+    def claim_open_loop_followup(self, memo_id: str, *, at: datetime) -> bool:
+        timestamp = stamp(at)
+        with self.runtime.transaction() as connection:
+            row = connection.execute("SELECT followup_count FROM agenda_open_loop_activity WHERE memo_id = ?",
+                                     (memo_id,)).fetchone()
+            if row is not None and row["followup_count"] > 0:
+                return False
+            connection.execute("""INSERT INTO agenda_open_loop_activity
+                (memo_id, last_context_at, context_count, last_followup_at, followup_count, updated_at)
+                VALUES (?, NULL, 0, ?, 1, ?)
+                ON CONFLICT(memo_id) DO UPDATE SET last_followup_at = excluded.last_followup_at,
+                    followup_count = agenda_open_loop_activity.followup_count + 1,
+                    updated_at = excluded.updated_at""", (memo_id, timestamp, timestamp))
+            return True
 
     def save_memo(self, memo: Memo, *, expected_revision: int, now: datetime) -> None:
         with self.runtime.transaction() as connection:

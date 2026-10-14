@@ -73,6 +73,41 @@ class RoleReadingReceipt:
 
 
 @dataclass(frozen=True)
+class RoleSleepReceipt:
+    """Physiological facts accumulated across one role-owned sleep episode."""
+
+    kind: str
+    base_need_minutes: int
+    target_minutes: int
+    slept_seconds: int = 0
+    interruptions: int = 0
+    early_interruptions: int = 0
+    workload_score: int = 0
+    quality_min: int = 70
+    quality_max: int = 92
+    wake_until: datetime | None = None
+    oversleep_minutes: int = 0
+
+    def __post_init__(self):
+        if self.kind not in ("night", "nap", "manual"):
+            raise ReferenceValidationError("sleep kind must be explicit")
+        for name in ("base_need_minutes", "target_minutes"):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= 1440:
+                raise ReferenceValidationError(f"{name} must be from 1 to 1440")
+        for name, maximum in (("slept_seconds", 172800), ("interruptions", 1000),
+                              ("early_interruptions", 1000), ("workload_score", 100),
+                              ("quality_min", 100), ("quality_max", 100), ("oversleep_minutes", 60)):
+            value = getattr(self, name)
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ReferenceValidationError(f"{name} is out of range")
+        if self.quality_min > self.quality_max:
+            raise ReferenceValidationError("sleep quality range is reversed")
+        if self.wake_until is not None:
+            object.__setattr__(self, "wake_until", normalize_utc(self.wake_until, field="sleep wake grace"))
+
+
+@dataclass(frozen=True)
 class RoleActivity:
     activity_id: str
     role_id: str
@@ -85,6 +120,7 @@ class RoleActivity:
     updated_at: datetime | None = None
     reading: RoleReadingReceipt | None = None
     work: RoleWorkSpec | None = None
+    sleep: RoleSleepReceipt | None = None
 
     def __post_init__(self) -> None:
         _opaque(self.activity_id, field="activity_id")
@@ -107,6 +143,9 @@ class RoleActivity:
         if self.work is not None:
             if not isinstance(self.work, RoleWorkSpec) or (self.work.source is not None and self.work.source.scope != self.scope):
                 raise ReferenceValidationError("role execution must retain the original scope")
+        if self.sleep is not None and (not isinstance(self.sleep, RoleSleepReceipt)
+                                       or self.work is None or self.work.kind != "sleep"):
+            raise ReferenceValidationError("sleep receipt must belong to a sleep activity")
 
     @property
     def owner(self) -> RoleOwnerRef:
@@ -142,7 +181,8 @@ class RoleArtifact:
             raise ReferenceValidationError("artifact asset and source must share a scope")
 
 
-def advance_activity(activity, *, expected_revision, state, observed_at, checkpoint=None, reading=None, work=None):
+def advance_activity(activity, *, expected_revision, state, observed_at, checkpoint=None, reading=None, work=None,
+                     sleep=None):
     """Apply an explicit owner decision; elapsed wall time never advances an activity."""
     if type(expected_revision) is not int or activity.revision != expected_revision:
         raise ReferenceValidationError("activity revision conflict")
@@ -164,7 +204,8 @@ def advance_activity(activity, *, expected_revision, state, observed_at, checkpo
         raise ReferenceValidationError("activity update cannot move backwards in time")
     return replace(activity, state=state, revision=activity.revision + 1, updated_at=at,
                    checkpoint=activity.checkpoint if checkpoint is None else checkpoint, reading=reading,
-                   work=activity.work if work is None else work)
+                   work=activity.work if work is None else work,
+                   sleep=activity.sleep if sleep is None else sleep)
 
 
 class RoleLifeLedger:
@@ -194,13 +235,15 @@ class RoleLifeLedger:
         observed_at: datetime | None = None,
         checkpoint: str | None = None,
         reading: RoleReadingReceipt | None = None,
+        work: RoleWorkSpec | None = None,
+        sleep: RoleSleepReceipt | None = None,
     ) -> RoleActivity:
         activity = self._activities.get(activity_id)
         if activity is None or activity.owner != owner:
             raise KeyError(activity_id)
         updated = advance_activity(activity, expected_revision=expected_revision, state=state,
                                    observed_at=activity.updated_at if observed_at is None else observed_at,
-                                   checkpoint=checkpoint, reading=reading)
+                                   checkpoint=checkpoint, reading=reading, work=work, sleep=sleep)
         self._activities[activity_id] = updated
         return updated
 

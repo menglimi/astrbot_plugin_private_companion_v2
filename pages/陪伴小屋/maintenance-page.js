@@ -1960,15 +1960,15 @@ window.CompanionMaintenancePage = (() => {
       contact_purpose_paused: "所选联系目的当前已暂停",
       contact_quiet_hours: "当前处于免打扰时段",
       model_task_unregistered: "主动联系模型任务未配置",
-      contact_diagnostic_source_required: "当前没有所选目的的有效真实来源",
+      contact_diagnostic_source_required: "当前没有可测试的私聊窗口或事件机会",
     };
     const failureExplanations = {
       setup_binding_confirmation_required: "用户页的“管理员权限”决定谁是核心管理员；“开始使用”里的私聊窗口确认决定消息投递到哪扇可信窗口，两者是独立前置条件。本次失败表示窗口确认缺失：回到开始使用确认同一私聊窗口；若用户页仍显示未开启，再把目标成员设为核心用户并保存。",
-      contact_attempt_budget: "决策尝试次数已经达到本私聊的上限；模型跳过或最终未投递的尝试也会计入。",
-      contact_relationship_attempt_budget: "这个关系下所有私聊窗口的决策尝试次数已经达到关系级上限。",
+      contact_attempt_budget: "本私聊的24小时决策额度已用完；已完成判断的跳过仍计入；失败、过期、取消和死信任务不计入，仍在处理或任务状态不确定时会临时保留额度，模型实际用量单独记账。",
+      contact_relationship_attempt_budget: "该关系所有私聊窗口共享24小时决策额度；已完成判断的跳过仍计入；失败、过期、取消和死信任务不计入，仍在处理或任务状态不确定时会临时保留额度，模型实际用量单独记账。",
       contact_delivery_budget: "本私聊24小时内的联系投递额度已经用完。",
       contact_relationship_delivery_budget: "这个关系下所有私聊窗口的投递额度已经用完。",
-      contact_diagnostic_source_required: "排障测试只接受真实生产器已经产生的来源；没有当前来源时不会调用模型，也不会用泛化文案代替。",
+      contact_diagnostic_source_required: "关系表达类不要求固定关键词，但需要已完成的私聊窗口；事件类需要所选生产器的当前有效来源。没有可测试机会时不会调用模型。",
     };
     const skipReason = result?.skip_reason;
     const confidence = Number(result?.decision_confidence), threshold = Number(result?.silence_threshold);
@@ -1978,7 +1978,7 @@ window.CompanionMaintenancePage = (() => {
         ? '模型把握度 ' + confidence.toFixed(2) + ' 低于沉默阈值 ' + threshold.toFixed(2)
         : result?.judge_reason && skipReason === "persona_review" ? result.judge_reason : "";
     const stageNames = {authorization: "核心管理员与角色授权", settings: "主动联系授权", purpose: "目的开关", execution: "端到端执行",
-      trusted_candidate: "诊断候选", contact_admission: "主动联系准入", attempt_budget: "本私聊24小时尝试额度",
+      trusted_candidate: "测试机会", contact_admission: "主动联系准入", attempt_budget: "本私聊24小时尝试额度",
       relationship_attempt_budget: "关系级24小时尝试额度", delivery_budget: "本私聊24小时投递额度",
       relationship_delivery_budget: "关系级24小时投递额度", model_route: "主动联系模型任务", model_generation: "模型生成",
       persona_review: "人格复核", delivery: "消息投递"};
@@ -2020,7 +2020,7 @@ window.CompanionMaintenancePage = (() => {
       proactivePurposes.map(([key, label]) => '<option value="' + key + '"' + (state.proactivePurpose === key ? " selected" : "") + '>' + label + '</option>').join("") +
       '</select></label><button type="button" data-proactive-test ' + (state.proactiveTesting || state.proactiveConfirming ? "disabled" : "") + '>' +
       (state.proactiveTesting ? "正在运行完整链路" : state.proactiveConfirming ? "等待确认" : "运行并真实投递") + '</button></div>' +
-      '<p class="maint-proactive-test-note">手动测试不占日常联系额度；它只复用当前用途已经产生的真实来源，找不到来源时不会调用模型或用通用文案代替。确认后会真实投递到核心管理员私聊，结果未知时不会自动重试。</p>' + confirmation + running + notice + detail + '</section>';
+      '<p class="maint-proactive-test-note">手动测试不占日常联系额度；关系表达类按已确认私聊窗口和用途设置验证，事件类按当前有效来源验证。没有有效测试机会时不会调用模型。确认后会真实投递到核心管理员私聊，结果未知时不会自动重试。</p>' + confirmation + running + notice + detail + '</section>';
   }
 
   function clearDiagnosticExpiry(target = state) {
@@ -2615,6 +2615,8 @@ window.CompanionMaintenancePage = (() => {
       ...(hasCore ? [["核心 P50 发送返回", "median_end_to_end_send_returned_ms"], ["核心 P95 发送返回", "p95_end_to_end_send_returned_ms"],
         ["核心 P50 首次发送返回", "median_first_send_returned_ms"], ["核心 P50 首 Token", "median_ttft_ms"],
         ["P50 插件准备", "median_plugin_preparation_ms"], ["P50 已观测模型请求", "median_model_request_ms"],
+        ["P50 等待 LLM 至插件准备", "median_waiting_llm_to_request_hook_ms"],
+        ["P50 插件准备至 Agent", "median_request_hook_to_agent_ms"],
         ["P50 工具执行累计", "median_tool_ms"], ["P50 Agent 总时长", "median_agent_ms"]] : []),
       ...(hasLegacy ? [[hasCore ? "历史 P50 平台回执" : "P50 端到端", "median_end_to_end_ms"], [hasCore ? "历史 P95 平台回执" : "P95 端到端", "p95_end_to_end_ms"],
       [hasCore ? "历史 P50 首段回执" : "P50 首段送达", "median_first_reply_ms"],
@@ -2858,7 +2860,8 @@ window.CompanionMaintenancePage = (() => {
       const sameReceipt = Boolean(firstReceipt && lastReceipt && Date.parse(firstReceipt) === Date.parse(lastReceipt));
       const mergedReceipt = sameReceipt && sample.outcome === "completed";
       const timelineRows = core ? [
-        ["received_at", "原生消息收到"], ["generation_started_at", "插件请求准备完成"], ["agent_started_at", "Agent 启动"],
+        ["received_at", "原生消息收到"], ["waiting_llm_at", "进入 AstrBot 请求队列"],
+        ["generation_started_at", "插件请求准备完成"], ["agent_started_at", "Agent 启动"],
         ["first_model_started_at", "模型启动"], ["last_model_finished_at", "末次模型返回（已观测）"], ["agent_finished_at", "Agent 完成"],
         ["first_dispatched_at", "首次开始发送"], ["first_send_returned_at", "首次发送返回"], ["last_send_returned_at", "末次发送返回"],
       ].sort(([left], [right]) => (Date.parse(times[left]) || Infinity) - (Date.parse(times[right]) || Infinity))
@@ -2887,6 +2890,7 @@ window.CompanionMaintenancePage = (() => {
       const stageBreakdown = core ? '<section class="maint-efficiency-cumulative" aria-label="单次回复分项耗时">' +
         '<div class="maint-efficiency-cumulative-head"><strong>分项耗时</strong><span>累计与区间存在重叠</span></div>' +
         '<div class="maint-efficiency-cumulative-grid">' + [["插件准备", "plugin_preparation_ms"], ["已观测模型请求累计", "model_request_ms"],
+          ["等待 LLM 至插件准备", "waiting_llm_to_request_hook_ms"], ["插件准备至 Agent", "request_hook_to_agent_ms"],
           ["工具执行累计", "tool_ms"], ["Agent 总时长", "agent_ms"], ["发送区间", "send_ms"], ["首 Token", "ttft_ms"]]
         .map(([label, key]) => '<div class="maint-efficiency-cumulative-item"><span>' + label + '</span><strong>' +
           efficiencyDuration(stages[key]) + '</strong></div>').join("") + '</div></section>' : "";

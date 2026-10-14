@@ -215,7 +215,7 @@ class PrivateMemberSettings:
                 self.context.role_binding, command["sections"]]), observed_at=self.app.now()))
             for name, data in command["sections"].items():
                 allowed_section_keys = {"edit_token", "changes", "reset_to_inherit"} if name in (
-                    "reply", "person", "person_learning") else {
+                    "reply", "person", "person_learning", "contact") else {
                     "edit_token", "changes"}
                 if (type(data) is not dict or not {"edit_token", "changes"} <= set(data)
                         or set(data) - allowed_section_keys

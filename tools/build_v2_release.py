@@ -14,7 +14,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_ID = "astrbot_plugin_private_companion_v2"
-VERSION = "2.1.5"
+VERSION = "2.1.25"
 RELEASE_SCHEMA = "companion.v2.release.v2"
 NATIVE_EXTENSION_FILES = {
     "content": ("companion_v2/content/assembly.py", "companion_v2/content/provider.py",
@@ -51,6 +51,8 @@ NATIVE_EXTENSION_FILES = {
              "astrbot_host/native_extensions/game/web/app.css",
              "astrbot_host/native_extensions/game/web/native.html",
              "astrbot_host/native_extensions/game/web/native.js",
+             "astrbot_host/native_extensions/game/web/native-gomoku.js",
+             "astrbot_host/native_extensions/game/web/native-gomoku-input.js",
              "astrbot_host/native_extensions/game/web/native.css",
              "astrbot_host/native_extensions/game/web/lucide.min.js"),
     "live": ("companion_v2/live/provider.py",
@@ -83,6 +85,7 @@ NATIVE_HASH_FILES = {
         "companion_v2/games/blackjack.py", "companion_v2/games/xiangqi.py",
         "companion_v2/games/pikafish.py", "companion_v2/games/native/xiangqi.py",
         "companion_v2/games/turtle_soup.py", "companion_v2/games/draw_guess.py",
+        "companion_v2/games/native/context.py",
     ),
     "live": ("companion_v2/live/provider.py",),
 }

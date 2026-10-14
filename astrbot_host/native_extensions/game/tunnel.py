@@ -364,7 +364,7 @@ class QuickTunnel:
     async def _probe_health(self, public_url: str) -> bool:
         timeout = aiohttp.ClientTimeout(total=4.0)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 async with session.get(f"{public_url.rstrip('/')}/health", allow_redirects=False) as response:
                     return response.status == 200
         except (aiohttp.ClientError, asyncio.TimeoutError):

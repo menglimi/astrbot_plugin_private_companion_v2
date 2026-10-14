@@ -36,6 +36,9 @@ from .astrbot_host.core_reply_decision import prepare_core_reply_decision
 from .astrbot_host.native import warm_session_settings
 from .astrbot_host.core_reply_tool_dispatch import observe_core_tool_dispatch_begin, restore_core_tool_dispatch
 from .astrbot_host.core_reply_native_send import inject_core_reply_send_tool
+from .astrbot_host.core_reply_perception import (
+    inject_core_reply_perception_context, inject_core_reply_perception_policy,
+)
 from .astrbot_host.native_extensions.host_events import (
     prepare_native_host_request, observe_native_host_response, observe_native_host_result,
 )
@@ -50,7 +53,8 @@ from .astrbot_host.core_reply_tracking import (
 from .astrbot_host.core_reply_telemetry import (
     finish_core_reply_telemetry, observe_core_agent_begin, observe_core_agent_done,
     observe_core_llm_response, observe_core_reply_delivery, observe_core_tool_finished,
-    observe_core_tool_started, prepare_core_reply_telemetry, observe_core_reply_suppressed,
+    observe_core_tool_started, observe_core_waiting_llm_request, prepare_core_reply_telemetry,
+    observe_core_reply_suppressed,
 )
 from .astrbot_host.calendar_command import parse_calendar_command
 from .astrbot_host.event_routing import (
@@ -79,10 +83,8 @@ GROUP_INPUT_PASSTHROUGH_FAILURES = frozenset({
     "host_group_media_unsupported",
     "host_media_unsupported",
 })
-CORE_REPLY_NATIVE_PASSTHROUGH_PREFIXES = (
-    "host_persona_",
-    "host_conversation_",
-    "host_native_lookup_timeout",
+CORE_REPLY_IDENTITY_FAILURE_PREFIXES = (
+    "host_persona_", "host_conversation_", "host_native_lookup_timeout", "host_core_reply_capture_failed",
 )
 RETRYABLE_HOST_STARTUP_CODES = frozenset({
     "host_platform_unavailable", "host_account_unavailable", "host_persona_unavailable",
@@ -92,14 +94,15 @@ RETRYABLE_HOST_STARTUP_CODES = frozenset({
 
 
 def _can_continue_astrbot_core_reply(code):
+    if isinstance(code, str) and code.startswith(CORE_REPLY_IDENTITY_FAILURE_PREFIXES):
+        return False
     if code in {
         "host_reply_settings_unavailable", "host_core_reply_prepare_failed",
-        "host_core_reply_capture_failed", "host_not_claimed", "application_not_running",
-        "host_persona_changed", "host_core_reply_conversation_unavailable",
+        "host_not_claimed", "application_not_running", "host_core_reply_conversation_unavailable",
         "host_session_settings_timeout",
     }:
         return True
-    return isinstance(code, str) and code.startswith(CORE_REPLY_NATIVE_PASSTHROUGH_PREFIXES)
+    return False
 
 
 @register(
@@ -110,38 +113,66 @@ def _can_continue_astrbot_core_reply(code):
 )
 class PrivateCompanionV2StagingPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None):
-        super().__init__(context, config)
         self._imports_retired = False
-        self._host_start_task = None
-        self._startup_failure_key = None
-        self._startup_failure_at = 0.0
-        self._session_settings_warm_task = None
-        self.config = config if config is not None else {}
-        default_data_root = Path(StarTools.get_data_dir(PLUGIN_NAME)).resolve()
-        data_root = prepare_storage_root(default_data_root, self.config)
-        data_root.mkdir(parents=True, exist_ok=True)
-        migrated, changed = migrate_single_target_config(self.config)
-        if changed:
-            self.config.clear()
-            self.config.update(migrated)
-        self.staging = AstrBotMultiController(context, self.config, data_root)
-        self._retire_context_reset_marker = install_native_reset_marker(context)
-        self.staging.default_data_root = default_data_root
-        config_object = config if hasattr(config, "save_config") else None
-        if config_object is not None:
-            self.staging.save_plugin_config = self._save_plugin_config
-            if changed:
-                try:
-                    config_object.save_config()
-                except Exception:
-                    logger.warning("[CompanionV2] 旧单目标设置已在内存迁移，但持久化失败", exc_info=True)
-        # One public facade exposes the body and its seven internal modules.
-        # Independent third-party integrations use their documented APIs.
-        self.extension_api = UnifiedCompanionExtensionAPI(self.staging)
         try:
-            self.staging.register_routes()
+            super().__init__(context, config)
+            self._host_start_task = None
+            self._startup_failure_key = None
+            self._startup_failure_at = 0.0
+            self._session_settings_warm_task = None
+            self.config = config if config is not None else {}
+            default_data_root = Path(StarTools.get_data_dir(PLUGIN_NAME)).resolve()
+            data_root = prepare_storage_root(default_data_root, self.config)
+            data_root.mkdir(parents=True, exist_ok=True)
+            migrated, changed = migrate_single_target_config(self.config)
+            if changed:
+                self.config.clear()
+                self.config.update(migrated)
+            self.staging = AstrBotMultiController(context, self.config, data_root)
+            self._retire_context_reset_marker = install_native_reset_marker(context)
+            self.staging.default_data_root = default_data_root
+            config_object = config if hasattr(config, "save_config") else None
+            if config_object is not None:
+                self.staging.save_plugin_config = self._save_plugin_config
+                if changed:
+                    try:
+                        config_object.save_config()
+                    except Exception:
+                        logger.warning("[CompanionV2] 旧单目标设置已在内存迁移，但持久化失败", exc_info=True)
+            # One public facade exposes the body and its seven internal modules.
+            # Independent third-party integrations use their documented APIs.
+            self.extension_api = UnifiedCompanionExtensionAPI(self.staging)
+            try:
+                self.staging.register_routes()
+            except Exception:
+                logger.warning("[CompanionV2] 共享宿主管理 API 注册失败", exc_info=True)
+        except BaseException:
+            self._retire_failed_initialization()
+            raise
+
+    def _retire_failed_initialization(self) -> None:
+        if self._imports_retired:
+            return
+        retire_reset_marker = getattr(self, "_retire_context_reset_marker", None)
+        if callable(retire_reset_marker):
+            try:
+                retire_reset_marker()
+            except Exception:
+                logger.warning("[CompanionV2] 初始化失败后清理 reset 标记失败", exc_info=True)
+        staging = getattr(self, "staging", None)
+        unregister_routes = getattr(staging, "unregister_routes", None)
+        if callable(unregister_routes):
+            try:
+                unregister_routes()
+            except Exception:
+                logger.warning("[CompanionV2] 初始化失败后注销管理路由失败", exc_info=True)
+        try:
+            retire_plugin_imports(_PLUGIN_ROOT, __name__, path_inserted=_CORE_PATH_INSERTED,
+                                  entry_globals=globals())
         except Exception:
-            logger.warning("[CompanionV2] 共享宿主管理 API 注册失败", exc_info=True)
+            logger.warning("[CompanionV2] 初始化失败后清理导入模块失败", exc_info=True)
+        finally:
+            self._imports_retired = True
 
     def _save_plugin_config(self, candidate: dict[str, Any]) -> None:
         previous = dict(self.config)
@@ -599,8 +630,10 @@ class PrivateCompanionV2StagingPlugin(Star):
 
         async def prepare_core_voice(current, message, authorize, segment_index, segment_count):
             from .astrbot_host.core_reply_voice import prepare_core_reply_voice_message
+            from .astrbot_host.core_reply_reaction_delivery import prepare_core_reaction_message
             from .astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
             session = getattr(self.staging, "session", None)
+            message = await prepare_core_reaction_message(event, message, authorize=authorize)
             message = await prepare_core_reply_voice_message(
                 event, current, message,
                 renderer=getattr(session, "voice", None),
@@ -612,9 +645,11 @@ class PrivateCompanionV2StagingPlugin(Star):
             return prepare_core_reply_outbound_message(
                 event, current, message, segment_index=segment_index)
 
+        observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
         prepare_core_reply_event(event, prepared, authorize=authorize_core_send,
                                  on_denied=note_core_send_denied, on_sent=observe_core_send,
-                                 on_delivery=observe_core_delivery, prepare_send=prepare_core_voice)
+                                 on_delivery=observe_core_delivery, prepare_send=prepare_core_voice,
+                                 media_submit=getattr(observer, "submit", None))
         observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
         media = getattr(observer, "media", None)
         if callable(media):
@@ -655,6 +690,10 @@ class PrivateCompanionV2StagingPlugin(Star):
         logger.info("[CompanionV2] 交由 AstrBot 核心回复管线 event_ref=%s channel=%s",
                     event_ref, channel)
 
+    @filter.on_waiting_llm_request()
+    async def observe_companion_core_waiting_llm_request(self, event: AstrMessageEvent):
+        observe_core_waiting_llm_request(event, now=self.staging.now)
+
     @filter.on_llm_request(priority=250000)
     async def prepare_companion_core_request(self, event: AstrMessageEvent, req):
         state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
@@ -681,6 +720,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             event.stop_event()
             return
         with measure_core_preparation(event, "prompt_injection", now=self.staging.now):
+            inject_core_reply_perception_policy(event, req)
             inject_core_reply_prompt(event, req)
         mark_core_reply_inflight(event)
         application = getattr(getattr(self.staging, "session", None), "application", None)
@@ -696,22 +736,36 @@ class PrivateCompanionV2StagingPlugin(Star):
         prepare_native_host_request(self.staging, event, req)
         with measure_core_preparation(event, "send_tool_injection", now=self.staging.now):
             inject_core_reply_send_tool(event, req, submit=getattr(observer, "submit", None))
+        try:
+            with measure_core_preparation(event, "perception_injection", now=self.staging.now):
+                await inject_core_reply_perception_context(
+                    event, req, native_context=getattr(self.staging, "context", None))
+        except Exception as error:
+            logger.warning("[CompanionV2] 核心回复感知信息暂不可用，继续回复 error_type=%s",
+                           type(error).__name__)
         if application is not None:
             try:
-                prepare_core_reply_telemetry(event, req, application=application,
-                    submit=getattr(observer, "submit", None), now=self.staging.now)
+                with measure_core_preparation(event, "telemetry_capture", now=self.staging.now):
+                    prepare_core_reply_telemetry(event, req, application=application,
+                        submit=getattr(observer, "submit", None), now=self.staging.now)
             except Exception as error:
                 logger.warning("[CompanionV2] 核心回复统计暂不可用，继续回复 error_type=%s", type(error).__name__)
         from .astrbot_host.core_reply_presentation import capture_core_reply_tool_names
         capture_core_reply_tool_names(event, req)
 
-    @filter.on_agent_begin()
+    @filter.on_agent_begin(priority=-1000000)
     async def observe_companion_core_agent_begin(self, event: AstrMessageEvent, run_context):
+        from .astrbot_host.core_reply_media_prompt import finalize_core_reply_media_prompt
+        finalize_core_reply_media_prompt(event, run_context)
+        from .astrbot_host.core_reply_voice_authoring import prepare_core_voice_authoring
+        prepare_core_voice_authoring(event, run_context)
         observe_core_tool_dispatch_begin(event, run_context)
         observe_core_agent_begin(event, run_context)
 
     @filter.on_agent_done()
     async def observe_companion_core_agent_done(self, event: AstrMessageEvent, run_context, response):
+        from .astrbot_host.core_reply_voice_authoring import restore_core_voice_authoring
+        restore_core_voice_authoring(event)
         restore_core_tool_dispatch(event, run_context)
         observe_core_agent_done(event, run_context, response)
         state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
@@ -731,6 +785,8 @@ class PrivateCompanionV2StagingPlugin(Star):
 
     @filter.after_message_sent(priority=1000000)
     async def observe_companion_core_reply_sent(self, event: AstrMessageEvent):
+        from .astrbot_host.core_reply_voice_authoring import restore_core_voice_authoring
+        restore_core_voice_authoring(event)
         state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
         if isinstance(state, dict):
             if not state.get("delivery_guard_active"):
@@ -788,6 +844,10 @@ class PrivateCompanionV2StagingPlugin(Star):
 
     @filter.on_llm_response()
     async def observe_companion_model_session(self, event: AstrMessageEvent, response):
+        from .astrbot_host.core_reply_reaction_delivery import observe_core_reaction_response
+        observe_core_reaction_response(event, response)
+        from .astrbot_host.core_reply_voice import observe_core_voice_response
+        observe_core_voice_response(event, response)
         observe_native_host_response(self.staging, event, response)
         observe_core_llm_response(event, response)
         if response is not None and getattr(response, "role", None) == "assistant":

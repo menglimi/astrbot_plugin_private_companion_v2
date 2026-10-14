@@ -3,11 +3,39 @@
 from __future__ import annotations
 
 import time
+import json
+
+from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+from companion_v2.execution.models import TaskContext, encode
+from companion_v2.foundation.refs import ScopeKind
 
 
 class GameHostEvents:
     def __init__(self, runtime, current):
         self.runtime, self.current = runtime, current
+
+    def _native_facts(self, event, sender):
+        provider = getattr(self.runtime, "_native_provider", None)
+        getter = getattr(event, "get_extra", None)
+        state = getter(CORE_REPLY_CONTEXT_EXTRA) if callable(getter) else None
+        prepared = state.get("prepared") if isinstance(state, dict) else None
+        context = prepared.get("context") if isinstance(prepared, dict) else None
+        if (provider is None or not self.current() or not isinstance(context, TaskContext)
+                or context.scope.kind is not ScopeKind.PRIVATE
+                or context.actor.principal.native_account_id != sender
+                or context.scope.native_scope_id != sender
+                or context.audience.recipients != (context.actor.subject,)):
+            return []
+        application = getattr(getattr(self.runtime.controller, "session", None), "application", None)
+        external = getattr(getattr(application, "tools", None), "external", None)
+        if external is None:
+            return []
+        available = {tool.action for tool in external.catalog_for(context)}
+        if not available:
+            return []
+        return provider.conversation_snapshot(json.loads(encode(context)), authorized_actions=available,
+            now=time.time(), result_ttl=self.runtime.recent_game_result_ttl_seconds,
+            before_read=self.current)
 
     def request(self, event, req):
         runtime = self.runtime
@@ -35,12 +63,21 @@ class GameHostEvents:
                 recent_results.pop(session_id, None)
             else:
                 lines.append(recent.summary)
+        facts = self._native_facts(event, sender)
+        if facts:
+            lines.append("当前角色与当前私聊的原生网页/聊天共用对局实况：" +
+                         json.dumps(facts, ensure_ascii=False, separators=(",", ":")))
         if lines:
             req.system_prompt = (current + "\n\n" + "\n".join([
                 marker,
-                "以下是当前私聊用户的游戏房间临时只读事实。用户谈及当前或刚结束的游戏时自然接话；"
+                "以下是当前私聊用户与当前角色的游戏只读实况。player 是当前用户，bot 是你这个当前角色。"
+                "已结束的 status 与真实 outcome 优先于历史中尚未开局、还在邀请或轮到谁的旧描述。"
+                "用户给出简短回应时，也可结合最近对局自然承接；不需要特定词或再次询问输赢才理解实况，"
+                "但不要把对局结果当作用户情绪的唯一原因。ended_at 为空表示旧记录未保存结束时间，不猜发生时刻。"
+                "用户谈及当前或最近结束的游戏时自然接话；"
                 "无关话题无需提起。这里没有 WebUI 对话记录，不猜测未列出的棋局细节、暗牌或海龟汤汤底。",
                 *lines,
-                "房间操作仍通过 WebUI 完成；仅凭聊天或这些状态资料，不能声称已经落子、投降、悔棋或改变房间。",
+                "具体游戏操作通过已授权工具或 WebUI 完成；以实际操作结果为准，"
+                "只读状态本身不代表本轮执行过落子、投降、悔棋或改变房间。",
                 "</game_companion_private_context>",
             ])).strip()

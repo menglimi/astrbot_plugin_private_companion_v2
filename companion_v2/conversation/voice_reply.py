@@ -9,16 +9,17 @@ import re
 from companion_v2.conversation.segment_control import controlled_parts
 from companion_v2.execution.models import digest, stamp
 from companion_v2.foundation.refs import ScopeKind
+from .voice_markup import slice_speech, visible_speech
 
 
 _PROTOCOL_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
 _PROTOCOL_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
 _TAG = re.compile(
-    rf"(?is){_PROTOCOL_LT}\s*pc_tts\b[^>]*?{_PROTOCOL_GT}(.*?)"
-    rf"{_PROTOCOL_LT}\s*/\s*pc_tts\s*{_PROTOCOL_GT}"
+    rf"(?is){_PROTOCOL_LT}\s*(?P<tag>pc_tts|tts)\b[^>]*?{_PROTOCOL_GT}(?P<speech>.*?)"
+    rf"{_PROTOCOL_LT}\s*/\s*(?P=tag)\s*{_PROTOCOL_GT}"
 )
 _STRAY_TAG = re.compile(
-    rf"(?is){_PROTOCOL_LT}\s*/?\s*pc_tts\b[^>]*?{_PROTOCOL_GT}"
+    rf"(?is){_PROTOCOL_LT}\s*/?\s*(?:pc_tts|tts)\b[^>]*?{_PROTOCOL_GT}"
 )
 _TURN_LANGUAGE_NAMES = {
     "ja": r"(?:日语|日語|日文|日本语|日本語|japanese)",
@@ -83,7 +84,7 @@ def strip_voice_markup(text):
     """Remove internal voice wrappers while keeping their authored text visible."""
     if type(text) is not str:
         return text
-    return _STRAY_TAG.sub("", _TAG.sub(lambda match: match.group(1), text))
+    return _STRAY_TAG.sub("", _TAG.sub(lambda match: visible_speech(match.group("speech")), text))
 
 
 def _has_chinese_translation(text):
@@ -153,16 +154,29 @@ class VoiceReplyPolicy:
     def instruction(self):
         if self.generation_mode != "model_tag" and self.trigger_mode != "adaptive":
             return ""
-        prompt = (
-            "本轮可自行决定哪些短句适合用语音表达。仅将需要朗读的原文包在 <pc_tts> 与 </pc_tts> 中；"
-            "标签内不得放分段标记、代码、链接或图片说明。没有合适内容就不用标签。"
-            "语音标签只是内部格式；不需要语音时直接写普通正文，不要在正文中解释或复述标签。"
+        prompt = "仅将实际朗读的原文包在 <pc_tts> 与 </pc_tts> 中；标签内不放分段标记、代码、链接或图片说明。"
+        if self.trigger_mode == "request":
+            prompt = "用户本轮已提出语音请求，用语音标签承载实际说给对方听的完整回应。" + prompt
+        elif self.trigger_mode == "always":
+            prompt = "本轮采用语音回复，普通聊天短句也用语音标签承载完整的口语回应，无需等用户再次要求语音。" + prompt
+        else:
+            prompt = "本轮按语境选择语音，把适合亲口说的短句写入语音标签；没有适合朗读的内容时直接写普通正文。" + prompt
+        prompt += (
+            "语音标签是程序消费的内部呈现格式，不向用户解释标签，也不把标签当作代码展示。"
+            "代码、链接等适合阅读的内容放在标签外，正常口语回应仍按本轮语音方式呈现。"
+            "对方本轮明确要求只用文字时，尊重这次要求。"
         )
+        prompt += f"每个朗读片段尽量在 {self.max_speech_chars} 字内，长内容在自然语意停顿处分为多个语音标签。"
         if self.language != "zh":
             label = "日语" if self.language == "ja" else "英语"
             prompt += f"语音标签内用自然{label}，完整表达标签承载的意思。"
             if self.foreign_text_mode == "translation":
                 prompt += "每个语音标签后紧接与该片段完整对应的自然中文译文，不加标题、不省略关键信息；译文作为可见文字。"
+                if self.trigger_mode in {"always", "request"}:
+                    prompt += "中文聊天正文都对应相邻的朗读片段，不在译文后另加没有朗读的口语回应；代码和链接可单独保留。"
+                example = ("<pc_tts>おやすみ。ゆっくり休んでね。</pc_tts>晚安，好好休息呀。"
+                           if self.language == "ja" else "<pc_tts>Good night. Rest well.</pc_tts>晚安，好好休息呀。")
+                prompt += "格式示例：" + example + " 示例只说明格式，实际内容和语气按当前对话生成。"
             elif self.foreign_text_mode == "bilingual":
                 prompt += "每个语音标签后紧接完整自然中文译文，不加标题；可见文字保留外语原文和中文译文。"
             else:
@@ -186,8 +200,10 @@ class VoiceReplyPolicy:
 def capability_instruction(policy):
     language = {"zh": "中文", "ja": "日语", "en": "英语"}[policy.language]
     delivery = "优先语音呈现" if policy.delivery_mode == "voice_only" else "语音与文字并行"
-    return (f"本轮已启用可选语音呈现策略：目标语种{language}，{delivery}。"
-            "对话模型只生成文字；语音在投递时由 TTS Provider 尽力合成，可能因触发条件、频率或合成失败而退回文字。"
+    mode = {"always": "语音回复", "request": "应用户请求语音回复", "adaptive": "按语境选择语音"}[policy.trigger_mode]
+    return (f"本轮呈现方式：{mode}，目标语种{language}，{delivery}。"
+            "本轮设置已通过开关和触发条件检查；人格中旧的仅文字、需另行请求语音等呈现规则由本轮设置替代，角色身份和语气仍遵循人格。"
+            "对话模型生成朗读文字，程序在投递时交给 TTS Provider 合成；合成失败时退回文字。"
             "没有成功投递结果前，不要声称已经发送语音。")
 
 
@@ -200,13 +216,13 @@ def separate_spoken(text, policy):
     visible, spoken, cursor = [], [], 0
     for index, match in enumerate(matches):
         visible.append(text[cursor:match.start()])
-        speech = match.group(1).strip()
+        speech = match.group("speech").strip()
         if speech:
             spoken.append((len(_STRAY_TAG.sub("", "".join(visible))), speech))
         following = text[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(text)]
         translated = translate and _has_chinese_translation(following)
         if not translated:
-            visible.append(match.group(1))
+            visible.append(visible_speech(match.group("speech")))
         cursor = match.end()
     visible.append(text[cursor:])
     return _STRAY_TAG.sub("", "".join(visible)), tuple(spoken)
@@ -247,7 +263,7 @@ def speech_decisions(text, parts, spans, policy, *, candidates=None):
             decisions.append(("", "segment_skipped"))
         elif not candidate:
             decisions.append(("", "no_speech"))
-        elif len(candidate) > policy.max_speech_chars:
+        elif len(visible_speech(candidate)) > policy.max_speech_chars:
             decisions.append(("", "too_long"))
         else:
             decisions.append((candidate, "planned"))
@@ -265,6 +281,29 @@ def eligible(policy, *, input_text, kind, batch_id):
             return False
     chance = policy.chance(kind)
     return chance >= 1 or chance > 0 and int(digest(batch_id)[:12], 16) / 0xFFFFFFFFFFFF < chance
+
+
+def speech_chunks(text, maximum):
+    """Split at spoken pauses while keeping performance directions intact."""
+    chunks = []
+    source = text.strip()
+    remaining = visible_speech(source)
+    if len(remaining) <= maximum:
+        return (source,) if source else ()
+    start = 0
+    while len(remaining) > maximum:
+        pauses = tuple(re.finditer(r"[。！？!?；;\n]|[.](?=\s|$)|[，,](?=\s|[\u4e00-\u9fff\u3040-\u30ff])", remaining[:maximum]))
+        boundary = pauses[-1].end() if pauses else remaining.rfind(" ", 0, maximum + 1)
+        if boundary <= 0:
+            boundary = maximum
+        chunks.append(slice_speech(source, start, start + boundary).strip())
+        start += boundary
+        tail = remaining[boundary:]
+        start += len(tail) - len(tail.lstrip())
+        remaining = tail.lstrip()
+    if remaining:
+        chunks.append(slice_speech(source, start, start + len(remaining)).strip())
+    return tuple(chunk for chunk in chunks if chunk)
 
 
 class VoiceReplyDelivery:

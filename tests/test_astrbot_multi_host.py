@@ -28,6 +28,8 @@ from astrbot_host.settings import INSTALLATION_PREFIX
 from companion_v2.storage.runtime import StorageRuntime
 from astrbot_host.multi_api import PREFIX as MULTI_HOST_PREFIX
 from astrbot_host.host_options_api import HostOptionsWebAPI
+from astrbot_host.native_perception_api import PREFIX as NATIVE_PERCEPTION_PREFIX
+from astrbot_host.native import resolve_native_persona_selection
 
 
 class _Query(dict):
@@ -66,6 +68,24 @@ class MultiSettingsTests(unittest.TestCase):
         self.assertEqual(MultiHostSettings.parse(original), MultiHostSettings.parse(reordered))
 
 
+class NativePersonaSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_resolver_result_uses_the_configured_window_default(self):
+        configuration = {
+            "agent_runner": {"runner_type": "local", "config": {"persona": {"persona_id": "private-persona"}}},
+            "provider_settings": {},
+        }
+        context = NS(
+            persona_manager=NS(resolve_selected_persona=AsyncMock(return_value=(None, None, None, False))),
+            get_platform_inst=lambda _platform: NS(meta=lambda: NS(name="aiocqhttp")),
+            get_config=lambda **_kwargs: configuration,
+        )
+
+        selected = await resolve_native_persona_selection(
+            context, "qq-main:FriendMessage:200", "")
+
+        self.assertEqual(selected, "private-persona")
+
+
 class LegacyStagingReceiptTests(unittest.TestCase):
     def authority(self, receipt):
         settings = MultiHostSettings.parse(multi_config())
@@ -93,6 +113,13 @@ class LegacyStagingReceiptTests(unittest.TestCase):
 
 
 class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_profile_initialization_does_not_load_the_global_identity_grant_snapshot(self):
+        with patch("companion_v2.identity_policy.repository.PersistentIdentityDirectory.snapshot",
+                   side_effect=AssertionError("profile provisioning should read only the current subject")):
+            result = await self.controller.initialize_profile()
+
+        self.assertTrue(result.is_success, result.failure)
+
     async def test_profile_open_does_not_block_host_event_loop(self):
         started, release = threading.Event(), threading.Event()
         original = StorageRuntime._open_connection
@@ -124,6 +151,59 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(current["prompt"], prompt)
         self.assertEqual(self.native.role_lookups - lookups, 0)
+
+    async def test_warmed_window_snapshot_selects_its_role_without_native_persona_reads(self):
+        await self.start_host()
+        bridge = self.controller.session.bridge
+        umo = "qq-main:FriendMessage:200"
+        account = bridge.accounts[("qq-main", "100")]
+        conversation_id = await self.native.conversation_manager.get_curr_conversation_id(umo)
+        self.controller.session_topology.update_persona_selection_snapshot(
+            umo, "100", "bot-a", "second", "role-b", conversation_id)
+        bridge.session_persona_override_lookup = None
+        self.assertIsNotNone(bridge.persona_window_snapshot_lookup)
+        self.assertIsNone(bridge.session_persona_override_lookup)
+        self.assertEqual(bridge.persona_window_snapshot_lookup(umo, "100")["persona_id"], "second")
+        bridge.persona_snapshot_lookup = AsyncMock(side_effect=AssertionError("conversation database read"))
+        bridge.persona_selection_lookup = AsyncMock(side_effect=AssertionError("persona resolver call"))
+
+        snapshot = await bridge._selected_role_snapshot(account, umo)
+
+        self.assertEqual((snapshot[0], snapshot[1], snapshot[3].role.subject_id),
+                         (conversation_id, "second", "role-b"))
+        self.assertEqual(snapshot[2]["name"], "second")
+        bridge.persona_snapshot_lookup.assert_not_awaited()
+        bridge.persona_selection_lookup.assert_not_awaited()
+
+    async def test_stale_window_snapshot_refreshes_after_conversation_reset(self):
+        async def selected_persona_id(context, umo, conversation_id):
+            self.assertIs(context, self.native)
+            self.assertEqual((umo, conversation_id), ("qq-main:FriendMessage:200", "conversation-after-reset"))
+            return "original"
+
+        self.controller.native_types = replace(self.controller.native_types,
+            persona_snapshot_lookup=selected_persona_id)
+        await self.start_host()
+        bridge = self.controller.session.bridge
+        umo = "qq-main:FriendMessage:200"
+        account = bridge.accounts[("qq-main", "100")]
+        old_conversation_id = await self.native.conversation_manager.get_curr_conversation_id(umo)
+        self.controller.session_topology.update_persona_selection_snapshot(
+            umo, "100", "bot-a", "second", "role-b", old_conversation_id)
+        new_conversation_id = "conversation-after-reset"
+        bridge.context.conversation_manager.get_curr_conversation_id = AsyncMock(
+            side_effect=(new_conversation_id, new_conversation_id))
+        bridge.context.conversation_manager.get_conversation = AsyncMock(
+            side_effect=AssertionError("conversation history must not be loaded"))
+
+        snapshot = await bridge._selected_role_snapshot(account, umo)
+
+        self.assertEqual((snapshot[0], snapshot[1], snapshot[3].role.subject_id),
+                         (new_conversation_id, "original", "role-a"))
+        refreshed = self.controller.session_topology.persona_selection_snapshot(umo, "100")
+        self.assertEqual((refreshed["persona_id"], refreshed["conversation_id"]),
+                         ("original", new_conversation_id))
+        bridge.context.conversation_manager.get_conversation.assert_not_awaited()
 
     async def test_verified_runtime_change_is_acknowledged_once_across_authority_recreation(self):
         (await self.controller.initialize_profile()).unwrap()
@@ -298,6 +378,7 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             for suffix in ("/status", "/probe", "/initialize", "/start", "/stop",
                            "/authorize-delivery", "/revoke-delivery")
         }
+        materials_route = NATIVE_PERCEPTION_PREFIX + "/materials"
         self.assertTrue({
             "/astrbot_plugin_private_companion_v2/host-options",
             "/astrbot_plugin_private_companion_v2/host-options/voice",
@@ -310,6 +391,7 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                            if route == "/astrbot_plugin_private_companion_v2/storage"}
         self.assertEqual(storage_methods, {("GET",), ("POST",)})
         self.assertTrue(expected.issubset(registered))
+        self.assertIn(materials_route, registered)
         expected_memory_routes = {
             role["memory_api"] for target in self.controller.web_api.target_inventory()
             for role in target["roles"] if role["memory_api"] is not None
@@ -329,6 +411,11 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await registered[MULTI_HOST_PREFIX + "/probe"]())["status"], "ok")
             self.assertEqual((await registered[MULTI_HOST_PREFIX + "/initialize"]())["status"], "ok")
             self.assertEqual((await registered[MULTI_HOST_PREFIX + "/start"]())["status"], "ok")
+            with patch("astrbot_host.native_perception_api.request", request):
+                materials = await registered[materials_route]()
+            self.assertEqual(materials["status"], "ok", materials)
+            self.assertEqual(materials["data"]["items"], [])
+            self.assertEqual(materials["data"]["history_count"], 0)
             for route in memory_routes:
                 memory_settings = next(
                     handler for path, handler in registered.items()
@@ -397,16 +484,28 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_global_probe_does_not_read_window_persona_override(self):
         entered = asyncio.Event()
+        conversation_lookups = {}
+        manager = self.native.conversation_manager
+        current = manager.get_curr_conversation_id
+
+        async def tracked_conversation(umo):
+            conversation_lookups[umo] = conversation_lookups.get(umo, 0) + 1
+            return await current(umo)
 
         async def unavailable(_umo):
             entered.set()
             raise AssertionError("global startup must not depend on a window persona override")
 
+        manager.get_curr_conversation_id = tracked_conversation
         self.controller.native_types = replace(
             self.controller.native_types, session_persona_override_lookup=unavailable)
-        result = await self.controller.probe()
+        with patch.object(self.controller.session_topology, "inventory_report",
+                          AsyncMock(side_effect=AssertionError("global probe must not read window personas"))) as inventory:
+            result = await self.controller.probe()
         self.assertTrue(result.is_success, result.failure)
         self.assertFalse(entered.is_set())
+        self.assertEqual(set(conversation_lookups.values()), {2})
+        inventory.assert_not_awaited()
         self.assertFalse(self.controller._lifecycle_lock.locked())
 
     async def test_start_uses_the_current_host_persona_when_no_v2_override_exists(self):

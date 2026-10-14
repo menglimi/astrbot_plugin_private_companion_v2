@@ -6,6 +6,33 @@ from .native_context import resolve_room_context, room_background
 
 class GameRoomsMethods:
 
+    async def native_game_room_access(self, game_id: str, *, before_dispatch) -> dict[str, Any]:
+        """Publish the actual chat game's browser view to its authorized caller."""
+        before_dispatch()
+        if not self.server_enabled:
+            return {'state': 'unavailable', 'reason': 'game_room_server_disabled'}
+        public_access = None
+        try:
+            base_url = await self._ensure_mobile_room_access()
+        except (RuntimeError, OSError) as exc:
+            # A public tunnel failure must not remove the confirmed local game.
+            # The caller receives an explicitly local entry, never a broken
+            # public URL or a claim that a phone can reach this computer.
+            before_dispatch()
+            if not self.room_server.running:
+                await self.room_server.start()
+            base_url = self.room_server.local_base_url
+            public_access = 'unavailable'
+            logger.warning('[GameCompanion] 原生棋局公网入口未就绪，保留本机房间: %s', exc)
+        before_dispatch()
+        ticket = self._native_provider.issue_web_ticket(game_id)
+        access = {'state': 'ready', 'url': f"{base_url.rstrip('/')}/native/{quote(ticket, safe='')}",
+                  'access_scope': 'same_device' if urlsplit(base_url).hostname in
+                      {'127.0.0.1', 'localhost', '::1'} else 'network'}
+        if public_access:
+            access['public_access'] = public_access
+        return access
+
     async def mobile_create_native_room(self, user_id: str, game_type: str, *, via_mobile_gateway: bool=False) -> dict[str, Any]:
         """Create a native V2 game behind the same paired mobile room flow as V1."""
         normalized_user = str(user_id or '').strip()[:120]

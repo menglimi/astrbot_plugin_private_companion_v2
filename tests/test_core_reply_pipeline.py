@@ -17,7 +17,9 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import ProviderRequest
+from astrbot.core.provider.entities import LLMResponse
 from companion_v2.conversation.segmentation import SegmentationPolicy
+from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 from companion_v2.foundation.outcome import Outcome
 from astrbot_host.core_reply import sent_core_text
 
@@ -46,24 +48,32 @@ class PipelineEvent(AstrMessageEvent):
 
 
 class CoreAgentFixture:
-    def __init__(self, plugin, *, streaming=False):
+    def __init__(self, plugin, *, streaming=False, response_text=None):
         self.plugin, self.streaming = plugin, streaming
+        self.response_text = response_text
         self.requests = []
 
     async def process(self, event):
+        # The actual runner selects streaming before on_llm_request.
+        streaming = self.streaming and event.get_extra("enable_streaming") is not False
         req = ProviderRequest(prompt=event.message_str, system_prompt="AstrBot 当前人格")
         await self.plugin.prepare_companion_core_request(event, req)
         self.requests.append(req)
         if event.is_stopped():
             return
-        if self.streaming and event.get_extra("enable_streaming") is not False:
+        if streaming:
             async def chunks():
                 yield MessageEventResult().message("嘿嘿，")
                 yield MessageEventResult().message("再摸一下！")
             result = MessageEventResult().set_result_content_type(ResultContentType.STREAMING_RESULT)
             result.set_async_stream(chunks())
         else:
-            result = MessageEventResult().message("嘿嘿！\n\n再摸一下！")
+            text = self.response_text if self.response_text is not None else "嘿嘿！\n\n再摸一下！"
+            if self.response_text is not None:
+                response = LLMResponse(role="assistant", completion_text=text)
+                await self.plugin.observe_companion_model_session(event, response)
+                text = response.completion_text
+            result = MessageEventResult().message(text)
             result.set_result_content_type(ResultContentType.LLM_RESULT)
         event.set_result(result)
         yield
@@ -71,7 +81,7 @@ class CoreAgentFixture:
 
 class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def run_pipeline(self, *, streaming=False, authorize=None, segmented=False, tts=False, dual=False,
-                           presentation=None, companion_segmenting=False):
+                           presentation=None, companion_segmenting=False, voice_policy=None, response_text=None):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         target = NS(key="target", target_id="target")
         observed = []
@@ -79,6 +89,7 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
             "context": object(), "instruction": "V2 人格资料", "prompt_instruction": "自然分段",
             "target_id": "target", "channel": "private", "event_id": "core-pipeline-1",
             "presentation_settings": presentation,
+            "voice_reply_policy": voice_policy,
         }
         if companion_segmenting:
             policy = SegmentationPolicy(rule_mode="paragraphs", min_segment_chars=1, max_segments=3)
@@ -92,7 +103,10 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
             authorize_core_reply=authorize or AsyncMock(return_value=Outcome.success(True)),
             receive_claimed=AsyncMock(), runtime=None, now=lambda: None,
             session=NS(core_reply_observations=NS(outputs=observed,
-                output=lambda prepared, text, **kwargs: observed.append((text, kwargs.get("state"))))),
+                output=lambda prepared, text, **kwargs: observed.append((text, kwargs["state"]))
+                    if kwargs.get("state") == "send_returned" else None),
+                voice=AsyncMock(return_value={"type": "record", "data": {"file": "base64://YQ=="}}),
+                voice_delivery=None),
         )
         event = PipelineEvent()
         await plugin.receive_companion_message(event)
@@ -106,12 +120,17 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
         config["platform_settings"]["segmented_reply"].update(
             enable=segmented, split_mode="regex", regex=r"[^\n]+", interval="0,0", interval_method="random",
         )
+        async def get_tts_provider(_umo):
+            return (NS(get_audio=AsyncMock(return_value="native-test-speech.wav")) if tts else None)
+
         pipeline_context = NS(astrbot_config=config,
-                              plugin_manager=NS(context=NS(get_using_tts_provider=lambda _: NS(
-                                  get_audio=AsyncMock(return_value="native-test-speech.wav")) if tts else None)))
+                              plugin_manager=NS(context=NS(
+                                  get_using_tts_provider=lambda _: NS(
+                                      get_audio=AsyncMock(return_value="native-test-speech.wav")) if tts else None,
+                                  get_using_tts_provider_async=get_tts_provider)))
         process = ProcessStage()
         process.ctx = pipeline_context
-        agent = CoreAgentFixture(plugin, streaming=streaming)
+        agent = CoreAgentFixture(plugin, streaming=streaming, response_text=response_text)
         process.agent_sub_stage = agent
         decorate = decorate_module.ResultDecorateStage()
         await decorate.initialize(pipeline_context)
@@ -219,6 +238,42 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.sent, [])
         self.assertEqual(event.streams, [])
         plugin.staging.receive_claimed.assert_not_awaited()
+
+    async def test_v2_japanese_voice_survives_native_regex_and_early_stream_selection(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        plugin, event, agent = await self.run_pipeline(streaming=True, segmented=True,
+            companion_segmenting=True, voice_policy=policy,
+            response_text="<pc_tts>こんにちは。</pc_tts>你好呀！\n\n<pc_tts>もう一度。</pc_tts>再来一次吧！")
+        self.assertEqual(event.streams, [])
+        self.assertEqual([call.args[1] for call in plugin.staging.session.voice.await_args_list],
+                         ["こんにちは。", "もう一度。"])
+        components = [c for chain in event.sent for c in chain]
+        self.assertEqual([c.text for c in components if isinstance(c, Plain)], ["你好呀！", "再来一次吧！"])
+        self.assertEqual([c.text for c in components if isinstance(c, Record)], ["こんにちは。", "もう一度。"])
+        self.assertEqual(sum(isinstance(c, Image) for c in components), 1)
+        self.assertTrue(all(len(chain) == 1 for chain in event.sent if any(isinstance(c, Record) for c in chain)))
+        self.assertIn("<pc_tts>", agent.requests[0].system_prompt)
+
+    async def test_v2_tagged_original_speech_is_not_lost_when_native_regex_splits_the_span(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag")
+        plugin, event, _ = await self.run_pipeline(segmented=True, companion_segmenting=True,
+            voice_policy=policy, response_text="<pc_tts>你好呀！\n再来一次吧！</pc_tts>")
+        self.assertEqual([call.args[1] for call in plugin.staging.session.voice.await_args_list],
+                         ["你好呀！", "再来一次吧！"])
+        self.assertEqual([c.text for chain in event.sent for c in chain if isinstance(c, Plain)],
+                         ["你好呀！", "再来一次吧！"])
+
+    async def test_translation_replacement_keeps_the_authored_foreign_voice(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        for native in (False, True):
+            plugin, event, _ = await self.run_pipeline(segmented=native, companion_segmenting=True,
+                voice_policy=policy, response_text="<pc_tts>こんにちは。</pc_tts>你好呀！\n\n<pc_tts>もう一度。</pc_tts>再来一次吧！",
+                presentation={"content_replacement_enabled": True,
+                              "content_replacements": '["你好呀 => 哈喽", "再来一次吧 => 再摸摸"]'})
+            self.assertEqual([call.args[1] for call in plugin.staging.session.voice.await_args_list],
+                             ["こんにちは。", "もう一度。"])
+            self.assertEqual([c.text for chain in event.sent for c in chain if isinstance(c, Plain)],
+                             ["哈喽！", "再摸摸！"])
 
 
 if __name__ == "__main__":

@@ -1,12 +1,14 @@
 """Current role-location weather through the private automatic contact path."""
 
 from datetime import timedelta
+from dataclasses import replace
 import json
 import unittest
 
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.proactive.external_materials import WeatherSnapshot
 from companion_v2.proactive.weather_events import SOURCE_OWNER
+from companion_v2.execution.models import TaskError
 from companion_v2.role_work.state.management import StateManagement
 from tests.contact_schedule_support import ContactScheduleFixture
 from tests.test_planning_weather import LOCATION, LOCATION_JSON
@@ -14,6 +16,25 @@ from tests.test_role_tool_loop import answered
 
 
 class WeatherContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_real_weather_diagnostic_fetches_outside_daily_slot_and_validates_qweather(self):
+        app, context, manager = await self.setup_weather()
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        events = app.contact_schedule.weather_events
+        events.port = SimpleNamespace(provider="qweather", fetch=AsyncMock(return_value=replace(self.snapshot(), provider="qweather")))
+        preferences = self.preferences(app, context)
+        self.assertIsNone(events.select(context, preferences, self.clock.now()))
+        candidate, stages = await events.diagnostic_candidate(context, preferences, test_id="weather-test")
+        events.port.fetch.assert_awaited_once_with(LOCATION)
+        self.assertEqual(stages[0]["stage"], "weather_fetch")
+        events.validate(context, candidate[2], self.clock.now())
+        self.assertEqual(events.retry_at, {})
+        before = manager.status(self.core).unwrap()
+        manager.command(self.core, dict(action="configure", operation_key="change-weather-location",
+            edit_token=before["edit_token"], role_edit_token=before["role_edit_token"], changes={"planning_weather_location": ""})).unwrap()
+        with self.assertRaises(TaskError):
+            events.validate(context, candidate[2], self.clock.now())
+
     async def setup_weather(self, *, enabled=True, location=LOCATION_JSON):
         host, batch = await self.scheduled()
         self.host_instance = host
@@ -23,7 +44,7 @@ class WeatherContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
         if location:
             before = manager.status(self.core).unwrap()
             manager.command(self.core, dict(action="configure", operation_key="weather-location",
-                edit_token=before["edit_token"], changes={"planning_weather_location": location})).unwrap()
+                edit_token=before["edit_token"], role_edit_token=before["role_edit_token"], changes={"planning_weather_location": location})).unwrap()
         settings = {"chat.enabled": False, "weather_checkin_time": "08:01"}
         if enabled is not None:
             settings["weather_checkin_enabled"] = enabled
@@ -155,7 +176,7 @@ class WeatherContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
             if isinstance(envelope.original.event, BackgroundPromptTrigger):
                 before = manager.status(self.core).unwrap()
                 manager.command(self.core, dict(action="configure", operation_key="new-weather-location",
-                    edit_token=before["edit_token"], changes={"planning_weather_location":
+                    edit_token=before["edit_token"], role_edit_token=before["role_edit_token"], changes={"planning_weather_location":
                         json.dumps({"name": "新城市", "latitude": 39.9, "longitude": 116.4},
                                    ensure_ascii=False)})).unwrap()
                 return answered('{"decision":"send","text":"旧城市天气"}')

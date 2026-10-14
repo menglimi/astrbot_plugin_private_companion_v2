@@ -33,6 +33,7 @@ from .legacy_group_data_api import LegacyGroupDataWebAPI
 from .backup_api import BackupWebAPI
 from .reality_access_api import RealityAccessWebAPI, PREFIX as REALITY_ACCESS_PREFIX
 from .screen_access_api import ScreenAccessWebAPI, PREFIX as SCREEN_ACCESS_PREFIX
+from .game_access_api import GameAccessWebAPI, PREFIX as GAME_ACCESS_PREFIX
 from .image_material_api import ImageMaterialsWebAPI, PREFIX as IMAGE_MATERIAL_PREFIX
 from .qzone_api import QzoneWebAPI, PREFIX as QZONE_PREFIX
 from .host_options_api import HostOptionsWebAPI
@@ -143,6 +144,8 @@ class MultiHostWebAPI:
                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/reality-access"),
              "screen_access_api": (None if isinstance(target, GroupTarget) else
                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/screen-access"),
+             "game_access_api": (None if isinstance(target, GroupTarget) else
+                           PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/game-access"),
              "qzone_extension_api": (None if isinstance(target, GroupTarget) else
                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/qzone-extension"),
              "image_material_api": (None if isinstance(target, GroupTarget) else
@@ -239,6 +242,9 @@ class MultiHostWebAPI:
         # Shared defaults stay on an installation route, away from selected chats.
         routes += ConfigurationWebAPI(InstallationControllerView(self.controller),
             allowed_sections=INSTALLATION_CONFIGURATION_SECTIONS).routes()
+        installation_perception = NativePerceptionWebAPI(InstallationControllerView(self.controller))
+        routes.append((NATIVE_PERCEPTION_PREFIX + "/materials", installation_perception.material_pool,
+                       ["GET"], "Read role-wide shared materials"))
         routes.append((PREFIX + "/preview", self.api_preview, ["GET"], "Companion V2 conversation preview"))
         routes.append((PREFIX + "/batches", self.api_batches, ["GET"], "Companion V2 recent target batches"))
         for action, method in (("probe", "probe"), ("initialize", "initialize_profile"), ("start", "start"),
@@ -277,6 +283,9 @@ class MultiHostWebAPI:
                 routes.extend((role["screen_access_api"] + path.removeprefix(SCREEN_ACCESS_PREFIX),
                                handler, methods, description)
                               for path, handler, methods, description in ScreenAccessWebAPI(view).routes())
+                routes.extend((role["game_access_api"] + path.removeprefix(GAME_ACCESS_PREFIX),
+                               handler, methods, description)
+                              for path, handler, methods, description in GameAccessWebAPI(view).routes())
                 routes.extend((role["qzone_extension_api"] + path.removeprefix(QZONE_PREFIX),
                                handler, methods, description)
                               for path, handler, methods, description in QzoneWebAPI(view).routes())

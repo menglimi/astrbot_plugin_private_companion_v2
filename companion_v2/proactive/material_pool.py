@@ -226,6 +226,11 @@ def _thought_origin(data):
                 continue
             if event == "relationship_event" and type(origin[event]) is dict:
                 purpose = origin[event].get("purpose")
+                if purpose is None and origin[event].get("mode") == "slot":
+                    purpose = data.get("purpose")
+                if not isinstance(purpose, str):
+                    purposes = origin[event].get("purposes")
+                    purpose = purposes[0] if isinstance(purposes, list) and len(purposes) == 1 else None
                 return PURPOSES.get(purpose, label) if isinstance(purpose, str) else label
             if event == "news_event":
                 provenance = data.get("news_provenance")
@@ -344,7 +349,7 @@ def _contact_history(schedule, context, *, interaction=None, observed_at=None):
 
         records.sort(key=lambda item: item["sequence"])
         used_at = records[-1]["delivered_at"] if records else None
-        created_at = used_at or row["created_at"]
+        created_at = row["created_at"]
         summary = _text(data.get("thought_summary"), 120)
         purpose = data.get("purpose")
         purpose_label = PURPOSES.get(purpose, purpose) if isinstance(purpose, str) else ""
@@ -361,6 +366,33 @@ def _contact_history(schedule, context, *, interaction=None, observed_at=None):
             "captured_at": created_at,
             "expires_at": None, "usage": usage})
     return items, total
+
+
+def read_proactive_contact_traces(schedule, contexts, *, observed_at):
+    """Project pre-dispatch contact drafts and their original delivery receipts."""
+    items, total, contexts_read = [], 0, 0
+    history = getattr(getattr(schedule, "contacts", None), "history", None)
+    for context, target_label, role_label in tuple(contexts)[:128]:
+        if context.scope.kind is not ScopeKind.PRIVATE:
+            continue
+        interaction = None
+        reader = getattr(history, "interaction", None)
+        if callable(reader):
+            try:
+                interaction = reader(context, observed_at, action=CONTACT_OWNER)
+            except (TaskError, KeyError, TypeError, ValueError, UnicodeError, OSError, AttributeError):
+                interaction = None
+        rows, count = _contact_history(schedule, context, interaction=interaction, observed_at=observed_at)
+        contexts_read += 1
+        total += count
+        for item in rows:
+            item["scope"] = "window"
+            item["trace_target"] = str(target_label or "私聊目标")[:120]
+            item["trace_role"] = str(role_label or "角色")[:80]
+            items.append(item)
+    items.sort(key=lambda item: (item["captured_at"], item["id"]), reverse=True)
+    return {"observed_at": observed_at.isoformat(), "items": items[:128],
+            "count": len(items[:128]), "total_count": total, "contexts_read": contexts_read}
 
 
 def read_material_pool(schedule, context, *, observed_at, settings):

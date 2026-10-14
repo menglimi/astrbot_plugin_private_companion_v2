@@ -153,19 +153,21 @@ class PageWebAPI:
                                    "perception_native_api": PREFIX + "/perception-native",
                                    "reality_access_api": PREFIX + "/reality-access",
                                    "screen_access_api": PREFIX + "/screen-access",
+                                   "game_access_api": PREFIX + "/game-access",
                                    # QQ 空间拓展按角色安装与授权，所以它的地址也跟角色走。
                                    "qzone_extension_api": PREFIX + "/qzone-extension",
                                    "image_material_api": PREFIX + "/image-materials"}]}]
                 # A directory is navigation, not delivery authorization or a configuration dump.
                 public = [{key: target.get(key) for key in
-                    ("target_id", "scope_kind", "platform_id", "account_id", "bot_id", "participant_id", "group_id")}
+                    ("target_id", "scope_kind", "platform_id", "account_id", "bot_id", "participant_id", "group_id",
+                     "display_name", "group_name", "account_name")}
                     | {"roles": [{"role_id": role["role_id"],
                                  "role_name": role.get("role_name") or role_display_name(
                                      role["role_id"], role.get("persona_ids", [])),
                                  **({"group_memory_api": role["group_memory_api"]} if role.get("group_memory_api") else {}),
                                  **{name + "_api": role.get(name + "_api") for name in
                                     ("memory", "state", "life", "relationships", "growth", "reply", "model",
-                                     "config", "perception_native", "reality_access", "screen_access", "persona", "legacy",
+                                     "config", "perception_native", "reality_access", "screen_access", "game_access", "persona", "legacy",
                                      "qzone_extension", "image_material")}}
                                  for role in target["roles"]]} for target in targets]
             public = await display_names(controller).targets(public)

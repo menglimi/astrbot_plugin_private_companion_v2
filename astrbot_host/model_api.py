@@ -31,6 +31,7 @@ from .reply_api import ReplyWebAPI
 from .service_balance import configured_balance_port, display_amount
 from .token_sources import read_token_sources
 from .voice import _read_audio
+from .fish_audio import MODEL_OPTIONS as FISH_AUDIO_MODEL_OPTIONS
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/model"
@@ -46,12 +47,6 @@ VOICE_AUDIO_MIME_TYPES = {
     ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".opus": "audio/ogg",
     ".wav": "audio/wav", ".webm": "audio/webm",
 }
-FISH_AUDIO_MODEL_OPTIONS = [
-    {"value": "s2.1-pro-free", "label": "S2.1 Pro Free"},
-    {"value": "s2.1-pro", "label": "S2.1 Pro"},
-    {"value": "s2-pro", "label": "S2 Pro"},
-    {"value": "s1", "label": "S1 旧版"},
-]
 TTS_PROVIDER_LABELS = {
     "openai_tts_api": "OpenAI TTS(API)", "mimo_tts_api": "MiMo TTS(API)",
     "genie_tts": "Genie TTS", "edge_tts": "Edge TTS", "gsv_tts_selfhost": "GSV TTS(Local)",
@@ -217,7 +212,7 @@ def _schema_fields(source, field_metadata, provider_type=""):
         meta = field_metadata.get(key) if isinstance(field_metadata.get(key), dict) else {}
         if provider_type == "fishaudio_tts_api" and key == "model":
             meta = {**meta, "type": "string", "description": "Fish Audio 模型",
-                    "hint": "S2/S2.1 使用方括号自然语言情绪控制；S1 使用旧版圆括号控制。",
+                    "hint": "Drama 3 支持方括号表演指令及 <whisper> 等成对局部语气标签；S2/S2.1 使用方括号，S1 使用圆括号。",
                     "options": deepcopy(FISH_AUDIO_MODEL_OPTIONS)}
         raw_options = meta.get("options") if isinstance(meta.get("options"), list) else []
         labels = meta.get("labels") if isinstance(meta.get("labels"), list) else []
@@ -371,7 +366,8 @@ class ModelWebAPI:
             raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
         if layer not in ("role", "window"):
             raise TaskError("model_request_invalid", "select role defaults or this private window")
-        if request.query and (set(request.query) != {"layer"} or request.query.get("layer") != layer):
+        if request.query and (set(request.query.keys()) != {"layer"} or request.query.get("layer") != layer
+                or callable(getattr(request.query, "getlist", None)) and len(request.query.getlist("layer")) != 1):
             raise TaskError("model_request_invalid", "model routes do not accept target overrides")
         if controller._terminated:
             raise TaskError("staging_host_terminated", "plugin is stopped")

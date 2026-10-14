@@ -11,6 +11,7 @@ window.CompanionModelsPage = (() => {
     ["对话", [["conversation.reply", "对话回复", "AstrBot 核心回复与 V2 附加提示"],
       ["conversation.image_narration", "当前图片转述", "为本轮已授权图片生成简短文字描述"],
       ["conversation.video_narration", "原生视频转述", "将原视频交给支持视频输入的模型直接理解"]]],
+    ["感知", [["screen.interpretation", "屏幕解读", "分析本次已授权截图，需要支持图片的模型"]]],
     ["主动与记忆", [["proactive.compose", "主动联系", "有真实契机时组织联系内容"], ["memory.reflect", "记忆整理", "从已授权素材整理认识"]]],
     ["生活与成长", [["calendar.plan", "日程规划", "基于已有目标规划下一步"], ["role.state.maintain", "角色状态", "维护角色的连续生活状态"], ["role.reading.consume", "阅读理解", "阅读实际提供的原文"], ["role.growth.progress", "成长进展", "根据已完成确认提出进展"]]],
     ["私人书写", [["role.journal.diary", "日记", "保存私人书写"], ["role.journal.dream", "梦境", "保存梦境记录"], ["role.journal.derive", "书写整理", "整理已有文字素材"], ["role.journal.select", "素材选择", "选择本次书写素材"]]],
@@ -156,7 +157,7 @@ window.CompanionModelsPage = (() => {
   };
   async function api(method, endpoint, body, timeout = 15000) { let timer;
     try { const bridge = window.CompanionProduct.bridgeNow() || await window.CompanionProduct.bridgeFor();
-      const response = await Promise.race([method === "GET" ? bridge.apiGet(endpoint) : bridge.apiPost(endpoint, body), new Promise((_, reject) => { timer = setTimeout(() => reject(failure("bridge_timeout")), timeout); })]);
+      const response = await Promise.race([method === "GET" ? bridge.apiGet(endpoint, body) : bridge.apiPost(endpoint, body), new Promise((_, reject) => { timer = setTimeout(() => reject(failure("bridge_timeout")), timeout); })]);
       const {wrapped, value} = responseContent(response);
       if (wrapped?.status === "error") {
         const code = codeOf(wrapped) || "invalid_response";
@@ -354,7 +355,7 @@ window.CompanionModelsPage = (() => {
     if (save && task && draft) save.disabled = draft.stale || draft.pending || !dirty(task, draft); }
   /* ---------- functional actions ---------- */
   async function refresh() { const s = state, ticket = version; if (!s || s.loading || s.busy) return; s.loading = true; s.notice = "正在读取任务配置…"; render();
-    try { const data = await api("GET", path + "?layer=" + encodeURIComponent(s.layer || "role")); if (!current(ticket, s)) return; setStatus(s, data); s.bad = false; s.denied = false; s.notice = "已读取当前任务配置。"; }
+    try { const data = await api("GET", path, {layer: s.layer || "role"}); if (!current(ticket, s)) return; setStatus(s, data); s.bad = false; s.denied = false; s.notice = "已读取当前任务配置。"; }
     catch (err) { if (!current(ticket, s)) return;
       /* 失败后的页面只能显示错误与重试入口，不能把上一次的任务路由、Provider
          和可编辑草稿继续当成当前真实配置。未提交草稿和待核对保存仍保留，

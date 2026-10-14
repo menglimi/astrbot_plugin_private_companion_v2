@@ -70,6 +70,19 @@ class ScreenOriginalTests(G6Fixture):
         self.assertEqual(self.screens.read_image(capture.reference, resolved=self.resolved,
                                                  observed_at=NOW).unwrap(), IMAGE)
 
+    def test_retained_review_survives_evidence_expiry_but_respects_revocation(self):
+        capture = self.capture()
+        self.publish(capture).unwrap()
+        later = NOW + timedelta(hours=2)
+        self.assertEqual(self.screens.read_image(capture.reference, resolved=self.resolved,
+            observed_at=later).failure.code, "source_expired")
+        self.assertEqual(self.screens.read_retained_image(capture.reference, resolved=self.resolved,
+            observed_at=later).unwrap(), IMAGE)
+        SourceRepository(self.runtime).revoke(capture.reference.source,
+            expected_governance_revision=1, observed_at=later).unwrap()
+        self.assertEqual(self.screens.read_retained_image(capture.reference, resolved=self.resolved,
+            observed_at=later).failure.code, "source_revoked")
+
     def test_revocation_and_missing_or_changed_bytes_are_not_readable(self) -> None:
         capture = self.capture()
         self.publish(capture).unwrap()

@@ -13,7 +13,7 @@ from unittest.mock import patch
 from tests import test_astrbot_staging_host as support
 from tests.multi_host_support import MultiFixture
 from astrbot_host.model_api import PREFIX
-from astrbot.api.web import PluginRequest, bind_request_context
+from astrbot.api.web import PluginMultiDict, PluginRequest, bind_request_context
 from starlette.requests import Request
 
 
@@ -154,7 +154,8 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         import astrbot_host.model_api as model_api
         request = Request({"type": "http", "method": "POST" if payload is not None else "GET",
                            "path": route, "headers": [], "query_string": b""})
-        fake_request = NS(username=username, path=route, query=query or {},
+        pairs = list(query.items()) if isinstance(query, dict) else query or []
+        fake_request = NS(username=username, path=route, query=PluginMultiDict(pairs),
                           body=(lambda: body(payload)) if payload is not None else None)
         with patch.object(model_api, "request", fake_request):
             with bind_request_context(PluginRequest(request, username=username)):
@@ -190,6 +191,19 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_core_reply_prompt_roundtrip_exposes_only_effective_configuration(self):
         (await self.controller.initialize_profile()).unwrap()
         await assert_core_reply_prompt_roundtrip(self, PREFIX)
+
+    async def test_model_status_accepts_sdk_query_keys_and_refuses_ambiguous_scope(self):
+        (await self.controller.initialize_profile()).unwrap()
+        for query in ({"layer": "role"}, {"layer": "window"}):
+            with self.subTest(query=query):
+                result = await self.call(PREFIX, query=query)
+                self.assertEqual(result["status"], "ok", result)
+                self.assertEqual(result["data"]["configuration_layer"], query["layer"])
+        for query in ({"layer": "role", "target": "other"},
+                      [("layer", "role"), ("layer", "window")]):
+            with self.subTest(query=query):
+                result = await self.call(PREFIX, query=query)
+                self.assertEqual(result["message"], "model_request_invalid", result)
 
     async def test_staging_reopen_prepares_legacy_reaction_settings_before_read_only_assembly(self):
         from dataclasses import replace
@@ -266,7 +280,7 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         model = next(field for field in item["fields"] if field["key"] == "model")
         self.assertEqual(model["value"], "s2.1-pro")
         self.assertEqual([option["value"] for option in model["options"]],
-                         ["s2.1-pro-free", "s2.1-pro", "s2-pro", "s1"])
+                         ["drama-3", "s2.1-pro-free", "s2.1-pro", "s2-pro", "s1"])
         self.assertEqual(next(field for field in item["fields"] if field["key"] == "proxy")["label"], "代理地址")
         self.assertGreaterEqual(len(listed["data"]["templates"]), 13)
         self.assertNotIn("proxy-secret", json.dumps(listed))
@@ -284,6 +298,15 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         stored = next(entry for entry in self.manager.providers_config if entry["id"] == "tts-b")
         self.assertEqual(stored["api_key"], "new-key")
         self.assertEqual(stored["model"], "s2.1-pro-free")
+
+        drama = await self.call(model_api.PREFIX + "/tts/providers/update", payload=(
+            b'{"provider_id":"tts-b","values":{"model":"drama-3"}}'))
+        self.assertEqual(drama["status"], "ok", drama)
+        self.assertEqual(next(entry for entry in self.manager.providers_config
+                              if entry["id"] == "tts-b")["model"], "drama-3")
+        invalid = await self.call(model_api.PREFIX + "/tts/providers/update", payload=(
+            b'{"provider_id":"tts-b","values":{"model":"drama3"}}'))
+        self.assertEqual(invalid["data"]["code"], "tts_provider_invalid")
 
         cloned_with_draft = await self.call(model_api.PREFIX + "/tts/providers/clone", payload=(
             b'{"provider_id":"tts-b","language":"en","config":{"enable":true,"values":{"api_key":"","model":"s2-pro"}}}'))

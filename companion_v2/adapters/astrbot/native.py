@@ -7,6 +7,7 @@ Async host reads finish before the SQLite intake transaction starts.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -129,6 +130,26 @@ def persona_instruction(persona):
     return prompt
 
 
+def configured_default_persona_id(context, umo):
+    """Resolve the per-origin default persona selected by AstrBot's Agent Runner."""
+    configuration = context.get_config(umo=umo)
+    if not isinstance(configuration, dict):
+        return "default"
+    runner = configuration.get("agent_runner", {})
+    runner_config = runner.get("config", {}) if isinstance(runner, dict) else {}
+    if isinstance(runner_config, dict) and runner:
+        if runner.get("runner_type") == "local":
+            persona = runner_config.get("persona", {})
+            selected = persona.get("persona_id", "default") if isinstance(persona, dict) else "default"
+        else:
+            selected = runner_config.get("persona_id", "default")
+        return selected or "default"
+    provider_settings = configuration.get("provider_settings", {})
+    if not isinstance(provider_settings, dict):
+        provider_settings = {}
+    return provider_settings.get("default_personality") or "default"
+
+
 @dataclass(frozen=True)
 class HostAccount:
     platform_id: str
@@ -234,7 +255,8 @@ class NativePrivateBridge:
                  reply_type=None, quote_loader=None, forward_type=None, forward_loader=None, now=None,
                  audio_type=None, audio_loader=None, component_reader=None, video_type=None, video_loader=None,
                  forward_intake=None, file_type=None, file_loader=None, file_settings=None,
-                 session_persona_override_lookup=None, persona_snapshot_lookup=None):
+                 session_persona_override_lookup=None, persona_snapshot_lookup=None, persona_selection_lookup=None,
+                 persona_window_snapshot_lookup=None, persona_window_snapshot_update=None):
         check_version(version)
         self.context, self.event_type, self.identities = context, event_type, identities
         if session_persona_override_lookup is not None and not callable(session_persona_override_lookup):
@@ -243,6 +265,15 @@ class NativePrivateBridge:
         if persona_snapshot_lookup is not None and not callable(persona_snapshot_lookup):
             raise ValueError("persona snapshot lookup must be supplied by trusted host assembly")
         self.persona_snapshot_lookup = persona_snapshot_lookup
+        if persona_selection_lookup is not None and not callable(persona_selection_lookup):
+            raise ValueError("persona selection lookup must be supplied by trusted host assembly")
+        self.persona_selection_lookup = persona_selection_lookup
+        if persona_window_snapshot_lookup is not None and not callable(persona_window_snapshot_lookup):
+            raise ValueError("persona window snapshot lookup must be supplied by trusted host assembly")
+        self.persona_window_snapshot_lookup = persona_window_snapshot_lookup
+        if persona_window_snapshot_update is not None and not callable(persona_window_snapshot_update):
+            raise ValueError("persona window snapshot updater must be supplied by trusted host assembly")
+        self.persona_window_snapshot_update = persona_window_snapshot_update
         self.installation_id, self.host_id = installation_id, host_id
         if (image_type is None) != (image_loader is None) or (image_type is not None and (
                 not isinstance(image_type, type) or not callable(image_loader))):
@@ -335,6 +366,7 @@ class NativePrivateBridge:
         manager = self.context.conversation_manager
         cid = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
         override = None
+        window_snapshot_used = False
         if self.session_persona_override_lookup is not None:
             override = await bounded_native_lookup(
                 self.session_persona_override_lookup(umo), operation="session_settings")
@@ -348,24 +380,55 @@ class NativePrivateBridge:
             if len(projected_ids) == 1:
                 selected = projected_ids[0]
             elif projected_ids:
-                if self.persona_snapshot_lookup is not None:
-                    conversation_persona_id = await bounded_native_lookup(
-                        self.persona_snapshot_lookup(self.context, umo, cid),
-                        operation="persona", report_slow=False)
-                elif cid is not None:
-                    conversation = await bounded_native_lookup(
-                        manager.get_conversation(umo, cid, create_if_not_exists=False), operation="conversation")
-                    if conversation is None:
-                        raise TaskError("host_conversation_missing", "selected host conversation is unavailable")
-                    conversation_persona_id = getattr(conversation, "persona_id", None)
-                else:
-                    conversation_persona_id = None
-                if conversation_persona_id is not None and type(conversation_persona_id) is not str:
-                    raise TaskError("host_persona_invalid", "selected host conversation has an invalid persona")
-                settings = self.context.get_config(umo=umo).get("provider_settings", {})
-                selected = conversation_persona_id
-                if selected != "[%None]" and selected is None:
-                    selected = settings.get("default_personality")
+                configured_fallback = None
+                if self.persona_window_snapshot_lookup is not None:
+                    snapshot = self.persona_window_snapshot_lookup(umo, account.self_id)
+                    if inspect.isawaitable(snapshot):
+                        snapshot = await bounded_native_lookup(snapshot, operation="persona_snapshot", report_slow=False)
+                    if (isinstance(snapshot, dict)
+                            and snapshot.get("selection_source") == "configured"):
+                        configured_fallback = snapshot
+                    if isinstance(snapshot, dict) and snapshot.get("conversation_id") == cid:
+                        selected = snapshot.get("persona_id")
+                        snapshot_role_id = snapshot.get("role_id")
+                        projection = self.personas.get((account.bot_id, selected))
+                        if projection is None or projection.role.subject_id != snapshot_role_id:
+                            raise TaskError("host_persona_window_unbound", "refresh the window persona snapshot")
+                        window_snapshot_used = True
+                    else:
+                        snapshot = None
+                if self.persona_window_snapshot_lookup is None or snapshot is None:
+                    if self.persona_snapshot_lookup is not None:
+                        conversation_persona_id = await bounded_native_lookup(
+                            self.persona_snapshot_lookup(self.context, umo, cid),
+                            operation="persona", report_slow=False)
+                    elif cid is not None:
+                        conversation = await bounded_native_lookup(
+                            manager.get_conversation(umo, cid, create_if_not_exists=False), operation="conversation")
+                        if conversation is None:
+                            raise TaskError("host_conversation_missing", "selected host conversation is unavailable")
+                        conversation_persona_id = getattr(conversation, "persona_id", None)
+                    else:
+                        conversation_persona_id = None
+                    if conversation_persona_id is not None and type(conversation_persona_id) is not str:
+                        raise TaskError("host_persona_invalid", "selected host conversation has an invalid persona")
+                    lookup = self.persona_selection_lookup
+                    if lookup is not None:
+                        resolved = lookup(self.context, umo, conversation_persona_id)
+                        selected = (await bounded_native_lookup(resolved, operation="persona")
+                                    if inspect.isawaitable(resolved) else resolved)
+                    else:
+                        selected = conversation_persona_id
+                        if selected != "[%None]" and not selected:
+                            selected = configured_default_persona_id(self.context, umo)
+                if selected not in projected_ids:
+                    if configured_fallback is not None:
+                        fallback_id = configured_fallback.get("persona_id")
+                        fallback_role_id = configured_fallback.get("role_id")
+                        fallback_projection = self.personas.get((account.bot_id, fallback_id))
+                        if (fallback_projection is not None
+                                and fallback_projection.role.subject_id == fallback_role_id):
+                            selected = fallback_id
                 if selected not in projected_ids:
                     raise TaskError(
                         "host_persona_window_unbound",
@@ -389,9 +452,15 @@ class NativePrivateBridge:
                 raise TaskError("host_persona_unavailable", "the V2 persona mapping no longer exists in AstrBot")
             if persona.get("name") != selected:
                 raise TaskError("host_persona_invalid", "AstrBot returned a different persona than the V2 mapping")
+        projection = self.personas.get((account.bot_id, selected))
+        if projection is not None and self.persona_window_snapshot_update is not None:
+            self.persona_window_snapshot_update(
+                umo, account.self_id, account.bot_id, selected, projection.role.subject_id, cid)
         special = False
-        if await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_verify") != cid:
-            raise TaskError("host_conversation_changed", "host conversation changed during capture")
+        if (not window_snapshot_used
+                and await bounded_native_lookup(manager.get_curr_conversation_id(umo),
+                                                operation="conversation_verify") != cid):
+            raise TaskError("host_conversation_changed", "host conversation changed during persona lookup")
         return cid, selected, persona, special
 
     async def _selected_role_snapshot(self, account, umo):
@@ -405,6 +474,8 @@ class NativePrivateBridge:
         return cid, selected, persona, projection, instruction
 
     def _confirm_persona_projection(self, account, selected, projection, instruction):
+        if self.persona_window_snapshot_lookup is not None:
+            return projection
         if digest(instruction) != projection.instruction_hash:
             raise TaskError("host_persona_changed", "persona prompt/examples changed; refresh the trusted projection")
         return projection

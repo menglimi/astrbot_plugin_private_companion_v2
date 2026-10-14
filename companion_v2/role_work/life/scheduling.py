@@ -50,9 +50,22 @@ def sleep_rhythm(now: datetime, next_sleep_at: datetime | None, body_sleep: dict
     """Describe a gentle phase without treating a projected time as a sleep receipt."""
     if body_sleep and body_sleep.get("state") == "sleeping":
         return {"phase": "sleeping", "basis": "execution_receipt",
-                "since": body_sleep.get("started_at"), "until": body_sleep.get("planned_wake_at")}
+                "since": body_sleep.get("started_at"), "until": body_sleep.get("planned_wake_at"),
+                "sleep_pressure": body_sleep.get("sleep_pressure"),
+                "sleep_debt_minutes": body_sleep.get("sleep_debt_minutes", 0),
+                "sleep_quality_range": body_sleep.get("sleep_quality_range"),
+                "interruptions": body_sleep.get("interruptions", 0)}
 
-    sleep_debt = _sleep_debt_minutes(body_sleep)
+    if body_sleep and body_sleep.get("state") == "interrupted":
+        return {"phase": "interrupted", "basis": "execution_receipt",
+                "since": body_sleep.get("started_at"), "until": body_sleep.get("wake_until"),
+                "sleep_pressure": body_sleep.get("sleep_pressure"),
+                "sleep_debt_minutes": body_sleep.get("sleep_debt_minutes", 0),
+                "sleep_quality_range": body_sleep.get("sleep_quality_range"),
+                "interruptions": body_sleep.get("interruptions", 0)}
+
+    sleep_debt = (body_sleep.get("sleep_debt_minutes", 0) if body_sleep and "sleep_debt_minutes" in body_sleep
+                  else _sleep_debt_minutes(body_sleep))
     ended_at = _parse_stamp(body_sleep.get("ended_at")) if body_sleep else None
     if ended_at is not None:
         elapsed = (now - ended_at).total_seconds() / 60
@@ -72,8 +85,11 @@ def sleep_rhythm(now: datetime, next_sleep_at: datetime | None, body_sleep: dict
             phase = "awake"
         return {"phase": phase, "basis": "schedule_projection",
                 "until": next_sleep_at.isoformat() if phase != "awake" else None,
-                "sleep_debt_minutes": sleep_debt}
-    return {"phase": "awake", "basis": "schedule_projection", "until": None}
+                "sleep_debt_minutes": sleep_debt,
+                "sleep_pressure": body_sleep.get("sleep_pressure") if body_sleep else None}
+    return {"phase": "awake", "basis": "schedule_projection", "until": None,
+            "sleep_debt_minutes": sleep_debt,
+            "sleep_pressure": body_sleep.get("sleep_pressure") if body_sleep else None}
 
 
 def _sleep_debt_minutes(body_sleep):

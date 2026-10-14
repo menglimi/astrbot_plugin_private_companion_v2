@@ -174,9 +174,10 @@ test('core efficiency and cache views retain the native measurement basis', asyn
     recent: [{turn_id: 'core-turn-one', execution_path: 'astrbot_core', outcome: 'completed', received_at: at, input_count: 1,
       model_calls: 2, model_call_count_available: true, model_call_count_complete: false,
       usage_observation_count: 3, send_returned_parts: 2, part_count: 2,
-      timestamps: {received_at: at, first_send_returned_at: at, last_send_returned_at: at},
+      timestamps: {received_at: at, waiting_llm_at: at, first_send_returned_at: at, last_send_returned_at: at},
       stages: {first_send_returned_ms: 2200, end_to_end_send_returned_ms: 3100,
-        plugin_preparation_ms: 100, model_request_ms: 900, tool_ms: 300, agent_ms: 1800, send_ms: 400},
+        plugin_preparation_ms: 100, model_request_ms: 900, waiting_llm_to_request_hook_ms: 600,
+        request_hook_to_agent_ms: 200, tool_ms: 300, agent_ms: 1800, send_ms: 400},
       trace: {model_calls: [{position: 3, state: 'returned', measurement_basis: 'runner_aggregate', tokens: 1200}],
         preparation_steps: [{name: 'context_build', state: 'returned', started_at: at, elapsed_ms: 100}],
         materials: [{owner: 'private_companion.v2', purpose: 'memory', state: 'ready', elapsed_ms: 35, chars: 1200}],
@@ -195,6 +196,9 @@ test('core efficiency and cache views retain the native measurement basis', asyn
   assert.match(efficiency, /用量观察 3<\/strong>/);
   assert.match(efficiency, /单次回复分项耗时/);
   assert.match(efficiency, /已观测模型请求累计<\/span><strong>900 毫秒/);
+  assert.match(efficiency, /等待 LLM 至插件准备<\/span><strong>600 毫秒/);
+  assert.match(efficiency, /插件准备至 Agent<\/span><strong>200 毫秒/);
+  assert.match(efficiency, /进入 AstrBot 请求队列/);
   assert.match(efficiency, /Agent 总时长<\/span><strong>1.8 秒/);
   assert.match(efficiency, /插件准备 · 素材准备/);
   assert.match(efficiency, /记忆召回/);
@@ -1083,7 +1087,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(root.innerHTML, /主动消息链路测试/);
   assert.match(root.innerHTML, /作品与阅读/);
   assert.match(root.innerHTML, /外部资讯/);
-  assert.match(root.innerHTML, /只复用当前用途已经产生的真实来源/);
+  assert.match(root.innerHTML, /关系表达类按已确认私聊窗口和用途设置验证，事件类按当前有效来源验证/);
   assert.doesNotMatch(root.innerHTML, /当前没有安全的主动消息测试接口/);
   assert.match(root.innerHTML, /data-focus-target="proactive-test"/);
   assert.match(root.innerHTML, /其他运行诊断/);
@@ -1328,7 +1332,6 @@ test('proactive diagnostic localizes exhausted attempt budget and identifies the
     posts: {'/setup/proactive-diagnostic': {state: 'failed', purpose: 'care', purpose_label: '情绪关怀',
       stage: 'attempt_budget', code: 'contact_attempt_budget',
       failure_title: '本私聊的24小时尝试额度已用完',
-      explanation: '决策尝试次数已经达到本私聊的上限；模型跳过或最终未投递的尝试也会计入。',
       budget_usage: {used: 12, limit: 12, window_hours: 24},
       suggestion: '到「主动联系 → 额度与去重」查看或调整“24 小时内最多尝试”。',
       error: 'contact decision allowance is exhausted', stages: [
@@ -1343,7 +1346,7 @@ test('proactive diagnostic localizes exhausted attempt budget and identifies the
   root.click('[data-proactive-confirm]');
   await flush();
   assert.match(root.innerHTML, /测试未通过 · 本私聊的24小时尝试额度已用完/);
-  assert.match(root.innerHTML, /模型跳过或最终未投递的尝试也会计入/);
+  assert.match(root.innerHTML, /失败、过期、取消和死信任务不计入/);
   assert.match(root.innerHTML, /已用 12 \/ 12 次（滚动 24 小时）/);
   assert.match(root.innerHTML, /本私聊24小时尝试额度<\/span><strong>失败/);
   assert.match(root.innerHTML, /展开技术详情/);

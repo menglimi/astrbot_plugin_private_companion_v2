@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+from datetime import datetime
 from types import SimpleNamespace
 
 from astrbot.api.web import request
@@ -20,7 +21,7 @@ from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.proactive.management import ContactManagement
-from companion_v2.proactive.material_pool import read_role_material_pool
+from companion_v2.proactive.material_pool import read_proactive_contact_traces, read_role_material_pool
 from companion_v2.role_work.state.management import StateManagement
 
 from .management_identity import dashboard_operator
@@ -50,6 +51,41 @@ class NativePerceptionWebAPI:
                 (PREFIX + "/configure", self.configure, ["POST"], "Save native perception settings"),
                 (PREFIX + "/news-diagnostic", self.news_diagnostic, ["POST"],
                  "Check the configured news source")]
+
+    @staticmethod
+    def _trace_contexts(controller, session):
+        selected = session.profile.target
+        if selected.scope.kind is ScopeKind.PRIVATE:
+            return ((selected, selected.actor.subject.subject_id,
+                     selected.role_binding.role.subject_id),), 0
+
+        host = getattr(controller, "controller", controller)
+        authority = getattr(host, "authority", None)
+        inventory = getattr(getattr(host, "web_api", None), "target_inventory", None)
+        if not callable(getattr(authority, "context", None)) or not callable(inventory):
+            return (), 0
+        contexts, unavailable = [], 0
+        try:
+            targets = inventory()
+        except Exception:
+            return (), 1
+        for target in targets:
+            if target.get("scope_kind") != "private":
+                continue
+            for role in target.get("roles", ()):
+                if len(contexts) >= 128:
+                    return tuple(contexts), unavailable + 1
+                try:
+                    context = authority.context(target["target_id"], role["role_id"])
+                except (TaskError, KeyError, TypeError, ValueError, AttributeError):
+                    unavailable += 1
+                    continue
+                target_label = target.get("participant_id")
+                if not target_label or target_label == "*":
+                    target_label = context.actor.subject.subject_id
+                contexts.append((context, target_label,
+                    role.get("role_name") or role["role_id"]))
+        return tuple(contexts), unavailable
 
     def _status(self, app, context, operator):
         model = require(PerceptionManagement(app, context).status(operator))
@@ -383,9 +419,34 @@ class NativePerceptionWebAPI:
                         events.maintain_role(contact["settings"])
                     except Exception:
                         logger.exception("[CompanionV2] 角色共享资讯巡视未能启动")
-                return outcome_response(Outcome.success(read_role_material_pool(
-                    schedule, observed_at=observed_at,
-                    settings=contact["settings"])))
+                shared = read_role_material_pool(schedule, observed_at=observed_at,
+                    settings=contact["settings"])
+                trace_state, trace_unavailable = "ready", 0
+                try:
+                    contexts, trace_unavailable = self._trace_contexts(controller, session)
+                    traces = read_proactive_contact_traces(schedule, contexts, observed_at=observed_at)
+                    if trace_unavailable:
+                        trace_state = "partial"
+                except Exception:
+                    logger.exception("[CompanionV2] 主动消息检视记录读取失败")
+                    traces = {"items": [], "count": 0, "total_count": 0, "contexts_read": 0}
+                    trace_state = "failed"
+                items = [*shared.get("items", ()), *traces["items"]]
+                def captured_at(item):
+                    try:
+                        value = datetime.fromisoformat(item.get("captured_at", ""))
+                        return value.timestamp() if value.tzinfo is not None else 0
+                    except (TypeError, ValueError, OverflowError, OSError):
+                        return 0
+                items.sort(key=lambda item: (captured_at(item), item.get("id", "")), reverse=True)
+                return outcome_response(Outcome.success({**shared,
+                    "items": items[:128], "count": min(len(items), 128),
+                    "shared_count": shared.get("count", 0),
+                    "history_count": traces["total_count"],
+                    "trace_count": traces["count"],
+                    "trace_context_count": traces["contexts_read"],
+                    "trace_context_unavailable": trace_unavailable,
+                    "trace_state": trace_state}))
         except (TaskError, ConfigurationError) as error:
             return outcome_response(Outcome.failed(error.code, str(error)))
         except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):

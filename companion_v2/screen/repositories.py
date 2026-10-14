@@ -27,6 +27,7 @@ from .models import (
     ScreenMaterial, ScreenMediaKind,
 )
 from .originals import ScreenImage, ScreenOriginalStore
+from .proactive_access import proactive_allowed
 
 
 @dataclass(frozen=True)
@@ -125,28 +126,87 @@ class ScreenRepository:
                 return Outcome(failure=material.failure)
             capture = material.unwrap().capture
             source = material.unwrap().source
+            return self._read_image_original(capture, source.payload)
+
+    def read_retained_capture(self, reference, *, resolved, observed_at):
+        """Open a saved original for review, without renewing its evidence TTL."""
+        with self._runtime.read_snapshot():
+            row = self._capture_row(reference.capture_id)
+            if row is None or not _matches_capture(row, reference):
+                return Outcome.failed("screen_capture_not_found", "the retained capture is absent")
+            consent = self._capabilities.consent(extension_id=SCREEN_EXTENSION,
+                capability_id=SCREEN_READ, subject=resolved.subject, scope=reference.source.scope)
+            if not consent.is_success:
+                return Outcome(failure=consent.failure)
+            access = self._authorizer.authorize(resolved, scope=reference.source.scope,
+                capability=SCREEN_READ, observed_at=observed_at)
+            if not access.is_success:
+                return Outcome(failure=access.failure)
+            source = self._runtime.read_one("""SELECT payload_json, content_hash FROM sources
+                WHERE source_id = ? AND lineage_id = ? AND source_revision = ?""", _source_key(reference))
+            payload = json.loads(source["payload_json"]) if source is not None else None
+            if type(payload) is not str or _hash(payload) != source["content_hash"]:
+                return Outcome.failed("screen_original_unavailable", "retained original metadata changed")
+            provenance = self._sources.validate_archived_provenance(reference.source,
+                recipient=resolved.subject, observed_at=observed_at,
+                expected_content_hash=source["content_hash"])
+            if not provenance.is_success:
+                return Outcome(failure=provenance.failure)
+            asset = self._assets.read(reference.asset, resolved=resolved, capability=SCREEN_READ,
+                observed_at=observed_at, authorizer=self._authorizer)
+            if not asset.is_success:
+                return Outcome(failure=asset.failure)
+            return Outcome.success((_capture_from_row(row, reference), payload))
+
+    def read_retained_image(self, reference, *, resolved, observed_at):
+        """Review inert saved bytes; current model reads still use read_image."""
+        with self._runtime.read_snapshot():
+            retained = self.read_retained_capture(reference, resolved=resolved, observed_at=observed_at)
+            if not retained.is_success:
+                return Outcome(failure=retained.failure)
+            return self._read_image_original(*retained.unwrap())
+
+    def read_retained_analysis(self, reference, analysis_id, *, resolved, observed_at):
+        with self._runtime.read_snapshot():
+            retained = self.read_retained_capture(reference, resolved=resolved, observed_at=observed_at)
+            if not retained.is_success:
+                return Outcome(failure=retained.failure)
+            row = self._runtime.read_one("SELECT * FROM screen_analyses WHERE analysis_id = ? AND capture_id = ?",
+                (analysis_id, reference.capture_id))
+            if row is None:
+                return Outcome.failed("screen_analysis_not_found", "this capture has no confirmed analysis")
             try:
-                metadata = json.loads(source.payload)
-                expected = {
-                    "schema": "screen.image-original.v1", "capture_id": reference.capture_id,
-                    "device_id": capture.device_id, "mime_type": metadata["mime_type"],
-                    "byte_count": metadata["byte_count"], "image_hash": reference.asset.content_hash,
-                    "window_title": metadata["window_title"],
-                    "coverage": json.loads(_coverage_json(capture.coverage)),
-                    "captured_at": encode_timestamp(capture.captured_at),
-                    "received_at": encode_timestamp(capture.received_at),
-                }
-                if (metadata != expected or _hash(source.payload) != source.content_hash
-                        or capture.media_kind is not ScreenMediaKind.IMAGE
-                        or ("window.title" in capture.coverage.units) != bool(
-                            isinstance(metadata["window_title"], str) and metadata["window_title"].strip())):
-                    raise ReferenceValidationError("screen image manifest differs from its original capture")
-                body = self._originals.read(reference.asset.content_hash)
-                if len(body) != metadata["byte_count"]:
-                    raise ReferenceValidationError("screen image length differs from its original manifest")
-                return Outcome.success(ScreenImage(metadata["mime_type"], body))
-            except (OSError, ValueError, KeyError, TypeError):
-                return Outcome.failed("screen_original_unavailable", "the original image is missing or has changed")
+                analysis = _analysis_from_row(row, reference)
+                if not set(analysis.input_units).issubset(retained.unwrap()[0].coverage.units):
+                    raise ReferenceValidationError("analysis coverage differs from the retained original")
+                return Outcome.success(analysis)
+            except (ValueError, TypeError, KeyError):
+                return Outcome.failed("screen_analysis_changed", "the saved analysis no longer matches its hash")
+
+    def _read_image_original(self, capture, payload):
+        reference = capture.reference
+        try:
+            metadata = json.loads(payload)
+            expected = {
+                "schema": "screen.image-original.v1", "capture_id": reference.capture_id,
+                "device_id": capture.device_id, "mime_type": metadata["mime_type"],
+                "byte_count": metadata["byte_count"], "image_hash": reference.asset.content_hash,
+                "window_title": metadata["window_title"],
+                "coverage": json.loads(_coverage_json(capture.coverage)),
+                "captured_at": encode_timestamp(capture.captured_at),
+                "received_at": encode_timestamp(capture.received_at),
+            }
+            if (metadata != expected
+                    or capture.media_kind is not ScreenMediaKind.IMAGE
+                    or ("window.title" in capture.coverage.units) != bool(
+                        isinstance(metadata["window_title"], str) and metadata["window_title"].strip())):
+                raise ReferenceValidationError("screen image manifest differs from its original capture")
+            body = self._originals.read(reference.asset.content_hash)
+            if len(body) != metadata["byte_count"]:
+                raise ReferenceValidationError("screen image length differs from its original manifest")
+            return Outcome.success(ScreenImage(metadata["mime_type"], body))
+        except (OSError, ValueError, KeyError, TypeError):
+            return Outcome.failed("screen_original_unavailable", "the original image is missing or has changed")
 
     def published_reference(self, capture_id: str, *, scope: ScopeRef) -> Outcome[ScreenCaptureRef]:
         """Resolve only an already published sample; the caller must read it with current authority."""
@@ -281,10 +341,8 @@ class ScreenRepository:
             if not set(analysis.input_units).issubset(current.material.capture.coverage.units):
                 return Outcome.failed("screen_coverage_mismatch", "analysis claims input outside the supplied material")
             if feedback.kind is ScreenFeedbackKind.PROACTIVE:
-                projection = self._capabilities.projection(
-                    extension_id=SCREEN_EXTENSION, scope=analysis.capture.source.scope,
-                ).unwrap()
-                if projection.settings is None or not projection.settings.proactive_enabled:
+                if not proactive_allowed(self._runtime, scope=analysis.capture.source.scope,
+                                         role=role, subject=resolved.subject):
                     return Outcome.failed("screen_proactive_disabled", "proactive feedback is not enabled in this scope")
             previous_analysis = self._analysis_row(analysis.analysis_id, analysis.version)
             if previous_analysis is not None:

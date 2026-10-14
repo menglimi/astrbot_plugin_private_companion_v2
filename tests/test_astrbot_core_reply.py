@@ -25,6 +25,7 @@ class PreparedContext:
     target_id: str = "target-1"
     channel: str = "private"
     prompt_instruction: str = ""
+    stable_prompt_instruction: str = ""
 
 
 class FakeEvent:
@@ -197,29 +198,32 @@ class AstrBotCoreReplyTests(unittest.IsolatedAsyncioTestCase):
 
         event = FakeEvent()
         instruction = "Use the companion's current private context."
+        stable_instruction = "Keep the configured companion voice."
         await resolve(prepare_core_reply_event(
             event,
-            PreparedContext("Captured native persona", context={"text": "private context"}, prompt_instruction=instruction),
+            PreparedContext("Captured native persona", context={"text": "private context"},
+                            prompt_instruction=instruction, stable_prompt_instruction=stable_instruction),
             authorize=_allow,
         ))
         await resolve(inject_core_reply_prompt(event, request))
         injected = request.system_prompt + "\n" + request.prompt
 
-        self.assertIn(instruction, injected)
+        self.assertIn(stable_instruction, injected)
+        self.assertNotIn(instruction, injected)
         self.assertNotIn("Captured native persona", injected)
         await resolve(inject_core_reply_prompt(event, request))
         self.assertEqual(request.system_prompt + "\n" + request.prompt, injected)
-        self.assertEqual(injected.count(instruction), 1)
+        self.assertEqual(injected.count(stable_instruction), 1)
 
-    async def test_prompt_instruction_is_supported_when_instruction_is_empty(self):
+    async def test_stable_prompt_instruction_is_supported_when_instruction_is_empty(self):
         event = FakeEvent()
-        prepared = PreparedContext("", prompt_instruction="Use this reply instruction.")
+        prepared = PreparedContext("", stable_prompt_instruction="Use this stable reply instruction.")
         request = FakeRequest()
 
         await resolve(prepare_core_reply_event(event, prepared, authorize=_allow))
         await resolve(inject_core_reply_prompt(event, request))
 
-        self.assertIn("Use this reply instruction.", request.system_prompt + request.prompt)
+        self.assertIn("Use this stable reply instruction.", request.system_prompt + request.prompt)
 
     async def test_core_stream_observes_only_successful_native_parts_and_counts_each_once(self):
         event = FakeEvent()

@@ -7,9 +7,20 @@
 .journal-cover{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:var(--sp-3);align-items:center;
   min-width:0;padding:var(--sp-3) var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);
   background:linear-gradient(160deg,color-mix(in srgb,var(--t-accent-quiet) 55%,transparent),transparent 55%),var(--t-surface);box-shadow:var(--t-shadow)}
-.portrait{display:grid;place-items:center;width:64px;aspect-ratio:1;border:1px solid var(--t-line-firm);
+.portrait{position:relative;display:grid;place-items:center;width:64px;aspect-ratio:1;overflow:hidden;border:1px solid var(--t-line-firm);
   border-radius:var(--r-sm);background:var(--t-surface-soft);color:var(--t-accent-ink);font-size:var(--fs-title);font-weight:650;
   box-shadow:inset 0 0 0 4px var(--t-surface-raised)}
+.portrait>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.portrait-upload,.portrait-remove{position:absolute;z-index:1;display:grid;place-items:center;width:24px;aspect-ratio:1;
+  border:1px solid var(--t-line-firm);border-radius:var(--r-xs);background:var(--t-surface-raised);color:var(--t-text-strong);
+  box-shadow:var(--t-shadow);cursor:pointer}
+.portrait-upload{right:3px;bottom:3px}
+.portrait-upload input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;clip-path:inset(50%)}
+.portrait-upload:focus-within,.portrait-remove:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
+.portrait-upload svg,.portrait-remove svg{width:14px;height:14px}
+.portrait-remove{top:3px;right:3px}
+.portrait.has-avatar .portrait-upload{background:var(--t-surface-raised)}
+.self-page .wb-journal [data-wb-row="avatar_data_url"]{display:none!important}
 .journal-id{display:grid;gap:calc(var(--sp-1) * 1.5);min-width:0}
 .journal-name-row{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;min-width:0}
 .journal-name-row h2{margin:0;color:var(--t-text-strong);font-size:var(--fs-title);font-weight:650;line-height:1.25;overflow-wrap:anywhere}

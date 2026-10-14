@@ -4,17 +4,17 @@
 
 | 目的 | 生产器现状 | 触发器/链路证据 | 验收层级 |
 |---|---|---|---|
-| `affection` | 新增私聊明确亲近表达候选器 | `test_proactive_relationship_events.RelationshipContactEventTests.test_explicit_affection_reaches_the_contact_model_and_delivery` | 私聊线索、候选目的、模型证据、实际替身投递与回执均通过 |
-| `care` | 夜间问候与私聊明确情绪表达候选 | `test_proactive_relationship_events.RelationshipContactEventTests.test_explicit_feeling_creates_care_contact_from_original_private_turn`；`test_proactive_rhythm_and_greetings` | 触发器与主动联系链路 |
-| `play` | 新增私聊明确共同玩笑/互动表达候选器 | `test_proactive_relationship_events.RelationshipContactEventTests.test_explicit_play_reaches_the_contact_model_and_delivery` | 私聊线索、候选目的、模型证据、实际替身投递与回执均通过 |
-| `repair` | 新增私聊明确指出失误/不适的候选器 | `test_proactive_relationship_events.RelationshipContactEventTests.test_explicit_repair_reaches_the_contact_model_and_delivery` | 私聊线索、候选目的、模型证据、实际替身投递与回执均通过 |
+| `affection` | 常规联系节律中的自发亲近表达候选；不依赖用户近期说过固定词 | `test_proactive_relationship_events.RelationshipContactEventTests.test_relationship_contact_uses_a_later_slot_without_a_new_user_message`；`test_explicit_affection_reaches_the_contact_model_and_delivery` | 默认来源有效期之后仍能进入关系表达链；对话历史仅提供连续性 |
+| `care` | 常规联系节律中的低压力近况问候；旧情绪不能当作当前状态 | `test_explicit_feeling_creates_care_contact_from_original_private_turn`；`test_neutral_private_text_can_reach_enabled_relationship_prompt`；`test_proactive_rhythm_and_greetings` | 不要求近期出现情绪词；由模型决定是否自然联系 |
+| `play` | 常规联系节律中的轻松互动候选 | `test_explicit_play_reaches_the_contact_model_and_delivery` | 不要求用户先提出玩法；不虚构共同梗或共同经历 |
+| `repair` | 常规联系节律可进入模型判断，但只有对话能核验具体分歧时才可修复 | `test_explicit_repair_reaches_the_contact_model_and_delivery` | 没有具体分歧来源时不道歉、不推测矛盾 |
 | `chat` | 自动会话调度器 | `test_proactive_contacts`、`test_proactive_activity_events` | 触发器与主动联系链路 |
 | `greeting` | 日常窗口与日期事件生产器 | `test_proactive_rhythm_and_greetings`、`test_proactive_date_events` | 触发器与主动联系链路 |
 | `life` | 角色活动与日记事件生产器 | `test_proactive_activity_events`、`test_proactive_journal_events` | 触发器与主动联系链路 |
 | `creation` | 完成阅读活动生产器 | `test_proactive_activity_events` | 触发器与主动联系链路 |
 | `news` | 外部资讯生产器；环境诊断支持 `external_news` 变体复用该来源 | `test_proactive_news_events`、`test_proactive_diagnostic_routes` | 触发器与主动联系链路；诊断路由与来源归因 |
 | `followup` | 基于已确认投递历史的接话候选器 | `test_proactive_relationship_events.FollowupContactEventTests.test_followup_waits_then_composes_and_delivers_and_respects_cooldown`、`test_recent_followup_receipt_blocks_a_second_followup_during_cooldown`、`test_a_new_user_input_supersedes_an_unanswered_followup` | 等待前不触发；等待后完成 compose/投递；冷却与新输入取消均通过 |
-| `invitation` | 新增私聊明确共同活动表达候选器 | `test_proactive_relationship_events.RelationshipContactEventTests.test_explicit_invitation_reaches_the_contact_model_and_delivery`、`test_common_interest_without_an_invitation_does_not_create_an_invitation_contact`、`test_explicitly_rejected_invitation_can_be_skipped_without_a_delivery` | 正向邀请进入发送链；只有共同兴趣不生成邀请；对方拒绝时模型可跳过且不投递 |
+| `invitation` | 常规联系节律中的自主活动邀请候选 | `test_explicit_invitation_reaches_the_contact_model_and_delivery`、`test_common_interest_is_not_forced_into_an_invitation`、`test_explicitly_rejected_invitation_can_be_skipped_without_a_delivery` | 不要求用户先提活动；共同兴趣不被当成已约事实；拒绝后不投递 |
 | `reminder` | 已接受日历约定生产器 | `test_proactive_calendar_events` | 触发器与主动联系链路 |
 | `environment` | 天气观测、天气变化、官方预警、服务余额四个来源生产器 | `test_proactive_weather_events`、`test_proactive_weather_change_events`、`test_proactive_official_alert_events`、`test_proactive_balance_events` | 四个来源分支各自有触发器与主动联系链路 |
 | `meal` | 本地饭点生产器 | `test_proactive_meal_events` | 触发器与主动联系链路 |
@@ -27,7 +27,7 @@
 - `test_proactive_contacts.ProactiveContactTests.test_skip_is_successful_model_decision_without_draft_or_delivery` 覆盖模型明确 `skip`；`test_accepted_receipt_is_not_reported_as_delivered` 覆盖平台已接受但未确认；`test_unknown_is_not_replayed_after_restart_and_late_receipt_still_counts` 覆盖未知结果不重放及迟到回执。
 - 撤权、候选过期、配置关闭/变更、静默、冷却和去重分别由上述生产器套件与 `test_proactive_contacts` 的来源撤权、暂停、静默和去重用例覆盖。各事件套件的断言主要以是否调用模型、是否产生 contact 记录、是否触发替身发送表达结果；无需把所有场景重复复制到每个目的。
 
-关系目的候选器只筛选私聊中明确出现的原文线索，原文来源仍经过当前授权读取，最终正文和是否发送仍交给统一主动联系模型决定；候选分类不是情绪事实。亲近、玩笑、修复和邀请各有完整 compose/投递用例；邀请另覆盖只有共同兴趣时不建立候选，以及明确拒绝时模型可以 `skip` 且不投递。`followup` 只读取同一关系内已确认送达的主动消息历史，等待期未到不建立候选，且新输入会使其失效。
+关系用途不再要求用户先说出固定词。常规联系时机将已启用的关系用途和日常话题放入同一个 `Opportunity`，由现有 Planner 按配置权重选一个方向，再由统一主动联系模型根据真实来源判断发送或跳过；这不会增加模型分类调用。最近私聊原文仍经过当前授权读取与哈希复核，候选分类不是情绪、承诺或意图事实；关系候选也继续服从常规空闲、冷却、未回应和活动曲线门槛。固定词正则只保留给显式诊断兼容，不决定自动主动消息是否进入候选。亲近、玩笑、修复和邀请各有完整 compose/投递用例；邀请另覆盖只有共同兴趣时模型可跳过，以及明确拒绝时不投递。`followup` 只读取同一关系内已确认送达的主动消息历史，等待期未到不建立候选，且新输入会使其失效。
 
 屏幕生产器会返回带 `proactive.screen` 来源的专属 `ContactIntent`，调度器将该专属来源送入统一 compose、确认投递和 `observe` 回执；撤销屏幕读取授权会令来源校验失败。定向链路还发现并修复 `screen` 未登记目的去重路线导致 compose 抛出 `KeyError` 的问题。
 

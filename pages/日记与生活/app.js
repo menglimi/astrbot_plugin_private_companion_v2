@@ -12,7 +12,7 @@
   let datePages = [null], datePage = 0, activityCursor = null, polling = null;
   const pending = new Map();
   const booleanFields = ["enabled", "diary_enabled", "sleep_enabled", "reading_enabled", "derive_enabled"];
-  const configFields = [...booleanFields, "timezone", "diary_time", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes"];
+  const configFields = [...booleanFields, "timezone", "diary_time", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_window_minutes", "sleep_minutes"];
   const date = value => value ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
   const kind = item => item.kind === "dream" ? "梦境" : "日记";
   const display = () => bridge?.getContext?.()?.display || {};
@@ -152,7 +152,9 @@
     const plan = state.sleep_schedule;
     if (!plan) {
       $("sleep-scope").textContent = "暂不可用"; $("sleep-executor").textContent = "—";
-      $("sleep-next").textContent = "—"; $("sleep-active-wake").textContent = "—"; return;
+      $("sleep-next").textContent = "—"; $("sleep-active-wake").textContent = "—";
+      $("sleep-pressure").textContent = "—"; $("sleep-debt").textContent = "—";
+      $("sleep-workload").textContent = "—"; $("sleep-recommended").textContent = "—"; return;
     }
     $("sleep-scope").textContent = plan.enabled ? "当前角色 · 各会话共享" : "未启用";
     const executorName = plan.executor_is_current ? "当前私聊窗口" : "同一角色的其他私聊窗口";
@@ -162,6 +164,12 @@
     $("sleep-next").textContent = plan.next_sleep_at
       ? `${date(plan.next_sleep_at)} · ${date(plan.next_wake_at)}` : "未安排";
     $("sleep-active-wake").textContent = plan.active_wake_at ? date(plan.active_wake_at) : "当前没有进行中的睡眠";
+    const profile = plan.physiology || {};
+    $("sleep-pressure").textContent = profile.sleep_pressure == null ? "暂无记录" : `${profile.sleep_pressure} / 100`;
+    $("sleep-debt").textContent = profile.has_sleep_history ? `${Math.round(profile.sleep_debt_minutes || 0)} 分钟` : "暂无记录";
+    $("sleep-workload").textContent = `${Math.round(profile.workload_score || 0)} / 100`;
+    $("sleep-recommended").textContent = plan.recommended_duration_minutes
+      ? `${Math.round(plan.recommended_duration_minutes / 60 * 10) / 10} 小时` : "—";
   }
   function render() {
     $("role").textContent = roleName();
@@ -185,7 +193,7 @@
       state = selected = null;
       ["journal-list", "journal-detail", "reading-list", "sleep-list", "receipt-list", "retry-id", "dream-retry"].forEach(id => $(id).replaceChildren());
       $("retry-form").hidden = true;
-      for (const id of ["role", "participant", "routine-state", "sleep-scope", "sleep-executor", "sleep-next", "sleep-active-wake"]) $(id).textContent = "—";
+      for (const id of ["role", "participant", "routine-state", "sleep-scope", "sleep-executor", "sleep-next", "sleep-active-wake", "sleep-pressure", "sleep-debt", "sleep-workload", "sleep-recommended"]) $(id).textContent = "—";
       $("host-state").textContent = "暂不可用"; $("editor").close(); notice(error.message, true); controls(false);
     }
   }
@@ -208,7 +216,7 @@
     document.querySelectorAll(".tab-panel").forEach(p => { p.hidden = p.id !== tab; }); $("activity-pages").hidden = !["reading", "sleep"].includes(tab);
   }));
   $("config-form").addEventListener("input", () => { dirty = true; });
-  $("config-form").addEventListener("submit", e => { e.preventDefault(); const changes = {}; configFields.forEach(k => { changes[k] = booleanFields.includes(k) ? $(k).checked : ["sleep_minutes", "sleep_variation_minutes"].includes(k) ? Number($(k).value) : $(k).value; }); send("configure", { changes, edit_token: state.edit_token }); });
+  $("config-form").addEventListener("submit", e => { e.preventDefault(); const changes = {}; configFields.forEach(k => { changes[k] = booleanFields.includes(k) ? $(k).checked : ["sleep_minutes", "sleep_variation_minutes", "sleep_window_minutes"].includes(k) ? Number($(k).value) : $(k).value; }); send("configure", { changes, edit_token: state.edit_token }); });
   $("editor-form").addEventListener("submit", e => {
     e.preventDefault(); const args = {};
     if (dialogAction === "add_text") { args.title = $("text-title").value; args.text = $("text-body").value; }

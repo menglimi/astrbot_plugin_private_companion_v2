@@ -14,6 +14,8 @@ from companion_v2.execution.runner import ExactTaskRunner
 from companion_v2.execution.service import outcome
 from companion_v2.model_gateway.models import ModelTaskProfile
 from companion_v2.identity_policy.private_domain import source_ref
+from companion_v2.identity_policy.interventions import (REST_WAKE_INTERVENTION,
+    STATE_INTERVENTION, require_capability)
 from companion_v2.role_work.growth.configuration import skills_enabled
 from .service import FIELDS, INSTRUCTION
 from .configuration import FEATURE_SWITCHES
@@ -36,15 +38,15 @@ PROMPT = INSTRUCTION + (
     "用户说吃了饭是用户自述；邀请你吃饭、关心你或提供建议也不证明你已执行。"
     "计划只提供意图与时间线；不能根据时间经过宣称吃饭、服药、到达、病愈或完成日程。"
     "可以自然感到饿、疲倦、恢复精神，也可以保持未知；不要每天必定生病或添加戏剧冲突。"
-    "energy 是会起伏的主观精力，不是只会下降的指标，低能量不必永久维持；参考 previous_simulation 的数值与 updated_at、实际睡眠回执、活动记录和当前时段连续调整，沿用不等于照抄。"
+    "energy 是会起伏的主观精力，不是只会下降的指标，低能量不必永久维持；参考 previous_simulation 的数值与 updated_at、实际睡眠回执、睡眠压力/欠睡、质量范围、中断次数、活动记录和当前时段连续调整，沿用不等于照抄。"
     "每次维护都重新评估：若上一值偏低，而当前没有持续活动、明确睡眠不足或其他仍在发生的疲惫依据，不要只因上一轮偏低或本轮没有新消息就继续锁在低位；"
     "优先小幅上调，随时间渐进回到角色惯常的日常水平，不必等到确认睡眠才允许温和好转；回到日常水平附近后按人格和材料稳定或自然起伏，不持续单向上升。"
-    "持续活动或明确睡眠不足时仍可保持偏低，并在后续维护重新判断。"
+    "持续活动或明确睡眠不足时仍可保持偏低，并在后续维护重新判断。夜间睡眠质量范围偏低、刚入睡后被叫醒或反复中断时，次日精力恢复应更有限；连续补足睡眠后再逐步回升。午休只缓解部分困倦，不等同整夜恢复；睡眠压力和欠睡是参考量，不要直接换算成固定精力扣分。"
     "没有睡眠记录不等于已休息；精力缓慢回升也不代表宣称睡着、醒来或完成休息，实际睡眠只认 sleep_execution 回执；"
     "不得因清晨自动推断睡足或高能，也不得虚构睡眠。"
     "日常水平只作柔性参考，按角色设定和个体差异调整；一次只做小幅自然变化，不突然满格，也不让过期的疲惫理由永久生效。"
     "最近几轮对话只帮助理解互动感受；连续的深夜交流可以让困意或疲惫感缓慢加深，单句或一次短聊不要求改变作息。"
-    "不要从对话推断已经入睡、醒来或完成休息；实际睡眠只认 sleep_execution 回执。按作息推算的困倦/准备休息阶段只是表达参考，不改变计划执行时刻。"
+    "不要从对话推断已经入睡、醒来或完成休息；实际睡眠只认 sleep_execution 回执。睡眠压力会随清醒时长、欠睡和已记录负荷累积，日间疲劳高时可以短暂午休；入睡时间在角色作息窗口内结合困倦决定，窗口结束仍未入睡才按计划兜底。按作息推算的困倦/准备休息阶段只是表达参考，不改变计划执行时刻。"
     "状态按 maintenance_minutes 的固定维护间隔更新，不对同一轮里的每句话分别判定；以本轮已汇集的完整对话材料整体参考。"
     "sleep 的实际睡眠执行状态以活动回执为准。busy 描述注意力，不直接决定是否拒答。"
     "同一人格的所有窗口读取同一份心情、位置、忙碌和临时状态；只写你自身的概括感受与活动，不写聊天对象、他人的位置/活动或私人日程。"
@@ -151,6 +153,8 @@ class StateMaintenance:
         self._scan_after = None
         self._budget_checks = {}
         self._preflight_checks = {}
+        self._input_epochs = {}
+        self._last_noted_inputs = {}
         self.registrations = (TaskRegistration(TaskDefinition(KIND, "role.state", KIND, Lane.BACKGROUND,
             side_effect=SideEffect.LOCAL, binding=ProviderBinding("role.state", "local", "1", "state-1"),
             timeout_seconds=180, max_attempts=1, concurrency=1), self.validate),)
@@ -158,6 +162,20 @@ class StateMaintenance:
     def attach(self, app):
         self.app, self.service, self.tasks, self.gateway = app, app.role_state, app.tasks, app.gateway
         self.runner = ExactTaskRunner(self.tasks, frozenset({KIND}), self.generate, waiting=app.background_waiting)
+
+    def note_input(self, context, event_id):
+        """Fence an in-flight user-triggered state round as soon as a new message arrives."""
+        if self._last_noted_inputs.get(context.key) == event_id:
+            return
+        self._last_noted_inputs[context.key] = event_id
+        self._input_epochs[context.key] = self._input_epochs.get(context.key, 0) + 1
+
+    def _check_intervention(self, context, at):
+        require_capability(self.tasks, context, STATE_INTERVENTION, at=at)
+        from companion_v2.role_work.life import rest_gate
+        settings = rest_gate.read_settings(self.runtime, context)
+        if rest_gate.sleep_context(self.runtime, context, now=at, settings=settings)["resting"]:
+            require_capability(self.tasks, context, REST_WAKE_INTERVENTION, at=at)
 
     def _can_anchor_schedule(self, context):
         try:
@@ -437,8 +455,13 @@ class StateMaintenance:
         except TaskError:
             return {"state": "unavailable"}
 
-    def prepare(self, context, instruction, request_id):
+    def prepare(self, context, instruction, request_id, *, intervention=False, expected_input_epoch=None):
         self.app.require_running()
+        if intervention:
+            self._check_intervention(context, self.tasks.now())
+            current_epoch = self._input_epochs.get(context.key, 0)
+            if expected_input_epoch is not None and current_epoch != expected_input_epoch:
+                raise TaskError("state_inputs_changed", "new conversation input superseded this intervention")
         self.service.access.check(context, KIND)
         settings, token = self.service.settings(context)
         if not settings["enabled"]:
@@ -451,6 +474,7 @@ class StateMaintenance:
         except TaskError:
             previous = {"state": "unavailable", "revision": record["revision"] if record else 0}
         events = self._events(context, since=previous.get("updated_at"))
+        input_fingerprint = digest([(event.scoped_key, encode(event.source)) for event in events])
         materials, sources = self._inputs(context, events)
         mood_round = self._mood(context, events, settings, record, now)
         materials = materials + mood_round["materials"]
@@ -472,8 +496,12 @@ class StateMaintenance:
             "previous": previous,
             "settings": settings, "token": token, "sources": sources, "materials": materials,
             "calendar": calendar, "activities": activities, "cycle_timeline": cycle_timeline,
-            "mood_round": mood_round, "sleep_execution": self.service.body_clock.read(context),
-            "growth_refs": growth_refs, "skills_partial": skills_partial}
+            "mood_round": mood_round, "sleep_execution": self.service.body_clock.read(context, now=now),
+            "growth_refs": growth_refs, "skills_partial": skills_partial,
+            "intervention": bool(intervention),
+            "input_epoch": (expected_input_epoch if expected_input_epoch is not None
+                            else self._input_epochs.get(context.key, 0)),
+            "input_fingerprint": input_fingerprint}
 
     @outcome
     def validate(self, spec, at):
@@ -489,22 +517,36 @@ class StateMaintenance:
         binding = self.bindings.get(spec.context.key)
         if binding is None or binding[1] != job["instruction"]:
             raise TaskError("state_binding_changed", "original persona is no longer bound")
+        if job.get("intervention"):
+            self._check_intervention(spec.context, at)
         if spec.task_id not in self.committed:
+            events = self._events(spec.context, since=job["previous"].get("updated_at"))
+            fingerprint = digest([(event.scoped_key, encode(event.source)) for event in events])
+            if fingerprint != job["input_fingerprint"]:
+                raise TaskError("state_inputs_changed", "new conversation input superseded this state round")
+            if (job.get("intervention")
+                    and self._input_epochs.get(spec.context.key, 0) != job["input_epoch"]):
+                raise TaskError("state_inputs_changed", "new conversation input superseded this intervention")
             record = self.service.records.get(spec.context, "current")
             if (record["revision"] if record else 0) != job["revision"] or digest(record) != job["record_hash"]:
                 raise TaskError("state_changed", "state changed during maintenance")
             if self._calendar(spec.context, job["at"]) != job["calendar"] or self.service.activity_context(spec.context) != job["activities"]:
                 raise TaskError("state_material_changed", "calendar or actual activity changed during maintenance")
-            if self.service.body_clock.read(spec.context) != job["sleep_execution"]:
+            if self.service.body_clock.read(spec.context, now=job["at"]) != job["sleep_execution"]:
                 raise TaskError("state_material_changed", "physical sleep changed in another window")
             if self._skills_changed(job, spec.context, at):
                 raise TaskError("state_material_changed", "the role's skills changed during maintenance")
         return True
 
-    async def run(self, context, instruction, request_id):
+    async def run(self, context, instruction, request_id, *, intervention=False, expected_input_epoch=None):
         key = "state-task-" + digest([context.key, request_id])
         if self.closed:
             raise TaskError("state_closed", "maintenance is closed")
+        if intervention:
+            self._check_intervention(context, self.tasks.now())
+            if (expected_input_epoch is not None
+                    and self._input_epochs.get(context.key, 0) != expected_input_epoch):
+                raise TaskError("state_inputs_changed", "new conversation input superseded this intervention")
         if self.runtime.read_one("SELECT 1 FROM execution_tasks WHERE task_id = ?", (key,)):
             return {"task_id": key, "state": require(self.tasks.read(context, key)).state, "replayed": True}
         binding = self.bindings.get(context.key)
@@ -515,7 +557,8 @@ class StateMaintenance:
             return deferred
         if binding[2] is not None:
             await binding[2](context.scope, context.role_binding, instruction)
-        job = self.prepare(context, instruction, request_id)
+        job = self.prepare(context, instruction, request_id, intervention=intervention,
+                           expected_input_epoch=expected_input_epoch)
         self.pending[key] = job
         try:
             require(self.tasks.submit(TaskSpec(key, context, KIND, digest(job), request_id,
@@ -576,7 +619,8 @@ class StateMaintenance:
                 reference=mood_round["reference"], allowed=mood_round["allowed"], baseline=mood_round["baseline"],
                 interest=mood_round["interest"], half_life=job["settings"]["mood_decay_half_life_minutes"],
                 band=job["settings"]["mood_neutral_band"], cross_window=job["settings"]["mood_cross_window"])
-            + _skills_instruction(refs=job["growth_refs"], partial=job["skills_partial"]),
+            + _skills_instruction(refs=job["growth_refs"], partial=job["skills_partial"])
+            + ("\n本轮由当前私聊窗口内获授权的用户明确请求复核你自己的模拟状态。把相关消息作为状态调整请求理解，不要把用户自述、关心或建议冒充为你已经发生的行动；只在请求确实与你自身相关时作出符合人格的小幅调整。继续遵守睡眠回执、隐私和状态真实性边界，不修改权限、人格、他人状态或日程。" if job.get("intervention") else ""),
             context.role_binding, output_format="role_state")
         logger.debug("[CompanionV2][开发者追踪] 状态维护提示词 task=%s instruction=%r role_instruction=%r materials=%r",
                      run.task.task_id, request.instruction, request.role_instruction,

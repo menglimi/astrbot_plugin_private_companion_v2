@@ -61,14 +61,16 @@ class AgendaTests(unittest.TestCase):
         name = name or f"operation-{self.operation_sequence}"
         return OperationRef(name, "agenda", SCOPE, VersionRef(name, 1), name)
 
-    def create(self, *, memo_id="memo-a", title="喝水计划", body="只记录，不默认设置提醒", schedule=None, operation=None):
+    def create(self, *, memo_id="memo-a", title="喝水计划", body="只记录，不默认设置提醒", schedule=None,
+               purpose="open_loop", observed_at=NOW, operation=None):
         return self.service.create_memo(self.actor, target=TARGET, memo_id=memo_id, title=title, body=body,
-                                        schedule=schedule, operation=operation or self.op(), expected_role_revision=1, observed_at=NOW)
+                                        schedule=schedule, purpose=purpose, operation=operation or self.op(),
+                                        expected_role_revision=1, observed_at=observed_at)
 
-    def change(self, action, *, memo_id="memo-a", revision=1, changes=None, operation=None):
+    def change(self, action, *, memo_id="memo-a", revision=1, changes=None, observed_at=NOW, operation=None):
         return self.service.change_memo(self.actor, target=TARGET, memo_id=memo_id, action=action,
                                         expected_revision=revision, expected_role_revision=1, operation=operation or self.op(),
-                                        changes=changes, observed_at=NOW)
+                                        changes=changes, observed_at=observed_at)
 
     def remind(self, *, reminder_id="reminder-a", memo_id=None, schedule=None, operation=None):
         return self.service.create_reminder(self.actor, target=TARGET, reminder_id=reminder_id,
@@ -102,6 +104,65 @@ class AgendaTests(unittest.TestCase):
         self.assertEqual(prepared.delivery, "not_started")
         self.assertEqual(self.runtime.read_all("SELECT * FROM outbox", ()), ())
         self.assertEqual(len(self.service.list_memos(self.actor, target=TARGET, observed_at=NOW).unwrap()), 1)
+
+    def test_open_loops_expire_and_explicit_reopen_starts_a_new_lifetime(self):
+        memo = self.create().unwrap()
+        original = self.memo()
+        self.assertEqual(original.expires_at, NOW + timedelta(days=30))
+        expired_at = original.expires_at + timedelta(seconds=1)
+        self.assertTrue(original.expired(expired_at))
+        self.assertEqual(self.service.list_memos(self.actor, target=TARGET, observed_at=expired_at,
+            state="active", purpose="open_loop", include_expired=True).unwrap()[0].memo_id, memo.object_id)
+        self.change("edit", changes={"body": "稍后继续"}, observed_at=NOW + timedelta(days=29))
+        self.assertEqual(self.memo().expires_at, original.expires_at)
+        reopened = self.change("reopen", revision=2, observed_at=expired_at).unwrap()
+        self.assertEqual(reopened.revision, 3)
+        current = self.service.read_memo(self.actor, target=TARGET, memo_id=memo.object_id,
+                                         observed_at=expired_at).unwrap()
+        self.assertFalse(current.expired(expired_at))
+        self.assertEqual(current.expires_at, expired_at + timedelta(days=30))
+
+    def test_ordinary_note_is_not_an_open_loop_and_due_window_is_bounded(self):
+        self.create(purpose="note").unwrap()
+        self.assertEqual(self.service.list_memos(self.actor, target=TARGET, observed_at=NOW,
+            state="active", purpose="open_loop").unwrap(), ())
+        scheduled = self.create(memo_id="scheduled-loop", purpose="open_loop",
+            schedule=Schedule(NOW + timedelta(days=5), "Asia/Shanghai"), operation=self.op()).unwrap()
+        memo = self.service.read_memo(self.actor, target=TARGET, memo_id=scheduled.object_id,
+                                      observed_at=NOW).unwrap()
+        self.assertEqual(memo.expires_at, NOW + timedelta(days=12))
+
+    def test_default_and_legacy_memos_remain_notes(self):
+        name = "implicit-note"
+        receipt = self.service.create_memo(self.actor, target=TARGET, memo_id=name, title="随手记",
+            body="普通备忘", operation=self.op(), expected_role_revision=1, observed_at=NOW).unwrap()
+        row = self.runtime.read_one("SELECT record_json FROM agenda_memos WHERE memo_id = ?", (name,))
+        record = json.loads(row["record_json"])
+        record.pop("purpose")
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE agenda_memos SET record_json = ? WHERE memo_id = ?",
+                               (json.dumps(record, ensure_ascii=False), name))
+        restored = self.service.repository.memo(receipt.object_id)
+        self.assertEqual(restored.purpose, "note")
+        self.assertIsNone(restored.expires_at)
+        self.assertEqual(self.service.list_memos(self.actor, target=TARGET, observed_at=NOW,
+            state="active", purpose="open_loop").unwrap(), ())
+
+    def test_expired_rows_do_not_starve_a_page_of_active_open_loops(self):
+        expired_ids = [f"a-expired-{index}" for index in range(4)]
+        for memo_id in expired_ids:
+            self.create(memo_id=memo_id, operation=self.op()).unwrap()
+            row = self.runtime.read_one("SELECT record_json FROM agenda_memos WHERE memo_id = ?", (memo_id,))
+            record = json.loads(row["record_json"])
+            record["expires_at"] = (NOW - timedelta(days=1)).isoformat()
+            with self.runtime.transaction() as connection:
+                connection.execute("UPDATE agenda_memos SET record_json = ? WHERE memo_id = ?",
+                                   (json.dumps(record, ensure_ascii=False), memo_id))
+        for memo_id in ("z-active-a", "z-active-b", "z-active-c"):
+            self.create(memo_id=memo_id, operation=self.op()).unwrap()
+        page = self.service.list_memos(self.actor, target=TARGET, observed_at=NOW,
+            limit=2, state="active", purpose="open_loop").unwrap()
+        self.assertEqual([memo.memo_id for memo in page], ["z-active-a", "z-active-b"])
 
     def test_lost_create_response_and_lookup_replay_original_result_after_new_edit(self):
         operation = self.op()

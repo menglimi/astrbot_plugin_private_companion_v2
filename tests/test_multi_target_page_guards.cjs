@@ -53,6 +53,18 @@ test("an unanswered mapping save releases the editor without replaying it", () =
   assert.match(hostPage, /finally\s*\{\s*setBusy\(false\);\s*updateBindingCheck\(\);\s*\}/);
 });
 
+test("the topology does not turn unknown sessions into the default persona", () => {
+  const topology = read(path.join(ROOT, "pages", "宿主管理", "app.js"));
+  assert.match(topology, /name === "\[%None\]" \? "未指定人格" : !name \? "未确定人格"/);
+  assert.match(topology, /target\.persona_override \|\| target\.persona_id \|\| ""/);
+  assert.doesNotMatch(topology, /listedPersonas\[0\]/,
+    "a role may contain several personas, so its first persona cannot stand in for a session");
+  assert.doesNotMatch(topology, /target\.persona_id \|\| "\[%None\]"/,
+    "a session without a recognized persona cannot be marked as using AstrBot's no-persona entry");
+  assert.doesNotMatch(topology, /persona\?\.persona_id \|\| "\[%None\]"/,
+    "an unknown persona must not appear to have native windows");
+});
+
 test("the backup entry is available and its restore preview explains scope", () => {
   const app = read(path.join(PAGE, "app.js"));
   const at = app.indexOf('id="backupWorkspace"');

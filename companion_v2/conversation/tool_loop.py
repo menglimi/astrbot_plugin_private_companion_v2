@@ -38,6 +38,12 @@ TOOL_INSTRUCTION = (
     "不要换一个调用编号重做同一未知操作。调用编号重用时必须保持原参数。"
     "多轮结果按发生顺序理解，早期观察及操作回执不是对象当前状态，更不能推断用户实际做过相应活动。"
     "本地便签、提醒登记和平台发送各自有结果，互不代替。无需为了使用工具而调用工具。"
+    "未完话头只记录用户明确约定稍后继续、等待具体结果或主动要求回头聊的内容；普通闲聊、猜测和已经结束的话题不记录。"
+    "创建前先用 memo.list 查询同一话头，已有记录时编辑原件，不要重复创建。"
+    "只有用户明确约定稍后继续、等待具体结果或要求以后回头聊，才指定 purpose=open_loop；其他备忘一律 purpose=note。"
+    "未完话头默认 30 天后到期；有明确一次性日期时保留到日期后一周，最长 180 天。普通备忘保持 purpose=note。"
+    "话头正文仅供当前相关对话承接，到期、用户已结束或已表达不想继续时不得再次提起。"
+    "用户明确说事情已解决、取消或不想再聊时，用 memo.complete 结束原话头；不要留下可重复提起的记录。"
 )
 GAME_PLAY_INSTRUCTION = (
     "把游戏当作两人共享的桌边时光，不要连续播报规则和分数；关键操作后用简短的角色反应接住对方，再自然留出下一轮。"
@@ -61,8 +67,13 @@ class ToolSource:
 
 
 def specification(action, required, optional=(), description="Use the original role's authorized local agenda."):
+    properties = {key: {} for key in sorted(set(required) | set(optional))}
+    if action == "memo.create":
+        properties["purpose"] = {"type": "string", "enum": ["note", "open_loop"]}
+    elif action == "memo.list":
+        properties["purpose"] = {"type": "string", "enum": ["note", "open_loop"]}
     return ToolSpec(action, description, encode({
-        "type": "object", "properties": {key: {} for key in sorted(set(required) | set(optional))},
+        "type": "object", "properties": properties,
         "required": sorted(required), "additionalProperties": False,
     }))
 
@@ -109,8 +120,14 @@ class LocalRoleTools:
         if agenda:
             from companion_v2.agenda.service import AgendaService
             AgendaService(self.runtime)
+        agenda_descriptions = {
+            "memo.create": "Save one private agenda note. Use purpose=open_loop only for a concrete conversation explicitly left to continue; it expires automatically.",
+            "memo.list": "List the current participant's private agenda notes; purpose=open_loop returns only unfinished conversation threads.",
+            "memo.edit": "Revise an existing note or open loop; edit an existing loop instead of creating a duplicate.",
+        }
         self.catalog = (
-            *(specification(action, *fields) for action, fields in TOOL_FIELDS.items() if agenda),
+            *(specification(action, *fields, description=agenda_descriptions.get(action,
+                "Use the original role's authorized local agenda.")) for action, fields in TOOL_FIELDS.items() if agenda),
             specification("source.read", ("handle",), description="Read one exact host-offered source under its original permission."),
             *((specification("diagnostics.explain", ("topic",), description="Explain a registered design topic without a runtime check."),
                specification("diagnostics.inspect", ("query",), description="Run bounded local checks using a DiagnosticQuery document."))

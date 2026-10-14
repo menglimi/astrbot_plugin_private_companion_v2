@@ -538,13 +538,35 @@
 .wb-field:has(.wb-tagset),
 .wb-field:has(.wb-date){grid-column:1/-1}
 .wb-date{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;min-width:0}
-.wb-date input[type=date]{
-  box-sizing:border-box;flex:1 1 170px;min-width:150px;max-width:240px;min-height:38px;
+.wb-date-solar[hidden],.wb-date-lunar[hidden]{display:none!important}
+.wb-date-text{box-sizing:border-box;flex:1 1 240px;min-width:min(200px,100%);max-width:100%;min-height:38px;
+  padding:var(--sp-2) var(--sp-3);border:1px solid var(--field-border);border-radius:var(--field-radius);
+  background:var(--field-bg);color:var(--t-text);font:inherit;font-size:var(--fs-body);
+  transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease}
+.wb-date-text:focus-visible{outline:none;border-color:var(--t-accent);box-shadow:var(--focus-ring)}
+.wb-date-solar{display:flex;flex:1 1 170px;min-width:0}
+.wb-date-lunar{display:flex;align-items:flex-end;gap:var(--sp-2);flex-wrap:wrap;min-width:0}
+.wb-date-year,.wb-date-select{display:grid;gap:calc(var(--sp-1) * .75);min-width:0;color:var(--t-text-faint);font-size:var(--fs-micro);font-weight:500}
+.wb-date-year input,.wb-date-select select{box-sizing:border-box;min-height:32px;padding:var(--sp-1) var(--sp-2);
+  border:1px solid var(--field-border);border-radius:var(--field-radius);background:var(--field-bg);
+  color:var(--t-text);font:inherit;font-size:var(--fs-tiny)}
+.wb-date-year input{width:112px}
+.wb-date-select select{width:100px}
+.wb-date-year input:focus-visible,.wb-date-select select:focus-visible{outline:none;border-color:var(--t-accent);box-shadow:var(--focus-ring)}
+.wb-date-clear{display:grid;place-items:center;width:32px;aspect-ratio:1;border:1px solid var(--field-border);
+  border-radius:var(--field-radius);background:var(--field-bg);color:var(--t-text-faint);cursor:pointer}
+.wb-date-clear:hover{border-color:var(--t-line-firm);color:var(--t-text-strong)}
+.wb-date-clear:focus-visible{outline:2px solid var(--t-accent);outline-offset:2px}
+.wb-date-clear svg{width:15px;height:15px}
+.wb-date-error{flex-basis:100%;color:var(--t-risk-ink);font-size:var(--fs-micro);overflow-wrap:anywhere}
+.wb-date[data-wb-date-invalid="true"] :is(input,select){border-color:var(--t-risk)}
+.wb-date-solar input[type=date]{
+  box-sizing:border-box;flex:1 1 170px;width:100%;min-width:150px;max-width:240px;min-height:38px;
   padding:var(--sp-2) var(--sp-3);border:1px solid var(--field-border);border-radius:var(--field-radius);
   background:var(--field-bg);color:var(--t-text);font:inherit;font-size:var(--fs-body);
   transition:border-color var(--dur-fast) ease,box-shadow var(--dur-fast) ease;
 }
-.wb-date input[type=date]:focus-visible{outline:none;border-color:var(--t-accent);box-shadow:var(--focus-ring)}
+.wb-date-solar input[type=date]:focus-visible{outline:none;border-color:var(--t-accent);box-shadow:var(--focus-ring)}
 .wb-date-flag{display:inline-flex;align-items:center;gap:calc(var(--sp-1) * 1.25);min-height:38px;padding:0 var(--sp-3);
   border:1px solid var(--field-border);border-radius:var(--field-radius);background:var(--field-bg);
   color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer;user-select:none;white-space:nowrap}
@@ -592,6 +614,7 @@
 .wb-quote-tools{display:flex;align-items:center;gap:var(--sp-2);min-width:0}
 .wb-quote-tools .wb-text-length{margin-left:auto}
 @media(max-width:650px){
+  .wb-date-text,.wb-date-solar{flex-basis:100%}
   .wb-quote{grid-template-columns:auto minmax(0,1fr)}
   .wb-quote-remove{grid-column:2;justify-self:end;margin-top:calc(-1 * var(--sp-1))}
   .wb-tag-form input[type=text]{min-width:0}

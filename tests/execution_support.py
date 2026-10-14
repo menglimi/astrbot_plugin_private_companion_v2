@@ -2,10 +2,45 @@
 
 from companion_v2.storage.schema import (
     MEMORY_TABLES, V10_MIGRATION_STATEMENTS, V15_MIGRATION_STATEMENTS, V36_MIGRATION_STATEMENTS,
+    V56_MIGRATION_STATEMENTS, V59_MIGRATION_STATEMENTS,
 )
 
 
+def remove_v61(connection):
+    remove_v62(connection)
+    if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'laya_decision_events'").fetchone():
+        has_intervention_events = connection.execute(
+            "SELECT 1 FROM laya_decision_events WHERE source = 'role_intervention' LIMIT 1").fetchone()
+        if has_intervention_events:
+            raise ValueError("cannot downgrade role_intervention events to a v60 fixture")
+        connection.execute("CREATE TEMP TABLE laya_decision_events_v61_saved AS SELECT * FROM laya_decision_events")
+        connection.execute('DROP TABLE "laya_decision_events"')
+        connection.execute(V56_MIGRATION_STATEMENTS[0])
+        for statement in V59_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        connection.execute("INSERT INTO laya_decision_events SELECT * FROM laya_decision_events_v61_saved")
+        connection.execute("DROP TABLE laya_decision_events_v61_saved")
+        for statement in V56_MIGRATION_STATEMENTS[1:]:
+            connection.execute(statement)
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v60-to-v61'")
+
+
+def remove_v62(connection):
+    remove_v63(connection)
+    connection.execute("DROP INDEX IF EXISTS conversation_inputs_scope_received_idx")
+    connection.execute("DROP INDEX IF EXISTS conversation_batches_role_binding_idx")
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v61-to-v62'")
+
+
+def remove_v63(connection):
+    connection.execute("DROP INDEX IF EXISTS agenda_open_loop_activity_followup_idx")
+    connection.execute('DROP TABLE IF EXISTS "agenda_open_loop_activity"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v62-to-v63'")
+
+
 def remove_v60(connection):
+    remove_v61(connection)
     connection.execute('DROP TABLE IF EXISTS "proactive_schedule_diagnostics"')
     connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v59-to-v60'")
 

@@ -107,6 +107,17 @@ class PersistentIdentityDirectory:
                 )),
             )
 
+    def grants_for_subject(self, subject: SubjectRef) -> tuple[CapabilityGrant, ...]:
+        """Read one subject's indexed grants without materializing the whole directory."""
+        self._installation(subject.installation_id)
+        with self.runtime.read_snapshot():
+            rows = self.runtime.read_all(
+                """SELECT payload_json FROM identity_grants
+                   WHERE subject_kind = ? AND subject_id = ? ORDER BY grant_id""",
+                (subject.kind.value, subject.subject_id),
+            )
+            return tuple(_grant(row["payload_json"]) for row in rows)
+
     def resolve_authenticated(
         self, principal: AuthenticatedHostPrincipal, *, observed_at: datetime,
     ) -> Outcome[ResolvedIdentity]:

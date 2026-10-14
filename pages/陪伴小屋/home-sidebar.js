@@ -5,11 +5,8 @@ window.CompanionHomeSidebar = (() => {
   const text = value => typeof value === "string" ? value.trim() : "";
   const stamp = value => typeof value === "string" && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
   const kinds = {sleep:"睡眠休息", reading:"阅读", diary:"整理日记", dream:"梦境"};
-  let scheduleExpanded = false;
   let schedulePastExpanded = false;
   if (typeof document !== "undefined") document.addEventListener("click", event => {
-    const summary = event.target?.closest?.("details[data-home-agenda-more] > summary");
-    if (summary) scheduleExpanded = !summary.parentElement.open;
     const past = event.target?.closest?.("details[data-home-agenda-past] > summary");
     if (past) schedulePastExpanded = !past.parentElement.open;
   });
@@ -24,6 +21,89 @@ window.CompanionHomeSidebar = (() => {
   }
   const day = (value, zone) => format(value, zone, {year:"numeric", month:"numeric", day:"numeric"});
   const clock = (value, zone) => format(value, zone, {hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
+  const dayMinutes = 24 * 60;
+  function minuteOfDay(value, zone) {
+    const at = typeof value === "number" ? value : stamp(value);
+    if (at == null) return null;
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {timeZone:zone, hour:"2-digit", minute:"2-digit", hourCycle:"h23"})
+      .formatToParts(new Date(at)).filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return Number(parts.hour) * 60 + Number(parts.minute);
+  }
+  function dayMinute(value, now, zone) {
+    const at = typeof value === "number" ? value : stamp(value);
+    if (at == null) return null;
+    const target = dayKey(at, zone), today = dayKey(now, zone);
+    return target < today ? 0 : target > today ? dayMinutes : minuteOfDay(at, zone);
+  }
+  function minuteLabel(value) {
+    if (value >= dayMinutes) return "24:00";
+    const minutes = Math.max(0, Math.floor(value));
+    return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  }
+  function durationLabel(value) {
+    const minutes = Math.max(0, Math.floor(value));
+    const hours = Math.floor(minutes / 60), remainder = minutes % 60;
+    return hours ? `${hours}小时${remainder ? `${remainder}分` : ""}` : `${remainder}分钟`;
+  }
+  function overviewSegments(items, now, zone, complete) {
+    const ranges = items.map(item => {
+      const start = dayMinute(item.start, now, zone), end = dayMinute(item.end, now, zone);
+      if (start == null || end == null || end <= start) return null;
+      const tone = item.order === 0 || item.tone === "current" ? "current"
+        : item.tone === "proposed" ? "proposed"
+          : item.tone === "elapsed" || end <= minuteOfDay(now, zone) ? "elapsed" : "planned";
+      return {start, end, tone};
+    }).filter(Boolean);
+    const boundaries = [...new Set([0, dayMinutes, ...ranges.flatMap(item => [item.start, item.end])])].sort((a,b)=>a-b);
+    const segments = [];
+    for (let index = 0; index < boundaries.length - 1; index += 1) {
+      const start = boundaries[index], end = boundaries[index + 1];
+      const covering = ranges.filter(item => item.start < end && item.end > start)
+        .sort((a,b) => (a.tone === "current" ? 0 : 1) - (b.tone === "current" ? 0 : 1));
+      const segment = covering.length ? {start, end, kind:"planned", tone:covering[0].tone}
+        : {start, end, kind:complete ? "gap" : "unknown", tone:""};
+      const previous = segments[segments.length - 1];
+      if (previous && previous.end === start && previous.kind === segment.kind && previous.tone === segment.tone) previous.end = end;
+      else segments.push(segment);
+    }
+    return segments;
+  }
+  function timelineRows(items, now, zone, complete) {
+    let cursor = minuteOfDay(now, zone), cursorKnown = true;
+    const rows = [];
+    for (const item of items) {
+      const start = dayMinute(item.start, now, zone);
+      if (complete && cursorKnown && start != null && start > cursor) {
+        rows.push({type:"gap", start:cursor, end:start, current:rows.length === 0, next:item});
+      }
+      rows.push({type:"event", item});
+      const end = dayMinute(item.end, now, zone);
+      if (end != null) cursor = Math.max(cursor, end);
+      else if (item.order === 0 && (item.start == null || stamp(item.start) <= now)) cursorKnown = false;
+      else if (start != null) cursor = Math.max(cursor, start);
+    }
+    if (complete && cursorKnown && cursor < dayMinutes) {
+      rows.push({type:"gap", start:cursor, end:dayMinutes, current:rows.length === 0});
+    }
+    return rows;
+  }
+  function renderOverview(items, now, zone, complete) {
+    const segments = overviewSegments(items, now, zone, complete);
+    const marker = Math.min(100, Math.max(0, minuteOfDay(now, zone) / dayMinutes * 100));
+    const blocks = segments.map(item => `<span class="home-agenda-overview-segment" data-kind="${item.kind}"${item.tone ? ` data-tone="${item.tone}"` : ""} style="width:${(item.end-item.start)/dayMinutes*100}%" aria-hidden="true"></span>`).join("");
+    const points = items.filter(item => item.start != null && item.end == null).map(item => {
+      const at = dayMinute(item.start, now, zone);
+      return at == null ? "" : `<span class="home-agenda-overview-point" style="left:${at/dayMinutes*100}%" aria-hidden="true"></span>`;
+    }).join("");
+    return `<div class="home-agenda-overview">
+      <div class="home-agenda-overview-track" role="img" aria-label="${complete ? "全天日程概览，空白表示未安排" : "全天日程概览，空白可能尚未读取"}">
+        ${blocks}${points}<span class="home-agenda-overview-now" style="left:${marker}%" aria-hidden="true"></span>
+      </div>
+      <div class="home-agenda-overview-labels" aria-hidden="true"><span>00:00</span><span>12:00</span><span>24:00</span></div>
+      <div class="home-agenda-overview-legend"><span data-kind="planned">已安排</span><span data-kind="${complete ? "gap" : "unknown"}">${complete ? "未安排" : "未读范围"}</span><time>此刻 ${e(clock(now, zone))}</time></div>
+      ${complete ? "" : `<p class="home-agenda-overview-note">日程数据不完整，空白暂不能判断为未安排。</p>`}
+    </div>`;
+  }
   function dayKey(value, zone) {
     const at = typeof value === "number" ? value : stamp(value);
     if (at == null) return "";
@@ -193,7 +273,7 @@ window.CompanionHomeSidebar = (() => {
     const planningNote = planning?.enabled
       ? !planning.calendar_enabled ? "日历写入尚未开启，自动规划暂停"
         : planning.running ? "自动规划正在检查日程"
-          : nextCheck != null ? `自动规划已开启 · 下次检查 ${moment(nextCheck, now, zone)}`
+          : nextCheck != null ? `自动规划已开启 · 调度巡检 ${moment(nextCheck, now, zone)}`
             : "自动规划已开启 · 暂无近期计划"
       : "";
     if (!loading) {
@@ -218,7 +298,7 @@ window.CompanionHomeSidebar = (() => {
     const emptyTitle = loading ? "正在读取日程…" : calendarRead && lifeRead
       ? state?.occurrences?.partial ? "日程未完整读取" : "今日暂无安排"
       : "日程暂不可读取";
-    const row = item => `<li class="home-agenda-item" data-tone="${item.tone}"><span class="home-agenda-dot" aria-hidden="true"></span><div class="home-agenda-body">
+    const row = (item, current=false) => `<li class="home-agenda-item" data-tone="${item.tone}"${current ? ` data-current="true" aria-current="time"` : ""}><span class="home-agenda-dot" aria-hidden="true"></span><div class="home-agenda-body">
       <time${item.start == null ? "" : ` datetime="${new Date(item.start).toISOString()}"`}>${e(windowText(item, now, zone))}</time><strong>${e(item.title)}</strong><small>${e(item.label)}</small>
       ${item.detail ? `<small class="home-agenda-detail">${e(item.detail)}</small>` : ""}</div></li>`;
     const active = items.filter(item=>item.order === 0);
@@ -226,21 +306,29 @@ window.CompanionHomeSidebar = (() => {
     const elapsed = items.filter(item=>item.tone === "elapsed" || item.end != null && item.end <= now && item.order !== 0)
       .sort((a,b)=>(b.end ?? b.start ?? -Infinity)-(a.end ?? a.start ?? -Infinity));
     const upcoming = items.filter(item=>!active.includes(item) && !current.includes(item) && !elapsed.includes(item));
-    const live = [...active, ...current, ...upcoming];
-    const visible = live.slice(0,4), remaining = live.slice(4);
+    const live = [...active, ...current, ...upcoming]
+      .sort((a,b)=>(a.start ?? Infinity)-(b.start ?? Infinity) || a.order-b.order || a.key.localeCompare(b.key));
+    const coverageComplete = calendarRead && lifeRead && !state?.occurrences?.partial
+      && !state?.occurrences?.skipped && !state?.occurrences?.scan_truncated
+      && !state?.occurrences?.occurrences_truncated;
+    const rows = timelineRows(live, now, zone, coverageComplete);
+    const currentGap = rows.find(item => item.type === "gap" && item.current);
     const clockLabel = loading ? "正在读取当前活动…" : lifeRead
       ? active.length ? "有活动正在进行" : "当前没有进行中的活动"
       : "当前活动尚未读取";
-    const currentLine = `<p class="home-agenda-current">${elapsed.length && !live.length ? "今日安排已结束" : clockLabel}</p>`;
+    const currentLine = `<p class="home-agenda-current">${elapsed.length && !live.length ? "今日安排已结束" : clockLabel}</p>
+      ${currentGap ? `<p class="home-agenda-current-gap"><time>${e(clock(now, zone))}</time><strong>${items.length ? "当前未安排" : "今日暂无安排"}</strong><span>${e(durationLabel(currentGap.end-currentGap.start))}${currentGap.next ? ` · 下一项 ${e(clock(currentGap.next.start, zone))}` : " · 今日暂无后续安排"}</span></p>` : ""}`;
+    const timeline = rows.length ? rows.map(item => item.type === "event"
+      ? row(item.item, item.item.tone === "current" || item.item.order === 0)
+      : `<li class="home-agenda-gap"${item.current ? ` data-current="true" aria-current="time"` : ""}><span class="home-agenda-gap-mark" aria-hidden="true"></span><div class="home-agenda-gap-body"><time>${minuteLabel(item.start)} – ${minuteLabel(item.end)} · ${e(durationLabel(item.end-item.start))}</time><strong>${item.current ? "当前未安排" : "未安排时段"}</strong><small>${item.next ? `这段时间没有已记录安排 · 下一项 ${e(clock(item.next.start, zone))}` : "当天暂无后续安排"}</small></div></li>`).join("")
+      : `<li class="home-agenda-item"><span class="home-agenda-dot" aria-hidden="true"></span><div class="home-agenda-body"><strong>${emptyTitle}</strong></div></li>`;
     return `${currentLine}
-      <ol class="home-agenda" aria-label="今日安排">${items.length ? visible.map(row).join("")
-        : elapsed.length && !loading ? ""
-          : `<li class="home-agenda-item"><span class="home-agenda-dot" aria-hidden="true"></span><div class="home-agenda-body"><strong>${emptyTitle}</strong></div></li>`}</ol>
-      ${remaining.length ? `<details class="home-agenda-more" data-home-agenda-more ${scheduleExpanded ? "open" : ""}><summary>${scheduleExpanded ? "收起" : "展开"}其余 ${remaining.length} 项</summary><ol class="home-agenda">${remaining.map(row).join("")}</ol></details>` : ""}
+      ${calendarRead && lifeRead ? renderOverview(items, now, zone, coverageComplete) : ""}
+      <div class="home-agenda-scroll" tabindex="0" aria-label="当天日程时间线"><ol class="home-agenda" aria-label="今日安排">${timeline}</ol></div>
       ${elapsed.length ? `<details class="home-agenda-more" data-home-agenda-past ${schedulePastExpanded ? "open" : ""}><summary>${schedulePastExpanded ? "收起" : "查看"}已过时段 ${elapsed.length} 项</summary><ol class="home-agenda">${elapsed.map(row).join("")}</ol></details>` : ""}
       ${messages.length ? `<p class="home-side-warning" role="status">${e(messages.join("；"))}</p>` : ""}
       ${runtimeMissing ? `<button class="text-button home-side-action" data-go="manage" data-manage="host">前往账号与会话</button>` : ""}
-      <p class="home-side-caption">${planningNote ? `${e(planningNote)} · ` : ""}${items.length > 4 ? `另有 ${items.length-4} 项安排 · ` : ""}时间按 ${e(zone)} 显示</p>`;
+      <p class="home-side-caption">${planningNote ? `${e(planningNote)} · ` : ""}时间按 ${e(zone)} 显示</p>`;
   }
   return {renderState, renderSchedule};
 })();

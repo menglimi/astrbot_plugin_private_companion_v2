@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ from sqlmodel import select
 
 from companion_v2.adapters.astrbot.native import (
     NATIVE_LOOKUP_SLOW_SECONDS, HostPersona, NativePrivateBridge, account_number, bounded_native_lookup,
-    persona_instruction, report_slow_native_lookup,
+    configured_default_persona_id, persona_instruction, report_slow_native_lookup,
 )
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
@@ -99,6 +100,42 @@ async def load_persona_snapshot_selection(context, umo, conversation_id):
     if row is None:
         raise TaskError("host_conversation_missing", "selected AstrBot conversation is unavailable")
     return row[0]
+
+
+async def resolve_native_persona_selection(context, umo, conversation_persona_id):
+    """Resolve AstrBot's active persona while building a window snapshot."""
+    manager = getattr(context, "persona_manager", None)
+    resolver = getattr(manager, "resolve_selected_persona", None)
+    if not callable(resolver):
+        if conversation_persona_id not in (None, ""):
+            return conversation_persona_id
+        return configured_default_persona_id(context, umo)
+
+    platform_id = umo.partition(":")[0] if type(umo) is str else ""
+    platform = context.get_platform_inst(platform_id) if platform_id else None
+    meta = platform.meta() if platform is not None else None
+    platform_name = getattr(meta, "name", None)
+    if type(platform_name) is not str or not platform_name:
+        raise TaskError("host_persona_platform_unavailable", "the conversation platform is unavailable")
+
+    configuration = context.get_config(umo=umo)
+    provider_settings = configuration.get("provider_settings", {}) if isinstance(configuration, dict) else {}
+    if not isinstance(provider_settings, dict):
+        provider_settings = {}
+    result = resolver(umo=umo, conversation_persona_id=conversation_persona_id, platform_name=platform_name,
+                      provider_settings=provider_settings)
+    if inspect.isawaitable(result):
+        result = await result
+    if not isinstance(result, tuple) or len(result) != 4:
+        raise TaskError("host_persona_invalid", "AstrBot returned an invalid selected persona")
+    selected, _persona, _forced, special = result
+    if special:
+        return "[%None]"
+    if selected in (None, ""):
+        if conversation_persona_id not in (None, ""):
+            return conversation_persona_id
+        return configured_default_persona_id(context, umo)
+    return selected
 
 
 def _start_event_loop_lag_probe(interval=1.0):
@@ -248,6 +285,7 @@ def installed_native_types() -> NativeAdapterTypes:
         video_provider_factory=_native_video_provider,
         session_persona_override_lookup=load_session_persona_override,
         persona_snapshot_lookup=load_persona_snapshot_selection,
+        persona_selection_lookup=resolve_native_persona_selection,
     )
 
 

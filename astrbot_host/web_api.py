@@ -32,6 +32,7 @@ from .configuration_api import ConfigurationWebAPI
 from .persona_workshop_api import PersonaWorkshopWebAPI
 from .reality_access_api import RealityAccessWebAPI
 from .screen_access_api import ScreenAccessWebAPI
+from .game_access_api import GameAccessWebAPI
 from .native_extension_api import NativeExtensionWebAPI
 from .account_session_api import AccountSessionWebAPI
 from .image_material_api import ImageMaterialsWebAPI
@@ -125,6 +126,7 @@ class StagingWebAPI:
             all_routes += PersonaWorkshopWebAPI(self.controller).routes()
             all_routes += RealityAccessWebAPI(self.controller).routes()
             all_routes += ScreenAccessWebAPI(self.controller).routes()
+            all_routes += GameAccessWebAPI(self.controller).routes()
             all_routes += AccountSessionWebAPI(self.controller).routes()
             all_routes += ImageMaterialsWebAPI(self.controller).routes()
             all_routes += QzoneWebAPI(self.controller).routes()

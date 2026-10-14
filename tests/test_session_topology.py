@@ -306,6 +306,148 @@ class SharedTopologyBindingTests(GroupFixture, unittest.IsolatedAsyncioTestCase)
                 patch("astrbot_host.setup_api.display_names", return_value=NS(targets=AsyncMock(side_effect=lambda rows: rows))):
             return await self.api.save()
 
+    async def test_native_private_and_group_personas_share_their_mapped_role(self):
+        private_umo = "qq-main:FriendMessage:200"
+        group_umo = "qq-main:GroupMessage:300"
+        unknown_umo = "qq-main:GroupMessage:301"
+        rows = [
+            {"session_id": private_umo, "conversation_id": "private-cid", "persona_id": "星缘-私聊"},
+            {"session_id": group_umo, "conversation_id": "group-cid", "persona_id": None},
+            {"session_id": unknown_umo, "conversation_id": "unknown-cid", "persona_id": "default"},
+        ]
+        conversation_ids = {private_umo: "private-cid", group_umo: "group-cid", unknown_umo: "unknown-cid"}
+
+        async def current(umo):
+            return conversation_ids.get(umo)
+
+        async def read_sessions(*, platform, **_kwargs):
+            selected = [row for row in rows if row["session_id"].startswith(platform + ":")]
+            return selected, len(selected)
+
+        async def resolve_selected_persona(context, umo, conversation_persona_id):
+            self.assertIs(context, self.native)
+            if umo == private_umo:
+                return conversation_persona_id
+            if umo == group_umo:
+                return conversation_persona_id or "星缘-群聊"
+            return conversation_persona_id
+
+        self.controller.config["multi_host"]["personas"] = [
+            {"bot_id": "bot-a", "persona_id": "星缘-私聊", "role_id": "星缘"},
+            {"bot_id": "bot-a", "persona_id": "星缘-群聊", "role_id": "星缘"},
+            {"bot_id": "bot-b", "persona_id": "original", "role_id": "role-a"},
+            {"bot_id": "bot-b", "persona_id": "second", "role_id": "role-b"},
+        ]
+        self.native.conversation_manager.get_curr_conversation_id = current
+        self.native.conversation_manager.db = NS(get_session_conversations=read_sessions)
+        self.controller.native_types = replace(self.controller.native_types,
+                                               persona_selection_lookup=resolve_selected_persona)
+
+        with patch.object(self.controller.session_topology, "services", AsyncMock(return_value={})):
+            report = await self.controller.session_topology.inventory_report()
+
+        private = next(row for row in report["targets"] if row.get("unified_msg_origin") == private_umo)
+        group = next(row for row in report["targets"] if row.get("unified_msg_origin") == group_umo)
+        unknown = next(row for row in report["targets"] if row.get("unified_msg_origin") == unknown_umo)
+        self.assertEqual((private["persona_id"], private["roles"][0]["role_id"]), ("星缘-私聊", "星缘"))
+        self.assertEqual((group["persona_id"], group["roles"][0]["role_id"]), ("星缘-群聊", "星缘"))
+        self.assertEqual(unknown["persona_id"], "")
+        self.assertEqual(unknown["roles"], [])
+        self.assertFalse(unknown["managed"])
+        self.assertEqual(self.controller.session_topology.persona_selection_snapshot(private_umo, "100"),
+                         {"bot_id": "bot-a", "persona_id": "星缘-私聊", "role_id": "星缘",
+                          "conversation_id": "private-cid", "selection_source": "conversation"})
+        self.assertEqual(self.controller.session_topology.persona_selection_snapshot(group_umo, "100"),
+                         {"bot_id": "bot-a", "persona_id": "星缘-群聊", "role_id": "星缘",
+                          "conversation_id": "group-cid", "selection_source": "conversation"})
+
+    async def test_empty_persona_snapshot_uses_sync_runner_lookup_in_the_directory(self):
+        private_umo = "qq-main:FriendMessage:200"
+        group_umo = "qq-main:GroupMessage:300"
+        rows = [
+            {"session_id": private_umo, "conversation_id": "private-cid", "persona_id": ""},
+            {"session_id": group_umo, "conversation_id": "group-cid", "persona_id": None},
+        ]
+
+        async def current(umo):
+            return {private_umo: "private-cid", group_umo: "group-cid"}.get(umo)
+
+        async def read_sessions(*, platform, **_kwargs):
+            selected = [row for row in rows if row["session_id"].startswith(platform + ":")]
+            return selected, len(selected)
+
+        self.controller.config["multi_host"]["personas"] = [
+            {"bot_id": "bot-a", "persona_id": "星缘-私聊", "role_id": "星缘"},
+            {"bot_id": "bot-a", "persona_id": "星缘-群聊", "role_id": "星缘"},
+        ]
+        self.native.conversation_manager.get_curr_conversation_id = current
+        self.native.conversation_manager.db = NS(get_session_conversations=read_sessions)
+        self.controller.native_types = replace(self.controller.native_types,
+            persona_selection_lookup=lambda _context, umo, selected: selected or
+                ("星缘-私聊" if umo == private_umo else "星缘-群聊"))
+
+        with patch.object(self.controller.session_topology, "services", AsyncMock(return_value={})):
+            report = await self.controller.session_topology.inventory_report()
+
+        selected = {row["unified_msg_origin"]: row for row in report["targets"]
+                    if row.get("unified_msg_origin")}
+        self.assertEqual((selected[private_umo]["persona_id"], selected[private_umo]["roles"][0]["role_id"]),
+                         ("星缘-私聊", "星缘"))
+        self.assertEqual((selected[group_umo]["persona_id"], selected[group_umo]["roles"][0]["role_id"]),
+                         ("星缘-群聊", "星缘"))
+
+    async def test_manual_private_refresh_updates_only_the_private_snapshot(self):
+        private_umo = "qq-main:FriendMessage:200"
+        group_umo = "qq-main:GroupMessage:300"
+        rows = [
+            {"session_id": private_umo, "conversation_id": "private-cid", "persona_id": "original"},
+            {"session_id": group_umo, "conversation_id": "group-cid", "persona_id": "original"},
+        ]
+
+        async def current(umo):
+            return {private_umo: "private-cid", group_umo: "group-cid"}.get(umo)
+
+        async def read_sessions(*, platform, **_kwargs):
+            selected = [row for row in rows if row["session_id"].startswith(platform + ":")]
+            return selected, len(selected)
+
+        self.controller.config["multi_host"]["personas"] = [
+            {"bot_id": "bot-a", "persona_id": "original", "role_id": "original-role"},
+            {"bot_id": "bot-a", "persona_id": "second", "role_id": "second-role"},
+        ]
+        self.native.conversation_manager.get_curr_conversation_id = current
+        self.native.conversation_manager.db = NS(get_session_conversations=read_sessions)
+        self.controller.native_types = replace(self.controller.native_types,
+            persona_selection_lookup=lambda _context, umo, _selected:
+                "second" if umo == private_umo else "original")
+
+        with patch.object(self.controller.session_topology, "services", AsyncMock(return_value={})):
+            await self.controller.session_topology.inventory_report()
+            await self.controller.session_topology.inventory_report(scope_kind="private")
+
+        self.assertEqual(self.controller.session_topology.persona_selection_snapshot(private_umo, "100")["persona_id"],
+                         "second")
+        self.assertEqual(self.controller.session_topology.persona_selection_snapshot(group_umo, "100")["persona_id"],
+                         "original")
+
+    async def test_wildcard_target_installs_default_snapshot_for_new_private_windows(self):
+        from dataclasses import replace as dataclass_replace
+
+        settings = dataclass_replace(self.controller.settings, targets=(
+            dataclass_replace(self.controller.settings.targets[0], participant_id="*"),))
+        self.controller.native_types = replace(self.controller.native_types,
+            persona_selection_lookup=lambda _context, _umo, _selected: "original")
+
+        with patch.object(self.controller.session_topology, "_native_sessions", AsyncMock(return_value=({}, []))):
+            await self.controller.session_topology.inventory_report(settings=settings)
+            await self.controller.session_topology.inventory_report(settings=settings, scope_kind="private")
+
+        snapshot = self.controller.session_topology.persona_selection_snapshot(
+            "qq-main:FriendMessage:299", "100")
+        self.assertEqual(snapshot["persona_id"], "original")
+        self.assertEqual(snapshot["role_id"], "role-a")
+        self.assertEqual(snapshot["selection_source"], "configured")
+
     def test_accounts_keep_registered_bot_ids_without_any_window(self):
         from companion_v2.adapters.astrbot.native import HostAccount
 

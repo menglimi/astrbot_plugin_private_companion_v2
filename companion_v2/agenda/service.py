@@ -23,7 +23,7 @@ from companion_v2.storage.runtime import StorageRuntime
 
 from .models import (
     AgendaError, AgendaReceipt, AgendaTarget, DueClaim, DueCursor, DuePage, LocalPreparation,
-    Memo, MemoCursor, Reminder, Schedule, encode, fingerprint, opaque, stamp,
+    Memo, MemoCursor, Reminder, Schedule, encode, fingerprint, open_item_expiry, opaque, stamp,
 )
 from .repository import AgendaRepository
 
@@ -171,23 +171,28 @@ class AgendaService:
 
     def create_memo(
         self, actor: ResolvedIdentity, *, target: AgendaTarget, memo_id: str, title: str, body: str,
-        operation: OperationRef, expected_role_revision: int, observed_at: datetime, schedule: Schedule | None = None,
+        operation: OperationRef, expected_role_revision: int, observed_at: datetime,
+        schedule: Schedule | None = None, purpose: str = "note",
     ) -> Outcome[AgendaReceipt]:
         def mutate() -> AgendaReceipt:
             opaque(memo_id)
             text_field(title, nonblank=True)
             text_field(body)
             check_schedule(schedule)
+            if purpose not in ("note", "open_loop"):
+                raise AgendaError("invalid_memo_purpose", "memo purpose must be note or open_loop")
             if schedule is not None:
                 self._authorize(actor, target, "memo.reminder.set", observed_at)
             if self.repository.memo(memo_id) is not None:
                 raise AgendaError("agenda_id_conflict", "memo identifier is already in use")
-            memo = Memo(memo_id, target, 1, "active", title, body, False, schedule, 0, 0, actor)
+            expiry = open_item_expiry(observed_at, schedule) if purpose == "open_loop" else None
+            memo = Memo(memo_id, target, 1, "active", title, body, False, schedule, 0, 0, actor,
+                        purpose=purpose, expires_at=expiry, created_at=observed_at)
             self.repository.save_memo(memo, expected_revision=0, now=observed_at)
             self._register("memo", memo_id, target)
             return AgendaReceipt("", "", memo_id, 1, "active")
         return self._command(actor, target, "memo.create", operation, expected_role_revision,
-                             [memo_id, title, body, schedule], observed_at, mutate)
+                             [memo_id, title, body, schedule, purpose], observed_at, mutate)
 
     def change_memo(
         self, actor: ResolvedIdentity, *, target: AgendaTarget, memo_id: str, action: str,
@@ -203,6 +208,8 @@ class AgendaService:
         def mutate() -> AgendaReceipt:
             memo = self._memo(memo_id, target)
             expect_revision(memo.revision, expected_revision)
+            if memo.expired(observed_at) and action not in ("reopen", "delete"):
+                raise AgendaError("agenda_memo_expired", "expired open items must be explicitly reopened before editing")
             updated = memo
             schedule_changed = "schedule" in patch and patch["schedule"] != memo.schedule
             if action != "edit" and patch:
@@ -222,6 +229,9 @@ class AgendaService:
                         raise AgendaError("agenda_state_conflict", "reopen the memo before changing its schedule")
                     updated = replace(updated, sequence=0)
                 updated = replace(updated, **patch)
+                if memo.purpose == "open_loop" and schedule_changed:
+                    created_at = memo.created_at or observed_at
+                    updated = replace(updated, expires_at=open_item_expiry(created_at, updated.schedule, updated.sequence))
             elif action == "complete":
                 if memo.state != "active":
                     raise AgendaError("agenda_state_conflict", "memo is not active")
@@ -230,9 +240,14 @@ class AgendaService:
                                   sequence=memo.sequence + 1 if next_due is not None else memo.sequence,
                                   completion_count=memo.completion_count + 1)
             elif action == "reopen":
-                if memo.state != "completed":
-                    raise AgendaError("agenda_state_conflict", "only a completed memo can reopen")
-                updated = replace(memo, state="active")
+                if memo.state == "completed":
+                    updated = replace(memo, state="active",
+                        expires_at=open_item_expiry(observed_at, memo.schedule, memo.sequence)
+                        if memo.purpose == "open_loop" else memo.expires_at)
+                elif memo.state == "active" and memo.expired(observed_at):
+                    updated = replace(memo, expires_at=open_item_expiry(observed_at, memo.schedule, memo.sequence))
+                else:
+                    raise AgendaError("agenda_state_conflict", "only a completed or expired open item can reopen")
             elif action in ("pin", "unpin"):
                 updated = replace(memo, pinned=action == "pin")
             elif action == "delete":
@@ -328,11 +343,16 @@ class AgendaService:
                              [reminder_id, expected_revision, schedule, expected_memo_revision], observed_at, mutate,
                              self.object_key("reminder", reminder_id))
 
-    def read_memo(self, actor: ResolvedIdentity, *, target: AgendaTarget, memo_id: str, observed_at: datetime) -> Outcome[Memo]:
+    def read_memo(self, actor: ResolvedIdentity, *, target: AgendaTarget, memo_id: str, observed_at: datetime,
+                  include_expired: bool = False) -> Outcome[Memo]:
         try:
+            if type(include_expired) is not bool:
+                raise AgendaError("invalid_agenda_filter", "include_expired must be a boolean")
             with self.runtime.read_snapshot():
                 self._authorize(actor, target, "memo.read", observed_at, self.object_key("memo", memo_id))
                 memo = self._memo(memo_id, target)
+                if memo.expired(observed_at) and not include_expired:
+                    raise AgendaError("agenda_object_not_found", "open item is unavailable")
             return Outcome.success(memo)
         except AgendaError as error:
             return Outcome.failed(error.code, str(error))
@@ -340,31 +360,54 @@ class AgendaService:
     def list_memos(
         self, actor: ResolvedIdentity, *, target: AgendaTarget, observed_at: datetime,
         limit: int = 20, after: MemoCursor | None = None, search: str = "", state: str = "all",
+        purpose: str | None = None, include_expired: bool = False,
     ) -> Outcome[tuple[Memo, ...]]:
         try:
             check_limit(limit)
             text_field(search)
+            if type(include_expired) is not bool:
+                raise AgendaError("invalid_agenda_filter", "include_expired must be a boolean")
             if after is not None and not isinstance(after, MemoCursor):
                 raise AgendaError("invalid_memo_cursor", "use the last row's pinned state and stable ID")
             cursor = (int(after.pinned), after.memo_id) if after else (2, "")
             if state not in ("active", "completed", "all"):
                 raise AgendaError("invalid_agenda_filter", "unsupported memo state")
+            if purpose not in (None, "note", "open_loop"):
+                raise AgendaError("invalid_memo_purpose", "unsupported memo purpose")
             with self.runtime.read_snapshot():
                 decision = require(self.policy.feature_access(actor, scope=target.scope, action="memo.list", observed_at=observed_at))
                 self._role_revision(target, decision.tier, observed_at)
                 visible = require(self.policy.permitted_object_keys(actor, scope=target.scope, action="memo.read",
                                                                     owner=target.owner, observed_at=observed_at))
                 ids = tuple(key[len("agenda.memo:"):] for key in visible if key.startswith("agenda.memo:"))
-                rows = self.runtime.read_all(
-                    """SELECT memo_id FROM agenda_memos WHERE target_key = ? AND state != 'deleted'
+                rows = []
+                result = []
+                scan_cursor = cursor
+                while len(result) < limit:
+                    rows = self.runtime.read_all(
+                    """SELECT memo_id, pinned FROM agenda_memos WHERE target_key = ? AND state != 'deleted'
                        AND memo_id IN (SELECT value FROM json_each(?))
                        AND (pinned < ? OR (pinned = ? AND memo_id > ?))
+                       AND (? IS NULL OR COALESCE(json_extract(record_json, '$.purpose'), 'note') = ?)
                        AND (? = 'all' OR state = ?) AND (instr(json_extract(record_json, '$.title'), ?) > 0
                        OR instr(json_extract(record_json, '$.body'), ?) > 0) ORDER BY pinned DESC, memo_id LIMIT ?""",
-                    (target.key, encode(ids), cursor[0], *cursor, state, state, search, search, limit),
-                )
-                result = tuple(self.repository.memo(row["memo_id"]) for row in rows)
-            return Outcome.success(result)
+                    (target.key, encode(ids), scan_cursor[0], *scan_cursor, purpose, purpose,
+                     state, state, search, search, limit),
+                    )
+                    if not rows:
+                        break
+                    exhausted = len(rows) < limit
+                    for row in rows:
+                        memo = self.repository.memo(row["memo_id"])
+                        scan_cursor = (int(row["pinned"]), row["memo_id"])
+                        if memo is None or (not include_expired and memo.expired(observed_at)):
+                            continue
+                        result.append(memo)
+                        if len(result) >= limit:
+                            break
+                    if len(result) >= limit or exhausted:
+                        break
+            return Outcome.success(tuple(result))
         except AgendaError as error:
             return Outcome.failed(error.code, str(error))
 

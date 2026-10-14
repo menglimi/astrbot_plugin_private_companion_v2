@@ -33,7 +33,7 @@ class BackgroundCoordinator:
         if error is not None or result.failure or result.unwrap().task is not None:
             self.notify()
 
-    def advance(self):
+    def advance(self, *, planners=True):
         if self._closed:
             return False
         require(self.tasks.check_generation())
@@ -46,8 +46,9 @@ class BackgroundCoordinator:
                         # Exact claims can fail before mutating the queue after binding/permission changes.
                         self.delivery.cancel_unstarted(task_id, reason=result.failure.code)
         more = self.delivery.settle() == 32
-        for planner in self.planners:
-            more = require(planner.advance()) or more
+        if planners:
+            for planner in self.planners:
+                more = require(planner.advance()) or more
         available = self.tasks.limits.background_slots - len(self._workers)
         if available > 0:
             for context, task_id in self.delivery.pending(limit=available, excluded=tuple(self._workers)):
@@ -55,6 +56,11 @@ class BackgroundCoordinator:
                 self._workers[task_id] = worker
                 worker.add_done_callback(self._done)
         return more
+
+    def next_wake(self):
+        if self._closed or len(self._workers) >= self.tasks.limits.background_slots:
+            return None
+        return self.delivery.next_wake(excluded=tuple(self._workers))
 
     def cancel(self):
         self._closed = True

@@ -265,7 +265,7 @@ class MultiAuthority:
             # 默认关的能力**不签发**——没有授权就是没有权限，页面也会如实显示"未授权"；
             # 默认开的能力即使不在配置能力表里也签发（表管的是宿主能力，不是这两项按人权限）。
             pending = self._defaults(TaskContext(actor, resolution.binding, AudienceRef(scope, (actor.subject,))))
-            decided = {grant.capability for grant in self.identities.snapshot().grants
+            decided = {grant.capability for grant in self.identities.grants_for_subject(actor.subject)
                        if grant.subject == actor.subject and grant.scope == scope
                        and grant.grant_id.startswith(PERSON_PERMISSION_GRANT_PREFIX)}
             for capability in self.settings.capabilities:

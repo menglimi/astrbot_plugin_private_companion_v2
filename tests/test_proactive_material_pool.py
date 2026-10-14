@@ -10,7 +10,8 @@ from companion_v2.execution.models import digest
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.proactive.balance_events import SOURCE_OWNER as BALANCE_OWNER
 from companion_v2.proactive.material_pool import (read_active_material_pool, read_material_pool,
-                                                  read_role_material_pool, read_shared_material_pool)
+                                                  read_proactive_contact_traces, read_role_material_pool,
+                                                  read_shared_material_pool)
 from companion_v2.proactive.news_events import SOURCE_OWNER as NEWS_OWNER
 
 
@@ -169,6 +170,11 @@ class ProactiveMaterialPoolTests(unittest.TestCase):
             "contact-5", "private-a", json.dumps({"decision": "skip", "thought_summary": "没有发出的念头",
                 "purpose": "chat", "parts": [{"text": "没有真的发出", "payload_hash": "part-hash-6"}]}),
             "没有真的发出", "whole-hash-5", NOW.isoformat()))
+        database.execute("INSERT INTO proactive_contacts VALUES (?, ?, ?, ?, ?, ?)", (
+            "contact-6", "private-a", json.dumps({"decision": "send", "thought_summary": "早上想和你打个招呼",
+                "purpose": "greeting", "automatic_origin": {"greeting_event": {}},
+                "parts": [{"text": "早呀，今天也慢慢来。", "payload_hash": "part-hash-7"}]}),
+            "早呀，今天也慢慢来。", "whole-hash-6", NOW.isoformat()))
         for contact_id, sequence, part_count, payload_hash, state, receipt_ref, delivered_at in (
             ("contact-1", 0, 2, "part-hash-1", "delivered", "receipt-1", NOW.isoformat()),
             ("contact-1", 1, 2, "part-hash-2", "pending", None, None),
@@ -224,7 +230,16 @@ class ProactiveMaterialPoolTests(unittest.TestCase):
         self.assertEqual(messages["没有发出的念头"]["category"], "未发送的念头")
         self.assertEqual(messages["没有发出的念头"]["source"], "主动念头记录")
         history.interaction.assert_called_once_with(context, NOW, action="proactive.contact")
-        self.assertEqual(result["history_count"], 5)
+        self.assertEqual(result["history_count"], 6)
+
+        traces = read_proactive_contact_traces(schedule, ((context, "user-17", "澄溪"),), observed_at=NOW)
+        greeting = next(item for item in traces["items"] if item["title"] == "早上想和你打个招呼")
+        self.assertEqual(greeting["scope"], "window")
+        self.assertEqual(greeting["trace_target"], "user-17")
+        self.assertEqual(greeting["trace_role"], "澄溪")
+        self.assertEqual(greeting["captured_at"], NOW.isoformat(), "draft time is recorded before delivery")
+        self.assertEqual(greeting["usage"]["status"], "pending")
+        self.assertEqual(greeting["usage"]["thought_origin"], "问候时机")
 
         other_context = NS(key="private-b", scope=NS(kind=ScopeKind.PRIVATE, key="private-b"),
                            audience=NS(recipients=("recipient-a",)), actor=object())

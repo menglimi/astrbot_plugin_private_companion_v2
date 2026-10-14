@@ -745,6 +745,26 @@ class WindowedSegmentationMigrationTests(unittest.TestCase):
         self.assertEqual(result.sources["weather.provider"], ("weather_config.weather_source",))
         self.assertEqual(plugin_configuration_defaults()["weather.provider"], "auto")
 
+    def test_v1_global_full_probability_preserves_automatic_voice_when_auto_switch_is_off(self):
+        source = {"voice_action_config": {"tts_frequency_control_mode": "global", "tts_trigger_probability": 100,
+                  "tts_private_trigger_probability": -1, "tts_group_trigger_probability": -1},
+                  "auto_voice_config": {"auto_voice_enabled": False}}
+        converted = convert_plugin_configuration(source)
+        self.assertEqual(converted.changes["voice_reply.trigger_mode"], "always")
+        self.assertEqual(converted.changes["voice_reply.private_probability"], -1.0)
+        self.assertEqual(converted.changes["voice_reply.group_probability"], -1.0)
+        self.assertIn("voice_action_config.tts_frequency_control_mode", converted.sources["voice_reply.trigger_mode"])
+        source["voice_action_config"]["tts_frequency_control_mode"] = "legacy"
+        self.assertEqual(convert_plugin_configuration(source).changes["voice_reply.trigger_mode"], "request")
+
+    def test_v1_voice_probability_force_respects_the_window_override(self):
+        source = {"voice_action_config": {"tts_frequency_control_mode": "global", "tts_trigger_probability": 100,
+                  "tts_private_trigger_probability": -1, "tts_group_trigger_probability": 20},
+                  "auto_voice_config": {"auto_voice_enabled": False}}
+        self.assertEqual(convert_plugin_configuration(source).changes["voice_reply.trigger_mode"], "request")
+        self.assertEqual(convert_plugin_configuration(source, window_kind="private").changes["voice_reply.trigger_mode"], "always")
+        self.assertEqual(convert_plugin_configuration(source, window_kind="group").changes["voice_reply.trigger_mode"], "request")
+
     def test_weather_source_aliases_are_normalized_and_unsupported_sources_are_explained(self):
         for source in ("open-meteo", "open_meteo", "openmeteo"):
             with self.subTest(source=source):

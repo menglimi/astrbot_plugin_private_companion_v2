@@ -15,6 +15,8 @@ from .text_processing import literal_ranges
 DEFAULT_SPLIT_WORDS = ("。", "？", "！", "~", "～", "?", ".", "!", ";", "；", "……", "）", "“", "…")
 DEFAULT_RULE_REGEX = r"(?<=[。！？!?…~～])\s*|\n+"
 PART_GAP_MODES = frozenset(("fixed", "random", "log"))
+_SOFT_COMMA_CHARS = frozenset((",", "，"))
+_SOFT_COMMA_MIN_CHARS = 10
 
 
 def part_gap_seconds(settings, text, seed):
@@ -79,6 +81,29 @@ def _width_words(words):
     return tuple(sorted(set(expanded), key=lambda word: (-len(word), word)))
 
 
+def _match_word(text, position, words):
+    return next((word for word in words if text.startswith(word, position)), None)
+
+
+def _is_punctuation_word(word):
+    """Return whether a configured boundary token contains punctuation only."""
+    return bool(word) and all(not char.isalnum() and not char.isspace() for char in word)
+
+
+def _coalesce_punctuation_boundaries(text, boundaries):
+    """Keep a run such as ``...？`` in one message boundary."""
+    result = []
+    for end in boundaries:
+        if (result and end > result[-1]
+                and text[result[-1]:end]
+                and all(not char.isalnum() and not char.isspace()
+                        for char in text[result[-1]:end])):
+            result[-1] = end
+        else:
+            result.append(end)
+    return tuple(result)
+
+
 def _word_boundaries(text, words, protected):
     boundaries = []
     position = interval = 0
@@ -95,7 +120,7 @@ def _word_boundaries(text, words, protected):
                 boundaries.append(position + 1)
             position = protected[interval][1] + 1
             continue
-        word = next((word for word in words if text.startswith(word, position)), None)
+        word = _match_word(text, position, words)
         if word is None:
             position += 1
             continue
@@ -111,6 +136,14 @@ def _word_boundaries(text, words, protected):
         if word in (".", "…", "~", "～"):
             while text.startswith(word, end):
                 end += len(word)
+        # Different punctuation marks in one run express one pause. Consume
+        # all adjacent configured punctuation before publishing the boundary,
+        # so ``...？`` cannot leave a message beginning with ``？``.
+        while True:
+            following = _match_word(text, end, words)
+            if following is None or not _is_punctuation_word(following):
+                break
+            end += len(following)
         boundaries.append(end)
         position = end
     return boundaries
@@ -121,7 +154,7 @@ COHERENCE_PROMPT = (
     "先把同一个意思自然说完整，紧接的回应与理由保持连贯；简短不等于只说几个字或一句就结束。"
     "对轻松、亲昵或分享式消息，可以像熟人一样自然接住情绪并多回应一点；称呼要和所在的完整句子放在一起。不要为制造聊天感，"
     "把一次接话写成一串反问、称呼、否认和重复解释。称呼和语气词随语境使用，不必每句都补。"
-    "标点按语义使用，不为凑消息条数额外添加标点、换行或短句，分段上限不是需要达到的目标。"
+    "标点按语义使用，不为凑消息条数额外添加标点、换行或短句；连续标点（例如 ...？、？！）属于同一处停顿，不要在连续标点之间拆段。分段上限不是需要达到的目标。"
     "日常短消息正文内部不插入空行，每条正文首尾不填充空行；换行只用于实际内容格式或已配置的分段边界，"
     "不用空白制造停顿。代码、列表、引用和表格保持原有格式。"
 )
@@ -130,7 +163,7 @@ COHERENCE_PROMPT = (
 DEFAULT_PROMPT = (
     "你可以自行决定将本轮回复作为多条消息发送：熟悉的日常聊天可按自然停顿拆成简短、各自读得通的气泡，"
     "一两句通常就够；不要把一句话、称呼与回应、因果解释或紧密相连的步骤拆散。"
-    "完整回应之后的自然追问可以另发一条；模型指定的边界无需凑够规则分段的最短字数。每条正文首尾不要填充空行。"
+    "完整回应之后的自然追问可以另发一条；模型指定的边界无需凑够规则分段的最短字数。连续标点（例如 ...？、？！）保持在同一条消息里，不要让消息以孤立标点开头。每条正文首尾不要填充空行。"
     "长文、教程、代码、引用、列表、表格、链接和带格式的内容尽量保持完整，只有清楚的主题转折才考虑分段。"
     "每个消息边界只用完整标记 {{split_marker}}，在 text 字符串内单独占一行；"
     "标记只表达消息边界，不是正文，也不能借此删改、概括或重排原文。不要加引号，不要放进代码、引用、列表或链接。"
@@ -280,9 +313,10 @@ class SegmentationPolicy:
                     pattern, text, timeout=0.05) if match.end() > 0]
             except TimeoutError as error:
                 raise ValueError("segmentation regex exceeded its execution budget") from error
-        return tuple(end for boundary in boundaries
-                     if (end := boundary if isinstance(boundary, int) else boundary[1]) > 0
-                     and (isinstance(boundary, int) or not any(a < end <= b for a, b in protected)))
+        boundaries = tuple(end for boundary in boundaries
+                           if (end := boundary if isinstance(boundary, int) else boundary[1]) > 0
+                           and (isinstance(boundary, int) or not any(a < end <= b for a, b in protected)))
+        return _coalesce_punctuation_boundaries(text, boundaries)
 
     def _rule_parts(self, text, limit):
         if limit <= 1:
@@ -291,7 +325,10 @@ class SegmentationPolicy:
         for end in self.rule_boundaries(text):
             if end <= start:
                 continue
-            if (len(text[start:end].strip()) < self.min_segment_chars
+            visible_length = sum(not char.isspace() for char in text[start:end])
+            if (visible_length < self.min_segment_chars
+                    or (text[end - 1] in _SOFT_COMMA_CHARS
+                        and visible_length < max(_SOFT_COMMA_MIN_CHARS, self.min_segment_chars * 2))
                     or len(text[end:].strip()) < self.min_segment_chars):
                 continue
             parts.append(text[start:end])

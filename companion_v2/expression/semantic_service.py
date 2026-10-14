@@ -403,7 +403,7 @@ class SemanticService:
         self.background[key] = asyncio.create_task(learn(), name="v2-native-slang-learning")
 
     def reaction_settings(self, context):
-        """Window-scoped reaction bounds and their revision; never blocks a turn."""
+        """Installation-wide reaction bounds and their revision; never blocks a turn."""
         return read_reaction_configuration(self.app.runtime, context)
 
     def schedule_reaction_backfill(self, context, settings=None):

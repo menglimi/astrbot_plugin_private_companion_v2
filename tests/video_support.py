@@ -4,6 +4,7 @@ import base64
 from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import unittest
 
 from astrbot_host.video.decoder import inspect_video
 from astrbot_host.video.loader import load_native_video
@@ -13,7 +14,10 @@ from tests.native_adapter_support import FakeEvent
 
 @lru_cache(maxsize=8)
 def video_bytes(count=12, fps=10, size=(64, 48), tint=0):
-    import cv2
+    try:
+        import cv2
+    except ImportError as error:
+        raise unittest.SkipTest("video fixture requires the optional OpenCV decoder") from error
     import numpy as np
     with TemporaryDirectory(prefix="v2-video-fixture-") as directory:
         path = Path(directory) / "fixture.mp4"

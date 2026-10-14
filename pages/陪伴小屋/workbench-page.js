@@ -216,20 +216,125 @@ window.CompanionWorkbench = (() => {
   const parseTagList = value => String(value ?? "").split(TAG_SPLIT)
     .map(part => part.trim()).filter(Boolean);
   const parseQuoteLines = value => String(value ?? "").split(/\r\n|\n|\r/);
-  const BIRTHDAY_RE = /^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日(?:\s*·\s*农历)?$/;
-  function parseBirthday(value) {
-    const text = String(value ?? "").trim();
-    const chinese = BIRTHDAY_RE.exec(text);
-    if (chinese) {
-      return {year: chinese[1] || "", month: chinese[2], day: chinese[3],
-        lunar: /农历\s*$/.test(text)};
+  const CHINESE_DIGITS = {零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5,
+    六: 6, 七: 7, 八: 8, 九: 9};
+  const LUNAR_MONTHS = ["", "正", "二", "三", "四", "五", "六", "七", "八", "九", "十", "冬", "腊"];
+  const LUNAR_DAYS = ["", "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九",
+    "初十", "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
+    "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"];
+  const lunarFormatter = (() => {
+    try { return new Intl.DateTimeFormat("en-u-ca-chinese", {
+      year: "numeric", month: "long", day: "numeric", timeZone: "UTC",
+    }); } catch { return null; }
+  })();
+  const lunarYearCache = new Map();
+  const utcTime = (year, month, day) => {
+    const date = new Date(0);
+    date.setUTCHours(0, 0, 0, 0);
+    date.setUTCFullYear(year, month, day);
+    return date.getTime();
+  };
+  function chineseNumber(text) {
+    if (text.startsWith("初")) text = text.slice(1);
+    if (/^\d+$/.test(text)) return Number(text);
+    if (/^[零〇一二两三四五六七八九]+$/.test(text)) {
+      return Number([...text].map(digit => CHINESE_DIGITS[digit]).join(""));
     }
-    const iso = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(text);
-    if (iso) return {year: iso[1], month: iso[2], day: iso[3], lunar: false};
+    if (text === "廿") return 20;
+    if (text === "卅") return 30;
+    if (text.startsWith("廿")) return 20 + (CHINESE_DIGITS[text.slice(1)] || 0);
+    if (text.startsWith("卅")) return 30 + (CHINESE_DIGITS[text.slice(1)] || 0);
+    if (text === "十") return 10;
+    if (text.startsWith("十")) return 10 + (CHINESE_DIGITS[text.slice(1)] || 0);
+    if (text.endsWith("十")) return (CHINESE_DIGITS[text[0]] || 0) * 10;
+    if (text.includes("十")) {
+      const [tens, ones] = text.split("十");
+      return (CHINESE_DIGITS[tens] || 1) * 10 + (CHINESE_DIGITS[ones] || 0);
+    }
+    return CHINESE_DIGITS[text] || 0;
+  }
+  function parseBirthday(value) {
+    const text = String(value ?? "").normalize("NFKC").trim();
+    const lunarMarked = /农历|阴历|舊曆|旧历|農曆|陰曆/.test(text);
+    const solarMarked = /公历|阳历|新历|陽曆|公曆/.test(text);
+    const normalized = text.replace(/[\s·，,]/g, "")
+      .replace(/农历|阴历|舊曆|旧历|農曆|陰曆|公历|阳历|新历|陽曆|公曆/g, "")
+      .replace(/[()\[\]【】（）]/g, "")
+      .replace(/^[:：]/, "")
+      .replace(/^(?:每年)?(?:出生年月日|出生日期|生日|出生于|出生|日期)(?:是|为)?[:：]?/, "")
+      .replace(/(?:生日|纪念日)$/, "");
+    const iso = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(normalized);
+    if (iso) return {year: iso[1], month: iso[2], day: iso[3], lunar: lunarMarked, leap: false};
+    const monthFirst = /^(\d{1,2})[-/.](\d{1,2})(?:[-/.](\d{4}))?$/.exec(normalized);
+    if (monthFirst) return {year: monthFirst[3] || "", month: monthFirst[1], day: monthFirst[2],
+      lunar: lunarMarked, leap: false};
+    const chinese = /^(?:(\d{4}|[零〇一二两三四五六七八九]{4})年?)?(闰|閏)?(正|冬|腊|[零〇一二两三四五六七八九十\d]{1,3})月((?:初|廿|卅)?[零〇一二两三四五六七八九十\d]{1,3})[日号號]?$/.exec(normalized);
+    if (chinese) {
+      const month = chinese[3] === "正" ? 1 : chinese[3] === "冬" ? 11
+        : chinese[3] === "腊" ? 12 : chineseNumber(chinese[3]);
+      const day = chineseNumber(chinese[4]);
+      const year = chinese[1] ? (/^\d+$/.test(chinese[1]) ? chinese[1]
+        : String(chineseNumber(chinese[1]))) : "";
+      const inferredLunar = Boolean(chinese[2] || /^(?:正|冬|腊)/.test(chinese[3])
+        || /^(?:初|廿|卅)/.test(chinese[4]));
+      const lunar = lunarMarked || (!solarMarked && inferredLunar);
+      return {year, month: String(month), day: String(day), lunar, leap: Boolean(chinese[2])};
+    }
     return null;
   }
-  const birthdayText = (parts, lunar, noYear) =>
-    `${!noYear && parts.year ? `${parts.year}年` : ""}${Number(parts.month)}月${Number(parts.day)}日${lunar ? " · 农历" : ""}`;
+  function birthdayPartsError(parts) {
+    const year = parts.year ? Number(parts.year) : null;
+    const month = Number(parts.month);
+    const day = Number(parts.day);
+    if (year != null && (!Number.isInteger(year) || year < 1 || year > 9999)) return "年份需在 1 至 9999 年之间。";
+    if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(day) || day < 1 || day > 31) {
+      return "请核对生日的月份和日期。";
+    }
+    if (parts.lunar) {
+      if (day > 30) return "农历日期最多为三十。";
+      if (year != null) {
+        const index = lunarDateIndex(year);
+        if (!index) return "当前浏览器无法校验这个农历年份，请核对年份或更换浏览器。";
+        if (!index.has(month + ":" + (parts.leap ? "1" : "0") + ":" + day)) {
+          return "这个年份没有对应的农历日期，请核对月份、日期和闰月。";
+        }
+      }
+    } else {
+      const checkYear = year == null ? 2000 : year;
+      const daysInMonth = new Date(utcTime(checkYear, month, 0)).getUTCDate();
+      if (day > daysInMonth) return "这个公历日期不存在，请核对月份和日期。";
+    }
+    return "";
+  }
+  const birthdayText = (parts, lunar, noYear) => {
+    const year = !noYear && parts.year ? String(Number(parts.year)) + "年" : "";
+    if (lunar) return year + "农历" + (parts.leap ? "闰" : "")
+      + LUNAR_MONTHS[Number(parts.month)] + "月" + LUNAR_DAYS[Number(parts.day)];
+    return year + Number(parts.month) + "月" + Number(parts.day) + "日";
+  };
+  function lunarDateIndex(year) {
+    if (!lunarFormatter || !Number.isInteger(year) || year < 1 || year > 9999) return null;
+    if (lunarYearCache.has(year)) return lunarYearCache.get(year);
+    const months = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh",
+      "Eighth", "Ninth", "Tenth", "Eleventh", "Twelfth"];
+    const found = new Set();
+    const start = utcTime(year, 0, 1);
+    const stop = utcTime(year + 1, 3, 1);
+    try {
+      for (let time = start; time < stop; time += 86400000) {
+        const parts = Object.fromEntries(lunarFormatter.formatToParts(new Date(time))
+          .map(part => [part.type, part.value]));
+        if (Number(parts.relatedYear) !== year) continue;
+        const match = /^(First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth|Eleventh|Twelfth) Month(bis)?$/i
+          .exec(parts.month || "");
+        if (!match) continue;
+        const month = months.findIndex(name => name.toLowerCase() === match[1].toLowerCase()) + 1;
+        found.add(String(month) + ":" + (match[2] ? "1" : "0") + ":" + Number(parts.day));
+      }
+    } catch { return null; }
+    lunarYearCache.set(year, found.size ? found : null);
+    return found.size ? found : null;
+  }
   const fireInput = el => el.dispatchEvent(new Event("input", {bubbles: true}));
   const displayValue = (item, value) => item.input === "line-list"
     ? (parseStringList(value) || []).map(word => word === "\n" ? "<newline>" : word).join(" · ") || "（空）"
@@ -520,23 +625,46 @@ window.CompanionWorkbench = (() => {
         + ">" + icon("plus") + "<span>添加</span></button><button type=\"button\" class=\"wb-word-special\""
         + " data-wb-order-natural=\"" + e(item.name) + "\"" + dis + ">" + icon("rotate-ccw") + "<span>恢复自然顺序</span></button></div></div>";
     }
-    /* 生日：日期选择 + 农历 + 「不确定年份」。选择器里用一个占位年份承载
-       「不确定」的月日；保存值始终是组成后的中文字符串。 */
+    /* 文字字段是保存真源；识别到日期后，历法选择器可继续细调。 */
     if (item.kind === "text" && item.input === "date") {
       const parts = parseBirthday(value);
+      const dateError = parts ? birthdayPartsError(parts) : "";
       const lunar = parts?.lunar || false;
       const noYear = parts ? !parts.year : false;
-      const picker = parts
-        ? `${noYear ? "2000" : parts.year.padStart(4, "0")}-${parts.month.padStart(2, "0")}-${parts.day.padStart(2, "0")}`
-        : "";
-      return `<div class="wb-date" data-wb-date-group="${e(item.name)}">`
-        + `<input type="hidden" data-wb-field="${e(item.name)}" value="${e(value)}">`
+      const picker = parts && !parts.lunar
+        ? `${noYear ? "2000" : parts.year.padStart(4, "0")}-${parts.month.padStart(2, "0")}-${parts.day.padStart(2, "0")}` : "";
+      const selectedMonth = parts ? Number(parts.month) : "";
+      const selectedDay = parts ? Number(parts.day) : "";
+      const year = noYear ? "" : parts?.year || "";
+      const monthOptions = Array.from({length: 12}, (_, index) => index + 1).map(month =>
+        `<option value="${month}"${selectedMonth === month ? " selected" : ""}>${LUNAR_MONTHS[month]}月</option>`).join("");
+      const dayOptions = Array.from({length: 30}, (_, index) => index + 1).map(day =>
+        `<option value="${day}"${selectedDay === day ? " selected" : ""}>${LUNAR_DAYS[day]}</option>`).join("");
+      return `<div class="wb-date" data-wb-date-group="${e(item.name)}" data-wb-date-invalid="${String(Boolean(dateError))}">`
+        + `<input type="text" class="wb-date-text" data-wb-field="${e(item.name)}"`
+        + ` data-wb-date-text="${e(item.name)}" value="${e(value)}"`
+        + ` aria-label="${e(item.label || item.name)}文字输入"`
+        + ` placeholder="如：农历五月初八 / 2000-05-08 / 每年冬至"${dis}>`
+        + `<div class="wb-date-solar"${lunar ? " hidden" : ""}>`
         + `<input type="date" data-wb-date="${e(item.name)}" data-wb-date-role="picker" value="${e(picker)}"`
-        + ` aria-label="${e(item.label || item.name)}日期"${dis}>`
+        + ` aria-label="${e(item.label || item.name)}公历日期"${dis}></div>`
+        + `<div class="wb-date-lunar"${lunar ? "" : " hidden"}>`
+        + `<label class="wb-date-year"><span>农历年份</span><input type="number" min="1" max="9999" step="1"`
+        + ` data-wb-date="${e(item.name)}" data-wb-date-role="year" value="${e(year)}"`
+        + ` aria-label="${e(item.label || item.name)}农历年份"${noYear ? " disabled" : ""}${dis}></label>`
+        + `<label class="wb-date-select"><span>月份</span><select data-wb-date="${e(item.name)}"`
+        + ` data-wb-date-role="month" aria-label="农历月份"${dis}><option value="">选择月</option>${monthOptions}</select></label>`
+        + `<label class="wb-date-select"><span>日期</span><select data-wb-date="${e(item.name)}"`
+        + ` data-wb-date-role="day" aria-label="农历日期"${dis}><option value="">选择日</option>${dayOptions}</select></label>`
+        + `<label class="wb-date-flag"><input type="checkbox" data-wb-date="${e(item.name)}"`
+        + ` data-wb-date-role="leap"${parts?.leap ? " checked" : ""}${dis}><span>闰月</span></label></div>`
         + `<label class="wb-date-flag"><input type="checkbox" data-wb-date="${e(item.name)}"`
         + ` data-wb-date-role="lunar"${lunar ? " checked" : ""}${dis}><span>农历</span></label>`
         + `<label class="wb-date-flag"><input type="checkbox" data-wb-date="${e(item.name)}"`
-        + ` data-wb-date-role="noyear"${noYear ? " checked" : ""}${dis}><span>不确定年份</span></label></div>`;
+        + ` data-wb-date-role="noyear"${noYear ? " checked" : ""}${dis}><span>不确定年份</span></label>`
+        + `<button type="button" class="wb-date-clear" data-wb-date-clear="${e(item.name)}" aria-label="清除${e(item.label || "生日")}日期"`
+        + ` title="清除日期"${dis}>${icon("x")}</button>`
+        + `<span class="wb-date-error" data-wb-date-error role="status" aria-live="polite">${e(dateError)}</span></div>`;
     }
     /* 词条快选：固定候选 + 自定义输入。可见的文本框就是 data-wb-field，
        候选只是往里填写；单击选中、再击清空（multi 模式为顿号清单的加入与移除）。 */
@@ -1212,6 +1340,17 @@ window.CompanionWorkbench = (() => {
       /* 生日与台词气泡的辅助控件：先把它们的改动翻译回 data-wb-field 的字符串，
          再走下面同一条通用路径（草稿、脏标记、计数全部复用）。 */
       if (el.dataset?.wbDate) { composeDateField(el.dataset.wbDate); return; }
+      if (el.dataset?.wbDateText) {
+        const group = el.closest("[data-wb-date-group]");
+        const parsed = parseBirthday(el.value);
+        if (parsed) {
+          syncDateControlsFromText(group, parsed);
+          setDateGroupError(group, birthdayPartsError(parsed));
+        } else {
+          clearDateControls(group);
+          setDateGroupError(group, "");
+        }
+      }
       if (el.dataset?.wbQuoteLine !== undefined) {
         el.style.height = "auto";
         el.style.height = `${el.scrollHeight}px`;
@@ -1319,6 +1458,8 @@ window.CompanionWorkbench = (() => {
     }
 
     function onClick(event) {
+      const clearDate = event.target.closest("[data-wb-date-clear]");
+      if (clearDate) { composeDateField(clearDate.dataset.wbDateClear, true); return; }
       const section = event.target.closest("[data-wb-section]");
       if (section) { selectSection(section.dataset.wbSection, true); return; }
       const removeWord = event.target.closest("[data-wb-word-remove]");
@@ -1554,24 +1695,123 @@ window.CompanionWorkbench = (() => {
     }
 
     /* === 轻结构文本的编辑翻译 === */
-    /* 生日：辅助控件（日期/农历/不确定年份）→ 组成字符串写回隐藏的 data-wb-field。
-       原值是无法解析的自由文本且尚未选日期时不碰它，避免一句“春天出生”被清掉。 */
-    function composeDateField(name) {
+    /* 生日选择器编辑后写回可见文字字段；无法解析的纪念日文字保持原样。 */
+    function composeDateField(name, clear = false) {
       if (!state.draft || locked()) return;
-      const group = mountPoint()?.querySelector(`[data-wb-date-group="${name}"]`);
+      const group = mountPoint()?.querySelector('[data-wb-date-group="' + name + '"]');
       if (!group) return;
       const field = group.querySelector("[data-wb-field]");
       if (!field) return;
       const item = state.container?.fields[name];
       if (!item || item.input !== "date") return;
-      const picker = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(
-        group.querySelector('[data-wb-date-role="picker"]')?.value || "");
       const lunar = Boolean(group.querySelector('[data-wb-date-role="lunar"]')?.checked);
       const noYear = Boolean(group.querySelector('[data-wb-date-role="noyear"]')?.checked);
-      const parts = picker || parseBirthday(field.value);
-      if (!parts) return;
-      field.value = birthdayText(parts, lunar, noYear || !parts.year);
+      const yearInput = group.querySelector('[data-wb-date-role="year"]');
+      const solar = group.querySelector(".wb-date-solar");
+      const lunarInputs = group.querySelector(".wb-date-lunar");
+      if (solar) solar.hidden = lunar;
+      if (lunarInputs) lunarInputs.hidden = !lunar;
+      if (yearInput) yearInput.disabled = noYear || locked();
+      const error = group.querySelector("[data-wb-date-error]");
+      const setError = message => {
+        setDateGroupError(group, message, error);
+      };
+      if (clear) {
+        group.querySelectorAll("input,select").forEach(input => {
+          if (input.type === "checkbox") input.checked = false;
+          else input.value = "";
+        });
+        if (yearInput) yearInput.disabled = false;
+        field.value = "";
+        setError("");
+        fireInput(field);
+        return;
+      }
+      if (lunar) {
+        const month = group.querySelector('[data-wb-date-role="month"]')?.value || "";
+        const day = group.querySelector('[data-wb-date-role="day"]')?.value || "";
+        const year = noYear ? "" : String(yearInput?.value || "").trim();
+        const leap = Boolean(group.querySelector('[data-wb-date-role="leap"]')?.checked);
+        if (!month && !day) {
+          if (field.value) { setDateGroupError(group, "选择农历日期后会替换现有生日文字；清除请使用清除按钮。", error, false); return; }
+          setError("");
+          return;
+        }
+        if (!month || !day) { setDateGroupError(group, "请选择完整的农历月份和日期。", error, false); return; }
+        if (year) {
+          const numericYear = Number(year);
+          if (!Number.isInteger(numericYear) || numericYear < 1 || numericYear > 9999) {
+            setError("农历年份需在 1 至 9999 年之间；不需要年份时可勾选「不确定年份」。");
+            return;
+          }
+          const index = lunarDateIndex(numericYear);
+          if (!index) { setError("当前浏览器无法校验这个农历年份，请清空年份或更换浏览器。"); return; }
+          if (!index.has(month + ":" + (leap ? "1" : "0") + ":" + Number(day))) {
+            setError("这个年份没有对应的农历日期，请核对月份、日期和闰月。");
+            return;
+          }
+        }
+        field.value = birthdayText({year, month, day, leap}, true, noYear || !year);
+      } else {
+        const picker = /^(\d{4})-(\d{2})-(\d{2})$/.exec(
+          group.querySelector('[data-wb-date-role="picker"]')?.value || "");
+        if (!picker) {
+          if (field.value) { setDateGroupError(group, "选择完整日期后才会替换现有生日文字；清除请使用清除按钮。", error, false); return; }
+          setError("");
+          return;
+        }
+        field.value = birthdayText({year: picker[1], month: picker[2], day: picker[3]}, false, noYear);
+      }
+      setError("");
       fireInput(field);
+    }
+    function setDateGroupError(group, message, error = group?.querySelector("[data-wb-date-error]"), invalid = Boolean(message)) {
+      if (!group) return;
+      group.dataset.wbDateInvalid = String(invalid);
+      if (error) error.textContent = message || "";
+    }
+    function clearDateControls(group) {
+      if (!group) return;
+      group.querySelectorAll('[data-wb-date-role="year"], [data-wb-date-role="month"], '
+        + '[data-wb-date-role="day"], [data-wb-date-role="picker"]').forEach(input => { input.value = ""; });
+      const leap = group.querySelector('[data-wb-date-role="leap"]');
+      if (leap) leap.checked = false;
+      const lunar = group.querySelector('[data-wb-date-role="lunar"]');
+      if (lunar) lunar.checked = false;
+      const noyear = group.querySelector('[data-wb-date-role="noyear"]');
+      if (noyear) { noyear.checked = false; noyear.disabled = locked(); }
+      const year = group.querySelector('[data-wb-date-role="year"]');
+      if (year) year.disabled = locked();
+      const solar = group.querySelector(".wb-date-solar");
+      const lunarPanel = group.querySelector(".wb-date-lunar");
+      if (solar) solar.hidden = false;
+      if (lunarPanel) lunarPanel.hidden = true;
+    }
+    function syncDateControlsFromText(group, parts) {
+      if (!group) return;
+      const lunar = Boolean(parts.lunar);
+      const noYear = !parts.year;
+      const lunarToggle = group.querySelector('[data-wb-date-role="lunar"]');
+      const noyearToggle = group.querySelector('[data-wb-date-role="noyear"]');
+      if (lunarToggle) lunarToggle.checked = lunar;
+      if (noyearToggle) noyearToggle.checked = noYear;
+      const year = group.querySelector('[data-wb-date-role="year"]');
+      if (year) { year.value = parts.year || ""; year.disabled = noYear || locked(); }
+      const month = group.querySelector('[data-wb-date-role="month"]');
+      const day = group.querySelector('[data-wb-date-role="day"]');
+      if (month) month.value = String(Number(parts.month));
+      if (day) day.value = String(Number(parts.day));
+      const leap = group.querySelector('[data-wb-date-role="leap"]');
+      if (leap) leap.checked = Boolean(parts.leap);
+      const picker = group.querySelector('[data-wb-date-role="picker"]');
+      if (picker) {
+        const pickerYear = parts.year || "2000";
+        picker.value = `${pickerYear.padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+      }
+      const solar = group.querySelector(".wb-date-solar");
+      const lunarPanel = group.querySelector(".wb-date-lunar");
+      if (solar) solar.hidden = lunar;
+      if (lunarPanel) lunarPanel.hidden = !lunar;
     }
     /* 词条快选：single 模式单击选中、再击清空；multi 模式维护顿号清单。 */
     function applyChipOption(name, option) {
@@ -1825,6 +2065,11 @@ window.CompanionWorkbench = (() => {
        if (!retry) {
          if (state.pending) { state.notice = ""; state.bad = false; paint(); return; }
         if (state.stale) { state.notice = "配置已更新，请先核对当前版本。"; paint(); return; }
+        const invalidDate = mountPoint()?.querySelector('[data-wb-date-invalid="true"]');
+        if (invalidDate) {
+          invalidDate.querySelector("[data-wb-date-error]")?.focus?.();
+          return;
+        }
         const bad = Object.entries(state.draft).find(([name, value]) =>
           !valid(state.container.fields[name], value));
         if (bad) {

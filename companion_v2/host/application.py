@@ -667,7 +667,8 @@ class CompanionApplication:
             text = record.payload if record.content_hash == event.input_hash else ""
             return rest_gate.deferral(self.runtime, context, text=text, now=self.now(),
                                       event_key=event.scoped_key, source=event.source,
-                                      capability=event.capability)
+                                      capability=event.capability,
+                                      body_clock=self.role_state.body_clock)
         except (TaskError, ValueError, KeyError, TypeError):
             return 0.0
 
@@ -835,7 +836,6 @@ class CompanionApplication:
                             self.flow.completed(work.batch_id, worker.result())
                 excluded = tuple(work.batch_id for work, _ in self._workers.values())
                 available = self.worker_limit - len(self._workers)
-                started_foreground = False
                 if available > 0:
                     def slots_for(work):
                         batch = self.messages.batch(work.batch_id)
@@ -856,11 +856,10 @@ class CompanionApplication:
                                                      name="companion:flow:" + work.batch_id)
                         self._workers[work.task_id] = (work, worker)
                         worker.add_done_callback(lambda done: self.notify())
-                        started_foreground = True
-                if started_foreground:
-                    # Start admitted model/send work before synchronous periodic
-                    # maintenance occupies the loop. All original fences remain.
-                    await asyncio.sleep(0)
+                # Receipt notifications first release completed delivery workers
+                # and admit due parts. Planners run below, after send work starts.
+                more_background = self.background.advance(planners=False)
+                await asyncio.sleep(0)
                 excluded = tuple(work.batch_id for work, _ in self._workers.values())
                 deadline = self.flow.next_wake(excluded=excluded) if len(self._workers) < self.worker_limit else None
                 self.memory_schedule.advance()
@@ -868,18 +867,23 @@ class CompanionApplication:
                 if memory_deadline is not None:
                     deadline = min(deadline, memory_deadline) if deadline else memory_deadline
                 self.life_runtime.advance()
+                await asyncio.sleep(0)
                 self.state_maintenance.advance()
+                await asyncio.sleep(0)
                 self.memory.activity.advance_bound(self.state_maintenance.bindings.values())
                 if self.memory.game is not None:
                     self.memory.game.advance_bound(self.state_maintenance.bindings.values())
                 self.calendar_planning.advance()
+                await asyncio.sleep(0)
                 self.growth_progress.advance()
                 self.self_review.advance()
+                await asyncio.sleep(0)
                 tools = self.messages.tools
                 participation = getattr(tools, "group_participation", None) if tools is not None else None
                 if participation is not None:
                     participation.advance_reflection()
                 self.expression_style.advance()
+                await asyncio.sleep(0)
                 if self.presence is not None:
                     self.presence.advance()
                 if loop.time() >= next_contact_delivery_check:
@@ -889,9 +893,10 @@ class CompanionApplication:
                 journal_deadline = self.journal_schedule.next_wake()
                 if journal_deadline is not None:
                     deadline = min(deadline, journal_deadline) if deadline else journal_deadline
-                timeout = max(0, (deadline - self.now()).total_seconds()) if deadline else None
-                more_background = self.background.advance()
+                more_background = self.background.advance() or more_background
+                await asyncio.sleep(0)
                 self.contact_schedule.advance()
+                await asyncio.sleep(0)
                 if loop.time() >= next_wal_checkpoint:
                     checkpoint = getattr(self.runtime, "checkpoint_passive", None)
                     worker = self._wal_checkpoint_worker
@@ -901,6 +906,10 @@ class CompanionApplication:
                         worker.add_done_callback(self._report_wal_checkpoint)
                         self._wal_checkpoint_worker = worker
                     next_wal_checkpoint = loop.time() + self.WAL_CHECKPOINT_INTERVAL_SECONDS
+                delivery_deadline = self.background.next_wake()
+                if delivery_deadline is not None:
+                    deadline = min(deadline, delivery_deadline) if deadline else delivery_deadline
+                timeout = max(0, (deadline - self.now()).total_seconds()) if deadline else None
                 timeout = 0 if more_background else min(timeout, 1.0) if timeout is not None else 1.0
                 if timeout == 0:
                     await asyncio.sleep(0)  # Bounded pages yield to intake, cancellation and other routes.

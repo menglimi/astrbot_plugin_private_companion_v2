@@ -45,6 +45,6 @@ $env:PYTHONPATH = 'C:/Users/99505/.astrbot/backend/app'
 
 真实 AstrBot SDK 独立进程入口已通过初始化、四组生活路由、启动、睡眠命令、停机、数据库关闭和路由注销。日志保存在系统临时目录 `companion-background-fairness-regression.log`、`companion-background-fairness-queue-recheck.log` 和 `companion-background-fairness-entry.log`。验证使用临时 V2 数据根及模型/平台替身；没有在线重载、真实模型/QQ 调用或 V1 数据访问。本批无 schema 迁移。
 
-## 下一步
+## 后续进展
 
-推进同一角色跨窗口的身体状态与作息时钟，统一饥饿、健康、睡眠和生理周期的连续性，同时保留各窗口聊天、日记及其来源的访问边界。页面接线和真实平台效果继续按现场验收推进。
+同一角色跨窗口的身体状态、睡眠连续性和共享作息已分别由[角色身体正本](CORE_SHARED_ROLE_BODY_20260924.md)与[共享睡眠排程](CORE_SHARED_ROLE_SLEEP_SCHEDULE_20260924.md)接续完成。生活管理页面已接入「陪伴小屋」；生产平台现场效果仍需独立验收。

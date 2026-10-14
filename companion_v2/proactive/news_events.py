@@ -12,12 +12,14 @@ from companion_v2.sources.models import SourceRecord
 from .news_sources import news_failure
 
 from .contact_models import ContactIntent
+from .diagnostic_models import DiagnosticSourceError
 from .external_materials import ParseBatch, canonical_news_url
 from .models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
 
 
 SOURCE_OWNER = "proactive.news"
 SHARED_FEED_PREFIX = "proactive.news.feed:"
+DIAGNOSTIC_EVENT_PREFIX = "proactive.news.test:"
 EVENT_WINDOW = timedelta(minutes=30)
 MAX_AGE = timedelta(hours=24)
 RETRY = timedelta(minutes=5)
@@ -538,6 +540,45 @@ class NewsContactEvents:
             self._save_diagnostic(context, value, port=port)
         return self.diagnostic(context, preferences)
 
+    async def diagnostic_candidate(self, context, preferences, *, test_id):
+        """Fetch current articles for one test without consuming natural poll/seen state."""
+        port = self._source(preferences)
+        if port is None or not self._maintenance_allowed(context, preferences):
+            raise DiagnosticSourceError("contact_news_unavailable", "当前配置的真实资讯源不可用", stage="news_fetch")
+        fingerprint = self.source_fingerprint(port)
+        feed = await self._refresh_shared_feed(context, preferences, port, force=True)
+        if feed is None or feed.get("failure") or not feed.get("last_checked_at"):
+            code = (feed or {}).get("failure", {}) or {}
+            raise DiagnosticSourceError("contact_news_unavailable",
+                "本次真实资讯抓取没有成功：" + str(code.get("code", "source_changed")), stage="news_fetch")
+        at = self.contacts.tasks.now()
+        items = [item for item in feed["items"]
+                 if timedelta(0) <= at - datetime.fromisoformat(item["published_at"]) < MAX_AGE]
+        if not items:
+            raise DiagnosticSourceError("contact_news_unavailable", "本次资讯源没有返回24小时内的有效条目", stage="news_fetch")
+        article = items[0]
+        published = datetime.fromisoformat(article["published_at"])
+        event = {"id": "news-diagnostic-" + digest([context.key, test_id]),
+                 "opened_at": stamp(at), "expires_at": stamp(min(at + EVENT_WINDOW, published + MAX_AGE)),
+                 "settings_hash": fingerprint, "key": digest(article["url"]),
+                 "feed": port.source_label, "article": article}
+        key = DIAGNOSTIC_EVENT_PREFIX + event["id"]
+        with self.runtime.transaction() as connection:
+            connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?)", (key, encode(event)))
+        stages = [{"stage": "news_fetch", "state": "passed",
+                   "detail": f"本次已从{port.source_label}抓取{len(items)}条有效资讯"}]
+        try:
+            return self._project(context, event, at), stages
+        except TaskError as error:
+            raise DiagnosticSourceError(error.code, str(error), stage="trusted_candidate", stages=stages) from error
+
+    def _diagnostic_event(self, event_id):
+        if not isinstance(event_id, str) or not event_id.startswith("news-diagnostic-"):
+            return None
+        row = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?",
+                                    (DIAGNOSTIC_EVENT_PREFIX + event_id,))
+        return json.loads(row["value"]) if row is not None else None
+
     @staticmethod
     def _opportunity(context, event):
         return Opportunity(event["id"], context.scope,
@@ -711,6 +752,15 @@ class NewsContactEvents:
             receipt = json.loads(record.payload)["_receipt"]
             context = TaskContext.restore(receipt["context"])
             preferences = require(self.contacts.preferences.read(context, observed_at=at))
+            event = self._diagnostic_event(receipt["event_id"])
+            if event is not None:
+                opportunity = self._opportunity(context, event)
+                if (not self._maintenance_allowed(context, preferences)
+                        or self.source_fingerprint(self._source(preferences)) != receipt["settings_hash"]
+                        or not opportunity.opened_at <= at < opportunity.expires_at
+                        or record != self._record(context, event)):
+                    raise ValueError("diagnostic news original or source changed")
+                return
             row = self._row(context)
             if (self._settings(context, preferences) != receipt["settings_hash"] or row is None
                     or row["settings_hash"] != receipt["settings_hash"] or row["event_json"] is None):
@@ -733,10 +783,11 @@ class NewsContactEvents:
             source = source_from_document(marker["source"])
             preferences = require(self.contacts.preferences.read(context, observed_at=at))
             row = self._row(context)
-            event = json.loads(row["event_json"]) if row is not None and row["event_json"] else None
+            diagnostic = self._diagnostic_event(marker["event_id"])
+            event = diagnostic or (json.loads(row["event_json"]) if row is not None and row["event_json"] else None)
             if (source.owner != SOURCE_OWNER or source.scope != context.scope or event is None
                     or event["id"] != marker["event_id"] or event["settings_hash"] != marker["settings_hash"]
-                    or self._self_link_cooled_down(context, preferences, at, exclude_event_id=event["id"])
+                    or (diagnostic is None and self._self_link_cooled_down(context, preferences, at, exclude_event_id=event["id"]))
                     or source != self._record(context, event).reference):
                 raise ValueError("news marker changed")
             require(self.contacts.sources.validate_reference_for_audience(

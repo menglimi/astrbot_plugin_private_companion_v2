@@ -75,7 +75,10 @@ function harness() {
       bridgeFor: () => ({then: resolve => resolve(window.AstrBotPluginPage)}),
     },
     AstrBotPluginPage: {
-      apiGet: route => new Promise((resolve, reject) => requests.push({method: 'GET', route, resolve, reject})),
+      apiGet: (route, params) => new Promise((resolve, reject) => {
+        if (/[?#]/.test(route)) return reject(new Error('invalid plugin endpoint'));
+        requests.push({method: 'GET', route, params, resolve, reject});
+      }),
       apiPost: (route, values) => new Promise((resolve, reject) => requests.push({method: 'POST', route, values, resolve, reject})),
     },
     sessionStorage: {
@@ -159,6 +162,8 @@ test('the routing matrix lists every registered task with its provider', async (
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
+  assert.equal(requests[0].route, 'model');
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[0].params)), {layer: 'role'});
   requests[0].resolve(status());
   await flush();
   assert.match(node.innerHTML, /任务/);
@@ -207,7 +212,7 @@ test('switching a provider inline raises one queued change and posting saves tha
   const post = requests.find(request => request.method === 'POST');
   assert.equal(post.route, 'model/configure');
   assert.deepEqual(JSON.parse(JSON.stringify(post.values)),
-    {kind: 'memory.reflect', operation_key: post.values.operation_key, edit_token: TOKEN, changes: {provider: 'secondary'}, reset: []});
+    {kind: 'memory.reflect', layer: 'role', operation_key: post.values.operation_key, edit_token: TOKEN, changes: {provider: 'secondary'}, reset: []});
   post.resolve({replayed: false, task: task('memory.reflect', 'secondary', ['text'], 'background')});
   await flush();
   assert.match(node.innerHTML, /已保存 1 项/);

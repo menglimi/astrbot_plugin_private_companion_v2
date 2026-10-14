@@ -23,7 +23,7 @@ from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.execution.models import TaskError, digest, stamp
 from companion_v2.foundation.refs import (AssetRef, AudienceRef, OperationRef, RoleOwnerRef, SourceRef, VersionRef)
 from companion_v2.identity_policy.models import AuthorizationTier
-from companion_v2.model_gateway.models import Amount, ProviderBinding, LocalProvider
+from companion_v2.model_gateway.models import Amount, ProviderBinding, LocalProvider, ProviderResponse
 from companion_v2.model_gateway.routing import configuration_fields
 from companion_v2.proactive.configuration import target_for as contact_target_for
 from companion_v2.role_work.journal import JournalContext, JournalKey, JournalKind
@@ -164,8 +164,9 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
         capture = self.publish_capture(app)
         context = self.contact_context()
 
+        original_instruction = "\n保持这个角色。\n"
         task_id = app.screen_interpretation.submit(context, capture.reference, purpose="reply",
-                                                  role_instruction="保持这个角色。")
+                                                  role_instruction=original_instruction)
         self.assertIsNotNone(task_id)
         self.assertIsNone(app.screen_interpretation.submit(context, capture.reference, purpose="reply"))
 
@@ -176,6 +177,7 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
         self.assertEqual(analysis["purpose"], "reply")
         self.assertIn("代码编辑器", json.loads(analysis["payload_json"]))
         request = self.called[-1].original
+        self.assertEqual(request.role_instruction, original_instruction)
         self.assertEqual(len(request.images), 1)
         self.assertEqual(request.images[0].source.owner, "screen")
         self.assertEqual(request.output_format, "screen_interpretation")
@@ -197,6 +199,34 @@ class ScreenInterpretationTests(ScreenChainFixture, unittest.IsolatedAsyncioTest
         withdrawn = app.screen_repository.latest_analysis(scope=context.scope, resolved=context.actor,
                                                           observed_at=self.clock.now())
         self.assertEqual(withdrawn.failure.code, "capability_consent_revoked")
+
+    async def test_confirmed_model_not_started_is_failed_while_unknown_stays_uncertain(self):
+        async def not_started(envelope):
+            return ProviderResponse("not_started", usage=Amount(0, 0), receipt_ref="model:not-started")
+
+        self.model_behavior = not_started
+        app = (await self.start()).application
+        self.window_settings(app, {"interpretation_enabled": True}).unwrap()
+        context = self.contact_context()
+        for capture_id, behavior, expected_state in (
+            ("not-started", not_started, "failed"),
+            ("unknown", None, "uncertain"),
+        ):
+            async def unknown(envelope):
+                return ProviderResponse("unknown")
+            self.model_behavior = behavior or unknown
+            capture = self.publish_capture(app, capture_id)
+            task_id = app.screen_interpretation.submit(context, capture.reference, purpose="reply",
+                                                      role_instruction="保持这个角色。")
+            await self.until(lambda: app.tasks.read(context, task_id).unwrap().state == expected_state)
+            task = app.tasks.read(context, task_id).unwrap()
+            if expected_state == "failed":
+                row = self.runtime.read_one("SELECT record_json FROM execution_tasks WHERE task_id = ?", (task_id,))
+                self.assertEqual((task.effect, json.loads(row["record_json"])["receipt_ref"]),
+                                 ("not_committed", "model:not-started"))
+                self.assertEqual(app.screen_interpretation.pending[task_id]["error_code"], "model_not_started")
+            self.assertIsNone(app.screen_interpretation.submit(context, capture.reference, purpose="reply"))
+        self.assertEqual(self._anchors(), 0)
 
     async def test_authorized_screen_producer_validates_and_rejects_revocation(self):
         async def interpret(envelope):

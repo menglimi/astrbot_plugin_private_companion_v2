@@ -1,5 +1,6 @@
 """Bounded proactive sharing of explicitly captured, currently authorized Screen results."""
 
+import asyncio
 from datetime import datetime, time, timedelta, timezone
 import json
 from zoneinfo import ZoneInfo
@@ -14,6 +15,7 @@ from companion_v2.sources.governance import bind
 from companion_v2.sources.models import SourceRecord
 
 from .contact_models import ContactIntent
+from .diagnostic_models import DiagnosticSourceError
 from .models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
 
 
@@ -246,6 +248,66 @@ class ScreenContactEvents:
             except (TaskError, KeyError, ValueError):
                 continue
         return None
+
+    async def diagnostic(self, context, peek, *, test_id, role_instruction):
+        """Capture once, interpret that original, and select only its new feedback."""
+        stages = []
+        at = self.tasks.now()
+        if peek is None or not peek.ready(context, at):
+            raise DiagnosticSourceError("screen_peek_unavailable",
+                "当前窗口的截图设备、识屏开关或窥屏授权不可用", stage="screen_capture")
+        try:
+            peek.app.screen_interpretation.check_model_route(context, role_instruction=role_instruction)
+        except TaskError as error:
+            reason = ("屏幕解读需要支持图片的模型；请检查主模型和备用模型。本次未采集截图。"
+                      if error.code == "model_capability_mismatch" else str(error))
+            raise DiagnosticSourceError(error.code, reason, stage="screen_interpretation") from error
+        task_id = "screen-peek-diagnostic:" + digest([context.key, test_id])
+        decision = {"purpose": "diagnostic", "episode_at": at, "task_id": task_id}
+        if peek.request(context, decision, request_ref=test_id, role_instruction=role_instruction) is None:
+            raise DiagnosticSourceError("screen_peek_unavailable",
+                "本次截图任务没有启动；已有任务不会再次执行", stage="screen_capture", task_id=task_id)
+        deadline = asyncio.get_running_loop().time() + 130
+
+        async def completed(identifier, stage):
+            while asyncio.get_running_loop().time() < deadline:
+                task = require(self.tasks.read(context, identifier))
+                if task.state == "succeeded" and task.result_ref:
+                    return task.result_ref
+                if task.state in ("failed", "cancelled", "expired", "uncertain", "dead_letter"):
+                    reason = task.reason
+                    if stage == "screen_capture":
+                        reason = peek.pending.get(identifier, {}).get("error_code") or reason
+                    elif peek.app is not None:
+                        reason = peek.app.screen_interpretation.pending.get(identifier, {}).get("error_code") or reason
+                    unknown = task.state == "uncertain" or reason in (
+                        "screen_peek_unknown", "screen_interpretation_unknown", "model_result_unknown",
+                        "model_timeout", "model_usage_unknown")
+                    raise DiagnosticSourceError(reason or "screen_diagnostic_failed",
+                        "截图结果未确认" if unknown and stage == "screen_capture" else
+                        "视觉分析结果未确认" if unknown else "本次截图或视觉分析任务未成功：" + (reason or task.state),
+                        stage=stage, stages=stages, state="unknown" if unknown else "failed", task_id=identifier)
+                await asyncio.sleep(0.2)
+            raise DiagnosticSourceError("screen_diagnostic_pending",
+                "本次截图或视觉分析仍未完成，请核对任务记录，不要重新运行",
+                stage=stage, stages=stages, state="pending", task_id=identifier)
+
+        interpretation_id = await completed(task_id, "screen_capture")
+        stages.append({"stage": "screen_capture", "state": "passed", "detail": "本次设备已返回并保存真实截图"})
+        analysis_id = await completed(interpretation_id, "screen_interpretation")
+        row = self.runtime.read_one("""SELECT feedback_id, capture_id FROM screen_feedback_anchors
+            WHERE analysis_id = ? AND feedback_kind = 'proactive' ORDER BY created_at DESC LIMIT 1""", (analysis_id,))
+        if row is None:
+            raise DiagnosticSourceError("contact_screen_feedback_unavailable",
+                "本次视觉模型没有生成可分享的屏幕观察", stage="screen_interpretation", stages=stages,
+                task_id=interpretation_id)
+        try:
+            candidate = self._project(context, row["feedback_id"], row["capture_id"], self.tasks.now())
+        except TaskError as error:
+            raise DiagnosticSourceError(error.code, str(error), stage="screen_interpretation", stages=stages,
+                task_id=interpretation_id) from error
+        stages.append({"stage": "screen_interpretation", "state": "passed", "detail": "视觉模型已分析本次截图"})
+        return candidate, stages
 
     def _validate_source(self, record, at):
         try:

@@ -12,6 +12,7 @@
  */
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const html = fs.readFileSync(process.argv[2] || "docs/page-designs/contact-rhythm-preview.html", 'utf8');
+const materialPreview = (process.argv[2] || "").includes("material-pool-preview.html");
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
 console.log('脚本块数：', scripts.length);
 if (scripts.length !== 3) throw new Error('预期三个脚本块（桥桩 / 页面本体 / 挂载）');
@@ -47,7 +48,11 @@ const nodes = {contactWorkspace: el('contactWorkspace'), theme: el('theme'), sce
 const document = {
   documentElement: {dataset: {theme: 'courtyard'}},
   getElementById: (id) => nodes[id] || null,
-  addEventListener: () => {}, querySelector: () => null, querySelectorAll: () => [],
+  addEventListener: () => {},
+  querySelector: selector => materialPreview && selector === '#contactWorkspace [data-view="materials"]'
+    ? {click: () => listeners.contactWorkspace?.click({target: {closest: sel => sel === '[data-view]'
+      ? {dataset: {view: 'materials'}} : null}})} : null,
+  querySelectorAll: () => [],
   body: {classList: {add(){},remove(){},toggle(){}}}, title: '',
 };
 const window = {document};
@@ -62,13 +67,24 @@ const initial = (async () => {
   for (let i = 0; i < 40; i++) { await new Promise(r => setImmediate(r)); await new Promise(r => setTimeout(r, 20)); }
   const state = sandbox.window.CompanionContactPage.state.data;
   const out = nodes.contactWorkspace.innerHTML;
+  const surfaceChecks = materialPreview ? {
+    '主动检视页同时显示外部素材和主动记录': out.includes('素材与主动检视')
+      && out.includes('外部素材') && out.includes('主动记录'),
+    '待发送问候显示发送前状态': out.includes('早上想和你打个招呼')
+      && out.includes('发送前检视 · 等待投递'),
+    '已送达消息与未发送念头可检视': out.includes('发送前检视 · 已送达')
+      && out.includes('发送前检视 · 未发送'),
+    '主动消息显示接收目标和角色': out.includes('用户 001') && out.includes('澄溪'),
+  } : {
+    '环上有 24 根柱子': (out.match(/class="ct-bar[" ]/g) || []).length === 24,
+    '环上有三条问候弧': (out.match(/class="ct-anchor"/g) || []).length === 3,
+    '免打扰弧跨午夜拆两段': (out.match(/class="ct-quiet is-on"/g) || []).length === 1,
+  };
   const checks = {
     '页面挂载出内容': out.length > 3000,
     '设置了 ready 标志': state && state.ready === true,
     '拉到了 160 项设置': !!(state && state.settings) && Object.keys(state.settings).length === 160,
-    '环上有 24 根柱子': (out.match(/class="ct-bar[" ]/g) || []).length === 24,
-    '环上有三条问候弧': (out.match(/class="ct-anchor"/g) || []).length === 3,
-    '免打扰弧跨午夜拆两段': (out.match(/class="ct-quiet is-on"/g) || []).length === 1,
+    ...surfaceChecks,
     '契机矩阵可切换': !!listeners.contactWorkspace.click,
     '曲线可拖涂': !!listeners.contactWorkspace.pointerdown,
     '请求走的是插件相对路径': sandbox.window.__requests.every(r => r.indexOf('/astrbot_plugin') < 0),

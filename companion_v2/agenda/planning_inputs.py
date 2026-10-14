@@ -76,11 +76,12 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
         raise TaskError("calendar_disabled", "enable the role-wide calendar switch in schedule and planning settings")
     if not manual and not settings["planning_enabled"]:
         raise TaskError("planning_disabled", "enable automatic planning in schedule and planning settings")
-    if settings["schedule_simulation_mode"] != SCHEDULE_MODE_ORCHESTRATED:
+    if mode != "intervention" and settings["schedule_simulation_mode"] != SCHEDULE_MODE_ORCHESTRATED:
         raise TaskError("planning_mode_inactive", "automatic planning is inactive in continuous schedule mode")
     zone = ZoneInfo(settings["planning_timezone"])
+    window_days = min(31, settings["planning_horizon_days"]) if mode == "intervention" else settings["planning_horizon_days"]
     end = (datetime.combine(at.astimezone(zone).date() + timedelta(days=1), time(), zone)
-           if mode == "daily" else at + timedelta(days=settings["planning_horizon_days"]))
+           if mode == "daily" else at + timedelta(days=window_days))
     calendar_context = planning_calendar_context(at, end, zone,
                                                  configured_annual_calendars(settings["planning_annual_calendars"]))
     inventory, calendar_snapshot = calendar_inventory(app, context, role_global=role_global)
@@ -160,6 +161,9 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
             coverage["inputs_unavailable"] = True
 
     calendar_items = inventory["items"]
+    if mode == "intervention":
+        calendar_items = tuple(item for item in calendar_items
+                               if item["kind"] == "role_plan" and item["state"] == "accepted")
     for item in calendar_items:
         if item["state"] == "cancelled":
             continue
@@ -252,6 +256,8 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
 def validate(planner, job, at, *, committed=False):
     app, context = planner.app, job["context"]
     app.calendar.access.check(context, "calendar.write", at=at)
+    if job.get("intervention"):
+        planner._check_intervention(context, at)
     if planning_values(app.role_state.settings(context)[0]) != job["settings"]:
         raise TaskError("planning_settings_changed", "planning preferences changed")
     binding = app.state_maintenance.bindings.get(context.key)
@@ -260,6 +266,9 @@ def validate(planner, job, at, *, committed=False):
     app.calendar.access.evidence(context, job["sources"], at=at)
     if committed:
         return
+    if (job.get("intervention") and app.state_maintenance._input_epochs.get(context.key, 0)
+            != job["input_epoch"]):
+        raise TaskError("planning_inputs_changed", "new conversation input superseded this schedule intervention")
     _, current_calendar_snapshot = calendar_inventory(app, context, role_global=job.get("role_global", False))
     if current_calendar_snapshot != job["calendar_snapshot"]:
         raise TaskError("planning_calendar_changed", "calendar changed while planning")

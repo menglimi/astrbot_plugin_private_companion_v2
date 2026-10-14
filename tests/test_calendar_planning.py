@@ -12,7 +12,7 @@ from companion_v2.agenda.models import Frequency, Schedule
 from companion_v2.agenda.planning import KIND, CalendarPlanning, planning_profile
 from companion_v2.agenda.planning_config import configured_annual_calendars, planning_values
 from companion_v2.agenda.planning_inputs import capture, validate, MATERIAL_CHARS, planning_calendar_context
-from companion_v2.agenda.planning_output import INSTRUCTION, parse_output
+from companion_v2.agenda.planning_output import INSTRUCTION, INTERVENTION_INSTRUCTION, parse_output
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.configuration.owners import SparseConfigurationOwner
@@ -22,6 +22,7 @@ from companion_v2.execution.models import TaskContext, TaskError, digest, encode
 from companion_v2.foundation.refs import AudienceRef, SourceRef, VersionRef, OperationRef
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.identity_policy.models import AuthorizationTier
+from companion_v2.identity_policy.interventions import CALENDAR_INTERVENTION
 from companion_v2.model_gateway.routing import configuration_fields
 from companion_v2.model_gateway.budget import BudgetLedger
 from companion_v2.model_gateway.models import Amount, BudgetPolicy
@@ -102,6 +103,13 @@ class PlanningOutputTests(unittest.TestCase):
             settings={"planning_max_items": 12, "planning_timezone": "Asia/Shanghai"},
             goal_refs={}, calendar_refs={}, existing=[])
 
+    def test_instruction_does_not_treat_planning_window_as_a_wake_schedule(self):
+        self.assertIn("按 timezone 指定的当地日期与钟点理解", INSTRUCTION)
+        self.assertIn("规划窗口的开始时间只表示可规划范围", INSTRUCTION)
+        self.assertIn("模型过去生成的日程只是计划", INSTRUCTION)
+        self.assertIn("不排在规划时区的 23:00 至次日 07:00", INSTRUCTION)
+        self.assertIn("宁可留空", INSTRUCTION)
+
     def test_fence_and_optional_fields_do_not_lose_valid_siblings(self):
         text = "```json\n" + json.dumps({"items": [output(), output(title="错误时长", minutes=-1),
             output(title="散步", detail="想看看落叶", start=(NOW + timedelta(hours=2)).isoformat())]}, ensure_ascii=False) + "\n```"
@@ -128,6 +136,27 @@ class PlanningOutputTests(unittest.TestCase):
         self.assertEqual(parse_output('{"items":[]}', self.job()), ([], ()))
         with self.assertRaises(TaskError):
             parse_output('{"items":[', self.job())
+
+    def test_intervention_only_changes_accepted_role_plan_records(self):
+        plan = {"id": "role-plan", "revision": 3, "kind": "role_plan", "state": "accepted",
+            "title": "阅读", "schedule": json.loads(encode(Schedule(NOW + timedelta(hours=2), "Asia/Shanghai"))),
+            "exceptions": {}}
+        report = {**plan, "id": "user-report", "kind": "user_report"}
+        job = {"mode": "intervention", "at": NOW, "end": NOW + timedelta(days=14),
+            "settings": {"planning_max_items": 12, "planning_timezone": "Asia/Shanghai"},
+            "material": {"calendar": [plan, report]}, "calendar_refs": {"role-plan": {"id": "role-plan"}}}
+
+        accepted, rejected = parse_output(json.dumps({"changes": [
+            {"action": "cancel", "id": "role-plan", "revision": 3},
+            {"action": "cancel", "id": "user-report", "revision": 3},
+        ]}), job)
+
+        self.assertEqual(accepted, [{"action": "cancel", "id": "role-plan",
+            "expected_revision": 3, "data": None}])
+        self.assertEqual(rejected, ({"index": 1, "code": "invalid_intervention_change"},))
+        with self.assertRaises(TaskError):
+            parse_output(json.dumps({"changes": [{"action": "cancel", "id": "user-report", "revision": 3}]}), job)
+        self.assertIn("绝不修改 user_report、commitment", INTERVENTION_INSTRUCTION)
 
 
 class CalendarRefinementTests(StateFixture, unittest.IsolatedAsyncioTestCase):
@@ -205,6 +234,22 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
             app.calendar_planning.next_checks[context.key] = NOW + timedelta(days=1)
         self.model_behavior = lambda envelope: self.response(envelope)
         return app, context, manager
+
+    async def test_new_private_input_fences_a_stale_calendar_intervention_before_dispatch(self):
+        app, context, _ = await self.ready()
+        self.identity.issue_grant(grant_id="calendar-intervention-window", subject=context.actor.subject,
+            scope=context.scope, capability=CALENDAR_INTERVENTION, tier=AuthorizationTier.STANDARD,
+            valid_from=NOW, expected_revision=self.identity.revision)
+        expected_epoch = app.state_maintenance._input_epochs.get(context.key, 0)
+        app.state_maintenance.note_input(context, "new-message")
+
+        with self.assertRaises(TaskError) as raised:
+            await app.calendar_planning.run_intervention(context, "这是原角色，喜欢阅读也愿意休息。",
+                "stale-intervention", expected_input_epoch=expected_epoch)
+
+        self.assertEqual(raised.exception.code, "planning_inputs_changed")
+        self.assertEqual(self.runtime.read_all("SELECT task_id FROM execution_tasks", ()), ())
+        self.assertEqual(self.called, [])
 
     async def test_budget_deferral_waits_and_later_recaptures_the_unstarted_plan(self):
         app, context, _ = await self.ready()

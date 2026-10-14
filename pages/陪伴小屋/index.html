@@ -70,7 +70,7 @@
   <link rel="stylesheet" href="expression-config.css?v=reply-component-placements-20261007">
   <link rel="stylesheet" href="host-options.css?v=forward-intake-settings-20261004">
   <link rel="stylesheet" href="config-editor.css?v=config-ownership-20261001">
-  <link rel="stylesheet" href="workbench.css?v=official-knowledge-20261007">
+  <link rel="stylesheet" href="workbench.css?v=lunar-birthday-text-20261014">
   <!-- 配置控制台外壳。
        console.css 定义 .console / .console-section / .console-section-head /
        .console-row / .console-mount-head 等管理页的全部结构样式，
@@ -84,7 +84,7 @@
   <link rel="stylesheet" href="output-page.css?v=image-route-config-20261012">
   <link rel="stylesheet" href="decision-page.css?v=reply-decision-split-20261001">
   <link rel="stylesheet" href="action-page.css?v=action-workspace-20261007">
-  <link rel="stylesheet" href="home.css?v=status-display-policy-20261007">
+  <link rel="stylesheet" href="home.css?v=agenda-scroll-20261014">
   <link rel="stylesheet" href="models-page.css?v=replacement-policy-design-20261013">
   <link rel="stylesheet" href="product-page.css?v=no-host-state-20260929">
   <link rel="stylesheet" href="native-extension-panel.css?v=native-management-20261010">
@@ -101,7 +101,7 @@
   <!-- 外壳布局：小屋常驻 + 左栏 + 右栏 + 下方面板。必须在 styles.css 之后，
        它覆盖旧的固定定位左栏与顶栏栅格。 -->
   <link rel="stylesheet" href="shell.css?v=home-viewport-height-20261011">
-  <link rel="stylesheet" href="self-page.css?v=core-user-relationship-20261007">
+  <link rel="stylesheet" href="self-page.css?v=self-profile-avatar-20261014">
   <link rel="stylesheet" href="theme-skins.css?v=theme-material-20261001">
   <link rel="stylesheet" href="page-motion.css?v=page-interactions-20261011">
   <!-- 小屋就绪闸门（见 tokens.css）。
@@ -161,7 +161,7 @@
   <template data-workspace-bundle="relationships"><script src="workspace-bundles/relationships.js?v=workspace-lazy-20261012"></script></template>
   <template data-workspace-bundle="identity"><script src="workspace-bundles/identity.js?v=workspace-lazy-20261012"></script></template>
   <template data-workspace-bundle="persona"><script src="workspace-bundles/persona.js?v=workspace-lazy-20261012"></script></template>
-  <script defer src="home-sidebar.js?v=role-calendar-20261013"></script>
+  <script defer src="home-sidebar.js?v=agenda-scroll-20261014"></script>
   <script defer src="product-page.js?v=workspace-resource-diagnostics-20261012"></script>
   <script defer src="confirmation-dialog.js?v=page-confirmation-20261011"></script>
   <script defer src="native-extension-management.js?v=native-management-20261010"></script>
@@ -176,10 +176,13 @@
   <script defer src="weather-source-page.js?v=weather-source-config-text-cleanup-20261007"></script>
   <script defer src="perception-overview.js?v=perception-mihome-v2-bridge-20261013"></script>
   <script defer src="reality-access.js?v=reality-readonly-consent-20261002"></script>
-  <script defer src="screen-access.js?v=screen-upgrade-20261012"></script>
+  <script defer src="game-access.js?v=game-room-consent-20261014"></script>
+  <link rel="stylesheet" href="screen-observation.css?v=screen-retained-20261014">
+  <script defer src="screen-observation.js?v=screen-retained-20261014"></script>
+  <script defer src="screen-access.js?v=screen-retained-20261014"></script>
   <script defer src="room-editor.js?v=transient-time-preview-20261004"></script>
   <script defer src="memory-page.js?v=directory-names-20261002"></script>
-  <script defer src="contact-page.js?v=contact-save-history-fallback-20261008"></script>
+  <script defer src="contact-page.js?v=relationship-proactive-window-20261014"></script>
   <script defer src="learning-page.js?v=learning-record-ownership-20261012"></script>
   <script defer src="learning-overview.js?v=learning-record-ownership-20261012"></script>
   <script defer src="learning-review-page.js?v=learning-record-ownership-20261012"></script>
@@ -195,25 +198,25 @@
   <script defer src="host-options-page.js?v=forward-intake-settings-20261004"></script>
   <!-- 工作台内核必须先于使用它的编辑器加载（config-editor / expression-page
        都依赖 CompanionWorkbench）。 -->
-  <script defer src="workbench-page.js?v=page-interactions-20261011"></script>
+  <script defer src="workbench-page.js?v=lunar-birthday-text-20261014"></script>
   <!-- 忆忆策略位于忆忆页的独立视图。 -->
   <script defer src="memory-settings-section.js?v=memory-config-ownership-20261001"></script>
-  <script defer src="config-editor.js?v=life-sleep-settings-clarity-20261013"></script>
+  <script defer src="config-editor.js?v=self-profile-avatar-20261014"></script>
   <script defer src="output-page.js?v=image-route-config-20261012"></script>
   <script defer src="role-profile-draft.js?v=config-receipt-recovery-20261007"></script>
   <script defer src="role-profile-migration.js?v=storage-fallback-20261012"></script>
   <script defer src="decision-page.js?v=role-wakeup-shared-20261013"></script>
   <script defer src="expression-page.js?v=expression-completion-20261008"></script>
-  <script defer src="models-page.js?v=replacement-policy-design-20261013"></script>
+  <script defer src="models-page.js?v=screen-vision-route-20261014"></script>
   <script defer src="image-materials-page.js?v=reference-usage-persistence-20261007"></script>
-  <script defer src="maintenance-page.js?v=token-dashboard-layout-20261012"></script>
+  <script defer src="maintenance-page.js?v=relationship-diagnostic-window-20261014"></script>
   <script defer src="appearance-page.js?v=appearance-workbench-20261008"></script>
   <!-- 备份与还原：后端 backup_api.py 有六条真实路由，而这一页此前没有任何
        入口加载它——资料与维护页的挂载点永远停在「正在读取快照列表…」。 -->
   <script defer src="backup-page.js?v=data-subpages-20261008-r2"></script>
   <script defer src="storage-page.js?v=data-subpages-20261008-r2"></script>
   <script defer src="understanding-page.js?v=understanding-figma-layout-20261007"></script>
-  <script defer src="app.js?v=learning-record-ownership-20261012"></script>
+  <script defer src="app.js?v=self-profile-avatar-agenda-scroll-20261014"></script>
 </head>
 <body>
   <!-- 启动幕：首屏闸门（tokens.css 的 data-room-ready）在体素包解析完之前

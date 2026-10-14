@@ -20,16 +20,15 @@ import json
 
 from companion_v2.conversation.external_tools import ExternalToolInvocation
 from companion_v2.conversation.media.screen import ACTION as SCREEN_CAPTURE_ACTION
-from companion_v2.capabilities import CapabilityRepository
 from companion_v2.execution.models import (Lane, ProviderBinding, SideEffect, TaskContext, TaskDefinition,
                                            TaskError, TaskRegistration, TaskResult, TaskSpec, digest, require)
 from companion_v2.execution.runner import ExactTaskRunner
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import ScopeKind
-from companion_v2.screen.models import SCREEN_EXTENSION
 
 from .configuration import ScreenSettings
 from .repositories import ScreenRepository
+from .proactive_access import proactive_allowed
 
 
 KIND = "screen.peek"
@@ -38,8 +37,8 @@ ACTION = "extension.tool.invoke"
 TIMEOUT_SECONDS = 120
 DEVICE_TIMEOUT_SECONDS = 60
 MAX_CONCURRENCY = 1
-PEEK_ARGUMENTS = '{"all_screens":false}'
-PURPOSES = ("goodnight", "followup")
+PEEK_ARGUMENTS = '{}'
+PURPOSES = ("goodnight", "followup", "diagnostic")
 
 
 class ScreenPeekService:
@@ -108,7 +107,7 @@ class ScreenPeekService:
         at = self.tasks.now()
         self.pending[task_id] = {"context": context, "decision": decision,
                                  "request_ref": request_ref or task_id,
-                                 "role_instruction": role_instruction.strip()}
+                                 "role_instruction": role_instruction}
         try:
             with self.runtime.transaction():
                 require(self.tasks.submit(TaskSpec(task_id, context, KIND, request_ref or task_id, task_id,
@@ -144,10 +143,8 @@ class ScreenPeekService:
             return False
         if self._settings(context, at) is None:
             return False
-        projection = CapabilityRepository(self.runtime).projection(extension_id=SCREEN_EXTENSION,
-                                                                   scope=context.scope)
-        return (projection.is_success and projection.unwrap().settings is not None
-                and projection.unwrap().settings.proactive_enabled)
+        return proactive_allowed(self.runtime, scope=context.scope, role=context.role_binding.role,
+                                 subject=context.actor.subject)
 
     # -- planner -------------------------------------------------------
 
@@ -167,16 +164,29 @@ class ScreenPeekService:
                 break
             if task_id in self._workers:
                 continue
-            if self.tasks.read(job["context"], task_id) is None:
+            task = self.tasks.read(job["context"], task_id)
+            if task.is_success and task.unwrap().state in ("succeeded", "failed", "cancelled", "expired", "uncertain", "dead_letter"):
+                continue
+            if task.failure is not None:
                 self.pending.pop(task_id, None)
                 continue
-            worker = asyncio.create_task(self.runner.run(job["context"], task_id),
+            worker = asyncio.create_task(self._run(job["context"], task_id),
                                          name="companion:screen-peek:" + task_id)
             self._workers[task_id] = worker
             worker.add_done_callback(lambda done: self.notify())
             capacity -= 1
             started += 1
         return started > 0
+
+    async def _run(self, context, task_id):
+        result = await self.runner.run(context, task_id)
+        if result.is_success and result.unwrap().failure_code:
+            # The supervisor records worker_error; retain the actual device failure
+            # for diagnostics without resubmitting the effectful task.
+            self.pending[task_id]["error_code"] = result.unwrap().failure_code
+        if result.failure is not None or result.unwrap().task is not None:
+            self.notify()
+        return result
 
     # -- execution -----------------------------------------------------
 
@@ -188,7 +198,8 @@ class ScreenPeekService:
         at = self.tasks.now()
         if self._settings(context, at) is None:
             raise TaskError("screen_peek_disabled", "Screen peeks are no longer enabled for this window")
-        capture = await self._dispatch(run, context)
+        self.app.screen_interpretation.check_model_route(context, role_instruction=job["role_instruction"])
+        capture, response = await self._dispatch(run, context)
         run.validate()
         submitted = self.app.screen_interpretation.submit(
             context, capture, purpose="glance", request_ref=job["request_ref"],
@@ -196,7 +207,8 @@ class ScreenPeekService:
         if submitted is None:
             raise TaskError("screen_peek_interpretation_unavailable",
                             "the peek could not be handed to the interpretation chain")
-        return TaskResult("succeeded", result_ref=submitted)
+        return TaskResult("succeeded", "committed", result_ref=submitted,
+                          receipt_ref=response.receipt_ref, operation_id=response.operation_id)
 
     async def _dispatch(self, run, context):
         provider = self.app.external.providers.get(SCREEN_CAPTURE_ACTION)
@@ -205,17 +217,24 @@ class ScreenPeekService:
         descriptor = provider.descriptor
         invocation_id = "screen-peek-" + digest([run.task.task_id, context.key])
         deadline = self.tasks.now() + timedelta(seconds=DEVICE_TIMEOUT_SECONDS)
+        effect_started = False
 
         def before_dispatch():
+            nonlocal effect_started
             run.validate()
             self.app.external.admit(descriptor, context, self.tasks.now())
+            if not effect_started:
+                run.begin_effect()
+                effect_started = True
 
         invocation = ExternalToolInvocation(invocation_id, run.task.task_id, "screen-peek", context,
                                             descriptor, PEEK_ARGUMENTS, deadline, before_dispatch)
         response = await provider.invoke(invocation)
         if response.state != "succeeded" or response.source is None:
+            if response.state in ("unknown", "uncertain", "accepted", "pending"):
+                raise TaskError("screen_peek_unknown", "截图设备结果未确认；请核对设备记录，不要重新截图")
             raise TaskError("screen_peek_not_committed", "the device did not return a confirmed screenshot")
-        return self._capture(response, invocation_id, context)
+        return self._capture(response, invocation_id, context), response
 
     def _capture(self, response, invocation_id, context):
         try:

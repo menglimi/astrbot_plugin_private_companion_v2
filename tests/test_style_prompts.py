@@ -123,6 +123,15 @@ class ProactiveStyleTests(unittest.TestCase):
         plain = request_for(self.contact_job(), (), ContactPreferences(None, plain_values, NOW))
         self.assertNotIn("主动表达风格补充", plain.instruction)
 
+    def test_chat_prompt_allows_self_started_low_pressure_message(self):
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        request = request_for(self.contact_job(), (), preferences)
+
+        self.assertIn("不要求用户刚说过某个关键词，也不要求有待办或事件来源", request.instruction)
+        self.assertIn("优先写一条轻松、低压力、无需回复的消息", request.instruction)
+        self.assertIn("不能编造刚做过的事、共同经历或用户当前状态", request.instruction)
+        self.assertIn("不要复述原话、盘问近况、催回复", request.instruction)
+
     def test_administrator_diagnostic_omits_history_and_dedup_for_every_purpose(self):
         values = dict(PREF_VALUES, dedup_enabled=True)
         preferences = ContactPreferences(snapshot=None, values=values, observed_at=NOW)
@@ -160,7 +169,8 @@ class ProactiveStyleTests(unittest.TestCase):
         preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
         request = request_for(job, (), preferences)
         self.assertIn("不是必须完成的签到任务", request.instruction)
-        self.assertIn("没有具体话头就 skip", request.instruction)
+        self.assertIn("时段本身就可以作为轻轻问候的由头", request.instruction)
+        self.assertIn("不是开口前提", request.instruction)
         self.assertIn("不要每次套用", request.instruction)
 
     def test_insomnia_greeting_keeps_the_low_pressure_rule(self):
@@ -188,6 +198,22 @@ class ProactiveStyleTests(unittest.TestCase):
         self.assertIn("只使用本次提供的已核验来源", request.instruction)
         self.assertNotIn("测试不读取聊天历史、记忆或真实事件", request.instruction)
 
+    def test_synthetic_diagnostic_uses_the_fictional_scenario_without_claiming_real_sources(self):
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        job = self.contact_job()
+        job.intent.purpose = "news"
+        job.administrator_test = True
+        job.diagnostic_source_backed = False
+        job.diagnostic_origin = {"_diagnostic": {"route_id": "synthetic_event"},
+                                 "synthetic_event": {"test_id": "attempt-1"}}
+
+        request = request_for(job, (), preferences)
+
+        self.assertIn("合成事件投递测试", request.instruction)
+        self.assertIn("不得将合成内容说成现实事实", request.instruction)
+        self.assertIn("让收件人能看出这是模拟测试", request.instruction)
+        self.assertNotIn("本轮素材仍来自所选目的的真实生产器", request.instruction)
+
     def test_each_registered_purpose_has_its_own_evidence_guidance(self):
         self.assertEqual(set(PURPOSE_INSTRUCTIONS), set(PURPOSES))
         for purpose, guidance in PURPOSE_INSTRUCTIONS.items():
@@ -204,8 +230,10 @@ class ProactiveStyleTests(unittest.TestCase):
     def test_selected_thought_is_the_anchor_and_old_context_cannot_create_a_task(self):
         preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
         request = request_for(self.contact_job(), (), preferences)
-        self.assertIn("本轮已选中的联系目的、念头和与之对应的有效来源共同构成本轮主动由头", request.instruction)
-        self.assertIn("不能擅自替换由头、恢复旧请求、增加待办或触发工具行为", request.instruction)
+        self.assertIn("调度窗口可以直接提供关系表达或日常聊天的开口机会", request.instruction)
+        self.assertIn("不能把旧情绪写成当前状态、恢复已结束的话题、增加待办或触发工具行为", request.instruction)
+        self.assertIn("这是角色主动开启日常聊天的机会，不要求用户刚说过某个关键词", PURPOSE_INSTRUCTIONS["chat"])
+        self.assertIn("日期或时段本身可以成为简短问候的由头", PURPOSE_INSTRUCTIONS["greeting"])
         self.assertIn("正文优先说清一个自然、完整的意思", request.instruction)
 
     def test_each_supported_event_origin_adds_its_scene_boundary(self):
@@ -218,21 +246,18 @@ class ProactiveStyleTests(unittest.TestCase):
                 self.assertIn(guidance, request.instruction)
 
     def test_relationship_and_followup_purposes_have_registered_producers(self):
-        from companion_v2.proactive.relationship_events import PURPOSE_CUES
-        self.assertEqual(set(PURPOSE_CUES), {"affection", "care", "play", "repair", "invitation"})
-        examples = {"affection": "我想你，也很喜欢你", "care": "最近很累，也有点难过",
-                    "play": "我们一起玩个游戏吧", "repair": "你刚才那句话让我不舒服",
-                    "invitation": "下次一起去看电影吧"}
-        for purpose, sample in examples.items():
-            with self.subTest(purpose=purpose):
-                self.assertRegex(sample, PURPOSE_CUES[purpose])
+        self.assertTrue(all(purpose in PURPOSE_INSTRUCTIONS
+                            for purpose in ("affection", "care", "play", "repair", "invitation")))
+        self.assertIn("不需要用户近期先说想念", PURPOSE_INSTRUCTIONS["affection"])
+        self.assertIn("不需要用户先说累了或难过", PURPOSE_INSTRUCTIONS["care"])
+        self.assertIn("具体分歧", ORIGIN_INSTRUCTIONS["relationship_event"])
         from companion_v2.proactive.configuration import GROUP, configuration_fields
         fields = {field.field_id for field in configuration_fields()}
         self.assertIn(GROUP + ".contact_followup_after_minutes", fields)
         self.assertIn(GROUP + ".contact_followup_cooldown_minutes", fields)
         self.assertEqual(PURPOSES["followup"], "接回旧话题")
         self.assertIn("不暗示已读", PURPOSE_INSTRUCTIONS["followup"])
-        self.assertIn("不要求对方接受", PURPOSE_INSTRUCTIONS["invitation"])
+        self.assertIn("给对方留出拒绝或改期空间", PURPOSE_INSTRUCTIONS["invitation"])
 
 
 class JournalStyleTests(RequestForDreamTests):

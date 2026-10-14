@@ -12,11 +12,17 @@ from tests.test_role_tool_loop import answered
 
 
 class RelationshipContactEventTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
+    def _relationship_settings(self, app, purpose):
+        values = {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
+                  "chat.enabled": False}
+        values.update({name + ".enabled": name == purpose
+                       for name in ("affection", "care", "play", "repair", "invitation")})
+        return self.settings(app, values).unwrap()
+
     async def test_explicit_feeling_creates_care_contact_from_original_private_turn(self):
         host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
         app = host.application
-        self.settings(app, {"enabled": True, "automatic_enabled": True,
-                            "idle_seconds": 60, "chat.enabled": False}).unwrap()
+        self._relationship_settings(app, "care")
         batch = host.receive(self.event(text="我最近很累，今天有点难过。", prompt="原角色人格提示")).unwrap()
         await self.done(app, batch)
 
@@ -33,7 +39,8 @@ class RelationshipContactEventTests(ContactScheduleFixture, unittest.IsolatedAsy
         record = json.loads(contact["record_json"])
         self.assertEqual(record["purpose"], "care")
         materials = self.contact_calls()[0].original.context.materials
-        self.assertTrue(any(item.purpose == "contact_evidence" and "很累" in item.payload for item in materials))
+        self.assertTrue(any(item.purpose == "recent_private_dialogue" and "很累" in item.payload
+                            for item in materials))
         status = app.proactive.observe(self.context(app, batch), contact["task_id"]).unwrap()
         self.assertEqual(status["delivery"], "delivered")
 
@@ -41,8 +48,7 @@ class RelationshipContactEventTests(ContactScheduleFixture, unittest.IsolatedAsy
         host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
         app = host.application
         app.contact_schedule.advance = lambda: None
-        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
-                            "chat.enabled": False}).unwrap()
+        self._relationship_settings(app, purpose)
         batch = host.receive(self.event("relationship-" + purpose, text=text)).unwrap()
         await self.done(app, batch)
         self.advance(app, 60)
@@ -57,15 +63,118 @@ class RelationshipContactEventTests(ContactScheduleFixture, unittest.IsolatedAsy
 
         contact = self.contacts(app)[0]
         self.assertEqual(json.loads(contact["record_json"])["purpose"], purpose)
-        evidence = [item.payload for item in self.contact_calls()[-1].original.context.materials
-                    if item.purpose == "contact_evidence"]
-        self.assertTrue(evidence)
-        self.assertTrue(any(text_part in evidence[0] for text_part in text.split()), evidence[0])
+        dialogue = [item.payload for item in self.contact_calls()[-1].original.context.materials
+                    if item.purpose == "recent_private_dialogue"]
+        self.assertTrue(dialogue)
+        self.assertTrue(any(text_part in " ".join(dialogue) for text_part in text.split()), dialogue)
         self.assertEqual(app.proactive.observe(self.context(app, batch), contact["task_id"])
                          .unwrap()["delivery"], "delivered")
 
     async def test_explicit_affection_reaches_the_contact_model_and_delivery(self):
         await self._assert_explicit_relationship_contact("我今天有点想你。", "affection")
+
+    async def test_neutral_private_text_can_reach_enabled_relationship_prompt(self):
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        app.contact_schedule.advance = lambda: None
+        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
+            "chat.enabled": False, "affection.enabled": False, "care.enabled": True,
+            "play.enabled": False, "repair.enabled": False, "invitation.enabled": False}).unwrap()
+        batch = host.receive(self.event("relationship-soft-candidate", text="准备睡觉咯")).unwrap()
+        await self.done(app, batch)
+
+        self.advance(app, 60)
+        row = app.runtime.read_one("""SELECT f.sequence, b.* FROM conversation_flows f
+            JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
+            ORDER BY f.sequence DESC LIMIT 1""", (self.contact_context().scope.key,))
+        plan = app.contact_schedule._plan(row, self.clock.now())
+
+        self.assertIsNotNone(plan)
+        self.assertEqual([intent.purpose for intent in plan[2]], ["care"])
+        self.assertEqual(plan[4]["relationship_event"]["mode"], "slot")
+        await app.contact_schedule._run(plan)
+        await self.automatic_delivery(app)
+
+        contact = self.contacts(app)[0]
+        self.assertEqual(json.loads(contact["record_json"])["purpose"], "care")
+        self.assertEqual(plan[2][0].thought.evidence.sources, ())
+        dialogue = [item.payload for item in self.contact_calls()[-1].original.context.materials
+                    if item.purpose == "recent_private_dialogue"]
+        self.assertTrue(any("准备睡觉咯" in item for item in dialogue))
+
+    async def test_relationship_contact_uses_a_later_slot_without_a_new_user_message(self):
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        app.contact_schedule.advance = lambda: None
+        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
+            "chat.enabled": False, "affection.enabled": True, "care.enabled": False,
+            "play.enabled": False, "repair.enabled": False, "invitation.enabled": False}).unwrap()
+        batch = host.receive(self.event("old-private-turn", text="今天先这样吧")).unwrap()
+        await self.done(app, batch)
+
+        self.advance(app, 3660)
+        row = app.runtime.read_one("""SELECT f.sequence, b.* FROM conversation_flows f
+            JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
+            ORDER BY f.sequence DESC LIMIT 1""", (self.contact_context().scope.key,))
+        plan = app.contact_schedule._plan(row, self.clock.now())
+
+        self.assertIsNotNone(plan)
+        self.assertEqual([intent.purpose for intent in plan[2]], ["affection"])
+        self.assertEqual(plan[2][0].thought.evidence.sources, ())
+        self.assertEqual(plan[4]["relationship_event"]["mode"], "slot")
+        await app.contact_schedule._run(plan)
+        await self.automatic_delivery(app)
+
+        contact = self.contacts(app)[0]
+        self.assertEqual(json.loads(contact["record_json"])["purpose"], "affection")
+        self.assertFalse(any(item.purpose == "contact_evidence"
+                             for item in self.contact_calls()[-1].original.context.materials))
+
+    async def test_relationship_and_chat_candidates_share_a_normal_slot_without_keyword_cues(self):
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        app.contact_schedule.advance = lambda: None
+        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
+            "chat.enabled": True, "affection.enabled": False, "care.enabled": True,
+            "play.enabled": False, "repair.enabled": False, "invitation.enabled": False}).unwrap()
+        batch = host.receive(self.event("neutral-relationship-slot", text="准备睡觉咯")).unwrap()
+        await self.done(app, batch)
+
+        self.advance(app, 60)
+        row = app.runtime.read_one("""SELECT f.sequence, b.* FROM conversation_flows f
+            JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
+            ORDER BY f.sequence DESC LIMIT 1""", (self.contact_context().scope.key,))
+        plan = app.contact_schedule._plan(row, self.clock.now())
+
+        self.assertIsNotNone(plan)
+        self.assertEqual([intent.purpose for intent in plan[2]], ["chat", "care"])
+        self.assertTrue(all(intent.thought.opportunity == plan[1] for intent in plan[2]))
+        self.assertTrue(plan[1].opportunity_id.startswith("automatic-"))
+        self.assertEqual(plan[4]["relationship_event"]["mode"], "slot")
+        self.assertIn("角色自己的想法", plan[2][0].thought.summary)
+        self.assertIn("不要求依赖最近某条消息", plan[2][0].thought.summary)
+
+    async def test_relationship_diagnostic_uses_real_neutral_turn_and_leaves_fit_to_prompt(self):
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        self.settings(app, {"enabled": True, "automatic_enabled": True,
+                            "idle_seconds": 60, "chat.enabled": False}).unwrap()
+        batch = host.receive(self.event("relationship-diagnostic", text="准备睡觉咯")).unwrap()
+        await self.done(app, batch)
+
+        context = self.contact_context()
+        at = self.clock.now()
+        event = app.contact_schedule._origin(context, batch, at)[2]
+        preferences = app.contact_schedule.contacts.preferences.read(context, observed_at=at).unwrap()
+        producer = app.contact_schedule.relationship_events
+
+        self.assertIsNotNone(producer.select(context, preferences, event, at, purpose="affection"))
+        candidate = await app.contact_schedule.diagnostic_candidate(context, "affection", at=at)
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["route"]["id"], "relationship_event")
+        self.assertEqual(candidate["intents"][0].purpose, "affection")
+        self.assertEqual(candidate["intents"][0].thought.evidence.sources, (event.source,))
 
     async def test_explicit_play_reaches_the_contact_model_and_delivery(self):
         await self._assert_explicit_relationship_contact("今天一起玩游戏吧。", "play")
@@ -76,27 +185,39 @@ class RelationshipContactEventTests(ContactScheduleFixture, unittest.IsolatedAsy
     async def test_explicit_invitation_reaches_the_contact_model_and_delivery(self):
         await self._assert_explicit_relationship_contact("下次一起去看电影吧。", "invitation")
 
-    async def test_common_interest_without_an_invitation_does_not_create_an_invitation_contact(self):
+    async def test_common_interest_is_not_forced_into_an_invitation(self):
         host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
         app = host.application
         app.contact_schedule.advance = lambda: None
         self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
-                            "chat.enabled": False}).unwrap()
+            "chat.enabled": False, "affection.enabled": False, "care.enabled": False,
+            "play.enabled": False, "repair.enabled": False, "invitation.enabled": True}).unwrap()
+
+        async def skip(_envelope):
+            return answered('{"decision":"skip","text":"","skip_reason":"purpose_mismatch"}')
+
         batch = host.receive(self.event("shared-interest", text="我喜欢看电影，最近看了三部。")).unwrap()
         await self.done(app, batch)
+        self.sent.clear()
+        self.model_behavior = skip
         self.advance(app, 60)
         row = app.runtime.read_one("""SELECT f.sequence, b.* FROM conversation_flows f
             JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
             ORDER BY f.sequence DESC LIMIT 1""", (self.contact_context().scope.key,))
-        self.assertIsNone(app.contact_schedule._plan(row, self.clock.now()))
-        self.assertEqual(self.contacts(app), ())
+        plan = app.contact_schedule._plan(row, self.clock.now())
+        self.assertIsNotNone(plan)
+        self.assertEqual([intent.purpose for intent in plan[2]], ["invitation"])
+        await app.contact_schedule._run(plan)
+
+        record = json.loads(self.contacts(app)[0]["record_json"])
+        self.assertEqual((record["purpose"], record["decision"]), ("invitation", "skip"))
+        self.assertEqual(self.sent, [])
 
     async def test_explicitly_rejected_invitation_can_be_skipped_without_a_delivery(self):
         host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
         app = host.application
         app.contact_schedule.advance = lambda: None
-        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
-                            "chat.enabled": False}).unwrap()
+        self._relationship_settings(app, "invitation")
 
         async def skip(_envelope):
             return answered('{"decision":"skip","text":"","skip_reason":"respect_user_boundary"}')

@@ -31,6 +31,9 @@ from companion_v2.relationships.group_network import (
     attach_member_clues,
 )
 from companion_v2.relationships.private_management import PrivateMemberSettings
+from companion_v2.agenda.models import AgendaTarget, MemoCursor
+from companion_v2.agenda.service import AgendaService
+from companion_v2.foundation.refs import OperationRef, VersionRef
 
 from .management_identity import dashboard_operator
 from .display_names import display_names
@@ -42,6 +45,7 @@ AUTHORIZATION_PATH = PREFIX + "/authorization"
 ADMIN_NAME_PATH = PREFIX + "/admin-name"
 IDENTITY_PATH = PREFIX + "/identity"
 SETTINGS_PATH = PREFIX + "/settings"
+OPEN_LOOPS_PATH = PREFIX + "/open-loops"
 MAX_AUTHORIZATION_BODY = 8192
 logger = logging.getLogger(__name__)
 
@@ -306,7 +310,9 @@ class AcquaintanceWebAPI:
                  "Set a directory person's administrator-assigned display name"),
                 (IDENTITY_PATH, self.set_identity, ["POST"], "Set one trusted person's management tier"),
                 (SETTINGS_PATH, self.member_settings, ["GET"], "Read one private member's settings"),
-                (SETTINGS_PATH, self.configure_member, ["POST"], "Save one private member's settings")]
+                (SETTINGS_PATH, self.configure_member, ["POST"], "Save one private member's settings"),
+                (OPEN_LOOPS_PATH, self.open_loops, ["GET"], "Read one person's open conversation threads"),
+                (OPEN_LOOPS_PATH, self.change_open_loop, ["POST"], "Manage one person's open conversation thread")]
 
     def _settings(self):
         settings = self.controller.settings
@@ -688,3 +694,77 @@ class AcquaintanceWebAPI:
 
     async def configure_member(self):
         return await self._member_settings(write=True)
+
+    async def open_loops(self):
+        from .web_api import outcome_response
+        try:
+            query = self._query(("subject_id", *PERSON_ROUTE_KEYS, "state", "after"),
+                                required=("subject_id", *PERSON_ROUTE_KEYS))
+            state = query.get("state", "all")
+            if state not in ("all", "active", "completed"):
+                raise TaskError("acquaintance_request_invalid", "unsupported open-loop state")
+            cursor = MemoCursor(**json.loads(query["after"])) if query.get("after") else None
+            async with self.controller._control_lock:
+                _, operator = await self._operator()
+                context = self._context(query["subject_id"], {key: query[key] for key in PERSON_ROUTE_KEYS})
+                target = AgendaTarget(context.scope, context.role_binding.role, context.actor.subject)
+                result = AgendaService(self.controller.runtime).list_memos(
+                    operator, target=target, observed_at=self.controller.now(), limit=100,
+                    after=cursor, state=state, purpose="open_loop", include_expired=True)
+                if result.failure is not None:
+                    return outcome_response(result)
+                memos = result.unwrap()
+                active, expired, completed = [], [], []
+                for memo in memos:
+                    item = {"memo_id": memo.memo_id, "revision": memo.revision, "state": memo.state,
+                            "title": memo.title, "body": memo.body, "created_at": memo.created_at,
+                            "expires_at": memo.expires_at, "pinned": memo.pinned,
+                            "expired": memo.expired(self.controller.now()),
+                            "last_followup_at": memo.last_followup_at,
+                            "context_count": memo.context_count,
+                            "followup_count": memo.followup_count}
+                    (completed if memo.state == "completed" else expired if item["expired"] else active).append(item)
+                page = {"active": active, "expired": expired, "completed": completed,
+                        "next_cursor": None if len(memos) < 100 else {"pinned": memos[-1].pinned,
+                                                                       "memo_id": memos[-1].memo_id}}
+                return outcome_response(Outcome.success(page))
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+            return outcome_response(Outcome.failed("open_loop_request_invalid", "invalid open-loop request"))
+
+    async def change_open_loop(self):
+        from .web_api import outcome_response
+        try:
+            command = await self._command(expected={"subject_id", "route", "memo_id", "expected_revision",
+                                                     "action", "operation_key"})
+            if command["action"] not in ("complete", "reopen", "delete"):
+                raise TaskError("open_loop_action_invalid", "unsupported open-loop operation")
+            route = command["route"]
+            if type(route) is not dict or set(route) != set(PERSON_ROUTE_KEYS):
+                raise TaskError("acquaintance_route_invalid", "select one complete Bot, account and role route")
+            if (type(command["expected_revision"]) is not int or type(command["memo_id"]) is not str
+                    or type(command["operation_key"]) is not str or not command["operation_key"]):
+                raise TaskError("open_loop_request_invalid", "open-loop operation fields are invalid")
+            async with self.controller._control_lock:
+                _, operator = await self._operator()
+                context = self._context(command["subject_id"], route)
+                target = AgendaTarget(context.scope, context.role_binding.role, context.actor.subject)
+                service = AgendaService(self.controller.runtime)
+                current = service.read_memo(operator, target=target, memo_id=command["memo_id"],
+                                            observed_at=self.controller.now(), include_expired=True)
+                if current.failure is not None:
+                    return outcome_response(current)
+                if current.unwrap().purpose != "open_loop":
+                    raise TaskError("open_loop_not_found", "selected item is not an open conversation thread")
+                operation = OperationRef(command["operation_key"], "agenda", context.scope,
+                                         VersionRef(command["operation_key"], 1), command["operation_key"])
+                result = service.change_memo(operator, target=target, memo_id=command["memo_id"],
+                    action=command["action"], expected_revision=command["expected_revision"],
+                    expected_role_revision=context.role_binding.revision, operation=operation,
+                    observed_at=self.controller.now())
+                return outcome_response(result)
+        except TaskError as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+            return outcome_response(Outcome.failed("open_loop_request_invalid", "invalid open-loop operation"))

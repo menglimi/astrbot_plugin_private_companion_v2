@@ -34,19 +34,19 @@ class RoleSleepConfigurationTests(MultiLifeFixture, unittest.IsolatedAsyncioTest
 
         await self.command("configure", "first", "role-a", key="set-shared-sleep", changes={
             "sleep_enabled": True, "sleep_time": "00:01", "sleep_timezone": "UTC",
-            "sleep_variation_minutes": 30, "sleep_minutes": 45,
+            "sleep_variation_minutes": 30, "sleep_window_minutes": 90, "sleep_minutes": 45,
             "diary_time": "21:15",
         })
         first = await self.status("first", "role-a")
         second = await self.status("second", "role-a")
         self.assertEqual((first["config"]["sleep_enabled"], first["config"]["sleep_time"],
                           first["config"]["sleep_timezone"], first["config"]["sleep_variation_minutes"],
-                          first["config"]["sleep_minutes"]),
-                         (True, "00:01", "UTC", 30, 45))
+                          first["config"]["sleep_window_minutes"], first["config"]["sleep_minutes"]),
+                         (True, "00:01", "UTC", 30, 90, 45))
         self.assertEqual((second["config"]["sleep_enabled"], second["config"]["sleep_time"],
                           second["config"]["sleep_timezone"], second["config"]["sleep_variation_minutes"],
-                          second["config"]["sleep_minutes"]),
-                         (True, "00:01", "UTC", 30, 45))
+                          second["config"]["sleep_window_minutes"], second["config"]["sleep_minutes"]),
+                         (True, "00:01", "UTC", 30, 90, 45))
         self.assertEqual((first["config"]["diary_time"], first["config"]["timezone"]),
                          ("21:15", "Europe/London"))
         self.assertEqual((second["config"]["diary_time"], second["config"]["timezone"]),

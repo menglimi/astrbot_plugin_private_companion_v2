@@ -7,11 +7,14 @@ from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import MessageChain
 
 from astrbot_host.core_reply import (
+    CORE_REPLY_CONTEXT_EXTRA,
     activate_core_reply_delivery_guard,
     inject_core_reply_prompt,
     prepare_core_reply_event,
 )
 from astrbot_host.core_reply_voice import prepare_core_reply_voice_message, voice_prompt_instruction
+from astrbot_host.core_reply_voice import observe_core_voice_response
+from astrbot.core.provider.entities import LLMResponse
 from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 from companion_v2.foundation.outcome import Outcome
 
@@ -108,13 +111,87 @@ class CoreReplyVoiceTests(unittest.IsolatedAsyncioTestCase):
         prepared = {"prompt_instruction": "Use the captured persona.\n\n" + voice_prompt_instruction(policy),
                     "voice_reply_policy": policy}
         prepare_core_reply_event(event, prepared, authorize=_allow)
+        # The SDK picks streaming before on_llm_request, so admission must
+        # reserve the complete reply before the prompt hook runs.
+        self.assertFalse(event.get_extra("enable_streaming"))
         request = NS(system_prompt="base", prompt="hello")
 
         inject_core_reply_prompt(event, request)
 
         self.assertFalse(event.get_extra("enable_streaming"))
         self.assertIn("<pc_tts>", request.system_prompt)
-        self.assertIn("Use the captured persona.", request.system_prompt)
+        self.assertNotIn("Use the captured persona.", request.system_prompt)
+        first_prompt = request.system_prompt
+        inject_core_reply_prompt(event, request)
+        self.assertEqual(request.system_prompt, first_prompt)
+
+    async def test_long_spoken_text_is_split_without_losing_content_or_translation(self):
+        event = FakeEvent()
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", max_speech_chars=6,
+                                  foreign_text_mode="translation")
+        prepared = {"voice_reply_policy": policy, "context": object(), "event_id": "long"}
+        spoken = []
+        async def renderer(_, text, **__):
+            spoken.append(text)
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+        output = await prepare_core_reply_voice_message(event, prepared,
+            MessageChain(chain=[Plain("<pc_tts>こんにちは。元気ですか。</pc_tts>你好，最近还好吗？")]),
+            renderer=renderer, delivery=None, authorize=_allow)
+        self.assertTrue(all(len(text) <= 6 for text in spoken))
+        self.assertEqual("".join(spoken), "こんにちは。元気ですか。")
+        self.assertEqual(output.get_plain_text(), "你好，最近还好吗？")
+        self.assertEqual(len([part for part in output.chain if isinstance(part, Record)]), 2)
+
+    async def test_captured_performance_is_preserved_after_visible_reply_is_segmented(self):
+        event = FakeEvent()
+        policy = VoiceReplyPolicy(generation_mode="model_tag")
+        prepared = {"voice_reply_policy": policy, "context": object(), "event_id": "drama"}
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": prepared})
+        response = LLMResponse(role="assistant",
+            completion_text="<pc_tts>[温柔地]晚安。<whisper>好好休息。</whisper></pc_tts>")
+        observe_core_voice_response(event, response)
+        self.assertEqual(response.completion_text, "晚安。好好休息。")
+        rendered = []
+
+        async def renderer(_, text, **__):
+            rendered.append(text)
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        for index, text in enumerate(("晚安。", "好好休息。")):
+            output = await prepare_core_reply_voice_message(event, prepared,
+                MessageChain(chain=[Plain(text)]), renderer=renderer, delivery=None,
+                authorize=_allow, segment_index=index, segment_count=2)
+            self.assertEqual(output.get_plain_text(), text)
+        self.assertEqual(rendered, ["[温柔地]晚安。", "<whisper>好好休息。</whisper>"])
+
+    async def test_voice_only_uses_spoken_words_instead_of_control_tags_for_text_comparison(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", delivery_mode="voice_only")
+        prepared = {"voice_reply_policy": policy, "context": object(), "event_id": "drama-only"}
+
+        async def renderer(_, text, **__):
+            self.assertEqual(text, "[轻声]晚安。")
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        result = await prepare_core_reply_voice_message(FakeEvent(), prepared,
+            MessageChain(chain=[Plain("<pc_tts>[轻声]晚安。</pc_tts>")]), renderer=renderer,
+            delivery=None, authorize=_allow)
+        self.assertEqual([type(part) for part in result.chain], [Record])
+
+    async def test_qq_voice_is_sent_separately_from_text(self):
+        event = FakeEvent()
+        event.get_platform_name = lambda: "aiocqhttp"
+        policy = VoiceReplyPolicy()
+        prepared = {"voice_reply_policy": policy, "context": object(), "event_id": "qq"}
+        async def prepare(current, message, check, index, count):
+            async def render(*_, **__):
+                return {"type": "record", "data": {"file": "base64://YQ=="}}
+            return await prepare_core_reply_voice_message(event, current, message,
+                renderer=render, delivery=None, authorize=check)
+        prepare_core_reply_event(event, prepared, authorize=_allow, prepare_send=prepare)
+        activate_core_reply_delivery_guard(event)
+        await event.send(MessageChain(chain=[Plain("你好")]))
+        self.assertEqual([[type(part) for part in message.chain] for message in event.sent], [[Plain], [Record]])
+        self.assertEqual(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["send_returns"], 2)
 
 
 class FakeDelivery:

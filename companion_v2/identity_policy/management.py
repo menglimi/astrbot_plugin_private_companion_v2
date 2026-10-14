@@ -14,6 +14,7 @@ from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 from companion_v2.relationships.private_access import REVOCABLE_CAPABILITIES
+from companion_v2.identity_policy.interventions import INTERVENTION_CAPABILITIES
 
 
 # This page's lineage. Its presence is what makes a capability retractable here.
@@ -24,7 +25,7 @@ COMPANION_CAPABILITIES = ("conversation.reply",)
 # The capabilities this page can always reach, even when the person holds no grant
 # for them: an operator has to be able to switch one back on without first
 # writing a row for it somewhere else.
-PAGE_MANAGED_CAPABILITIES = ("conversation.reply", "proactive.contact")
+PAGE_MANAGED_CAPABILITIES = ("conversation.reply", "proactive.contact", *INTERVENTION_CAPABILITIES)
 MAX_OPERATION_KEY = 128
 MANAGED_BY_PAGE = "page"
 MANAGED_BY_CONFIGURATION = "configuration"
@@ -169,9 +170,10 @@ class PersonAuthorizationManagement:
                                     (subject.kind.value, subject.subject_id))
         tier = row["tier"] if row else AuthorizationTier.STANDARD.value
         for item in items:
-            item["effective_state"] = ("active" if tier != AuthorizationTier.STANDARD.value
+            core_intervention = tier == AuthorizationTier.CORE.value and item["capability"] in INTERVENTION_CAPABILITIES
+            item["effective_state"] = ("active" if core_intervention or tier != AuthorizationTier.STANDARD.value
                 and item["capability"] in REVOCABLE_CAPABILITIES else item["state"])
-            item["identity_override"] = tier != AuthorizationTier.STANDARD.value and item["capability"] in REVOCABLE_CAPABILITIES
+            item["identity_override"] = core_intervention or tier != AuthorizationTier.STANDARD.value and item["capability"] in REVOCABLE_CAPABILITIES
         return {"subject_id": subject.subject_id, "items": items,
                 "identity_tier": tier, "identity_revision": self.policy.revision,
                 # 管理员权限不是一条可单独签发的成员 grant，而是 CORE 身份的明确投影。
@@ -282,6 +284,8 @@ class PersonAuthorizationManagement:
             mine = [grant for grant in grants if grant.capability == capability
                     and self._same_window(grant.scope, scope) and grant.state is GrantState.ACTIVE
                     and self._classification(grant) == MANAGED_BY_PAGE]
+            if not mine and capability in INTERVENTION_CAPABILITIES:
+                return
             if not mine and capability not in REVOCABLE_CAPABILITIES:
                 raise TaskError("authorization_capability_not_managed",
                                 "this capability has no active grant this page owns")

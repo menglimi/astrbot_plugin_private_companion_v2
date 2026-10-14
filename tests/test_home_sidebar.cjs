@@ -80,6 +80,31 @@ test("今日时间线随当前时间前移，近期安排置顶，已过时段�
   assert.equal((finished.match(/今日安排已结束/g)||[]).length,1);
 });
 
+test("滚动时间线标出空档长度，并在数据不完整时停止推断", () => {
+  const now=Date.parse("2026-09-30T04:00:00Z");
+  const state=status([event("傍晚安排","2026-09-30T10:00:00Z","2026-09-30T11:00:00Z")]);
+  const html=renderSchedule({now,state,life:life([])});
+  assert.match(html,/class="home-agenda-overview"/);
+  assert.match(html,/class="home-agenda-scroll" tabindex="0"/);
+  assert.match(homeCss,/\.home-agenda-scroll\{[^}]*overflow-y:auto/);
+  assert.match(homeCss,/\.home-agenda-item\[data-current="true"\]/);
+  assert.match(homeCss,/\.home-agenda-gap\[data-current="true"\]/);
+  assert.match(html,/当前未安排/);
+  assert.match(html,/12:00 – 18:00 · 6小时/);
+  assert.match(html,/下一项 18:00/);
+
+  const current=status([event("正在阅读","2026-09-30T02:00:00Z","2026-09-30T05:00:00Z")]);
+  const currentHtml=renderSchedule({now,state:current,life:life([])});
+  assert.match(currentHtml,/data-tone="current" data-current="true" aria-current="time"/);
+  assert.doesNotMatch(currentHtml,/class="home-agenda-gap" data-current="true"/);
+
+  state.occurrences.partial=true;
+  const partial=renderSchedule({now,state,life:life([])});
+  assert.match(partial,/日程数据不完整，空白暂不能判断为未安排/);
+  assert.match(partial,/data-kind="unknown"/);
+  assert.doesNotMatch(partial,/class="home-agenda-gap"/);
+});
+
 test("共享睡眠以确认标记睡眠中，跨日计划有日期，并说明缺少执行窗口", () => {
   const state=status([]);
   state.body_sleep={state:"sleeping",started_at:"2026-09-30T00:00:00Z",planned_wake_at:"2026-09-30T03:00:00Z"};
@@ -150,11 +175,12 @@ test("角色数据未就绪时保留首次设置状态，并提供账号与会�
   assert.doesNotMatch(scheduleHtml,/还没完成首次设置/);
 });
 
-test("空日程仍说明自动规划状态与下一次检查时间", () => {
+test("空日程仍说明自动规划状态，并区分调度巡检与日程覆盖", () => {
   const state=status([]);
   state.planning={enabled:true,calendar_enabled:true,next_check:"2026-09-30T08:30:00Z"};
   const html=renderSchedule({now,state,life:life([])});
-  assert.match(html,/自动规划已开启 · 下次检查 16:30/);
+  assert.match(html,/自动规划已开启 · 调度巡检 16:30/);
+  assert.match(html,/今日暂无安排/);
   assert.doesNotMatch(html,/class="home-agenda-date"/);
   state.planning.calendar_enabled=false;
   assert.match(renderSchedule({now,state,life:life([])}),/日历写入尚未开启/);

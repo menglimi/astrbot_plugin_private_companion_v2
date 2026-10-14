@@ -11,6 +11,7 @@ from companion_v2.foundation.refs import RoleOwnerRef
 from companion_v2.memory.episodes import recent_dialogue_lines
 from companion_v2.memory.models import Proposal
 from companion_v2.role_work.journal.models import JournalContext, JournalKey, JournalKind
+from astrbot_host.core_reply_observations import may_be_intervention
 from tests.multi_host_support import MultiFixture
 
 
@@ -28,12 +29,22 @@ class CoreReplyObservationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.app.memory.query.begin(context, session_id)
         return require(self.app.memory.query.query(context, session_id, query_intent="", kind="sources"))
 
+    async def test_intervention_prefilter_skips_user_only_topics_and_keeps_role_directives(self):
+        self.assertFalse(may_be_intervention("我今天很累，晚上想早点睡。"))
+        self.assertFalse(may_be_intervention("我这周的日程排得很满。"))
+        self.assertTrue(may_be_intervention("你今天太累了，早点休息吧。"))
+        self.assertTrue(may_be_intervention("明天的计划推迟到下午。"))
+
     async def test_real_native_input_becomes_memory_evidence_and_recall_source(self):
         prepared = await self.prepared()
         reference = await prepared["native_source_future"]
         context = prepared["context"]
 
         self.assertEqual(reference.owner, INPUT_OWNER)
+        indexes = {row["name"] for row in self.app.runtime.read_all(
+            "PRAGMA index_list(conversation_native_observations)", ())}
+        self.assertTrue({"conversation_native_input_context_idx", "conversation_native_input_role_idx"}
+                        .issubset(indexes))
         evidence = self.app.memory.writer.access.capture(context, reference)
         self.assertEqual(evidence.source_kind, "human_message")
         self.assertEqual(evidence.speaker_id, context.actor.subject.subject_id)

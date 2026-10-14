@@ -1,5 +1,6 @@
 """Role canon is bounded, isolated by role and sealed into new conversation turns."""
 
+import base64
 import json
 import unittest
 
@@ -7,11 +8,13 @@ from companion_v2.configuration.models import ConfigLayer, ConfigTarget, Configu
 from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from companion_v2.role_profile.configuration import (
     CONTROL_FIELDS,
+    FIELD_DEFAULTS,
     FIELD_LIMITS,
     GROUP,
     RoleProfileConfigurationOwner,
     configuration_fields,
     target_for,
+    validate_values,
 )
 from tests.test_conversation_messages import MessageFixture
 from tests.test_management_access import NOW
@@ -47,11 +50,14 @@ class RoleProfileConversationTests(MessageFixture, unittest.IsolatedAsyncioTestC
         self.save_profile("rules", "从海上寄出的信至少要经过一整个雨季。")
         self.save_profile("world_adaptation_mode", "fantasy")
         self.save_profile("world_adaptation", "把资料柜说成行囊书匣；描述计划时用旅途安排。")
+        avatar = base64.b64encode(b"\xff\xd8\xffavatar\xff\xd9").decode("ascii")
+        self.save_profile("avatar_data_url", f"data:image/jpeg;base64,{avatar}")
 
         batch = self.accept()
         self.messages.seal(self.context, batch, deadline_at=self.deadline).unwrap()
         sealed = json.loads(self.messages.batch(batch)["contributions_json"])["role_profile"]
         self.assertEqual(sealed["role_id"], self.context.role_binding.role.subject_id)
+        self.assertNotIn("avatar_data_url", sealed["fields"])
         self.assertEqual(sealed["fields"]["name"], "沈知夏")
         self.assertEqual(sealed["fields"]["birthday"], "9 月 18 日")
         self.assertEqual(sealed["fields"]["world"], "信件总会晚一个雨季才抵达。")
@@ -72,6 +78,7 @@ class RoleProfileConversationTests(MessageFixture, unittest.IsolatedAsyncioTestC
         self.assertIn("世界观适配模式：fantasy", request.instruction)
         self.assertIn("幻想世界中的等价说法", request.instruction)
         self.assertIn("不要套用到其他人", request.instruction)
+        self.assertNotIn("data:image/jpeg;base64,", request.instruction)
 
         self.save_profile("world", "每封信都会在第二天清晨送到。")
         replay = self.messages._request(self.messages.batch(batch), self.context, NOW)
@@ -87,6 +94,7 @@ class RoleProfileConversationTests(MessageFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(other.fields[f"{GROUP}.identity"].value, "")
         self.assertEqual(other.fields[f"{GROUP}.name"].value, "")
         self.assertEqual(other.fields[f"{GROUP}.world"].value, "")
+        self.assertEqual(other.fields[f"{GROUP}.avatar_data_url"].value, "")
 
     async def test_blank_profile_does_not_add_a_prompt_block(self):
         self.save_profile("identity", " \n ")
@@ -137,6 +145,26 @@ class RoleProfileConversationTests(MessageFixture, unittest.IsolatedAsyncioTestC
         self.assertTrue(all(not item.value for name, item in unchanged.fields.items()
                             if name.removeprefix(GROUP + ".") not in CONTROL_FIELDS
                             and name != f"{GROUP}.world_adaptation_mode"))
+
+    async def test_avatar_is_bounded_and_does_not_consume_profile_text_budget(self):
+        avatar = base64.b64encode(b"\xff\xd8\xffavatar\xff\xd9").decode("ascii")
+        values = {name: FIELD_DEFAULTS.get(name, "") for name in FIELD_LIMITS}
+        baseline = sum(len(value) for name, value in values.items()
+                       if name in CONTROL_FIELDS or name == "world_adaptation_mode")
+        remaining = 29999 - baseline
+        for name, maximum in FIELD_LIMITS.items():
+            if name in CONTROL_FIELDS or name == "world_adaptation_mode":
+                continue
+            take = min(maximum, remaining)
+            values[name] = "x" * take
+            remaining -= take
+            if not remaining:
+                break
+        self.assertEqual(remaining, 0)
+        values["avatar_data_url"] = f"data:image/jpeg;base64,{avatar}"
+        validate_values(values)
+        with self.assertRaises(ConfigurationError):
+            validate_values({**values, "avatar_data_url": "data:image/jpeg;base64,not-an-image"})
 
 
 if __name__ == "__main__":

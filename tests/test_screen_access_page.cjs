@@ -11,8 +11,9 @@ const prefix = "/astrbot_plugin_private_companion_v2";
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 10; i += 1) await flush(); };
 
-function harness({kind = "private", route = true, request, confirm = async () => true} = {}) {
+function harness({kind = "private", route = true, request, targets = [], confirm = async () => true} = {}) {
   const calls = [];
+  const choices = [];
   const target = {scope_kind: kind, target_id: "window-a", bot_id: "bot-a"};
   const node = {
     innerHTML: "", isConnected: true, listeners: {},
@@ -25,6 +26,9 @@ function harness({kind = "private", route = true, request, confirm = async () =>
   const product = {
     hosted: () => true,
     target: () => target,
+    targets: () => targets,
+    targetLabel: item => item.display_name || item.target_id,
+    choose: async (targetId, roleId) => { choices.push({targetId, roleId}); },
     selection: () => ({role_id: "role-a", target_id: target.target_id}),
     role: () => ({screen_access_api: route ? prefix + "/screen-access" : null}),
     relative(value) {
@@ -45,8 +49,25 @@ function harness({kind = "private", route = true, request, confirm = async () =>
   vm.runInNewContext(source, {window, document, Promise, Map, String, Math, Date, JSON, Object,
     crypto: {randomUUID: () => "operation-a"}});
   window.CompanionScreenAccess.mount(node);
-  return {node, calls, page: window.CompanionScreenAccess};
+  return {node, calls, choices, page: window.CompanionScreenAccess};
 }
+
+test("识屏授权明确选择同角色私聊，切换对象不提交授权", async () => {
+  const {node, calls, choices} = harness({targets: [
+    {target_id: "window-a", scope_kind: "private", display_name: "私聊甲", roles: [{role_id: "role-a"}]},
+    {target_id: "window-b", scope_kind: "private", display_name: "私聊乙", roles: [{role_id: "role-a"}]},
+    {target_id: "group-a", scope_kind: "group", display_name: "群聊", roles: [{role_id: "role-a"}]},
+    {target_id: "other-role", scope_kind: "private", display_name: "其他角色", roles: [{role_id: "role-b"}]},
+  ]});
+  await settle();
+  assert.match(node.innerHTML, /识屏授权私聊/);
+  assert.match(node.innerHTML, /私聊乙/);
+  assert.doesNotMatch(node.innerHTML, /value="(?:group-a|other-role)"/);
+  node.listeners.change({target: {closest: () => ({value: "window-b"})}});
+  await settle();
+  assert.deepEqual(choices, [{targetId: "window-b", roleId: "role-a"}]);
+  assert.equal(calls.filter(call => call.method === "POST").length, 0);
+});
 
 test("群聊显示私聊边界，不发送屏幕授权请求", async () => {
   const {node, calls} = harness({kind: "group", route: false});

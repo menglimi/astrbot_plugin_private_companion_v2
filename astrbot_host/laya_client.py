@@ -13,10 +13,12 @@ from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+import warnings
 
 from companion_v2.decision.contract import (CONFIGURABLE_DECISION_FIELDS, DECISION_DEFAULTS, LayaDecision,
                        DecisionContractError, deterministic_skip_reason, parse_decision)
-from companion_v2.decision.prompt import DECISION_QUESTIONS, build_state, decision_questions, facts_document, render_model_state
+from companion_v2.decision.prompt import (DECISION_QUESTIONS, INTERVENTION_CHOICES, build_state,
+    decision_questions, facts_document, intervention_question, render_intervention_state, render_model_state)
 from companion_v2.decision.store import cached_multilingual_model
 
 
@@ -49,7 +51,24 @@ def _source_key(local_model_path=""):
     return str(Path(local_model_path).expanduser().resolve()) if local_model_path.strip() else DEFAULT_MODEL
 
 
+def _cuda_available():
+    try:
+        import torch
+    except ImportError:
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _require_cuda():
+    if not _cuda_available():
+        raise LayaClientError("laya_gpu_unavailable", "当前 AstrBot Python 的 PyTorch 不支持 CUDA，已跳过本地 Laya")
+
+
 def _local_router(local_model_path=""):
+    _require_cuda()
     source = _source_key(local_model_path)
     with _LOCAL_ROUTER_LOCK:
         cached = _LOCAL_ROUTERS.get(source)
@@ -68,7 +87,7 @@ def _local_router(local_model_path=""):
                     "rl_agent_config.json", "model.safetensors", "tokenizer/tokenizer.json", "encoder/config.json")):
                 raise LayaClientError("laya_model_path_invalid", "本地检查点缺少完整的 Laya 权重、配置或分词器")
             options = {"models": {DEFAULT_MODEL: str(installed)}} if installed is not None else {}
-            router = Router(default=DEFAULT_MODEL, max_loaded=1, **options)
+            router = Router(default=DEFAULT_MODEL, max_loaded=1, device="cuda", **options)
         except LayaClientError:
             raise
         except Exception as error:
@@ -94,12 +113,19 @@ def _local_predict(state: str, questions: dict, *, local_model_path=""):
             model_load_started = perf_counter()
             agent = loader(DEFAULT_MODEL) if callable(loader) else None
             model_load_ms = round((perf_counter() - model_load_started) * 1000)
+            if not str(getattr(agent, "device", "")).lower().startswith("cuda"):
+                raise LayaClientError("laya_gpu_unavailable", "Laya 模型没有加载到 CUDA 设备，已跳过本地推理")
             fallback_before = getattr(agent, "cpu_fallback_count", None)
             device_before = str(getattr(agent, "device", "unknown"))
             prediction_started = perf_counter()
             # Router.default is only a language-detection fallback. JSON field
             # names can otherwise route Chinese messages to another checkpoint.
-            result = router.predict(render_model_state(state), questions, model=DEFAULT_MODEL)
+            with warnings.catch_warnings():
+                # Laya retries CUDA OOM on CPU. Promote that exact warning so the
+                # retry is interrupted before any CPU inference can begin.
+                warnings.filterwarnings("error", message=r"Warning: GPU memory exceeded during inference\..*",
+                                       category=RuntimeWarning)
+                result = router.predict(render_model_state(state), questions, model=DEFAULT_MODEL)
             prediction_ms = round((perf_counter() - prediction_started) * 1000)
             fallback_after = getattr(agent, "cpu_fallback_count", None)
             device_after = str(getattr(agent, "device", "unknown"))
@@ -116,6 +142,8 @@ def _local_predict(state: str, questions: dict, *, local_model_path=""):
                                              if fallback_count else None),
             }
             return result
+    except LayaClientError:
+        raise
     except Exception as error:
         _LOCAL_PREDICTION_TRACE.value = {
             "router_setup_ms": router_setup_ms,
@@ -152,13 +180,19 @@ async def _run_local_load(local_model_path=""):
 
 
 def _load_local_model(local_model_path=""):
+    _require_cuda()
     router, lock = _local_router(local_model_path)
     with lock:
         agent = router.load(DEFAULT_MODEL)
-        return str(getattr(agent, "device", "unknown"))
+        device = str(getattr(agent, "device", "unknown"))
+        if not device.lower().startswith("cuda"):
+            raise LayaClientError("laya_gpu_unavailable", "Laya 模型没有加载到 CUDA 设备，已跳过本地预热")
+        return device
 
 
 def local_runtime_status(*, local_model_path=""):
+    if not _cuda_available():
+        return {"local_runtime_state": "gpu_unavailable"}
     source = _source_key(local_model_path)
     task = _LOCAL_WARMUP_TASKS.get(source)
     if task is not None and not task.done():
@@ -175,6 +209,9 @@ def start_laya_warmup(store):
             return None
         local_model_path = values["local_model_path"]
         source = _source_key(local_model_path)
+        if not _cuda_available():
+            logger.info("[CompanionV2] Laya 本地预热跳过 reason=cuda_unavailable")
+            return None
         if not local_model_path.strip() and cached_multilingual_model() is None:
             return None
         if local_runtime_status(local_model_path=local_model_path)["local_runtime_state"] == "ready":
@@ -316,6 +353,7 @@ class LayaDecisionClient:
                      self.mode, state[:16000], render_model_state(state)[:16000],
                      json.dumps(questions, ensure_ascii=False, separators=(",", ":")))
         if self.mode == "local":
+            _require_cuda()
             if local_runtime_status(local_model_path=self.local_model_path)["local_runtime_state"] == "warming":
                 raise LayaClientError("laya_initializing", "Laya 本地模型正在预热，本轮继续普通回复流程")
             try:
@@ -367,6 +405,57 @@ class LayaDecisionClient:
         logger.debug("[CompanionV2][开发者追踪] Laya 合同转换 result=%s",
                      json.dumps(decision.document(), ensure_ascii=False, separators=(",", ":")))
         return decision
+
+    async def classify_intervention(self, facts: dict) -> str:
+        """Classify one coalesced private conversation without mutating role data."""
+        if type(facts) is not dict or facts.get("scope_kind") != "private":
+            raise LayaClientError("laya_facts_invalid", "role intervention classification requires a private window")
+        self.last_trace = {}
+        questions = intervention_question(facts)
+        state = render_intervention_state(facts)
+        model_state = render_model_state(state)
+        self.last_trace = {
+            "request": {"model": DEFAULT_MODEL, "state": model_state, "questions": questions, "sent": False},
+            "response": None,
+            "processing": {"stages": [{"name": "request_preparation", "status": "ok"}]},
+        }
+        raw_result, local_runtime = None, None
+        if self.mode == "local":
+            _require_cuda()
+            if local_runtime_status(local_model_path=self.local_model_path)["local_runtime_state"] == "warming":
+                raise LayaClientError("laya_initializing", "Laya 本地模型正在预热")
+            try:
+                self.last_trace["request"]["sent"] = True
+                options = {"local_model_path": self.local_model_path} if self.local_model_path.strip() else {}
+                raw_result, local_runtime = await asyncio.wait_for(
+                    _run_local_predict(state, questions, **options), timeout=self.timeout_seconds)
+            except asyncio.TimeoutError as error:
+                raise LayaClientError("laya_inference_timeout", "Laya 本地干预判断超时") from error
+            self.last_trace["response"] = {"format": "python_object",
+                "body": _diagnostic_response_text(raw_result),
+                "value": raw_result if type(raw_result) is dict else None}
+        else:
+            self.last_trace["request"]["sent"] = True
+            raw_body = await self._post(model_state, questions)
+            self.last_trace["response"] = {"format": "json", "body": raw_body}
+            raw_result = _parse_document(raw_body)
+            self.last_trace["response"]["value"] = raw_result
+        if type(raw_result) is not dict:
+            raise LayaClientError("laya_response_invalid", "Laya intervention result is not an object")
+        answers = raw_result.get("answers")
+        answer = answers.get("intervention_need") if type(answers) is dict else None
+        choice = answer.get("choice") if type(answer) is dict and answer.get("type") == "choice" else None
+        if type(choice) is not str or choice not in INTERVENTION_CHOICES:
+            raise LayaClientError("laya_contract_invalid", "Laya returned an unsupported intervention category")
+        if self.mode == "local":
+            _LOCAL_READY.add(_source_key(self.local_model_path))
+        self.last_trace["processing"] = {"stages": [
+            {"name": "inference", "status": "ok"},
+            {"name": "contract_conversion", "status": "ok"}],
+            "intervention_need": choice}
+        if local_runtime is not None:
+            self.last_trace["processing"]["local_runtime"] = local_runtime
+        return choice
 
     async def probe(self, *, enabled_fields=None) -> LayaDecision:
         return await self.decide({

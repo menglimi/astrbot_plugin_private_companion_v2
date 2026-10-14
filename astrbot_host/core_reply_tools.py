@@ -38,6 +38,14 @@ TOOL_INSTRUCTION = (
     "记忆提议使用本轮查询提供的真实证据句柄。提醒登记与平台发送分别解释，登记成功不代表已发送。"
     "unknown 表示原操作结果未知，不更换调用编号重复相同操作。"
     "需要引用当前消息的证据时先调用 turn.evidence，按返回的真实句柄提交。"
+    "对方接受你刚提出的具体游戏或共处邀请时，使用当前开放的对应工具创建或接续实际活动，"
+    "提供工具成功返回的完整房间链接；不要只在文字里假装开局或把真实对局改成口头报坐标。"
+    "用户给角色安排先手或颜色时，先分清双方；human_side 表示用户方，不能把角色的选择填给用户。"
+    "五子棋里用户说‘你执黑’、‘你先下’或点名当前角色‘黑先’，都是角色执黑、用户执白，human_side=white；"
+    "用户说‘我执黑’或‘我先下’才是 human_side=black。按完整本轮原话理解，不沿用历史中已被更正的颜色。"
+    "房间入口未就绪时如实说明，不能编造链接；工具未开放时不声称已建立房间。"
+    "房间 access_scope=same_device 时，说明链接只在运行 AstrBot 的电脑上可用；"
+    "public_access=unavailable 时公网入口尚未就绪，不能把本机链接当作手机或外网入口。"
 )
 EVIDENCE_SPEC = ToolSpec("turn.evidence", "读取本轮已认证发言的证据句柄，供记忆、日历、成长和关系提案使用。",
                         encode({"type": "object", "properties": {}, "additionalProperties": False}))
@@ -362,6 +370,9 @@ class CoreReplyToolSession:
                     effectful=action == "slang.learn")
                 result = semantic.validate_native(self.context, self.turn_id, call_id, action, result)
                 if result["state"] == "succeeded" and action == "reaction.search":
+                    reaction = self.state.get("_reaction_reply")
+                    if isinstance(reaction, dict):
+                        reaction["attempted"] = True
                     result["_images"] = semantic.reactions.native_images(
                         self.context, self.turn_id, call_id, result["payload"])
                     from .core_reply_reactions import offer_core_reactions
@@ -474,6 +485,10 @@ def inject_core_reply_tools(event, req, *, application):
         session = CoreReplyToolSession(event, state, application)
         state["_tool_session"] = session
     offered = session.catalog()
+    semantic = getattr(application.tools, "semantic", None)
+    if semantic is not None:
+        from .core_reply_reaction_delivery import inject_core_reaction_instruction
+        inject_core_reaction_instruction(event, req, semantic, session.turn_id)
     existing = list(getattr(getattr(req, "func_tool", None), "tools", ()))
     existing = [tool for tool in existing if not isinstance(tool, CoreReplyFunctionTool)]
     names = {tool.name for tool in existing}

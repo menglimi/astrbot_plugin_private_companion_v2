@@ -9,25 +9,43 @@ from astrbot.core.tools.message_tools import SendMessageToUserTool
 from companion_v2.execution.models import TaskError, digest
 from .core_reply import CORE_REPLY_CONTEXT_EXTRA, sent_core_text
 from .core_reply_presentation import present_core_reply_message
+from .core_reply_media_delivery import native_reply_messages, native_wire_message
 
 
 class _CurrentReplyContext:
     def __init__(self, original, tool, arguments):
         self._original, self._tool, self._arguments = original, tool, arguments
+        self.error = None
 
     def __getattr__(self, name):
         return getattr(self._original, name)
 
     async def send_message(self, session, message_chain):
+        try:
+            return await self._send_message(session, message_chain)
+        except BaseException as error:
+            self.error = error
+            raise
+
+    async def _send_message(self, session, message_chain):
         tool, state = self._tool, self._tool._state
         tool.assert_current()
         if state.get("group_participation", {}).get("mode") == "skip":
             raise TaskError("group_participation_skipped", "this group turn chose to keep listening")
         if str(session) != tool._origin:
             raise TaskError("core_reply_tool_target_changed", "native reply tools can send only to their admitted session")
+        from .core_reply_reaction_delivery import capture_core_reaction_intent
+        capture_core_reaction_intent(tool._event, message_chain)
+        from .core_reply_voice_authoring import author_core_voice_message
+        await author_core_voice_message(tool._event, message_chain)
+        from .core_reply_voice import capture_core_voice_message
+        message_chain = capture_core_voice_message(tool._event, message_chain)
+        voice_source = message_chain.get_plain_text()
         message_chain = present_core_reply_message(tool._event, message_chain)
         if message_chain is None:
             raise TaskError("core_reply_text_removed", "the configured text rules removed all message content; nothing was sent")
+        if state.get("_voice_authored"):
+            object.__setattr__(message_chain, "_companion_v2_voice_source", voice_source)
         try:
             await state["_authorize_delivery"]()
         except BaseException:
@@ -39,39 +57,58 @@ class _CurrentReplyContext:
             raise
         key = digest([tool._origin, self._arguments])
         attempts = state.setdefault("_native_send_outcomes", {})
-        if attempts.get(key) in {"started", "unknown"}:
+        if state["send_unknown"] or attempts.get(key) in {"started", "unknown", "partial_returned"}:
             raise TaskError("core_reply_delivery_unknown", "the previous native send outcome is unknown; do not replay it")
-        attempts[key] = "started"
-        state["send_attempts"] += 1
-        tool.observe("started")
-        try:
-            result = await self._original.send_message(session, message_chain)
-        except BaseException:
-            attempts[key] = "unknown"
-            state["send_unknown"] += 1
-            tool.observe("unknown")
-            tool.observe("finished")
-            raise
-        if result is False:
-            attempts[key] = "failed"
-            state["send_failed"] += 1
-            tool.observe("failed")
-            tool.observe("finished")
-            raise TaskError("core_reply_platform_unavailable", "AstrBot did not find a platform for this session; nothing was sent")
+        callback = state.get("prepare_send")
+        if callable(callback):
+            from inspect import isawaitable
+            message_chain = callback(state["prepared"], message_chain, state["_authorize_delivery"], 0, 1)
+            if isawaitable(message_chain):
+                message_chain = await message_chain
+        from .core_reply_voice import commit_pending_voice_claim, release_pending_voice_claim
+        returned = 0
+        for part in native_reply_messages(tool._event, message_chain):
+            try:
+                await state["_authorize_delivery"]()
+                wire = await native_wire_message(tool._event, part)
+            except BaseException:
+                release_pending_voice_claim(tool._event)
+                raise
+            attempts[key] = "started"
+            state["send_attempts"] += 1
+            tool.observe("started")
+            try:
+                result = await self._original.send_message(session, wire)
+            except BaseException:
+                attempts[key] = "unknown"
+                state["send_unknown"] += 1
+                tool.observe("unknown")
+                tool.observe("finished")
+                raise
+            if result is False:
+                release_pending_voice_claim(tool._event)
+                attempts[key] = "partial_returned" if returned else "failed"
+                state["send_failed"] += 1
+                tool.observe("failed")
+                tool.observe("finished")
+                raise TaskError("core_reply_platform_unavailable", "AstrBot did not find a platform for this session; nothing was sent")
+            state["send_returns"] += 1
+            returned += 1
+            from astrbot.core.message.components import Record
+            if any(isinstance(component, Record) for component in getattr(part, "chain", ())):
+                commit_pending_voice_claim(tool._event)
+            tool.observe("returned", result=result)
+            state["_notify_sent"](sent_core_text(part))
+            _remember_sent_text(tool._event, part)
+            try:
+                from .core_reply_reaction_delivery import observe_core_reaction_returned
+                observe_core_reaction_returned(tool._event, part, submit=tool._submit)
+            except Exception:
+                pass
         attempts[key] = "returned"
-        state["send_returns"] += 1
-        tool.observe("returned", result=result)
-        state["_notify_sent"](sent_core_text(message_chain))
         # AstrBot also registers the raw tool text after this call. Keep the
         # presented body so a matching final result remains deduplicated.
-        text = message_chain.get_plain_text().strip()
-        if text:
-            key = "_send_message_to_user_current_session_plain_texts"
-            texts = tool._event.get_extra(key, [])
-            texts = list(texts) if isinstance(texts, list) else []
-            if text not in texts:
-                texts.append(text)
-                tool._event.set_extra(key, texts)
+        _remember_sent_text(tool._event, message_chain)
         try:
             from .core_reply_reactions import observe_core_media_send_returned
             observe_core_media_send_returned(tool._event, message_chain, submit=tool._submit)
@@ -79,6 +116,17 @@ class _CurrentReplyContext:
             pass
         tool.observe("finished")
         return result
+
+
+def _remember_sent_text(event, message):
+    text = message.get_plain_text().strip()
+    if text:
+        key = "_send_message_to_user_current_session_plain_texts"
+        texts = event.get_extra(key, [])
+        texts = list(texts) if isinstance(texts, list) else []
+        if text not in texts:
+            texts.append(text)
+            event.set_extra(key, texts)
 
 
 class CurrentReplySendTool(SendMessageToUserTool):
@@ -122,8 +170,14 @@ class CurrentReplySendTool(SendMessageToUserTool):
         # instances remain untouched, including during concurrent tool calls.
         local = copy(context)
         local.context = copy(context.context)
-        local.context.context = _CurrentReplyContext(context.context.context, self, deepcopy(kwargs.get("messages")))
-        return await self._original.call(local, **kwargs)
+        sender = _CurrentReplyContext(context.context.context, self, deepcopy(kwargs.get("messages")))
+        local.context.context = sender
+        result = await self._original.call(local, **kwargs)
+        # Newer SDK tools turn send exceptions into strings. Keep the original
+        # authority/unknown-outcome error authoritative across SDK versions.
+        if sender.error is not None:
+            raise sender.error
+        return result
 
 
 def inject_core_reply_send_tool(event, req, *, submit=None):

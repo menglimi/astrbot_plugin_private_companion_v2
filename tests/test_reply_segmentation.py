@@ -111,6 +111,18 @@ class ReplySegmentationTests(unittest.TestCase):
                          ("嗯。\n我刚才去买咖啡了。", "哈哈！\n还有点小蛋糕。"))
         self.assertEqual("".join(merged), marked.replace(f"\n{MARKER}\n", "\n"))
 
+    def test_adjacent_punctuation_is_one_boundary_and_short_commas_stay_with_reply(self):
+        policy = replace(self.policy, llm_controlled=False, threshold=500,
+                         split_words=json.dumps(["。", "？", "！", "?", ".", "!", "，"], ensure_ascii=False),
+                         min_segment_chars=5, max_segments=5)
+        source = "笨蛋比折大人，大半夜的突然说什么呢...？真那么想看的话，真就只能看一眼哦？"
+        parts = policy.parts(source)
+        self.assertEqual(tuple(part.strip() for part in parts), (
+            "笨蛋比折大人，大半夜的突然说什么呢...？",
+            "真那么想看的话，真就只能看一眼哦？"))
+        self.assertEqual("".join(parts), source)
+        self.assertFalse(any(part.lstrip().startswith(("？", "！", "。")) for part in parts[1:]))
+
     def test_explicit_boundary_before_and_after_markdown_without_blank_lines(self):
         for block in ("```python\nprint('x。')\n```", "> 引用。\n> 后续。", "- 第一项\n- 第二项"):
             source = f"开头\n{MARKER}\n{block}\n{MARKER}\n结尾"

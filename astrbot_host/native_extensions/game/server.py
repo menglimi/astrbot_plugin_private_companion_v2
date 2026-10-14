@@ -18,7 +18,7 @@ class GameRoomServer:
     """Serve the mobile game UI without sharing AstrBot's dashboard port."""
 
     ASSETS = {"index.html", "app.css", "app.js", "lucide.min.js",
-              "native.html", "native.css", "native.js"}
+              "native.html", "native.css", "native.js", "native-gomoku.js", "native-gomoku-input.js"}
     TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{24,80}")
     TRUSTED_BROWSER_COOKIE = "game_companion_device"
 
@@ -166,7 +166,7 @@ class GameRoomServer:
 
     async def _serve_native_asset(self, request: web.Request) -> web.FileResponse:
         name = str(request.match_info.get("name") or "")
-        if name not in {"native.css", "native.js"}:
+        if name not in {"native.css", "native.js", "native-gomoku.js", "native-gomoku-input.js"}:
             raise web.HTTPNotFound()
         path = self.web_root / name
         return web.FileResponse(

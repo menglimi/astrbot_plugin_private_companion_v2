@@ -126,6 +126,16 @@ class ScreenAccessAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call(query=b"target_id=other"))["data"]["code"],
                          "screen_access_request_invalid")
 
+    async def test_review_routes_reject_api_keys_and_identity_or_capture_overrides(self):
+        await self.start()
+        for suffix in ("/last-observation", "/last-original"):
+            self.assertEqual((await self.call(route=PREFIX + suffix, username="api_key:synthetic"))["data"]["code"],
+                "dashboard_identity_required")
+        for suffix, query in (("/last-observation", b"target_id=other"),
+                              ("/last-original", b"capture_id=a&capture_id=b")):
+            self.assertEqual((await self.call(route=PREFIX + suffix, query=query))["data"]["code"],
+                "screen_access_request_invalid")
+
 
 if __name__ == "__main__":
     unittest.main()

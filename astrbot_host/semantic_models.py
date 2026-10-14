@@ -3,6 +3,7 @@
 import inspect
 import json
 import os
+import re
 
 from companion_v2.execution.models import TaskError, digest
 
@@ -13,6 +14,40 @@ SLANG_SEARCH_ENV = ("COMPANION_V2_SLANG_SEARCH_URL", "COMPANION_V2_SLANG_SEARCH_
 
 async def awaited(value):
     return await value if inspect.isawaitable(value) else value
+
+
+def _embedding_batch_limit(error, count):
+    """Read a Provider's explicit batch rejection, without retrying other errors."""
+    if getattr(error, "status_code", None) not in {400, 413, 422} or count < 2:
+        return None
+    body = getattr(error, "body", None)
+    if not isinstance(body, dict):
+        return None
+    body = body.get("error", body)
+    if not isinstance(body, dict) or not isinstance(body.get("message"), str):
+        return None
+    message = body["message"].lower()
+    if not re.search(r"\bbatch(?:[ _-]*size)?\b", message):
+        return None
+    match = re.search(r"(?:larger than|at most|maximum(?: batch size)?(?: is)?|max(?:imum)?(?: size)?\s*[:=]|limit\s*[:=])\s*(\d{1,5})", message)
+    if match:
+        limit = int(match.group(1))
+        return limit if 0 < limit < count else None
+    return max(1, count // 2) if any(word in message for word in ("too large", "exceed")) else None
+
+
+def _embedding_values(values, count):
+    if isinstance(values, dict):
+        values = values.get("data", values.get("embeddings", values.get("vectors")))
+    if not isinstance(values, (list, tuple)):
+        values = getattr(values, "data", ())
+    if len(values) != count:
+        raise ValueError("embedding response length mismatch")
+    if values and all(isinstance(value, dict) and "index" in value for value in values):
+        if sorted(value["index"] for value in values) != list(range(count)):
+            raise ValueError("embedding response indices mismatch")
+        values = sorted(values, key=lambda value: value["index"])
+    return list(values)
 
 
 def _slang_search_results(batch, limit):
@@ -77,6 +112,7 @@ class NativeSemanticModels:
     def __init__(self, context, default_analysis="", slang_search=None):
         self.context, self.default_analysis = context, default_analysis
         self.slang_search = slang_search
+        self._embedding_batch_limits = {}
 
     def providers(self, kind):
         getter = getattr(self.context, "get_all_providers" if kind == "analysis" else "get_all_" + kind + "_providers", None)
@@ -121,20 +157,27 @@ class NativeSemanticModels:
 
     async def embed(self, identifier, texts):
         provider = self.resolve(identifier, "embedding")
-        if callable(getattr(provider, "get_embeddings", None)):
-            values = await awaited(provider.get_embeddings(texts))
-        elif callable(getattr(provider, "get_embeddings_batch", None)):
-            values = await awaited(provider.get_embeddings_batch(texts))
-        else:
-            values = [await awaited(provider.get_embedding(text)) for text in texts]
-        if isinstance(values, dict):
-            values = values.get("data", values.get("embeddings", values.get("vectors")))
-        if not isinstance(values, (list, tuple)):
-            values = getattr(values, "data", ())
-        if values and all(isinstance(x, dict) and "index" in x for x in values):
-            if sorted(x["index"] for x in values) != list(range(len(texts))):
-                raise ValueError("embedding response indices mismatch")
-            values = sorted(values, key=lambda x: x["index"])
+        batch = getattr(provider, "get_embeddings", None)
+        if not callable(batch):
+            batch = getattr(provider, "get_embeddings_batch", None)
+        if not callable(batch):
+            return [await awaited(provider.get_embedding(text)) for text in texts]
+        binding = self.binding(identifier, "embedding")
+        values, offset = [], 0
+        while offset < len(texts):
+            count = min(len(texts) - offset, self._embedding_batch_limits.get(binding, len(texts)))
+            try:
+                current = _embedding_values(await awaited(batch(texts[offset:offset + count])), count)
+            except Exception as error:
+                limit = _embedding_batch_limit(error, count)
+                if limit is None:
+                    raise
+                self._embedding_batch_limits[binding] = min(limit, self._embedding_batch_limits.get(binding, limit))
+                continue
+            # Each Provider subrequest numbers its own results from zero.
+            values.extend({**value, "index": value["index"] + offset}
+                          if isinstance(value, dict) and "index" in value else value for value in current)
+            offset += count
         return values
 
     async def rerank(self, identifier, query, documents):

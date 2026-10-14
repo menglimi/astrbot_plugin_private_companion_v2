@@ -22,6 +22,12 @@ def _identifier(value):
     return text if text.isascii() and text.isdigit() and int(text) > 0 else ""
 
 
+def _label(value):
+    """Return a human label, ignoring a bare native numeric id."""
+    text = _name(value)
+    return "" if _identifier(text) else text
+
+
 class PlatformDisplayNames:
     def __init__(self, context):
         self.context = context
@@ -114,13 +120,21 @@ class PlatformDisplayNames:
         async def enrich(target):
             row = dict(target)
             platform, account = row.get("platform_id"), row.get("account_id")
-            kind = "group" if row.get("group_id") else "private"
+            kind = "group" if row.get("scope_kind") == "group" or row.get("group_id") else "private"
             native_id = row.get("group_id") if kind == "group" else row.get("participant_id")
             name, account_name = await asyncio.gather(
                 self.lookup(platform, account, kind, native_id, cached_only=cached_only),
                 self.lookup(platform, account, "account", account, cached_only=cached_only))
-            row.update(display_name=name or row.get("display_name") or "",
+            # Keep a name already carried by the native session directory when
+            # an optional OneBot lookup is unavailable. A bare id is not a
+            # label and must not prevent a later group name from being used.
+            fallback = ((_label(row.get("display_name")) or _label(row.get("group_name")))
+                        if kind == "group" else _name(row.get("display_name")))
+            resolved = _label(name) or fallback
+            row.update(display_name=resolved,
                        account_name=account_name or row.get("account_name") or "")
+            if kind == "group":
+                row["group_name"] = resolved or _name(row.get("group_name"))
             return row
         return list(await asyncio.gather(*(enrich(row) for row in targets)))
 

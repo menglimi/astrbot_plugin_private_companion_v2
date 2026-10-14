@@ -366,12 +366,15 @@ def _core_sample(record, laya_events=()):
         "model_call_count_complete": record.get("request_observation_complete", False),
         "active_model_calls": sum(item["state"] == "started" for item in requests),
         "timestamps": {"received_at": received, "last_input_received_at": received,
-            "flow_due_at": None, "generation_started_at": record.get("request_hook_at"),
+            "flow_due_at": None, "waiting_llm_at": record.get("waiting_llm_at"),
+            "generation_started_at": record.get("request_hook_at"),
             "first_model_started_at": first_started, "last_model_finished_at": finished,
             "agent_started_at": record.get("agent_started_at"), "agent_finished_at": agent_finished,
             "first_dispatched_at": first_dispatched, "first_delivered_at": None, "last_delivered_at": None,
             "first_send_returned_at": first_returned, "last_send_returned_at": last_returned},
         "stages": {"pre_model_ms": _elapsed_ms(received, first_started), "last_input_to_model_ms": _elapsed_ms(received, first_started),
+            "waiting_llm_to_request_hook_ms": _elapsed_ms(record.get("waiting_llm_at"), record.get("request_hook_at")),
+            "request_hook_to_agent_ms": _elapsed_ms(record.get("request_hook_at"), record.get("agent_started_at")),
             "model_ms": _elapsed_ms(first_started, finished),
             "model_request_ms": measured_total(real_requests, "latency_ms"),
             "agent_ms": record.get("runner_duration_ms") if record.get("runner_duration_ms") is not None
@@ -460,6 +463,8 @@ def reply_efficiency_report(runtime, role_context, now):
             if event["status"] in ("ok", "failed") and type(event.get("elapsed_ms")) is int], 0.95),
     }
     for key in ("model_request_ms", "agent_ms", "tool_ms", "plugin_preparation_ms", "send_ms"):
+        summary["median_" + key] = _percentile([sample["stages"][key] for sample in core_samples], 0.5)
+    for key in ("waiting_llm_to_request_hook_ms", "request_hook_to_agent_ms"):
         summary["median_" + key] = _percentile([sample["stages"][key] for sample in core_samples], 0.5)
     coverage_keys = ("received", "model_started", "model_finished", "first_dispatched", "first_delivered", "final_delivered")
     coverage = {key: sum(sample["observed"][key] for sample in samples) for key in coverage_keys}

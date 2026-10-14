@@ -1,9 +1,9 @@
 """Apply configured TTS to authorized AstrBot core replies."""
 
-import logging
 import re
 import asyncio
 
+from astrbot.api import logger
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -11,19 +11,85 @@ from companion_v2.conversation.voice_reply import (
     VoiceReplyPolicy,
     separate_spoken,
     speech_candidates,
+    speech_chunks,
+    strip_voice_markup,
 )
 from .core_reply import CORE_REPLY_CONTEXT_EXTRA
+from companion_v2.conversation.voice_markup import slice_speech, visible_speech
 
 
-logger = logging.getLogger(__name__)
-
-
-def voice_prompt_instruction(policy):
+def voice_prompt_instruction(policy, provider_instruction=""):
     if not isinstance(policy, VoiceReplyPolicy):
         return ""
     from companion_v2.conversation.voice_reply import capability_instruction
 
-    return "\n".join(part for part in (capability_instruction(policy), policy.instruction) if part)
+    return "\n".join(part for part in (capability_instruction(policy), policy.instruction, provider_instruction) if part)
+
+
+def observe_core_voice_response(event, response):
+    """Capture speech before native regex segmentation can break its wrappers."""
+    core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    if (not isinstance(core, dict) or response is None or getattr(response, "is_chunk", False)
+            or getattr(response, "role", None) != "assistant"
+            or getattr(response, "tools_call_name", ())):
+        return
+    if core.get("_voice_observed_response") is response:
+        return
+    core["_voice_observed_response"] = response
+    policy = core["prepared"].get("voice_reply_policy")
+    text = getattr(response, "completion_text", "") or ""
+    visible, spans = separate_spoken(text, policy)
+    if spans:
+        core["_voice_authored"] = {"visible": visible, "spans": spans, "cursor": 0, "used": set()}
+    else:
+        core.pop("_voice_authored", None)
+    if isinstance(policy, VoiceReplyPolicy):
+        core["_voice_response_diagnostics"] = {"mode": policy.trigger_mode, "spoken_spans": len(spans),
+            "reason": "authored" if spans else "plain_generation" if policy.generation_mode == "plain"
+            and policy.trigger_mode != "adaptive" else "no_authored_speech"}
+        logger.info("[CompanionV2][media] stage=response event_ref=%s media=voice mode=%s spans=%s reason=%s",
+                    core["prepared"].get("event_ref", "unknown"), policy.trigger_mode, len(spans),
+                    core["_voice_response_diagnostics"]["reason"])
+    if visible != text:
+        response.completion_text = visible
+        for part in getattr(getattr(response, "result_chain", None), "chain", ()):
+            if isinstance(part, Plain):
+                part.text = separate_spoken(part.text, policy)[0]
+
+
+def capture_core_voice_message(event, message):
+    """Consume native tool speech before text cleanup or segmentation."""
+    core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    policy = core.get("prepared", {}).get("voice_reply_policy") if isinstance(core, dict) else None
+    if not isinstance(policy, VoiceReplyPolicy):
+        return message
+    visible, spans, cleaned = _clean_plain_runs(message, policy)
+    if spans:
+        core["_voice_authored"] = {"visible": visible, "spans": spans, "cursor": 0, "used": set()}
+        return cleaned
+    return message
+
+
+def _captured_speech(core, visible):
+    authored = core.get("_voice_authored") if isinstance(core, dict) else None
+    if not authored:
+        return ""
+    start = authored["visible"].find(visible.strip(), authored["cursor"])
+    if start < 0:
+        return ""
+    end = start + len(visible.strip())
+    authored["cursor"] = end
+    selected = []
+    for index, (position, speech) in enumerate(authored["spans"]):
+        displayed = visible_speech(speech)
+        if authored["visible"].startswith(displayed, position):
+            left, right = max(start, position), min(end, position + len(displayed))
+            if right > left:
+                selected.append(slice_speech(speech, left - position, right - position))
+        elif index not in authored["used"] and start <= position < end:
+            selected.append(speech)
+            authored["used"].add(index)
+    return "\n".join(selected)
 
 
 def _plain_text(message):
@@ -64,7 +130,7 @@ def _clean_plain_runs(message, policy):
     return visible, tuple(spans), cleaned
 
 
-def _message_with_voice(message, visible, record, policy, *, hide_text):
+def _message_with_voice(message, visible, records, policy, *, hide_text):
     chain = getattr(message, "chain", None)
     if not isinstance(chain, (list, tuple)):
         chain = [Plain(message)] if isinstance(message, str) and message else []
@@ -89,7 +155,8 @@ def _message_with_voice(message, visible, record, policy, *, hide_text):
         insert_at = last_plain + 1 if last_plain is not None else 0
     else:
         insert_at = len(output)
-    output.insert(max(0, min(insert_at, len(output))), record)
+    insert_at = max(0, min(insert_at, len(output)))
+    output[insert_at:insert_at] = records
 
     derive = getattr(message, "derive", None)
     return derive(output) if callable(derive) else MessageChain(chain=output)
@@ -109,34 +176,55 @@ async def prepare_core_reply_voice_message(
     """Synthesize one completed segment while preserving text and media order."""
     policy = prepared.get("voice_reply_policy") if hasattr(prepared, "get") else None
     if not isinstance(policy, VoiceReplyPolicy):
+        if isinstance(message, str):
+            return strip_voice_markup(message)
+        chain = getattr(message, "chain", None)
+        if isinstance(chain, (list, tuple)) and any(
+                isinstance(part, Plain) and strip_voice_markup(part.text) != part.text for part in chain):
+            return _clean_plain_runs(message, None)[2]
         return message
+    core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    diagnostics = core.setdefault("_voice_reply_diagnostics", []) if isinstance(core, dict) else []
+    note = {"segment": segment_index + 1, "language": policy.language, "state": "not_started"}
+    diagnostics.append(note)
     if not callable(renderer) or not callable(getattr(event, "get_extra", None)):
-        return message
+        note["state"] = "renderer_unavailable"
+        return _clean_plain_runs(message, policy)[2]
 
     chain = getattr(message, "chain", None)
     if isinstance(message, Record) or (isinstance(chain, (list, tuple)) and
                                        any(isinstance(component, Record) for component in chain)):
+        note["state"] = "native_voice_exists"
         return message
     source = _plain_text(message)
     if not source.strip():
+        note["state"] = "no_text"
         return message
 
     visible, spans, cleaned_message = _clean_plain_runs(message, policy)
     if not visible.strip():
+        note["state"] = "no_visible_text"
         return cleaned_message
 
     segment_index = max(0, int(segment_index))
     segment_count = max(1, int(segment_count))
+    captured_speech = _captured_speech(core, getattr(message, "_companion_v2_voice_source", visible)) if not spans else ""
     selected = (policy.segment_mode == "each" or
                 policy.segment_mode == "first" and segment_index == 0 or
                 policy.segment_mode == "last" and segment_index == segment_count - 1)
     if not selected:
+        note["state"] = "segment_skipped"
         return cleaned_message
 
     candidates = speech_candidates(visible, (visible,), spans, policy)
-    speech = candidates[0].strip() if candidates else ""
-    if not speech or len(speech) > policy.max_speech_chars:
+    speech = captured_speech or (candidates[0].strip() if candidates else "")
+    if not speech:
+        note["state"] = "no_authored_speech"
+        logger.info("[CompanionV2][media] stage=delivery event_ref=%s media=voice state=%s segment=%s/%s",
+                    prepared.get("event_ref", "unknown"), note["state"], segment_index + 1, segment_count)
         return cleaned_message
+    chunks = speech_chunks(speech, policy.max_speech_chars)
+    note["chars"], note["chunks"] = len(speech), len(chunks)
 
     context = prepared.get("context")
     event_id = prepared.get("event_id") or prepared.get("turn_id") or "core-reply"
@@ -145,50 +233,42 @@ async def prepare_core_reply_voice_message(
     if callable(claim_route) and policy.cooldown_seconds:
         claim = claim_route(context, event_id, policy.cooldown_seconds)
         if claim is None:
+            note["state"] = "cooldown"
             return cleaned_message
 
     try:
-        await authorize()
-        audio = await renderer(context, speech, provider_id=policy.provider_for_language(),
-                               timeout_seconds=policy.timeout_seconds)
+        records = []
+        for chunk in chunks:
+            await authorize()
+            audio = await renderer(context, chunk, provider_id=policy.provider_for_language(),
+                                   timeout_seconds=policy.timeout_seconds)
+            audio_data = audio.get("data") if isinstance(audio, dict) and audio.get("type") == "record" else None
+            file_value = audio_data.get("file") if isinstance(audio_data, dict) else None
+            if not isinstance(file_value, str) or not file_value.startswith("base64://"):
+                raise ValueError("tts_audio_unavailable")
+            record = Record(file=file_value, text=chunk)
+            object.__setattr__(record, "_companion_v2_spoken_text", visible_speech(chunk).strip())
+            records.append(record)
     except asyncio.CancelledError:
         if claim is not None:
             delivery.release(claim, claim["part_id"])
         raise
     except Exception as error:
+        note["state"] = "synthesis_failed"
+        note["error_type"] = type(error).__name__
         logger.warning("[CompanionV2] 核心回复 TTS 降级为文字 event_ref=%s error_type=%s",
                        prepared.get("event_ref", "unknown"), type(error).__name__)
         if claim is not None:
             delivery.release(claim, claim["part_id"])
         return cleaned_message
-    if not isinstance(audio, dict) or audio.get("type") != "record":
-        logger.warning("[CompanionV2] 核心回复 TTS 未返回音频 event_ref=%s language=%s",
-                       prepared.get("event_ref", "unknown"), policy.language)
-        if claim is not None:
-            delivery.release(claim, claim["part_id"])
-        return cleaned_message
-    audio_data = audio.get("data")
-    file_value = audio_data.get("file") if isinstance(audio_data, dict) else None
-    if not isinstance(file_value, str) or not file_value.startswith("base64://"):
-        logger.warning("[CompanionV2] 核心回复 TTS 音频格式无效 event_ref=%s",
-                       prepared.get("event_ref", "unknown"))
-        if claim is not None:
-            delivery.release(claim, claim["part_id"])
-        return cleaned_message
-
-    record = Record(file=file_value)
-    try:
-        object.__setattr__(record, "_companion_v2_spoken_text", speech)
-    except Exception:
-        pass
+    note["state"] = "ready"
     logger.info("[CompanionV2] 核心回复 TTS 已合成 event_ref=%s language=%s chars=%s segment=%s/%s",
                 prepared.get("event_ref", "unknown"), policy.language, len(speech),
                 segment_index + 1, segment_count)
-    core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     if isinstance(core, dict) and claim is not None:
         core["_voice_reply_pending_claim"] = (delivery, claim)
-    same_text = re.sub(r"\s+", "", visible) == re.sub(r"\s+", "", speech)
-    return _message_with_voice(cleaned_message, visible, record, policy,
+    same_text = re.sub(r"\s+", "", visible) == re.sub(r"\s+", "", visible_speech(speech))
+    return _message_with_voice(cleaned_message, visible, records, policy,
                                hide_text=policy.delivery_mode == "voice_only" and same_text)
 
 

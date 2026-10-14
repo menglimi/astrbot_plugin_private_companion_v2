@@ -337,6 +337,40 @@ class RestGateHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rest_gate.awake_grace(document, now=self.clock.now())["active"])
         self.assertEqual(rest_gate.deferral(app.runtime, context, text="在吗", now=self.clock.now()), 0.0)
 
+    async def test_real_wake_interrupts_once_then_resumes_the_remaining_sleep(self):
+        _, app, context = await self.ready()
+        sleep = self.sleep_for(app, context, minutes=30)
+        self.clock.advance(timedelta(minutes=5))
+        body_clock = app.role_state.body_clock
+        first = self.source(app, context, "wake-real-1", "醒醒")
+        delay = rest_gate.deferral(app.runtime, context, text="醒醒", now=self.clock.now(),
+            event_key="wake-real-1", source=first, capability="text", body_clock=body_clock)
+        self.assertEqual(delay, 0.0)
+        interrupted = app.role_life.activity(sleep.activity_id, owner=sleep.owner)
+        self.assertEqual(interrupted.state.value, "paused")
+        self.assertEqual(interrupted.sleep.slept_seconds, 5 * 60)
+        self.assertEqual((interrupted.sleep.interruptions, interrupted.sleep.early_interruptions), (1, 1))
+
+        self.clock.advance(timedelta(minutes=1))
+        second = self.source(app, context, "wake-real-2", "快醒醒")
+        rest_gate.deferral(app.runtime, context, text="快醒醒", now=self.clock.now(),
+            event_key="wake-real-2", source=second, capability="text", body_clock=body_clock)
+        still_interrupted = app.role_life.activity(sleep.activity_id, owner=sleep.owner)
+        self.assertEqual(still_interrupted.sleep.interruptions, 1)
+
+        self.clock.advance(still_interrupted.sleep.wake_until - self.clock.now())
+        resumed = body_clock.resume_due(context, observed_at=self.clock.now())[0]
+        self.assertEqual(resumed.state.value, "active")
+        self.assertEqual(resumed.sleep.slept_seconds, 5 * 60)
+        self.assertEqual(resumed.work.due_at, self.clock.now() + timedelta(minutes=25))
+
+        self.clock.advance(timedelta(minutes=10))
+        third = self.source(app, context, "wake-real-3", "起来啦")
+        rest_gate.deferral(app.runtime, context, text="起来啦", now=self.clock.now(),
+            event_key="wake-real-3", source=third, capability="text", body_clock=body_clock)
+        interrupted_again = app.role_life.activity(sleep.activity_id, owner=sleep.owner)
+        self.assertEqual(interrupted_again.sleep.interruptions, 2)
+
     async def test_the_backlog_is_bounded_ordered_and_only_released_after_waking(self):
         _, app, context = await self.ready()
         sleep = self.sleep_for(app, context)

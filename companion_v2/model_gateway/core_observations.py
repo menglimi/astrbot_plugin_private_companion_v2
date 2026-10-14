@@ -30,14 +30,14 @@ def _fingerprints_only(value):
 
 def _validate_record(record):
     if type(record) is not dict or set(record) - {
-        "version", "revision", "turn_id", "event_id", "execution_path", "received_at", "request_hook_at", "observed_at",
+        "version", "revision", "turn_id", "event_id", "execution_path", "received_at", "waiting_llm_at", "request_hook_at", "observed_at",
         "generation_state", "generation_finished_at", "request_observation_available", "request_observation_complete",
         "tool_requery_observed", "requests", "tools", "ttft_ms", "runner_duration_ms", "usage_scope", "delivery",
         "request_hook_signature", "signature_scope", "agent_started_at", "preparation_steps", "materials", "offered_tools"}:
         raise ValueError("core telemetry records contain only declared metadata")
     for step in record.get("preparation_steps", []):
         if (type(step) is not dict or set(step) - {"name", "state", "started_at", "finished_at", "elapsed_ms"}
-                or step.get("name") not in {"context_build", "request_authorization", "prompt_injection", "tool_injection", "send_tool_injection"}
+                or step.get("name") not in {"context_build", "request_authorization", "prompt_injection", "tool_injection", "send_tool_injection", "perception_injection", "telemetry_capture"}
                 or step.get("state") not in {"returned", "failed"}
                 or step.get("elapsed_ms") is not None and (type(step["elapsed_ms"]) is not int or step["elapsed_ms"] < 0)):
             raise ValueError("core preparation contains only declared stages and timings")
@@ -56,13 +56,20 @@ def _validate_record(record):
         raise ValueError("core offered tools contain function names only")
     _fingerprints_only(record.get("request_hook_signature"))
     request_fields = {"position", "state", "started_at", "finished_at", "latency_ms", "ttft_ms", "provider", "usage",
-                      "signature", "signature_scope", "measurement_basis", "failure_code"}
+                      "signature", "signature_scope", "measurement_basis", "failure_code", "media"}
     usage_fields = {"input_tokens", "output_tokens", "tokens", "cached_input_tokens", "cache_creation_tokens",
                     "availability", "cache_availability", "cost_availability"}
     for request in record.get("requests", []):
         if type(request) is not dict or set(request) - request_fields or set(request.get("usage") or {}) - usage_fields:
             raise ValueError("core request metadata must not include prompt or response bodies")
         _fingerprints_only(request.get("signature"))
+        media = request.get("media")
+        if media is not None:
+            flags = {"voice_prompt_present", "reaction_enabled", "reaction_prompt_present", "presentation_present"}
+            if (type(media) is not dict or set(media) != flags | {"voice_mode"}
+                    or media["voice_mode"] not in {"disabled", "always", "request", "adaptive"}
+                    or any(type(media[key]) is not bool for key in flags)):
+                raise ValueError("core media diagnostics contain mode and boolean presence flags only")
     for tool in record.get("tools", []):
         if type(tool) is not dict or set(tool) - {"sequence", "action", "state", "started_at", "finished_at"}:
             raise ValueError("core tool timing must not include arguments or output")

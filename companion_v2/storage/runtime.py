@@ -13,6 +13,12 @@ import time
 from typing import Iterator
 
 from .schema import (
+    SCHEMA_VERSION_V63, MIGRATION_V62_TO_V63_ID, MIGRATION_V62_TO_V63_FINGERPRINT,
+    V63_MIGRATION_STATEMENTS, V63_REQUIRED_TABLES, V63_SCHEMA_STATEMENTS,
+    SCHEMA_VERSION_V62, MIGRATION_V61_TO_V62_ID, MIGRATION_V61_TO_V62_FINGERPRINT,
+    V62_MIGRATION_STATEMENTS, V62_REQUIRED_TABLES, V62_SCHEMA_STATEMENTS,
+    SCHEMA_VERSION_V61, MIGRATION_V60_TO_V61_ID, MIGRATION_V60_TO_V61_FINGERPRINT,
+    V61_MIGRATION_STATEMENTS, V61_REQUIRED_TABLES, V61_SCHEMA_STATEMENTS,
     SCHEMA_VERSION_V60, MIGRATION_V59_TO_V60_ID, MIGRATION_V59_TO_V60_FINGERPRINT,
     V60_MIGRATION_STATEMENTS, V60_REQUIRED_TABLES, V60_SCHEMA_STATEMENTS,
     SCHEMA_VERSION_V59, MIGRATION_V58_TO_V59_ID, MIGRATION_V58_TO_V59_FINGERPRINT,
@@ -579,6 +585,9 @@ class StorageRuntime:
                 self._migrate_v57_to_v58(connection)
                 self._migrate_v58_to_v59(connection)
                 self._migrate_v59_to_v60(connection)
+                self._migrate_v60_to_v61(connection)
+                self._migrate_v61_to_v62(connection)
+                self._migrate_v62_to_v63(connection)
                 return
             if "runtime_metadata" not in existing_tables:
                 raise StorageOpenError("V2 data root is partially initialized")
@@ -1275,12 +1284,36 @@ class StorageRuntime:
                 self._migrate_v59_to_v60(connection)
                 version = SCHEMA_VERSION_V60
                 existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V60:
+                _validate_table_shapes(connection, V60_SCHEMA_STATEMENTS, V60_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 61):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v60_to_v61(connection)
+                version = SCHEMA_VERSION_V61
+                existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V61:
+                _validate_table_shapes(connection, V61_SCHEMA_STATEMENTS, V61_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 62):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v61_to_v62(connection)
+                version = SCHEMA_VERSION_V62
+                existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V62:
+                _validate_table_shapes(connection, V62_SCHEMA_STATEMENTS, V62_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 63):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v62_to_v63(connection)
+                version = SCHEMA_VERSION_V63
+                existing_tables = _existing_tables(connection)
             if version != SCHEMA_VERSION:
                 raise StorageOpenError("V2 data root has an incompatible schema version")
-            missing = V60_REQUIRED_TABLES.difference(existing_tables)
+            missing = V63_REQUIRED_TABLES.difference(existing_tables)
             if missing:
                 raise StorageOpenError("V2 data root is missing required schema objects")
-            _validate_table_shapes(connection, V60_SCHEMA_STATEMENTS, V60_REQUIRED_TABLES)
+            _validate_table_shapes(connection, V63_SCHEMA_STATEMENTS, V63_REQUIRED_TABLES)
             # Each schema migration runs a full integrity check at its boundary.
             # Rechecking every page and foreign key on every normal startup makes
             # open time grow with the data store, even when the schema is current.
@@ -1306,6 +1339,7 @@ class StorageRuntime:
             self._validate_v19_migration_record(connection)
             self._validate_v20_migration_record(connection)
             self._validate_v21_migration_record(connection)
+            self._validate_v63_migration_record(connection)
             self._validate_v22_migration_record(connection)
             self._validate_v23_migration_record(connection)
             self._validate_v24_migration_record(connection)
@@ -1345,6 +1379,8 @@ class StorageRuntime:
             self._validate_v58_migration_record(connection)
             self._validate_v59_migration_record(connection)
             self._validate_v60_migration_record(connection)
+            self._validate_v61_migration_record(connection)
+            self._validate_v62_migration_record(connection)
 
     def _migrate_v53_to_v54(self, connection):
         for statement in V54_MIGRATION_STATEMENTS:
@@ -1492,6 +1528,69 @@ class StorageRuntime:
         if row is None or (row["from_version"] != SCHEMA_VERSION_V59 or row["to_version"] != SCHEMA_VERSION_V60
                            or row["fingerprint"] != MIGRATION_V59_TO_V60_FINGERPRINT):
             raise StorageOpenError("V2 data root has an untrusted v60 migration record")
+
+    def _migrate_v60_to_v61(self, connection):
+        for statement in V61_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V61_SCHEMA_STATEMENTS, V61_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V60_TO_V61_ID, SCHEMA_VERSION_V60, SCHEMA_VERSION_V61,
+            MIGRATION_V60_TO_V61_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V61, "schema_version", SCHEMA_VERSION_V60))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v61 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v61_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V60_TO_V61_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V60 or row["to_version"] != SCHEMA_VERSION_V61
+                           or row["fingerprint"] != MIGRATION_V60_TO_V61_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v61 migration record")
+
+    def _migrate_v61_to_v62(self, connection):
+        for statement in V62_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V62_SCHEMA_STATEMENTS, V62_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V61_TO_V62_ID, SCHEMA_VERSION_V61, SCHEMA_VERSION_V62,
+            MIGRATION_V61_TO_V62_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V62, "schema_version", SCHEMA_VERSION_V61))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v62 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v62_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V61_TO_V62_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V61 or row["to_version"] != SCHEMA_VERSION_V62
+                           or row["fingerprint"] != MIGRATION_V61_TO_V62_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v62 migration record")
+
+    def _migrate_v62_to_v63(self, connection):
+        for statement in V63_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V63_SCHEMA_STATEMENTS, V63_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V62_TO_V63_ID, SCHEMA_VERSION_V62, SCHEMA_VERSION_V63,
+            MIGRATION_V62_TO_V63_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V63, "schema_version", SCHEMA_VERSION_V62))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v63 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v63_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V62_TO_V63_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V62 or row["to_version"] != SCHEMA_VERSION_V63
+                           or row["fingerprint"] != MIGRATION_V62_TO_V63_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v63 migration record")
 
     def _migrate_v52_to_v53(self, connection):
         for statement in V53_MIGRATION_STATEMENTS:

@@ -438,9 +438,13 @@ class ProactiveContacts:
             raise ValueError("administrator_test must be an explicit boolean")
         if type(diagnostic_source_backed) is not bool:
             raise ValueError("diagnostic_source_backed must be an explicit boolean")
-        if diagnostic_origin is not None and (not administrator_test or not diagnostic_source_backed
+        synthetic_origin = (type(diagnostic_origin) is dict
+                            and type(diagnostic_origin.get("_diagnostic")) is dict
+                            and diagnostic_origin["_diagnostic"].get("route_id") == "synthetic_event")
+        if diagnostic_origin is not None and (not administrator_test
+                or not diagnostic_source_backed and not synthetic_origin
                 or type(diagnostic_origin) is not dict or automatic_origin is not None):
-            raise ValueError("diagnostic origin requires a source-backed administrator test")
+            raise ValueError("diagnostic origin requires a source-backed or synthetic administrator test")
         if diagnostic_origin is not None and any(
                 intent.purpose != (diagnostic_origin.get("_diagnostic") or {}).get("purpose") for intent in intents):
             raise ValueError("diagnostic producer and contact purpose must match")
@@ -566,6 +570,9 @@ class ProactiveContacts:
                 raise
             try:
                 result = await self.runner.run(context, task_id)
+                if administrator_test and result.is_success and result.unwrap().failure_code:
+                    return Outcome.failed(result.unwrap().failure_code,
+                                          "administrator diagnostic task failed before delivery")
                 if result.is_success and (result.unwrap().task is None or result.unwrap().task.state in ("created", "retry_scheduled")):
                     task = require(self.tasks.discard_queued(task_id, reason="owner_unavailable"))
                     return Outcome.success(RunResult(task))

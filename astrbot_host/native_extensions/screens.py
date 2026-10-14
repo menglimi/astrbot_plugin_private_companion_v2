@@ -87,7 +87,11 @@ class ScreenAdopter:
         # Core vision receives the original immediately. Interpretation is an
         # optional background consumer and cannot invalidate a captured image.
         interpretation = getattr(self.application, "screen_interpretation", None)
-        if interpretation is not None:
+        parent = self.application.runtime.read_one("SELECT kind FROM execution_tasks WHERE task_id = ? AND origin_key = ?",
+            (invocation.parent_task_id, invocation.context.key))
+        # A supervised peek hands this capture to its own glance interpretation.
+        # Ordinary tool calls still keep their optional reply interpretation.
+        if interpretation is not None and not (parent is not None and parent["kind"] == "screen.peek"):
             try:
                 interpretation.submit(invocation.context, bound, purpose="reply",
                                       parent_task_id=invocation.parent_task_id)

@@ -612,6 +612,31 @@ test("面板为每一项能力画一行，状态取自服务端读回的那一�
   assert.doesNotMatch(JSON.stringify(text(detail)), /conversation\.reply|proactive\.contact|login-a|档位 standard/);
 });
 
+test("日程干预可按当前成员与私聊窗口单独授权", async () => {
+  const people = [person("subject-1", "阿澈")];
+  let saved;
+  const h = harness({persons: people, authorizations: {"subject-1": status("subject-1", [
+    grantRow("calendar.intervene", {state: "off"}),
+  ])}, post: request => {
+    saved = request;
+    return {status: "ok", data: {replayed: false, operation_id: "intervention-op",
+      status: status("subject-1", [grantRow("calendar.intervene", {policy_revision: 8})])}};
+  }});
+  const detail = await open(h, "阿澈");
+  const toggle = findPermission(detail, "calendar.intervene");
+  assert.equal(toggle.checked, false);
+  toggle.checked = true;
+  toggle.handlers.change();
+  await h.send(request => request.method === "POST");
+
+  assert.equal(saved.route, "acquaintance/authorization");
+  assert.equal(saved.body.capability, "calendar.intervene");
+  assert.equal(saved.body.enabled, true);
+  assert.equal(saved.body.expected_revision, 7);
+  assert.equal(saved.body.route.bot_id, "bot-a");
+  assert.equal(findPermission(h.element("person-detail"), "calendar.intervene").checked, true);
+});
+
 test("配置派生的那一行没有撤销按钮，并说清去哪里改", async () => {
   const people = [person("subject-1", "阿澈")];
   const h = harness({ persons: people, authorizations: { "subject-1": status("subject-1", [
@@ -716,6 +741,115 @@ test("联系偏好显示该私聊的自动调度原因与下一步建议", async
   assert.match(flat(diagnostic), /后台自动联系已关闭/);
   assert.match(flat(diagnostic), /打开此窗口的后台自动联系开关/);
   assert.doesNotMatch(flat(diagnostic), /automatic_contact_disabled/);
+});
+
+test("私聊联系页提供未回应降频、尝试上限和恢复继承", async () => {
+  const fields = {
+    enabled: {kind: "boolean"}, automatic_enabled: {kind: "boolean"}, quiet_enabled: {kind: "boolean"},
+    max_contacts_24h: {kind: "integer", minimum: 0, maximum: 100},
+    max_attempts_24h: {kind: "integer", minimum: 0, maximum: 1000},
+    interval_seconds: {kind: "integer", minimum: 60, maximum: 604800},
+    idle_seconds: {kind: "integer", minimum: 0, maximum: 86400},
+    unanswered_slowdown_start: {kind: "integer", minimum: 1, maximum: 10},
+    unanswered_pause_after: {kind: "integer", minimum: 0, maximum: 50},
+    unanswered_max_interval_multiplier: {kind: "weight", minimum: 1, maximum: 8, decimal_places: 6},
+    quiet_start: {kind: "text"}, quiet_end: {kind: "text"}, quiet_timezone: {kind: "text"}, pause_until: {kind: "text"},
+    note: {kind: "text"}, style_prompt: {kind: "text", maximum_chars: 4000},
+  };
+  const settings = {enabled: true, automatic_enabled: true, quiet_enabled: false,
+    max_contacts_24h: 5, max_attempts_24h: 9, interval_seconds: 3600, idle_seconds: 900,
+    unanswered_slowdown_start: 2, unanswered_pause_after: 5, unanswered_max_interval_multiplier: 3.5,
+    quiet_start: "22:00", quiet_end: "08:00", quiet_timezone: "Asia/Shanghai", pause_until: "", note: "", style_prompt: ""};
+  const purposeGroups = [
+    [["affection", "想念与亲近"], ["care", "情绪关怀"], ["play", "轻松互动"], ["repair", "关系修复"], ["chat", "日常话题"]],
+    [["greeting", "问候与纪念"], ["followup", "接回旧话题"], ["invitation", "共同活动邀请"], ["reminder", "约定与提醒"], ["meal", "饭点问候"]],
+    [["life", "分享自己的生活"], ["creation", "作品与阅读"], ["news", "外部资讯"], ["environment", "环境与状态变化"], ["screen", "已授权屏幕观察"]],
+  ];
+  for (const [name] of purposeGroups.flat()) {
+    fields[name + ".enabled"] = {kind: "boolean"};
+    fields[name + ".weight"] = {kind: "weight"};
+    fields[name + ".pause_until"] = {kind: "text"};
+    settings[name + ".enabled"] = true;
+    settings[name + ".weight"] = 1;
+    settings[name + ".pause_until"] = "";
+  }
+  const inherited = {...settings, max_attempts_24h: 12, unanswered_slowdown_start: 1,
+    unanswered_pause_after: 0, unanswered_max_interval_multiplier: 2.2};
+  const unanswered = ["max_attempts_24h", "unanswered_slowdown_start", "unanswered_pause_after",
+    "unanswered_max_interval_multiplier"];
+  const provenance = Object.fromEntries(Object.keys(settings).map(name => [name,
+    {layer: unanswered.includes(name) ? "window" : "installation", explicit: unanswered.includes(name)}]));
+  const contact = {edit_token: "contact-edit-1", fields, settings, provenance};
+  let saved;
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])},
+    memberSettings: {"subject-1": {sections: {contact}}}, post: request => {
+      saved = request;
+      const section = request.body.sections.contact;
+      const resets = section.reset_to_inherit || [];
+      return {sections: {contact: {...contact, edit_token: "contact-edit-2",
+        settings: {...settings, ...section.changes,
+          ...Object.fromEntries(resets.map(name => [name, inherited[name]]))},
+        provenance: {...provenance, ...Object.fromEntries(resets.map(name => [name,
+          {layer: "installation", explicit: false}]))}}}};
+    }});
+  const detail = await open(h, "阿澈", "联系偏好");
+  const attempts = findInput(detail, "24 小时尝试上限");
+  const slowdown = findInput(detail, "开始降频的未回应次数");
+  const pause = findInput(detail, "暂停联系的未回应次数（0 表示不暂停）");
+  const pauseUntil = findInput(detail, "临时暂停到（本地时间）");
+  const multiplier = findInput(detail, "降频后的最大间隔倍数");
+  const note = findInput(detail, "联系补充偏好");
+  assert.ok(attempts && slowdown && pause && pauseUntil && multiplier && note);
+  for (const [name] of purposeGroups.flat()) {
+    assert.ok(inputByName(detail, name + ".enabled"), `${name} 的联系开关应在用户页提供`);
+    assert.ok(inputByName(detail, name + ".weight"), `${name} 的联系权重应在用户页提供`);
+    assert.ok(inputByName(detail, name + ".pause_until"), `${name} 的临时暂缓应在用户页提供`);
+  }
+  assert.equal(attempts.type, "number");
+  assert.equal(attempts.min, 0);
+  assert.equal(attempts.max, 1000);
+  assert.equal(slowdown.min, 1);
+  assert.equal(slowdown.max, 10);
+  assert.equal(pause.min, 0);
+  assert.equal(pause.max, 50);
+  assert.equal(pauseUntil.type, "datetime-local");
+  assert.equal(multiplier.min, 1);
+  assert.equal(multiplier.max, 8);
+  assert.equal(multiplier.step, "0.000001");
+
+  slowdown.value = "3"; slowdown.handlers.input();
+  pause.value = "0"; pause.handlers.input();
+  pauseUntil.value = "2026-10-20T12:30"; pauseUntil.handlers.input();
+  multiplier.value = "4"; multiplier.handlers.input();
+  note.value = "尽量避开工作时间联系"; note.handlers.input();
+  const newsEnabled = inputByName(detail, "news.enabled");
+  newsEnabled.checked = false; newsEnabled.handlers.change();
+  const newsWeight = inputByName(detail, "news.weight");
+  newsWeight.value = "1.5"; newsWeight.handlers.input();
+  const newsPause = inputByName(detail, "news.pause_until");
+  newsPause.value = "2026-10-21T18:00"; newsPause.handlers.input();
+  const reset = findControl(detail, "恢复继承");
+  assert.ok(reset, "显式窗口值应提供恢复继承入口");
+  reset.handlers.click();
+  const cancelReset = findControl(h.element("person-detail"), "取消恢复");
+  assert.ok(cancelReset, "待保存的恢复操作应可撤销");
+  cancelReset.handlers.click();
+  findControl(h.element("person-detail"), "恢复继承").handlers.click();
+  assert.equal(findInput(h.element("person-detail"), "24 小时尝试上限").value, 9);
+  assert.match(flat(h.element("person-detail")), /保存后恢复继承/);
+  findControl(h.element("person-detail"), "保存资料").handlers.click();
+  await h.send(request => request.method === "POST");
+
+  assert.equal(saved.route, "acquaintance/settings");
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.contact.changes)), {
+    unanswered_slowdown_start: 3, unanswered_pause_after: 0,
+    unanswered_max_interval_multiplier: 4, pause_until: new Date(pauseUntil.value).toISOString(),
+    note: "尽量避开工作时间联系", "news.enabled": false, "news.weight": 1.5,
+    "news.pause_until": new Date(newsPause.value).toISOString(),
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.contact.reset_to_inherit)), ["max_attempts_24h"]);
+  assert.equal(findInput(h.element("person-detail"), "24 小时尝试上限").value, 12);
 });
 
 test("私聊回复默认继承角色，字段可即时展开并单独覆盖或恢复", async () => {
@@ -1067,6 +1201,16 @@ function findInput(node, label) {
   for (const child of node.children || []) {
     const input = findInput(child, label);
     if (input) return input;
+  }
+  return null;
+}
+
+function inputByName(node, name) {
+  const stack = [node];
+  while (stack.length) {
+    const item = stack.shift();
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(item.tagName) && item.name === name) return item;
+    stack.push(...(item.children || []));
   }
   return null;
 }

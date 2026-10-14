@@ -32,7 +32,8 @@ class ProactiveDiagnosticRouteTests(unittest.IsolatedAsyncioTestCase):
         return opportunity, (ContactIntent(purpose, thought),), {"source": "producer-marker"}
 
     def producer(self, selection=None, prepared=None):
-        return NS(select=Mock(return_value=selection), prepare=AsyncMock(return_value=prepared))
+        return NS(select=Mock(return_value=selection), prepare=AsyncMock(return_value=prepared),
+                  diagnostic_candidate=AsyncMock(return_value=(prepared, [])))
 
     def schedule(self):
         schedule = ContactSchedule.__new__(ContactSchedule)
@@ -46,7 +47,8 @@ class ProactiveDiagnosticRouteTests(unittest.IsolatedAsyncioTestCase):
         schedule.greeting_events = NS(select=Mock(return_value=None))
         schedule.date_events = NS(select=Mock(return_value=None))
         schedule.journal_events = NS(select=Mock(return_value=(None, False)))
-        schedule.screen_events = NS(select=Mock(return_value=None))
+        schedule.screen_events = NS(select=Mock(return_value=None), diagnostic=AsyncMock(return_value=(None, [])))
+        schedule.screen_peek = object()
         schedule.relationship_events = NS(select=Mock(return_value=None))
         schedule.calendar_events = NS(select=Mock(return_value=(None, False)))
         schedule.meal_events = NS(select=Mock(return_value=None))
@@ -82,19 +84,24 @@ class ProactiveDiagnosticRouteTests(unittest.IsolatedAsyncioTestCase):
         cases = (
             ("affection", "relationship_event", lambda s: setattr(s.relationship_events, "select",
                 Mock(return_value=self.candidate("affection"))),
-                lambda s: s.relationship_events.select.assert_called_once()),
+                lambda s: s.relationship_events.select.assert_called_once_with(self.context, ANY, ANY, NOW,
+                    purpose="affection", prompt_judgement=True)),
             ("care", "relationship_event", lambda s: setattr(s.relationship_events, "select",
                 Mock(return_value=self.candidate("care"))),
-                lambda s: s.relationship_events.select.assert_called_once()),
+                lambda s: s.relationship_events.select.assert_called_once_with(self.context, ANY, ANY, NOW,
+                    purpose="care", prompt_judgement=True)),
             ("play", "relationship_event", lambda s: setattr(s.relationship_events, "select",
                 Mock(return_value=self.candidate("play"))),
-                lambda s: s.relationship_events.select.assert_called_once()),
+                lambda s: s.relationship_events.select.assert_called_once_with(self.context, ANY, ANY, NOW,
+                    purpose="play", prompt_judgement=True)),
             ("repair", "relationship_event", lambda s: setattr(s.relationship_events, "select",
                 Mock(return_value=self.candidate("repair"))),
-                lambda s: s.relationship_events.select.assert_called_once()),
+                lambda s: s.relationship_events.select.assert_called_once_with(self.context, ANY, ANY, NOW,
+                    purpose="repair", prompt_judgement=True)),
             ("invitation", "relationship_event", lambda s: setattr(s.relationship_events, "select",
                 Mock(return_value=self.candidate("invitation"))),
-                lambda s: s.relationship_events.select.assert_called_once()),
+                lambda s: s.relationship_events.select.assert_called_once_with(self.context, ANY, ANY, NOW,
+                    purpose="invitation", prompt_judgement=True)),
             ("chat", "conversation_scheduler", lambda _s: None, lambda _s: None),
             ("greeting", "greeting_event", lambda s: setattr(s.greeting_events, "select",
                 Mock(return_value=self.candidate("greeting"))),
@@ -105,10 +112,9 @@ class ProactiveDiagnosticRouteTests(unittest.IsolatedAsyncioTestCase):
             ("creation", "activity_event", lambda s: setattr(s.events, "select",
                 Mock(return_value=(self.candidate("creation"), False))),
                 lambda s: s.events.select.assert_called_once_with(self.context, ANY, NOW, purpose="creation")),
-            ("news", "news_event", lambda s: setattr(s.news_events, "select",
-                Mock(return_value=(self.candidate("news")[0], {"poll": "news"}))) or
-                setattr(s.news_events, "prepare", AsyncMock(return_value=self.candidate("news"))),
-                lambda s: s.news_events.prepare.assert_awaited_once()),
+            ("news", "news_event", lambda s: setattr(s.news_events, "diagnostic_candidate",
+                AsyncMock(return_value=(self.candidate("news"), []))),
+                lambda s: s.news_events.diagnostic_candidate.assert_awaited_once()),
             ("followup", "followup_event", lambda s: setattr(s, "_followup_candidate",
                 Mock(return_value=self.candidate("followup"))),
                 lambda s: s._followup_candidate.assert_called_once()),
@@ -118,9 +124,10 @@ class ProactiveDiagnosticRouteTests(unittest.IsolatedAsyncioTestCase):
             ("meal", "meal_event", lambda s: setattr(s.meal_events, "select",
                 Mock(return_value=self.candidate("meal"))),
                 lambda s: s.meal_events.select.assert_called_once()),
-            ("screen", "screen_event", lambda s: setattr(s.screen_events, "select",
-                Mock(return_value=self.candidate("screen"))),
-                lambda s: s.screen_events.select.assert_called_once()),
+            ("screen", "screen_event", lambda s: setattr(s.screen_events, "diagnostic",
+                AsyncMock(return_value=(self.candidate("screen"), []))),
+                lambda s: s.screen_events.diagnostic.assert_awaited_once_with(self.context, s.screen_peek,
+                    test_id=ANY, role_instruction=self.batch["role_instruction"])),
         )
         for purpose, route_id, configure, expected_producer in cases:
             with self.subTest(purpose=purpose):
@@ -153,15 +160,20 @@ class ProactiveDiagnosticRouteTests(unittest.IsolatedAsyncioTestCase):
                 producer = getattr(schedule, producer_name)
                 producer.select.return_value = (self.candidate("environment")[0], {"poll": route_id})
                 producer.prepare.return_value = self.candidate("environment")
+                producer.diagnostic_candidate.return_value = (self.candidate("environment"), [])
 
-                result = await schedule.diagnostic_candidate(self.context, "environment", at=NOW)
+                result = await schedule.diagnostic_candidate(self.context, "environment", at=NOW, variant=variant)
 
                 self.assertEqual(result["route"], {"id": route_id,
                     "label": {"official_alert_event": "官方预警生产器", "balance_event": "服务余额生产器",
-                              "news_event": "外部资讯生产器", "weather_event": "天气观测生产器",
+                              "news_event": "真实资讯抓取", "weather_event": "真实天气观测",
                               "weather_change_event": "天气变化生产器"}[route_id], "variant": variant})
-                producer.select.assert_called_once()
-                producer.prepare.assert_awaited_once()
+                if variant in ("weather", "external_news"):
+                    producer.select.assert_not_called()
+                    producer.diagnostic_candidate.assert_awaited_once()
+                else:
+                    producer.select.assert_called_once()
+                    producer.prepare.assert_awaited_once()
 
     async def test_news_source_can_only_satisfy_news_and_missing_source_is_not_synthesized(self):
         schedule = self.schedule()

@@ -29,6 +29,7 @@ from ..xiangqi import BLACK as XIANGQI_BLACK, RED as XIANGQI_RED, XiangqiGame
 from ..pikafish import MOVE_PATTERN
 from .xiangqi import MAX_MOVES as XIANGQI_MAX_MOVES
 from .xiangqi import outcome as xiangqi_outcome, replay as replay_xiangqi, view as xiangqi_view
+from .context import SNAPSHOT_ACTIONS, conversation_records, public_game_fact, stamp_game_changes
 
 
 SCHEMA = "companion.native-provider.v1"
@@ -77,6 +78,7 @@ TURTLE_ACTIONS = {TURTLE_READ, TURTLE_PRIVATE_CONTEXT, TURTLE_CREATE, TURTLE_ASK
 DRAW_ACTIONS = {DRAW_READ, DRAW_CREATE, DRAW_GUESS, DRAW_GIVE_UP, DRAW_CLOSE}
 BOARD_GAME_KINDS = {"tictactoe", "gomoku"}
 WEB_INTERACT = "web_interact"
+WEB_REPLY = "web_reply"
 ACTIONS = (TICTACTOE_ACTIONS | GOMOKU_ACTIONS | {PIG_READ, PIG_CREATE, PIG_ROLL, PIG_HOLD, PIG_CLOSE}
            | {BLACKJACK_READ, BLACKJACK_CREATE, BLACKJACK_HIT, BLACKJACK_STAND, BLACKJACK_CLOSE}
            | XIANGQI_ACTIONS | TURTLE_ACTIONS | DRAW_ACTIONS)
@@ -279,7 +281,10 @@ def _game(record: dict[str, Any]) -> (TicTacToeGame | GomokuGame | PigDiceGame |
         return game
     if kind == "pig_dice":
         return _pig_dice_state(record)[0]
-    game = (GomokuGame(human_color=BLACK, difficulty=record["difficulty"])
+    human_side = record.get("human_side", "black")
+    if kind == "gomoku" and human_side not in {"black", "white"}:
+        raise ValueError("invalid gomoku side")
+    game = (GomokuGame(human_color=BLACK if human_side == "black" else WHITE, difficulty=record["difficulty"])
             if kind == "gomoku" else TicTacToeGame(difficulty=record["difficulty"]))
     moves = record["moves"]
     for index, (row, column, mark) in enumerate(moves):
@@ -488,6 +493,7 @@ class GameStore:
         self.data = data
 
     def commit(self, draft: dict[str, Any]) -> None:
+        stamp_game_changes(self.data["scopes"], draft["scopes"], time.time())
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         try:
             with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
@@ -510,7 +516,7 @@ class NativeGameProvider:
              source.parent.parent / "pig_dice.py", source.parent.parent / "blackjack.py",
              source.parent.parent / "xiangqi.py", source.parent.parent / "pikafish.py",
              source.parent / "xiangqi.py", source.parent.parent / "turtle_soup.py",
-             source.parent.parent / "draw_guess.py"))).hexdigest()
+             source.parent.parent / "draw_guess.py", source.parent / "context.py"))).hexdigest()
         self.artifact_hash = artifact_hash
         self.generation = "game-" + _hash({"version": version, "artifact": artifact_hash})
         self.store = GameStore(Path(data_dir) / "native_v2" / "games.json")
@@ -539,11 +545,15 @@ class NativeGameProvider:
                  "description": f"读取当前身份的{kind}对局及棋盘。", "parameters": empty,
                  "side_effect": "none", "timeout_seconds": 10},
                 {"action": create, "capability": create, "source_owner": PROVIDER_ID,
-                 "description": f"为当前身份开始{kind}；已有未结束对局时接续原局。",
+                 "description": f"为当前身份开始{kind}并返回可用房间链接；已有未结束对局时接续原局。"
+                     + ("human_side 选择当前发言用户的颜色，不是你的颜色；用户让你执黑或先下时传 white。" if create == GOMOKU_CREATE else ""),
                  "parameters": {"type": "object", "properties": {
-                     "difficulty": {"type": "string", "enum": ["easy", "normal", "hard"]}},
+                     "difficulty": {"type": "string", "enum": ["easy", "normal", "hard"]},
+                     **({"human_side": {"type": "string", "enum": ["black", "white"],
+                         "description": "用户（当前发言者）的执棋颜色。用户让你或当前角色执黑先下时填 white；用户说我执黑或我先下时填 black。未安排颜色时默认用户执黑。"}}
+                        if create == GOMOKU_CREATE else {})},
                      "required": ["difficulty"], "additionalProperties": False},
-                 "side_effect": "local", "timeout_seconds": 10},
+                 "side_effect": "local", "timeout_seconds": 60},
                 {"action": move, "capability": move, "source_owner": PROVIDER_ID,
                  "description": f"在当前身份的{kind}对局落子；行列从 0 到 {last}，Bot 随后应手。",
                  "parameters": {"type": "object", "properties": {
@@ -692,6 +702,10 @@ class NativeGameProvider:
                  "description": "关闭当前身份的指定你画我猜对局。", "parameters": game_id,
                  "side_effect": "local", "timeout_seconds": 10},
             ])
+        for tool in tools:
+            if tool["action"] in CREATE_ACTIONS:
+                # A first browser entry may need the existing access tunnel.
+                tool["timeout_seconds"] = max(60, tool["timeout_seconds"])
         return {"schema": SCHEMA, "plugin_id": PLUGIN_ID, "provider_id": PROVIDER_ID,
                 "generation": self.generation,
                 "package": {"extension_id": "game", "package_id": PLUGIN_ID,
@@ -733,8 +747,10 @@ class NativeGameProvider:
         if action in CREATE_ACTIONS:
             create_keys = ({"difficulty", "human_side"} if action == XIANGQI_CREATE else
                            set() if action == TURTLE_CREATE else {"difficulty"})
-            if (set(args) != create_keys
+            allowed_keys = (create_keys, create_keys | {"human_side"}) if action == GOMOKU_CREATE else (create_keys,)
+            if (set(args) not in allowed_keys
                     or (action != TURTLE_CREATE and args["difficulty"] not in {"easy", "normal", "hard"})
+                    or (action == GOMOKU_CREATE and args.get("human_side", "black") not in {"black", "white"})
                     or (action == XIANGQI_CREATE and args["human_side"] not in {XIANGQI_RED, XIANGQI_BLACK})):
                 raise NativeGameError("invalid_game_arguments")
         if action in CLOSE_ACTIONS | {PIG_HOLD, BLACKJACK_HIT, BLACKJACK_STAND,
@@ -886,6 +902,8 @@ class NativeGameProvider:
         args = request["arguments"]
         action = request["action"]
         kind = _kind(action)
+        if action in {WEB_INTERACT, WEB_REPLY}:
+            kind = _record_kind(rooms.get(args["game_id"], {}))
         if action not in CLOSE_ACTIONS and not getattr(self.plugin, f"native_v2_{kind}_enabled", False):
             raise NativeGameError(f"game_{kind}_disabled")
         if action in CREATE_ACTIONS:
@@ -921,6 +939,12 @@ class NativeGameProvider:
                     if kind in BOARD_GAME_KINDS:
                         current["piece_positions"] = {}
                         current["interactions"] = []
+                    if kind == "gomoku":
+                        current["human_side"] = args.get("human_side", "black")
+                        if current["human_side"] == "white":
+                            game = _game(current)
+                            row, column = game.choose_bot_move()
+                            current["moves"].append([row, column, game.bot_color])
                 if kind == "blackjack":
                     game = _game(current)
                     if game.finished:
@@ -938,6 +962,8 @@ class NativeGameProvider:
         if room["status"] != "active":
             raise NativeGameError("game_not_active")
         game = _game(room)
+        if action == WEB_REPLY and kind not in BOARD_GAME_KINDS:
+            raise NativeGameError("invalid_game_arguments")
         if action == WEB_INTERACT:
             if kind not in BOARD_GAME_KINDS:
                 raise NativeGameError("invalid_game_arguments")
@@ -1056,16 +1082,17 @@ class NativeGameProvider:
                 room["status"] = "finished"
                 room["outcome"] = "player" if game.winner == "human" else "bot"
             return _view(room)
-        human, bot = (BLACK, WHITE) if kind == "gomoku" else (X, NOUGHT)
+        human, bot = (game.human_color, game.bot_color) if kind == "gomoku" else (X, NOUGHT)
         room.setdefault("piece_positions", {})
         room.setdefault("interactions", [])
         try:
-            game.place(args["row"], args["column"], human)
-            room["moves"].append([args["row"], args["column"], human])
-            room["piece_positions"][_piece_id(len(room["moves"]) - 1)] = {
-                "row": args["row"], "column": args["column"],
-                "x": args.get("x", 0.5), "y": args.get("y", 0.5),
-            }
+            if action != WEB_REPLY:
+                game.place(args["row"], args["column"], human)
+                room["moves"].append([args["row"], args["column"], human])
+                room["piece_positions"][_piece_id(len(room["moves"]) - 1)] = {
+                    "row": args["row"], "column": args["column"],
+                    "x": args.get("x", 0.5), "y": args.get("y", 0.5),
+                }
             if not game.finished:
                 row, column = game.choose_bot_move(seed=int(_hash(request["invocation_id"]), 16))
                 game.place(row, column, bot)
@@ -1245,8 +1272,30 @@ class NativeGameProvider:
         async with self._async_lock:
             self._request(request)
             if request["action"] in XIANGQI_ACTIONS:
-                return await self._execute_xiangqi(request, before_dispatch=before_dispatch)
-            return self._execute_sync(request, before_dispatch=before_dispatch)
+                result = await self._execute_xiangqi(request, before_dispatch=before_dispatch)
+            else:
+                result = self._execute_sync(request, before_dispatch=before_dispatch)
+        return await self._with_room_access(request, result, before_dispatch=before_dispatch)
+
+    async def _with_room_access(self, request, result, *, before_dispatch):
+        room_access = getattr(self.plugin, "native_game_room_access", None)
+        if (request["action"] not in CREATE_ACTIONS or result["state"] != "succeeded"
+                or not callable(room_access)):
+            return result
+        self._checked(before_dispatch)
+        game = result["result"]["game"]
+        try:
+            access = await room_access(game["game_id"], before_dispatch=before_dispatch)
+        except Exception:
+            # Access failure does not undo a confirmed game commit. Lookup can
+            # recover its browser entry without replaying the game operation.
+            access = {"state": "unavailable", "reason": "game_room_access_unavailable"}
+        self._checked(before_dispatch)
+        result = copy.deepcopy(result)
+        result["result"]["room_access"] = access
+        if access.get("state") == "ready":
+            result["result"]["room_url"] = access["url"]
+        return result
 
     async def lookup(self, request: dict[str, Any], *, before_dispatch) -> dict[str, Any]:
         scope, _args = self._request(request)
@@ -1257,11 +1306,28 @@ class NativeGameProvider:
                     or operation["identity"] != _identity(request)
                     or (request.get("operation_id") and request["operation_id"] != operation["id"])):
                 raise NativeGameError("game_operation_not_found")
-            return self._receipt(request, operation)
+            result = self._receipt(request, operation)
+        return await self._with_room_access(request, result, before_dispatch=before_dispatch)
 
     @staticmethod
     def _web_ticket_key(ticket: str) -> str:
         return hashlib.sha256(ticket.encode("ascii", errors="ignore")).hexdigest()
+
+    def conversation_snapshot(self, context: dict[str, Any], *, authorized_actions,
+                              now: float, result_ttl: float, before_read) -> list[dict[str, Any]]:
+        """Read this admitted chat's ledger without a model, engine or write."""
+        if self.closed:
+            return []
+        self._checked(before_read)
+        kinds = {SNAPSHOT_ACTIONS[action] for action in authorized_actions if action in SNAPSHOT_ACTIONS
+                 and getattr(self.plugin, f"native_v2_{SNAPSHOT_ACTIONS[action]}_enabled", False)}
+        with self.store.lock:
+            rooms = self.store.data["scopes"].get(_hash(_context(context)), {})
+            records = conversation_records(rooms, kinds, now=now, result_ttl=result_ttl)
+            facts = [public_game_fact(room, _view(room) if _record_kind(room) != "xiangqi" else None)
+                     for room in records]
+            self._checked(before_read)
+            return facts
 
     def list_web_games(self) -> list[dict[str, Any]]:
         """Return a minimal, identity-free inventory for the authenticated manager page."""
@@ -1347,8 +1413,8 @@ class NativeGameProvider:
             raise NativeGameError("invalid_game_arguments")
         action = payload["action"]
         maps = {
-            "tictactoe": {"move": MOVE, "interact": WEB_INTERACT, "close": CLOSE},
-            "gomoku": {"move": GOMOKU_MOVE, "interact": WEB_INTERACT, "close": GOMOKU_CLOSE},
+            "tictactoe": {"move": MOVE, "interact": WEB_INTERACT, "reply": WEB_REPLY, "close": CLOSE},
+            "gomoku": {"move": GOMOKU_MOVE, "interact": WEB_INTERACT, "reply": WEB_REPLY, "close": GOMOKU_CLOSE},
             "pig_dice": {"roll": PIG_ROLL, "hold": PIG_HOLD, "close": PIG_CLOSE},
             "blackjack": {"hit": BLACKJACK_HIT, "stand": BLACKJACK_STAND, "close": BLACKJACK_CLOSE},
             "xiangqi": {"move": XIANGQI_MOVE, "close": XIANGQI_CLOSE},

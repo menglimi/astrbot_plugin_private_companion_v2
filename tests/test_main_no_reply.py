@@ -63,7 +63,8 @@ class MainNoReplyTests(unittest.IsolatedAsyncioTestCase):
             session=NS(profile=NS(target=self.target)),
             session_topology=NS(reply_enabled=AsyncMock(return_value=True), schedule_observe=lambda event: None),
             persona_mapping_for_event=AsyncMock(return_value=NS(role_id="registered-role")),
-            prepare_core_reply=AsyncMock(return_value=Outcome.failed("host_persona_unmapped", "persona not registered")),
+            prepare_core_reply=AsyncMock(return_value=Outcome.failed(
+                "host_core_reply_prepare_failed", "optional reply preparation unavailable")),
             group_reply_candidate=AsyncMock(),
             receive_claimed=AsyncMock(side_effect=RuntimeError("synthetic processing failure")),
             terminate=AsyncMock(),
@@ -110,22 +111,23 @@ class MainNoReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(event.stopped)
         self.assertFalse(getattr(event, "call_llm", False))
 
-    async def test_unregistered_persona_leaves_astrbot_core_reply_available(self):
+    async def test_unregistered_persona_suppresses_astrbot_default_reply(self):
         self.staging.claims = lambda _event: True
         self.staging.target_for_event = lambda _event: self.target
-        self.staging.persona_mapping_for_event = AsyncMock(return_value=None)
+        self.staging.prepare_core_reply = AsyncMock(return_value=Outcome.failed(
+            "host_persona_unmapped", "persona not registered"))
         event = private_event()
 
         await self.plugin.receive_companion_message(event)
 
         self.assertFalse(event.stopped)
-        self.staging.persona_mapping_for_event.assert_not_awaited()
+        self.assertTrue(event.call_llm)
         self.staging.prepare_core_reply.assert_awaited_once()
         self.staging.receive_claimed.assert_not_awaited()
-        self.assertFalse(getattr(event, "call_llm", False))
-        self.assertEqual(self.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
+        row = self.runtime.read_one("SELECT reason_code FROM inbound_no_replies", ())
+        self.assertEqual(row["reason_code"], "host_persona_unmapped")
 
-    async def test_persona_lookup_timeout_leaves_astrbot_core_reply_available(self):
+    async def test_persona_lookup_timeout_suppresses_unverified_default_reply(self):
         self.staging.claims = lambda _event: True
         self.staging.target_for_event = lambda _event: self.target
         self.staging.prepare_core_reply = AsyncMock(return_value=Outcome.failed(
@@ -136,10 +138,11 @@ class MainNoReplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(event.stopped)
         self.staging.prepare_core_reply.assert_awaited_once()
-        self.assertFalse(getattr(event, "call_llm", False))
-        self.assertEqual(self.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
+        self.assertTrue(getattr(event, "call_llm", False))
+        row = self.runtime.read_one("SELECT reason_code FROM inbound_no_replies", ())
+        self.assertEqual(row["reason_code"], "host_native_lookup_timeout__conversation")
 
-    async def test_unmapped_group_persona_leaves_astrbot_core_reply_available(self):
+    async def test_unmapped_group_persona_suppresses_astrbot_default_reply(self):
         self.staging.claims = lambda _event: True
         self.staging.target_for_event = lambda _event: self.target
         self.staging.group_reply_candidate = AsyncMock(return_value=NS(
@@ -149,7 +152,7 @@ class MainNoReplyTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.receive_companion_message(event)
 
         self.assertFalse(event.stopped)
-        self.assertFalse(getattr(event, "call_llm", False))
+        self.assertTrue(getattr(event, "call_llm", False))
         self.assertEqual(self.runtime.read_all("SELECT * FROM inbound_no_replies", ()), ())
 
     async def test_competing_astrbot_command_passes_through_a_claimed_route(self):

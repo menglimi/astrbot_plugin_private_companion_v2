@@ -249,8 +249,21 @@ window.CompanionConfigEditors = (() => {
     const name = String(settings.name || "").trim();
     const title = document.querySelector("[data-profile-name]");
     if (title) title.textContent = name || title.dataset.profileFallback || "当前角色";
+    const avatarUrl = String(settings.avatar_data_url || "");
+    document.querySelectorAll("[data-profile-portrait]").forEach(portrait => {
+      portrait.classList.toggle("has-avatar", Boolean(avatarUrl));
+    });
+    document.querySelectorAll("[data-profile-avatar]").forEach(image => {
+      image.hidden = !avatarUrl;
+      if (avatarUrl) image.src = avatarUrl;
+      else image.removeAttribute("src");
+    });
     document.querySelectorAll("[data-profile-emblem]").forEach(emblem => {
+      emblem.hidden = Boolean(avatarUrl);
       emblem.textContent = Array.from(name)[0] || emblem.dataset.profileFallback || "设";
+    });
+    document.querySelectorAll("[data-profile-avatar-remove]").forEach(button => {
+      button.hidden = !avatarUrl;
     });
     const first = (...keys) => keys.map(key => String(settings[key] || "").trim()).find(Boolean) || "待补充";
     const identity = document.querySelector('[data-profile-signal="identity"]');
@@ -560,6 +573,7 @@ window.CompanionConfigEditors = (() => {
       note: "按角色保存；姓名、外貌、性格与世界设定会进入新对话，并在该角色的窗口共享。",
       labels: {
         name: "姓名",
+        avatar_data_url: "角色头像",
         species: "种族",
         birthday: "生日",
         age: "年龄感",
@@ -614,7 +628,7 @@ window.CompanionConfigEditors = (() => {
       helps: {
         name: "角色在设定中的姓名；上方角色展示会优先显示这里。",
         species: "人类、精灵、仿生人等；没有特殊种族时可留空。",
-        birthday: "角色的出生日期或纪念日；勾选「不确定年份」保存为“4月17日”，勾选「农历」按农历纪日。不确定时可留空。",
+        birthday: "角色出生日期或纪念日；支持直接输入农历与公历，年份不确定时可留空。",
         age: "填写年龄感或保留原有生日设定；新的明确生日也可填入“生日”字段。",
         gender: "角色自我认同的性别；不需要的设定可留空。",
         occupation: "职业、身份、所属组织或社会位置。",
@@ -624,6 +638,7 @@ window.CompanionConfigEditors = (() => {
         eyes: "瞳色、眼部特征或非人角色的视觉特征。",
         clothing: "日常服饰倾向；具体衣物可在「产出 · 衣柜」管理。",
         image_identity_hint: "头像、截图昵称、OC 别名、水印等难以归入外貌的识别线索。",
+        avatar_data_url: "角色头像图片，保存于当前角色档案。",
         appearance: "保留原来整段外貌文字；新字段不会覆盖它。",
         personality: "保留原来整段性格文字；可与说话方式、习惯字段并用。",
         first_person: "角色如何称呼自己，以及需要稳定使用的自称或代词。",
@@ -678,7 +693,7 @@ window.CompanionConfigEditors = (() => {
          避免默认 textarea 把两列排布顶成通栏。 */
       inputs: {birthday: "date", gender: "chips", species: "chips", first_person: "chips",
         voice_examples: "quotes", signature_phrases: "tags", hobbies: "tags",
-        name: "line", age: "line", occupation: "line", appearance_points: "line",
+        name: "line", avatar_data_url: "line", age: "line", occupation: "line", appearance_points: "line",
         hair: "line", eyes: "line", clothing: "line", image_identity_hint: "line",
         world_name: "line", era: "line", tone: "line",
         platform_group_chat: "line", platform_screen: "line", platform_bilibili: "line",
@@ -692,7 +707,7 @@ window.CompanionConfigEditors = (() => {
       },
       segmentedChoices: ["world_adaptation_mode", "expression_private_source_mode",
         "expression_private_application_mode"],
-      order: ["name", "species", "birthday", "age", "gender", "occupation", "identity", "key_lore", "character_extra", "appearance_points", "hair", "eyes",
+      order: ["name", "species", "birthday", "age", "gender", "occupation", "identity", "key_lore", "character_extra", "avatar_data_url", "appearance_points", "hair", "eyes",
         "clothing", "image_identity_hint", "appearance", "personality", "first_person", "speech_style", "emotional_style", "social_distance",
         "reaction_patterns", "voice_examples", "signature_phrases", "daily_habits", "motivations",
         "core_values", "desire", "hobbies", "boundaries", "taboos", "world_name", "era", "tone",
@@ -704,7 +719,7 @@ window.CompanionConfigEditors = (() => {
       scopeNote: "当前角色 · 所有会话共享",
       onStatus: updateRoleProfileSummary,
       sections: [
-        {id: "identity", title: "基础身份", help: "姓名、种族、生日、年龄感、职业、关键经历与补充。", fields: ["name", "gender", "birthday", "age", "species", "occupation", "key_lore", "identity", "character_extra"]},
+        {id: "identity", title: "基础身份", help: "姓名、种族、生日、年龄感、职业、关键经历与补充。", fields: ["name", "gender", "birthday", "age", "species", "occupation", "key_lore", "identity", "character_extra", "avatar_data_url"]},
         {id: "appearance", title: "外貌与识别", help: "发型、瞳色、服饰和能稳定辨认角色的线索。", fields: ["appearance_points", "hair", "eyes", "clothing", "image_identity_hint", "appearance"]},
         {id: "personality", title: "性格与日常", help: "性格底色、日常习惯和角色做事的稳定倾向。", fields: ["personality", "daily_habits"]},
         {id: "voice", title: "口吻与反应", help: "用自称、情绪表达、典型反应和示例台词写出角色说话的感觉。", fields: ["voice_examples", "signature_phrases", "first_person", "speech_style", "emotional_style", "social_distance", "reaction_patterns"]},
@@ -730,7 +745,7 @@ window.CompanionConfigEditors = (() => {
       helps: {
         default_nickname: "角色平时如何称呼当前这位用户；没有固定称呼时留空。",
         user_gender: "只记录对方明确告诉你的内容；不确定时留空。",
-        user_birthday: "生日或纪念日；勾选「不确定年份」保存为“4月17日”，勾选「农历」按农历纪日。不确定时留空。",
+        user_birthday: "生日或纪念日；支持直接输入农历与公历，年份不确定时可留空。",
         user_occupation: "当前用户明确提供的职业；避免猜测。",
         role_relation: "例如朋友、搭档、家人；按你确认的关系填写。",
         interaction: "你们熟悉的相处节奏、互动习惯或需要留意的关系背景。",
@@ -803,6 +818,7 @@ window.CompanionConfigEditors = (() => {
         sleep_time: "入睡时刻（HH:MM）",
         sleep_timezone: "作息时区",
         sleep_variation_minutes: "自然浮动上限（分钟）",
+        sleep_window_minutes: "入睡窗口（分钟）",
         sleep_minutes: "睡眠时长（分钟）",
         reading_enabled: "启用阅读角",
         derive_enabled: "从日记提取衍生材料",
@@ -829,6 +845,7 @@ window.CompanionConfigEditors = (() => {
         sleep_time: "这是入睡时间的中心点；实际时间会在浮动上限内缓慢提前或延后，连续几天变化不会突然跳动。按作息时区解释，24 小时制。",
         sleep_timezone: "作息可以独立于日记时区，例如角色作息按另一个城市算。",
         sleep_variation_minutes: "这是节律自然变化的最大范围，不是每天重新抽取一次。偏移会沿用前几天的趋势并逐步变化；同一角色、同一天在重启和窗口切换后保持一致。设为 0 即固定，最多 ±120 分钟。",
+        sleep_window_minutes: "到达作息时刻后进入观察窗口；窗口内结合睡眠压力和近期负荷决定何时入睡，窗口结束仍未困倦时按计划开始。设为 0 表示到点入睡，最多 360 分钟。",
         reading_enabled: "只登记阅读角是否可用；读了什么、读到哪由角色记录。",
         derive_enabled: "从日记正文提取摘要、梦境一类衍生材料；关闭时只保存原正文。",
         diary_style_prompt: "补充日记的写法偏好；留空使用默认风格。",
@@ -851,7 +868,7 @@ window.CompanionConfigEditors = (() => {
       inputs: {diary_time: "time", sleep_time: "time", timezone: "line", sleep_timezone: "line"},
       audit: lifeAudit,
       order: ["enabled", "diary_enabled", "diary_time", "timezone",
-              "sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes",
+              "sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_window_minutes", "sleep_minutes",
               "reading_enabled", "derive_enabled",
               "diary_style_prompt", "dream_theme_candidates", "dream_mixed_themes_enabled",
               "dream_intimate_theme_enabled", "dream_afterglow_mode",
@@ -865,7 +882,7 @@ window.CompanionConfigEditors = (() => {
         {id: "routine", title: "生活例程", help: "关闭总闸时，日记、睡眠与阅读的日程都不再登记，下面各项都不起作用。",
          fields: ["enabled", "diary_enabled", "diary_time", "timezone", "reading_enabled", "derive_enabled"]},
         {id: "sleep", title: "睡眠作息", help: "角色共享作息；自动执行需开启生活日程总开关，并选择已授权的有效窗口。睡眠状态模拟在角色状态页单独设置。",
-         fields: ["sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_minutes"]},
+         fields: ["sleep_enabled", "sleep_time", "sleep_timezone", "sleep_variation_minutes", "sleep_window_minutes", "sleep_minutes"]},
         {id: "writing", title: "日记与梦境", help: "写作偏好，只影响日记与梦境的文本，不改变任何权限或事实。",
          fields: ["diary_style_prompt", "dream_theme_candidates", "dream_mixed_themes_enabled",
                   "dream_intimate_theme_enabled", "dream_afterglow_mode"]},
@@ -1457,6 +1474,8 @@ window.CompanionConfigEditors = (() => {
       if (typeof values[name]==="string" && !isZone(values[name])) return "life_timezone_invalid";
     if (!Number.isInteger(values.sleep_variation_minutes) || values.sleep_variation_minutes < 0 || values.sleep_variation_minutes > 120)
       return "life_sleep_variation_invalid";
+    if (values.sleep_window_minutes != null && (!Number.isInteger(values.sleep_window_minutes)
+        || values.sleep_window_minutes < 0 || values.sleep_window_minutes > 360)) return "life_sleep_window_invalid";
     return null;
   }
 

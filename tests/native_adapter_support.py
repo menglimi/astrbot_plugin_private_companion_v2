@@ -106,6 +106,7 @@ class FakeHostContext:
         self.cid = "conversation-1"
         self.persona = {"name": "original", "prompt": "你是原来的角色，比折的陪伴者。"}
         self.selected = "original"
+        self.agent_configuration = None
         self.role_lookups = 0
         self.before_resolve = None
         self.persona_manager = NS(resolve_selected_persona=self.resolve, personas_v3=[self.persona],
@@ -116,7 +117,9 @@ class FakeHostContext:
         return self.platform if self.platform.meta().id == platform_id else None
 
     def get_provider_by_id(self, provider_id): return self.provider if provider_id == "native-model" else None
-    def get_config(self, *, umo): return {"provider_settings": {"default_personality": "original"}}
+    def get_config(self, *, umo):
+        return deepcopy(self.agent_configuration) if self.agent_configuration is not None else {
+            "provider_settings": {"default_personality": "original"}}
     async def current(self, umo): return self.cid
 
     def persona_by_id(self, persona_id):

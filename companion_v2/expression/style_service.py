@@ -75,6 +75,7 @@ class ExpressionStyleService:
         self.window_hours = window_hours
         self.pending, self.committed, self.workers, self.results = {}, set(), {}, {}
         self.next_checks = {}
+        self._next_discovery_at = None
         self.cursor = 0
         self.closed = False
         self.registrations = (TaskRegistration(TaskDefinition(KIND, OWNER, "role.expression.read",
@@ -571,8 +572,13 @@ class ExpressionStyleService:
                                              "code": getattr(error, "code", "expression_learn_failed")}
         if self.workers or KIND not in self.gateway.router.profiles:
             return
-        bindings = tuple(self.app.state_maintenance.bindings.values())
         at = self.tasks.now()
+        # Discovery reads all authorized source windows, before the per-window
+        # scan gate. Delivery receipts must not repeat that work for every part.
+        if self._next_discovery_at is not None and at < self._next_discovery_at:
+            return
+        self._next_discovery_at = at + timedelta(seconds=60)
+        bindings = tuple(self.app.state_maintenance.bindings.values())
         group_contexts = self._group_candidates(at)
         if not bindings and not group_contexts:
             self.next_checks.clear()

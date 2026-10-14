@@ -1,4 +1,4 @@
-"""Opt-in presentation transforms, with literal and factual text kept intact."""
+"""Presentation transforms with cleanup enabled by default; literals and facts stay intact."""
 
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -166,7 +166,9 @@ def strip_internal_expression_protocol(text):
 
 @dataclass(frozen=True)
 class ReplyTextPolicy:
-    content_cleanup_enabled: bool = False
+    # New windows inherit the presentation cleanup rules.  A stored False
+    # remains an explicit opt-out at the role or window layer.
+    content_cleanup_enabled: bool = True
     content_cleanup_mode: str = "words"
     content_cleanup_scope: str = "all"
     content_cleanup_rule: str = r"[\n]"

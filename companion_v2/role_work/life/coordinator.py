@@ -10,6 +10,7 @@ from .configuration import GROUP
 from .runtime import RoleLifeRuntime
 from .configuration import values
 from .scheduling import next_bedtime, sleep_rhythm
+from .physiology import recommended_sleep_minutes
 
 
 class RoleLifeCoordinator:
@@ -102,21 +103,30 @@ class RoleLifeCoordinator:
             if next_at is None:
                 next_at = next_bedtime(now, routine.owner, settings["sleep_timezone"],
                     time.fromisoformat(settings["sleep_time"]), settings["sleep_variation_minutes"])
-        next_wake = next_at + timedelta(minutes=settings["sleep_minutes"]) if next_at else None
-        active_sleep = self.app.role_state.body_clock.read(routine.context)
+        profile = self.app.role_state.body_clock.profile(routine.context, now=now)
+        planned_minutes = recommended_sleep_minutes(settings["sleep_minutes"],
+            profile["sleep_debt_minutes"], profile["workload_score"])
+        next_wake = next_at + timedelta(minutes=planned_minutes) if next_at else None
+        active_sleep = self.app.role_state.body_clock.read(routine.context, now=now)
         rhythm = sleep_rhythm(now, next_at if settings["sleep_enabled"] else None, active_sleep)
         return {"shared": True, "owner": {"installation_id": routine.context.scope.installation_id,
                     "bot_id": routine.context.scope.bot_id, "role_id": routine.context.role_binding.role.subject_id},
             "enabled": settings["sleep_enabled"], "time": settings["sleep_time"],
             "timezone": settings["sleep_timezone"], "duration_minutes": settings["sleep_minutes"],
             "variation_minutes": settings["sleep_variation_minutes"],
+            "window_minutes": settings["sleep_window_minutes"],
+            "recommended_duration_minutes": planned_minutes, "physiology": profile,
             "executor_is_current": executor is routine,
             "executor_state": "available" if executor is not None else "no_authorized_window" if settings["sleep_enabled"] else "disabled",
             "executor_window": self._window_descriptor(executor),
             "next_sleep_at": next_at.isoformat() if next_at else None,
             "next_wake_at": next_wake.isoformat() if next_wake else None,
-            "rhythm": rhythm,
-            "active_wake_at": active_sleep["planned_wake_at"] if active_sleep and active_sleep["state"] == "sleeping" else None}
+            "sleep_window_closes_at": (next_at + timedelta(minutes=settings["sleep_window_minutes"])).isoformat()
+                if next_at else None,
+            "rhythm": rhythm, "sleep_state": active_sleep["state"] if active_sleep else None,
+            "active_wake_at": (active_sleep["planned_wake_at"] if active_sleep and active_sleep["state"] == "sleeping"
+                                else active_sleep["wake_until"] if active_sleep and active_sleep["state"] == "interrupted"
+                                else None)}
 
     @staticmethod
     def _window_descriptor(routine):

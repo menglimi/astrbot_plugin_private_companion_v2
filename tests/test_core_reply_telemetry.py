@@ -15,11 +15,12 @@ from astrbot_host.core_reply import (
     inject_core_reply_prompt,
 )
 from astrbot_host.core_reply_preparation import measure_core_preparation
+from astrbot_host.core_reply_perception import inject_core_reply_perception_context
 from astrbot_host.core_reply_telemetry import (
     CORE_REPLY_TELEMETRY_EXTRA, _usage, finish_core_reply_telemetry,
     observe_core_agent_begin, observe_core_agent_done, observe_core_llm_response,
     observe_core_reply_delivery, observe_core_tool_finished, observe_core_tool_started,
-    prepare_core_reply_telemetry,
+    observe_core_waiting_llm_request, prepare_core_reply_telemetry,
 )
 from companion_v2.execution.models import digest
 from companion_v2.foundation.outcome import Outcome
@@ -75,7 +76,8 @@ class UsageAvailabilityTests(unittest.TestCase):
     def test_efficiency_separates_observed_requests_tools_and_agent_duration(self):
         def at(seconds):
             return (datetime.fromisoformat("2026-10-10T00:00:00+00:00") + timedelta(seconds=seconds)).isoformat()
-        record = {"turn_id": "timed-core-turn", "received_at": at(0), "request_hook_at": at(1),
+        record = {"turn_id": "timed-core-turn", "received_at": at(0), "waiting_llm_at": at(0.5),
+            "request_hook_at": at(1),
             "agent_started_at": at(1.2), "generation_finished_at": at(3), "runner_duration_ms": 1800,
             "generation_state": "completed", "requests": [
                 {"position": 1, "state": "returned", "started_at": at(1.5), "finished_at": at(2), "latency_ms": 500},
@@ -92,6 +94,8 @@ class UsageAvailabilityTests(unittest.TestCase):
         self.assertEqual(sample["stages"]["tool_ms"], 300)
         self.assertEqual(sample["stages"]["agent_ms"], 1800)
         self.assertEqual(sample["stages"]["plugin_preparation_ms"], 200)
+        self.assertEqual(sample["stages"]["waiting_llm_to_request_hook_ms"], 500)
+        self.assertEqual(sample["stages"]["request_hook_to_agent_ms"], 200)
         self.assertEqual(sample["stages"]["send_ms"], 400)
         self.assertEqual(sample["timestamps"]["last_model_finished_at"], at(2.7))
         self.assertEqual(sample["timestamps"]["agent_finished_at"], at(3))
@@ -149,10 +153,65 @@ class CoreReplyTelemetryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.app = await self.start_host()
         self.queued = []
 
+    async def test_actual_media_request_presence_persists_without_prompt_bodies(self):
+        from astrbot_host.core_reply_media_prompt import finalize_core_reply_media_prompt
+        from companion_v2.conversation.voice_reply import VoiceReplyPolicy
+        event, prepared, req = await self.prepare("media-presence-observation")
+        prepared["voice_reply_policy"] = VoiceReplyPolicy(generation_mode="model_tag", language="ja")
+        event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["_reaction_reply"] = {"enabled": True}
+        runner = NativeRunnerFixture(event, req, [[response()]])
+        finalize_core_reply_media_prompt(event, runner.run_context)
+        self.register(event, runner)
+        async for _ in runner.step():
+            pass
+        self.flush()
+        saved = observations_for_role(self.app.runtime, prepared["context"])[0]
+        media = saved["requests"][0]["media"]
+        self.assertEqual(media["voice_mode"], "always")
+        self.assertTrue(media["voice_prompt_present"])
+        self.assertTrue(media["reaction_prompt_present"])
+        self.assertNotIn("private system prompt", json.dumps(saved))
+        for malformed in ({**media, "body": "private prompt"}, {**media, "presentation_present": "private prompt"}):
+            bad = {**saved, "requests": [{**saved["requests"][0], "media": malformed}]}
+            # Stored projections add role/context keys outside the raw record.
+            bad.pop("context_key", None)
+            bad.pop("context_json", None)
+            with self.assertRaises(ValueError):
+                record_observation(self.app.runtime, prepared["context"], bad)
+
+    async def test_voice_formatting_stays_in_core_usage_and_does_not_spend_plugin_budget(self):
+        from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+        from astrbot.core.provider.entities import ProviderRequest
+        from astrbot_host.core_reply_voice_authoring import bind_core_voice_authoring
+        from companion_v2.conversation.voice_reply import VoiceReplyPolicy
+        from tests.test_core_reply_voice_authoring import Hooks, Provider
+
+        event, prepared, _ = await self.prepare("core-voice-formatting-accounting")
+        prepared["voice_reply_policy"] = VoiceReplyPolicy(generation_mode="model_tag", language="ja",
+            foreign_text_mode="translation")
+        runner = ToolLoopAgentRunner()
+        req = ProviderRequest(prompt="在干嘛呢", system_prompt="当前角色")
+        await runner.reset(provider=Provider("我在陪你。", "<pc_tts>君と話してる。</pc_tts>我在陪你。"),
+            request=req, run_context=NS(context=NS(event=event), messages=[]),
+            tool_executor=None, agent_hooks=Hooks())
+        bind_core_voice_authoring(event, runner)
+        self.register(event, runner)
+        async for _ in runner.step():
+            pass
+        self.flush()
+        saved = observations_for_role(self.app.runtime, prepared["context"])[0]
+        self.assertEqual(len(saved["requests"]), 2)
+        self.assertTrue(all(request["measurement_basis"] == "provider_response" for request in saved["requests"]))
+        self.assertEqual(sum(request["usage"]["tokens"] for request in saved["requests"]), 220)
+        self.assertEqual(self.report(prepared["context"])["budget"]["spent_tokens"], 0)
+        self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) n FROM model_rounds", ())["n"], 0)
+        self.assertNotIn("君と話してる", json.dumps(saved, ensure_ascii=False))
+
     async def prepare(self, identifier="core-observation", *, inject=False):
         event = self.event(identifier=identifier, text="private latest prompt")
         prepared = (await self.controller.prepare_core_reply(event)).unwrap()
         event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": prepared})
+        observe_core_waiting_llm_request(event, now=self.clock.now)
         req = NS(system_prompt="private system prompt", prompt="private latest prompt", contexts=[],
                  model="real-model", func_tool=NS(tools=[NS(name="read_file", description="private tool description",
                      parameters={"type": "object"}, active=True)]), image_urls=["https://private.example/image"],
@@ -160,6 +219,9 @@ class CoreReplyTelemetryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         if inject:
             with measure_core_preparation(event, "prompt_injection", now=self.clock.now):
                 inject_core_reply_prompt(event, req)
+            await inject_core_reply_perception_context(event, req, native_context=self.controller.context)
+            if prepared.get("prompt_instruction"):
+                self.assertTrue(event.get_extra(CORE_REPLY_CONTEXT_EXTRA).get("_perception_background_injected"))
         prepare_core_reply_telemetry(event, req, application=self.app, submit=self.queued.append, now=self.clock.now)
         return event, prepared, req
 
@@ -187,17 +249,25 @@ class CoreReplyTelemetryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         with patch("astrbot_host.core_reply_preparation.time.monotonic", side_effect=[10, 10.2]):
             with measure_core_preparation(event, "tool_injection", now=self.clock.now):
                 pass
+        with measure_core_preparation(event, "perception_injection", now=self.clock.now):
+            pass
+        with measure_core_preparation(event, "telemetry_capture", now=self.clock.now):
+            pass
         self.assertEqual(observations_for_role(self.app.runtime, prepared["context"]), [])
         observe_core_llm_response(event, response())
         self.flush(reversed_order=True)
         report = self.report(prepared["context"])
         sample = report["reply_efficiency"]["recent"][0]
         steps = sample["trace"]["preparation_steps"]
-        self.assertEqual([item["name"] for item in steps], ["context_build", "prompt_injection", "tool_injection"])
-        self.assertEqual(steps[-1]["elapsed_ms"], 200)
+        self.assertEqual([item["name"] for item in steps], ["context_build", "prompt_injection", "tool_injection",
+            "perception_injection", "telemetry_capture"])
+        self.assertEqual(steps[2]["elapsed_ms"], 200)
+        self.assertEqual(sample["timestamps"]["waiting_llm_at"], sample["received_at"])
         self.assertEqual(sample["trace"]["offered_tools"], ["read_file"])
         self.assertGreaterEqual(len(sample["trace"]["materials"]), 1)
-        self.assertTrue(any(item["state"] == "ready" for item in sample["trace"]["materials"]))
+        self.assertTrue(any(item["state"] == "ready" for item in sample["trace"]["materials"]),
+            f"background_injected={event.get_extra(CORE_REPLY_CONTEXT_EXTRA).get('_perception_background_injected')} "
+            f"instruction_chars={len(prepared.get('prompt_instruction', ''))} materials={sample['trace']['materials']!r}")
         self.assertTrue(all(type(item["elapsed_ms"]) is int for item in sample["trace"]["materials"]))
         self.assertEqual(report["reply_efficiency"]["coverage"]["core_preparation"], 1)
         self.assertEqual(report["budget"]["spent_tokens"], 0)
@@ -265,7 +335,7 @@ class CoreReplyTelemetryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     async def test_real_qq_buffered_stream_records_native_send_time_instead_of_first_chunk(self):
         record, started, stream_start, stages = await self.native_buffered_stream("qq-buffered-send-clock")
         delivery = record["delivery"]
-        self.assertEqual(stages, ["stream_started", "started", "returned", "finished"])
+        self.assertEqual(stages, ["started", "returned", "finished"])
         self.assertEqual(datetime.fromisoformat(delivery["first_started_at"]), started[0])
         self.assertNotEqual(datetime.fromisoformat(delivery["first_started_at"]), stream_start)
         self.assertEqual(datetime.fromisoformat(delivery["first_returned_at"]), stream_start + timedelta(seconds=6))
@@ -277,7 +347,7 @@ class CoreReplyTelemetryTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         record, started, stream_start, stages = await self.native_buffered_stream(
             "qq-buffered-after-tool-clock", preceding_send=True)
         delivery = record["delivery"]
-        self.assertEqual(stages, ["started", "returned", "stream_started", "started", "returned", "finished"])
+        self.assertEqual(stages, ["started", "returned", "started", "returned", "finished"])
         self.assertEqual(datetime.fromisoformat(delivery["first_started_at"]), started[0])
         self.assertEqual(datetime.fromisoformat(delivery["first_returned_at"]), started[0] + timedelta(seconds=1))
         self.assertEqual(datetime.fromisoformat(delivery["last_returned_at"]), stream_start + timedelta(seconds=6))

@@ -1,4 +1,4 @@
-"""Apply V2's opt-in text rules at native reply delivery boundaries."""
+"""Apply V2 text rules at native reply delivery boundaries."""
 
 from collections.abc import Mapping
 from contextlib import contextmanager

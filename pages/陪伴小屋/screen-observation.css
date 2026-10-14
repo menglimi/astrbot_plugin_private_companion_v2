@@ -1,0 +1,8 @@
+.screen-observation-panel{margin-top:18px;padding:18px;border:1px solid var(--t-line,#d8e1d7);border-radius:14px;background:var(--card-bg,#fff);color:inherit}
+.screen-observation-panel header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.screen-observation-panel header small{display:block;margin-top:4px;opacity:.7}
+.screen-observation-panel p{margin:12px 0;line-height:1.7;overflow-wrap:anywhere}
+.screen-observation-meta{font-size:12px;opacity:.7}
+.screen-observation-text{white-space:pre-wrap}
+.screen-observation-media{display:block;max-width:100%;max-height:540px;margin-top:14px;border-radius:8px;object-fit:contain;background:#151a16}
+@media(max-width:560px){.screen-observation-panel{padding:14px}.screen-observation-panel header{align-items:flex-start;flex-wrap:wrap}}

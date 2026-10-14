@@ -203,6 +203,21 @@ def _snapshot(state):
         logger.warning("[CompanionV2] 核心回复统计暂不可用 error_type=%s", type(error).__name__)
 
 
+@_passive
+def observe_core_waiting_llm_request(event, *, now=None):
+    """Mark AstrBot's wait-for-LLM hook without storing request content."""
+    core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    if not isinstance(core, dict) or not isinstance(core.get("prepared"), Mapping):
+        return None
+    existing = core.get("_waiting_llm_at")
+    if isinstance(existing, str) and existing:
+        return existing
+    clock = now or (lambda: datetime.now(timezone.utc))
+    observed = stamp(clock())
+    core["_waiting_llm_at"] = observed
+    return observed
+
+
 def prepare_core_reply_telemetry(event, req, *, application, submit=None, now=None):
     """Called after V2 prompt/tool injection. Persistence never runs inline."""
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
@@ -219,7 +234,8 @@ def prepare_core_reply_telemetry(event, req, *, application, submit=None, now=No
     received = getattr(native, "at", None) or moment
     record = {"version": 1, "revision": 0, "turn_id": prepared.get("turn_id") or "core-reply:" + digest([context.key, prepared.get("event_id")]),
         "event_id": prepared.get("event_id", ""), "execution_path": "astrbot_core",
-        "received_at": stamp(received), "request_hook_at": stamp(moment), "observed_at": stamp(moment),
+        "received_at": stamp(received), "waiting_llm_at": core.get("_waiting_llm_at"),
+        "request_hook_at": stamp(moment), "observed_at": stamp(moment),
         "generation_state": "prepared", "generation_finished_at": None, "agent_started_at": None,
         "request_observation_available": False, "requests": [], "tools": [],
         "request_observation_complete": None, "tool_requery_observed": False,
@@ -229,10 +245,24 @@ def prepare_core_reply_telemetry(event, req, *, application, submit=None, now=No
                      "platform_confirmed": False, "measurement_basis": "native_send_return"}}
     record["preparation_steps"] = copy.deepcopy(list(prepared.get("preparation_steps", ()))
         + list(core.get("_preparation_steps", ())))
+    materials = list(prepared.get("context_materials", ()))
+    system_prompt = _value(req, "system_prompt", "") or ""
     instruction = prepared.get("prompt_instruction", "")
-    injected = bool(instruction and instruction in (_value(req, "system_prompt", "") or ""))
-    record["materials"] = [{**item, "state": "not_injected" if item["state"] == "ready" and not injected else item["state"]}
-                           for item in prepared.get("context_materials", ())]
+    stable_instruction = prepared.get("stable_prompt_instruction", "")
+    background_injected = bool(instruction and instruction in system_prompt) or (
+        core.get("_perception_background_injected") is True)
+    stable_injected = bool(stable_instruction and stable_instruction in system_prompt)
+    injected_purposes = set()
+    stable_purposes = {"expression_preferences", "task_prompt", "role_profile"}
+    if stable_injected:
+        injected_purposes.update(stable_purposes)
+    if background_injected:
+        injected_purposes.update(item["purpose"] for item in materials
+            if item["purpose"] not in stable_purposes | {"perception"})
+    if core.get("_perception_material_injected") is True:
+        injected_purposes.add("perception")
+    record["materials"] = [{**item, "state": "not_injected" if item["state"] == "ready"
+        and item["purpose"] not in injected_purposes else item["state"]} for item in materials]
     record["offered_tools"] = [name for tool in (_value(_value(req, "func_tool"), "tools", ()) or ())
         if _value(tool, "active", True) and isinstance(name := _value(tool, "name"), str)
         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}", name)][:256]
@@ -326,10 +356,17 @@ def observe_core_agent_begin(event, run_context):
         request = None
         started = time.monotonic()
         try:
+            try:
+                from .core_reply_media_prompt import core_media_request_diagnostics
+                media = core_media_request_diagnostics(event, runner.run_context)
+            except Exception:
+                media = None
             request = {"position": len(state["record"]["requests"]) + 1, "state": "started",
                        "started_at": _at(state), "finished_at": None, "latency_ms": None,
                        "ttft_ms": None, "provider": _provider(runner), "usage": _usage(None),
                        "signature": None, "signature_scope": "runner_pre_provider", "measurement_basis": "provider_response"}
+            if media is not None:
+                request["media"] = media
             try:
                 request["signature"] = _runner_signature(runner, kwargs.get("include_model", True))
             except Exception:

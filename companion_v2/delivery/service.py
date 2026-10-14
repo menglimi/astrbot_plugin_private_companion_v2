@@ -332,6 +332,23 @@ class OutboundDelivery:
             " ORDER BY t.next_run_at, d.delivery_id LIMIT ?", (stamp(self.tasks.now()), *excluded, limit))
         return tuple((DeliveryRequest.restore(row["request_json"]).context, row["task_id"]) for row in rows)
 
+    def next_wake(self, *, excluded=()):
+        """Earliest queued delivery that can use its original kind/scope slot."""
+        if len(excluded) > 32:
+            raise ValueError("delivery exclusions must be bounded")
+        exclusions = "" if not excluded else " AND d.task_id NOT IN (" + ",".join("?" for _ in excluded) + ")"
+        row = self.runtime.read_one("""SELECT MIN(t.next_run_at) AS next_at FROM background_deliveries d
+            JOIN execution_tasks t ON t.task_id = d.task_id WHERE d.state = 'pending'
+            AND t.state IN ('created', 'retry_scheduled')
+            AND (SELECT COUNT(*) FROM execution_attempts a WHERE a.slot_held = 1 AND a.lane = 'background') < ?
+            AND (SELECT COUNT(*) FROM execution_attempts a WHERE a.slot_held = 1 AND a.kind = t.kind)
+                < json_extract(t.record_json, '$.definition.concurrency')
+            AND (SELECT COUNT(*) FROM execution_attempts a WHERE a.slot_held = 1 AND a.kind = t.kind
+                 AND a.scope_key = json_extract(t.record_json, '$.scope_key'))
+                < json_extract(t.record_json, '$.definition.per_scope_concurrency')""" + exclusions,
+            (self.tasks.limits.background_slots, *excluded))
+        return datetime.fromisoformat(row["next_at"]) if row and row["next_at"] else None
+
     def cancel_unstarted(self, task_id, *, reason):
         with self.runtime.transaction() as connection:
             task = require(self.tasks.discard_queued(task_id, reason="owner_unavailable"))

@@ -9,8 +9,8 @@ async function run({browser, outputDir}) {
   const root = path.resolve(__dirname, '../pages/日记与生活');
   const bridge = `(() => {
     const state = {role_id:'小伴', participant:'测试私聊', host_state:'running', view_token:'v1', edit_token:'c1',
-      config:{enabled:true,diary_enabled:true,diary_time:'23:50',timezone:'Asia/Shanghai',sleep_enabled:false,sleep_time:'00:30',sleep_timezone:'Asia/Shanghai',sleep_variation_minutes:20,sleep_minutes:480,reading_enabled:false,derive_enabled:true},
-      sleep_schedule:{shared:true,owner:{installation_id:'test',bot_id:'bot-test',role_id:'小伴'},enabled:true,time:'22:30',timezone:'Asia/Shanghai',variation_minutes:20,duration_minutes:480,executor_is_current:true,executor_state:'available',executor_window:{platform:'qq',account_id:'10001',native_scope_id:'20002',session_id:'20002',label:'qq · 账号 10001 · 会话 20002'},next_sleep_at:'2026-09-23T14:30:00Z',next_wake_at:'2026-09-23T22:30:00Z',active_wake_at:'2026-09-23T12:00:00Z'},
+      config:{enabled:true,diary_enabled:true,diary_time:'23:50',timezone:'Asia/Shanghai',sleep_enabled:false,sleep_time:'00:30',sleep_timezone:'Asia/Shanghai',sleep_variation_minutes:20,sleep_window_minutes:120,sleep_minutes:480,reading_enabled:false,derive_enabled:true},
+      sleep_schedule:{shared:true,owner:{installation_id:'test',bot_id:'bot-test',role_id:'小伴'},enabled:true,time:'22:30',timezone:'Asia/Shanghai',variation_minutes:20,window_minutes:120,duration_minutes:480,recommended_duration_minutes:510,physiology:{sleep_pressure:68,sleep_debt_minutes:95,workload_score:54,awake_minutes:390,has_sleep_history:true},executor_is_current:true,executor_state:'available',executor_window:{platform:'qq',account_id:'10001',native_scope_id:'20002',session_id:'20002',label:'qq · 账号 10001 · 会话 20002'},next_sleep_at:'2026-09-23T14:30:00Z',next_wake_at:'2026-09-23T22:30:00Z',active_wake_at:'2026-09-23T12:00:00Z'},
       journals:[{kind:'diary',local_date:'2026-09-23',revision:1,state:'active',body:'读到一段谈论城市和树木的文章。\\n我又想起窗边那点慢慢移动的光。<img src=x onerror="window.injected=true">',afterglow:'',summary:'读到城市与树木，想到窗边的光。',dream_fragments:[],view_token:'j1'},
         {kind:'dream',local_date:'2026-09-22',revision:1,state:'active',body:'我只记得树叶的影子。',afterglow:'有一点安静。',summary:null,dream_fragments:[],view_token:'j2'}],
       activities:[{activity_id:'book1',revision:1,kind:'reading',state:'planned',title:'城市与树木 · 1–120 字符',started_at:'2026-09-23T04:00:00Z',view_token:'a1',task:null},
@@ -62,6 +62,11 @@ async function run({browser, outputDir}) {
     assert.match(await page.locator('#sleep-executor').textContent(),/当前私聊窗口（本页）/);
     assert.doesNotMatch(await page.locator('body').innerText(),/bot-test|10001|20002/);
     assert.match(await page.locator('#sleep-active-wake').textContent(),/2026/);
+    assert.equal(await page.locator('#sleep-pressure').textContent(),'68 / 100');
+    assert.equal(await page.locator('#sleep-debt').textContent(),'95 分钟');
+    assert.equal(await page.locator('#sleep-workload').textContent(),'54 / 100');
+    assert.equal(await page.locator('#sleep-recommended').textContent(),'8.5 小时');
+    assert.equal(await page.locator('#sleep_window_minutes').inputValue(),'120');
     await layout();assert.equal(await page.evaluate(()=>window.injected),undefined);
     await capture('life-desktop');
     await page.getByRole('button',{name:'更正正文',exact:true}).click();
@@ -85,8 +90,10 @@ async function run({browser, outputDir}) {
     await page.getByRole('button',{name:'睡眠记录',exact:true}).click();await page.getByRole('button',{name:'现在醒来',exact:true}).click();
     await page.locator('#dialog-submit').click();await idle();assert.equal(await page.locator('#sleep-list .badge').textContent(),'已完成');
     await page.locator('#settings summary').click();await page.locator('#diary_time').fill('22:40');
+    await page.locator('#sleep_window_minutes').fill('75');
     await page.getByRole('button',{name:'保存设置',exact:true}).click();await idle();
     assert.equal(await page.evaluate(()=>window.pageQA.state.config.diary_time),'22:40');
+    assert.equal(await page.evaluate(()=>window.pageQA.calls.at(-1).changes.sleep_window_minutes),75);
     assert.equal(await page.evaluate(()=>window.pageQA.calls.at(-1).changes.sleep_timezone),'Asia/Shanghai');
     await page.locator('#settings summary').click();
     await page.getByRole('button',{name:'停止运行',exact:true}).click();await idle();assert.equal(await page.locator('#host-state').textContent(),'已停止');
@@ -100,7 +107,7 @@ async function run({browser, outputDir}) {
     await page.waitForFunction(()=>document.getElementById('notice').textContent==='当前账号没有本体管理权限。');
     assert.equal(await page.locator('.journal-link').count(),0);assert.equal(await page.locator('#journal-detail').textContent(),'');
     assert.deepEqual(failures,[]);
-    return {checks:'desktop/mobile 390/320px, edit/lost-response idempotency, delete/restore, reading, wake, settings, keyboard/Escape, XSS, revoked read clears content',screenshots};
+    return {checks:'desktop/mobile 390/320px, role sleep physiology, sleep window persistence, edit/lost-response idempotency, delete/restore, reading, wake, settings, keyboard/Escape, XSS, revoked read clears content',screenshots};
   }finally{await context.close();await new Promise(resolve=>server.close(resolve));}
 }
 module.exports={run};

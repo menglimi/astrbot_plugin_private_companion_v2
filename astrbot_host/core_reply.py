@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from inspect import isawaitable
 from typing import Any
 
-from companion_v2.execution.models import require
+from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
 
 
@@ -86,6 +86,7 @@ def prepare_core_reply_event(
     on_sent: OnSent | None = None,
     on_delivery: OnDelivery | None = None,
     prepare_send: PrepareSend | None = None,
+    media_submit: Callable | None = None,
 ) -> None:
     """Attach reply authorization and guard final delivery on this event."""
     state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
@@ -121,10 +122,19 @@ def prepare_core_reply_event(
                 return await state["_original_send"](message, *args, **kwargs)
             if state.get("group_participation", {}).get("mode") == "skip":
                 return None
+            if state["send_unknown"]:
+                raise TaskError("core_reply_delivery_unknown", "the platform send outcome is unknown; do not replay this reply")
+            from .core_reply_reaction_delivery import capture_core_reaction_intent
+            capture_core_reaction_intent(event, message)
+            from .core_reply_voice import capture_core_voice_message
+            message = capture_core_voice_message(event, message)
             from .core_reply_presentation import present_core_reply_message
+            voice_source = getattr(message, "_companion_v2_voice_source", _plain_text(message))
             message = present_core_reply_message(event, message, from_stream=True)
             if message is None:
                 return None
+            if state.get("_voice_authored") and hasattr(message, "chain"):
+                object.__setattr__(message, "_companion_v2_voice_source", voice_source)
             callback = state.get("prepare_send")
             if callback is not None:
                 message = callback(state["prepared"], message, authorize_delivery,
@@ -132,25 +142,40 @@ def prepare_core_reply_event(
                                    state.get("voice_segment_count", 1))
                 if isawaitable(message):
                     message = await message
-            try:
-                await authorize_delivery()
-            except BaseException:
-                from .core_reply_voice import release_pending_voice_claim
-                release_pending_voice_claim(event)
-                raise
-            state["send_attempts"] += 1
-            notify_delivery("started")
-            try:
-                result = await state["_original_send"](message, *args, **kwargs)
-            except BaseException:
-                state["send_unknown"] += 1
-                notify_delivery("unknown")
-                raise
-            state["send_returns"] += 1
-            from .core_reply_voice import commit_pending_voice_claim
-            commit_pending_voice_claim(event)
-            notify_delivery("returned")
-            notify_sent(sent_core_text(message))
+            from .core_reply_media_delivery import native_reply_messages, native_wire_message
+            from .core_reply_voice import commit_pending_voice_claim, release_pending_voice_claim
+            result = None
+            for part in native_reply_messages(event, message):
+                try:
+                    await authorize_delivery()
+                    wire = await native_wire_message(event, part)
+                except BaseException:
+                    release_pending_voice_claim(event)
+                    raise
+                state["send_attempts"] += 1
+                notify_delivery("started")
+                try:
+                    result = await state["_original_send"](wire, *args, **kwargs)
+                except BaseException:
+                    state["send_unknown"] += 1
+                    notify_delivery("unknown")
+                    raise
+                if result is False:
+                    release_pending_voice_claim(event)
+                    state["send_failed"] += 1
+                    notify_delivery("failed")
+                    raise TaskError("core_reply_platform_unavailable", "the platform did not accept this reply")
+                state["send_returns"] += 1
+                from astrbot.core.message.components import Record
+                if any(isinstance(component, Record) for component in getattr(part, "chain", ())):
+                    commit_pending_voice_claim(event)
+                notify_delivery("returned")
+                notify_sent(sent_core_text(part))
+                try:
+                    from .core_reply_reaction_delivery import observe_core_reaction_returned
+                    observe_core_reaction_returned(event, part, submit=state.get("media_submit"))
+                except Exception:
+                    pass
             return result
 
         def notify_delivery(stage: str) -> None:
@@ -271,6 +296,7 @@ def prepare_core_reply_event(
         on_sent=on_sent,
         on_delivery=on_delivery,
         prepare_send=prepare_send,
+        media_submit=media_submit,
         delivery_guard_active=False,
         denial_notified=False,
         send_attempts=0,
@@ -282,6 +308,10 @@ def prepare_core_reply_event(
     event.send = state["_send_wrapper"]
     if callable(state["_original_send_streaming"]):
         event.send_streaming = state["_streaming_wrapper"]
+    from .core_reply_voice import prepare_core_reply_voice
+    prepare_core_reply_voice(event)
+    if isinstance(prepared, Mapping) and prepared.get("reaction_reply_enabled"):
+        event.set_extra("enable_streaming", False)
 
 
 def activate_core_reply_delivery_guard(event: Any) -> None:
@@ -311,7 +341,7 @@ def restore_core_reply_event(event: Any) -> None:
 
 
 def inject_core_reply_prompt(event: Any, req: Any) -> None:
-    """Append the prepared instruction only to its associated core reply."""
+    """Append only turn-stable V2 guidance to the selected core request."""
     state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     if not isinstance(state, dict):
         return
@@ -320,44 +350,25 @@ def inject_core_reply_prompt(event: Any, req: Any) -> None:
     system_prompt = getattr(req, "system_prompt", "") or ""
     # AstrBot already constructs the selected persona and its example dialogs.
     # The captured native instruction is only an authorization fingerprint.
-    for field in ("prompt_instruction",):
-        instruction = (
-            prepared.get(field)
-            if isinstance(prepared, Mapping)
-            else getattr(prepared, field, None)
-        )
-        if not isinstance(instruction, str) or not instruction:
-            continue
-        if instruction in system_prompt:
-            continue
-        system_prompt = (
-            f"{system_prompt.rstrip()}\n\n{instruction}"
-            if system_prompt.strip()
-            else instruction
-        )
+    previous = state.pop("_stable_prompt_instruction", None)
+    if isinstance(previous, str) and previous and previous in system_prompt:
+        system_prompt = system_prompt.replace(previous, "", 1).rstrip()
+    instruction = (prepared.get("stable_prompt_instruction") if isinstance(prepared, Mapping)
+                   else getattr(prepared, "stable_prompt_instruction", None))
+    if isinstance(instruction, str) and instruction:
+        if instruction not in system_prompt:
+            system_prompt = (f"{system_prompt.rstrip()}\n\n{instruction}"
+                             if system_prompt.strip() else instruction)
+        state["_stable_prompt_instruction"] = instruction
     req.system_prompt = system_prompt
-    from .core_reply_voice import prepare_core_reply_voice
+    from .core_reply_voice import prepare_core_reply_voice, voice_prompt_instruction
+    voice_instruction = voice_prompt_instruction(
+        prepared.get("voice_reply_policy") if isinstance(prepared, Mapping) else None,
+        prepared.get("voice_provider_instruction", "") if isinstance(prepared, Mapping) else "")
+    previous_voice = state.pop("_voice_prompt_instruction", None)
+    if previous_voice and previous_voice in req.system_prompt:
+        req.system_prompt = req.system_prompt.replace(previous_voice, "", 1).rstrip()
+    if voice_instruction:
+        req.system_prompt = (req.system_prompt.rstrip() + "\n\n" + voice_instruction).lstrip()
+        state["_voice_prompt_instruction"] = voice_instruction
     prepare_core_reply_voice(event)
-    if state.get("_reply_segmentation") or state.get("_group_segmentation"):
-        from .core_reply_segmentation import segmentation_instruction
-        instruction = segmentation_instruction(event, request=req)
-        if instruction and instruction not in req.system_prompt:
-            req.system_prompt = req.system_prompt.rstrip() + "\n\n" + instruction
-    admission = prepared.get("group_admission") if isinstance(prepared, Mapping) else None
-    if isinstance(admission, Mapping) and not admission.get("mentioned"):
-        from companion_v2.conversation.group_admission import REASONS
-        hint = ("本轮没有明确 @，入站候选依据是：" + REASONS.get(admission.get("reason"), "原人格自主判断参与")
-                + "。候选只表示可以考虑参与，默认旁听；弱相关词不代表在叫你，近期同一成员发言也不代表仍在对你说话。"
-                "没有清楚的参与邀请、他人在交流、已有回答或近期已说够时，调用 group.participation.choose 选择 skip，"
-                "决定接话时先记录 mode=reply 和简短 reason。")
-        policy = admission.get("participation_policy") or {}
-        if policy.get("question_enabled") is False:
-            hint += "本群答疑已关闭，不能因未点名的问题或求助抢答。"
-        if policy.get("interjection_enabled") is False:
-            hint += "本群自主插话已关闭，不能把弱相关候选当成插话邀请。"
-        reference = admission.get("question_reference")
-        if isinstance(reference, Mapping):
-            hint += (f"本轮答疑参考评分 {reference.get('score', 0)}/100，阈值 {policy.get('question_threshold', 65)}/100；"
-                     "达到阈值仍须判断问题是否向你开放以及是否需要回答。")
-        if hint not in req.system_prompt:
-            req.system_prompt = req.system_prompt.rstrip() + "\n\n" + hint

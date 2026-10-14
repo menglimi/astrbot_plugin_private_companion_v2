@@ -11,6 +11,8 @@ from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import RoleOwnerRef, SourceRef, VersionRef
 from companion_v2.sources.models import SourceRecord
 from companion_v2.role_work.models import RoleActivity, RoleActivityState as State
+from companion_v2.role_work.life.physiology import (nap_ready, night_sleep_ready,
+    recommended_sleep_minutes, sleep_receipt)
 from companion_v2.role_work.work_models import RoleWorkSpec
 from companion_v2.role_work.journal.models import JournalKind
 
@@ -134,28 +136,36 @@ class RoleLifeRuntime:
         require(self.app.configuration.report_application(self.context.actor, snapshot=snapshot,
             generation=generation, succeeded=True, observed_at=self.app.now()))
 
-    def start_sleep(self, request_id, minutes, *, label="角色开始一段睡眠"):
+    def start_sleep(self, request_id, minutes, *, label="角色开始一段睡眠", sleep_kind="manual"):
         with self.runtime.transaction():
-            return self._start_sleep(request_id, minutes, label=label)
+            return self._start_sleep(request_id, minutes, label=label, sleep_kind=sleep_kind)
 
-    def _start_sleep(self, request_id, minutes, *, label):
+    def _start_sleep(self, request_id, minutes, *, label, sleep_kind):
         self.authorize()
         if type(minutes) is not int or not 1 <= minutes <= 1440:
             raise ValueError("sleep duration must be 1..1440 minutes")
+        if sleep_kind not in ("night", "nap", "manual"):
+            raise ValueError("unknown sleep kind")
         identifier = "sleep-" + digest([self.context.key, request_id])
         try:
             return self.activity(identifier)
         except TaskError as error:
             if error.code != "life_activity_unavailable":
                 raise
-        if self.app.role_state.body_clock.active(self.context, "sleep"):
+        if self.app.role_state.body_clock.pending_sleep(self.context):
             raise TaskError("life_already_sleeping", "there is already an active sleep")
         if self.app.role_state.body_clock.active(self.context, "reading"):
             raise TaskError("life_reading_active", "wait for the current reading or cancel it before sleeping")
         now = self.app.now()
-        work = RoleWorkSpec("sleep", self.context.key, request_id, due_at=now + timedelta(minutes=minutes))
+        base_need = self.settings["sleep_minutes"] if self.settings else minutes
+        profile = self.app.role_state.body_clock.profile(self.context, now=now)
+        target = (25 if sleep_kind == "nap" else recommended_sleep_minutes(base_need,
+            profile["sleep_debt_minutes"], profile["workload_score"])) if sleep_kind != "manual" else minutes
+        receipt = sleep_receipt(kind=sleep_kind, base_need_minutes=base_need, target_minutes=target,
+            workload_score=profile["workload_score"], sleep_debt_minutes=profile["sleep_debt_minutes"])
+        work = RoleWorkSpec("sleep", self.context.key, request_id, due_at=now + timedelta(minutes=target))
         saved = self.app.role_life.add_activity(RoleActivity(identifier, self.owner.persona_id,
-            self.context.scope, now, State.ACTIVE, description=label, work=work))
+            self.context.scope, now, State.ACTIVE, description=label, work=work, sleep=receipt))
         self.app.notify()
         return saved
 
@@ -164,8 +174,7 @@ class RoleLifeRuntime:
         a = self.activity(identifier)
         if a.work.kind != "sleep" or self.app.now() <= a.started_at:
             raise TaskError("life_sleep_invalid", "sleep must actually have started before waking")
-        saved = self.app.role_life.transition_activity(identifier, owner=self.owner,
-            expected_revision=expected_revision, state=State.COMPLETED, operation_id=operation_id,
+        saved = self.app.role_state.body_clock.finish(self.context, a, operation_id=operation_id,
             observed_at=self.app.now(), checkpoint="已醒来，梦境由独立任务记录")
         self.app.notify()
         return saved
@@ -280,6 +289,7 @@ class RoleLifeRuntime:
                 return
             self.authorize()
             now = self.app.now()
+            self.app.role_state.body_clock.resume_due(self.context, observed_at=now)
             for sleeping in self.app.role_state.body_clock.active(self.context, "sleep"):
                 if sleeping.work.due_at <= now:
                     self.launch("wake:" + sleeping.activity_id, self._wake_shared_due)
@@ -293,20 +303,34 @@ class RoleLifeRuntime:
                 elif a.work.kind == "sleep" and a.state is State.COMPLETED and a.activity_id not in self._dreams:
                     self._dreams.add(a.activity_id)
                     self.launch(a.activity_id, lambda a=a: self.dream(a))
-            busy = self._workers or any(a.state is State.ACTIVE for a in records) or self.app.role_state.body_clock.active(self.context, "sleep")
+            pending_sleep = self.app.role_state.body_clock.pending_sleep(self.context)
+            busy = self._workers or any(a.state is State.ACTIVE for a in records) or pending_sleep
             if (self._next_sleep is not None and self._next_sleep <= now and not busy
                     and self.app.life_runtime.owns_sleep_schedule(self)):
                 zone = self.settings["sleep_timezone"]
                 local_now = now.astimezone(ZoneInfo(zone))
                 due_day = self._next_sleep.astimezone(ZoneInfo(zone)).date()
-                self._next_sleep = next_bedtime(now + timedelta(microseconds=1), self.owner, zone,
-                    time.fromisoformat(self.settings["sleep_time"]), self.settings["sleep_variation_minutes"])
-                self._next_wake = self._next_sleep + timedelta(minutes=self.settings["sleep_minutes"])
-                if due_day != local_now.date() and local_now.time().replace(tzinfo=None) < time.fromisoformat(self.settings["sleep_time"]):
+                if not (due_day != local_now.date()
+                        and local_now.time().replace(tzinfo=None) < time.fromisoformat(self.settings["sleep_time"])):
+                    profile = self.app.role_state.body_clock.profile(self.context, now=now)
+                    window_closed = now >= self._next_sleep + timedelta(minutes=self.settings["sleep_window_minutes"])
+                    if night_sleep_ready(profile) or window_closed:
+                        self._next_sleep = next_bedtime(now + timedelta(microseconds=1), self.owner, zone,
+                            time.fromisoformat(self.settings["sleep_time"]), self.settings["sleep_variation_minutes"])
+                        self._next_wake = self._next_sleep + timedelta(minutes=self.settings["sleep_minutes"])
+                        self.start_sleep("daily-sleep-" + due_day.isoformat(),
+                            self.settings["sleep_minutes"], sleep_kind="night")
+                        return
+            local_now = now.astimezone(ZoneInfo(self.settings["sleep_timezone"]))
+            profile = self.app.role_state.body_clock.profile(self.context, now=now)
+            if (self.settings["sleep_enabled"] and not busy
+                    and nap_ready(profile, local_minutes=local_now.hour * 60 + local_now.minute)):
+                today = local_now.date().isoformat()
+                if not any(item.sleep and item.sleep.kind == "nap" and item.started_at.astimezone(
+                        ZoneInfo(self.settings["sleep_timezone"])).date().isoformat() == today
+                        for item in self.app.role_state.body_clock.episodes(self.context)):
+                    self.start_sleep("daily-nap-" + today, 25, label="角色短暂午休", sleep_kind="nap")
                     return
-                day = now.astimezone(ZoneInfo(zone)).date().isoformat()
-                self.start_sleep("daily-sleep-" + day, self.settings["sleep_minutes"])
-                return
             if self.settings["reading_enabled"] and not busy:
                 queued = next(iter(sorted((a for a in records if a.work.kind == "reading" and a.state is State.PLANNED),
                     key=lambda a: (a.started_at, a.work.source.source_id, a.work.start_offset))), None)

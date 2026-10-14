@@ -1,4 +1,4 @@
-import pathlib, json
+import pathlib, json, sys
 
 page = pathlib.Path("pages/陪伴小屋")
 tokens = (page / "tokens.css").read_text(encoding="utf-8")
@@ -127,7 +127,8 @@ status = {
     "host_state": "running",
 }
 
-DEST = pathlib.Path("docs/page-designs/contact-rhythm-preview.html")
+TEMPLATE = pathlib.Path("docs/page-designs/contact-rhythm-preview.html")
+DEST = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else TEMPLATE
 CSS_MARK = "/* ===== contact-page.css 原样内联 ===== */"
 JS_MARK = "/* ===== contact-page.js 原样内联（预览与真页面同一个文件） ===== */"
 HEAD_MARK = "/* ===== tokens.css 整份内联（含 :root 尺寸/字号令牌） ===== */"
@@ -177,6 +178,8 @@ def splice(previous):
 
 if DEST.exists():
     out = splice(DEST.read_text(encoding="utf-8"))
+elif TEMPLATE.exists():
+    out = splice(TEMPLATE.read_text(encoding="utf-8"))
 else:
     raise SystemExit("没有可以续写的生成页：" + str(DEST) +
                      "（模板已不再依赖仓库外的临时目录，但首次仍需一份带壳的生成页）")

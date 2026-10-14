@@ -177,14 +177,19 @@
   const topologyScope = (target) => {
     const kind = target?.scope_kind === "group" || target?.group_id ? "群" : "私聊";
     const id = nativeId(target.group_id || target.participant_id);
-    return `${kind} ${target.display_name ? target.display_name + (id ? `（${id}）` : "") : id || "当前对象"}`;
+    const name = groupDisplayName(target) || (kind === "私聊" ? String(target.display_name || "").trim() : "");
+    return `${kind} ${name ? name + (id ? `（${id}）` : "") : id || "当前对象"}`;
   };
   const accountChoiceLabel = item => {
     const id = nativeId(item.account_id || item.account);
     const name = item.account_name || item.name;
     return name ? name + (id ? `（${id}）` : "") : id ? `账号 ${id}` : "待确认账号";
   };
-  const personaName = name => !name || name === "[%None]" ? "默认人格" : name;
+  const groupDisplayName = item => {
+    const display = String(item?.display_name || item?.group_name || "").trim();
+    return display && !/^\d+$/.test(display) ? display : "";
+  };
+  const personaName = name => name === "[%None]" ? "未指定人格" : !name ? "未确定人格" : name;
   const personaLabel = item => personaName(item.name || item.personaId);
   const topologySessionPinKey = row => row?.session_key ? `session:${row.session_key}`
     : row?.managed && row.target_id ? `target:${row.target_id}` : "";
@@ -230,7 +235,7 @@
       return accounts.get(key);
     };
     const ensurePersona = (botId, nativePersonaId) => {
-      const personaId = nativePersonaId || "[%None]";
+      const personaId = nativePersonaId == null ? "" : String(nativePersonaId);
       const key = "persona:" + JSON.stringify([botId, personaId]);
       if (!personas.has(key)) personas.set(key, {key, botId, personaId,
         name: personaName(personaId), roleId: "", roleKey: "", accountKeys: new Set(), sessionKeys: new Set()});
@@ -268,8 +273,7 @@
     }
     targets.forEach((target, targetIndex) => {
       const account = ensureAccount(target);
-      const listedPersonas = (target.roles || []).flatMap((role) => role.persona_ids || []);
-      const personaId = String(target.persona_override || target.persona_id || listedPersonas[0] || "[%None]");
+      const personaId = String(target.persona_override || target.persona_id || "");
       const detailsAvailable = target.details_available !== false;
       const persona = detailsAvailable ? ensurePersona(account.bot_id, personaId) : null;
       const mapping = persona ? mappedPersonas.get(JSON.stringify([account.bot_id, personaId])) : null;
@@ -1045,10 +1049,11 @@
   const bindingAccountKey = (row) => `${row.platform_id}|${row.account_id}|${row.bot_id}`;
   function personaHasNativeWindow(persona, account) {
     const targets = bindingConfig?.discovered?.targets || [];
-    const personaId = String(persona?.persona_id || "[%None]");
+    const personaId = String(persona?.persona_id ?? "");
+    if (!personaId) return false;
     return targets.some(target => target?.native && String(target.bot_id || "") === String(persona.bot_id || "")
       && (!account || (target.platform_id === account.platform_id && target.account_id === account.account_id))
-      && (String(target.persona_id || "[%None]") === personaId
+      && (String(target.persona_id ?? "") === personaId
         || String(target.persona_override || "") === personaId
         || (target.roles || []).some(role => (role.persona_ids || []).map(String).includes(personaId))));
   }
@@ -1241,13 +1246,18 @@
     const accounts = discovered.accounts || bindingConfig?.accounts || [];
     const rows = new Map();
     const add = (target, account, native) => {
+      const name = groupDisplayName(target);
       const row = {platform_id: account?.platform_id || target.platform_id || "",
         account_id: account?.account_id || target.account_id || "", bot_id: account?.bot_id || target.bot_id || "",
-        group_id: String(target.group_id || ""), account, native};
+        group_id: String(target.group_id || ""), display_name: name, group_name: name, account, native};
       if (!row.group_id || row.group_id === "*") return;
       const key = groupRouteKey(row);
       const previous = rows.get(key);
-      rows.set(key, {...previous, ...row, native: Boolean(previous?.native || native)});
+      const merged = {...previous, ...row, native: Boolean(previous?.native || native)};
+      const previousName = groupDisplayName(previous);
+      const resolvedName = name || previousName;
+      if (resolvedName) merged.display_name = merged.group_name = resolvedName;
+      rows.set(key, merged);
     };
     for (const target of discovered.targets || []) {
       if (!(target.scope_kind === "group" || target.group_id) || target.native !== true || !target.group_id
@@ -1339,8 +1349,9 @@
         input.checked = selected.has(groupRouteKey(row));
         const copy = document.createElement("span");
         copy.className = "group-target-copy";
-        appendText(copy, "strong", `群 ${row.group_id}`);
-        appendText(copy, "small", `${row.account ? accountChoiceLabel(row.account) : "账号待确认"} · ${row.native ? "已发现" : "当前已启用，暂未发现"}`);
+        const name = groupDisplayName(row);
+        appendText(copy, "strong", name ? `群 ${name}` : `群 ${row.group_id}`);
+        appendText(copy, "small", `${name ? `群号 ${row.group_id} · ` : ""}${row.account ? accountChoiceLabel(row.account) : "账号待确认"} · ${row.native ? "已发现" : "当前已启用，暂未发现"}`);
         label.append(input, copy);
         input.addEventListener("change", markGroupTargetsDirty);
         return label;

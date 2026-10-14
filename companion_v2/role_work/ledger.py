@@ -100,7 +100,7 @@ class PersistentRoleLifeLedger:
         return tuple(activity_from_json(row["record_json"]) for row in rows)
 
     def transition_activity(self, activity_id, *, owner, expected_revision, state,
-                            operation_id, checkpoint=None, observed_at=None, reading=None, work=None) -> RoleActivity:
+                            operation_id, checkpoint=None, observed_at=None, reading=None, work=None, sleep=None) -> RoleActivity:
         key = self._owner_key(owner)
         at = self.now() if observed_at is None else observed_at
         with self.runtime.transaction() as connection:
@@ -115,6 +115,8 @@ class PersistentRoleLifeLedger:
                 parameters.append(document)
             if work is not None:
                 parameters.append(work)
+            if sleep is not None:
+                parameters.append(sleep)
             receipt = require(self.operations.reserve(operation, parameter_hash=digest(parameters), observed_at=at))
             if receipt.replayed:
                 saved = connection.execute("SELECT result_json FROM role_life_operations WHERE operation_id = ? AND owner_key = ?",
@@ -123,7 +125,7 @@ class PersistentRoleLifeLedger:
                     raise ReferenceValidationError("original role activity operation is incomplete")
                 return activity_from_json(saved["result_json"])
             updated = advance_activity(activity, expected_revision=expected_revision, state=state,
-                                       observed_at=at, checkpoint=checkpoint, reading=reading, work=work)
+                                       observed_at=at, checkpoint=checkpoint, reading=reading, work=work, sleep=sleep)
             self._remember_revision(connection, activity)
             changed = connection.execute("""UPDATE role_activities SET revision = ?, state = ?, updated_at = ?, record_json = ?
                 WHERE owner_key = ? AND activity_id = ? AND revision = ?""",

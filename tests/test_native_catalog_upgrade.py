@@ -43,6 +43,19 @@ class NativeCatalogUpgradeTests(G6Fixture):
         self.assertEqual(self.runtime.read_all("SELECT * FROM capability_authorizations WHERE capability_id = ?",
                                                ("screen.new.action",)), ())
 
+    def test_loaded_native_update_keeps_authority_and_repeated_registration_is_idle(self):
+        self.enable_screen()
+        self.upgrade().unwrap()
+        before = tuple(dict(row) for row in self.runtime.read_all("SELECT * FROM capability_authorizations", ()))
+        new = replace(self.replacement(), package_version="2.1.1")
+        for _ in range(2):
+            register_native_replacement(self.runtime, new, previous_package_id=new.package_id,
+                                        observed_at=NOW).unwrap()
+            installed = self.capabilities.installation(extension_id=new.extension_id).unwrap()
+            self.assertEqual((installed.package_version, installed.revision), ("2.1.1", 3))
+            self.assertEqual(before, tuple(dict(row) for row in self.runtime.read_all(
+                "SELECT * FROM capability_authorizations", ())))
+
     def test_unknown_publisher_or_data_owner_fails_without_modifying_installation(self):
         self.enable_screen()
         before = self.capabilities.installation(extension_id=descriptor().extension_id).unwrap()

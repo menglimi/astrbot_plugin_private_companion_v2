@@ -5,6 +5,7 @@ import hashlib
 import threading
 from unittest.mock import patch
 
+from companion_v2.execution.models import TaskError
 from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
 from companion_v2.foundation.refs import AssetRef, AudienceRef, ReferenceValidationError, SourceRef, SubjectRef, SubjectKind, VersionRef
 from companion_v2.identity_policy.directory import IdentityDirectory
@@ -279,6 +280,16 @@ class ScreenPipelineTests(G6Fixture):
         self.assertEqual(self.process().failure.code, "screen_processing_unresolved")
         self.assertEqual(self.model.calls, 0)
         self.assertEqual(self.runtime.read_one("SELECT state FROM operations", ())["state"], "unknown")
+
+    def test_model_task_error_keeps_its_code_without_repeating_processing(self) -> None:
+        def fail():
+            raise TaskError("screen_interpretation_invalid", "the returned interpretation was invalid")
+        self.model = LocalRole(fail)
+        result = self.process()
+        self.assertEqual(result.failure.code, "screen_interpretation_invalid")
+        self.assertEqual(result.failure.reason, "the returned interpretation was invalid")
+        self.assertEqual(self.process().failure.code, "screen_processing_unresolved")
+        self.assertEqual(self.model.calls, 1)
 
     def test_result_commit_before_receipt_loss_recovers_without_reprocessing(self) -> None:
         with patch.object(OperationRepository, "transition", side_effect=RuntimeError("lost completion ACK")):

@@ -607,6 +607,38 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(task.state, "succeeded")
         self.assertEqual((self.called, self.sent), ([], []))
 
+    async def test_failed_contact_tasks_release_decision_allowance(self):
+        app = await self.enabled()
+        self.settings(app, {"max_attempts_24h": 1}).unwrap()
+
+        async def skip(_envelope):
+            return answered('{"decision":"skip","text":""}')
+
+        self.model_behavior = skip
+        task = (await self.contact(app)).unwrap().task
+        self.assertEqual(task.state, "succeeded")
+        preferences = self.preferences(app)
+        usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
+        self.assertEqual((usage["session"]["used"], usage["relationship"]["used"]), (1, 1))
+        with self.assertRaises(TaskError) as exhausted:
+            app.proactive.budget.attempts(self.contact_context(), preferences, self.clock.now())
+        self.assertEqual(exhausted.exception.code, "contact_attempt_budget")
+
+        for state in ("failed", "cancelled", "expired", "dead_letter"):
+            with app.runtime.transaction() as connection:
+                connection.execute("UPDATE execution_tasks SET state = ? WHERE task_id = ?", (state, task.task_id))
+            usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
+            self.assertEqual((usage["session"]["used"], usage["relationship"]["used"]), (0, 0), state)
+            app.proactive.budget.attempts(self.contact_context(), preferences, self.clock.now())
+
+    async def test_administrator_diagnostic_surfaces_local_model_budget_deferral(self):
+        app = await self.enabled(budget=BudgetPolicy(*(Amount(1, 100_000) for _ in range(5))))
+
+        result = await self.contact(app, administrator_test=True)
+
+        self.assertEqual(result.failure.code, "model_budget_exhausted")
+        self.assertEqual((self.called, self.sent), ([], []))
+
     async def test_administrator_delivery_tests_bypass_contact_windows_and_do_not_consume_daily_limits(self):
         app = await self.enabled()
         self.settings(app, {"max_attempts_24h": 0, "max_contacts_24h": 0,

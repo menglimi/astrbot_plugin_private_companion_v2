@@ -14,10 +14,68 @@ from astrbot.core.tools.message_tools import SendMessageToUserTool
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, prepare_core_reply_event
 from astrbot_host.core_reply_native_send import inject_core_reply_send_tool
 from companion_v2.execution.models import TaskError
+from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 from companion_v2.foundation.outcome import Outcome
 
 
 class CoreReplyNativeSendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_tool_missing_speech_uses_current_runner_before_platform_delivery(self):
+        from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+        from astrbot.core.message.components import Plain, Record
+        from astrbot_host.core_reply_voice import prepare_core_reply_voice_message
+        from astrbot_host.core_reply_voice_authoring import bind_core_voice_authoring, restore_core_voice_authoring
+        from tests.test_core_reply_voice_authoring import Provider
+        event, wrapper, tool = self.prepare()
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        state["prepared"]["voice_reply_policy"] = VoiceReplyPolicy(generation_mode="model_tag", language="ja",
+            foreign_text_mode="translation")
+        runner = ToolLoopAgentRunner()
+        request = ProviderRequest(prompt="在干嘛呢")
+        provider = Provider("<pc_tts>君と話してるよ。</pc_tts>我在陪你聊天呀。")
+        await runner.reset(provider=provider, request=request, run_context=NS(context=NS(event=event), messages=[]),
+            tool_executor=None, agent_hooks=None)
+        bind_core_voice_authoring(event, runner)
+        rendered = []
+        async def render(_, text, **__):
+            rendered.append(text)
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+        async def prepare(current, message, check, index, count):
+            return await prepare_core_reply_voice_message(event, current, message, renderer=render,
+                delivery=None, authorize=check)
+        state["prepare_send"] = prepare
+        try:
+            await tool.call(wrapper, messages=[{"type":"plain", "text":"我在陪你聊天呀。"}])
+        finally:
+            restore_core_voice_authoring(event)
+        chains = [call.args[1] for call in self.platform.send_by_session.call_args_list]
+        self.assertEqual([[type(component) for component in chain.chain] for chain in chains], [[Plain], [Record]])
+        self.assertEqual(rendered, ["君と話してるよ。"])
+        self.assertEqual(chains[0].get_plain_text(), "我在陪你聊天呀。")
+        self.assertIs(runner.req, request)
+        self.assertIsNone(provider.calls[0]["func_tool"])
+
+    async def test_native_tool_voice_is_captured_before_text_replacement_without_response_hook(self):
+        from astrbot.core.message.components import Plain, Record
+        from astrbot_host.core_reply_voice import prepare_core_reply_voice_message
+        event, wrapper, tool = self.prepare()
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        state["prepared"].update(voice_reply_policy=VoiceReplyPolicy(generation_mode="model_tag", language="ja",
+            foreign_text_mode="translation"), presentation_settings={"content_replacement_enabled": True,
+            "content_replacements": '["晚安 => 早点休息"]'})
+        rendered = []
+        async def render(_, text, **__):
+            rendered.append(text)
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+        async def prepare(current, message, check, index, count):
+            return await prepare_core_reply_voice_message(event, current, message, renderer=render,
+                delivery=None, authorize=check)
+        state["prepare_send"] = prepare
+        await tool.call(wrapper, messages=[{"type": "plain", "text": "<pc_tts>おやすみ。</pc_tts>晚安。"}])
+        chains = [call.args[1] for call in self.platform.send_by_session.call_args_list]
+        self.assertEqual(rendered, ["おやすみ。"])
+        self.assertEqual([[type(component) for component in chain.chain] for chain in chains], [[Plain], [Record]])
+        self.assertEqual(chains[0].get_plain_text(), "早点休息。")
+
     def prepare(self, *, platform=True):
         event = PipelineEvent()
         self.platform = NS(meta=lambda: NS(id="qq-main"), send_by_session=AsyncMock())
@@ -130,3 +188,43 @@ class CoreReplyNativeSendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sent", result.lower())
         self.platform.send_by_session.assert_awaited_once()
         self.assertEqual(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["send_returns"], 1)
+
+    def attach_voice(self, event):
+        from astrbot_host.core_reply_voice import prepare_core_reply_voice_message
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        state["prepared"]["voice_reply_policy"] = VoiceReplyPolicy()
+        render = AsyncMock(return_value={"type": "record", "data": {"file": "base64://YQ=="}})
+        async def prepare(current, message, authorize, index, count):
+            return await prepare_core_reply_voice_message(event, current, message,
+                renderer=render, delivery=None, authorize=authorize)
+        state["prepare_send"] = prepare
+        return render
+
+    async def test_native_media_tool_also_synthesizes_and_separates_qq_voice(self):
+        from astrbot.core.message.components import Plain, Record
+        event, wrapper, tool = self.prepare()
+        render = self.attach_voice(event)
+        await tool.call(wrapper, messages=[{"type": "plain", "text": "你好"}])
+        self.assertEqual(self.platform.send_by_session.await_count, 2)
+        self.assertEqual([[type(part) for part in call.args[1].chain]
+                          for call in self.platform.send_by_session.await_args_list], [[Plain], [Record]])
+        render.assert_awaited_once()
+        self.assertEqual(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["send_returns"], 2)
+
+    async def test_partially_sent_voice_tool_records_text_and_never_replays_the_prefix(self):
+        event, wrapper, tool = self.prepare()
+        self.attach_voice(event)
+        async def disconnect_after_text(*_):
+            self.host.platform_manager.platform_insts = []
+        self.platform.send_by_session.side_effect = disconnect_after_text
+        arguments = {"messages": [{"type": "plain", "text": "你好"}]}
+        with self.assertRaises(TaskError):
+            await tool.call(wrapper, **arguments)
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        self.assertEqual((state["send_returns"], state["send_failed"], state["send_unknown"]), (1, 1, 0))
+        self.assertEqual(self.observed, ["你好"])
+        self.assertIn("你好", event.get_extra("_send_message_to_user_current_session_plain_texts"))
+        self.host.platform_manager.platform_insts = [self.platform]
+        with self.assertRaises(TaskError):
+            await tool.call(wrapper, **arguments)
+        self.platform.send_by_session.assert_awaited_once()

@@ -9,6 +9,7 @@ import inspect
 import json
 from typing import Awaitable, Callable, Protocol
 
+from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import OperationRef, ReferenceValidationError, SubjectRef, VersionRef, normalize_utc
 from companion_v2.identity_policy.models import ResolvedIdentity
@@ -128,6 +129,9 @@ class ScreenProcessingPipeline:
             interpreted = self._role_port.interpret(request)
             if inspect.isawaitable(interpreted):
                 interpreted = await interpreted
+        except TaskError as error:
+            self._mark_unknown(operation)
+            return Outcome.failed(error.code, str(error))
         except Exception:
             self._mark_unknown(operation)
             return Outcome.failed("screen_processing_unknown", "processing did not return a confirmed result")

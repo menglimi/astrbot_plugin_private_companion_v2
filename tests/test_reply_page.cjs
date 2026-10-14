@@ -52,7 +52,7 @@ const DEFAULTS = {
   file_understanding_private_enabled: true, file_understanding_group_enabled: true,
   file_understanding_max_size_mb: 8, file_understanding_max_chars: 24000,
   file_understanding_timeout_seconds: 15, file_understanding_prompt: '',
-  style_prompt: '', content_cleanup_enabled: false, content_cleanup_mode: 'words',
+  style_prompt: '', content_cleanup_enabled: true, content_cleanup_mode: 'words',
   content_cleanup_scope: 'all', content_cleanup_rule: '[\\n]', content_cleanup_words: '["\\n"]',
   content_replacement_enabled: false, content_replacements: '[]', framework_error_guard_enabled: true,
   enable_forbidden_word_recall: false, recall_forbidden_words: '[]', recall_forbidden_scope: 'bot_and_group',

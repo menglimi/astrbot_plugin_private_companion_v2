@@ -6,7 +6,7 @@ import json
 from companion_v2.foundation.refs import AssetRef, RoleOwnerRef, ScopeRef, SourceRef, VersionRef
 
 from .models import (RoleActivity, RoleActivityState, RoleArtifact, RoleArtifactJournalMeaning,
-                     RoleArtifactKind, RoleReadingReceipt)
+                     RoleArtifactKind, RoleReadingReceipt, RoleSleepReceipt)
 from .work_models import RoleWorkSpec
 
 
@@ -26,10 +26,14 @@ def activity_from_json(payload: str) -> RoleActivity:
     if reading is not None:
         reading = RoleReadingReceipt(**{**reading, "source": source_from_document(reading["source"]),
             "completed_at": datetime.fromisoformat(reading["completed_at"])})
+    sleep = data.get("sleep")
+    if sleep is not None:
+        sleep = RoleSleepReceipt(**{**sleep,
+            "wake_until": datetime.fromisoformat(sleep["wake_until"]) if sleep.get("wake_until") else None})
     return RoleActivity(**{**data, "scope": ScopeRef.restore(data["scope"]),
         "state": RoleActivityState(data["state"]), "started_at": datetime.fromisoformat(data["started_at"]),
         "updated_at": datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else None,
-        "reading": reading, "work": work})
+        "reading": reading, "work": work, "sleep": sleep})
 
 
 def artifact_from_json(payload: str) -> RoleArtifact:

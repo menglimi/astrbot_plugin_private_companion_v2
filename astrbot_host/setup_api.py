@@ -15,6 +15,7 @@ from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.proactive.configuration import PURPOSES
+from companion_v2.proactive.diagnostic_models import DiagnosticSourceError
 from companion_v2.proactive.management import ContactManagement
 from companion_v2.proactive.scheduling import DIAGNOSTIC_ENVIRONMENT_VARIANTS
 from companion_v2.sources.privacy import redact_text
@@ -33,16 +34,20 @@ logger = logging.getLogger(__name__)
 PROACTIVE_TEST_SUGGESTIONS = {
     "contact_permission_required": "在核心管理员私聊的主动联系设置中启用主动联系授权。",
     "model_task_unregistered": "为核心管理员角色配置并启用 proactive.compose 模型任务。",
-    "contact_attempt_budget": "到「主动联系 → 额度与去重」查看或调整“24 小时内最多尝试”，也可以等旧尝试滚出 24 小时窗口后重测。跳过或未投递的尝试同样计入。",
-    "contact_relationship_attempt_budget": "该关系下所有私聊窗口的 24 小时尝试额度已用完；请检查关系级额度，或等旧尝试滚出 24 小时窗口后重测。",
+    "contact_attempt_budget": "到「主动联系 → 额度与去重」查看或调整“24 小时内最多尝试”；完成的跳过算一次决策，失败、过期、取消和死信任务不计入，仍在处理或任务状态不确定时会临时保留额度；模型实际用量单独记账。",
+    "contact_relationship_attempt_budget": "该关系下所有私聊窗口共享 24 小时决策额度；完成的跳过算一次决策，失败、过期、取消和死信任务不计入，仍在处理或任务状态不确定时会临时保留额度。请检查关系级额度及使用量。",
     "contact_delivery_budget": "到「主动联系 → 额度与去重」查看“24 小时内最多联系”；已有投递仍占用额度，等待窗口恢复后重测。",
     "contact_relationship_delivery_budget": "该关系下所有私聊窗口的 24 小时投递额度已用完；请检查关系级额度和未决投递，或等待窗口恢复。",
     "contact_purpose_paused": "检查所选目的的暂停状态和恢复时间。",
     "contact_quiet_hours": "当前处于静默时段；结束后再运行测试。",
     "delivery_result_unknown": "投递结果未知；先核对核心管理员私聊，不要重放这次尝试。",
     "delivery_failed": "检查 OneBot 私聊连接、机器人在线状态和平台返回错误。",
-    "contact_diagnostic_source_required": "当前用途没有有效来源。日常话题需要一轮已完成的真实私聊；外部资讯需要配置来源并读到当前条目；天气变化需要两次新鲜观测；预警和余额需要各自的宿主数据源可用。先补齐来源再运行，不会用通用文案替代。",
+    "contact_diagnostic_source_required": "展开技术详情查看本次没有测试机会的原因。关系表达类使用已完成的私聊窗口和用途设置；事件类需要当前有效事件来源。没有候选时不会调用模型。",
     "contact_weather_unavailable": "检查角色地点与天气观测设置，并确认 Open-Meteo 或已配置的和风凭据可访问；刷新后先在状态页确认出现当前观测。",
+    "contact_news_unavailable": "检查当前资讯源的网络抓取结果与条目发布时间；真实测试不会用合成新闻替代。",
+    "screen_peek_unavailable": "检查当前私聊已配置的截图设备、识屏开关与窥屏授权。",
+    "screen_diagnostic_pending": "本次截图或视觉分析任务仍未结束；先核对该任务和设备记录，结果确认前不要重新运行。",
+    "screen_peek_unknown": "设备截图结果未确认；核对该截图任务与设备记录，不要重放。",
     "contact_weather_change_unavailable": "确认角色地点和天气变化开关已设置；该来源需要前后两次新鲜观测，等第二次观测完成后再测。",
     "contact_official_alert_unavailable": "确认角色地点包含预警区域，并在宿主环境配置 QWEATHER_ALERT_API_HOST 与 QWEATHER_ALERT_TOKEN；没有当前覆盖该地点的官方预警时不能完成此分支验收。",
     "contact_balance_unavailable": "在宿主环境配置 COMPANION_V2_BALANCE_URL 和所需认证变量，检查接口可达及余额 JSON 路径；缺少当前有效余额时不能完成此分支验收。",
@@ -52,6 +57,8 @@ PROACTIVE_TEST_SUGGESTIONS = {
     "contact_diagnostic_variant_invalid": "环境与状态变化可选择天气观测、天气变化、官方预警、服务余额或外部资讯；请重新选择来源。",
     "model_provider_unavailable": "打开「模型路由」，为当前角色的 proactive.compose 选择一个已加载且支持文本生成的 Provider。",
     "model_generation_failed": "查看 proactive.compose 任务的 Provider 返回与用量限制；修复连接、额度或模型错误后，用新的来源验收。",
+    "model_budget_exhausted": "检查本地模型每日硬额度；额度恢复或调整策略后再测。管理员测试仍会真实调用模型，因此遵守本地用量上限。",
+    "model_budget_soft_deferred": "本次 proactive.compose 被本地每日软限额暂缓；检查软限额设置，额度恢复后再测。",
     "persona_review_denied": "检查 proactive.judge 的 Provider、角色设定和拒绝理由；调整后重新验收，不能绕过人格复核。",
     "delivery_result_unknown": "投递结果未知；核对核心管理员私聊与平台消息记录。确认是否收到前不要重试本次测试。",
     "delivery_failed": "检查 OneBot 私聊连接、机器人在线状态和平台返回错误；确认没有收到后，再用新的验收尝试重测。",
@@ -67,7 +74,7 @@ PROACTIVE_TEST_FAILURE_LABELS = {
     "contact_purpose_paused": ("purpose", "所选联系目的当前已暂停"),
     "contact_quiet_hours": ("settings", "当前处于免打扰时段"),
     "model_task_unregistered": ("model_route", "主动联系模型任务未配置"),
-    "contact_diagnostic_source_required": ("trusted_candidate", "当前没有所选目的的有效真实来源"),
+    "contact_diagnostic_source_required": ("trusted_candidate", "当前用途没有可核验的测试机会"),
     "contact_diagnostic_variant_invalid": ("trusted_candidate", "测试来源选择无效"),
     "contact_weather_unavailable": ("trusted_candidate", "天气观测来源不可用"),
     "contact_weather_change_unavailable": ("trusted_candidate", "天气变化来源不可用"),
@@ -78,6 +85,8 @@ PROACTIVE_TEST_FAILURE_LABELS = {
     "contact_official_alert_changed": ("trusted_candidate", "官方预警来源已变化"),
     "model_provider_unavailable": ("model_route", "主动联系模型 Provider 不可用"),
     "model_generation_failed": ("model_generation", "主动联系模型生成失败"),
+    "model_budget_exhausted": ("model_generation", "主动消息模型每日硬额度已用完"),
+    "model_budget_soft_deferred": ("model_generation", "主动消息模型生成被每日软限额暂缓"),
     "persona_review_denied": ("persona_review", "人格复核未放行"),
     "delivery_result_unknown": ("delivery", "平台投递结果未知"),
     "delivery_failed": ("delivery", "平台投递失败"),
@@ -89,7 +98,11 @@ PROACTIVE_TEST_STAGE_SUGGESTIONS = {
     "runtime": "在宿主管理页检查 V2 运行实例、角色载入和路由注册状态。",
     "settings": "检查主动联系总开关、目的开关及角色/关系/窗口各层的有效配置。",
     "purpose": "检查该用途是否启用、暂停时间是否结束，以及当前权限是否覆盖该私聊。",
-    "trusted_candidate": "修复对应生产器的数据源或等待一条有效来源；不要用手工文案补造候选。",
+    "trusted_candidate": "检查所选用途的测试条件；事件类等待当前有效来源，关系表达类确认私聊窗口和用途开关。不要手工补造事件。",
+    "news_fetch": "检查当前配置的真实资讯源是否可访问、是否返回带日期的有效条目。",
+    "weather_fetch": "检查已配置的角色所在地与真实天气接口；测试会即时获取观测。",
+    "screen_capture": "检查已授权的截图设备及本次任务记录；未知结果不能重拍。",
+    "screen_interpretation": "检查 screen.interpretation 的视觉模型、实际截图原件及分析任务记录。",
     "model_route": "在模型路由中为 proactive.compose 选择可用文本 Provider。",
     "attempt_budget": "查看「主动联系 → 额度与去重」的 24 小时尝试额度；等待滚动窗口恢复后再测。",
     "relationship_attempt_budget": "查看关系级尝试额度，或等关系级滚动窗口恢复。",
@@ -102,7 +115,8 @@ PROACTIVE_TEST_STAGE_SUGGESTIONS = {
 }
 
 PROACTIVE_TEST_STAGE_ORDER = (
-    "authorization", "binding", "runtime", "settings", "purpose", "trusted_candidate",
+    "authorization", "binding", "runtime", "settings", "purpose", "news_fetch", "weather_fetch",
+    "screen_capture", "screen_interpretation", "trusted_candidate",
     "attempt_budget", "relationship_attempt_budget", "delivery_budget", "relationship_delivery_budget",
     "model_route", "model_generation", "persona_review", "delivery", "receipt",
 )
@@ -122,6 +136,8 @@ PROACTIVE_TEST_STAGE_BY_CODE = {
     "contact_diagnostic_variant_invalid": "trusted_candidate",
     "model_task_unregistered": "model_route",
     "model_provider_unavailable": "model_route",
+    "model_budget_exhausted": "model_generation",
+    "model_budget_soft_deferred": "model_generation",
     "delivery_result_unknown": "delivery",
     "delivery_failed": "delivery",
 }
@@ -723,12 +739,15 @@ class SetupWebAPI:
         async with self._test_lock:
             try:
                 username = self._admin()
-                data = await self._body({"purpose", "confirm_delivery"}, optional={"variant"})
+                data = await self._body({"purpose", "confirm_delivery"}, optional={"variant", "synthetic_event"})
                 purpose = data["purpose"]
                 variant = data.get("variant")
+                synthetic_event = data.get("synthetic_event", False)
                 if type(purpose) is not str or purpose not in PURPOSES or data["confirm_delivery"] is not True:
                     raise TaskError("proactive_test_confirmation_required",
                                     "choose one proactive purpose and confirm delivery to the core administrator")
+                if type(synthetic_event) is not bool:
+                    raise TaskError("proactive_test_confirmation_required", "synthetic_event must be an explicit boolean")
                 if variant is not None and (type(variant) is not str or purpose != "environment"
                                             or variant not in DIAGNOSTIC_ENVIRONMENT_VARIANTS):
                     raise TaskError("contact_diagnostic_variant_invalid",
@@ -759,7 +778,7 @@ class SetupWebAPI:
                 now = session.application.now()
                 schedule = getattr(session.application, "contact_schedule", None)
                 producer = getattr(schedule, "diagnostic_candidate", None)
-                if not callable(producer):
+                if not synthetic_event and not callable(producer):
                     raise TaskError("proactive_diagnostic_unavailable",
                                     "the active host has no source-backed proactive producer registry")
                 route_hint = None
@@ -767,8 +786,24 @@ class SetupWebAPI:
                     _producer_name, route_id, route_label = DIAGNOSTIC_ENVIRONMENT_VARIANTS[variant]
                     route_hint = {"id": route_id, "label": route_label, "variant": variant}
                 try:
-                    candidate = (await producer(context, purpose, at=now, variant=variant)
-                                 if variant is not None else await producer(context, purpose, at=now))
+                    if synthetic_event:
+                        synthetic_producer = getattr(schedule, "synthetic_diagnostic_candidate", None)
+                        if not callable(synthetic_producer):
+                            raise TaskError("proactive_diagnostic_unavailable",
+                                            "the active host has no synthetic diagnostic event registry")
+                        candidate = await synthetic_producer(context, purpose, at=now,
+                                                             test_id=attempt_id, variant=variant)
+                    else:
+                        candidate = (await producer(context, purpose, at=now, test_id=attempt_id, variant=variant)
+                                     if variant is not None else await producer(context, purpose, at=now, test_id=attempt_id))
+                except DiagnosticSourceError as error:
+                    stages = [{"stage": name, "state": "passed"} for name in
+                        ("authorization", "binding", "runtime", "settings", "purpose")]
+                    stages.extend(error.stages)
+                    failure = self._diagnostic_failure(purpose, route_hint, error.stage, error.code, str(error),
+                        stages=stages, route=route_hint, state=error.state, task_id=error.task_id)
+                    failure.update(attempt_id=attempt_id, event_mode="source_backed")
+                    return self._response(Outcome.success(failure))
                 except TaskError as error:
                     failure_stage = PROACTIVE_TEST_FAILURE_LABELS.get(
                         error.code, ("trusted_candidate", "当前来源生产器未能生成有效候选"))[0]
@@ -783,14 +818,16 @@ class SetupWebAPI:
                 label = PURPOSES[purpose]
                 result = await session.application.proactive.contact(context, opportunity, intents,
                     role_instruction=candidate["role_instruction"], selection_seed=attempt_id,
-                    administrator_test=True, diagnostic_source_backed=True,
+                    administrator_test=True, diagnostic_source_backed=not synthetic_event,
                     diagnostic_origin=candidate["diagnostic_origin"])
                 if result.failure is not None:
                     failure = result.failure
                     failure_stage = PROACTIVE_TEST_FAILURE_LABELS.get(
                         failure.code, ("contact_admission", "主动联系准入检查失败"))[0]
                     stages = [{"stage": name, "state": "passed"} for name in
-                        ("authorization", "binding", "runtime", "settings", "purpose", "trusted_candidate")]
+                        ("authorization", "binding", "runtime", "settings", "purpose")]
+                    stages.extend(candidate.get("stages", []))
+                    stages.append({"stage": "trusted_candidate", "state": "passed"})
                     stages.append({"stage": failure_stage, "state": "failed"})
                     budget_usage = self._diagnostic_attempt_usage(
                         session, context, failure.code)
@@ -804,7 +841,9 @@ class SetupWebAPI:
                         "the proactive service did not create an execution task", route=route)))
 
                 stages = [{"stage": name, "state": "passed"} for name in
-                    ("authorization", "binding", "runtime", "settings", "purpose", "trusted_candidate")]
+                    ("authorization", "binding", "runtime", "settings", "purpose")]
+                stages.extend(candidate.get("stages", []))
+                stages.append({"stage": "trusted_candidate", "state": "passed"})
                 stages[-1]["detail"] = f"{route.get('label', route.get('id', ''))} · {route.get('variant', '')}".strip(" ·")
                 stages.extend(({"stage": "model_generation", "state": "running"},
                                {"stage": "persona_review", "state": "pending"},
@@ -853,6 +892,7 @@ class SetupWebAPI:
                 return self._response(Outcome.success({"state": state, "purpose": purpose,
                     "purpose_label": label, "variant": route,
                     "route": route,
+                    "event_mode": "synthetic_event" if synthetic_event else "source_backed",
                     "recipient": "core_administrator", "attempt_id": attempt_id, "task_id": task.task_id,
                     "task_state": current_task.state, "delivery_state": delivery,
                     "judge_state": judge, "judge_reason": (redact_text(observation["judge_reason"])
@@ -908,11 +948,11 @@ class SetupWebAPI:
 
     @staticmethod
     def _diagnostic_failure(purpose, variant, stage, code, error, *, stages=None, task_id=None,
-                            budget_usage=None, route=None):
+                            budget_usage=None, route=None, state="failed"):
         label = PROACTIVE_TEST_FAILURE_LABELS.get(code)
         if label:
-            stage, title = label
-            explanation = title + "。本次在模型生成前被拦截，没有调用模型，也没有发送消息。"
+            title = label[1]
+            explanation = title + "。请根据下方阶段记录核对本次实际完成的步骤。"
         else:
             explanation = None
         if stages is None:
@@ -923,7 +963,7 @@ class SetupWebAPI:
             stages = ([{"stage": name, "state": "passed"}
                        for name in PROACTIVE_TEST_STAGE_ORDER[:failed_index]]
                       + [{"stage": stage, "state": "failed"}])
-        return {"state": "failed", "purpose": purpose,
+        return {"state": state, "purpose": purpose,
             "purpose_label": PURPOSES.get(purpose) if purpose else None,
             "variant": (variant if isinstance(variant, dict) else
                         {"id": variant[0], "label": variant[1]} if variant else None),

@@ -6,7 +6,7 @@ import json
 from types import SimpleNamespace as NS
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from companion_v2.adapters.astrbot.native import (
     HostAccount,
@@ -101,10 +101,59 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
         self.bridge.session_persona_override_lookup = no_override
         self.bridge.persona_snapshot_lookup = selected_persona
+        self.bridge.persona_window_snapshot_lookup = lambda *_: {
+            "bot_id": "bot-a", "persona_id": "original", "role_id": ROLE.subject_id,
+            "conversation_id": None, "selection_source": "configured",
+        }
         with patch.object(self.native.conversation_manager, "get_conversation",
                            side_effect=AssertionError("the projection query must not load conversation history")):
             result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
 
+        self.assertEqual(result[1:], ("second", self.native.persona_manager.personas_v3[1], False))
+
+    async def test_unmapped_conversation_persona_uses_configured_v2_window_snapshot(self):
+        account = self.bridge.accounts[("qq-main", "100")]
+        self.map_second_native_persona()
+        self.bridge.session_persona_override_lookup = AsyncMock(return_value=None)
+        self.bridge.persona_snapshot_lookup = AsyncMock(return_value="unmapped")
+        self.bridge.persona_window_snapshot_lookup = lambda *_: {
+            "bot_id": "bot-a", "persona_id": "original", "role_id": ROLE.subject_id,
+            "conversation_id": None, "selection_source": "configured",
+        }
+        refreshed = []
+        self.bridge.persona_window_snapshot_update = lambda *args: refreshed.append(args)
+
+        result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
+
+        self.assertEqual(result[1:], ("original", self.native.persona, False))
+        self.assertEqual(refreshed, [("qq-main:FriendMessage:200", "100", "bot-a",
+                                      "original", ROLE.subject_id, "conversation-1")])
+
+    async def test_empty_conversation_persona_uses_local_agent_runner_default(self):
+        account = self.bridge.accounts[("qq-main", "100")]
+        self.map_second_native_persona()
+        self.bridge.session_persona_override_lookup = AsyncMock(return_value=None)
+        self.bridge.persona_snapshot_lookup = AsyncMock(return_value="")
+        self.native.agent_configuration = {
+            "provider_settings": {"default_personality": "original"},
+            "agent_runner": {"runner_type": "local", "config": {"persona": {"persona_id": "second"}}},
+        }
+
+        result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
+
+        self.assertEqual(result[1:], ("second", self.native.persona_manager.personas_v3[1], False))
+
+    async def test_empty_conversation_persona_uses_async_selection_lookup(self):
+        account = self.bridge.accounts[("qq-main", "100")]
+        self.map_second_native_persona()
+        self.bridge.session_persona_override_lookup = AsyncMock(return_value=None)
+        self.bridge.persona_snapshot_lookup = AsyncMock(return_value=None)
+        self.bridge.persona_selection_lookup = AsyncMock(return_value="second")
+
+        result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
+
+        self.bridge.persona_selection_lookup.assert_awaited_once_with(
+            self.native, "qq-main:FriendMessage:200", None)
         self.assertEqual(result[1:], ("second", self.native.persona_manager.personas_v3[1], False))
 
     async def test_multiple_v2_personas_reject_an_unmapped_astrbot_selection(self):
@@ -257,6 +306,18 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured.unwrap().instruction, self.native.persona["prompt"])
         self.native.persona["prompt"] = "新人格"
         self.assertEqual((await self.bridge.capture(FakeEvent(self.native))).failure.code, "host_persona_changed")
+
+    async def test_installed_persona_snapshot_accepts_prompt_updates_until_manual_refresh(self):
+        self.bridge.persona_window_snapshot_lookup = lambda umo, account_id: {
+            "bot_id": "bot-a", "persona_id": "original", "role_id": ROLE.subject_id,
+            "conversation_id": "conversation-1",
+        } if (umo, account_id) == ("qq-main:FriendMessage:200", "100") else None
+        self.native.persona["prompt"] = "启动快照之后更新的人格提示词。"
+
+        captured = await self.bridge.capture(FakeEvent(self.native))
+
+        self.assertTrue(captured.is_success, captured.failure)
+        self.assertEqual(captured.unwrap().instruction, "启动快照之后更新的人格提示词。")
 
     async def test_capture_has_no_open_sqlite_transaction_while_awaiting_host(self):
         entered, release = asyncio.Event(), asyncio.Event()

@@ -14,6 +14,11 @@ from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectKind, Subje
 from companion_v2.identity_policy.models import AuthenticatedHostPrincipal, ResolvedIdentity
 
 
+OPEN_ITEM_TTL = timedelta(days=30)
+OPEN_ITEM_AFTER_DUE_GRACE = timedelta(days=7)
+OPEN_ITEM_MAX_LIFETIME = timedelta(days=180)
+
+
 class AgendaError(ValueError):
     def __init__(self, code: str, reason: str) -> None:
         self.code = code
@@ -46,6 +51,14 @@ def fingerprint(value: object) -> str:
 
 def stamp(value: datetime) -> str:
     return normalize_utc(value, field="timestamp").isoformat(timespec="microseconds")
+
+
+def open_item_expiry(created_at: datetime, schedule: Schedule | None = None, sequence: int = 0) -> datetime:
+    created_at = normalize_utc(created_at, field="created_at")
+    due_at = schedule.at(sequence) if schedule is not None else None
+    expiry = (due_at + OPEN_ITEM_AFTER_DUE_GRACE
+              if due_at is not None and due_at > created_at else created_at + OPEN_ITEM_TTL)
+    return min(expiry, created_at + OPEN_ITEM_MAX_LIFETIME)
 
 
 def restore_identity(data: dict) -> ResolvedIdentity:
@@ -193,6 +206,32 @@ class Memo:
     completion_count: int
     creator: ResolvedIdentity
     content_revision: int = 1
+    purpose: str = "note"
+    expires_at: datetime | None = None
+    created_at: datetime | None = None
+    last_context_at: datetime | None = None
+    last_followup_at: datetime | None = None
+    context_count: int = 0
+    followup_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.purpose not in ("note", "open_loop"):
+            raise AgendaError("invalid_memo_purpose", "memo purpose must be note or open_loop")
+        if self.expires_at is not None:
+            object.__setattr__(self, "expires_at", normalize_utc(self.expires_at, field="expires_at"))
+        if self.created_at is not None:
+            object.__setattr__(self, "created_at", normalize_utc(self.created_at, field="created_at"))
+        if self.last_context_at is not None:
+            object.__setattr__(self, "last_context_at", normalize_utc(self.last_context_at, field="last_context_at"))
+        if self.last_followup_at is not None:
+            object.__setattr__(self, "last_followup_at", normalize_utc(self.last_followup_at, field="last_followup_at"))
+        if (type(self.context_count) is not int or self.context_count < 0
+                or type(self.followup_count) is not int or self.followup_count < 0):
+            raise AgendaError("invalid_activity_count", "open-loop activity counters must be nonnegative integers")
+
+    def expired(self, at: datetime) -> bool:
+        return (self.state == "active" and self.purpose == "open_loop" and self.expires_at is not None
+                and normalize_utc(at, field="observed_at") >= self.expires_at)
 
 
 @dataclass(frozen=True)

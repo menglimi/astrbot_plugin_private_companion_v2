@@ -28,6 +28,9 @@ from unittest.mock import patch
 
 from astrbot_host.acquaintance_api import ADMIN_NAME_PATH, AUTHORIZATION_PATH, _authorization_participants
 from astrbot_host.management_identity import dashboard_operator
+from companion_v2.execution.models import TaskContext
+from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import AudienceRef
 from companion_v2.identity_policy.grants import (
     DELIVERY_GRANT_ID,
     STAGING_CAPABILITY_GRANT_PREFIX,
@@ -40,6 +43,14 @@ from companion_v2.identity_policy.management import (
     PersonAuthorizationManagement,
 )
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
+from companion_v2.identity_policy.personas import ConversationRoute
+from companion_v2.identity_policy.interventions import (
+    CALENDAR_INTERVENTION,
+    INTERVENTION_CAPABILITIES,
+    REST_WAKE_INTERVENTION,
+    STATE_INTERVENTION,
+    authorized_capabilities,
+)
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.screen import SCREEN_READ
 from companion_v2.execution.models import encode, stamp
@@ -101,9 +112,40 @@ class AuthorizationReadTests(AuthorizationFixture):
     def test_a_person_without_grants_gets_an_honest_empty_state(self):
         status = self.status()
         # 一项授权都没有的人：如实说没有，而不是给每项能力画一行空白状态。
-        self.assertEqual({item["capability"] for item in status["items"]}, {"conversation.reply", "proactive.contact"})
+        self.assertEqual({item["capability"] for item in status["items"]},
+                         {"conversation.reply", "proactive.contact", *INTERVENTION_CAPABILITIES})
         self.assertTrue(all(item["state"] == "off" for item in status["items"]))
         self.assertFalse(status["companion"])
+
+    def test_only_core_has_default_intervention_access_and_delegation_is_exact(self):
+        self.personas.register_route(ConversationRoute(self.scope, user=self.important.subject), observed_at=NOW)
+        role = self.identity.resolve_role(self.scope, observed_at=NOW).unwrap()
+        tasks = NS(runtime=self.runtime, identity=self.identity,
+            check_context_access=lambda *_args, **_kwargs: Outcome.success(True))
+
+        def context(actor):
+            return TaskContext(actor, role, AudienceRef(self.scope, (actor.subject,)))
+
+        standard = context(self.important)
+        core = context(self.core)
+        self.assertEqual(authorized_capabilities(tasks, standard, at=AT), frozenset())
+        self.assertEqual(authorized_capabilities(tasks, core, at=AT), frozenset(INTERVENTION_CAPABILITIES))
+
+        self.capability(GRANT_PREFIX + "state-intervention", STATE_INTERVENTION)
+        other_scope = replace(self.scope, native_scope_id="another-private-window",
+                              conversation_id="another-conversation", session_id="another-session")
+        self.identity.issue_grant(grant_id=GRANT_PREFIX + "calendar-other-window",
+            subject=self.important.subject, scope=other_scope, capability=CALENDAR_INTERVENTION,
+            tier=AuthorizationTier.STANDARD, valid_from=NOW, expected_revision=self.identity.revision)
+        self.assertEqual(authorized_capabilities(tasks, standard, at=AT), frozenset({STATE_INTERVENTION}))
+        self.identity.revoke_grant(GRANT_PREFIX + "state-intervention", revoked_at=AT,
+                                   expected_revision=self.identity.revision)
+        self.assertEqual(authorized_capabilities(tasks, standard, at=AT), frozenset())
+
+        self.policy.set_tier(self.important.subject, AuthorizationTier.CORE,
+                             expected_revision=self.policy.revision, observed_at=NOW)
+        core_rows = {item["capability"]: item for item in self.status()["items"]}
+        self.assertEqual(core_rows[REST_WAKE_INTERVENTION]["effective_state"], "active")
 
     def test_status_exposes_administrator_permission_as_the_core_identity_projection(self):
         standard = self.status()
@@ -123,7 +165,8 @@ class AuthorizationReadTests(AuthorizationFixture):
 
         status = self.status()
         self.assertEqual({item["capability"] for item in status["items"]},
-                         {"conversation.reply", "proactive.contact", "screen.process", "memory.read"})
+                         {"conversation.reply", "proactive.contact", "screen.process", "memory.read",
+                          *INTERVENTION_CAPABILITIES})
         # 对话回复来自运行实例配置：真实状态是「已生效」，但本页不能改它。
         reply = self.row(status, "conversation.reply")
         self.assertEqual((reply["state"], reply["managed_by"], reply["revocable"]),

@@ -12,7 +12,7 @@ ADDED_PROFILE_FIELDS = frozenset({"birthday", "first_person", "emotional_style",
                                  "world_adaptation_mode", "world_adaptation",
                                  "main_companion_subject", "expression_private_source_mode",
                                  "expression_private_source_subject_ids", "expression_private_application_mode",
-                                 "expression_private_application_subject_ids"})
+                                 "expression_private_application_subject_ids", "avatar_data_url"})
 
 
 FIELD_LABELS = {

@@ -33,7 +33,7 @@ button { color: inherit; }
 .playfield { min-width: 0; }
 .playfield-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
 .eyebrow { margin: 0 0 7px; color: var(--mint); font-size: 10px; font-weight: 800; line-height: 1.3; }
-h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height: 1.1; }
+h1 { margin: 0; font-size: 28px; font-weight: 760; line-height: 1.2; }
 .round-state { display: inline-flex; align-items: center; min-height: 28px; flex: 0 0 auto; padding: 0 10px; border: 1px solid rgba(185, 242, 116, .22); border-radius: 99px; color: var(--mint); font-size: 11px; }
 .game-board { min-height: 320px; display: grid; place-items: center; padding: clamp(14px, 3vw, 32px) 0; }
 .game-board[aria-busy="true"] { color: var(--muted); }
@@ -42,19 +42,16 @@ h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height
 .board-grid { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; }
 .piece-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 .grid-board { width: min(100%, 520px); display: grid; gap: 5px; margin: auto; }
-.grid-board.gomoku-board { width: min(100%, 670px); gap: 1px; padding: 7px; border: 1px solid rgba(246, 193, 92, .18); background: #49523e; box-shadow: 0 18px 60px rgba(0, 0, 0, .28); }
 .board-cell { min-width: 0; aspect-ratio: 1; display: grid; place-items: center; padding: 0; border: 1px solid rgba(214, 233, 213, .12); border-radius: 4px; background: #1b2821; color: var(--ink); cursor: pointer; transition: background .16s, transform .16s, border-color .16s; }
 .tictactoe-board .board-cell { font-size: clamp(24px, 6vw, 54px); font-weight: 700; }
 .board-cell:enabled:hover { background: #293a2f; border-color: rgba(185, 242, 116, .55); transform: translateY(-1px); }
 .board-cell:disabled { cursor: default; }
 .board-cell.mark-player { color: var(--mint); text-shadow: 0 0 16px rgba(185, 242, 116, .42); }
 .board-cell.mark-bot { color: var(--coral); text-shadow: 0 0 16px rgba(255, 128, 104, .3); }
-.gomoku-board .board-cell { border: 0; border-radius: 0; background: #d5c391; }
-.gomoku-board .board-cell:enabled:hover { background: #eadcad; transform: none; }
 .board-cell.logical-occupied { background: rgba(16, 23, 20, .28); }
 .stone { width: 78%; aspect-ratio: 1; border-radius: 50%; animation: stone-in .18s var(--ease) both; }
-.stone-player { background: #17201d; box-shadow: inset -3px -4px 8px rgba(0, 0, 0, .62), 1px 2px 3px rgba(0, 0, 0, .38); }
-.stone-bot { background: #f6f1db; box-shadow: inset -3px -4px 8px rgba(107, 94, 62, .19), 1px 2px 3px rgba(0, 0, 0, .34); }
+.stone-black { background: #17201d; box-shadow: inset -3px -4px 8px rgba(0, 0, 0, .62), 1px 2px 3px rgba(0, 0, 0, .38); }
+.stone-white { background: #f6f1db; box-shadow: inset -3px -4px 8px rgba(107, 94, 62, .19), 1px 2px 3px rgba(0, 0, 0, .34); }
 .floating-piece, .drag-ghost { position: absolute; width: min(25%, 86px); aspect-ratio: 1; display: grid; place-items: center; padding: 0; border: 1px solid rgba(239, 247, 239, .2); border-radius: 50%; transform: translate(-50%, -50%); font-size: clamp(26px, 5vw, 54px); font-weight: 800; line-height: 1; cursor: grab; touch-action: none; user-select: none; transition: left .22s var(--ease), top .22s var(--ease), transform .16s var(--ease), box-shadow .16s; }
 .gomoku-stage .floating-piece, .gomoku-stage .drag-ghost { width: min(6.8%, 46px); font-size: 0; }
 .floating-piece { pointer-events: auto; z-index: 1; }
@@ -81,6 +78,7 @@ h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height
 .xiangqi-cell.piece-red { color: #ff9b7d; }
 .xiangqi-cell.piece-black { color: #e8dec1; }
 .action-controls { min-height: 46px; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 9px; padding: 4px 0 10px; }
+.action-controls:empty { display: none; }
 .control-button { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 15px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-raised); color: var(--ink); font-size: 13px; font-weight: 680; cursor: pointer; transition: background .16s, border-color .16s, transform .16s; }
 .control-button svg { width: 16px; height: 16px; }
 .control-button:hover:enabled { border-color: rgba(185, 242, 116, .45); transform: translateY(-1px); }
@@ -100,6 +98,7 @@ h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height
 .score-item.player strong { color: var(--mint); }
 .score-item.bot strong { color: var(--coral); }
 .summary-line { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.game-outcome { padding-top: 8px; border-top: 1px solid var(--line); color: var(--ink); font-size: 15px; font-weight: 700; }
 .history-panel { padding: 14px 14px 7px; }
 .history-panel header { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
 .history-panel h2 { margin: 0; font-size: 12px; }
@@ -108,7 +107,96 @@ h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height
 .game-history li { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid rgba(215, 234, 219, .07); color: #cbd7ce; font-size: 11px; line-height: 1.4; }
 .game-history li span:last-child { color: var(--muted); text-align: right; }
 .game-notice { min-height: 18px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.game-notice:empty { min-height: 0; }
 .game-notice.error { color: #ff9784; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+.board-toolbar[hidden] { display: none; }
+.board-toolbar { width: min(100%, 620px); display: grid; gap: 12px; margin: 18px auto 0; }
+.gomoku-status { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.gomoku-status strong { font-size: 15px; font-weight: 700; }
+.gomoku-status p { margin-top: 3px; }
+.turn-stone { display: inline-block; flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; border: 1px solid rgba(255,255,255,.22); }
+.turn-stone.black { background: radial-gradient(circle at 34% 26%, #4a4c48, #161816 68%); }
+.turn-stone.white { background: radial-gradient(circle at 34% 26%, #fffef9, #e1dfd5 75%); }
+.gomoku-options { display: flex; gap: 8px; flex-wrap: wrap; }
+.gomoku-option { min-height: 36px; padding: 0 12px; font-size: 12px; }
+.gomoku-option[aria-pressed="true"] { color: var(--mint); border-color: rgba(185,242,116,.5); background: #283922; }
+.game-board:has(.gomoku-stage) { min-height: 0; padding: 16px 0; }
+body:has(.gomoku-stage) { min-width: 0; }
+.board-stage.gomoku-stage { width: min(100%, 620px); border: 1px solid #baa675; border-radius: 6px; background: #dfcda1; box-shadow: 0 12px 30px rgba(0,0,0,.2); }
+.gomoku-intersections { position: absolute; inset: 5.5%; }
+.gomoku-lines, .gomoku-winning-line { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.gomoku-lines path { fill: none; stroke: #776642; stroke-width: .8; }
+.gomoku-lines circle { fill: #635537; }
+.gomoku-axes { position: absolute; inset: 0; pointer-events: none; color: #665733; font-size: 11px; font-weight: 600; }
+.gomoku-axes span { position: absolute; text-align: center; }
+.axis-column { top: -5.4%; transform: translateX(-50%); }
+.axis-row { left: -5.4%; transform: translateY(-50%); width: 18px; }
+.gomoku-hit-grid { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); grid-template-rows: repeat(15, minmax(0, 1fr)); }
+.gomoku-point { position: relative; min-height: 0; min-width: 0; padding: 0; border: 0; background: transparent; cursor: pointer; touch-action: manipulation; }
+.gomoku-point::after { display: none; }
+.gomoku-point.occupied, .gomoku-point:disabled { cursor: default; }
+.gomoku-point:focus-visible { outline: 2px solid #964537; outline-offset: -3px; border-radius: 3px; }
+.gomoku-intersections[data-interactive="true"] { touch-action: none; user-select: none; }
+.gomoku-intersections[data-interactive="true"] .gomoku-point { touch-action: none; }
+.gomoku-stage .gomoku-piece, .gomoku-stage .drag-ghost { width: 6%; max-width: none; font-size: 12px; border: 0; background: transparent; box-shadow: none; text-shadow: none; }
+.gomoku-stage .gomoku-piece { transition: none; cursor: default; }
+.gomoku-stage .stone { width: 100%; display: grid; place-items: center; animation: none; font-size: 12px; font-weight: 650; }
+.gomoku-stage .stone-black, .gomoku-tray-piece .stone-black { color: #f6f2e7; background: radial-gradient(circle at 32% 24%, #51534d, #1b1d1a 65%); box-shadow: inset -1px -2px 3px rgba(0,0,0,.45), 0 2px 3px rgba(58,43,16,.35); }
+.gomoku-stage .stone-white, .gomoku-tray-piece .stone-white { color: #34362e; background: radial-gradient(circle at 32% 24%, #fffef9, #e9e6dc 75%); box-shadow: inset -1px -2px 3px rgba(84,72,41,.17), 0 2px 3px rgba(58,43,16,.3); }
+.gomoku-stage .gomoku-piece:disabled { opacity: 1; }
+.gomoku-stage[data-mode="play"] .gomoku-piece { pointer-events: none; }
+.gomoku-piece.last-move:not(.numbered)::after { content: ""; position: absolute; width: 19%; aspect-ratio: 1; background: #df5946; border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,.65); }
+.gomoku-piece.last-move.numbered .stone-black { color: #ff8570; }
+.gomoku-piece.last-move.numbered .stone-white { color: #a72e24; }
+.gomoku-piece.winning-piece .stone { outline: 2px solid #b34032; outline-offset: 1px; }
+.gomoku-winning-line { z-index: 0; }
+.gomoku-winning-line line { stroke: #b34032; stroke-width: 3; stroke-linecap: round; }
+.gomoku-stage[data-mode="free"] .gomoku-piece { cursor: grab; }
+.gomoku-stage[data-mode="free"] .gomoku-piece:hover, .gomoku-stage .gomoku-piece.selected { transform: translate(-50%,-50%); box-shadow: none; }
+.gomoku-piece .stone { transition: transform .12s var(--ease), opacity .12s; }
+@media (hover: hover) {
+  .gomoku-stage[data-mode="free"] .gomoku-piece:enabled:hover .stone { transform: translateY(-3px); }
+}
+.gomoku-stage[data-mode="free"] .gomoku-piece.selected .stone { transform: translateY(-6px) scale(1.1); box-shadow: 0 8px 7px rgba(58,43,16,.35); }
+.gomoku-piece.selected::before { content: ""; position: absolute; inset: 0; border: 1px dashed #9f4938; border-radius: 50%; }
+.gomoku-stage[data-mode="free"] .gomoku-piece.piece-lifted .stone, .gomoku-tray-piece.piece-lifted .stone { opacity: .18; transform: none; }
+.gomoku-piece.piece-lifted::after { opacity: .2; }
+.gomoku-drag-piece, .gomoku-target { position: absolute; width: 6%; aspect-ratio: 1; transform: translate(-50%,-50%); display: grid; place-items: center; pointer-events: none; }
+.gomoku-drag-piece { z-index: 6; opacity: .94; transition: none; animation: none; will-change: left, top; }
+.gomoku-drag-piece .stone { box-shadow: 0 8px 9px rgba(58,43,16,.4); }
+.gomoku-target { z-index: 4; }
+.gomoku-target[hidden], .gomoku-lens[hidden] { display: none; }
+.gomoku-target::before { content: ""; position: absolute; inset: -13%; border: 1.5px dashed #964537; border-radius: 50%; }
+.gomoku-target .stone { opacity: .58; }
+.gomoku-target.invalid::before { border-style: solid; border-color: #c93128; }
+.gomoku-target.invalid .stone { opacity: .18; }
+.gomoku-target.sending .stone { opacity: .82; }
+.gomoku-intersections.pointer-dragging, .gomoku-intersections.pointer-dragging * { cursor: grabbing; }
+.gomoku-piece.just-placed .stone { animation: gomoku-settle .16s var(--ease) both; }
+.gomoku-interaction-readout { min-height: 22px; width: min(100%,620px); margin: 9px 0 -4px; color: var(--muted); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+.gomoku-lens { position: absolute; z-index: 8; top: 6px; width: 124px; max-width: 48%; padding: 6px; border: 1px solid #aa9469; border-radius: 6px; color: #543c23; background: #eedeba; box-shadow: 0 4px 15px rgba(0,0,0,.28); pointer-events: none; }
+.gomoku-lens[data-side="left"] { left: 6px; }
+.gomoku-lens[data-side="right"] { right: 6px; }
+.gomoku-lens-label { display: block; margin-bottom: 5px; font-size: 11px; text-align: center; }
+.gomoku-lens-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); aspect-ratio: 1; }
+.gomoku-lens-cell { position: relative; display: grid; place-items: center; min-width: 0; background: linear-gradient(#8b7752,#8b7752) center/1px 100% no-repeat, linear-gradient(#8b7752,#8b7752) center/100% 1px no-repeat; }
+.gomoku-lens-cell.outside { background: #e6d6b0; }
+.gomoku-lens-cell .stone { width: 86%; }
+.gomoku-lens-cell.lens-target::after { content: ""; position: absolute; inset: 0; border: 1.5px solid #a74130; border-radius: 3px; }
+.gomoku-lens-cell.lens-target.invalid::after { border-color: #c93128; }
+.piece-tray:has(.gomoku-tray-piece) { width: min(100%, 620px); margin: 12px auto 0; background: var(--panel); box-shadow: none; }
+.piece-tray:has(.gomoku-tray-piece) .piece-tray-heading { flex: 0 0 auto; }
+.gomoku-tray-piece { min-height: 52px; gap: 10px; padding: 6px 12px; font-size: 12px; cursor: grab; touch-action: none; }
+.gomoku-tray-piece .stone { width: 34px; flex: 0 0 34px; animation: none; transition: transform .12s var(--ease); }
+.gomoku-tray-piece[aria-pressed="true"] { border-color: var(--mint); color: var(--mint); }
+.gomoku-tray-piece[aria-pressed="true"] .stone { transform: translateY(-3px); }
+.action-controls:has(.gomoku-pending-label) { min-height: 56px; }
+.gomoku-pending-label { color: var(--muted); font-size: 12px; min-width: 120px; }
+.gomoku-history-item { align-items: center; }
+.gomoku-history-item .history-step { width: 20px; flex: 0 0 auto; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.gomoku-history-item span:first-of-type { margin-right: auto; }
+.playfield > .game-notice { width: min(100%, 620px); margin: 0 auto; font-size: 12px; }
 .dice-layout { width: min(100%, 520px); display: grid; grid-template-columns: minmax(110px, .8fr) minmax(0, 1fr); align-items: center; gap: clamp(14px, 4vw, 42px); }
 .die { width: min(25vw, 116px); aspect-ratio: 1; display: grid; place-items: center; border: 1px solid rgba(255, 255, 255, .44); border-radius: 17px; background: linear-gradient(145deg, #fff3d1, #d7c49b); color: #222822; font-size: 60px; line-height: 1; box-shadow: 0 18px 34px rgba(0, 0, 0, .28), inset -7px -9px 15px rgba(73, 70, 55, .16); animation: dice-in .35s var(--ease) both; }
 .blackjack-table { width: min(100%, 650px); display: grid; gap: 22px; padding: clamp(16px, 4vw, 28px); border: 1px solid rgba(185, 242, 116, .18); border-radius: 120px 120px 24px 24px; background: radial-gradient(ellipse at 50% 35%, #315240, #182b21 70%); box-shadow: inset 0 0 60px rgba(0, 0, 0, .24), 0 18px 60px rgba(0, 0, 0, .26); }
@@ -134,6 +222,18 @@ h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height
 @keyframes card-in { from { opacity: 0; transform: translateY(9px) rotate(-4deg); } to { opacity: 1; transform: translateY(0) rotate(0); } }
 @keyframes move-pop { 50% { transform: scale(1.07); } }
 @keyframes ghost-in { from { opacity: 0; } to { opacity: .78; } }
+@keyframes gomoku-settle { from { transform: translateY(-5px) scale(1.06); } to { transform: none; } }
+@media (min-width: 881px) {
+  .game-shell:has(.gomoku-stage) { padding-top: 12px; }
+  .game-shell:has(.gomoku-stage) .game-topbar { margin-bottom: 16px; }
+  .playfield:has(.gomoku-stage) .playfield-heading { padding-bottom: 12px; }
+  .playfield:has(.gomoku-stage) .board-toolbar { margin-top: 12px; gap: 8px; }
+  .game-board:has(.gomoku-stage) { padding-top: 12px; }
+  .board-stage.gomoku-stage { width: min(100%,620px,max(380px,calc(100svh - 320px))); }
+  .board-stage.gomoku-stage[data-mode="free"] { width: min(100%,620px,max(320px,calc(100svh - 400px))); }
+  .piece-tray:has(.gomoku-tray-piece) { padding: 6px 10px; }
+  .piece-tray:has(.gomoku-tray-piece) .piece-tray-hint { flex: 1; min-width: 130px; }
+}
 @media (max-width: 880px) {
   .game-layout { grid-template-columns: minmax(0, 1fr); }
   .game-rail { grid-template-columns: minmax(0, 1.1fr) minmax(220px, .9fr); }
@@ -145,7 +245,6 @@ h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height
   .playfield-heading { align-items: start; }
   .round-state { margin-top: 2px; }
   .game-board { min-height: 260px; padding: 16px 0; }
-  .grid-board.gomoku-board { gap: 1px; padding: 3px; }
   .piece-tray { margin-top: -2px; padding: 9px 10px; }
   .piece-tray-hint { flex: 1 0 100%; }
   .tray-piece { width: 38px; }
@@ -159,6 +258,18 @@ h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); font-weight: 760; line-height
   .blackjack-table { border-radius: 70px 70px 16px 16px; }
   .playing-card { width: 47px; height: 68px; }
   .control-button { min-height: 40px; }
+  .playfield-heading { padding-bottom: 12px; }
+  .board-toolbar { margin-top: 12px; gap: 8px; }
+  .gomoku-option { flex: 1; padding: 0 8px; }
+  .gomoku-axes { font-size: 9px; }
+  .axis-row { left: -6%; width: 12px; }
+  .gomoku-piece .stone { font-size: 9px; }
+  .gomoku-piece.winning-piece .stone { outline-width: 1px; }
+  .gomoku-pending-label { min-width: 95px; font-size: 11px; }
+  .gomoku-interaction-readout { font-size: 11px; }
+  .gomoku-tray-piece { flex: 1; min-height: 52px; padding: 6px 10px; }
+  .action-controls .control-button { padding: 0 10px; font-size: 12px; }
+  .action-controls:has(.gomoku-pending-label) .warm { flex-basis: 100%; max-width: 120px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }

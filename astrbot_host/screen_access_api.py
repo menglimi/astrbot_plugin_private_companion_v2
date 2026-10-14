@@ -19,8 +19,10 @@ class ScreenAccessWebAPI:
         self.controller = controller
 
     def routes(self, prefix=PREFIX):
+        from .screen_observation_api import ScreenObservationWebAPI
         return [(prefix, self.status, ["GET"], "Read scoped native Screen access"),
-                (prefix + "/configure", self.configure, ["POST"], "Set scoped native Screen consent")]
+                (prefix + "/configure", self.configure, ["POST"], "Set scoped native Screen consent"),
+                *ScreenObservationWebAPI(self.controller).routes(prefix)]
 
     async def _run(self, command=None):
         from .web_api import outcome_response

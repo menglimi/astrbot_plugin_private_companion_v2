@@ -88,6 +88,74 @@ let hostProbeVersion=0;
 function persist(){try{localStorage.setItem(KEY,JSON.stringify(state));return true;}catch{return false;}}
 function saved(message){toast(persist()?message:`${message}；此环境仅保留至页面关闭`);}
 function toast(message){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').classList.add('show');toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),2900);}
+function updateProfileAvatarPreview(dataUrl){
+  const hasAvatar=Boolean(dataUrl);
+  document.querySelectorAll('[data-profile-portrait]').forEach(portrait=>{
+    const image=portrait.querySelector('[data-profile-avatar]');
+    const emblem=portrait.querySelector('[data-profile-emblem]');
+    const remove=portrait.querySelector('[data-profile-avatar-remove]');
+    portrait.classList.toggle('has-avatar',hasAvatar);
+    if(image){image.hidden=!hasAvatar;if(hasAvatar)image.src=dataUrl;else image.removeAttribute('src');}
+    if(emblem)emblem.hidden=hasAvatar;
+    if(remove)remove.hidden=!hasAvatar;
+  });
+}
+function setProfileAvatar(dataUrl){
+  const field=$('#roleProfileConfigWorkspace [data-wb-field="avatar_data_url"]');
+  if(!field){toast('角色档案尚未读取完成，请稍后再试');return false;}
+  field.value=dataUrl;
+  updateProfileAvatarPreview(dataUrl);
+  field.dispatchEvent(new Event('input',{bubbles:true}));
+  return true;
+}
+async function compressRoleAvatar(file){
+  if(file.size>12*1024*1024)throw new Error('图片不能超过 12 MB');
+  let source=null,release=()=>{};
+  if(typeof createImageBitmap==='function')source=await createImageBitmap(file);
+  else{
+    const url=URL.createObjectURL(file);
+    release=()=>URL.revokeObjectURL(url);
+    try{
+      source=await new Promise((resolve,reject)=>{
+        const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(new Error('图片无法读取'));image.src=url;
+      });
+    }catch(error){release();throw error;}
+  }
+  try{
+    const crop=Math.min(source.width,source.height),left=(source.width-crop)/2,top=(source.height-crop)/2;
+    if(!crop||source.width*source.height>80000000)throw new Error('图片尺寸无效或过大');
+    const canvas=document.createElement('canvas'),context=canvas.getContext('2d');
+    if(!context)throw new Error('当前浏览器无法处理图片');
+    for(const size of [256,192,144]){
+      canvas.width=size;canvas.height=size;
+      context.fillStyle='#fff';context.fillRect(0,0,size,size);
+      context.imageSmoothingEnabled=true;context.imageSmoothingQuality='high';
+      context.drawImage(source,left,top,crop,crop,0,0,size,size);
+      for(const quality of [.82,.72,.62,.52]){
+        const value=canvas.toDataURL('image/jpeg',quality);
+        if(value.length<=32791)return value;
+      }
+    }
+    throw new Error('压缩后仍超过头像大小限制，请选择更简单的图片');
+  }finally{source.close?.();release();}
+}
+document.addEventListener('change',event=>{
+  const input=event.target.closest?.('[data-profile-avatar-file]');
+  if(!input)return;
+  const file=input.files?.[0];input.value='';
+  if(!file)return;
+  if(!$('#roleProfileConfigWorkspace [data-wb-field="avatar_data_url"]')){
+    toast('角色档案尚未读取完成，请稍后再试');return;
+  }
+  const roleId=product.role()?.role_id,botId=product.roleTarget()?.bot_id;
+  toast('正在处理头像…');
+  compressRoleAvatar(file).then(value=>{
+    if(product.role()?.role_id!==roleId||product.roleTarget()?.bot_id!==botId){
+      toast('当前角色已切换，头像未应用');return;
+    }
+    if(setProfileAvatar(value))toast('头像已加入角色档案，保存后生效');
+  }).catch(error=>toast(error?.message||'头像处理失败'));
+});
 function chip(text,type=''){return `<span class="pill ${type}">${text}</span>`;}
 function button(text,attrs='',kind=''){return `<button class="button ${kind}" ${attrs}>${text}</button>`;}
 function updateAppearance(){
@@ -517,7 +585,14 @@ async function refreshHomeAgendaClock(refresh=false){
   const host=$('[data-home-agenda-clock]');
   if(!host)return;
   const next=scheduleCard();
-  if(host.innerHTML!==next)host.innerHTML=next;
+  if(host.innerHTML!==next){
+    const previous=host.querySelector('.home-agenda-scroll');
+    const scrollTop=previous?.scrollTop||0;
+    const restoreFocus=previous?.contains(document.activeElement)||false;
+    host.innerHTML=next;
+    const current=host.querySelector('.home-agenda-scroll');
+    if(current){current.scrollTop=scrollTop;if(restoreFocus)current.focus({preventScroll:true});}
+  }
 }
 function armHomeAgendaClock(){
   clearTimeout(homeAgendaClockTimer);
@@ -815,6 +890,10 @@ function mountPanelWorkspaces(){
   guarded('屏幕读取授权',()=>screenAccessHost
     ?window.CompanionScreenAccess?.mount(screenAccessHost)
     :window.CompanionScreenAccess?.unmount());
+  const screenObservationHost=document.querySelector('[data-screen-observation]');
+  guarded('最近主动识屏',()=>screenObservationHost
+    ?window.CompanionScreenObservation?.mount(screenObservationHost)
+    :window.CompanionScreenObservation?.unmount());
   /* 外观与设置。它没有后端端点，读的写的是 :root 上的 data-* 与 localStorage，
      但"容器在就挂、不在就卸"这条照样要走：不卸的话，主题切换的叠化回调
      会继续操作已经丢弃的节点。 */
@@ -977,6 +1056,7 @@ function render(){
   window.CompanionNativePerceptionPage?.unmount();
   window.CompanionWeatherSourcePage?.unmount();
   window.CompanionScreenAccess?.unmount();
+  window.CompanionScreenObservation?.unmount();
   window.CompanionModelsPage?.unmount();
   window.CompanionExpressionLearningPage?.unmount();
   window.CompanionExpressionSignalsPage?.unmount();
@@ -1699,6 +1779,7 @@ function renderPerceptionOriginal(){
                 <section class="perception-access-block" aria-labelledby="perceptionAccessTitle">
                   <div class="perception-access-heading"><div><h3 id="perceptionAccessTitle">对话能力授权</h3></div></div>
                   <div data-screen-access class="reality-consent-workspace"></div>
+                  <div data-screen-observation></div>
                   <div data-reality-access class="reality-consent-workspace"></div>
                 </section>
                 <div id="perceptionContactScreenWorkspace" class="perception-scope">${consoleLoading('正在读取设备观察契机…')}</div>
@@ -3235,6 +3316,8 @@ function renderGovernanceOriginal(){
   const roleLabel=roleValue|| (connection.state==='checking'?'正在识别角色':'尚未读取角色');
   const connectionLabel=(connection.label||'连接状态未知').replace(/^小屋\s*·\s*/,'');
   const emblem=roleValue?escapeHTML(Array.from(roleValue)[0]||''):I('user-round');
+  const profileDraft=roleProfileConfigMount?.state?.instances?.find(instance=>instance.group==='role_profile')?.state?.draft;
+  const avatarDataUrl=typeof profileDraft?.avatar_data_url==='string'?profileDraft.avatar_data_url:'';
   const canonNav=SELF_PROFILE_SECTIONS.map(([id,,label,fields],index)=>`<button type="button" class="section-chip${selfProfileSection===id?' is-active':''}" id="self-chapter-tab-${id}" aria-controls="self-chapter-panel-${id}"${selfProfileSection===id?' aria-current="location"':''} data-self-focus="${id}" data-profile-field="${id}" data-profile-fields='${escapeHTML(JSON.stringify(fields))}' data-profile-label="${label}" data-complete="false" aria-label="${label}，待补充，打开对应设定"><span class="section-chip-no">${String(index+1).padStart(2,'0')}</span>${label}<i class="section-chip-dot" aria-hidden="true"></i></button>`).join('');
   const relationshipEditor=`<section id="relationshipProfileConfigWorkspace" class="self-relationship-workspace" aria-label="核心用户关系资料"></section>`;
   const tabs=[
@@ -3245,7 +3328,15 @@ function renderGovernanceOriginal(){
   const liveLabel=role?'已识别当前角色':connectionLabel;
   return `<div class="self-page${selfPane==='questionnaire'?' is-questionnaire-focus':''}">
     <section class="journal-cover" aria-label="当前角色">
-      <div class="portrait"><span data-profile-emblem data-profile-fallback="${escapeHTML(roleValue?Array.from(roleValue)[0]||'':'设')}" aria-hidden="true">${emblem}</span></div>
+      <div class="portrait${avatarDataUrl?' has-avatar':''}" data-profile-portrait>
+        <img data-profile-avatar alt="" src="${escapeHTML(avatarDataUrl)}"${avatarDataUrl?'':' hidden'}>
+        <span data-profile-emblem data-profile-fallback="${escapeHTML(roleValue?Array.from(roleValue)[0]||'':'设')}" aria-hidden="true"${avatarDataUrl?' hidden':''}>${emblem}</span>
+        <label class="portrait-upload" title="上传或更换角色头像">
+          <input type="file" data-profile-avatar-file accept="image/png,image/jpeg,image/webp" aria-label="上传或更换角色头像">
+          ${I('image-plus')}
+        </label>
+        <button type="button" class="portrait-remove" data-profile-avatar-remove aria-label="移除角色头像" title="移除头像"${avatarDataUrl?'':' hidden'}>${I('x')}</button>
+      </div>
       <div class="journal-id">
         <div class="journal-name-row"><h2 data-profile-name data-profile-fallback="${escapeHTML(roleLabel)}">${escapeHTML(roleLabel)}</h2>
           <span class="live" data-state="${escapeHTML(connection.state||'unknown')}"><i aria-hidden="true"></i><span data-profile-status>${escapeHTML(liveLabel)}</span></span></div>
@@ -3424,7 +3515,7 @@ function renderConfigEditors(){
   }));
   if($('#roleProfileConfigWorkspace')){
     roleProfileConfigMount=mountConfigEditor('roleProfileConfigWorkspace',['role_profile'],{
-      role_profile:{presentation:'journal',sectionTabPrefix:'self-chapter-',initialSection:selfProfileSection}
+      role_profile:{presentation:'journal',sectionTabPrefix:'self-chapter-',initialSection:selfProfileSection,navigationLimit:9}
     });
     configEditorMounts.push(roleProfileConfigMount);
   }
@@ -3967,7 +4058,7 @@ function bundledCapabilitySurface(key){
 }
 function capabilitySurface(key){
   if(['content','image','screen'].includes(key))return bundledCapabilitySurface(key);
-  if(['reality','together','game','live'].includes(key))return `<div data-native-extension-host="${key}">${consoleLoading('正在读取内置能力设置…')}</div>`;
+  if(['reality','together','game','live'].includes(key))return `${key==='game'?'<div data-game-access-host></div>':''}<div data-native-extension-host="${key}">${consoleLoading('正在读取内置能力设置…')}</div>`;
   return '';
 }
 function definitions(rows){return `<dl class="definition-list">${rows.map(([label,value])=>`<div class="definition-row"><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl>`;}
@@ -4021,6 +4112,7 @@ function openDetailDialog(title,body){
   if(!dialog||!dialog.classList||!$('#dialogContent'))return false;
   identityDialogMount?.stop?.();
   identityDialogMount=null;
+  window.CompanionGameAccess?.unmount();
   const previousNativeHost=$('#dialogContent').querySelector('[data-native-extension-host]');
   if(previousNativeHost)window.CompanionNativeExtensionPanel?.unmount(previousNativeHost);
   dialog.classList.remove('detail-dialog-settings','detail-dialog-native-extension');
@@ -4028,6 +4120,8 @@ function openDetailDialog(title,body){
   lastDetail=title;
   $('#dialogContent').innerHTML=`<header class="dialog-head"><h2 id="dialogTitle">${escapeHTML(title)}</h2><button class="icon-button" data-close-detail aria-label="关闭详情">${I('x')}</button></header><div class="dialog-body">${body}</div>`;
   const nativeHost=$('#dialogContent').querySelector('[data-native-extension-host]');
+  const gameAccessHost=$('#dialogContent').querySelector('[data-game-access-host]');
+  if(gameAccessHost)window.CompanionGameAccess?.mount(gameAccessHost);
   if(nativeHost){
     dialog.classList.add('detail-dialog-native-extension');
     window.CompanionNativeExtensionPanel?.mount(nativeHost,{extensionId:nativeHost.dataset.nativeExtensionHost});
@@ -4243,6 +4337,9 @@ function openTokenTaskSettings(kind){
 function openSearch(){if($('#detailDialog').open)closeDetail();$('#globalSearch').value='';renderSearch();$('#searchDialog').showModal();$('#globalSearch').focus();}
 document.addEventListener('click',event=>{
   const el=event.target.closest('button,a');if(!el)return;
+  if(el.hasAttribute('data-profile-avatar-remove')){
+    event.preventDefault();setProfileAvatar('');toast('头像已移除，保存角色档案后生效');return;
+  }
   if(el.hasAttribute('data-state-open-home-settings')){window.CompanionStatePage?.openSettings?.(el);return;}
   if(el.hasAttribute('data-maint-open-patrol')){navigate('manage','maintenance','patrol');return;}
   if(el.dataset.identitySettings){
@@ -4481,7 +4578,7 @@ document.addEventListener('submit',event=>{
      弹窗里现在不会有 data-form 表单，保留这条兜底防止未捕获的提交刷新页面。 */
   const form=event.target;if(!form.dataset.form)return;event.preventDefault();
 });
-$('#detailDialog').addEventListener('close',()=>{identityDialogMount?.stop?.();identityDialogMount=null;const nativeHost=$('#dialogContent').querySelector('[data-native-extension-host]');if(nativeHost)window.CompanionNativeExtensionPanel?.unmount(nativeHost);$('#detailDialog').classList.remove('detail-dialog-settings','detail-dialog-native-extension');if(dialogReturnFocus?.isConnected)dialogReturnFocus.focus({preventScroll:true});else if(dialogReturnFurniture)document.querySelector('[data-furniture="'+dialogReturnFurniture+'"]')?.focus({preventScroll:true});else document.querySelector('[data-detail="'+lastDetail+'"]')?.focus({preventScroll:true});});
+$('#detailDialog').addEventListener('close',()=>{identityDialogMount?.stop?.();identityDialogMount=null;window.CompanionGameAccess?.unmount();const nativeHost=$('#dialogContent').querySelector('[data-native-extension-host]');if(nativeHost)window.CompanionNativeExtensionPanel?.unmount(nativeHost);$('#detailDialog').classList.remove('detail-dialog-settings','detail-dialog-native-extension');if(dialogReturnFocus?.isConnected)dialogReturnFocus.focus({preventScroll:true});else if(dialogReturnFurniture)document.querySelector('[data-furniture="'+dialogReturnFurniture+'"]')?.focus({preventScroll:true});else document.querySelector('[data-detail="'+lastDetail+'"]')?.focus({preventScroll:true});});
 $('#detailDialog').addEventListener('click',event=>{if(event.target!==event.currentTarget)return;const r=event.currentTarget.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)closeDetail();});
 $('#searchDialog').addEventListener('click',event=>{if(event.target===event.currentTarget){const r=event.currentTarget.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)event.currentTarget.close();}});
 $('#searchButton').addEventListener('click',openSearch);
