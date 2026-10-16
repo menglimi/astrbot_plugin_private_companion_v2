@@ -594,8 +594,8 @@ const CONTACT_FIELDS = {
   budgets: [
     "dedup_enabled", "dedup_last_message_enabled", "dedup_last_message_window_minutes",
     "dedup_min_overlap_ratio", "dedup_min_shared_tokens", "dedup_policies",
-    "dedup_sent_window_minutes", "enable_proactive_burst", "max_attempts_24h",
-    "max_contacts_24h", "max_relationship_attempts_24h", "max_relationship_contacts_24h",
+    "dedup_sent_window_minutes", "enable_proactive_burst",
+    "max_contacts_24h",
     "proactive_burst_gap_max_seconds", "proactive_burst_gap_min_seconds",
     "proactive_burst_max_messages", "proactive_closing_contacts_threshold",
     "proactive_closing_grace_minutes", "proactive_share_probability",
@@ -615,7 +615,7 @@ const CONTACT_FIELDS = {
     "news_source_url", "official_alert_min_severity", "official_alert_poll_minutes",
     "official_weather_alert_enabled", "poke_action_cooldown_minutes",
     "poke_action_daily_limit", "poke_action_enabled", "proactive_persona_judge_cache_minutes",
-    "proactive_persona_judge_daily_limit", "proactive_persona_judge_threshold",
+    "proactive_persona_judge_threshold",
     "screen_glance_cooldown_minutes", "screen_glance_daily_limit", "screen_glance_enabled",
     "screen_glance_followup_after_minutes", "screen_glance_followup_cooldown_minutes",
     "screen_glance_followup_enabled", "screen_glance_goodnight_delay_minutes",
@@ -644,7 +644,7 @@ test('五个设置视图渲染出的字段清单与本页写出口完全一致',
     assert.deepEqual(names.slice().sort(), expected.slice(),
       view + ' 的字段清单变了。加字段要连这份清单一起改；少字段说明有控件没接上。');
   }
-  assert.equal(seen.size, 124, '五个设置视图合起来必须是 124 个 data-field 绑定');
+  assert.equal(seen.size, 120, '五个设置视图合起来必须是 120 个 data-field 绑定');
   /* 强度档位是五档共用一个字段，走 data-tier 而不是 data-field：
      只数 data-field 会把它整个漏掉。三个问候锚点同理（它们不是控件，是环上的热点）。 */
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'dial'}} : null}});
@@ -1199,20 +1199,20 @@ test('a pending save keeps retrying automatically with one notice and the same o
   assert.doesNotMatch(h.element.innerHTML, /保存结果尚未确认/);
 });
 
-test('保存失败时报错并保留草稿，除非是版本冲突', async () => {
+test('保存失败报告有效配置错误并保留草稿，除非是版本冲突', async () => {
   const h = harness();
   await boot(h);
   const box = fakeInput({type: 'checkbox', checked: false, dataset: {field: 'news.enabled'}});
   h.element.dispatch('change', fieldEvent(box, 'change'));
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-action]' ? {dataset: {action: 'save'}} : null}});
   await h.settle();
-  h.fail(h.requests.find(r => r.method === 'POST'), 'proactive_budget_scope');
+  h.fail(h.requests.find(r => r.method === 'POST'), 'invalid_contact_preference');
   await h.settle();
   assert.equal(h.page.state.data.error, true);
-  assert.ok(h.page.state.data.notice.includes('整段关系'), '关系级额度的专用文案要接上');
+  assert.ok(h.page.state.data.notice.includes('格式'), '配置错误要给出可理解的说明');
   assert.equal(h.page.state.data.touched.size, 1, '非冲突失败要保留草稿，用户不必重填');
   assert.equal(h.page.state.data.pendingWrite, null, '明确拒绝后不应保留待核对请求');
-  assert.match(h.element.innerHTML, /整段关系/, '保存失败必须立即在页面给出反馈');
+  assert.match(h.element.innerHTML, /格式/, '保存失败必须立即在页面给出反馈');
 });
 
 test('后端联系配置错误使用可理解的文案并立即反馈', async () => {
@@ -1250,11 +1250,11 @@ test('消息测试是一级视图，未读到设置时也可以打开', async ()
   assert.equal(h.page.state.data.view, 'tests');
   assert.ok(h.element.innerHTML.includes('ct-tests'), '静态测试指令不应依赖后端设置状态');
   assert.ok(h.element.innerHTML.includes('ct-head-test'), '页头应保留消息测试直达入口');
-  assert.equal((h.element.innerHTML.match(/data-test-id="/g) || []).length, 15);
-  assert.equal((h.element.innerHTML.match(/data-test-coverage="ready"/g) || []).length, 15);
+  assert.equal((h.element.innerHTML.match(/data-test-id="/g) || []).length, 17);
+  assert.equal((h.element.innerHTML.match(/data-test-coverage="ready"/g) || []).length, 17);
   assert.equal((h.element.innerHTML.match(/data-test-coverage="partial"/g) || []).length, 0);
   assert.equal((h.element.innerHTML.match(/data-test-coverage="missing"/g) || []).length, 0);
-  assert.match(h.element.innerHTML, /生产器已接通 <strong>15<\/strong>/);
+  assert.match(h.element.innerHTML, /生产器已接通 <strong>17<\/strong>/);
   assert.ok(!h.element.innerHTML.includes('当前没有独立 invitation 生产器'));
   for (const purpose of ['affection','care','play','repair','invitation']) {
     const start = h.element.innerHTML.indexOf(`data-test-id="${purpose}"`);
@@ -1320,6 +1320,10 @@ test('素材与主动检视共用列表并支持分类筛选', async () => {
   assert.match(h.element.innerHTML, /2 条外部素材/);
   assert.match(h.element.innerHTML, /0 条主动记录/);
 
+  const allMaterialsTab = {dataset: {materialKindFilter: 'all'}};
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-material-kind-filter]'
+    ? allMaterialsTab : null}});
+
   const cards = [
     {dataset: {category: '资讯', search: '资讯 新闻标题 摘要'}, hidden: false},
     {dataset: {category: '趣事', search: '趣事 有意思 小事 摘要'}, hidden: false},
@@ -1339,6 +1343,56 @@ test('素材与主动检视共用列表并支持分类筛选', async () => {
   assert.equal(h.requests.filter(r => r.method === 'POST').length, 0, '素材池只能讀取');
 });
 
+test('主动记录默认查看当天全部窗口并可按窗口和日期筛选', async () => {
+  const h = harness();
+  await boot(h);
+  h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+    ? {dataset: {view: 'materials'}} : null}});
+  await h.settle();
+  const first = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
+  assert.equal(h.page.state.data.materialKind, 'window');
+  assert.deepEqual(JSON.parse(JSON.stringify(first.params)), {day: h.page.state.data.materialDay,
+    timezone: h.page.state.data.materialTimezone});
+  assert.match(h.element.innerHTML, new RegExp(`data-material-day[^>]*value="${h.page.state.data.materialDay}"`));
+
+  h.reply(first, {state: 'ready', shared_count: 0, trace_count: 2, history_count: 2, items: [
+    {id: 'trace-a', scope: 'window', trace_window_id: 'window-a', trace_target: '用户甲', trace_role: '澄溪',
+      category: '主动消息', title: '窗口甲记录', captured_at: '2026-10-07T01:00:00+00:00',
+      usage: {status: 'pending', delivered_parts: 0, total_parts: 1, records: []}},
+    {id: 'trace-b', scope: 'window', trace_window_id: 'window-b', trace_target: '用户乙', trace_role: '小溪',
+      category: '主动消息', title: '窗口乙记录', captured_at: '2026-10-07T02:00:00+00:00',
+      usage: {status: 'not_sent', delivered_parts: 0, total_parts: 1, records: []}},
+  ]});
+  await h.settle();
+  assert.match(h.element.innerHTML, /全部窗口/);
+  assert.match(h.element.innerHTML, /用户甲 · 澄溪/);
+  assert.match(h.element.innerHTML, /用户乙 · 小溪/);
+
+  const cards = [
+    {dataset: {scope: 'window', windowId: 'window-a', category: '主动消息', search: '窗口甲'}, hidden: false},
+    {dataset: {scope: 'window', windowId: 'window-b', category: '主动消息', search: '窗口乙'}, hidden: false},
+  ];
+  const count = {textContent: ''}, empty = {hidden: true};
+  h.element.querySelectorAll = selector => selector === '[data-material-card]' ? cards : [];
+  h.element.querySelector = selector => selector === '[data-material-result-count]' ? count
+    : selector === '.ct-material-filter-empty' ? empty : null;
+  const windowFilter = {value: 'window-b', closest: sel => sel === '[data-material-window]' ? windowFilter : null};
+  h.element.dispatch('change', {target: windowFilter});
+  assert.deepEqual(cards.map(card => card.hidden), [true, false]);
+
+  const dateFilter = {value: '2026-10-06', closest: sel => sel === '[data-material-day]' ? dateFilter : null};
+  h.element.dispatch('change', {target: dateFilter});
+  await h.settle();
+  const requests = h.requests.filter(r => r.method === 'GET' && r.route === 'perception-native/materials');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].params.day, '2026-10-06');
+  assert.equal(requests[1].params.timezone, h.page.state.data.materialTimezone);
+  assert.equal(h.page.state.data.materialWindow, 'all', 'changing date resets the window filter');
+  h.reply(requests[1], {state: 'ready', shared_count: 0, trace_count: 0, history_count: 0, items: []});
+  await h.settle();
+  h.page.unmount();
+});
+
 test('主动消息检视显示发送前草稿、目标和投递状态', async () => {
   const h = harness();
   await boot(h);
@@ -1346,7 +1400,7 @@ test('主动消息检视显示发送前草稿、目标和投递状态', async ()
     ? {dataset: {view: 'materials'}} : null}});
   await h.settle();
   const request = h.requests.find(r => r.method === 'GET' && r.route === 'perception-native/materials');
-  h.reply(request, {state: 'ready', count: 4, shared_count: 1, trace_count: 3, history_count: 3,
+  h.reply(request, {state: 'ready', count: 5, shared_count: 1, trace_count: 4, history_count: 4,
     trace_context_count: 1, trace_state: 'ready', items: [
     {id: 'role-1', scope: 'role', category: '资讯', purpose: '分享见闻', title: '共享见闻',
       detail: '角色可共享的内容', source: '共享资讯池', captured_at: '2026-10-07T11:00:00+00:00'},
@@ -1366,10 +1420,16 @@ test('主动消息检视显示发送前草稿、目标和投递状态', async ()
       detail: '这条在审核后没有发送', source: '主动念头记录', captured_at: '2026-10-07T11:06:00+00:00',
       trace_target: 'user-17<admin>', trace_role: '澄溪',
       usage: {status: 'not_sent', delivered_parts: 0, total_parts: 1,
-        thought_origin: '旧话题接续', records: []}}
+        thought_origin: '旧话题接续', records: []}},
+    {id: 'thought-4', scope: 'window', category: '未发送的念头', purpose: '日常话题', title: '没有合适的开口',
+      detail: '', source: '主动念头记录', captured_at: '2026-10-07T11:07:00+00:00',
+      trace_target: 'user-17<admin>', trace_role: '澄溪',
+      skip_reason: 'model_decision', model_skip_reason: 'no_natural_opening',
+      usage: {status: 'not_sent', delivered_parts: 0, total_parts: 0,
+        thought_origin: '日常问候', records: []}}
   ]});
   await h.settle();
-  assert.equal(h.page.state.data.materialItems.length, 4);
+  assert.equal(h.page.state.data.materialItems.length, 5);
   assert.match(h.element.innerHTML, /共享见闻/);
   assert.match(h.element.innerHTML, /早上想和你打个招呼/);
   assert.match(h.element.innerHTML, /发送前检视 · 等待投递/);
@@ -1379,9 +1439,11 @@ test('主动消息检视显示发送前草稿、目标和投递状态', async ()
   assert.match(h.element.innerHTML, /user-17&lt;admin&gt;/, '目标标签按文本转义');
   assert.match(h.element.innerHTML, /澄溪/);
   assert.match(h.element.innerHTML, /生成于/);
-  assert.match(h.element.innerHTML, /1 条外部素材 · 3 条主动记录/);
+  assert.match(h.element.innerHTML, /本次没有可投递的正文/);
+  assert.doesNotMatch(h.element.innerHTML, /0 \/ 0 段已确认送达/);
+  assert.match(h.element.innerHTML, /1 条外部素材 · 4 条主动记录/);
 
-  const cards = ['role', 'window', 'window', 'window'].map(scope => ({dataset: {scope}, hidden: false}));
+  const cards = ['role', 'window', 'window', 'window', 'window'].map(scope => ({dataset: {scope}, hidden: false}));
   const count = {textContent: ''}, empty = {hidden: true};
   const tabs = ['all', 'role', 'window'].map(materialKindFilter => ({
     dataset: {materialKindFilter}, pressed: '', setAttribute(name, value) {
@@ -1396,7 +1458,7 @@ test('主动消息检视显示发送前草稿、目标和投递状态', async ()
   h.element.dispatch('click', {target: {closest: selector => selector === '[data-material-kind-filter]'
     ? traceTab : null}});
   assert.equal(h.page.state.data.materialKind, 'window');
-  assert.deepEqual(cards.map(card => card.hidden), [true, false, false, false]);
+  assert.deepEqual(cards.map(card => card.hidden), [true, false, false, false, false]);
   assert.equal(tabs[2].pressed, 'true');
 });
 
@@ -1444,7 +1506,7 @@ test('消息测试支持按类别、覆盖状态和内容筛选', async () => {
   const h = harness();
   await boot(h);
   const ids = ['affection','care','play','repair','chat','greeting','followup','invitation',
-    'reminder','meal','life','creation','news','environment','screen'];
+    'reminder','meal','life','creation','news','environment','screen','mobile_location','reaction_image'];
   const cards = ids.map(testId => ({dataset: {testId}, hidden: false}));
   const count = {textContent: ''}, empty = {hidden: true};
   h.element.querySelectorAll = selector => selector === '[data-test-card]' ? cards : [];
@@ -1459,23 +1521,29 @@ test('消息测试支持按类别、覆盖状态和内容筛选', async () => {
   assert.match(html, /data-test-copy="affection"><svg viewBox="0 0 24 24"[^>]*><rect x="8" y="8"/,
     '复制指令按钮使用复制图标');
   assert.ok(html.includes('尚无独立生产器'));
-  assert.equal(count.textContent, '15 / 15 类');
+  assert.equal(count.textContent, '17 / 17 类');
 
   const bucket = {value: 'daily', closest: selector => selector === '[data-test-bucket-filter]' ? bucket : null};
   h.element.dispatch('change', {target: bucket});
   assert.deepEqual(cards.filter(card => !card.hidden).map(card => card.dataset.testId),
     ['greeting','followup','invitation','reminder','meal']);
-  assert.equal(count.textContent, '5 / 15 类');
+  assert.equal(count.textContent, '5 / 17 类');
+
+  bucket.value = 'extension';
+  h.element.dispatch('change', {target: bucket});
+  assert.deepEqual(cards.filter(card => !card.hidden).map(card => card.dataset.testId),
+    ['mobile_location','reaction_image']);
+  assert.equal(count.textContent, '2 / 17 类');
 
   const coverage = {value: 'ready', closest: selector => selector === '[data-test-coverage-filter]' ? coverage : null};
   h.element.dispatch('change', {target: coverage});
   assert.deepEqual(cards.filter(card => !card.hidden).map(card => card.dataset.testId),
-    ['greeting','followup','invitation','reminder','meal']);
-  assert.equal(count.textContent, '5 / 15 类');
+    ['mobile_location','reaction_image']);
+  assert.equal(count.textContent, '2 / 17 类');
 
   const search = {value: '撤权', closest: selector => selector === '[data-test-search]' ? search : null};
   h.element.dispatch('input', {target: search});
-  assert.equal(count.textContent, '0 / 15 类');
+  assert.equal(count.textContent, '0 / 17 类');
   assert.equal(empty.hidden, false, '无匹配时显示空状态');
   assert.equal(h.page.state.data.touched.size, 0, '筛选不能修改配置');
 });
@@ -1524,7 +1592,12 @@ test('主动消息类型卡片可确认后运行真实诊断并显示结果', as
 
   h.reply(request, {state: 'passed', purpose: 'news', purpose_label: '外部资讯',
     event_mode: 'source_backed', route: {label: '真实资讯抓取'},
-    delivery_state: 'delivered', receipt_ref: 'receipt-1', stages: [
+    delivery_state: 'delivered', receipt_ref: 'receipt-1',
+    stage_metrics: {model: {provider_calls: 1, tokens: 42, cost_microusd: 7, avg_latency_ms: 1500,
+      unknown_calls: 0}, delivery: {expected_parts: 2, delivered_parts: 2, unresolved_parts: 0, failed_parts: 0}},
+    usage_summary: {decisions: {session: {used: 2, calls: 2, pending: 0}},
+      deliveries: {session: {used: 1, occupied: 1, limit: 3, delivered: 1, unresolved: 0}},
+      model: {session: {calls: 2, tokens: 100, cost_microusd: 30}}}, stages: [
       {stage: 'news_fetch', state: 'passed', detail: '真实资讯抓取'},
       {stage: 'trusted_candidate', state: 'passed'},
       {stage: 'model_generation', state: 'passed'}, {stage: 'persona_review', state: 'passed'},
@@ -1540,7 +1613,36 @@ test('主动消息类型卡片可确认后运行真实诊断并显示结果', as
   assert.match(h.element.innerHTML, /诊断步骤/);
   assert.match(h.element.innerHTML, /人格复核/);
   assert.match(h.element.innerHTML, /平台已确认投递/);
+  assert.match(h.element.innerHTML, /本轮 Provider 模型：1 次调用/);
+  assert.match(h.element.innerHTML, /本轮投递：2 \/ 2 段已确认/);
+  assert.match(h.element.innerHTML, /主动模型决策已调用 2 次（待处理 0，仅统计）/);
+  assert.match(h.element.innerHTML, /实际联系已确认发送 1 条（每日上限占用 1\/3，待确认 0）/);
+  assert.doesNotMatch(h.element.innerHTML, /模型决策调用额度/);
   assert.equal(h.localStore.size, 0, 'a final result clears the durable replay guard');
+});
+
+test('手机地点和带图主动消息映射到各自的扩展诊断链路', async () => {
+  for (const [id, expected, confirmationText] of [
+    ['mobile_location', {purpose:'environment', confirm_delivery:true, synthetic_event:false, variant:'mobile_location'}, /不伪造坐标/],
+    ['reaction_image', {purpose:'chat', confirm_delivery:true, synthetic_event:false, diagnostic_image:true}, /授权图库检索一张表情原图/],
+  ]) {
+    const h = harness();
+    await boot(h);
+    h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]'
+      ? {dataset: {view: 'tests'}} : null}});
+    h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-run]'
+      ? {dataset: {testRun: id}} : null}});
+    assert.match(h.element.innerHTML, confirmationText);
+    h.element.dispatch('click', {target: {closest: sel => sel === '[data-test-action]'
+      ? {dataset: {testAction: 'confirm'}} : null}});
+    await h.settle();
+    const request = h.requests.at(-1);
+    assert.equal(request.route, 'setup/proactive-diagnostic');
+    assert.deepEqual(JSON.parse(JSON.stringify(request.values)), expected);
+    h.reply(request, {state: 'failed', purpose: expected.purpose, stages: []});
+    await h.settle();
+    h.page.unmount();
+  }
 });
 
 test('失败诊断标明卡点、前序步骤、原因和下一步', async () => {

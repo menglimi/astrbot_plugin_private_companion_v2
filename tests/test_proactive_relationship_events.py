@@ -4,6 +4,7 @@ import json
 import unittest
 from datetime import timedelta
 
+from companion_v2.agenda.models import AgendaTarget
 from companion_v2.conversation.flow import ConversationPolicy
 from companion_v2.foundation.refs import OperationRef, VersionRef
 from companion_v2.storage.repositories import OperationRepository
@@ -248,8 +249,8 @@ class FollowupContactEventTests(ContactScheduleFixture, unittest.IsolatedAsyncio
         app.contact_schedule.advance = lambda: None
         self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
             "chat.enabled": False, "contact_followup_after_minutes": 10,
-            "contact_followup_cooldown_minutes": 30, "event_max_age_seconds": 3600,
-            "max_contacts_24h": 20, "max_attempts_24h": 50}).unwrap()
+            "contact_followup_cooldown_minutes": 30, "event_max_age_seconds": 60,
+            "max_contacts_24h": 20}).unwrap()
         batch = host.receive(self.event("followup-origin", text="今天先读了几页小说。")).unwrap()
         await self.done(app, batch)
         context = self.context(app, batch)
@@ -276,11 +277,56 @@ class FollowupContactEventTests(ContactScheduleFixture, unittest.IsolatedAsyncio
         self.assertIsNotNone(plan)
         self.assertIn("followup_event", plan[4])
         self.assertEqual([intent.purpose for intent in plan[2]], ["followup"])
+        self.assertEqual(plan[1].expires_at, self.clock.now() + timedelta(minutes=5))
         await app.contact_schedule._run(plan)
         await self.automatic_delivery(app, count=2)
         followup = self.contacts(app)[-1]
         self.assertEqual(json.loads(followup["record_json"])["purpose"], "followup")
         self.assertEqual(app.proactive.observe(context, followup["task_id"]).unwrap()["delivery"], "delivered")
+
+    async def test_followup_expires_with_its_slot_instead_of_the_material_freshness_window(self):
+        _host, app, context, _batch = await self._start_with_delivered_contact()
+        self.clock.advance(timedelta(minutes=10))
+        first = app.contact_schedule._plan(self._latest_row(app, context), self.clock.now())
+        self.assertIsNotNone(first)
+
+        self.clock.advance(timedelta(minutes=6))
+        self.assertIsNone(app.contact_schedule._plan(self._latest_row(app, context), self.clock.now()))
+
+
+class OpenLoopContactEventTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
+    def _latest_row(self, app, context):
+        return app.runtime.read_one("""SELECT f.sequence, b.* FROM conversation_flows f
+            JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
+            ORDER BY f.sequence DESC LIMIT 1""", (context.scope.key,))
+
+    async def test_open_loop_uses_its_agenda_expiry_not_material_freshness(self):
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        app.contact_schedule.advance = lambda: None
+        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
+            "chat.enabled": False, "contact_followup_after_minutes": 10,
+            "event_max_age_seconds": 60}).unwrap()
+        for capability in ("memo.create", "memo.list", "memo.read"):
+            self.grant(self.important, self.contact_context().scope, capability)
+        context = self.contact_context()
+        target = AgendaTarget(context.scope, context.role_binding.role, context.actor.subject)
+        memo_id = "long-lived-open-loop"
+        app.agenda.create_memo(context.actor, target=target, memo_id=memo_id, title="继续读那本书",
+            body="之后聊聊读到哪里", purpose="open_loop", operation=self.operation(target.scope, owner="agenda"),
+            expected_role_revision=context.role_binding.revision, observed_at=self.clock.now()).unwrap()
+        batch = host.receive(self.event("open-loop-origin", text="今天先这样吧")).unwrap()
+        await self.done(app, batch)
+
+        self.clock.advance(timedelta(minutes=10))
+        row = self._latest_row(app, context)
+        plan = app.contact_schedule._plan(row, self.clock.now())
+        memo = app.agenda.read_memo(context.actor, target=target, memo_id=memo_id,
+            observed_at=self.clock.now()).unwrap()
+
+        self.assertIsNotNone(plan)
+        self.assertIn("open_loop_event", plan[4])
+        self.assertEqual(plan[1].expires_at, memo.expires_at)
 
     async def test_recent_followup_receipt_blocks_a_second_followup_during_cooldown(self):
         _host, app, context, _batch = await self._start_with_delivered_contact()

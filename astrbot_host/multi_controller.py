@@ -550,14 +550,13 @@ class AstrBotMultiController:
                                                                       configured_slang_search_port()),
             reaction_role_count=len({(item.bot_id, item.role_id) for item in self.settings.personas}))
         from companion_v2.decision import LayaDecisionService, LayaSettingsStore
-        from .laya_client import LayaDecisionClient, start_laya_warmup
+        from .laya_client import LayaDecisionClient
 
         def laya_for_context(context):
             return LayaDecisionService(LayaSettingsStore(self.data_root),
                 runtime=self.session.application.runtime, origin_key=context.key, client_factory=LayaDecisionClient)
 
         self.session.application.attach_laya_decision(laya_for_context)
-        start_laya_warmup(LayaSettingsStore(self.data_root))
 
     def _idle(self):
         if self.session is not None and self.session.application.state not in ("new", "stopped"):

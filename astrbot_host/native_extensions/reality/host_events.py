@@ -8,6 +8,7 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 from companion_v2.execution.models import TaskError
 
 from ..reality_camera import ACTION, explicit_camera_request
+from ..request_context import set_turn_context
 from .host_tools import RealityAudioCommandTool, RealityPrivateManagerTool, private_command, private_management_requested
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,8 @@ class RealityHostEvents:
         self.runtime._create_lifecycle_background_task(run(), label="host-event")
 
     def request(self, event, req):
+        set_turn_context(req, "reality_management")
+        set_turn_context(req, "reality_camera")
         metadata = self.runtime._official_reality_touch_metadata(event)
         reminder = self.reminder(event)
         if metadata:
@@ -94,8 +97,7 @@ class RealityHostEvents:
             if not any(getattr(item, "name", None) == tool.name for item in tools):
                 tools.append(tool)
             req.func_tool = ToolSet(tools=tools)
-            req.system_prompt = (str(getattr(req, "system_prompt", "") or "")
-                + "\n\n本轮可使用 " + tool.name + " 管理发言者本人的 V2 现实触及。"
+            set_turn_context(req, "reality_management", "本轮可使用 " + tool.name + " 管理发言者本人的 V2 现实触及。"
                 "仅根据本轮明确请求操作；涉及设置或确认时先调用工具，依据实际结果用原人格自然回应。"
                 "本人音频授权须先阅读风险说明，再单独发送确认文字；不得替用户确认或虚构成功。"
                 "普通回复继续由当前 AstrBot 核心对话完成。")
@@ -105,16 +107,11 @@ class RealityHostEvents:
         camera_tool = next((tool for tool in tools if getattr(tool, "_action", None) == ACTION), None)
         if camera_tool is None:
             return
-        current = str(getattr(req, "system_prompt", "") or "")
-        marker = "<!-- companion_v2_camera_request -->"
-        if marker in current:
-            return
-        req.system_prompt = (current + "\n\n" + marker + "\n"
-            "本轮用户明确请你通过摄像头观察。先使用当前已提供的 " + camera_tool.name
+        set_turn_context(req, "reality_camera", "本轮用户明确请你通过摄像头观察。先使用当前已提供的 " + camera_tool.name
             + "，purpose 准确表达本轮要看什么；拿到实际观察结果后，再用原有人格自然回应。"
             "依据返回的 observation 与 final_response_instruction 表达；"
             "未取得可靠答案时如实说明，不猜测画面或失败原因，也不把不确定说成确定。"
-            "不要从时间、姿势或房间物品推断未观察到的情绪、意图或状态。\n").strip()
+            "不要从时间、姿势或房间物品推断未观察到的情绪、意图或状态。")
 
     def response(self, event, response):
         if not self.runtime._official_reality_touch_metadata(event):

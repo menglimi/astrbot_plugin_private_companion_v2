@@ -315,11 +315,11 @@ class LiveModelMethods:
         formatted = self._format_bili_events(selected)
         if not formatted:
             return
-        system_prompt = str(self.config.get('bili_live_auto_reply_system_prompt') or '你是正在直播中的虚拟主播助手。请根据观众最近的弹幕自然回应，语气像实时聊天，不要逐条复读。')
+        system_prompt = str(self.config.get('bili_live_auto_reply_system_prompt') or '延续当前选定的人格和直播身份，结合最近的弹幕自然接话。像实时聊天一样简洁，优先回应具体问题或有意思的反馈；不逐条复读，也不必每条都回应。')
         persona_prompt = await live_private_persona_prompt(self, session_id)
         if persona_prompt:
             system_prompt += '\n\n' + persona_prompt
-        prompt = f'请根据以下 B站直播间最新互动生成一句自然回复。\n{self._bili_live_reply_identity_prompt_line()}\n要求：中文；像主播现场回应；不要说自己看不到弹幕；不要列清单；优先回应具体问题或反馈；控制在 15 到 60 个字；不要把每条弹幕都当成进场问候，除非当前弹幕本身就是问候且确实需要回应；不要反复使用“欢迎/你好/来啦/好久不见”这类开场白；只输出要发给直播间观众的话，不要描述发送状态、处理过程或自己的回应策略。\n\n{formatted}'
+        prompt = f'参考这批 B 站直播间的最新互动，挑一处最值得回应的内容。\n{self._bili_live_reply_identity_prompt_line()}\n用中文按当前直播身份自然接话，优先回应具体问题或反馈；不必逐条回复，也不要每次都用欢迎语开场。回复通常保持简短（约 15 至 60 字），复杂问题可适当展开。只输出给直播间观众的话，不描述处理过程或发送状态。\n\n{formatted}'
         prompt += self._build_bili_support_reply_hint(selected)
         auxiliary_context = await self._build_bili_live_auxiliary_context(selected)
         if auxiliary_context:
@@ -375,7 +375,7 @@ class LiveModelMethods:
         except Exception as e:
             logger.warning(f'[B站直播] 读取自动回应会话对话失败: {e}')
             return False
-        prompt = f'【B站直播间弹幕事件】\n请像正在直播中收到弹幕一样回应直播间观众。\n{self._bili_live_reply_identity_prompt_line()}\n身份边界：下面的用户名是 B站直播间观众昵称，不是当前私聊对象，也不等于私聊历史里的用户或群友；不要把私聊记忆、旧对话人物、现实称呼代入当前弹幕。\n要求：自然回应，不要逐条复读；优先回应具体问题或反馈；不要说自己看不到弹幕；不要把每条弹幕都当成进场问候，除非当前弹幕本身就是问候且确实需要回应；不要反复使用“欢迎/你好/来啦/好久不见”这类开场白；如果弹幕只是“摸摸/贴贴/抱抱”这类互动，就按当前直播身份自然回应这个观众，不要说第三个人在摸你，也不要提无关照片、日程或旧聊天。\n只输出要发给直播间观众的话，不要描述发送状态、处理过程或自己的回应策略。\n\n{formatted}'
+        prompt = f'【B站直播互动】\n{self._bili_live_reply_identity_prompt_line()}\n下方昵称属于直播间观众，不是当前私聊对象；只把与本轮互动有关的内容带入回复。挑一处最值得回应的弹幕，用自然中文接话；欢迎、问候和“摸摸/贴贴/抱抱”等互动按语境回应，不要逐条复读或把互动误说成第三者的行为。只输出给直播间观众的话，不描述处理过程或发送状态。\n\n{formatted}'
         prompt += self._build_bili_support_reply_hint(selected)
         auxiliary_context = await self._build_bili_live_auxiliary_context(selected)
         if auxiliary_context:
@@ -809,6 +809,9 @@ class LiveModelMethods:
         return '\n\n本批直播事件包含礼物或醒目留言。请优先感谢送礼物/SC 的观众，自然提到观众名和礼物或 SC 内容；不要机械复读数量，不要像播报清单。' + sc_requirement
 
     async def _inject_bili_live_context(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        from ..request_context import set_turn_context
+
+        set_turn_context(req, 'bili_live')
         if not self.config.get('bili_live_inject_enabled', True):
             return
         if not self._is_bili_live_enabled():
@@ -826,7 +829,7 @@ class LiveModelMethods:
         auxiliary_context = await self._build_bili_live_auxiliary_context(events)
         if auxiliary_context:
             prompt += '\n\n' + auxiliary_context
-        req.system_prompt += '\n\n' + prompt + '\n'
+        set_turn_context(req, 'bili_live', prompt)
 
     async def _format_bili_history_fallback(self, limit: int=10) -> str:
         client = self._bili_live_client

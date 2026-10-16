@@ -203,21 +203,27 @@ class NativeExtensionRegistry(AstrBotToolPort):
                      if entry[0].descriptor.package.extension_id not in self._blocked_extension_ids) if not self._closed else ()
 
     def current_declaration(self, host_tool_id):
+        if self.declaration_readiness(host_tool_id) != "ready":
+            return None
+        return self._entries[host_tool_id][0]
+
+    def declaration_readiness(self, host_tool_id):
+        """Explain whether a loaded declaration can currently be invoked."""
         entry = self._entries.get(host_tool_id)
         if (self._closed or entry is None
                 or entry[0].descriptor.package.extension_id in self._blocked_extension_ids
                 or not entry[1].current(self.context)):
-            return None
+            return "stale"
         if (self._enforcing_image_settings and entry[0].descriptor.tool.action in IMAGE_ACTIONS
                 and not self.image_enabled[entry[0].descriptor.tool.action]):
-            return None
+            return "disabled"
         if self._enforcing_image_settings and entry[0].descriptor.tool.action in IMAGE_ACTIONS:
             action = entry[0].descriptor.tool.action
             backend = getattr(getattr(entry[1].port, "owner", None), "backend", None)
             operations = getattr(backend, "operations", None)
             if operations is not None and action.split(".", 1)[1] not in operations:
-                return None
-        return entry[0]
+                return "unsupported"
+        return "ready"
 
     def image_extension_api(self):
         "The management API pinned to a current V2-native Image declaration."

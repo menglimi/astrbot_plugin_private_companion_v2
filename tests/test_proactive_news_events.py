@@ -86,6 +86,40 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.settings(app, {"news_share_enabled": enabled, "chat.enabled": False}).unwrap()
         return app, self.context(app, batch)
 
+    async def test_overnight_news_waits_on_a_stable_activity_slot_while_materials_refresh(self):
+        self.clock.advance(timedelta(hours=21, minutes=11))  # Local 05:11 in Shanghai.
+        port = NewsPort(self.clock, [[self.article()], lambda: [self.article("daytime")]])
+        app, context = await self.setup_news(port)
+        self.settings(app, {"quiet_enabled": False, "quiet_timezone": "Asia/Shanghai",
+            "interval_seconds": 3600, "proactive_hour_activity_enabled": True,
+            "proactive_hour_activity_curve": ",".join("0.05" if hour == 5 else "1.00" for hour in range(24))}).unwrap()
+        events = app.contact_schedule.news_events
+
+        with patch("companion_v2.proactive.rhythm.sample", return_value=0.5) as draw:
+            for seconds in (60, 1, 14, 15):
+                self.advance(app, seconds)
+                app.contact_schedule.advance()
+                await asyncio.sleep(0)
+            self.assertEqual(self.contact_calls(), [])
+            self.assertEqual(self.contacts(app), ())
+            seeds = [tuple(call.args[0]) for call in draw.call_args_list
+                     if call.args[0][1] == "hour-activity"]
+            self.assertGreaterEqual(len(seeds), 4)
+            self.assertEqual(len(set(seeds)), 1)
+
+            # Collection is independent of permission to interrupt the user.
+            events.maintain(context, self.preferences(app, context))
+            await asyncio.gather(*tuple(events._maintenance_workers.values()))
+            pool = events.role_materials(self.preferences(app, context).values, self.clock.now())
+            self.assertEqual(pool["state"], "ready")
+            self.assertGreater(len(pool["items"]), 0)
+            self.assertEqual(self.contacts(app), ())
+
+            self.advance(app, 5 * 3600)
+            await self.automatic_delivery(app)
+            self.assertEqual(json.loads(self.contacts(app)[0]["record_json"])["purpose"], "news")
+            self.assertEqual(len(self.contact_calls()), 1)
+
     async def test_news_patrol_builds_one_shared_pool_for_multiple_private_contacts(self):
         article = self.article("curious-find")
         article["category"] = "趣事"
@@ -188,8 +222,9 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(saved["news_provenance"]["url"], "https://news.example/story-a")
         self.assertIn("news_event", saved["diagnostic_origin"])
         request = self.contact_calls()[0].original
-        self.assertIn("资讯只按来源提供的标题、摘要和发布时间转述", request.instruction)
-        self.assertIn("孩子看到新鲜事后兴冲冲来分享", request.instruction)
+        self.assertIn("新闻按来源标题、摘要与发布时间分享", request.instruction)
+        self.assertIn("沿用原人格", request.instruction)
+        self.assertIn("不固定兴奋、卖萌", request.instruction)
         self.assertTrue(any(item.owner == SOURCE_OWNER for item in request.context.materials))
 
     async def test_news_sharing_prompt_and_natural_punctuation_create_separate_parts(self):
@@ -202,8 +237,8 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.settings(app, {"proactive_intensity_body_chars": 120}).unwrap()
 
         async def excited_sharing(envelope):
-            self.assertIn("像刚碰到一件有趣的事", envelope.original.instruction)
-            self.assertIn("孩子看到新鲜事后兴冲冲来分享", envelope.original.instruction)
+            self.assertIn("把新闻当作看到值得分享的内容后想说的一段话", envelope.original.instruction)
+            self.assertIn("不固定兴奋、卖萌", envelope.original.instruction)
             self.assertIn("无需压成一句", envelope.original.instruction)
             self.assertIn("已配置规则分段", envelope.original.instruction)
             self.assertNotIn(LLM_SEGMENT_MARKER, envelope.original.instruction)

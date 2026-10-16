@@ -39,7 +39,10 @@ window.CompanionDecisionPage = (() => {
   const setting = () => replyStatus?.settings || {};
   const participation = () => {
     const editor = root?.querySelector?.("#groupParticipationConfigWorkspace")?.companionConfigEditor;
-    return editor?.state?.draft || editor?.state?.base || editor?.state?.status?.settings || {};
+    const groupEditor = root?.querySelector?.("#groupInterjectionConfigWorkspace")?.companionConfigEditor;
+    const defaults = editor?.state?.draft || editor?.state?.base || editor?.state?.status?.settings || {};
+    const local = groupEditor?.state?.draft || groupEditor?.state?.base || groupEditor?.state?.status?.settings || {};
+    return {...defaults, ...local};
   };
   const stat = (label, value, note, tone = "") => `
     <article class="decision-stat${tone ? ` is-${tone}` : ""}">
@@ -60,6 +63,9 @@ window.CompanionDecisionPage = (() => {
       "enable_group_moments", "enable_group_moment_portrait"];
     const atmosphereCount = groupReady
       ? on(g, "enable_group_social_context") ? atmosphereFields.filter(key => on(g, key)).length : 0 : null;
+    const topicStatus = groupReady
+      ? `${flag(g, "enable_group_topic_threads")}${on(g, "enable_group_topic_threads")
+        ? ` · 最多保留 ${shown(g.group_topic_thread_max)} 条` : ""}` : "—";
     const directCount = replyReady ? count(s.group_wakeup_direct_words) : null;
     const interestCount = replyReady ? count(s.group_wakeup_interest_keywords) : null;
     const memberCount = replyReady ? count(s.group_wakeup_primary_member_ids) : null;
@@ -88,7 +94,7 @@ window.CompanionDecisionPage = (() => {
             <span class="decision-step-number">3</span><span class="decision-step-copy"><b>安全边界</b><small>空气护栏、内容护栏与玩笑尺度</small><em>${activeGuards === null ? "—" : `${activeGuards} 项`} 内容护栏 · 接话护栏 ${flag(s, "group_air_guard_enabled")}</em></span>${icon("arrow-right")}
           </button>
           <button type="button" class="decision-chain-step" data-decision-open="group">
-            <span class="decision-step-number">4</span><span class="decision-step-copy"><b>群聊参与</b><small>以旁听、插话或跟读参与</small><em>氛围参考 ${atmosphereCount === null ? "—" : `${atmosphereCount} / 4`} · 跟读 ${flag(g, "enable_group_repeat_follow")}</em></span>
+            <span class="decision-step-number">4</span><span class="decision-step-copy"><b>群聊参与</b><small>氛围与话题线供当前回复参考，插话或跟读另行判定</small><em>氛围参考 ${atmosphereCount === null ? "—" : `${atmosphereCount} / 4`} · 话题线 ${groupReady ? flag(g, "enable_group_topic_threads") : "—"} · 跟读 ${flag(g, "enable_group_repeat_follow")}</em></span>
           </button>
         </div>
       </section>
@@ -114,6 +120,7 @@ window.CompanionDecisionPage = (() => {
           <div class="decision-block-heading"><div><h2>参考材料与快照</h2><p>只使用当前窗口允许读取的内容</p></div></div>
           <div class="decision-reference-list">
             <div><b>群聊氛围</b><span>${atmosphereCount === null ? "—" : `${atmosphereCount} / 4 项参考开启`}</span></div>
+            <div><b>群聊话题线</b><span>${topicStatus}</span></div>
             <div><b>回复快照</b><span>${replyStatus?.apply_mode === "next_sealed_reply" ? "回合开始定格" : replyReady ? "按当前配置读取" : "—"}</span></div>
             <div><b>判定记录</b><span>${records ? `${records.length} 条 · 不含消息正文` : "切换到群聊窗口查看"}</span></div>
           </div>
@@ -160,7 +167,9 @@ window.CompanionDecisionPage = (() => {
     }
     const atmosphere = ["enable_group_mood_detection", "enable_group_roleplay_strength",
       "enable_group_moments", "enable_group_moment_portrait"].filter(key => on(g, key)).length;
-    return `<div class="decision-stats decision-stats-three">
+    return `<div class="decision-stats decision-stats-four">
+      ${stat("群聊话题线", flag(g, "enable_group_topic_threads"),
+        groupReady ? `最多保留 ${shown(g.group_topic_thread_max)} 条 · 90 分钟无更新后失效` : "读取配置后显示")}
       ${stat("氛围参考", groupReady ? `${on(g, "enable_group_social_context") ? atmosphere : 0} / 4 开` : "— / 4",
         groupReady ? "氛围、扮演、名场面与人物线索" : "读取配置后显示")}
       ${stat("主动插话", flag(g, "enable_group_interjection"),
@@ -208,6 +217,8 @@ window.CompanionDecisionPage = (() => {
     if (reply) reply.hidden = !["response", "tempo", "safety"].includes(view);
     const groupWrap = root.querySelector?.("[data-decision-editor='participation']");
     if (groupWrap) groupWrap.hidden = !["safety", "group"].includes(view);
+    const groupOnly = root.querySelector?.("[data-decision-group-only]");
+    if (groupOnly) groupOnly.hidden = view !== "group";
     const jokeHeading = root.querySelector?.("[data-decision-joke-heading]");
     if (jokeHeading) jokeHeading.hidden = view !== "safety";
     const domainLink = root.querySelector?.("[data-decision-domain-link]");
@@ -215,7 +226,7 @@ window.CompanionDecisionPage = (() => {
     window.CompanionReplyPage?.setDecisionView?.(view);
     const groupEditor = root.querySelector?.("#groupParticipationConfigWorkspace")?.companionConfigEditor;
     const groupSections = view === "safety" ? ["joke_guard"]
-      : view === "group" ? ["atmosphere", "interjection", "repeat"] : [];
+      : view === "group" ? ["topics", "atmosphere", "repeat"] : [];
     groupEditor?.setVisibleGroups?.(groupSections, groupSections[0] || "");
     renderPanels();
     return true;
@@ -243,7 +254,7 @@ window.CompanionDecisionPage = (() => {
   }
 
   function onGroupInput(event) {
-    if (event.target?.closest?.("#groupParticipationConfigWorkspace")) renderPanels();
+    if (event.target?.closest?.("#groupParticipationConfigWorkspace, #groupInterjectionConfigWorkspace")) renderPanels();
   }
 
   function render(groupSettingsMarkup = "") {
@@ -298,6 +309,10 @@ window.CompanionDecisionPage = (() => {
     renderPanels();
   }
 
+  function updateParticipationStatus() {
+    renderPanels();
+  }
+
   function unmount() {
     if (root) {
       root.removeEventListener?.("click", onClick);
@@ -309,5 +324,5 @@ window.CompanionDecisionPage = (() => {
     replyStatus = null;
   }
 
-  return {mount, unmount, setView, updateReplyStatus};
+  return {mount, unmount, setView, updateReplyStatus, updateParticipationStatus};
 })();

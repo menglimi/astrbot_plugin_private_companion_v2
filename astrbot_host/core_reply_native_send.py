@@ -77,12 +77,15 @@ class _CurrentReplyContext:
             attempts[key] = "started"
             state["send_attempts"] += 1
             tool.observe("started")
+            from .core_reply_behavior import observe_core_behavior_delivery
+            observe_core_behavior_delivery(tool._event, part, "started")
             try:
                 result = await self._original.send_message(session, wire)
             except BaseException:
                 attempts[key] = "unknown"
                 state["send_unknown"] += 1
                 tool.observe("unknown")
+                observe_core_behavior_delivery(tool._event, part, "unknown")
                 tool.observe("finished")
                 raise
             if result is False:
@@ -90,6 +93,7 @@ class _CurrentReplyContext:
                 attempts[key] = "partial_returned" if returned else "failed"
                 state["send_failed"] += 1
                 tool.observe("failed")
+                observe_core_behavior_delivery(tool._event, part, "failed")
                 tool.observe("finished")
                 raise TaskError("core_reply_platform_unavailable", "AstrBot did not find a platform for this session; nothing was sent")
             state["send_returns"] += 1
@@ -98,6 +102,7 @@ class _CurrentReplyContext:
             if any(isinstance(component, Record) for component in getattr(part, "chain", ())):
                 commit_pending_voice_claim(tool._event)
             tool.observe("returned", result=result)
+            observe_core_behavior_delivery(tool._event, part, "returned")
             state["_notify_sent"](sent_core_text(part))
             _remember_sent_text(tool._event, part)
             try:

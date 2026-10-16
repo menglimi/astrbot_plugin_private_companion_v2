@@ -1007,9 +1007,11 @@ window.CompanionProduct = (() => {
       return;
     }
     if(message.kind!=="request"||typeof message.requestId!=="string"||message.requestId.length>80)return;
+    const startedAt=Date.now();
+    let method="",path="",timeoutMs=DEFAULT_API_TIMEOUT_MS;
     try {
       valid();
-      const method=message.method,path=message.path;
+      method=message.method;path=message.path;
       if(!["GET","POST"].includes(method)||typeof path!=="string")throw fail("invalid_response");
       let mapped;
       if(context.kind==="host") {
@@ -1036,13 +1038,18 @@ window.CompanionProduct = (() => {
         mapped=relative(context.api)+(personaStandardize?"/standardize":path===name?"":"/command");
       }
       // Preserve original response envelopes and error reasons for each workspace.
-      const timeoutMs=requestTimeout({timeoutMs:message.timeoutMs});
+      timeoutMs=requestTimeout({timeoutMs:message.timeoutMs});
       const result=await bounded(method==="GET"?bridge.apiGet(mapped,message.body):bridge.apiPost(mapped,message.body),timeoutMs);valid();
       send({kind:"response",requestId:message.requestId,ok:true,data:result});
     } catch(error){
       const code=typeof error?.code==="string"?error.code.slice(0,80):"";
       const rawReason=[error?.reason,error?.message].find(value=>typeof value==="string"&&value.trim());
       const reason=rawReason?rawReason.replace(/[\u0000-\u001f\u007f]/g," ").slice(0,1200):"";
+      const expectedCode=code&&(Object.hasOwn(errors,code)||/(?:_invalid|_required|_denied|_conflict|_changed|_not_found|_unavailable|_running|_forbidden|_expired|_not_initialized)$/.test(code));
+      if(!error?.confirmed&&(code==="bridge_timeout"||!expectedCode))console.warn("[CompanionV2] Workspace request failed",{
+        method,endpoint:diagnosticEndpoint(path),elapsed_ms:Date.now()-startedAt,
+        timeout_ms:timeoutMs,code:code||"unknown",confirmed:false,
+      });
       send({kind:"response",requestId:message.requestId,ok:false,
         error:errors[code]||reason||"请求未完成，请刷新核对当前状态后重试。",
         code:code||undefined,reason:reason||undefined,confirmed:error?.confirmed===true});

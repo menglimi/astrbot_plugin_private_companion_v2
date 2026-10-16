@@ -119,8 +119,14 @@ class SemanticService:
                 and self.app.messages.reply_images.enabled
                 and self.reaction_preferences.available(context, batch_id, cfg))
 
-    def proactive_reaction_available(self, context, contact_id):
+    def proactive_reaction_available(self, context, contact_id, *, diagnostic=False):
         cfg = self.store.settings()
+        if diagnostic:
+            if (not cfg["enabled"] or not self.reaction_enabled(context, cfg)
+                    or not self.app.messages.reply_images.enabled):
+                return False
+            self.check(context, action="proactive.contact")
+            return self.reaction_preferences.allowed(context, contact_id)
         if not cfg["reactions_proactive_enabled"] or not self.reaction_available(context, contact_id, cfg):
             return False
         self.check(context, action="proactive.contact")

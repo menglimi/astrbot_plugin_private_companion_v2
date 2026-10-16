@@ -1,12 +1,33 @@
-"""Small deterministic policy for native poke notifications."""
+"""Policy and supervised model response for native poke notifications."""
 
+import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 from math import isfinite
 
-from companion_v2.execution.models import digest
+from companion_v2.conversation.foreground import BackgroundPromptTrigger, PromptMaterial, PromptRequest, SealedForegroundContext
+from companion_v2.execution.models import (Lane, TaskContext, TaskDefinition, TaskError, TaskRegistration, TaskResult,
+    TaskSpec, digest, require)
+from companion_v2.execution.runner import ExactTaskRunner
+from companion_v2.execution.service import outcome
+from companion_v2.model_gateway.models import ModelTaskProfile
 
 
 DEFAULT_REPLIES = ("在呢，怎么啦？", "收到你的戳戳啦。", "我在这里。")
+MAX_BACK_TIMES = 5
+MODEL_REPLY_KIND = "conversation.poke_reply"
+MODEL_REPLY_OWNER = "conversation.pokes"
+MODEL_REPLY_PROMPT = (
+    "把这次戳一戳当作轻量互动，按角色个性自然回应，可以俏皮、亲近或简短接住。"
+    "不要推断对方为什么戳、当时的情绪或你们的关系，不编造刚发生的事。"
+    "回复内容保持一条适合直接发送的简短正文，不解释选择或复述规则；最终输出遵循本轮宿主提供的回复格式。"
+)
+
+
+def poke_reply_profile(provider, *, max_output_tokens=128):
+    return ModelTaskProfile(MODEL_REPLY_KIND, Lane.BACKGROUND, provider,
+        "依据已配置角色身份回应当前戳一戳互动。", max_output_tokens=max_output_tokens,
+        capabilities=("text",), timeout_seconds=15)
 
 
 @dataclass(frozen=True)
@@ -15,16 +36,23 @@ class PokePolicy:
     trigger_probability: float = 1.0
     replies: tuple[str, ...] = DEFAULT_REPLIES
     back_probability: float = 0.0
+    back_times: int = 1
+    model_reply_enabled: bool = False
+    model_reply_probability: float = 0.3
 
     @classmethod
     def parse(cls, value):
         if value is None:
             value = {}
-        if type(value) is not dict or set(value) - {"enabled", "trigger_probability", "replies", "back_probability"}:
+        if type(value) is not dict or set(value) - {
+                "enabled", "trigger_probability", "replies", "back_probability", "back_times",
+                "model_reply_enabled", "model_reply_probability"}:
             raise ValueError("poke settings contain unknown fields")
         enabled = value.get("enabled", False)
         replies = value.get("replies", list(DEFAULT_REPLIES))
-        if type(enabled) is not bool or type(replies) is not list or not 1 <= len(replies) <= 20:
+        model_reply_enabled = value.get("model_reply_enabled", False)
+        if (type(enabled) is not bool or type(model_reply_enabled) is not bool
+                or type(replies) is not list or not 1 <= len(replies) <= 20):
             raise ValueError("poke switch or replies are invalid")
         if any(type(item) is not str or not item.strip() or len(item) > 120 for item in replies):
             raise ValueError("poke replies must be short nonempty strings")
@@ -35,8 +63,13 @@ class PokePolicy:
                 raise ValueError("poke probability must be between zero and one")
             return float(number)
 
+        back_times = value.get("back_times", 1)
+        if type(back_times) is not int or not 1 <= back_times <= MAX_BACK_TIMES:
+            raise ValueError("poke back count must be between one and five")
+
         return cls(enabled, probability("trigger_probability", 1.0), tuple(item.strip() for item in replies),
-                   probability("back_probability", 0.0))
+                   probability("back_probability", 0.0), back_times, model_reply_enabled,
+                   probability("model_reply_probability", 0.3))
 
     @staticmethod
     def _fraction(event_key, purpose):
@@ -48,5 +81,104 @@ class PokePolicy:
         index = int(digest([event_key, "reply"])[:13], 16) % len(self.replies)
         return self.replies[index]
 
+    def use_model_reply(self, event_key):
+        return (self.model_reply_enabled
+                and self._fraction(event_key, "model_reply") < self.model_reply_probability)
+
     def poke_back(self, event_key):
         return self._fraction(event_key, "back") < self.back_probability
+
+
+@dataclass(frozen=True)
+class PokeReplyJob:
+    context: TaskContext
+    role_instruction: str
+    event_key: str
+
+
+class PokeReplyModel:
+    """Generate one ephemeral response without recording a human conversation turn."""
+
+    def __init__(self, runtime, *, now):
+        self.runtime, self.now = runtime, now
+        self.app = self.tasks = self.gateway = self.runner = None
+        self.pending = {}
+        self.results = {}
+        self.invocations = set()
+        self.closed = False
+        self.registrations = (TaskRegistration(TaskDefinition(
+            MODEL_REPLY_KIND, MODEL_REPLY_OWNER, "conversation.reply", Lane.BACKGROUND,
+            timeout_seconds=20, max_attempts=1, concurrency=4), self.validate),)
+
+    def attach(self, app):
+        if app.runtime is not self.runtime:
+            raise ValueError("poke model task must share its original runtime")
+        self.app, self.tasks, self.gateway = app, app.tasks, app.gateway
+        self.runner = ExactTaskRunner(self.tasks, frozenset({MODEL_REPLY_KIND}), self.generate,
+                                      waiting=app.background_waiting)
+
+    @outcome
+    def validate(self, spec, at):
+        self.app.require_running()
+        job = self.pending.get(spec.task_id)
+        if self.closed or job is None or job.context != spec.context or digest(job) != spec.request_ref:
+            raise TaskError("poke_model_input_unavailable", "the original poke context is unavailable")
+        require(self.tasks.check_context_access(job.context, action="conversation.reply", observed_at=at))
+        return True
+
+    async def reply(self, context, role_instruction, event_key):
+        if self.closed or self.runner is None:
+            raise TaskError("poke_model_unavailable", "the supervised poke model is unavailable")
+        if not isinstance(context, TaskContext) or not isinstance(role_instruction, str) or not role_instruction.strip():
+            raise TaskError("poke_model_context_invalid", "the original role context is unavailable")
+        task_id = "poke-reply-" + digest(event_key)
+        job = PokeReplyJob(context, role_instruction, event_key)
+        self.pending[task_id] = job
+        invocation = asyncio.current_task()
+        self.invocations.add(invocation)
+        try:
+            now = self.tasks.now()
+            submitted = require(self.tasks.submit(TaskSpec(task_id, context, MODEL_REPLY_KIND, digest(job),
+                event_key, now, now + timedelta(seconds=20))))
+            if submitted.state != "created":
+                return None
+            result = await self.runner.run(context, task_id)
+            if (not result.is_success or result.unwrap().task is None
+                    or result.unwrap().task.state != "succeeded"):
+                return None
+            return self.results.pop(task_id, None)
+        finally:
+            self.pending.pop(task_id, None)
+            self.results.pop(task_id, None)
+            self.invocations.discard(invocation)
+
+    async def generate(self, run):
+        job = self.pending[run.task.task_id]
+        trigger = BackgroundPromptTrigger("poke-" + digest(job.event_key), job.context.actor.principal,
+                                          job.context.scope, self.tasks.now())
+        material = PromptMaterial(MODEL_REPLY_OWNER, "native_poke_notice",
+                                  "当前聊天中收到了一次戳一戳提示。")
+        request = PromptRequest(trigger, job.role_instruction,
+            SealedForegroundContext((material,), (), ()), MODEL_REPLY_PROMPT, job.context.role_binding)
+        completion = await self.gateway.generate(run, request)
+        draft = completion.draft
+        text = draft.text.strip() if draft is not None and draft.action == "text" else ""
+        if not text or len(text) > 240:
+            if completion.call_id:
+                self.gateway.ledger.discard(completion.call_id)
+            raise TaskError("poke_model_output_invalid", "the poke response was empty or too long")
+        run.validate()
+        self.results[run.task.task_id] = text
+        return TaskResult("succeeded", result_ref=digest(text))
+
+    @property
+    def active_handles(self):
+        return ((self.runner.active_handles if self.runner is not None else ())
+                + tuple("poke-model-" + str(id(task)) for task in self.invocations))
+
+    async def close(self):
+        self.closed = True
+        if self.runner is not None:
+            await self.runner.close()
+        if self.invocations:
+            await asyncio.wait(tuple(self.invocations), timeout=0.25)

@@ -43,9 +43,9 @@ from .identity_derivation import role_display_name
 
 
 PREFIX = "/astrbot_plugin_private_companion_v2/host"
-INSTALLATION_CONFIGURATION_SECTIONS = ("proactive.contact",)
+INSTALLATION_CONFIGURATION_SECTIONS = ("proactive.contact", "reaction", "budget")
 TARGET_CONFIGURATION_SECTIONS = tuple(name for name in SECTIONS
-    if name != "proactive.contact")
+    if name not in INSTALLATION_CONFIGURATION_SECTIONS)
 
 
 def configuration_routes(reply_route, view, *, allowed_sections=None):
@@ -239,7 +239,7 @@ class MultiHostWebAPI:
         routes += BackupWebAPI(self.controller).routes()
         routes += HostOptionsWebAPI(self.controller).routes()
         routes += StorageWebAPI(self.controller).routes()
-        # Shared defaults stay on an installation route, away from selected chats.
+        # Installation-owned groups stay on one route, away from selected chats.
         routes += ConfigurationWebAPI(InstallationControllerView(self.controller),
             allowed_sections=INSTALLATION_CONFIGURATION_SECTIONS).routes()
         installation_perception = NativePerceptionWebAPI(InstallationControllerView(self.controller))

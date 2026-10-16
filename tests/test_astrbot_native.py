@@ -89,7 +89,7 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result[1:], ("original", self.native.persona, False))
 
-    async def test_multiple_v2_personas_follow_the_mapped_astrbot_conversation_persona(self):
+    async def test_uncached_multiple_v2_personas_resolve_the_astrbot_selection_once(self):
         account = self.bridge.accounts[("qq-main", "100")]
         self.map_second_native_persona()
         async def no_override(_umo):
@@ -101,23 +101,27 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
         self.bridge.session_persona_override_lookup = no_override
         self.bridge.persona_snapshot_lookup = selected_persona
-        self.bridge.persona_window_snapshot_lookup = lambda *_: {
-            "bot_id": "bot-a", "persona_id": "original", "role_id": ROLE.subject_id,
-            "conversation_id": None, "selection_source": "configured",
-        }
+        refreshed = []
+        self.bridge.persona_window_snapshot_update = lambda *args: refreshed.append(args)
         with patch.object(self.native.conversation_manager, "get_conversation",
                            side_effect=AssertionError("the projection query must not load conversation history")):
             result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
 
         self.assertEqual(result[1:], ("second", self.native.persona_manager.personas_v3[1], False))
+        self.assertEqual(refreshed, [("qq-main:FriendMessage:200", "100", "bot-a",
+                                      "second", ROLE.subject_id, "conversation-1")])
 
     async def test_unmapped_conversation_persona_uses_configured_v2_window_snapshot(self):
         account = self.bridge.accounts[("qq-main", "100")]
         self.map_second_native_persona()
-        self.bridge.session_persona_override_lookup = AsyncMock(return_value=None)
-        self.bridge.persona_snapshot_lookup = AsyncMock(return_value="unmapped")
+        self.bridge.session_persona_override_lookup = AsyncMock(
+            side_effect=AssertionError("installed persona snapshots are authoritative until refresh"))
+        self.bridge.persona_snapshot_lookup = AsyncMock(
+            side_effect=AssertionError("installed persona snapshots do not query conversation personas"))
+        self.bridge.persona_selection_lookup = AsyncMock(
+            side_effect=AssertionError("installed persona snapshots do not resolve personas"))
         self.bridge.persona_window_snapshot_lookup = lambda *_: {
-            "bot_id": "bot-a", "persona_id": "original", "role_id": ROLE.subject_id,
+            "bot_id": "bot-a", "persona_id": "original", "role_id": "stale-role",
             "conversation_id": None, "selection_source": "configured",
         }
         refreshed = []
@@ -128,6 +132,9 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[1:], ("original", self.native.persona, False))
         self.assertEqual(refreshed, [("qq-main:FriendMessage:200", "100", "bot-a",
                                       "original", ROLE.subject_id, "conversation-1")])
+        self.bridge.session_persona_override_lookup.assert_not_awaited()
+        self.bridge.persona_snapshot_lookup.assert_not_awaited()
+        self.bridge.persona_selection_lookup.assert_not_awaited()
 
     async def test_empty_conversation_persona_uses_local_agent_runner_default(self):
         account = self.bridge.accounts[("qq-main", "100")]
@@ -309,7 +316,7 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_installed_persona_snapshot_accepts_prompt_updates_until_manual_refresh(self):
         self.bridge.persona_window_snapshot_lookup = lambda umo, account_id: {
-            "bot_id": "bot-a", "persona_id": "original", "role_id": ROLE.subject_id,
+            "bot_id": "bot-a", "persona_id": "original", "role_id": "stale-role",
             "conversation_id": "conversation-1",
         } if (umo, account_id) == ("qq-main:FriendMessage:200", "100") else None
         self.native.persona["prompt"] = "启动快照之后更新的人格提示词。"

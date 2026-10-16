@@ -300,7 +300,7 @@ test('V1 is not inspected until a target and persona are selected', async () => 
 
   assert.equal(page.calls.some(item => item.route === 'setup/status'), false,
     'the standalone migration workspace must not depend on first-run state');
-  assert.match(page.html, /选择来源、写入目标和配置范围/);
+  assert.match(page.html, /先选来源、写入目标和配置范围/);
   assert.match(page.html, /setup-migration-context/);
   assert.match(page.html, /V1 只读/);
   assert.equal(page.calls.some(item => item.route === 'legacy'), false);
@@ -645,8 +645,9 @@ test('data migration does not present an unplanned memory database as empty', as
   page.change('', 't-first', {setupLegacy: 'target'});
   page.change('', 'r-first', {setupLegacy: 'role'});
 
-  assert.match(page.html, /独立记忆库并迁入已映射的历史资料（试算后显示规模）/);
-  assert.doesNotMatch(page.html, /独立记忆库并迁入已映射的历史资料（0 条 \/ 0 MB）/);
+  assert.match(page.html, /独立记忆库（试算后显示规模）/);
+  assert.match(page.html, /仅迁入通过身份映射和治理检查的历史资料/);
+  assert.doesNotMatch(page.html, /独立记忆库（0 条 \/ 0 MB）/);
 });
 
 test('single-target migration exposes references and can import wardrobe text without gallery images', async () => {
@@ -668,11 +669,14 @@ test('single-target migration exposes references and can import wardrobe text wi
   }});
   page.mountMigration();
   await settle();
-  assert.match(page.html, /V1 数据迁移/);
+  assert.match(page.html, /从 V1 安全迁入 V2/);
   page.change('', 't-first', {setupLegacy: 'target'});
   page.change('', 'r-first', {setupLegacy: 'role'});
   page.click('legacy-data-plan');
   await settle();
+  page.change('', '', {setupLegacy: 'import-reference-images'}, {checked: true});
+  assert.match(page.html, /图片随角色使用，不按 V1 私聊用户区分/);
+  page.change('', '', {setupLegacy: 'import-reference-images'}, {checked: false});
   page.change('', '', {setupLegacy: 'import-wardrobe-items'}, {checked: true});
   page.change('', '', {setupLegacy: 'confirm-reference-persona-mapping'}, {checked: true});
   page.click('legacy-data-apply');

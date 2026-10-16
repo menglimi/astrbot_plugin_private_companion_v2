@@ -131,7 +131,8 @@ test('daily token trend stacks usage, scales the axis, and breaks totals at unkn
   const today = localDay();
   const dayOffset = offset => localDay(new Date(Date.now() + offset * 86400000));
   const rows = [
-    daily(dayOffset(-3), {calls: 1, tokens: 6100, input_tokens: 4800, cached_input_tokens: 1800, output_tokens: 1300}),
+    daily(dayOffset(-3), {calls: 1, tokens: 6100, input_tokens: 4800, cached_input_tokens: 1800,
+      cache_reported_calls: 1, output_tokens: 1300}),
     daily(dayOffset(-2), {calls: 1, tokens: 7400, input_tokens: 5900, cached_input_tokens: 2400, output_tokens: 1500}),
     daily(dayOffset(-1), {calls: 1, tokens: null, input_tokens: null, cached_input_tokens: null, output_tokens: null}),
     daily(today, {calls: 1, tokens: 8500, input_tokens: 6500, cached_input_tokens: 2500, output_tokens: 2000}),
@@ -144,12 +145,13 @@ test('daily token trend stacks usage, scales the axis, and breaks totals at unkn
   await flush();
   const dailyTrend = h.root.innerHTML.split('data-trend-panel="daily"')[1].split('data-trend-panel="hourly"')[0];
   assert.match(dailyTrend, /data-series="cached">缓存输入/);
-  assert.match(dailyTrend, /data-series="input">未命中缓存输入/);
+  assert.match(dailyTrend, /data-series="input">其余输入/);
   assert.match(dailyTrend, /data-series="output">输出/);
   assert.match(dailyTrend, /data-series="total">总计/);
   assert.match(dailyTrend, /class="maint-chart-axis"[\s\S]*?>10K<\/span>/);
   assert.match(dailyTrend, /class="maint-chart-total-line"[^>]*points="[^"]+"/);
-  assert.match(dailyTrend, /title="[^"]+缓存输入 2,500 · 未命中缓存输入 4,000 · 输出 2,000"/);
+  assert.match(dailyTrend, /title="[^"]+缓存输入 2,500 · 其余输入（含缓存未知） 4,000 · 输出 2,000"/);
+  assert.match(dailyTrend, /title="[^"]+缓存输入 1,800 · 未命中缓存输入 3,000 · 输出 1,300"/);
   const slots = Number(dailyTrend.match(/data-count="(\d+)"/)[1]);
   assert.equal((dailyTrend.match(/class="maint-chart-total-dot"/g) || []).length, slots - 1);
   assert.equal((dailyTrend.match(/class="maint-chart-total-line"/g) || []).length, 1);
@@ -371,14 +373,42 @@ test('reply efficiency charts core and historical daily latency as separate meas
   assert.match(page, /核心发送返回/);
   assert.match(page, /历史平台回执/);
   assert.match(page, /每日回复时长中位数柱状图，共用纵轴/);
+  assert.match(page, /单位：秒/);
+  assert.match(page, /--tick-position:0%">8<\/span>/);
   assert.match(page, /data-series="legacy" style="--bar-height:[1-9]\d*%" title="历史平台回执 · 2026-10-11 · P50 6\.4 秒 · P95 9\.2 秒"/);
   assert.match(page, /data-series="core" style="--bar-height:[1-9]\d*%" title="核心发送返回 · 2026-10-12 · P50 3\.2 秒 · P95 3\.2 秒"/);
   assert.match(page, /data-series="core" aria-hidden="true"><\/span>/);
   assert.match(page, /role="group" aria-label="2026-10-11：历史平台回执 P50 6\.4 秒，P95 9\.2 秒"/);
-  assert.match(page, /datetime="2026-10-11">10\/11<\/time>/);
+  assert.match(page, /datetime="2026-10-11"><span class="maint-efficiency-date-full">10\/11<\/span><span class="maint-efficiency-date-compact" aria-hidden="true">11日<\/span><\/time>/);
+  assert.match(page, /10\/11 – 10\/12/);
   assert.match(styles, /\.maint-efficiency-day:hover \.maint-efficiency-trend-bar/);
   assert.match(styles, /@media \(prefers-reduced-motion:reduce\)[\s\S]*\.maint-efficiency-trend-bar/);
   h.page.unmount();
+});
+
+test('daily latency keeps unobserved days distinct from a measured zero and exposes focusable readouts', async () => {
+  const report = {summary: {samples: 2}, coverage: {core_samples: 2},
+    by_source: {astrbot_core: {samples: 2}}, recent: [], daily: [
+      {day: '2026-10-11', samples: 1, median_end_to_end_send_returned_ms: null},
+      {day: '2026-10-12', samples: 1, median_end_to_end_send_returned_ms: 0},
+    ]};
+  const h = harness({maintenance: {generated_at: localStamp(), summary: {}, totals: {}, daily: [],
+    history: [], recent: [], reply_efficiency: report}});
+  h.page.mount(h.root, {activeView: 'efficiency'});
+  await flush();
+  assert.match(h.root.innerHTML, /aria-label="2026-10-11：回复时长未观测" tabindex="0"/);
+  assert.match(h.root.innerHTML, /aria-label="2026-10-12：核心发送返回 P50 0 毫秒" tabindex="0"/);
+  assert.match(h.root.innerHTML, /单位：毫秒/);
+  assert.match(h.root.innerHTML, /P50 0 毫秒<\/b>/);
+  h.page.unmount();
+  report.daily[1].median_end_to_end_send_returned_ms = null;
+  const unknown = harness({maintenance: {generated_at: localStamp(), summary: {}, totals: {}, daily: [],
+    history: [], recent: [], reply_efficiency: report}});
+  unknown.page.mount(unknown.root, {activeView: 'efficiency'});
+  await flush();
+  assert.doesNotMatch(unknown.root.innerHTML, /class="maint-efficiency-trend-chart"/);
+  assert.match(unknown.root.innerHTML, /暂无核心发送返回或历史回执样本/);
+  unknown.page.unmount();
 });
 
 test('dialogue and plugin views switch totals, rankings, cache, history, traces and CSV together', async () => {
@@ -714,7 +744,65 @@ test('missing usage breakdown never substitutes role totals for plugin or dialog
   }
   assert.equal(h.exports.length, 0);
   h.root.click('[data-token-source]', {tokenSource: 'main'});
-  assert.match(h.root.innerHTML, /AstrBot 全局统计未接入/);
+  assert.match(h.root.innerHTML, /AstrBot 全局用量暂不可用/);
+  h.page.unmount();
+});
+
+test('AstrBot all-session statistics connect the host ledger and export only the selected period', async () => {
+  const today = localDay(), oldDay = localDay(new Date(Date.now() - 40 * 86400000));
+  const hostToday = daily(today, {tokens: 370, calls: 2, input_tokens: 340, output_tokens: 30,
+    reported_tokens: 370, cached_input_tokens: 40, cost_microusd: null, cache_reported_calls: 0,
+    cache_telemetry_calls: 1, providers: [{key: 'host-provider', tokens: 370, calls: 2}],
+    tasks: [{key: 'conversation.reply', tokens: 370, calls: 2}]});
+  const hostOld = daily(oldDay, {tokens: 99, calls: 1, providers: [{key: 'old-host-provider', tokens: 99, calls: 1}]});
+  const role = daily(today, {tokens: 5000, calls: 1});
+  const main = {available: true, installed: true, display_name: 'AstrBot 全部会话',
+    totals: {...hostToday, tokens: 469, calls: 3}, daily: [hostOld, hostToday], history: [hostOld, hostToday],
+    by_provider: [{key: 'host-provider', tokens: 370, calls: 2}, {key: 'old-host-provider', tokens: 99, calls: 1}],
+    recent: [{at: today + 'T08:00:00', kind: 'conversation.reply', provider: 'host-provider', tokens: 160}],
+    note: '按核心回复轮次汇总，包含工具续轮；缓存命中率与费用未提供。'};
+  const h = harness({maintenance: {generated_at: localStamp(), summary: role, totals: role,
+    daily: [role], recent: [{at: localStamp(), kind: 'conversation.reply', provider: 'role-provider', tokens: 5000}],
+    budget: {spent_tokens: 123}, external_token_sources: {main}}});
+  h.page.mount(h.root);
+  await flush();
+  assert.match(h.root.innerHTML, /data-token-source="main"[^>]*>[\s\S]*?<small data-state="已连接">已连接/);
+  h.root.click('[data-token-source]', {tokenSource: 'main'});
+  const overview = () => h.root.innerHTML.split('data-maint-view="overview"')[1].split('data-maint-view="prompts"')[0];
+  assert.match(overview(), /今日 · 来源 Token<\/span><strong>370<\/strong>/);
+  assert.match(overview(), /2 次回复/);
+  assert.match(overview(), /缓存命中<\/span><strong>40<\/strong>/);
+  assert.match(overview(), /暂无命中率/);
+  assert.match(overview(), /缓存输入 40 · 其余输入（含缓存未知） 300 · 输出 30/);
+  assert.doesNotMatch(overview(), /未命中缓存输入/);
+  assert.doesNotMatch(overview(), /AstrBot 全局用量暂不可用|今日插件任务预算|role-provider/);
+  h.root.click('[data-period]', {period: '7d'});
+  h.root.click('[data-export-tokens]');
+  assert.match(h.exports[0], /AstrBot 全部会话/);
+  assert.match(h.exports[0], /host-provider/);
+  assert.doesNotMatch(h.exports[0], /role-provider|old-host-provider|5000/);
+  assert.equal(h.exports[0].split('\r\n')[1].split(',')[9], '""');
+  assert.match(h.downloads[0], /tokens-main-/);
+  h.root.click('[data-period]', {period: 'total'});
+  assert.match(overview(), /累计 · 来源 Token<\/span><strong>469<\/strong>/);
+  h.root.click('[data-maint-nav]', {maintNav: 'recent'});
+  const recent = h.root.innerHTML.split('data-maint-view="recent"')[1];
+  assert.match(recent, /host-provider/);
+  assert.doesNotMatch(recent, /role-provider/);
+  h.page.unmount();
+});
+
+test('a failed host statistics read shows its real unavailable state instead of a fixed missing integration', async () => {
+  const h = harness({maintenance: {generated_at: localStamp(), summary: {tokens: 5000}, daily: [], recent: [],
+    external_token_sources: {main: {available: false, installed: true, display_name: 'AstrBot 全部会话',
+      reason: 'AstrBot 全局用量读取失败，请稍后重新读取。'}}}});
+  h.page.mount(h.root);
+  await flush();
+  assert.match(h.root.innerHTML, /data-token-source="main"[^>]*>[\s\S]*?<small data-state="暂不可用">暂不可用/);
+  h.root.click('[data-token-source]', {tokenSource: 'main'});
+  assert.match(h.root.innerHTML, /AstrBot 全局用量读取失败/);
+  h.root.click('[data-export-tokens]');
+  assert.equal(h.exports.length, 0);
   h.page.unmount();
 });
 
@@ -1331,10 +1419,9 @@ test('proactive diagnostic localizes exhausted attempt budget and identifies the
     voice: {providers: []}, image: {actions: []}, model: {tasks: [], providers: []},
     posts: {'/setup/proactive-diagnostic': {state: 'failed', purpose: 'care', purpose_label: '情绪关怀',
       stage: 'attempt_budget', code: 'contact_attempt_budget',
-      failure_title: '本私聊的24小时尝试额度已用完',
-      budget_usage: {used: 12, limit: 12, window_hours: 24},
-      suggestion: '到「主动联系 → 额度与去重」查看或调整“24 小时内最多尝试”。',
-      error: 'contact decision allowance is exhausted', stages: [
+      failure_title: '旧版本的主动模型调用次数上限已触发',
+      suggestion: '当前版本已取消该独立上限。',
+      error: 'contact model-call allowance is exhausted', stages: [
         {stage: 'authorization', state: 'passed'}, {stage: 'settings', state: 'passed'},
         {stage: 'purpose', state: 'passed'}, {stage: 'trusted_candidate', state: 'passed'},
         {stage: 'attempt_budget', state: 'failed'},
@@ -1345,10 +1432,10 @@ test('proactive diagnostic localizes exhausted attempt budget and identifies the
   root.click('[data-proactive-test]');
   root.click('[data-proactive-confirm]');
   await flush();
-  assert.match(root.innerHTML, /测试未通过 · 本私聊的24小时尝试额度已用完/);
-  assert.match(root.innerHTML, /失败、过期、取消和死信任务不计入/);
-  assert.match(root.innerHTML, /已用 12 \/ 12 次（滚动 24 小时）/);
-  assert.match(root.innerHTML, /本私聊24小时尝试额度<\/span><strong>失败/);
+  assert.match(root.innerHTML, /测试未通过 · 旧版本的主动模型调用次数上限已触发/);
+  assert.match(root.innerHTML, /当前版本已取消该独立上限/);
+  assert.doesNotMatch(root.innerHTML, /模型决策调用额度已用 12 \/ 12/);
+  assert.match(root.innerHTML, /旧版本模型调用次数上限<\/span><strong>失败/);
   assert.match(root.innerHTML, /展开技术详情/);
   page.unmount();
 });

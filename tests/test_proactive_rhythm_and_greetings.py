@@ -8,6 +8,7 @@ the synthetic sender, and never open a platform connection.
 from datetime import datetime, timedelta, timezone
 import json
 import unittest
+from unittest.mock import patch
 
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.proactive import rhythm
@@ -119,6 +120,22 @@ class RhythmConfigurationTests(unittest.TestCase):
                          held.hour_allows(context, preferences, quiet_base))
         self.assertTrue(held.hour_allows(context, stub_preferences(), quiet_base))
 
+    def test_current_local_hour_uses_the_original_slot_draw_during_long_intervals(self):
+        context = StubContext()
+        preferences = stub_preferences(proactive_hour_activity_enabled=True, quiet_timezone="Asia/Shanghai",
+            proactive_hour_activity_curve=",".join("0.05" if hour == 5 else "1.00" for hour in range(24)))
+        held = rhythm.ContactRhythm(None)
+        opened = datetime(2026, 9, 21, 4, tzinfo=timezone.utc)  # Local noon.
+        overnight = datetime(2026, 9, 21, 21, 12, tzinfo=timezone.utc)  # Local 05:12.
+        with patch.object(rhythm, "sample", return_value=0.5) as draw:
+            self.assertTrue(held.hour_allows(context, preferences, opened))
+            for seconds in (0, 1, 15, 30):
+                self.assertFalse(held.hour_allows(context, preferences, opened,
+                    observed_at=overnight + timedelta(seconds=seconds)))
+            self.assertTrue(held.hour_allows(context, preferences, opened,
+                observed_at=overnight + timedelta(hours=5)))
+        self.assertEqual(len({tuple(call.args[0]) for call in draw.call_args_list}), 1)
+
 
 class RhythmSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
     def records(self, app):
@@ -130,9 +147,13 @@ class RhythmSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTest
         self.settings(app, {"enable_proactive_burst": True, "proactive_burst_max_messages": 2,
                             "proactive_burst_gap_min_seconds": 60, "proactive_burst_gap_max_seconds": 60,
                             "proactive_closing_contacts_threshold": 2, "proactive_closing_grace_minutes": 120,
-                            "max_contacts_24h": 5, "dedup_enabled": False}).unwrap()
+                            "max_contacts_24h": 5, "dedup_enabled": False,
+                            # A burst continues chat, not a competing relationship purpose.
+                            **{purpose + ".enabled": False for purpose in
+                               ("affection", "care", "play", "repair", "invitation")}}).unwrap()
         self.advance(app, 60)
         await self.automatic_delivery(app)
+        self.assertEqual(self.records(app)[0]["purpose"], "chat")
         self.advance(app, 70)
         await self.automatic_delivery(app, count=2)
         second = self.records(app)[1]

@@ -21,7 +21,7 @@ from companion_v2.memory import codec
 from companion_v2.memory.episodes import recent_dialogue_lines
 from companion_v2.memory.models import AtomRef, Proposal
 from companion_v2.memory.group.access import owner_key as group_owner
-from companion_v2.conversation.group_observation import MOOD_KIND
+from companion_v2.conversation.group_observation import MOOD_KIND, TOPIC_KIND
 
 
 def remember_confirmed_reply(app, context, batch):
@@ -332,6 +332,7 @@ class GroupWindowResetTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         admission.observe(unique, text="独立缓存", speaker_id="200", received_at=self.clock.now())
         with app.runtime.transaction() as connection:
             app.tools.group_participation.records.write(connection, group_owner(first), MOOD_KIND, {"old": True})
+            app.tools.group_participation.records.write(connection, group_owner(first), TOPIC_KIND, {"old": True})
             app.tools.group_participation.records.write(connection, group_owner(unique), MOOD_KIND, {"separate": True})
         event = self.group_event(identifier="group-reset", text="/reset")
         native_event_extras(event)["_clean_group_context_session"] = True
@@ -345,6 +346,7 @@ class GroupWindowResetTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(admission._key(first), admission.observations)
         self.assertIn(admission._key(unique), admission.observations)
         self.assertIsNone(app.tools.group_participation.records.read(group_owner(first), MOOD_KIND))
+        self.assertIsNone(app.tools.group_participation.records.read(group_owner(first), TOPIC_KIND))
         self.assertTrue(app.tools.group_participation.records.read(group_owner(unique), MOOD_KIND)["separate"])
         self.clock.advance(timedelta(seconds=1))
         fresh, batch = await self.receive("shared-fresh", "新的群聊话题", sender="201")

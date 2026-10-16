@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from .request_context import clear_turn_contexts, set_system_instruction
+
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,10 @@ def _dispatch(controller, method, *args):
 
 
 def prepare_native_host_request(controller, event, req):
+    clear_turn_contexts(req)
+    if _active(controller, "live") is None:
+        set_system_instruction(req, "soullink")
+        set_system_instruction(req, "live2d")
     _dispatch(controller, "request", event, req)
 
 

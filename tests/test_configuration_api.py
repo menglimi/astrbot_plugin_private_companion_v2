@@ -100,6 +100,11 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         handlers, first, _ = await self.routes()
         try:
             status = (await call(handlers[first]))["data"]["sections"]
+            installation_route = "/astrbot_plugin_private_companion_v2/config"
+            installation_status = (await call(handlers[installation_route]))["data"]["sections"]
+            self.assertEqual(set(installation_status), {"budget", "proactive.contact", "reaction"})
+            self.assertTrue({"budget", "proactive.contact", "reaction"}.isdisjoint(status))
+            status.update(installation_status)
             expected_sections = {"budget", "busy_gate", "group_participation", "image_review",
                                  "knowledge", "library", "life", "person", "photo.reference",
                                  "private_access", "quota", "reaction", "recall",
@@ -111,7 +116,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                                  # 反复出现的模式：新增能力却不更新按字面枚举的名单。
                                  "qzone",
                                  "relationship_profile",
-                                 "role_profile", "screen", "wardrobe"}
+                                 "role_profile", "screen", "wardrobe", "proactive.contact"}
             expected_sections.add("image.output")
             self.assertTrue(expected_sections.issubset(status))
             self.assertEqual(set(status), expected_sections)
@@ -253,22 +258,25 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_reaction_retrieval_settings_are_shared_across_windows(self):
         handlers, first, second = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
         try:
-            first_status = (await call(handlers[first], query={"sections": "reaction"}))[
+            denied = await call(handlers[first], query={"sections": "reaction"})
+            self.assertEqual(denied["data"]["code"], "configuration_request_invalid")
+            first_status = (await call(handlers[global_route], query={"sections": "reaction"}))[
                 "data"]["sections"]["reaction"]
-            second_status = (await call(handlers[second], query={"sections": "reaction"}))[
+            second_status = (await call(handlers[global_route], query={"sections": "reaction"}))[
                 "data"]["sections"]["reaction"]
             self.assertEqual(first_status["scope"], "installation")
             self.assertEqual(second_status["scope"], "installation")
             self.assertEqual(first_status["layers"], ["installation"])
             self.assertEqual(first_status["edit_token"], second_status["edit_token"])
 
-            saved = await call(handlers[first + "/configure"], {
+            saved = await call(handlers[global_route + "/configure"], {
                 "section": "reaction", "operation_key": "reaction-installation-setting",
                 "edit_token": first_status["edit_token"], "changes": {"candidate_limit": 9}})
             self.assertEqual(saved["status"], "ok", saved)
 
-            reread = (await call(handlers[second], query={"sections": "reaction"}))[
+            reread = (await call(handlers[global_route], query={"sections": "reaction"}))[
                 "data"]["sections"]["reaction"]
             self.assertEqual(reread["settings"]["candidate_limit"], 9)
             self.assertEqual(reread["revision"], first_status["revision"] + 1)
@@ -358,12 +366,13 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(life["fields"]["diary_enabled"]["write_layer"], "window")
             quota_after = (await call(handlers[first], query={"sections": "quota"}))
             self.assertEqual(quota_after["data"]["sections"]["quota"]["settings"]["group_max_daily"], 5)
-            # Using one section's token for another section's target is rejected.
+            # The target route rejects installation-owned groups; it cannot use a
+            # role or window path as a shortcut to shared settings.
             quota_token = quota_after["data"]["sections"]["quota"]["edit_token"]
             crossed = await call(handlers[first + "/configure"],
                                     {"section": "reaction", "operation_key": "cross",
                                      "edit_token": quota_token, "changes": {"candidate_limit": 3}})
-            self.assertIn(crossed["data"]["code"], ("configuration_revision_conflict", "invalid_configuration_value"))
+            self.assertEqual(crossed["data"]["code"], "configuration_request_invalid")
         finally:
             self.controller.unregister_routes()
 
@@ -373,10 +382,13 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         from companion_v2.model_gateway.budget import GROUP, SOFT_FIELDS, effective_soft
 
         handlers, first, second = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
         try:
-            status = (await call(handlers[first], query={"sections": "budget"}))["data"]["sections"]["budget"]
+            denied = await call(handlers[first], query={"sections": "budget"})
+            self.assertEqual(denied["data"]["code"], "configuration_request_invalid")
+            status = (await call(handlers[global_route], query={"sections": "budget"}))["data"]["sections"]["budget"]
             self.assertEqual((status["scope"], status["layers"]), ("installation", ["installation"]))
-            enabled = await call(handlers[first + "/configure"], {
+            enabled = await call(handlers[global_route + "/configure"], {
                 "section": "budget", "operation_key": "global-budget-enable",
                 "edit_token": status["edit_token"],
                 "changes": {"enable_daily_token_soft_limit": True, "daily_token_soft_limit": 1000},
@@ -391,15 +403,15 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             owner = SparseConfigurationOwner(app.runtime)
             owner.write(role, SOFT_FIELDS, changes={GROUP + ".enable_daily_token_soft_limit": True},
                 reset=(), expected_revision=owner.read(role, SOFT_FIELDS).revision, observed_at=self.clock.now())
-            other = (await call(handlers[second], query={"sections": "budget"}))["data"]["sections"]["budget"]
+            other = (await call(handlers[global_route], query={"sections": "budget"}))["data"]["sections"]["budget"]
             self.assertTrue(other["settings"]["enable_daily_token_soft_limit"])
             self.assertEqual(other["settings"]["daily_token_soft_limit"], 1000)
-            disabled = await call(handlers[second + "/configure"], {
+            disabled = await call(handlers[global_route + "/configure"], {
                 "section": "budget", "operation_key": "global-budget-disable",
                 "edit_token": other["edit_token"], "changes": {"enable_daily_token_soft_limit": False},
             })
             self.assertEqual(disabled["status"], "ok", disabled)
-            reread = (await call(handlers[first], query={"sections": "budget"}))["data"]["sections"]["budget"]
+            reread = (await call(handlers[global_route], query={"sections": "budget"}))["data"]["sections"]["budget"]
             self.assertFalse(reread["settings"]["enable_daily_token_soft_limit"])
             resolved = effective_soft(app.runtime, context, app.gateway.ledger.soft)
             self.assertEqual((resolved.enabled, resolved.tokens), (False, 1000))
@@ -459,7 +471,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         finally:
             self.controller.unregister_routes()
 
-    async def test_the_contact_section_edits_global_defaults_including_relationship_ceilings(self):
+    async def test_the_contact_section_uses_one_window_daily_contact_quota(self):
         handlers, first, _ = await self.routes()
         global_route = "/astrbot_plugin_private_companion_v2/config"
         try:
@@ -468,21 +480,24 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(contact["group_id"], "proactive.contact")
             self.assertEqual(contact["scope"], "installation")
             self.assertEqual(contact["layers"], ["installation"])
-            self.assertEqual(len(contact["settings"]), 164)
-            self.assertEqual(len(contact["provenance"]), 164)
+            self.assertEqual(len(contact["settings"]), 160)
+            self.assertEqual(len(contact["provenance"]), 160)
             self.assertFalse(contact["settings"]["enabled"])
             self.assertEqual(contact["settings"]["interval_seconds"], 3600)
             self.assertEqual(contact["settings"]["quiet_timezone"], "Asia/Shanghai")
-            for name in ("max_relationship_contacts_24h", "max_relationship_attempts_24h"):
-                with self.subTest(field=name):
-                    editable = contact["fields"][name]["editable_layers"]
-                    self.assertIn("relationship", editable)
-                    self.assertNotIn("window", editable)
+            self.assertNotIn("max_relationship_contacts_24h", contact["settings"])
+            self.assertNotIn("max_relationship_attempts_24h", contact["settings"])
+            self.assertNotIn("max_attempts_24h", contact["settings"])
+            self.assertNotIn("proactive_persona_judge_daily_limit", contact["settings"])
+            self.assertIn("window", contact["fields"]["max_contacts_24h"]["editable_layers"])
+            self.assertNotIn("relationship", contact["fields"]["max_contacts_24h"]["editable_layers"])
+            self.assertNotIn("max_attempts_24h", contact["fields"])
+            self.assertNotIn("proactive_persona_judge_daily_limit", contact["fields"])
             self.assertIn("window", contact["fields"]["interval_seconds"]["editable_layers"])
             budget = await call(handlers[global_route + "/configure"],
                 {"section": "proactive.contact", "operation_key": "contact-budget",
                  "edit_token": contact["edit_token"],
-                 "changes": {"max_relationship_contacts_24h": 12}})
+                 "changes": {"max_contacts_24h": 12}})
             self.assertEqual(budget["status"], "ok", budget)
             contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
                 "data"]["sections"][CONTACT_GROUP]
@@ -495,7 +510,8 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                 "data"]["sections"]["proactive.contact"]
             self.assertEqual(after["settings"]["interval_seconds"], 900)
             self.assertTrue(after["settings"]["quiet_enabled"])
-            self.assertEqual(after["settings"]["max_relationship_contacts_24h"], 12)
+            self.assertEqual(after["settings"]["max_contacts_24h"], 12)
+            self.assertNotIn("max_attempts_24h", after["settings"])
             # 保存后编辑令牌必然更新，否则两次保存会互相覆盖。
             self.assertNotEqual(after["edit_token"], contact["edit_token"])
         finally:
@@ -880,21 +896,26 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_requests_and_unknown_fields_are_refused(self):
         handlers, first, _ = await self.routes()
+        global_route = "/astrbot_plugin_private_companion_v2/config"
         try:
-            status = (await call(handlers[first]))["data"]["sections"]
+            status = (await call(handlers[global_route]))["data"]["sections"]
             token = status["reaction"]["edit_token"]
+            denied = await call(handlers[first + "/configure"],
+                {"section": "reaction", "operation_key": "wrong-route", "edit_token": token,
+                 "changes": {"candidate_limit": 3}})
+            self.assertEqual(denied["data"]["code"], "configuration_request_invalid")
             for changes in ({"nope": 1}, {"candidate_limit": 0}, {"candidate_limit": 99},
                             {"embedding_score_threshold": 2}, {"vision_verify_mode": "sometimes"}):
-                answer = await call(handlers[first + "/configure"],
+                answer = await call(handlers[global_route + "/configure"],
                                        {"section": "reaction", "operation_key": "bad-" + str(len(changes)),
                                         "edit_token": token, "changes": changes})
                 self.assertEqual(answer["status"], "error", changes)
                 self.assertNotEqual(answer["data"]["code"], "staging_host_terminated", changes)
-            self.assertEqual((await call(handlers[first + "/configure"],
+            self.assertEqual((await call(handlers[global_route + "/configure"],
                                             {"section": "unknown", "operation_key": "k", "edit_token": token,
                                              "changes": {"candidate_limit": 3}}))["data"]["code"],
                              "configuration_request_invalid")
-            self.assertEqual((await call(handlers[first + "/configure"],
+            self.assertEqual((await call(handlers[global_route + "/configure"],
                                             {"section": "reaction", "operation_key": "k", "edit_token": token,
                                              "changes": {"candidate_limit": 3}, "extra": 1}))["data"]["code"],
                              "configuration_request_invalid")

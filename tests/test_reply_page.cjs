@@ -35,8 +35,9 @@ const DEFAULTS = {
   group_wakeup_topic_interest_max_boost: 45, group_wakeup_debounce_pending_penalty: 65,
   group_wakeup_image_enabled: false, group_wakeup_image_weight: 0.2,
   group_wakeup_short_text_wait_ms: 15000, group_wakeup_log_limit: 80,
-  group_air_guard_enabled: true, group_air_guard_window_seconds: 180,
-  group_air_guard_max_bot_replies: 3, group_air_guard_polite_loop_limit: 2,
+  group_air_guard_enabled: true, group_air_guard_window_seconds: 60,
+  group_air_guard_max_bot_replies: 3, group_air_guard_cooldown_seconds: 150,
+  group_air_guard_polite_loop_limit: 2,
   enable_group_injection_guard: true, enable_group_privacy_guard: true,
   enable_group_reality_promise_guard: true, enable_context_image_captioning: false,
   context_image_caption_max_items: 2, enable_private_image_self_recognition: false,
@@ -52,7 +53,7 @@ const DEFAULTS = {
   file_understanding_private_enabled: true, file_understanding_group_enabled: true,
   file_understanding_max_size_mb: 8, file_understanding_max_chars: 24000,
   file_understanding_timeout_seconds: 15, file_understanding_prompt: '',
-  style_prompt: '', content_cleanup_enabled: true, content_cleanup_mode: 'words',
+  style_prompt: '', prompt_style_mode: 'free', content_cleanup_enabled: true, content_cleanup_mode: 'words',
   content_cleanup_scope: 'all', content_cleanup_rule: '[\\n]', content_cleanup_words: '["\\n"]',
   content_replacement_enabled: false, content_replacements: '[]', framework_error_guard_enabled: true,
   enable_forbidden_word_recall: false, recall_forbidden_words: '[]', recall_forbidden_scope: 'bot_and_group',
@@ -64,6 +65,8 @@ const DEFAULTS = {
   voice_delivery_mode: 'voice_and_text', voice_position: 'after_media', voice_language: 'zh',
   voice_foreign_text_mode: 'original', voice_probability: 1, voice_cooldown_seconds: 0,
   voice_max_speech_chars: 1800, voice_timeout_seconds: 30, voice_trigger_keywords: '',
+  voice_primary_mention_keywords: '', voice_primary_mention_probability: 0.8,
+  voice_primary_mention_prompt: '',
   voice_provider_id: '', voice_zh_provider_id: '', voice_ja_provider_id: '',
   voice_en_provider_id: '', voice_extra_prompt: '', style_prompt: '',
   enable_humanized_expression: false, humanized_expression_prompt: '',
@@ -79,6 +82,7 @@ const LIMITS = {
   group_wakeup_topic_interest_max_boost: [0, 150], group_wakeup_debounce_pending_penalty: [0, 100],
   group_wakeup_short_text_wait_ms: [0, 30000], group_wakeup_log_limit: [10, 300],
   group_air_guard_window_seconds: [30, 1800], group_air_guard_max_bot_replies: [1, 20],
+  group_air_guard_cooldown_seconds: [0, 1800],
   group_air_guard_polite_loop_limit: [1, 10], context_image_caption_max_items: [0, 8],
   private_image_vision_cache_max_items: [0, 2000], private_image_vision_max_chars: [120, 4000],
   private_image_vision_wait_seconds: [1, 30], private_image_provider_failure_cooldown_seconds: [0, 3600],
@@ -90,13 +94,15 @@ const LIMITS = {
 const GROUP_SCOPE_FIELDS = new Set(['group_wakeup_primary_member_ids', 'group_wakeup_owner_direct_words']);
 const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) => {
   const kind = name === 'part_gap_log_base' ? 'weight'
-    : ['voice_probability', 'group_wakeup_interest_probability', 'group_wakeup_image_weight'].includes(name)
+    : ['voice_probability', 'voice_primary_mention_probability',
+       'group_wakeup_interest_probability', 'group_wakeup_image_weight'].includes(name)
     ? 'probability'
     : typeof value === 'boolean' ? 'boolean' : typeof value === 'string' ? 'text' : 'integer';
   const roleShared = new Set([
     'image_understanding_private_enabled', 'image_understanding_group_enabled',
     'video_understanding_private_enabled', 'video_understanding_group_enabled',
     'file_understanding_private_enabled', 'file_understanding_group_enabled',
+    'prompt_style_mode',
     ...Object.keys(DEFAULTS).filter(name => name.startsWith('group_wakeup_') && !GROUP_SCOPE_FIELDS.has(name)),
   ]);
   const entry = {kind, default: value, apply_mode: 'immediate',
@@ -252,6 +258,26 @@ test('the settings section reads and saves through the reply route family', asyn
   await drains();
   assert.equal(instance.state.base.max_segments, 6);
   assert.equal(harnessed.store.size, 0);
+});
+
+test('prompt style offers free, guided, and constraint modes and saves the role preference', async () => {
+  const harnessed = await loaded(harness());
+  const instance = live(harnessed);
+  const field = instance.state.container.fields.prompt_style_mode;
+  assert.equal(instance.state.draft.prompt_style_mode, 'free');
+  assert.deepEqual(plain(field.choices), {constraint: '约束', free: '自由', guided: '引导'});
+  assert.deepEqual(plain(field.editable), ['role', 'window']);
+
+  instance.state.draft.prompt_style_mode = 'guided';
+  const saving = instance.save(false);
+  await drains();
+  assert.deepEqual(plain(harnessed.requests[1].body.changes), {prompt_style_mode: 'guided'});
+  harnessed.requests[1].resolve({result: {operation_id: 'style-save', replayed: false},
+    status: status({prompt_style_mode: 'guided'}, 'c'.repeat(64))});
+  await saving;
+  await drains();
+  assert.equal(instance.state.base.prompt_style_mode, 'guided');
+  harnessed.page.unmount();
 });
 
 test('group wakeup controls keep the selected group override', async () => {
@@ -657,11 +683,12 @@ test('a voice tab can select its TTS section before settings finish loading', as
   const h = harness();
   const diversitySwitch = h.page.searchEntries().find(item => item.field === 'enable_humanized_expression');
   const diversityPrompt = h.page.searchEntries().find(item => item.field === 'humanized_expression_prompt');
-  assert.equal(diversitySwitch.label, '启用拟人及多样表达 Prompt');
-  assert.match(diversitySwitch.help, /只发已提供的表情图/);
-  assert.match(diversitySwitch.help, /安静旁听/);
-  assert.match(diversitySwitch.help, /戳一戳只在当前流程开放时考虑/);
-  assert.equal(diversityPrompt.label, '拟人及多样表达 Prompt 正文');
+  assert.equal(diversitySwitch.label, '追加拟人表达提示');
+  assert.match(diversitySwitch.help, /与所选风格叠加/);
+  assert.match(diversitySwitch.help, /自由模式下关闭即可移除/);
+  assert.equal(diversityPrompt.label, '额外表达提示正文');
+  assert.match(diversityPrompt.help, /约束模式使用此正文/);
+  assert.match(diversityPrompt.help, /自由或引导模式也会额外注入/);
   h.page.mount(h.root, {view: 'expression'});
   await drains();
   assert.equal(h.page.selectSection('voice'), true);
@@ -719,6 +746,7 @@ test('expression D1-D6 links reach current settings owners', () => {
 
 test('expression voice tab hosts the shared reply editor with only TTS settings visible', () => {
   const expressionCss = fs.readFileSync(path.resolve(__dirname, PAGE + 'expression-config.css'), 'utf8');
+  const narrowExpressionLayouts = expressionCss.match(/@container expression-modules \(max-width:760px\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
   assert.ok(appPage.includes('id="expressionVoiceReplyHost"'));
   assert.ok(appPage.includes('function syncExpressionReplyWorkspace'));
   assert.ok(appPage.includes('voiceHost.append(reply)'));
@@ -729,6 +757,10 @@ test('expression voice tab hosts the shared reply editor with only TTS settings 
   assert.ok(adapter.includes('setVisibleGroups'));
   assert.ok(expressionCss.includes('expression-platform-focus .wb-section-sidebar{display:block}'));
   assert.ok(expressionCss.includes('#replyWorkspace.expression-voice-focus>[data-reply-part="preview"]{display:none}'));
+  assert.match(expressionCss, /container-name:expression-modules;container-type:inline-size/);
+  assert.match(narrowExpressionLayouts, /\.expression-module-nav\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(narrowExpressionLayouts, /\.expression-platform-workspace\{grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(narrowExpressionLayouts, /\.semantic-providers\{grid-template-columns:minmax\(0,1fr\)\}/);
   for (const field of ['voice_trigger_mode', 'voice_provider_id', 'voice_delivery_mode']) {
     assert.ok(adapter.includes(field), `missing TTS setting ${field}`);
   }
@@ -937,6 +969,11 @@ test('an over-long prompt and an out-of-range value never dispatch', async () =>
   /* 概率字段在界面按百分比编辑，101% 要拦下。 */
   instance.state.draft.max_segments = 4;
   instance.state.draft.voice_probability = 1.5;
+  await instance.save(false);
+  assert.equal(harnessed.requests.length, 1);
+  assert.equal(instance.state.bad, true);
+  instance.state.draft.voice_probability = 1;
+  instance.state.draft.voice_primary_mention_probability = 1.5;
   await instance.save(false);
   assert.equal(harnessed.requests.length, 1);
   assert.equal(instance.state.bad, true);

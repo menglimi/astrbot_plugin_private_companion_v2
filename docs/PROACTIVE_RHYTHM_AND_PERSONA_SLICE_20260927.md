@@ -2,6 +2,8 @@
 
 日期：2026-09-27。范围：V2 缺口清单 P2 的四个主动缺口任务。全部实现落在 `companion_v2/proactive/`（外科式修改 + 新文件）与 `companion_v2/agenda/appointments.py`，配置进既有 `proactive.contact` 组，**不新增数据表、不升级 schema、不新增发送路径**。
 
+> **历史设计，已于 2026-10-16 调整。** 本文记录的主动尝试次数与人格复核每日上限已退役。当前唯一主动次数上限是每个私聊窗口每日实际联系数；决策和复核调用只统计，不再设置次数硬上限。当前合同见 [自动联系与历史](CORE_AUTOMATIC_CONTACT_AND_HISTORY_SLICE.md)。
+
 参考的 V1 实现（只读）：`proactive.py`（爆发式发送、小时活跃曲线、强度预设、收束留白、人格判定阈值/缓存/日限）、`proactive_engine.py`（`_pick_daily_greeting_event`、`_pick_insomnia_night_event`、`_can_send_insomnia_night_message`、`_review_planned_proactive_with_model`、`_in_llm_timer_pre_silence_window`）、`proactive_message.py`（`proactive_share_probability`）、`daily_state_tick.py`（锚点触发）、`plugin_bootstrap.py` + `_conf_schema.json`（逐键核对键名、默认值与取值范围）。
 
 ## 1. T38 主动节奏增强

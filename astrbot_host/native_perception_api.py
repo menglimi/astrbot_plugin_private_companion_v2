@@ -4,8 +4,9 @@ import asyncio
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from astrbot.api.web import request
 
@@ -55,20 +56,22 @@ class NativePerceptionWebAPI:
     @staticmethod
     def _trace_contexts(controller, session):
         selected = session.profile.target
+        selected_context = None
         if selected.scope.kind is ScopeKind.PRIVATE:
-            return ((selected, selected.actor.subject.subject_id,
-                     selected.role_binding.role.subject_id),), 0
+            selected_context = (selected, selected.actor.subject.subject_id,
+                                selected.role_binding.role.subject_id)
 
         host = getattr(controller, "controller", controller)
         authority = getattr(host, "authority", None)
         inventory = getattr(getattr(host, "web_api", None), "target_inventory", None)
         if not callable(getattr(authority, "context", None)) or not callable(inventory):
-            return (), 0
+            return ((selected_context,) if selected_context else ()), 0
         contexts, unavailable = [], 0
         try:
             targets = inventory()
         except Exception:
-            return (), 1
+            return ((selected_context,) if selected_context else ()), 1
+        seen = set()
         for target in targets:
             if target.get("scope_kind") != "private":
                 continue
@@ -80,12 +83,41 @@ class NativePerceptionWebAPI:
                 except (TaskError, KeyError, TypeError, ValueError, AttributeError):
                     unavailable += 1
                     continue
+                if context.key in seen:
+                    continue
+                seen.add(context.key)
                 target_label = target.get("participant_id")
                 if not target_label or target_label == "*":
                     target_label = context.actor.subject.subject_id
                 contexts.append((context, target_label,
                     role.get("role_name") or role["role_id"]))
+        if selected_context and selected_context[0].key not in seen:
+            contexts.append(selected_context)
         return tuple(contexts), unavailable
+
+    @staticmethod
+    def _trace_date_range(query):
+        keys = set(query.keys())
+        if keys - {"day", "timezone"} or any(len(query.getlist(key)) != 1 for key in keys):
+            raise TaskError("perception_request_invalid", "invalid material date filter")
+        if not keys:
+            return None, None
+        if keys != {"day", "timezone"}:
+            raise TaskError("perception_request_invalid", "day and timezone must be provided together")
+        day_text, zone_name = query.get("day"), query.get("timezone")
+        if (type(day_text) is not str or len(day_text) != 10 or type(zone_name) is not str
+                or not zone_name or len(zone_name) > 64):
+            raise TaskError("perception_request_invalid", "invalid material date filter")
+        try:
+            local_day = date.fromisoformat(day_text)
+            if local_day.isoformat() != day_text:
+                raise ValueError("non-canonical date")
+            zone = ZoneInfo(zone_name)
+            start = datetime.combine(local_day, time.min, tzinfo=zone)
+            end = datetime.combine(local_day + timedelta(days=1), time.min, tzinfo=zone)
+        except (ValueError, KeyError, OverflowError) as error:
+            raise TaskError("perception_request_invalid", "invalid material date filter") from error
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
     def _status(self, app, context, operator):
         model = require(PerceptionManagement(app, context).status(operator))
@@ -396,8 +428,7 @@ class NativePerceptionWebAPI:
     async def material_pool(self):
         from .web_api import outcome_response
         try:
-            if request.query:
-                raise TaskError("perception_request_invalid", "target overrides are not accepted")
+            created_at_start, created_at_end = self._trace_date_range(request.query)
             username = request.username
             if type(username) is not str or not username.strip() or username.startswith("api_key:"):
                 raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
@@ -424,7 +455,8 @@ class NativePerceptionWebAPI:
                 trace_state, trace_unavailable = "ready", 0
                 try:
                     contexts, trace_unavailable = self._trace_contexts(controller, session)
-                    traces = read_proactive_contact_traces(schedule, contexts, observed_at=observed_at)
+                    traces = read_proactive_contact_traces(schedule, contexts, observed_at=observed_at,
+                        created_at_start=created_at_start, created_at_end=created_at_end)
                     if trace_unavailable:
                         trace_state = "partial"
                 except Exception:
@@ -439,8 +471,9 @@ class NativePerceptionWebAPI:
                     except (TypeError, ValueError, OverflowError, OSError):
                         return 0
                 items.sort(key=lambda item: (captured_at(item), item.get("id", "")), reverse=True)
+                projected_items = items if created_at_start is not None else items[:128]
                 return outcome_response(Outcome.success({**shared,
-                    "items": items[:128], "count": min(len(items), 128),
+                    "items": projected_items, "count": len(projected_items),
                     "shared_count": shared.get("count", 0),
                     "history_count": traces["total_count"],
                     "trace_count": traces["count"],

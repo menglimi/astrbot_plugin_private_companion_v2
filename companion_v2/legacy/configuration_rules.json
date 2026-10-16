@@ -63,12 +63,6 @@
       "confidence": "high"
     },
     {
-      "source": "basic_config.owner_exclusive_proactive_limit",
-      "source_type": "int",
-      "target": "proactive.contact.max_relationship_attempts_24h",
-      "confidence": "medium"
-    },
-    {
       "source": "basic_config.default_style",
       "source_type": "string",
       "target": "conversation.presentation.style_prompt",
@@ -1154,6 +1148,12 @@
       "confidence": "high"
     },
     {
+      "source": "group_slang_topic_config.enable_group_topic_threads",
+      "source_type": "bool",
+      "target": "conversation.group_participation.enable_group_topic_threads",
+      "confidence": "high"
+    },
+    {
       "source": "group_slang_topic_config.enable_group_episode_memory",
       "source_type": "bool",
       "target": "memory.group_episode_memory_enabled",
@@ -1193,6 +1193,12 @@
       "source": "group_relationship_config.worldbook_config_paths",
       "source_type": "string",
       "target": "knowledge.import_paths",
+      "confidence": "high"
+    },
+    {
+      "source": "relay_bridge_config.max_group_topic_threads",
+      "source_type": "int",
+      "target": "conversation.group_participation.group_topic_thread_max",
       "confidence": "high"
     },
     {
@@ -2610,7 +2616,7 @@
       "transform": "json_list",
       "contract": {
         "type": "text",
-        "default": "[\"。\", \"？\", \"！\", \"~\", \"～\", \"?\", \".\", \"!\", \";\", \"；\", \"……\", \"）\", \"“\", \"，\", \"…\"]"
+        "default": "[\"。\", \"？\", \"！\", \"~\", \"～\", \"?\", \".\", \"!\", \";\", \"；\", \"……\", \"）\", \"“\", \"…\"]"
       }
     },
     {
@@ -2648,6 +2654,10 @@
     }
   ],
   "exclusions": [
+    {
+      "source": "basic_config.owner_exclusive_proactive_limit",
+      "reason": "V2 已取消跨私聊窗口的关系级额度；每日决策调用与实际联系上限由各私聊窗口分别配置，不自动迁移旧关系额度。"
+    },
     {
       "source": "emotion_relationship_config.enable_smart_silence",
       "reason": "V2 没有独立的智能沉默开关；沉默由主动联系的单次生成决策及策略共同决定，不能把旧开关误写成置信度阈值。"
@@ -3490,10 +3500,10 @@
       "source": "basic_config.owner_exclusive_proactive_limit",
       "source_type": "int",
       "resolved_kind": "registry",
-      "target": "proactive.contact.max_relationship_attempts_24h",
-      "verdict": "renamed-equivalent",
+      "target": "",
+      "verdict": "not-migrated-by-design",
       "confidence": "medium",
-      "summary": "proactive.contact.max_relationship_contacts_24h（配套 proactive.contact.max_relationship_attempts_24h）"
+      "summary": "V2 已取消跨私聊窗口的关系级额度；每日决策调用与实际联系上限由各私聊窗口分别配置，不自动迁移旧关系额度。"
     },
     {
       "source": "basic_config.enable_group_relationship_affinity",
@@ -5581,7 +5591,7 @@
       "target": "expression.learning.sample_chars",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "三档预设取消，改为逐项显式上下限：expression.learning.sample_chars(40-4000，默认 800)、sample_limit(4-64，默认 60)、rules_per_turn(1-16，默认 2)、rotation_candidate_limit(1-64)、rotation_decay_hours(1-8760)（companion_v2/expression/configuration.py；读取 companion_v2/expression/style_service.py 与 companion_v2/conversation/style_context.py）。V1 预设的样本长度、样本量和每轮引用量在 V2 都有独立字段；每轮引用默认值现与 V1 的 2 条对齐，仍可由用户配置"
+      "summary": "三档预设取消，改为逐项显式上下限：expression.learning.sample_chars(40-4000，默认 800)、sample_limit(4-64，默认 24)、rules_per_turn(1-16，默认 8)、rotation_candidate_limit(1-64)、rotation_decay_hours(1-8760)（companion_v2/expression/configuration.py:24-48；读取 companion_v2/expression/style_service.py:113-116,131-132、companion_v2/conversation/style_context.py:42-52,164-168）。V1 预设的三个自由度（样本长度、样本量、每轮引用量）在 V2 都有独立字段，V1 硬编码的每轮最多 2 条改由 rules_per_turn 配置"
     },
     {
       "source": "memory_habit_config.enable_expression_manual_review",
@@ -7620,11 +7630,11 @@
     {
       "source": "group_slang_topic_config.enable_group_topic_threads",
       "source_type": "bool",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "registry",
+      "target": "conversation.group_participation.enable_group_topic_threads",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "缺失：V2 无群聊话题线（topic thread）读写、无对应注册字段、无窗口状态"
+      "summary": "conversation.group_participation.enable_group_topic_threads（群窗口的话题线开关；默认开启，线程在90分钟无更新后失效）"
     },
     {
       "source": "group_slang_topic_config.enable_group_episode_memory",
@@ -7872,11 +7882,11 @@
     {
       "source": "relay_bridge_config.max_group_topic_threads",
       "source_type": "int",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "not-migrated-by-design",
-      "confidence": "medium",
-      "summary": "V2 不保存带成员归属的群话题线程结构（V1 群成员画像族被明确排除）"
+      "resolved_kind": "registry",
+      "target": "conversation.group_participation.group_topic_thread_max",
+      "verdict": "renamed-equivalent",
+      "confidence": "high",
+      "summary": "conversation.group_participation.group_topic_thread_max（群窗口保留的话题线数量，默认12，范围3–40）"
     },
     {
       "source": "relay_bridge_config.group_episode_refresh_minutes",
@@ -9844,8 +9854,8 @@
       "source": "voice_action_config.tts_message_scope",
       "source_type": "string",
       "resolved_kind": "registry",
-      "target": "proactive.contact.voice_action_enabled",
-      "verdict": "renamed-equivalent",
+      "target": "",
+      "verdict": "not-migrated-by-design",
       "confidence": "medium",
       "summary": "旧版该枚举控制主动正文是否进入回复 TTS 链；V2 主动语音使用独立授权策略，不能据此改写 proactive.contact.voice_action_enabled。"
     },

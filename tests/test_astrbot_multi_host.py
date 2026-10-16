@@ -160,9 +160,9 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         conversation_id = await self.native.conversation_manager.get_curr_conversation_id(umo)
         self.controller.session_topology.update_persona_selection_snapshot(
             umo, "100", "bot-a", "second", "role-b", conversation_id)
-        bridge.session_persona_override_lookup = None
+        bridge.session_persona_override_lookup = AsyncMock(
+            side_effect=AssertionError("installed persona snapshots avoid live session settings"))
         self.assertIsNotNone(bridge.persona_window_snapshot_lookup)
-        self.assertIsNone(bridge.session_persona_override_lookup)
         self.assertEqual(bridge.persona_window_snapshot_lookup(umo, "100")["persona_id"], "second")
         bridge.persona_snapshot_lookup = AsyncMock(side_effect=AssertionError("conversation database read"))
         bridge.persona_selection_lookup = AsyncMock(side_effect=AssertionError("persona resolver call"))
@@ -172,17 +172,11 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((snapshot[0], snapshot[1], snapshot[3].role.subject_id),
                          (conversation_id, "second", "role-b"))
         self.assertEqual(snapshot[2]["name"], "second")
+        bridge.session_persona_override_lookup.assert_not_awaited()
         bridge.persona_snapshot_lookup.assert_not_awaited()
         bridge.persona_selection_lookup.assert_not_awaited()
 
-    async def test_stale_window_snapshot_refreshes_after_conversation_reset(self):
-        async def selected_persona_id(context, umo, conversation_id):
-            self.assertIs(context, self.native)
-            self.assertEqual((umo, conversation_id), ("qq-main:FriendMessage:200", "conversation-after-reset"))
-            return "original"
-
-        self.controller.native_types = replace(self.controller.native_types,
-            persona_snapshot_lookup=selected_persona_id)
+    async def test_installed_window_snapshot_survives_reset_until_manual_refresh(self):
         await self.start_host()
         bridge = self.controller.session.bridge
         umo = "qq-main:FriendMessage:200"
@@ -191,19 +185,28 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.controller.session_topology.update_persona_selection_snapshot(
             umo, "100", "bot-a", "second", "role-b", old_conversation_id)
         new_conversation_id = "conversation-after-reset"
-        bridge.context.conversation_manager.get_curr_conversation_id = AsyncMock(
-            side_effect=(new_conversation_id, new_conversation_id))
+        bridge.context.conversation_manager.get_curr_conversation_id = AsyncMock(return_value=new_conversation_id)
         bridge.context.conversation_manager.get_conversation = AsyncMock(
-            side_effect=AssertionError("conversation history must not be loaded"))
+            side_effect=AssertionError("installed persona snapshots do not load conversation history"))
+        bridge.session_persona_override_lookup = AsyncMock(
+            side_effect=AssertionError("installed persona snapshots avoid live session settings"))
+        bridge.persona_snapshot_lookup = AsyncMock(
+            side_effect=AssertionError("installed persona snapshots avoid conversation persona reads"))
+        bridge.persona_selection_lookup = AsyncMock(
+            side_effect=AssertionError("installed persona snapshots avoid persona resolution"))
 
         snapshot = await bridge._selected_role_snapshot(account, umo)
 
         self.assertEqual((snapshot[0], snapshot[1], snapshot[3].role.subject_id),
-                         (new_conversation_id, "original", "role-a"))
+                         (new_conversation_id, "second", "role-b"))
         refreshed = self.controller.session_topology.persona_selection_snapshot(umo, "100")
         self.assertEqual((refreshed["persona_id"], refreshed["conversation_id"]),
-                         ("original", new_conversation_id))
+                         ("second", new_conversation_id))
+        bridge.context.conversation_manager.get_curr_conversation_id.assert_awaited_once_with(umo)
         bridge.context.conversation_manager.get_conversation.assert_not_awaited()
+        bridge.session_persona_override_lookup.assert_not_awaited()
+        bridge.persona_snapshot_lookup.assert_not_awaited()
+        bridge.persona_selection_lookup.assert_not_awaited()
 
     async def test_verified_runtime_change_is_acknowledged_once_across_authority_recreation(self):
         (await self.controller.initialize_profile()).unwrap()

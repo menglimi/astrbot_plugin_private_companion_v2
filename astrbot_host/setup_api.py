@@ -34,10 +34,8 @@ logger = logging.getLogger(__name__)
 PROACTIVE_TEST_SUGGESTIONS = {
     "contact_permission_required": "在核心管理员私聊的主动联系设置中启用主动联系授权。",
     "model_task_unregistered": "为核心管理员角色配置并启用 proactive.compose 模型任务。",
-    "contact_attempt_budget": "到「主动联系 → 额度与去重」查看或调整“24 小时内最多尝试”；完成的跳过算一次决策，失败、过期、取消和死信任务不计入，仍在处理或任务状态不确定时会临时保留额度；模型实际用量单独记账。",
-    "contact_relationship_attempt_budget": "该关系下所有私聊窗口共享 24 小时决策额度；完成的跳过算一次决策，失败、过期、取消和死信任务不计入，仍在处理或任务状态不确定时会临时保留额度。请检查关系级额度及使用量。",
-    "contact_delivery_budget": "到「主动联系 → 额度与去重」查看“24 小时内最多联系”；已有投递仍占用额度，等待窗口恢复后重测。",
-    "contact_relationship_delivery_budget": "该关系下所有私聊窗口的 24 小时投递额度已用完；请检查关系级额度和未决投递，或等待窗口恢复。",
+    "contact_attempt_budget": "这是旧版本的模型调用次数上限错误；当前版本已取消该独立上限，请更新插件并查看每日实际联系额度。",
+    "contact_delivery_budget": "到「主动联系 → 每日额度」查看实际联系上限；已确认发送计联系次数，待回执发送暂时预占，明确未发送后释放。模型跳过不计联系。",
     "contact_purpose_paused": "检查所选目的的暂停状态和恢复时间。",
     "contact_quiet_hours": "当前处于静默时段；结束后再运行测试。",
     "delivery_result_unknown": "投递结果未知；先核对核心管理员私聊，不要重放这次尝试。",
@@ -48,13 +46,16 @@ PROACTIVE_TEST_SUGGESTIONS = {
     "screen_peek_unavailable": "检查当前私聊已配置的截图设备、识屏开关与窥屏授权。",
     "screen_diagnostic_pending": "本次截图或视觉分析任务仍未结束；先核对该任务和设备记录，结果确认前不要重新运行。",
     "screen_peek_unknown": "设备截图结果未确认；核对该截图任务与设备记录，不要重放。",
+    "reality_location_unavailable": "确认手机陪伴终端已连接并上报未过期的前台地点；测试只读取授权快照，不会伪造坐标。",
+    "reality_location_not_authorized": "在当前角色的现实触及授权中允许读取手机摘要，并确认手机终端与核心管理员私聊已配对。",
+    "proactive_diagnostic_image_unavailable": "确认图片能力和私聊图片发送开关已启用、图库中有可用且授权的原图，并确认本人没有要求停用图库表情。一次性测试忽略日常频率和日限设置。",
     "contact_weather_change_unavailable": "确认角色地点和天气变化开关已设置；该来源需要前后两次新鲜观测，等第二次观测完成后再测。",
     "contact_official_alert_unavailable": "确认角色地点包含预警区域，并在宿主环境配置 QWEATHER_ALERT_API_HOST 与 QWEATHER_ALERT_TOKEN；没有当前覆盖该地点的官方预警时不能完成此分支验收。",
     "contact_balance_unavailable": "在宿主环境配置 COMPANION_V2_BALANCE_URL 和所需认证变量，检查接口可达及余额 JSON 路径；缺少当前有效余额时不能完成此分支验收。",
     "contact_weather_source_changed": "天气观测在测试期间已更新或过期；刷新角色天气状态，再为当前来源启动一次新测试。",
     "contact_weather_change_source_changed": "两次天气观测已变化或过期；等待生产器重新确认当前变化后再测。",
     "contact_official_alert_changed": "预警已更新、撤销或不再覆盖配置地点；刷新官方预警状态后再测。",
-    "contact_diagnostic_variant_invalid": "环境与状态变化可选择天气观测、天气变化、官方预警、服务余额或外部资讯；请重新选择来源。",
+    "contact_diagnostic_variant_invalid": "环境与状态变化可选择天气观测、天气变化、官方预警、服务余额、外部资讯或手机终端地点；请重新选择来源。",
     "model_provider_unavailable": "打开「模型路由」，为当前角色的 proactive.compose 选择一个已加载且支持文本生成的 Provider。",
     "model_generation_failed": "查看 proactive.compose 任务的 Provider 返回与用量限制；修复连接、额度或模型错误后，用新的来源验收。",
     "model_budget_exhausted": "检查本地模型每日硬额度；额度恢复或调整策略后再测。管理员测试仍会真实调用模型，因此遵守本地用量上限。",
@@ -66,10 +67,8 @@ PROACTIVE_TEST_SUGGESTIONS = {
 }
 
 PROACTIVE_TEST_FAILURE_LABELS = {
-    "contact_attempt_budget": ("attempt_budget", "本私聊的24小时尝试额度已用完"),
-    "contact_relationship_attempt_budget": ("relationship_attempt_budget", "关系级24小时尝试额度已用完"),
-    "contact_delivery_budget": ("delivery_budget", "本私聊的24小时投递额度已用完"),
-    "contact_relationship_delivery_budget": ("relationship_delivery_budget", "关系级24小时投递额度已用完"),
+    "contact_attempt_budget": ("attempt_budget", "旧版本的主动模型调用次数上限已触发"),
+    "contact_delivery_budget": ("delivery_budget", "本私聊今日实际联系额度已用完"),
     "contact_permission_required": ("authorization", "主动联系授权未通过"),
     "contact_purpose_paused": ("purpose", "所选联系目的当前已暂停"),
     "contact_quiet_hours": ("settings", "当前处于免打扰时段"),
@@ -80,6 +79,11 @@ PROACTIVE_TEST_FAILURE_LABELS = {
     "contact_weather_change_unavailable": ("trusted_candidate", "天气变化来源不可用"),
     "contact_official_alert_unavailable": ("trusted_candidate", "官方预警来源不可用"),
     "contact_balance_unavailable": ("trusted_candidate", "服务余额来源不可用"),
+    "reality_location_unavailable": ("mobile_location_fetch", "手机终端没有可用的真实地点快照"),
+    "reality_location_not_authorized": ("mobile_location_fetch", "手机终端地点读取未获授权"),
+    "reality_location_label_unavailable": ("mobile_location_fetch", "手机快照没有可分享的地点标签"),
+    "reality_location_changed": ("mobile_location_fetch", "手机地点在读取过程中发生变化"),
+    "proactive_diagnostic_image_unavailable": ("image_attachment", "没有可用的授权主动图片素材"),
     "contact_weather_source_changed": ("trusted_candidate", "天气观测来源已变化"),
     "contact_weather_change_source_changed": ("trusted_candidate", "天气变化来源已变化"),
     "contact_official_alert_changed": ("trusted_candidate", "官方预警来源已变化"),
@@ -103,11 +107,11 @@ PROACTIVE_TEST_STAGE_SUGGESTIONS = {
     "weather_fetch": "检查已配置的角色所在地与真实天气接口；测试会即时获取观测。",
     "screen_capture": "检查已授权的截图设备及本次任务记录；未知结果不能重拍。",
     "screen_interpretation": "检查 screen.interpretation 的视觉模型、实际截图原件及分析任务记录。",
+    "mobile_location_fetch": "检查现实触及模块、手机端配对、位置读取授权和本次地点快照时效。",
+    "image_attachment": "检查私聊表情边界、已授权图库素材、图片检索和 QQ 图片投递能力。",
     "model_route": "在模型路由中为 proactive.compose 选择可用文本 Provider。",
-    "attempt_budget": "查看「主动联系 → 额度与去重」的 24 小时尝试额度；等待滚动窗口恢复后再测。",
-    "relationship_attempt_budget": "查看关系级尝试额度，或等关系级滚动窗口恢复。",
-    "delivery_budget": "查看「主动联系 → 额度与去重」的 24 小时投递额度。",
-    "relationship_delivery_budget": "查看关系级投递额度与未决投递。",
+    "attempt_budget": "此上限仅存在于旧版本；当前只按窗口每日实际联系额度限制发送。",
+    "delivery_budget": "查看「主动联系」中的每日实际联系上限与待回执发送。",
     "model_generation": "检查 proactive.compose Provider、任务参数、服务可达性与模型用量。",
     "persona_review": "检查 proactive.judge 路由、角色设定和复核理由；不要跳过复核。",
     "delivery": "检查 OneBot 连接和平台回执；未知结果先核对收件窗口，禁止重发。",
@@ -116,8 +120,8 @@ PROACTIVE_TEST_STAGE_SUGGESTIONS = {
 
 PROACTIVE_TEST_STAGE_ORDER = (
     "authorization", "binding", "runtime", "settings", "purpose", "news_fetch", "weather_fetch",
-    "screen_capture", "screen_interpretation", "trusted_candidate",
-    "attempt_budget", "relationship_attempt_budget", "delivery_budget", "relationship_delivery_budget",
+    "screen_capture", "screen_interpretation", "mobile_location_fetch", "image_attachment", "trusted_candidate",
+    "attempt_budget", "delivery_budget",
     "model_route", "model_generation", "persona_review", "delivery", "receipt",
 )
 
@@ -134,6 +138,10 @@ PROACTIVE_TEST_STAGE_BY_CODE = {
     "contact_quiet_hours": "purpose",
     "contact_diagnostic_source_required": "trusted_candidate",
     "contact_diagnostic_variant_invalid": "trusted_candidate",
+    "reality_location_unavailable": "mobile_location_fetch",
+    "reality_location_not_authorized": "mobile_location_fetch",
+    "reality_location_label_unavailable": "mobile_location_fetch",
+    "reality_location_changed": "mobile_location_fetch",
     "model_task_unregistered": "model_route",
     "model_provider_unavailable": "model_route",
     "model_budget_exhausted": "model_generation",
@@ -739,17 +747,23 @@ class SetupWebAPI:
         async with self._test_lock:
             try:
                 username = self._admin()
-                data = await self._body({"purpose", "confirm_delivery"}, optional={"variant", "synthetic_event"})
+                data = await self._body({"purpose", "confirm_delivery"},
+                    optional={"variant", "synthetic_event", "diagnostic_image"})
                 purpose = data["purpose"]
                 variant = data.get("variant")
                 synthetic_event = data.get("synthetic_event", False)
+                diagnostic_image = data.get("diagnostic_image", False)
                 if type(purpose) is not str or purpose not in PURPOSES or data["confirm_delivery"] is not True:
                     raise TaskError("proactive_test_confirmation_required",
                                     "choose one proactive purpose and confirm delivery to the core administrator")
                 if type(synthetic_event) is not bool:
                     raise TaskError("proactive_test_confirmation_required", "synthetic_event must be an explicit boolean")
+                if type(diagnostic_image) is not bool or (diagnostic_image and
+                        (purpose != "chat" or synthetic_event or variant is not None)):
+                    raise TaskError("proactive_test_confirmation_required",
+                                    "an image attachment test requires a source-backed chat diagnostic")
                 if variant is not None and (type(variant) is not str or purpose != "environment"
-                                            or variant not in DIAGNOSTIC_ENVIRONMENT_VARIANTS):
+                        or (variant not in DIAGNOSTIC_ENVIRONMENT_VARIANTS and variant != "mobile_location")):
                     raise TaskError("contact_diagnostic_variant_invalid",
                                     "choose a supported environment source for this proactive purpose")
                 fallback_target = await self._proactive_diagnostic_target()
@@ -783,8 +797,12 @@ class SetupWebAPI:
                                     "the active host has no source-backed proactive producer registry")
                 route_hint = None
                 if variant is not None:
-                    _producer_name, route_id, route_label = DIAGNOSTIC_ENVIRONMENT_VARIANTS[variant]
-                    route_hint = {"id": route_id, "label": route_label, "variant": variant}
+                    if variant == "mobile_location":
+                        route_hint = {"id": "reality_location_event", "label": "手机陪伴终端地点来源",
+                                      "variant": variant}
+                    else:
+                        _producer_name, route_id, route_label = DIAGNOSTIC_ENVIRONMENT_VARIANTS[variant]
+                        route_hint = {"id": route_id, "label": route_label, "variant": variant}
                 try:
                     if synthetic_event:
                         synthetic_producer = getattr(schedule, "synthetic_diagnostic_candidate", None)
@@ -793,6 +811,20 @@ class SetupWebAPI:
                                             "the active host has no synthetic diagnostic event registry")
                         candidate = await synthetic_producer(context, purpose, at=now,
                                                              test_id=attempt_id, variant=variant)
+                    elif variant == "mobile_location":
+                        native_extensions = getattr(self.controller, "native_extensions", None)
+                        reality = (native_extensions.active_service("reality")
+                                   if native_extensions is not None else None)
+                        if reality is None:
+                            raise TaskError("reality_location_unavailable",
+                                            "the Reality mobile location service is not active")
+                        _row, _batch, _event, receipt = schedule.diagnostic_receipt(
+                            context, purpose, "reality_location_event", now)
+                        candidate = await reality.v2_api().mobile_location_diagnostic_candidate(
+                            context.scope.native_scope_id, test_id=attempt_id, diagnostic_origin=receipt)
+                        if not candidate.get("accepted"):
+                            code = candidate.get("reason") or "contact_diagnostic_source_required"
+                            raise TaskError(code, "the current authorized mobile location is unavailable")
                     else:
                         candidate = (await producer(context, purpose, at=now, test_id=attempt_id, variant=variant)
                                      if variant is not None else await producer(context, purpose, at=now, test_id=attempt_id))
@@ -819,7 +851,9 @@ class SetupWebAPI:
                 result = await session.application.proactive.contact(context, opportunity, intents,
                     role_instruction=candidate["role_instruction"], selection_seed=attempt_id,
                     administrator_test=True, diagnostic_source_backed=not synthetic_event,
-                    diagnostic_origin=candidate["diagnostic_origin"])
+                    diagnostic_origin=candidate["diagnostic_origin"],
+                    diagnostic_image_intent=("适合轻松、友好、自然日常互动的表情图片；不适合严肃、悲伤、冲突或边界语境。"
+                                             if diagnostic_image else None))
                 if result.failure is not None:
                     failure = result.failure
                     failure_stage = PROACTIVE_TEST_FAILURE_LABELS.get(
@@ -845,6 +879,8 @@ class SetupWebAPI:
                 stages.extend(candidate.get("stages", []))
                 stages.append({"stage": "trusted_candidate", "state": "passed"})
                 stages[-1]["detail"] = f"{route.get('label', route.get('id', ''))} · {route.get('variant', '')}".strip(" ·")
+                if diagnostic_image:
+                    stages.append({"stage": "image_attachment", "state": "pending"})
                 stages.extend(({"stage": "model_generation", "state": "running"},
                                {"stage": "persona_review", "state": "pending"},
                                {"stage": "delivery", "state": "pending"},
@@ -873,6 +909,10 @@ class SetupWebAPI:
                 judge = observation["judge"]
                 stage_by_name = {item["stage"]: item for item in stages}
                 stage_by_name["model_generation"]["state"] = "passed" if current_task.state == "succeeded" else "failed"
+                if diagnostic_image:
+                    image_result = (observation.get("stage_metrics") or {}).get("image_attachment", {})
+                    image_attached = image_result.get("state") == "passed"
+                    stage_by_name["image_attachment"]["state"] = "passed" if image_attached else "failed"
                 stage_by_name["persona_review"]["state"] = ("skipped" if skipped else "passed" if observation["judge_allowed"] is True
                                        else "failed" if observation["judge_allowed"] is False
                                        else "not_required" if judge is None else "pending")
@@ -882,13 +922,15 @@ class SetupWebAPI:
                 stage_by_name["receipt"]["state"] = ("skipped" if skipped else "passed" if delivery == "delivered"
                                       and observation.get("receipt_ref") else
                                       "failed" if delivery in ("failed", "unknown") else "pending")
-                state = ("skipped" if skipped else "passed" if delivery == "delivered"
+                state = ("failed" if diagnostic_image and not image_attached else
+                         "skipped" if skipped else "passed" if delivery == "delivered"
                          else "unknown" if delivery in ("unknown", "accepted")
                          else "pending" if delivery in (None, "pending", "dispatched")
                          else "failed")
-                code = None if state in ("passed", "skipped") else current_task.reason or (
+                code = ("proactive_diagnostic_image_unavailable" if diagnostic_image and not image_attached else
+                        None if state in ("passed", "skipped") else current_task.reason or (
                     "delivery_result_unknown" if state == "unknown" else "delivery_failed" if state == "failed"
-                    else "proactive_test_timeout")
+                    else "proactive_test_timeout"))
                 return self._response(Outcome.success({"state": state, "purpose": purpose,
                     "purpose_label": label, "variant": route,
                     "route": route,
@@ -903,6 +945,8 @@ class SetupWebAPI:
                     "presentation_reason": observation.get("presentation_reason"),
                     "decision_confidence": observation.get("decision_confidence"),
                     "silence_threshold": observation.get("silence_threshold"),
+                    "stage_metrics": observation.get("stage_metrics"),
+                    "usage_summary": self._diagnostic_usage_summary(session, context),
                     "receipt_ref": observation["receipt_ref"], "stage": None if state in ("passed", "skipped") else
                         "delivery" if delivery else "model_generation", "code": code,
                     "error": None if code is None else redact_text(current_task.reason or code),
@@ -940,10 +984,26 @@ class SetupWebAPI:
             if result.failure is not None:
                 return None
             usage = budget.attempt_usage(context, result.unwrap(), now)
-            scope = "relationship" if label[0] == "relationship_attempt_budget" else "session"
-            return usage[scope]
+            return usage["session"]
         except Exception:
             # A supplemental counter must not hide the original admission failure.
+            return None
+
+    @staticmethod
+    def _diagnostic_usage_summary(session, context):
+        proactive = getattr(session.application, "proactive", None)
+        preferences_store = getattr(proactive, "preferences", None)
+        budget = getattr(proactive, "budget", None)
+        if preferences_store is None or budget is None:
+            return None
+        try:
+            now = session.application.now()
+            result = preferences_store.read(context, observed_at=now)
+            if result.failure is not None:
+                return None
+            return budget.usage_summary(context, result.unwrap(), now)
+        except Exception:
+            # Reporting is supplemental and must not change the test outcome.
             return None
 
     @staticmethod

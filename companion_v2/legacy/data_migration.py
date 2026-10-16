@@ -1295,7 +1295,8 @@ def _reference_assets(root, profile, configuration, persona_id):
                 rejected.append({"index": index, "reason": "item_invalid"})
                 continue
             acl = raw.get("image_access")
-            if raw.get("scope") != "relation_role":
+            scope = raw.get("scope")
+            if scope not in ("relation_role", "relation_user"):
                 rejected.append({"source_id": str(raw.get("id") or index)[:120],
                                  "reason": "identity_scope_unmapped"})
                 continue
@@ -1303,8 +1304,13 @@ def _reference_assets(root, profile, configuration, persona_id):
                     or set(acl) != {"subject_ref", "allow_generation", "readers", "audiences", "routes"}
                     or acl.get("allow_generation") is not True or acl.get("subject_ref") is not None
                     or any(not isinstance(acl.get(key), list)
-                           or any(type(value) is not str for value in acl.get(key, []))
-                           or "*" not in acl.get(key, []) for key in ("readers", "audiences", "routes"))):
+                           or not acl.get(key)
+                           or any(type(value) is not str or not value or value != value.strip()
+                                  for value in acl.get(key, []))
+                           for key in ("readers", "audiences", "routes"))
+                    or "*" not in acl.get("routes", [])
+                    or (scope == "relation_role"
+                        and any("*" not in acl.get(key, []) for key in ("readers", "audiences")))):
                 rejected.append({"source_id": str(raw.get("id") or index)[:120],
                                  "reason": "image_access_not_role_wide"})
                 continue

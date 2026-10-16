@@ -153,7 +153,7 @@ class HostSettings:
             fallback_provider_id=fallback_provider_id,
             replacement_rules=replacement_rules,
             fallback_on_refusal=_boolean(model.get("fallback_on_refusal", False)),
-            task_prompt=_text(model.get("task_prompt", "保持当前 AstrBot 人格，只根据本轮输入和有依据的材料回复。")),
+            task_prompt=_text(model.get("task_prompt", "沿用当前 AstrBot 人格，先回应本轮真正的问题或话题。自然、具体地说清意思；只使用本轮输入和有依据的材料，不补造事实。按任务需要调整长短与格式，闲聊不复述、不写客服式收尾。")),
             max_output_tokens=_integer(model.get("max_output_tokens", 2048), minimum=1, maximum=65_536),
             maximum_input_estimate=_integer(
                 model.get("maximum_input_estimate", 131_072), minimum=1_024, maximum=1_000_000

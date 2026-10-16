@@ -38,21 +38,10 @@ ACTION = "group.participation.choose"
 VERSION = "conversation.group_participation.v1"
 SKIPPED = "group_participation_skipped"
 logger = logging.getLogger(__name__)
-INSTRUCTION = (
-    "你正在以原人格旁听群聊。收到一条群消息不等于有人正在向你提问，也不要求每条都接话。"
-    "结合各人的话题、上下文、已经说过的话和原人格，自己判断此刻参与是否自然、有帮助；"
-    "他人之间的对话可以安静听着，被邀请时也按具体语境回应，不依赖固定关键词或回复配额。"
-    "未被点名而当前话题接不住、专名含义不明或缺少媒体内容时，可以 skip；"
-    "若本轮已有合适的可发送表情图且足以表达即时态度，也可先选择 reply，再仅发送该图，不必补文字。"
-    "表情不代替问题答案；明确向你求助但材料不足时，简短说明缺口或询问，不从群名、旧记忆补猜。"
-    "如果此刻无需说话，单独调用 group.participation.choose，mode=skip；系统会保留已授权发言供后续理解，"
-    "本轮到此结束，不发送空消息、占位回复或‘我选择不回复’。不要先调用业务工具再选择旁听。"
-    "被明确 @ 时可以直接正常回复；未被明确 @ 而决定接话时，先调用 group.participation.choose，"
-    "mode=reply，reason 用一句话说明为什么此刻接话，例如回应称呼、引用、补话、求助或相关话题。"
-    "理由只说明参与原因，不写推理过程，不向群里发送。然后继续本轮工具与回复。"
-    "已经开始参与后不能用 skip 撤销已发生的操作；旁听 reason 可省略。"
-    "旁听决定只针对本轮，不代表拒绝某成员或建立长期规则，不会在没有新消息时自行发起对话。"
-)
+INSTRUCTION = """以原人格旁听群聊，收到消息不等于有人在问你。结合话题、发言对象、已有回答和最近参与情况，判断此刻接话是否自然、有内容；他人之间的交流可以安静听着，不依赖固定关键词或回复配额。
+明确 @ 你时正常回应；未被明确 @ 而准备接话时，先调用 group.participation.choose，mode=reply，reason 简短说明参与缘由（称呼、引用、求助、补话等），只记录原因，不向群里发判断过程。随后按需使用工具与回复。
+不适合参与时调用 choose，mode=skip，reason 可省略。本轮到此结束，不发空消息、占位或“我选择不回复”。可以同时记录已授权的互动学习或反馈，不能先做业务操作再旁听，也不能用 skip 撤销已发生的操作。这个决定只针对本轮，不建立长期拒绝规则，不在无新消息时另起对话。
+未点名、专名不明或缺少媒体内容时可以 skip；明确向你求助但材料不足时简短问清。若本轮有合适表情原图且足够表达即时态度，可先 reply 再只发图；表情不能代替问题答案。"""
 
 CONFIG_GROUP = "conversation.group_participation"
 CONFIG_OWNER = "conversation.group_participation"
@@ -62,6 +51,8 @@ CONFIG_OWNER = "conversation.group_participation"
 # leave adjustable windows in code.
 CONFIG_DEFAULTS = {
     "enable_group_social_context": False,
+    "enable_group_topic_threads": True,
+    "group_topic_thread_max": 12,
     "enable_group_mood_detection": False,
     "enable_group_roleplay_strength": False,
     "enable_group_moments": False,
@@ -83,8 +74,13 @@ CONFIG_DEFAULTS = {
     "group_repeat_interrupt_image_path": "",
     "group_repeat_window_seconds": 120,
     "group_context_max_age_hours": 12,
+    "enable_group_behavior_learning": True,
+    "enable_group_behavior_imitation": True,
+    "enable_group_behavior_feedback": True,
+    "group_behavior_guidance": "",
 }
-CONFIG_LIMITS = {"group_interject_min_interval_minutes": (0, 1440),
+CONFIG_LIMITS = {"group_topic_thread_max": (3, 40),
+                 "group_interject_min_interval_minutes": (0, 1440),
                  "group_interject_max_daily": (0, 20),
                  "group_interject_feedback_window_seconds": (60, 86400),
                  "group_repeat_trigger_threshold": (3, 20),
@@ -108,7 +104,8 @@ def configuration_fields():
             CONFIG_GROUP + "." + name, CONFIG_GROUP, CONFIG_GROUP,
             {bool: ValueKind.BOOLEAN, int: ValueKind.INTEGER, float: ValueKind.PROBABILITY,
              str: ValueKind.TEXT}[type(default)], default,
-            minimum=low, maximum=high, apply_mode=ApplyMode.IMMEDIATE, core_only=True, owner_id=CONFIG_OWNER))
+            minimum=low, maximum=high, maximum_chars=1200 if name == "group_behavior_guidance" else None,
+            apply_mode=ApplyMode.IMMEDIATE, core_only=True, owner_id=CONFIG_OWNER))
     return tuple(fields)
 
 
@@ -169,6 +166,9 @@ def _check_interrupt_text(fields):
     image = fields.get(CONFIG_GROUP + "." + CONFIG_INTERRUPT_IMAGE)
     if image is not None:
         validate_interrupt_image_path(image.value)
+    guidance = fields.get(CONFIG_GROUP + ".group_behavior_guidance")
+    if guidance is not None and (type(guidance.value) is not str or len(guidance.value) > 1200):
+        raise ConfigurationError("group_participation_configuration", "behavior guidance must be at most 1200 characters")
 
 
 def group_participation_settings(runtime, context):
@@ -194,12 +194,14 @@ def group_participation_settings(runtime, context):
             raise ConfigurationError("group_participation_configuration", f"{name} must be a fraction between 0 and 1")
     validate_interrupt_text(settings[CONFIG_INTERRUPT_TEXT])
     validate_interrupt_image_path(settings[CONFIG_INTERRUPT_IMAGE])
+    if type(settings["group_behavior_guidance"]) is not str or len(settings["group_behavior_guidance"]) > 1200:
+        raise ConfigurationError("group_participation_configuration", "behavior guidance must be at most 1200 characters")
     return settings
 
 
 class GroupParticipation:
     actions = frozenset({ACTION})
-    catalog = (ToolSpec(ACTION, "按原人格决定本轮群聊参与或安静旁听；skip 必须单独调用且早于业务操作。",
+    catalog = (ToolSpec(ACTION, "按原人格决定本轮群聊参与或安静旁听；skip 可与互动学习、反馈笔记同批调用，不能与业务操作同批或在其后调用。",
         encode({"type": "object", "properties": {
             "mode": {"type": "string", "enum": ["reply", "skip"]},
             "reason": {"type": "string", "maxLength": 256}},
@@ -210,6 +212,8 @@ class GroupParticipation:
         self.records = GroupPresenceStore(self.runtime)
         self.speech = GroupSpeechLedger(self.runtime)
         self.admission = GroupReplyAdmission(messages)
+        from .behavior import GroupBehavior
+        self.behavior = GroupBehavior(messages)
         self._frozen_turns = {}
         self._reflection_day = ""
 
@@ -337,6 +341,7 @@ class GroupParticipation:
             return False  # media-only messages break the burst, without becoming expression evidence
         try:
             settings = group_participation_settings(self.runtime, context)
+            self.behavior.observe(context, text=text, speaker_id=speaker_id, received_at=received_at, event_id=event_id)
             item = history_items(({
                 "type": "group_member_message",
                 "speaker_id": speaker_id,

@@ -17,9 +17,7 @@
  * 全局设置通过 /config 读取，写入 installation 层的 proactive.contact 段。
  * 页面不读取宿主当前打开的会话；单个私聊用户的覆盖与授权在私聊用户页管理。
  *
- * 关于额度：budget.py 的滚动额度（max_contacts_24h 等）**只有写入口，没有读出口**。
- * 所以页面上这些一律画成「上限刻度」，不画成「已用量表」——不知道的就不画，
- * 比画一个假读数好。
+ * 关于额度：配置页展示滚动上限，管理员诊断结果展示模型调用、实际发送和待确认预占。
  *
  * 动效分三层，都在 prefers-reduced-motion 下压到瞬时终态，信息一条不丢：
  *   ① 开页一次——24 根柱子从 0:00（正上方）向两侧荡开，在 12:00 会合，
@@ -137,9 +135,19 @@ window.CompanionContactPage = (() => {
       setup:"实际调用窥屏设备，保存截图原件并调用视觉模型，再用这次分析生成主动消息。",
       instruction:"只提及分析明确支持且适合分享的一点观察；不暴露无关屏幕内容，不推断用户意图或身份。",
       expect:"新截图、该截图的视觉分析、消息生成与 QQ 回执全部完成；撤权或来源变化后失效。"},
+    {id:"mobile_location", label:"手机地点主动消息", bucket:"拓展", coverage:"ready",
+      source:"手机陪伴终端本次上报的授权地点快照与当前私聊角色",
+      setup:"读取终端当前未过期地点，经过现实触及授权和变化校验，再进入环境主动联系与 QQ 投递链。测试不伪造坐标，也不改生产去重标记。",
+      instruction:"只把手机上报的地点标签作为可选聊天素材；不能据此推断用户正在做什么、心情如何或是否安全。",
+      expect:"终端地点读取、来源发布、主动消息生成与 QQ 回执全部完成；没有有效地点或授权时明确失败。"},
+    {id:"reaction_image", label:"带图主动消息", bucket:"拓展", coverage:"ready",
+      source:"当前私聊已授权的表情图库、原图校验与图片投递回执",
+      setup:"按一次性测试意图从授权图库检索素材，执行原图校验、封存和真实 QQ 图片投递；不修改生产图片频率。",
+      instruction:"正文保持自然完整；只附一张适合日常友好互动的原图，不适合时或本人停用表情时不得发送。",
+      expect:"授权素材检索、图片原件、文本与图片同一投递载荷及平台回执全部匹配；不会以纯文本冒充通过。"},
   ];
   const TEST_COVERAGE = {ready:"生产器已接通", partial:"只有资格检查", missing:"尚无独立生产器"};
-  const TEST_BUCKET_IDS = {关系:"bond", 日程:"daily", 分享:"share"};
+  const TEST_BUCKET_IDS = {关系:"bond", 日程:"daily", 分享:"share", 拓展:"extension"};
   /* 强度档位。effects 只是**给界面看的**说明，真值在 configuration.py 的
      INTENSITY_PRESETS 里；这里写死的是「这个档位会怎么变」的文案，
      不参与任何计算。 */
@@ -182,8 +190,6 @@ window.CompanionContactPage = (() => {
     configuration_revision_conflict:"设置已有其他更新，请重新读取后再保存。",
     contact_configuration_invalid:"请核对联系设置：提交的字段或操作不完整。",
     invalid_contact_preference:"请核对联系设置的格式或范围。",
-    proactive_budget_scope:"这两个额度限制整段关系，只能在安装 / 角色 / 关系层设置。",
-    contact_relationship_budget_scope:"这两个额度限制整段关系，只能在安装 / 角色 / 关系层设置。",
     configuration_relationship_required:"这个对象还没有建立可写入的关系。",
     contact_recipient_changed:"联系对象已变化，请重新读取。",
     configuration_request_invalid:"请求与当前接口不匹配，请更新页面后重试。",
@@ -473,10 +479,19 @@ window.CompanionContactPage = (() => {
     autoRecoveryAttempts = 0;
   }
 
+  function localDayKey() {
+    const now = new Date();
+    return [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0")].join("-");
+  }
+  function localTimezone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }
+    catch { return "UTC"; }
+  }
   function blank() {
     return {view:"dial", purposeQuery:"", purposeBucket:"all", purposeFilter:"all",
       testQuery:"", testBucket:"all", testCoverage:"all", materialQuery:"", materialCategory:"all",
-      materialKind:"all",
+      materialKind:"window", materialWindow:"all", materialDay:localDayKey(), materialTimezone:localTimezone(),
       nativePath:"", configPath:"",
       settings:null, effective:null, effectiveSettings:null, purposes:{}, hostState:"",
       materialItems:[], materialsLoaded:false, materialsLoading:false, materialsError:"",
@@ -591,13 +606,18 @@ window.CompanionContactPage = (() => {
     let receivedStatus = false;
     render();
     try {
-      const payload = await api("GET", data.nativePath + "/materials");
+      const payload = await api("GET", data.nativePath + "/materials",
+        {day:data.materialDay, timezone:data.materialTimezone});
       if (!live(ticket)) return;
       if (!Array.isArray(payload?.items)) throw problem("invalid_response");
       data.materialItems = payload.items.filter(item => item && typeof item === "object"
         && typeof item.id === "string" && typeof item.title === "string"
         && (item.scope === "role" && !item.usage
           || item.scope === "window" && item.usage && typeof item.usage.status === "string"));
+      if (data.materialWindow !== "all"
+          && !data.materialItems.some(item => item.scope === "window" && materialWindowKey(item) === data.materialWindow)) {
+        data.materialWindow = "all";
+      }
       data.materialsState = typeof payload.state === "string" ? payload.state : "ready";
       data.materialsCheckedAt = typeof payload.checked_at === "string" ? payload.checked_at : "";
       data.materialsSharedCount = Number.isInteger(payload.shared_count)
@@ -1162,19 +1182,22 @@ window.CompanionContactPage = (() => {
       synthetic ? "按角色身处该情境时会主动发出的消息生成正文；除边界或安全要求不适合外，选择 send。"
         : "根据本次真实来源生成自然、符合角色的消息；内容受实际来源支持，报告 QQ 真实投递回执。",
       `类型要求：${item.instruction}`,
+      ...(item.id === "reaction_image" ? ["本次确认的是一次性带图测试，按生产图库检索与 QQ 图片投递链验证；不改变日常图片概率或频率配置。"] : []),
       "测试状态与合成标识只在管理端呈现；QQ 正文按正式效果表达，不加入测试、模拟、演练或链路说明。",
       "保持当前角色口吻和称呼，由角色先带来内容；可以自然提问或发出具体邀请，不催促回复。严格遵守通用 JSON 合同，并给出 decision_confidence。",
       `通过条件：${item.expect}`,
     ].join("\n");
   }
-  const REAL_SOURCE_TESTS = new Set(["news", "environment", "screen"]);
+  const SYNTHETIC_SOURCE_TESTS = new Set(["news", "environment", "screen"]);
+  const NON_SYNTHETIC_TESTS = new Set(["mobile_location", "reaction_image"]);
   const TEST_ENVIRONMENT_SOURCES = {weather:"当前真实天气", weather_change:"真实天气变化",
     official_alert:"当前官方预警", service_balance:"真实服务余额", external_news:"当前真实资讯"};
   function testUsesSynthetic(id) {
-    return !REAL_SOURCE_TESTS.has(id) || data.testModes?.[id] === "synthetic";
+    return !NON_SYNTHETIC_TESTS.has(id)
+      && (!SYNTHETIC_SOURCE_TESTS.has(id) || data.testModes?.[id] === "synthetic");
   }
   function testModeMarkup(id) {
-    if (!REAL_SOURCE_TESTS.has(id)) return "";
+    if (!SYNTHETIC_SOURCE_TESTS.has(id)) return "";
     const synthetic = testUsesSynthetic(id);
     return `<label class="ct-test-material"><span>测试素材</span><select data-test-mode="${e(id)}" aria-label="测试素材"
       ${data.testBusy || data.testUncertain ? " disabled" : ""}>
@@ -1217,13 +1240,13 @@ window.CompanionContactPage = (() => {
     </article>`).join("");
     return `<div class="ct-tests">
       <div class="ct-test-overview">
-        <p>15 类主动消息各有独立的素材准备、类型指令和验收条件。</p>
+        <p>主动联系目的与拓展发送链路分别验收，来源、素材和投递回执各自可核对。</p>
         <div class="ct-test-coverage-summary" aria-label="生产器覆盖情况">
           <span><i class="is-ready"></i>生产器已接通 <strong>${counts.ready}</strong></span>
           <span><i class="is-partial"></i>只有资格检查 <strong>${counts.partial}</strong></span>
           <span><i class="is-missing"></i>尚无独立生产器 <strong>${counts.missing}</strong></span>
         </div>
-        <p class="ct-test-boundary">资讯、天气和屏幕默认即时获取真实来源；屏幕会实际截图并调用视觉模型。其他类型使用一次性合成事件。测试调用角色模型并经 QQ 投递到核心管理员私聊，单独显示来源获取、分析、生成和回执结果。</p>
+        <p class="ct-test-boundary">资讯、天气、屏幕和手机地点读取真实来源；屏幕会实际截图并调用视觉模型，手机地点读取终端授权快照。带图测试使用授权图库素材。测试调用角色模型并真实投递到核心管理员私聊。</p>
       </div>
       ${data.testUncertain ? `<div class="ct-test-lock" role="alert">
         <span>${data.testGuard?.state === "pending" ? "上次测试没有收到最终回执。" : "上次测试结果未确认。"}请先核对核心管理员私聊；确认前不能再次启动测试，以免重复投递。</span>
@@ -1240,6 +1263,7 @@ window.CompanionContactPage = (() => {
           <option value="bond"${data.testBucket === "bond" ? " selected" : ""}>关系</option>
           <option value="daily"${data.testBucket === "daily" ? " selected" : ""}>日程</option>
           <option value="share"${data.testBucket === "share" ? " selected" : ""}>分享</option>
+          <option value="extension"${data.testBucket === "extension" ? " selected" : ""}>拓展</option>
         </select></label>
         <label><span>生产器状态</span><select data-test-coverage-filter aria-label="按生产器状态筛选">
           <option value="all"${data.testCoverage === "all" ? " selected" : ""}>全部状态</option>
@@ -1258,8 +1282,9 @@ window.CompanionContactPage = (() => {
     request:"诊断请求", authorization:"管理员身份", binding:"管理员私聊绑定", runtime:"运行环境",
     settings:"主动联系设置", purpose:"联系目的", trusted_candidate:"联系机会/来源", contact_admission:"主动联系准入",
     news_fetch:"真实资讯抓取", weather_fetch:"真实天气获取", screen_capture:"本次真实截图", screen_interpretation:"本次视觉分析",
-    attempt_budget:"本私聊 24 小时尝试额度", relationship_attempt_budget:"关系级 24 小时尝试额度",
-    delivery_budget:"本私聊 24 小时投递额度", relationship_delivery_budget:"关系级 24 小时投递额度",
+    mobile_location_fetch:"手机地点读取", image_attachment:"主动图片素材与投递",
+    attempt_budget:"旧版本的主动模型调用上限",
+    delivery_budget:"本窗口今日实际联系额度",
     model_route:"主动联系模型路由", model_generation:"模型生成", persona_review:"人格复核",
     delivery:"平台投递", receipt:"投递回执", execution:"端到端执行",
   };
@@ -1295,6 +1320,38 @@ window.CompanionContactPage = (() => {
         <strong>${e(TEST_STAGE_STATES[item.state] || item.state)}</strong>${item.detail ? `<small>${e(item.detail)}</small>` : ""}</li>`).join("")}</ol>
     </section>`;
   }
+  function testMetricsMarkup(result) {
+    const metrics = result.stage_metrics;
+    const model = metrics?.model;
+    const delivery = metrics?.delivery;
+    const fmtCost = (value) => value == null ? "费用未返回" : `成本 $${(Number(value) / 1000000).toFixed(6)}`;
+    const stageLines = [];
+    if (model && Number.isFinite(Number(model.provider_calls))) {
+      const latency = Number.isFinite(Number(model.avg_latency_ms)) ? ` · 平均 ${Number(model.avg_latency_ms)} ms` : "";
+      const unknown = Number(model.unknown_calls) > 0 ? ` · 未知 ${Number(model.unknown_calls)} 次` : "";
+      stageLines.push(`本轮 Provider 模型：${Number(model.provider_calls)} 次调用 · ${Number(model.tokens || 0)} Tokens · ${fmtCost(model.cost_microusd)}${latency}${unknown}`);
+    }
+    if (delivery && Number.isFinite(Number(delivery.expected_parts))) {
+      stageLines.push(`本轮投递：${Number(delivery.delivered_parts || 0)} / ${Number(delivery.expected_parts)} 段已确认 · ${Number(delivery.unresolved_parts || 0)} 段待确认 · ${Number(delivery.failed_parts || 0)} 段失败`);
+    }
+    const summary = result.usage_summary;
+    const sessionDecision = summary?.decisions?.session;
+    const sessionDelivery = summary?.deliveries?.session;
+    const sessionModel = summary?.model?.session;
+    const quotaLine = (label, decision, contact, usage) => {
+      if (!decision || !contact || !usage) return "";
+      const cost = usage.cost_microusd == null ? "费用未返回" : `$${(Number(usage.cost_microusd) / 1000000).toFixed(6)}`;
+      return `${label}：主动模型决策已调用 ${Number(decision.calls ?? decision.used ?? 0)} 次（待处理 ${Number(decision.pending || 0)}，仅统计）；实际联系已确认发送 ${Number(contact.delivered)} 条（每日上限占用 ${Number(contact.occupied ?? contact.used)}/${Number(contact.limit)}，待确认 ${Number(contact.unresolved)}）；主动生成/复核 Provider 调用 ${Number(usage.calls)} 次、${Number(usage.tokens)} Tokens、${cost}`;
+    };
+    const quotaDay = sessionDecision?.date || sessionDelivery?.date || sessionModel?.date || summary?.date;
+    const quotaTimezone = sessionDecision?.timezone || sessionDelivery?.timezone || sessionModel?.timezone || summary?.timezone;
+    const quotaLabel = quotaDay ? `当前窗口 ${quotaDay}${quotaTimezone ? `（${quotaTimezone}）` : ""} 每日额度` : "当前窗口每日额度";
+    const usageLines = [quotaLine(quotaLabel, sessionDecision, sessionDelivery, sessionModel)].filter(Boolean);
+    if (!stageLines.length && !usageLines.length) return "";
+    return `<section class="ct-test-diagnosis" aria-label="运行统计"><h4>运行统计</h4>
+      ${stageLines.concat(usageLines).map(line => `<p>${e(line)}</p>`).join("")}
+    </section>`;
+  }
   function testResultMarkup(id) {
     const result = data.testResults[id];
     if (!result) return "";
@@ -1307,9 +1364,6 @@ window.CompanionContactPage = (() => {
     const stage = result.stage ? TEST_STAGE_LABELS[result.stage] || result.stage : "";
     const skipReason = TEST_SKIP_REASONS[result.skip_reason] || result.skip_reason || "";
     const modelSkipReason = TEST_MODEL_SKIP_REASONS[result.model_skip_reason] || result.model_skip_reason || "";
-    const usage = result.budget_usage;
-    const budget = usage && Number.isFinite(Number(usage.used)) && Number.isFinite(Number(usage.limit))
-      ? `已用 ${Number(usage.used)} / ${Number(usage.limit)} 次（滚动 24 小时）` : "";
     const technical = result.code || result.error ? `<details class="ct-test-technical"><summary>展开技术详情</summary>
       ${result.code ? `<code>${e(result.code)}</code>` : ""}${result.error ? `<pre>${e(result.error)}</pre>` : ""}</details>` : "";
     const delivery = TEST_DELIVERY_STATES[result.delivery_state] || "";
@@ -1323,7 +1377,7 @@ window.CompanionContactPage = (() => {
       ${result.event_mode === "source_backed" ? `<p>输入：本次取得的真实来源</p>` : ""}
       ${delivery ? `<p>投递状态：${e(delivery)}</p>` : ""}
       ${skipReason ? `<p class="ct-test-cause"><b>未发送原因</b>${e(skipReason)}${modelSkipReason ? `：${e(modelSkipReason)}` : ""}</p>` : ""}
-      ${budget ? `<p class="ct-test-budget">当前额度：${e(budget)}</p>` : ""}
+      ${testMetricsMarkup(result)}
       ${testStageMarkup(result)}
       ${result.suggestion ? `<p class="ct-test-next"><b>下一步</b>${e(result.suggestion)}</p>` : ""}
       ${technical}
@@ -1345,7 +1399,9 @@ window.CompanionContactPage = (() => {
     const item = TEST_INSTRUCTIONS.find(candidate => candidate.id === data.confirmTest);
     if (!item) return "";
     const synthetic = testUsesSynthetic(item.id);
-    const realAction = item.id === "screen" ? "调用当前已授权的窥屏设备取得一张新截图，并调用视觉模型分析该截图"
+    const realAction = item.id === "mobile_location" ? "读取手机陪伴终端当前经授权且未过期的真实地点快照；不伪造坐标，也不改变生产去重标记"
+      : item.id === "reaction_image" ? "从当前私聊授权图库检索一张表情原图，执行素材校验并真实投递图片；不修改生产图片频率"
+      : item.id === "screen" ? "调用当前已授权的窥屏设备取得一张新截图，并调用视觉模型分析该截图"
       : item.id === "news" || data.testVariants?.environment === "external_news" ? "即时抓取当前配置的真实资讯源，使用带日期和原链接的有效条目"
       : item.id === "environment" && (data.testVariants?.environment || "weather") === "weather" ? "即时获取已配置角色所在地的真实天气观测"
       : "读取所选环境来源的当前真实事件";
@@ -1354,7 +1410,7 @@ window.CompanionContactPage = (() => {
         <p class="ct-test-dialog-kicker">${synthetic ? "合成事件" : "真实来源"} · 真实投递</p>
         <h2 id="ct-test-confirm-title">运行「${e(item.label)}」测试？</h2>
         <p>${synthetic ? `将为「${e(item.label)}」构造一次性合成事件；合成事件不会写入聊天记录。` : `将${realAction}。来源获取失败会显示失败阶段。`}之后调用角色配置的消息模型，按配置执行人格复核，并真实投递到核心管理员 QQ 私聊。QQ 正文按正式效果呈现，测试标识只保留在本页。</p>
-        <p class="ct-test-dialog-warning">测试不占日常联系额度。若结果未知，请先核对管理员私聊，不要重新运行。</p>
+        <p class="ct-test-dialog-warning">测试不占日常联系额度。带图测试可能记录素材实际已投递；若结果未知，请先核对管理员私聊，不要重新运行。</p>
         <div class="ct-test-dialog-actions">
           <button type="button" class="ct-btn" data-test-action="cancel">取消</button>
           <button type="button" class="ct-btn is-primary" data-test-action="confirm">确认并运行</button>
@@ -1534,12 +1590,7 @@ window.CompanionContactPage = (() => {
   /* 额度与去重：额度**没有读出口**，所以画成上限刻度而不是用量表。 */
   function budgetsView() {
     const num = name => { const n = Number(value(name)); return Number.isFinite(n) ? n : null; };
-    const quota = [
-      ["max_contacts_24h", "24 小时内最多联系", "次", 100],
-      ["max_attempts_24h", "24 小时内最多尝试", "次", 1000],
-      ["max_relationship_contacts_24h", "整段关系 · 24 小时联系", "次", 1000],
-      ["max_relationship_attempts_24h", "整段关系 · 24 小时尝试", "次", 10000],
-    ];
+    const quota = [["max_contacts_24h", "本窗口每日最多实际联系", "条", 100]];
     const dedup = [
       ["dedup_enabled", "启用重复抑制"],
       ["dedup_last_message_enabled", "与上一条原文比对"],
@@ -1560,7 +1611,6 @@ window.CompanionContactPage = (() => {
             <input type="range" min="0" max="${max}" step="1" data-field="${e(name)}"
               value="${current ?? 0}" aria-label="${e(label)}">
             <div class="ct-quota-scale"><span>0</span><span>${max}</span></div>
-            ${(name.startsWith("max_relationship") ? `<small class="ct-field-help">关系额度请在安装、角色或关系层设置。</small>` : "")}
           </div>`;
         }).join("")}
       </section>
@@ -1661,7 +1711,6 @@ window.CompanionContactPage = (() => {
         srcToggle("enable_llm_proactive_persona_judge", "开口前先自评", "多一次模型调用，按阈值决定这条要不要发。"),
         srcNumber("proactive_persona_judge_threshold", "自评阈值", "", 0, 100, ""),
         srcNumber("proactive_persona_judge_cache_minutes", "自评缓存", "分钟", 0, 720, ""),
-        srcNumber("proactive_persona_judge_daily_limit", "自评每日上限", "次", 0, 100, ""),
         srcNumber("generation_history_limit", "带入的历史条数", "条", 0, 8, ""),
         srcNumber("history_max_chars", "历史字数上限", "字", 0, 8192, ""),
       ]},
@@ -1749,17 +1798,26 @@ window.CompanionContactPage = (() => {
       return url.protocol === "https:" && !url.username && !url.password ? url.href : "";
     } catch { return ""; }
   }
+  function materialWindowKey(item) {
+    return typeof item.trace_window_id === "string" && item.trace_window_id
+      ? item.trace_window_id : "legacy:" + JSON.stringify([item.trace_target || "", item.trace_role || ""]);
+  }
   function materialCard(item) {
     const records = Array.isArray(item.usage?.records) ? item.usage.records : [];
     const search = [item.category, item.purpose, item.title, item.detail, item.note, item.source, item.url,
       item.usage?.status, item.usage?.thought_origin, item.usage?.followup_observation?.status,
-      item.trace_target, item.trace_role, ...records.map(record => record.text)]
+      item.trace_target, item.trace_role, item.skip_reason, item.model_skip_reason, ...records.map(record => record.text)]
       .filter(Boolean).join(" ").toLocaleLowerCase();
     const source = item.source || "已核验来源";
     const href = materialLink(item.url);
     const usage = item.usage && typeof item.usage === "object" ? item.usage : null;
     const usageLabels = {delivered:"已送达", partial:"部分送达", unconfirmed:"结果待确认", not_sent:"未发送",
       pending:"等待投递", failed:"投递失败", cancelled:"已取消", reviewing:"等待检视"};
+    const skipLabels = {duplicate:"内容重复", low_confidence:"判断把握不足", persona_review:"人格复核未通过",
+      presentation_empty:"正文整理后为空", forbidden_word:"内容规则限制", model_decision:"模型选择暂不发送",
+      source_coverage:"来源支撑不足", no_sendable_content:"没有可发送内容"};
+    const modelSkipLabels = {insufficient_context:"上下文不足", no_natural_opening:"当前没有自然的开口",
+      purpose_mismatch:"内容与联系目的不匹配", repetitive:"内容重复", respect_user_boundary:"遵守用户边界", other:"其他原因"};
     const usageHistory = records;
     const thoughtOrigin = typeof usage?.thought_origin === "string" ? usage.thought_origin : "";
     const followup = usage?.status === "delivered" ? usage.followup_observation : null;
@@ -1770,6 +1828,8 @@ window.CompanionContactPage = (() => {
         ? " · 截至 " + materialTime(followup.observed_through) : "";
     const followupMarkup = followup && typeof followup === "object" ? `<span title="仅表示时间上出现后续输入，不代表这条消息已读或得到回应。">
       ${e(followupLabels[followup.status] || "后续输入状态未知")}${e(followupTime)}</span>` : "";
+    const skipReason = modelSkipLabels[item.model_skip_reason] || skipLabels[item.skip_reason] || "未生成可投递正文";
+    const note = item.note || (usage?.status === "not_sent" ? "未发送原因 · " + skipReason : "");
     const contextMarkup = item.scope === "window" ? `<p class="ct-material-trace-context">
       <span>接收目标</span><b>${e(item.trace_target || "私聊目标")}</b>
       <span>角色</span><b>${e(item.trace_role || "角色")}</b>
@@ -1777,12 +1837,15 @@ window.CompanionContactPage = (() => {
     const usageMarkup = usage ? `<div class="ct-material-usage">
       <strong>发送前检视 · ${e(usageLabels[usage.status] || "状态未知")}</strong>
       ${thoughtOrigin ? `<span>念头来由 · ${e(thoughtOrigin)}</span>` : ""}
-      <span>${e(usage.delivered_parts ?? 0)} / ${e(usage.total_parts ?? 0)} 段已确认送达</span>
+      <span>${usage.status === "not_sent" && Number(usage.total_parts) === 0
+        ? "本次没有可投递的正文"
+        : `${e(usage.delivered_parts ?? 0)} / ${e(usage.total_parts ?? 0)} 段已确认送达`}</span>
       ${followupMarkup}
       ${usageHistory.length ? `<ol>${usageHistory.map(record => `<li><time datetime="${e(record.delivered_at || "")}">
         第 ${e(Number.isInteger(record.sequence) ? record.sequence + 1 : "-")} 段 · ${e(materialTime(record.delivered_at))}</time><span>${e(record.text || "")}</span></li>`).join("")}</ol>` : ""}
     </div>` : "";
     return `<article class="ct-material-card" data-material-card data-scope="${e(item.scope || "role")}"
+      data-window-id="${e(item.scope === "window" ? materialWindowKey(item) : "")}"
       data-category="${e(item.category || "")}" data-search="${e(search)}">
       <header class="ct-material-card-head"><span class="ct-material-category">${e(item.category || "素材")}</span>
         <span class="ct-material-purpose">${e(item.purpose || "")}</span></header>
@@ -1790,7 +1853,7 @@ window.CompanionContactPage = (() => {
       ${item.detail ? `<p class="ct-material-detail">${e(item.detail)}</p>` : ""}
       ${contextMarkup}
       ${usageMarkup}
-      ${item.note ? `<p class="ct-material-note">${e(item.note)}</p>` : ""}
+      ${note ? `<p class="ct-material-note">${e(note)}</p>` : ""}
       <footer><span>${e(source)}</span><span>${usage ? "生成于 " : "采集于 "}${e(materialTime(item.captured_at))}</span>
         <span>${usage ? "发送轨迹" : item.expires_at ? "有效至 " + e(materialTime(item.expires_at)) : "有效期未设"}</span>
         ${href ? `<a class="ct-material-source-link" href="${e(href)}" target="_blank" rel="noopener noreferrer">查看来源</a>` : ""}</footer>
@@ -1804,6 +1867,12 @@ window.CompanionContactPage = (() => {
     const traceTotal = data.materialsTraceTotal;
     const traceCountLabel = traceTotal > traceCount ? `${traceCount} / 共 ${traceTotal}` : String(traceCount);
     const categories = [...new Set(items.map(item => item.category).filter(value => typeof value === "string" && value))];
+    const windows = new Map();
+    for (const item of items) {
+      if (item.scope !== "window") continue;
+      const id = materialWindowKey(item);
+      if (!windows.has(id)) windows.set(id, `${item.trace_target || "私聊目标"} · ${item.trace_role || "角色"}`);
+    }
     let content = "";
     if (data.materialsLoading && !data.materialsLoaded) {
       content = `<div class="ct-material-empty"><span class="ct-spinner"></span><strong>正在读取外部素材与主动记录</strong></div>`;
@@ -1838,6 +1907,12 @@ window.CompanionContactPage = (() => {
             <span>${label}</span><b>${total}</b></button>`).join("")}
       </div>
       <div class="ct-material-tools">
+        <label><span>主动记录日期</span><input type="date" data-material-day aria-label="主动记录日期"
+          value="${e(data.materialDay)}"${data.materialsLoading ? " disabled" : ""}></label>
+        <label><span>私聊窗口</span><select data-material-window aria-label="按私聊窗口筛选">
+          <option value="all"${data.materialWindow === "all" ? " selected" : ""}>全部窗口</option>
+          ${[...windows].map(([id, label]) => `<option value="${e(id)}"${data.materialWindow === id ? " selected" : ""}>${e(label)}</option>`).join("")}
+        </select></label>
         <label class="ct-material-search"><span>查找记录</span>
           <input type="search" data-material-search aria-label="搜索外部素材与主动记录" value="${e(data.materialQuery)}" placeholder="内容、目标、角色或状态">
         </label>
@@ -1861,7 +1936,9 @@ window.CompanionContactPage = (() => {
     const query = data.materialQuery.trim().toLocaleLowerCase();
     const category = data.materialCategory;
     const cards = [...root.querySelectorAll("[data-material-card]")];
-    const candidates = cards.filter(card => data.materialKind === "all" || card.dataset.scope === data.materialKind);
+    const candidates = cards.filter(card => (data.materialKind === "all" || card.dataset.scope === data.materialKind)
+      && (card.dataset.scope !== "window" || data.materialWindow === "all"
+        || card.dataset.windowId === data.materialWindow));
     const candidateSet = new Set(candidates);
     let visible = 0;
     for (const card of cards) {
@@ -2019,6 +2096,20 @@ window.CompanionContactPage = (() => {
     if (testMode) { data.testModes = {...data.testModes, [testMode.dataset.testMode]:testMode.value}; render(); return; }
     const testVariant = event.target.closest("[data-test-variant]");
     if (testVariant) { data.testVariants = {...data.testVariants, [testVariant.dataset.testVariant]:testVariant.value}; render(); return; }
+    const materialDay = event.target.closest("[data-material-day]");
+    if (materialDay) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(materialDay.value)) return;
+      data.materialDay = materialDay.value;
+      data.materialWindow = "all";
+      void loadMaterials();
+      return;
+    }
+    const materialWindow = event.target.closest("[data-material-window]");
+    if (materialWindow) {
+      data.materialWindow = materialWindow.value || "all";
+      updateMaterialFilters();
+      return;
+    }
     const materialCategory = event.target.closest("[data-material-category]");
     if (materialCategory) {
       data.materialCategory = materialCategory.value;
@@ -2126,9 +2217,12 @@ window.CompanionContactPage = (() => {
     notice(synthetic ? "正在生成合成事件并等待模型与 QQ 投递回执…" : "正在获取真实来源、运行分析与消息模型，并等待 QQ 投递回执…");
     render();
     try {
+      const purpose = id === "mobile_location" ? "environment" : id === "reaction_image" ? "chat" : id;
       const result = await api("POST", "setup/proactive-diagnostic",
-        {purpose: id, confirm_delivery: true, synthetic_event: synthetic,
-          ...(id === "environment" ? {variant:data.testVariants?.environment || "weather"} : {})}, id === "screen" && !synthetic ? 300000 : 180000);
+        {purpose, confirm_delivery: true, synthetic_event: synthetic,
+          ...(id === "environment" ? {variant:data.testVariants?.environment || "weather"} : {}),
+          ...(id === "mobile_location" ? {variant:"mobile_location"} : {}),
+          ...(id === "reaction_image" ? {diagnostic_image:true} : {})}, id === "screen" && !synthetic ? 300000 : 180000);
       if (!live(ticket)) return;
       if (!["passed", "skipped", "failed", "unknown", "pending"].includes(result.state)) {
         throw problem("invalid_response");

@@ -2223,26 +2223,42 @@ button.maint-ranking-row:hover .maint-ranking-label { color: var(--t-text-strong
 .maint-efficiency-coverage-row strong { color:var(--t-text-strong); font-size:var(--fs-tiny); font-variant-numeric:tabular-nums; }
 .maint-efficiency-coverage-row > i { grid-column:1 / -1; display:block; height:5px; overflow:hidden; border-radius:var(--r-pill); background:var(--t-surface-sunken); }
 .maint-efficiency-coverage-row > i::after { display:block; width:var(--coverage-width,0%); height:100%; border-radius:inherit; background:var(--t-accent); content:""; }
-.maint-efficiency-daily { display:grid; gap:var(--sp-3); min-width:0; }
+.maint-efficiency-trend-panel { display:flex; flex-direction:column; }
+.maint-efficiency-daily { --trend-labels:44px; display:flex; flex:1; flex-direction:column; gap:var(--sp-3); min-width:0; }
 .maint-efficiency-legend { display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-2) var(--sp-4); }
 .maint-efficiency-legend-item { display:inline-flex; align-items:center; gap:var(--sp-2); color:var(--t-text-soft); font-size:var(--fs-micro); }
-.maint-efficiency-legend-item > i { width:9px; height:9px; border-radius:2px; background:var(--t-ok); }
-.maint-efficiency-legend-item > i[data-series="core"] { background:var(--t-accent); }
-.maint-efficiency-trend-chart { display:grid; grid-template-columns:38px minmax(0,1fr); gap:var(--sp-2); min-width:0; }
-.maint-efficiency-trend-axis { display:flex; flex-direction:column; justify-content:space-between; height:146px; padding-bottom:1px; color:var(--t-text-faint); font-size:var(--fs-micro); font-variant-numeric:tabular-nums; text-align:right; }
-.maint-efficiency-trend-plot { position:relative; height:176px; min-width:0; }
-.maint-efficiency-trend-guides { position:absolute; inset:0 0 30px; display:grid; grid-template-rows:repeat(3,minmax(0,1fr)); pointer-events:none; }
-.maint-efficiency-trend-guides > i { border-top:1px solid var(--t-line); }
-.maint-efficiency-trend-columns { position:relative; display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); height:100%; min-width:0; }
-.maint-efficiency-day { display:grid; grid-template-rows:minmax(0,1fr) auto auto; gap:3px; min-width:0; text-align:center; }
-.maint-efficiency-day-bars { display:flex; align-items:flex-end; justify-content:center; gap:3px; min-height:0; padding:0 2px; }
-.maint-efficiency-trend-bar,.maint-efficiency-trend-gap { display:block; flex:0 1 13px; width:13px; max-width:13px; min-height:1px; border-radius:3px 3px 0 0; }
-.maint-efficiency-trend-bar { height:var(--bar-height,0%); transform-origin:center bottom; background:var(--t-ok); animation:maint-bar-in 540ms cubic-bezier(.18,.67,.3,1) both; transition:filter 160ms ease,translate 160ms ease; }
-.maint-efficiency-trend-bar[data-series="core"] { background:var(--t-accent); }
+.maint-efficiency-legend-item > i,.maint-efficiency-day-readout i { flex:none; width:10px; height:10px; border-radius:2px; }
+.maint-efficiency-daily [data-series="core"] { background:var(--t-accent); }
+.maint-efficiency-daily [data-series="legacy"] { background:repeating-linear-gradient(135deg,transparent 0 3px,color-mix(in srgb,var(--t-surface) 45%,transparent) 3px 5px),var(--t-warn); }
+.maint-efficiency-trend-meta { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); color:var(--t-text-faint); font-size:var(--fs-micro); line-height:1; }
+.maint-efficiency-trend-chart { display:grid; flex:1; grid-template-columns:34px minmax(0,1fr); gap:var(--sp-2); min-width:0; min-height:248px; padding-top:var(--sp-1); }
+.maint-efficiency-trend-axis { position:relative; margin-bottom:var(--trend-labels); color:var(--t-text-faint); font-size:var(--fs-micro); font-variant-numeric:tabular-nums; text-align:right; }
+.maint-efficiency-trend-axis > span { position:absolute; top:var(--tick-position); right:0; translate:0 -50%; white-space:nowrap; }
+.maint-efficiency-trend-plot { position:relative; min-width:0; }
+.maint-efficiency-trend-guides { position:absolute; inset:0 0 var(--trend-labels); display:flex; flex-direction:column; justify-content:space-between; pointer-events:none; }
+.maint-efficiency-trend-guides > i { width:100%; border-top:1px dashed var(--t-line); }
+.maint-efficiency-trend-guides > i:last-child { border-top-style:solid; border-color:var(--t-line-firm); }
+.maint-efficiency-trend-columns { position:absolute; inset:0; display:grid; grid-template-columns:repeat(var(--day-count,7),minmax(0,1fr)); min-width:0; }
+.maint-efficiency-day { position:relative; display:grid; grid-template-rows:minmax(0,1fr) 18px 16px; gap:5px; min-width:0; border-radius:var(--r-xs); text-align:center; outline-offset:3px; }
+.maint-efficiency-day:focus-visible { outline:2px solid var(--t-accent); }
+.maint-efficiency-day-bars { display:flex; align-items:flex-end; justify-content:center; gap:4px; min-height:0; padding:0 3px; }
+.maint-efficiency-trend-bar,.maint-efficiency-trend-gap { display:block; flex:0 1 16px; width:16px; max-width:20px; min-height:2px; border-radius:4px 4px 0 0; }
+.maint-efficiency-trend-bar { height:var(--bar-height,0%); transform-origin:center bottom; animation:maint-bar-in 540ms cubic-bezier(.18,.67,.3,1) both; transition:filter 160ms ease,translate 160ms ease; }
 .maint-efficiency-trend-gap { height:1px; visibility:hidden; }
-.maint-efficiency-day:hover .maint-efficiency-trend-bar { filter:brightness(1.14); translate:0 -2px; }
-.maint-efficiency-day:hover time { color:var(--t-text-strong); }
-.maint-efficiency-day time,.maint-efficiency-day small { overflow:hidden; color:var(--t-text-faint); font-size:var(--fs-micro); font-variant-numeric:tabular-nums; text-overflow:clip; white-space:nowrap; }
+.maint-efficiency-day:hover .maint-efficiency-trend-bar,.maint-efficiency-day:focus-visible .maint-efficiency-trend-bar { filter:brightness(1.1); }
+.maint-efficiency-day:hover time,.maint-efficiency-day:focus-visible time { color:var(--t-text-strong); }
+.maint-efficiency-day > time,.maint-efficiency-day > small { color:var(--t-text-soft); font-size:var(--fs-micro); font-variant-numeric:tabular-nums; line-height:1.4; white-space:nowrap; }
+.maint-efficiency-day > small { color:var(--t-text-faint); }
+.maint-efficiency-date-compact { display:none; }
+.maint-efficiency-day-detail { position:absolute; z-index:4; bottom:calc(var(--trend-labels) + var(--sp-2)); left:50%; display:none; gap:var(--sp-3); width:max-content; min-width:185px; padding:var(--sp-3); border:1px solid var(--t-line-firm); border-radius:var(--r-sm); color:var(--t-text-soft); background:var(--t-surface-raised); box-shadow:var(--t-shadow-lift); translate:-50% 0; text-align:left; pointer-events:none; }
+.maint-efficiency-day:hover .maint-efficiency-day-detail,.maint-efficiency-day:focus-visible .maint-efficiency-day-detail { display:grid; }
+.maint-efficiency-day:last-child .maint-efficiency-day-detail { left:auto; right:0; translate:0 0; }
+.maint-efficiency-day:first-child .maint-efficiency-day-detail { left:0; right:auto; translate:0 0; }
+.maint-efficiency-day-detail > strong { color:var(--t-text-strong); font-size:var(--fs-micro); font-weight:600; white-space:nowrap; }
+.maint-efficiency-day-readout { display:grid; gap:var(--sp-1); font-size:var(--fs-micro); }
+.maint-efficiency-day-readout > span { display:flex; align-items:center; gap:var(--sp-2); }
+.maint-efficiency-day-readout > b { color:var(--t-text-strong); font-weight:600; }
+.maint-efficiency-day-readout > small { color:var(--t-text-faint); font-size:inherit; }
 .maint-efficiency-recent { display:grid; gap:0; }
 .maint-efficiency-recent > .maint-panel-heading { margin-bottom:var(--sp-2); }
 .maint-efficiency-sample { min-width:0; border-top:1px solid var(--t-line); }
@@ -2323,11 +2339,11 @@ button.maint-ranking-row:hover .maint-ranking-label { color: var(--t-text-strong
   .maint-efficiency-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .maint-efficiency-metric { min-height:72px; padding:var(--sp-2); }
   .maint-efficiency-metric strong { font-size:var(--fs-body); }
-  .maint-efficiency-trend-chart { grid-template-columns:38px minmax(0,1fr); gap:var(--sp-1); }
-  .maint-efficiency-trend-axis { height:126px; }
-  .maint-efficiency-trend-plot { height:156px; }
-  .maint-efficiency-trend-guides { bottom:30px; }
-  .maint-efficiency-day time,.maint-efficiency-day small { font-size:var(--fs-micro); }
+  .maint-efficiency-trend-chart { grid-template-columns:28px minmax(0,1fr); gap:var(--sp-1); min-height:224px; }
+  .maint-efficiency-legend { gap:var(--sp-2) var(--sp-3); }
+  .maint-efficiency-day-bars { gap:2px; padding:0 2px; }
+  .maint-efficiency-date-full { display:none; }
+  .maint-efficiency-date-compact { display:inline; }
   .maint-efficiency-sample > summary { grid-template-columns:minmax(0,1fr); gap:var(--sp-2); padding:var(--sp-3) 0; }
   .maint-efficiency-sample-timings > div { padding:var(--sp-2); }
   .maint-efficiency-detail { padding-left:0; }

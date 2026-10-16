@@ -9,6 +9,7 @@ that neither turns ``busy`` or an online status into an automatic refusal.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 import unittest
 
@@ -16,9 +17,11 @@ from companion_v2.configuration.models import ConfigLayer
 from companion_v2.configuration.registry import FieldRegistry, ValueKind
 from companion_v2.conversation.state_context import ConversationStateContext
 from companion_v2.execution.models import TaskError
+from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.role_work.state import configuration as state_configuration
 from companion_v2.role_work.state import humanized
 from companion_v2.role_work.state.maintenance import PROMPT, _expression_preferences
+from companion_v2.role_work.state.ownership import role_schedule_key
 from tests.test_management_access import NOW, SCOPE
 from tests.test_role_state import StateFixture, state_data
 
@@ -35,14 +38,11 @@ class HumanizedBandTests(unittest.TestCase):
     def test_energy_prompt_allows_evidence_based_gradual_recovery(self):
         self.assertIn("previous_simulation", PROMPT)
         self.assertIn("updated_at", PROMPT)
-        self.assertIn("低能量不必永久维持", PROMPT)
+        self.assertIn("低值且无持续负荷或睡眠不足依据时", PROMPT)
         self.assertIn("沿用不等于照抄", PROMPT)
-        self.assertIn("没有新消息就继续锁在低位", PROMPT)
-        self.assertIn("优先小幅上调", PROMPT)
-        self.assertIn("不必等到确认睡眠才允许温和好转", PROMPT)
-        self.assertIn("精力缓慢回升也不代表宣称睡着", PROMPT)
-        self.assertIn("不得因清晨自动推断睡足或高能", PROMPT)
-        self.assertIn("不得虚构睡眠", PROMPT)
+        self.assertIn("不必等睡眠回执才允许感受温和好转", PROMPT)
+        self.assertIn("好转不宣称已休息", PROMPT)
+        self.assertIn("不从清晨、沉默或对话推断已睡足、醒来或休息完成", PROMPT)
 
     def test_body_expression_preferences_are_soft_prompt_data(self):
         block = _expression_preferences({
@@ -66,7 +66,7 @@ class HumanizedBandTests(unittest.TestCase):
             self.assertEqual(field.default, value, name)
             self.assertEqual((field.group_id, field.consumer_id, field.owner_id),
                              (state_configuration.GROUP, state_configuration.GROUP, state_configuration.OWNER))
-            self.assertEqual(field.layers, (ConfigLayer.WINDOW,), name)
+            self.assertEqual(field.layers, (ConfigLayer.ROLE, ConfigLayer.WINDOW), name)
             self.assertTrue(field.core_only, name)
             kind = (ValueKind.BOOLEAN if type(value) is bool else ValueKind.INTEGER if type(value) is int
                     else ValueKind.TEXT)
@@ -106,6 +106,8 @@ class HumanizedBandTests(unittest.TestCase):
             self.assertTrue(block, intensity)
             self.assertLessEqual(len(block), characters, intensity)
             self.assertIn(MARKER, block)
+            self.assertIn("可感知的状态色彩", block)
+            self.assertIn("第一人称带出感受", block)
             self.assertIn("不改变身份、权限、记忆范围和安全规则", block)
             self.assertIn("不据此拒答", block)
             # The dial only ever expresses state: no location, no identity or
@@ -148,6 +150,14 @@ class HumanizedBandTests(unittest.TestCase):
 
 
 class HumanizedStateHostTests(StateFixture, unittest.IsolatedAsyncioTestCase):
+    def configure(self, manager, **changes):
+        result = super().configure(manager, **changes)
+        next_at = (self.clock.now() + timedelta(days=1)).isoformat()
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE role_state_schedules SET next_at = ? WHERE context_key = ?",
+                               (next_at, role_schedule_key(manager.context)))
+        return result
+
     async def ready(self, **changes):
         host, app, context, manager = self.setup_state()
         self.configure(manager, enabled=True, **changes)
@@ -224,6 +234,31 @@ class HumanizedStateHostTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.done(app, second, seconds=15))["state"], "complete")
         self.assertNotIn(MARKER, self.replies()[-1].original.instruction)
         self.assertEqual(len(self.replies()), 2)
+
+    async def test_role_simulation_is_injected_in_another_private_window_without_a_state_grant(self):
+        host, app, context, _ = await self.ready(humanized_state_intensity=80)
+        app.role_state.write(context, data=state_data(energy=15, mood="平稳"),
+                             expected_revision=0, operation_key="seed")
+        other_scope = replace(context.scope, native_scope_id="second-private",
+                              conversation_id="conversation-second", session_id="session-second")
+        self.personas.register_route(ConversationRoute(other_scope, user=context.actor.subject),
+                                     observed_at=self.clock.now())
+        self.grant(context.actor, other_scope, "conversation.reply")
+        self.grant(context.actor, other_scope, "text")
+        self.assertFalse(self.identity.authorize(context.actor, scope=other_scope,
+            capability="role.state.read", observed_at=self.clock.now()).is_success)
+        self.assertFalse(self.identity.authorize(context.actor, scope=other_scope,
+            capability="role.state.maintain", observed_at=self.clock.now()).is_success)
+
+        batch = host.receive(self.event("other-private-window", scope=other_scope,
+                                        actor=context.actor)).unwrap()
+        self.advance(app)
+        result = await self.done(app, batch, seconds=15)
+        self.assertEqual(result["state"], "complete", dict(result))
+        instruction = self.replies()[-1].original.instruction
+        self.assertIn(MARKER, instruction)
+        self.assertIn("精力很低", instruction)
+        self.assertEqual(len(self.sent), 2)
 
     async def test_the_daily_patrol_records_once_per_local_day_and_prunes_by_retention(self):
         _, app, context, manager = await self.ready(daily_state_patrol_time="23:59")

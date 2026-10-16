@@ -50,3 +50,10 @@ test("ordinary embedded requests keep their short default and timeout input is c
   assert.equal(capped.messages[0].timeoutMs, 300000);
   assert.equal(capped.timers[0].ms, 301000);
 });
+
+test("an embedded timeout carries an explicit ambiguous transport code", async () => {
+  const h = harness();
+  const pending = h.window.AstrBotPluginPage.apiPost("acquaintance/settings", {}, {timeoutMs: 60000});
+  h.timers[0].callback();
+  await assert.rejects(pending, error => error.code === "bridge_timeout" && error.confirmed === false);
+});

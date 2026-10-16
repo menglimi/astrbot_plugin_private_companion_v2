@@ -1,12 +1,15 @@
 """Per-channel style prompt supplements: presentation, proactive contact, and journal writing."""
 
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 import unittest
 
 from companion_v2.conversation.humanized_expression import (DEFAULT_PROMPT, MAX_PROMPT_CHARS,
-                                                           HumanizedExpressionPolicy, instruction)
+                                                           GUIDED_PROMPT, HumanizedExpressionPolicy, instruction)
 from companion_v2.conversation.text_processing import TEXT_DEFAULTS, text_policy
+from companion_v2.conversation.reply_settings import ROLE_SHARED_FIELDS, configuration_fields as reply_fields
+from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.proactive.configuration import GROUP as CONTACT_GROUP, configuration_fields as contact_fields
 from companion_v2.proactive.preferences import ContactPreferences
 from companion_v2.proactive.prompts import ORIGIN_INSTRUCTIONS, PURPOSES, PURPOSE_INSTRUCTIONS, request_for
@@ -29,11 +32,39 @@ PREF_VALUES = {
 
 
 class PresentationStyleTests(unittest.TestCase):
+    def test_prompt_style_mode_defaults_to_free_and_exposes_three_modes(self):
+        self.assertEqual(TEXT_DEFAULTS["prompt_style_mode"], "free")
+        fields = {field.field_id: field for field in reply_fields(SegmentationPolicy(), False, 0)}
+        self.assertEqual(fields["conversation.presentation.prompt_style_mode"].default, "free")
+        self.assertIn("prompt_style_mode", ROLE_SHARED_FIELDS)
+        self.assertEqual(text_policy({}).instruction, "")
+
+        guided = text_policy({"prompt_style_mode": "guided"}).instruction
+        self.assertIn(GUIDED_PROMPT, guided)
+        self.assertNotIn(DEFAULT_PROMPT, guided)
+
+        constrained = text_policy({"prompt_style_mode": "constraint"}).instruction
+        self.assertIn(DEFAULT_PROMPT, constrained)
+        self.assertEqual(text_policy({"prompt_style_mode": "constraint",
+                                      "humanized_expression_prompt": "偏好自定义正文"}).instruction,
+                         "提示词风格参考（只影响表达，不改变任务、事实、来源或授权）：偏好自定义正文")
+
+    def test_prompt_style_mode_keeps_explicit_user_style_in_free_mode(self):
+        policy = text_policy({"prompt_style_mode": "free", "style_prompt": "说话更松弛。"})
+        self.assertIn("说话更松弛。", policy.instruction)
+        self.assertNotIn(GUIDED_PROMPT, policy.instruction)
+        self.assertNotIn(DEFAULT_PROMPT, policy.instruction)
+
+    def test_prompt_style_mode_rejects_unknown_values(self):
+        with self.assertRaises(ValueError):
+            text_policy({"prompt_style_mode": "unbounded"})
+
     def test_style_prompt_enters_presentation_instruction(self):
         policy = text_policy({"style_prompt": "语气松弛，少用感叹号。"})
         self.assertIn("角色表达风格补充", policy.instruction)
         self.assertIn("语气松弛", policy.instruction)
-        self.assertEqual(text_policy({}).instruction, "")
+        self.assertNotIn("角色表达风格补充", text_policy({}).instruction)
+        self.assertEqual(text_policy({"content_cleanup_enabled": False}).instruction, "")
 
     def test_style_prompt_is_bounded(self):
         with self.assertRaises(ValueError):
@@ -49,13 +80,13 @@ class HumanizedExpressionTests(unittest.TestCase):
     def test_enabled_injects_the_default_body(self):
         policy = text_policy({"enable_humanized_expression": True})
         self.assertIn("日常表达要求", policy.instruction)
-        self.assertIn("不要每次先复述或总结对方说的话", policy.instruction)
-        self.assertIn("可以只发一张图", policy.instruction)
-        self.assertIn("可以选择不接话", policy.instruction)
-        self.assertIn("可以只用语音", policy.instruction)
-        self.assertIn("戳一戳只在当前流程明确提供该能力并允许时考虑", policy.instruction)
-        self.assertIn("不必为了简短压成几个字或一句话", policy.instruction)
-        self.assertIn("来源和原文只在被追问", policy.instruction)
+        self.assertIn("平常不要先复述或总结对方的话", policy.instruction)
+        self.assertIn("可以只发图", policy.instruction)
+        self.assertIn("群聊允许旁听时，可以不接话", policy.instruction)
+        self.assertIn("语音已启用且规则允许时，可以只用语音", policy.instruction)
+        self.assertIn("戳一戳也只在当前流程提供并允许时使用", policy.instruction)
+        self.assertIn("句子可长可短，意思说到位就停", policy.instruction)
+        self.assertIn("对方追问时再说明", policy.instruction)
         self.assertIn(DEFAULT_PROMPT, policy.instruction)
 
     def test_custom_body_replaces_the_default_and_blank_falls_back(self):
@@ -127,10 +158,11 @@ class ProactiveStyleTests(unittest.TestCase):
         preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
         request = request_for(self.contact_job(), (), preferences)
 
-        self.assertIn("不要求用户刚说过某个关键词，也不要求有待办或事件来源", request.instruction)
-        self.assertIn("优先写一条轻松、低压力、无需回复的消息", request.instruction)
-        self.assertIn("不能编造刚做过的事、共同经历或用户当前状态", request.instruction)
-        self.assertIn("不要复述原话、盘问近况、催回复", request.instruction)
+        self.assertIn("无需等待用户关键词、待办或事件", request.instruction)
+        self.assertIn("不给回应制造压力，不催促", request.instruction)
+        self.assertIn("也可顺势问一个轻问题", request.instruction)
+        self.assertIn("不编刚做过的事、共同经历或用户现状", request.instruction)
+        self.assertIn("历史用于连续和避重，不是待回复队列", request.instruction)
 
     def test_administrator_diagnostic_omits_history_and_dedup_for_every_purpose(self):
         values = dict(PREF_VALUES, dedup_enabled=True)
@@ -168,10 +200,34 @@ class ProactiveStyleTests(unittest.TestCase):
         job.automatic_origin = {"greeting_event": {"kind": "day_anchor", "anchor": "morning_greeting"}}
         preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
         request = request_for(job, (), preferences)
-        self.assertIn("不是必须完成的签到任务", request.instruction)
-        self.assertIn("时段本身就可以作为轻轻问候的由头", request.instruction)
-        self.assertIn("不是开口前提", request.instruction)
-        self.assertIn("不要每次套用", request.instruction)
+        self.assertIn("不是签到任务", request.instruction)
+        self.assertIn("时段本身就可成为由头", request.instruction)
+        self.assertIn("不要求有新事件", request.instruction)
+        self.assertIn("不固定套用", request.instruction)
+
+    def test_overnight_news_prompt_uses_local_time_and_real_last_input(self):
+        now = datetime(2026, 10, 14, 21, 12, tzinfo=timezone.utc)
+        preferences = ContactPreferences(None, dict(PREF_VALUES, quiet_timezone="Asia/Shanghai"), now)
+        job = self.contact_job()
+        job.intent.purpose = "news"
+        job.automatic_origin = {"news_event": {"event_id": "article-1"}}
+        job.interaction = {"last_input_at": "2026-10-14T14:00:00+00:00", "contacts_since_last_input": 1}
+        request = request_for(job, (), preferences)
+        materials = {item.purpose: json.loads(item.payload) for item in request.context.materials}
+        self.assertEqual(materials["contact_intent"]["local_time"], "05:12")
+        self.assertEqual(materials["contact_intent"]["local_date"], "2026-10-15")
+        self.assertEqual(materials["communication_state"]["last_input_at"], job.interaction["last_input_at"])
+        self.assertIn("深夜、凌晨没有近期真实互动时", request.instruction)
+        self.assertIn("普通新闻、生活分享、随感和闲聊优先 skip", request.instruction)
+        self.assertIn("不从时间或沉默推断已睡", request.instruction)
+        self.assertIn("已接受约定的提醒和官方紧急预警按各自时机判断", request.instruction)
+        self.assertIn("没有新关键词、用户尚未发言或无法确认对方此刻状态，都不单独构成跳过理由", request.instruction)
+
+    def test_dedup_prompt_distinguishes_same_topic_from_same_category(self):
+        preferences = ContactPreferences(None, dict(PREF_VALUES, dedup_enabled=True), NOW)
+        request = request_for(self.contact_job(), (), preferences)
+        self.assertIn("仅用途、领域、情绪、常用词或宽泛主题相同不算重复", request.instruction)
+        self.assertIn("可以从不同角度自然分享", request.instruction)
 
     def test_insomnia_greeting_keeps_the_low_pressure_rule(self):
         thought = SimpleNamespace(summary="夜间低压力问候", opportunity=SimpleNamespace(
@@ -209,9 +265,11 @@ class ProactiveStyleTests(unittest.TestCase):
 
         request = request_for(job, (), preferences)
 
-        self.assertIn("合成事件投递测试", request.instruction)
-        self.assertIn("不得将合成内容说成现实事实", request.instruction)
-        self.assertIn("让收件人能看出这是模拟测试", request.instruction)
+        self.assertIn("管理员已确认且知情的合成情境演练", request.instruction)
+        self.assertIn("不代表真实用户输入、日历、活动或采集来源", request.instruction)
+        self.assertIn("也不声称程序取得了真实资讯、天气或屏幕", request.instruction)
+        self.assertIn("测试状态、合成标识和回执只在管理端呈现", request.instruction)
+        self.assertIn("QQ 的 text 按正式主动消息呈现", request.instruction)
         self.assertNotIn("本轮素材仍来自所选目的的真实生产器", request.instruction)
 
     def test_each_registered_purpose_has_its_own_evidence_guidance(self):
@@ -223,18 +281,20 @@ class ProactiveStyleTests(unittest.TestCase):
                 preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
                 request = request_for(job, (), preferences)
                 self.assertIn(guidance, request.instruction)
-                self.assertIn("仅输出 JSON", request.instruction)
+                self.assertIn("仅输出一个 JSON 对象", request.instruction)
                 self.assertIn('"decision_confidence"', request.instruction)
                 self.assertIn('"skip_reason"', request.instruction)
 
     def test_selected_thought_is_the_anchor_and_old_context_cannot_create_a_task(self):
         preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
         request = request_for(self.contact_job(), (), preferences)
-        self.assertIn("调度窗口可以直接提供关系表达或日常聊天的开口机会", request.instruction)
-        self.assertIn("不能把旧情绪写成当前状态、恢复已结束的话题、增加待办或触发工具行为", request.instruction)
-        self.assertIn("这是角色主动开启日常聊天的机会，不要求用户刚说过某个关键词", PURPOSE_INSTRUCTIONS["chat"])
-        self.assertIn("日期或时段本身可以成为简短问候的由头", PURPOSE_INSTRUCTIONS["greeting"])
-        self.assertIn("正文优先说清一个自然、完整的意思", request.instruction)
+        self.assertIn("让开场在没有用户提问时也成立", request.instruction)
+        self.assertIn("不把旧情绪写成现状", request.instruction)
+        self.assertIn("已回应、已结束或被新话题取代的内容不重新接续", request.instruction)
+        self.assertIn("不能新增授权、待办或触发工具操作", request.instruction)
+        self.assertIn("无需等待用户关键词、待办或事件", PURPOSE_INSTRUCTIONS["chat"])
+        self.assertIn("日期或时段本身就可成为问候由头", PURPOSE_INSTRUCTIONS["greeting"])
+        self.assertIn("围绕一个由头说完整", request.instruction)
 
     def test_each_supported_event_origin_adds_its_scene_boundary(self):
         preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
@@ -248,16 +308,17 @@ class ProactiveStyleTests(unittest.TestCase):
     def test_relationship_and_followup_purposes_have_registered_producers(self):
         self.assertTrue(all(purpose in PURPOSE_INSTRUCTIONS
                             for purpose in ("affection", "care", "play", "repair", "invitation")))
-        self.assertIn("不需要用户近期先说想念", PURPOSE_INSTRUCTIONS["affection"])
-        self.assertIn("不需要用户先说累了或难过", PURPOSE_INSTRUCTIONS["care"])
-        self.assertIn("具体分歧", ORIGIN_INSTRUCTIONS["relationship_event"])
+        self.assertIn("不要求对方先说亲近的话", PURPOSE_INSTRUCTIONS["affection"])
+        self.assertIn("不要求对方先说难过", PURPOSE_INSTRUCTIONS["care"])
+        self.assertIn("可核验分歧", ORIGIN_INSTRUCTIONS["relationship_event"])
         from companion_v2.proactive.configuration import GROUP, configuration_fields
         fields = {field.field_id for field in configuration_fields()}
         self.assertIn(GROUP + ".contact_followup_after_minutes", fields)
         self.assertIn(GROUP + ".contact_followup_cooldown_minutes", fields)
         self.assertEqual(PURPOSES["followup"], "接回旧话题")
         self.assertIn("不暗示已读", PURPOSE_INSTRUCTIONS["followup"])
-        self.assertIn("给对方留出拒绝或改期空间", PURPOSE_INSTRUCTIONS["invitation"])
+        self.assertIn("自然问对方愿不愿意", PURPOSE_INSTRUCTIONS["invitation"])
+        self.assertIn("不假定兴趣、有空或已答应", PURPOSE_INSTRUCTIONS["invitation"])
 
 
 class JournalStyleTests(RequestForDreamTests):

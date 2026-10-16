@@ -100,7 +100,7 @@ class ReplyTextProcessingTests(unittest.TestCase):
             threshold=500, min_segment_chars=1, max_segments=3)
         result = prepare_reply("hi。hi。\t删", segmentation, presentation)
         self.assertEqual(result.parts, ("你好哇。", "你好哇。 "))
-        self.assertIn("格式数据", presentation.instruction)
+        self.assertNotIn("格式数据", presentation.instruction)
 
     def test_protected_markdown_nested_quotes_urls_and_declared_facts_are_literal(self):
         protected = ('（外层 hi（内层 hi））', '“hi，原句”', 'https://host.test/hi?q=hi',

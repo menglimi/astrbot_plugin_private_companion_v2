@@ -209,7 +209,7 @@ function navigationDestination(next,tab='',subtab=''){
     subtab=tab==='diary'&&['archive','reading','sleep','receipts'].includes(subtab)?subtab:'archive';
   }else if(next==='manage'){
     tab=manageTabs.some(item=>item[0]===tab)?tab:'host';
-    subtab=tab==='learning'?(['overview','strategy','review','chain','expression','semantic','reflection'].includes(subtab)?subtab:'overview')
+    subtab=tab==='learning'?(['overview','strategy','review','chain','expression','behavior','semantic','reflection'].includes(subtab)?subtab:'overview')
       :tab==='expression'?(['text','segment','style','cleanup','voice','components','checks','timing','platform','reaction','group'].includes(subtab)?subtab:'')
       :tab==='maintenance'?(['diagnostics','cache','efficiency','recent','prompts','patrol'].includes(subtab)?subtab:'')
         :tab==='data'?(['storage','backup','migration'].includes(subtab)?subtab:'storage')
@@ -770,6 +770,10 @@ function mountPanelWorkspaces(){
       :window.CompanionLearningPage?.unmount()
     :window.CompanionLearningPage?.unmount());
   const learningOverviewHost=$('#learningOverviewWorkspace');
+  const behaviorHost=$('#behaviorLearningWorkspace');
+  guarded('行为模仿',()=>behaviorHost
+    ?window.CompanionBehaviorPage?.mount(behaviorHost,{api:roleConfigApi(product.role?.())})
+    :window.CompanionBehaviorPage?.unmount());
   guarded('学习总览',()=>learningOverviewHost
     ?window.CompanionLearningOverviewPage?.mount(learningOverviewHost,{sources:learningReviewSources({includeGroups:true}),semantic:{global:true}})
     :window.CompanionLearningOverviewPage?.unmount());
@@ -1879,8 +1883,17 @@ function pageSections(title,sentence,sections,toc=[]){
  * 同字号同灰度地压在一起，就是「一坨文字」的主要来源。
  * 需要交代生效时机的，放在末尾一句，不放在开头。 */
 function renderDecisionOriginal(){
-  if(typeof product.role()?.reply_api!=='string')return pageNeedsTarget('群聊参与');
-  return configEditors('groupParticipationConfigWorkspace',['group_participation'],'群聊参与');
+  const role=product.role?.();
+  if(typeof role?.reply_api!=='string')return pageNeedsTarget('群聊参与');
+  const roleSettings=configEditors('groupParticipationConfigWorkspace',['group_participation'],'群聊参与');
+  const target=product.target?.();
+  if(target?.scope_kind!=='group'||!role.reply_api.startsWith('/astrbot_plugin_private_companion_v2/')
+    ||!role.reply_api.endsWith('/reply'))return roleSettings;
+  const endpoint=role.reply_api+'/participation';
+  return `${roleSettings}<div data-decision-group-only hidden>
+    <section id="groupInterjectionConfigWorkspace" class="config-editors" data-config-api="${escapeHTML(endpoint)}"
+      aria-label="本群主动插话设置">${consoleLoading('正在读取本群插话设置…')}</section>
+  </div>`;
 }
 const actionDomains=[
   {id:'together',provider:'together',icon:'heart-handshake',title:'共处与陪伴',destination:'action'},
@@ -3534,7 +3547,15 @@ function renderConfigEditors(){
     wardrobe:outputConfigView('wardrobe',{rows:{tendency:2,image_prompt:2},onStatus:()=>window.CompanionImageMaterialsPage?.reload?.()}),
   }));
   if($('#groupParticipationConfigWorkspace'))configEditorMounts.push(mountConfigEditor('groupParticipationConfigWorkspace',['group_participation'],{
-    group_participation:{sectionIds:['atmosphere','joke_guard','interjection','repeat','history'],navigationLimit:0}
+    group_participation:{sectionIds:['topics','atmosphere','joke_guard','repeat','history'],navigationLimit:0}
+  }));
+  if($('#groupInterjectionConfigWorkspace'))configEditorMounts.push(mountConfigEditor('groupInterjectionConfigWorkspace',['group_participation'],{
+    group_participation:{sectionIds:['interjection'],title:'本群主动插话',scopeNote:'当前群聊',navigationLimit:0,
+      query:null,requestSection:null,resetKey:'reset_to_inherit',
+      onStatus:status=>window.CompanionDecisionPage?.updateParticipationStatus?.(status)}
+  }));
+  if($('#behaviorLearningConfigWorkspace'))configEditorMounts.push(mountConfigEditor('behaviorLearningConfigWorkspace',['group_participation'],{
+    group_participation:{sectionIds:['behavior'],title:'行为模仿策略',note:'',scopeNote:'角色默认设置',navigationLimit:0}
   }));
   if($('#groupDenoiseWorkspace'))configEditorMounts.push(mountConfigEditor('groupDenoiseWorkspace',['group_participation'],{
     group_participation:{sectionIds:['denoise'],title:'群聊表达去噪',note:'只影响群聊回复的表达腔调。'}
@@ -3860,9 +3881,9 @@ window.addEventListener('companion:learning-open',event=>{
     growth_id:event.detail?.growth_id};
   navigate('manage','learning','chain');
 });
-/* 策略按安装全局保存；记录页按来源汇总，避免把某个私聊当作策略归属。 */
+/* 策略按当前角色保存；记录页按来源汇总，不把某个私聊当作策略归属。 */
 function renderLearningPage(){
-  const sections=[['overview','总览'],['strategy','全局策略'],['review','审阅中心'],['chain','成长链路'],['expression','表达学习'],['semantic','语义目录'],['reflection','每日复盘']];
+  const sections=[['overview','总览'],['strategy','角色策略'],['review','审阅中心'],['chain','成长链路'],['expression','表达学习'],['behavior','行为模仿'],['semantic','语义目录'],['reflection','每日复盘']];
   const titles=Object.fromEntries(sections);
   const nav=`<nav class="learning-hub-nav" aria-label="学习与反思">${sections.map(([key,label],index)=>
     `<a class="learning-hub-tab${learningTab===key?' is-active':''}" href="${navHref('manage','learning',key)}" ${learningTab===key?'aria-current="page"':''}><span>${String(index+1).padStart(2,'0')} ${label}</span></a>`).join('')}</nav>`;
@@ -3874,10 +3895,8 @@ function renderLearningPage(){
     content=`<section id="learningOverviewWorkspace" class="learning-overview-workspace" aria-label="学习总览">${consoleLoading('正在读取学习状态…')}</section>`;
   }else if(learningTab==='strategy'){
     content=`<div class="learning-policy-workspaces">
-      ${configEditors('growthConfigWorkspace',['role.growth.skills'],'成长与技能','',
-        '/astrbot_plugin_private_companion_v2/config',true)}
-      ${configEditors('expressionLearningConfigWorkspace',['expression.learning'],'表达学习策略','',
-        '/astrbot_plugin_private_companion_v2/config',true)}
+      ${configEditors('growthConfigWorkspace',['role.growth.skills'],'成长与技能')}
+      ${configEditors('expressionLearningConfigWorkspace',['expression.learning'],'表达学习策略')}
     </div>`;
   }else if(learningTab==='review'){
     content=`<section id="learningReviewWorkspace" class="learning-review-workspace" aria-label="学习审阅中心">${consoleLoading('正在汇总待审阅内容…')}</section>`;
@@ -3886,6 +3905,9 @@ function renderLearningPage(){
         ${recordControls}<section id="expressionSignalsWorkspace" class="expression-signals-workspace" aria-label="表达规则库">${consoleLoading('正在读取表达规则…')}</section>
         <section id="expressionSamplesWorkspace" class="expression-samples-workspace" aria-label="表达学习观察素材">${consoleLoading('正在读取观察素材…')}</section>`
       :`<div class="learning-hub-empty" role="status">暂无表达学习记录</div>`;
+  }else if(learningTab==='behavior'){
+    content=`${configEditors('behaviorLearningConfigWorkspace',['group_participation'],'行为模仿策略','')}
+      <section id="behaviorLearningWorkspace" class="behavior-learning-workspace" aria-label="学到的群聊互动">${consoleLoading('正在读取互动习惯…')}</section>`;
   }else if(learningTab==='semantic'){
     content=`<section id="semanticLearningWorkspace" class="learning-semantic-workspace" aria-label="全局语义策略">${consoleLoading('正在读取全局语义设置…')}</section>`;
   }else if(learningTab==='reflection'){
@@ -4163,10 +4185,13 @@ function configSearchLocation(entry){
   if(entry.group==='life')return ['rest','backlog'].includes(entry.section)
     ?{next:'manage',tab:'contact',contactView:'gates',root:'#replyGateConfigWorkspace'}
     :{next:'life',tab:'diary',subtab:'archive',root:'#lifeConfigWorkspace'};
+  if(entry.group==='group_participation'&&entry.section==='behavior')return {next:'manage',tab:'learning',subtab:'behavior',root:'#behaviorLearningConfigWorkspace'};
   if(entry.group==='group_participation')return entry.section==='denoise'
     ?{next:'manage',tab:'expression',expressionModule:'expression-group',root:'#groupDenoiseWorkspace',focusSection:''}
-    :{next:'manage',tab:'decision',decisionView:entry.section==='joke_guard'?'safety':'group',
-      root:'#groupParticipationConfigWorkspace'};
+    :entry.section==='interjection'
+      ?{next:'manage',tab:'decision',decisionView:'group',root:'#groupInterjectionConfigWorkspace'}
+      :{next:'manage',tab:'decision',decisionView:entry.section==='joke_guard'?'safety':'group',
+        root:'#groupParticipationConfigWorkspace'};
   return configSearchLocations[entry.group] || null;
 }
 function replySearchLocation(entry){
@@ -4222,7 +4247,7 @@ function renderSearch(){
 const tokenTaskSettings={
   'conversation.reply':{next:'manage',tab:'identity-people',identitySettings:'private-access',identityField:'dialogue_default'},
   'conversation.group.review':{next:'manage',tab:'decision',decisionView:'group',
-    workbench:{root:'#groupParticipationConfigWorkspace',field:'enable_group_interjection'}},
+    workbench:{root:'#groupInterjectionConfigWorkspace',field:'enable_group_interjection'}},
   'proactive.compose':{next:'manage',tab:'contact',contactView:'purposes'},
   'proactive.judge':{next:'manage',tab:'contact',contactView:'gates'},
   'memory.reflect':{next:'manage',tab:'memory',memorySection:'reflection',memoryField:'reflection_enabled'},

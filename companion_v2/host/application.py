@@ -33,6 +33,7 @@ from companion_v2.conversation.open_items_context import OpenItemsReader
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.configuration.service import ConfigurationService
 from companion_v2.conversation.delivery import LocalConversationDelivery
+from companion_v2.conversation.pokes import PokeReplyModel
 from companion_v2.conversation.flow import ConversationFlow, ConversationPolicy
 from companion_v2.conversation.generation import LocalReplyGenerator, single_part
 from companion_v2.conversation.voice_reply import VoiceReplyPolicy
@@ -301,6 +302,7 @@ class CompanionApplication:
         self.screen_interpretation = ScreenInterpretationService(runtime, notify=self.notify)
         self.screen_peek = ScreenPeekService(runtime, notify=self.notify)
         self.authoring = ContentAuthoringWorkflow(runtime)
+        self.poke_reply_model = PokeReplyModel(runtime, now=self.now)
         registrations = (
             TaskRegistration(TaskDefinition(REPLY_KIND, "conversation", REPLY_ACTION, Lane.FOREGROUND,
                 timeout_seconds=600, max_attempts=1, concurrency=self.worker_limit),
@@ -308,7 +310,7 @@ class CompanionApplication:
             TaskRegistration(TaskDefinition(DELIVERY_KIND, "conversation.delivery", REPLY_ACTION, Lane.FOREGROUND,
                 side_effect=SideEffect.MESSAGE_DELIVERY, binding=sender.binding, timeout_seconds=30,
                 max_attempts=1, concurrency=self.worker_limit), lambda spec, at: self.delivery.validate(spec, at)),
-        ) + self.journal_writer.registrations + self.memory_reflection.registrations + self.role_reader.registrations + self.state_maintenance.registrations + self.calendar_planning.registrations + self.growth_progress.registrations + self.self_review.registrations + self.expression_style.registrations + self.proactive.registrations + self.outbound.registrations + self.image_review_service.registrations + self.context_image_caption.registrations + self.image_narration.registrations + self.video_narration.registrations + self.screen_interpretation.registrations + self.screen_peek.registrations + self.authoring.registrations + (external.registrations if external is not None else ())
+        ) + self.poke_reply_model.registrations + self.journal_writer.registrations + self.memory_reflection.registrations + self.role_reader.registrations + self.state_maintenance.registrations + self.calendar_planning.registrations + self.growth_progress.registrations + self.self_review.registrations + self.expression_style.registrations + self.proactive.registrations + self.outbound.registrations + self.image_review_service.registrations + self.context_image_caption.registrations + self.image_narration.registrations + self.video_narration.registrations + self.screen_interpretation.registrations + self.screen_peek.registrations + self.authoring.registrations + (external.registrations if external is not None else ())
         registrations += self.expression_draft_review.registrations
         self.tasks = TaskSupervisor(runtime, registrations, limits=limits, now=self.now)
         # Reference material shares this runtime and the supervisor that owns it, so
@@ -409,6 +411,7 @@ class CompanionApplication:
         self.gateway = LocalModelGateway(self.router, BudgetLedger(runtime, budget, budget_soft), self.tasks)
         self.authoring.attach(self.gateway, require_running=self.require_running)
         self.background_waiting = BackgroundTaskQueue(self.tasks)
+        self.poke_reply_model.attach(self)
         self.image_review = GroupImageReview(self.messages)
         self.image_review_service.attach_review(self.image_review)
         self.image_fallback = ImageReviewFallback(self.messages, self.delivery)
@@ -964,6 +967,7 @@ class CompanionApplication:
                 + self.image_review_service.active_handles
                 + self.image_narration.active_handles
                 + self.video_narration.active_handles
+                + self.poke_reply_model.active_handles
                 + self.screen_interpretation.active_handles
                 + self.screen_peek.active_handles
                 + (self.authoring.runner.active_handles if self.authoring.runner else ())
@@ -993,6 +997,7 @@ class CompanionApplication:
                 if pending:
                     await asyncio.wait(pending, timeout=0.25)
             await self.runner.close()
+            await self.poke_reply_model.close()
             await self.authoring.close()
             await self.background.close(grace_seconds=grace_seconds)
             await self.life_runtime.close()

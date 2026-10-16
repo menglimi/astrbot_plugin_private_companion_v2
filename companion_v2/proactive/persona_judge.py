@@ -130,14 +130,6 @@ class PersonaJudge:
         return JudgeVerdict(previous["decision"], previous["score"], previous.get("reason", ""), signature,
                             previous["decision"] == "send" and previous["score"] >= threshold, cached=True)
 
-    def decided_today(self, context, day_start):
-        """How many contacts already spent a judge model call in this local day."""
-        return self.runtime.read_one("""SELECT COUNT(*) FROM proactive_contacts
-            WHERE origin_key = ? AND created_at >= ?
-            AND json_extract(record_json, '$.judge.model_call_id') IS NOT NULL
-            AND json_extract(record_json, '$.judge.model_call_id') != ''""",
-            (context.key, stamp(day_start)))[0]
-
     @staticmethod
     def denied(signature, failure, *, reason):
         return JudgeVerdict("drop", 0, reason, signature, False, failure=failure)

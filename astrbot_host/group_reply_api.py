@@ -4,16 +4,28 @@ import json
 
 from astrbot.api.web import request
 from companion_v2.adapters.astrbot.native import account_number
-from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.configuration.contract import contract_of, layers_of, provenance_of
+from companion_v2.configuration.models import ConfigLayer, ConfigTarget, ConfigurationError
+from companion_v2.conversation.participation import CONFIG_GROUP as PARTICIPATION_GROUP
+from companion_v2.conversation.participation import CONFIG_OWNER as PARTICIPATION_OWNER
 from companion_v2.conversation.reply_management import ReplyManagement
-from companion_v2.execution.models import TaskContext, TaskError
+from companion_v2.execution.models import TaskContext, TaskError, digest
 from companion_v2.expression.style_management import ExpressionStyleManagement
 from companion_v2.foundation.outcome import Outcome
-from companion_v2.foundation.refs import ScopeKind, ScopeRef
+from companion_v2.foundation.refs import OperationRef, ScopeKind, ScopeRef, VersionRef
 
 from .group_settings import GroupTarget
 from .management_identity import dashboard_operator
 from .web_api import outcome_response
+
+
+INTERJECTION_FIELDS = (
+    "enable_group_interjection",
+    "group_interject_min_interval_minutes",
+    "group_interject_max_daily",
+    "enable_group_interjection_feedback",
+    "group_interject_feedback_window_seconds",
+)
 
 
 class GroupReplyWebAPI:
@@ -27,6 +39,10 @@ class GroupReplyWebAPI:
                 (prefix + "/expression", self.expression, ["GET"], "Read this group's expression-learning bounds"),
                 (prefix + "/expression/configure", self.expression_configure, ["POST"],
                  "Save this group's expression-learning bounds"),
+                (prefix + "/participation", self.participation, ["GET"],
+                 "Read this group's active interjection settings"),
+                (prefix + "/participation/configure", self.participation_configure, ["POST"],
+                 "Save this group's active interjection settings"),
                 (prefix + "/style", self.style, ["GET"], "Review this group's learned expression signals"),
                 (prefix + "/style/samples", self.style_samples, ["GET"], "Review this group's writing samples"),
                 (prefix + "/style/samples/command", self.style_sample_command, ["POST"], "Decide a group writing sample"),
@@ -69,7 +85,8 @@ class GroupReplyWebAPI:
 
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=finite)
         expected = {"settings", "text"} if action == "preview" else {"operation_key", "edit_token", "changes"}
-        optional = {"image_count"} if action == "preview" else {"reset_to_inherit"} if action == "configure" else set()
+        optional = ({"image_count"} if action == "preview" else
+                    {"reset_to_inherit"} if action in ("configure", "participation_configure") else set())
         if type(data) is not dict or not expected <= set(data) or set(data) - expected - optional:
             raise ValueError("unexpected or missing group reply fields")
         return data
@@ -111,17 +128,94 @@ class GroupReplyWebAPI:
                     result = manager.expression_status(operator)
                 elif action == "expression_configure":
                     result = manager.expression_configure(operator, data)
+                elif action == "participation":
+                    result = self._participation_status(session.application, operator, target, controller.now())
+                    if result.is_success:
+                        result.value.update(target_id=self.target_id, role_id=self.role_id, session_id=session_id,
+                                            scope_kind="group")
+                elif action == "participation_configure":
+                    return outcome_response(self._participation_configure(
+                        session.application, operator, target, data, controller.now(),
+                        target_id=self.target_id, role_id=self.role_id, session_id=session_id))
                 else:
                     result = manager.configure(operator, data)
                 if result.is_success and action != "preview":
-                    status = result.value if action in ("status", "expression") else result.value["status"]
+                    status = result.value if action in ("status", "expression", "participation") else result.value["status"]
                     status.update(target_id=self.target_id, role_id=self.role_id, session_id=session_id,
                                   scope_kind="group")
                 return outcome_response(result)
             except TaskError as error:
                 return outcome_response(Outcome.failed(error.code, str(error)))
+            except ConfigurationError as error:
+                return outcome_response(Outcome.failed(error.code, str(error)))
             except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
                 return outcome_response(Outcome.failed("group_reply_request_invalid", "invalid group reply settings request"))
+
+    @staticmethod
+    def _participation_status(application, operator, target, observed_at):
+        read = application.configuration.read(operator, target=target, group_id=PARTICIPATION_GROUP,
+                                              observed_at=observed_at)
+        if read.failure is not None:
+            return Outcome.failed(read.failure.code, read.failure.reason)
+        snapshot = read.unwrap()
+        prefix = PARTICIPATION_GROUP + "."
+        fields = contract_of(application.configuration.registry, PARTICIPATION_GROUP)
+        selected_fields = {}
+        settings = {}
+        for name in INTERJECTION_FIELDS:
+            entry = dict(fields[name])
+            entry.update(write_layer=ConfigLayer.WINDOW.value, editable_layers=[ConfigLayer.WINDOW.value])
+            selected_fields[name] = entry
+            settings[name] = snapshot.fields[prefix + name].value
+        provenance = provenance_of(snapshot, PARTICIPATION_GROUP)
+        return Outcome.success({
+            "settings": settings,
+            "edit_token": snapshot.edit_token,
+            "revision": snapshot.revision,
+            "configuration_token": snapshot.resolution_token,
+            "group_id": PARTICIPATION_GROUP,
+            "scope": ConfigLayer.WINDOW.value,
+            "apply_mode": "immediate",
+            "layers": layers_of(target),
+            "provenance": {name: provenance[name] for name in INTERJECTION_FIELDS},
+            "fields": selected_fields,
+        })
+
+    @classmethod
+    def _participation_configure(cls, application, operator, target, data, observed_at,
+                                 *, target_id, role_id, session_id):
+        changes = data["changes"]
+        resets = data.get("reset_to_inherit", [])
+        if (type(data["operation_key"]) is not str or not data["operation_key"].strip()
+                or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
+                or len(data["edit_token"]) != 64 or type(changes) is not dict
+                or (not changes and not resets)
+                or type(resets) is not list or any(type(name) is not str for name in resets)
+                or any(type(name) is not str for name in changes)
+                or set(changes).union(resets) - set(INTERJECTION_FIELDS)
+                or set(changes).intersection(resets) or len(set(resets)) != len(resets)):
+            return Outcome.failed("group_participation_configuration_invalid",
+                                  "provide valid interjection fields for this group")
+        operation_id = "group-participation-config:" + digest(
+            [operator.subject, target.key, data["operation_key"]])
+        result = application.configuration.patch(
+            operator, target=target, group_id=PARTICIPATION_GROUP,
+            operation=OperationRef(operation_id, PARTICIPATION_OWNER, target.authorization_scope,
+                                   VersionRef(operation_id, 1), operation_id),
+            expected_edit_token=data["edit_token"],
+            changes={PARTICIPATION_GROUP + "." + name: value for name, value in changes.items()},
+            reset_to_inherit=tuple(PARTICIPATION_GROUP + "." + name for name in resets),
+            observed_at=observed_at)
+        if result.failure is not None:
+            return Outcome.failed(result.failure.code, result.failure.reason)
+        receipt = result.unwrap()
+        application.notify()
+        payload = {"result": {"operation_id": receipt.operation_id, "replayed": receipt.replayed}}
+        status = cls._participation_status(application, operator, target, observed_at)
+        if status.is_success:
+            status.value.update(target_id=target_id, role_id=role_id, session_id=session_id, scope_kind="group")
+            payload["status"] = status.unwrap()
+        return Outcome.success(payload)
 
     async def status(self):
         return await self._run("status")
@@ -149,6 +243,17 @@ class GroupReplyWebAPI:
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             return outcome_response(Outcome.failed("group_reply_request_invalid", "invalid UTF-8 expression settings request"))
         return await self._run("expression_configure", data)
+
+    async def participation(self):
+        return await self._run("participation")
+
+    async def participation_configure(self):
+        try:
+            data = await self._body("participation_configure")
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("group_reply_request_invalid",
+                                                   "invalid UTF-8 group participation settings request"))
+        return await self._run("participation_configure", data)
 
     def _style_context(self, controller, session_id, binding, scope):
         from companion_v2.conversation.native_turns import latest_scope

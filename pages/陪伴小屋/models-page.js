@@ -9,16 +9,23 @@ window.CompanionModelsPage = (() => {
     fallback_on_refusal: "拒答替代", refusal_terms: "拒答匹配词", replacement_scope: "替换作用范围" };
   const groups = [
     ["对话", [["conversation.reply", "对话回复", "AstrBot 核心回复与 V2 附加提示"],
+      ["conversation.context_image_caption", "图片摘要", "为已授权的历史图片提取可见内容"],
       ["conversation.image_narration", "当前图片转述", "为本轮已授权图片生成简短文字描述"],
       ["conversation.video_narration", "原生视频转述", "将原视频交给支持视频输入的模型直接理解"]]],
-    ["感知", [["screen.interpretation", "屏幕解读", "分析本次已授权截图，需要支持图片的模型"]]],
-    ["主动与记忆", [["proactive.compose", "主动联系", "有真实契机时组织联系内容"], ["memory.reflect", "记忆整理", "从已授权素材整理认识"]]],
+    ["感知", [["screen.interpretation", "屏幕解读", "分析本次已授权截图，需要支持图片的模型"],
+      ["screen.peek", "屏幕速览", "为已授权屏幕画面生成简短摘要"],
+      ["image_review", "图片审核", "检查群聊成图的可见内容"],
+      ["conversation.image_review", "图片审核", "检查群聊成图的可见内容"]]],
+    ["主动与记忆", [["proactive.compose", "主动联系", "有真实契机时组织联系内容"],
+      ["proactive.judge", "主动联系复核", "复核主动消息是否符合当前人格与来源"],
+      ["memory.reflect", "记忆整理", "从已授权素材整理认识"]]],
     ["生活与成长", [["calendar.plan", "日程规划", "基于已有目标规划下一步"], ["role.state.maintain", "角色状态", "维护角色的连续生活状态"], ["role.reading.consume", "阅读理解", "阅读实际提供的原文"], ["role.growth.progress", "成长进展", "根据已完成确认提出进展"]]],
     ["私人书写", [["role.journal.diary", "日记", "保存私人书写"], ["role.journal.dream", "梦境", "保存梦境记录"], ["role.journal.derive", "书写整理", "整理已有文字素材"], ["role.journal.select", "素材选择", "选择本次书写素材"]]],
     ["学习", [["role.expression.learn", "表达学习", "从当前会话的原始素材提炼表达规则"],
       ["role.expression.review", "回复表达复核", "发送前检查规则应用是否自然"],
       ["role.expression.contact_review", "主动表达复核", "主动消息发送前检查表达"],
       ["role.self_review", "每日复盘", "从近期执行记录提炼调整"]]],
+    ["内容工作", [["content.authoring.draft", "内容起草", "根据用户要求与已有素材创作或续写作品"]]],
   ];
   const names = new Map(groups.flatMap(([group, items]) => items.map(([kind, label, description]) => [kind, { group, label, description }])));
   const errors = {
@@ -77,7 +84,15 @@ window.CompanionModelsPage = (() => {
   const taskOf = (s, kind) => s.status?.tasks.find(task => task.kind === kind) || null;
   const configSource = source => ({ default: "插件默认", host_conversation: "AstrBot 会话", installation: "安装级", role: "角色级", window: "当前对象" }[source] || "上级配置");
   const adoption = state => ({ applied: "已采用", next_task: "下次任务", consumer_not_started: "尚未运行", failed: "采用失败", pending: "等待采用", restart_required: "需重启" }[state] || state);
-  const taskName = kind => names.get(kind) || { group: "其他任务", label: kind, description: "V2 注册任务" };
+  const taskName = kind => names.get(kind) || { group: "其他任务", label: "其他模型任务", description: "V2 注册任务" };
+  const taskGroups = s => {
+    const registered = new Set(snapshot(s).map(task => task.kind));
+    const known = groups.map(([group, items]) => [group, items.filter(([kind]) => registered.has(kind))])
+      .filter(([, items]) => items.length);
+    const other = snapshot(s).filter(task => !names.has(task.kind))
+      .map(task => [task.kind, taskName(task.kind).label, taskName(task.kind).description]);
+    return other.length ? [...known, ["其他任务", other]] : known;
+  };
   const snapshot = s => s?.status?.tasks || [];
   const coreReply = task => task?.execution_path === "astrbot_core";
   const taskFields = task => coreReply(task) ? ["prompt"] : fields;
@@ -459,7 +474,7 @@ window.CompanionModelsPage = (() => {
     const gpick = event.target.closest("[data-model-gpick]");
     if (gpick) { const key = gpick.dataset.modelGpick;
       const kinds = key.startsWith("lane:") ? snapshot(s).filter(t => t.lane === key.slice(5)).map(t => t.kind)
-        : (groups.find(([name]) => name === key) || [null, []])[1].map(([kind]) => kind);
+        : (taskGroups(s).find(([name]) => name === key) || [null, []])[1].map(([kind]) => kind);
       if (kinds.length) { const all = kinds.every(kind => s.rule.picked.includes(kind));
         s.rule.picked = all ? s.rule.picked.filter(kind => !kinds.includes(kind)) : Array.from(new Set(s.rule.picked.concat(kinds)));
         s.rule.report = null; render(); } return; }
@@ -937,13 +952,14 @@ window.CompanionModelsPage = (() => {
     native_provider_unavailable: "Image 模块没有创建生图 Provider",
     native_configuration_invalid: "Image 模块配置文件无效",
     native_image_declaration_missing: "当前会话没有发现 Image 能力声明",
+    native_image_operation_unavailable: "当前生图模型队列未提供此操作",
     native_declaration_stale: "Image 能力声明已失效",
     native_host_registration_missing: "AstrBot 尚未注册该生图动作",
     capability_descriptor_conflict: "Image 能力目录与现有声明冲突",
     capability_identity_conflict: "Image 能力身份与现有记录冲突"};
   const imageDiagnostic = code => IMAGE_DIAGNOSTICS[code] || (code ? `诊断码：${code}` : "请刷新状态并检查 V2 模块启动记录");
   function imageModuleNotice(data) {
-    const unresolved = data?.actions?.find(item => item.enabled && item.state !== "ready");
+    const unresolved = data?.actions?.find(item => item.enabled && !["ready", "unsupported"].includes(item.state));
     if (!unresolved) return "";
     const module = data.module || {}, code = module.issue_code || module.error_code ||
       unresolved.diagnostic_code || (module.state === "unavailable" ? "native_extension_unavailable" : "native_image_declaration_missing");
@@ -1144,10 +1160,14 @@ window.CompanionModelsPage = (() => {
     const item = i.data.actions.find(value => value.action === action);
     if (!item) return "";
     const enabled = !!i.draft[action], changed = enabled !== i.data.enabled[action];
-    const stateLabel = !enabled ? "已关闭" : item.state === "ready" ? "已注册" : item.loaded ? "注册未就绪" : "扩展未加载";
-    const diag = [["已加载", item.loaded], ["声明一致", item.current], ["已注册", item.registered]]
+    const stateLabel = !enabled ? "已关闭" : item.state === "ready" ? "已注册"
+      : item.state === "unsupported" ? "当前队列未提供" : item.loaded ? "注册未就绪" : "扩展未加载";
+    const diag = (item.state === "unsupported"
+      ? [["已加载", item.loaded], ["队列可用", false]]
+      : [["已加载", item.loaded], ["声明一致", item.current], ["已注册", item.registered]])
       .map(([label, ok]) => `<span class="model-diag ${ok ? "ok" : "no"}><i>${ok ? "✓" : "—"}</i>${label}</span>`).join("");
     const route = !enabled ? "V2 不会调用此动作" : item.state === "ready" ? "可调用 · 每次调用前校验授权"
+      : item.state === "unsupported" ? imageDiagnostic(item.diagnostic_code)
       : item.loaded ? `声明与注册不一致 · ${imageDiagnostic(item.diagnostic_code)}`
       : `扩展未加载 · ${imageDiagnostic(item.diagnostic_code)}`;
     return `<li class="model-pv${enabled && item.state === "ready" ? " main" : ""}${enabled ? "" : " off"}"><span class="ix">${index + 1}</span><span class="nm"><strong>${esc(IMAGE_LABELS[action])}</strong><small>${esc(action)} · ${esc(item.owner || "尚无扩展提供")}${item.provider_id ? " · " + esc(item.provider_id) : ""}</small><span class="caps"><span class="model-tag ${enabled && item.state === "ready" ? "g" : enabled ? "a" : "n"}">${esc(stateLabel)}${changed ? " · 待保存" : ""}</span>${diag}</span><small class="rt">${esc(route)}</small></span><span class="mt"><label class="model-switch"><input type="checkbox" data-img-toggle="${esc(action)}"${enabled ? " checked" : ""}${i.loading || i.busy ? " disabled" : ""} aria-label="启用${esc(IMAGE_LABELS[action])}"><i></i></label><button type="button" class="button small" data-img-test="${esc(action)}"${i.testing ? " disabled" : ""}>${i.testing === action ? "检查中…" : "检查注册"}</button></span></li>`;
@@ -1252,7 +1272,7 @@ window.CompanionModelsPage = (() => {
       if (!q) return true; const info = taskName(t.kind); return (info.label + info.group + info.description + t.kind).toLocaleLowerCase().includes(q); };
     let groups2;
     if (s.av === "lane") groups2 = [["前台 · 用户可见", tasks.filter(t => t.lane === "foreground")], ["后台 · 静默运行", tasks.filter(t => t.lane === "background")]];
-    else groups2 = groups.map(([g, items]) => [g, items.map(([kind]) => tasks.find(t => t.kind === kind)).filter(Boolean)]);
+    else groups2 = taskGroups(s).map(([g, items]) => [g, items.map(([kind]) => taskOf(s, kind))]);
     const list = groups2.filter(([, ts]) => ts.length).map(([g, ts]) => {
       const shownTasks = ts.filter(match);
       const items = shownTasks.map(t => { const info = taskName(t.kind); const main = coreReply(t) ? "" : t.fields.provider?.value || ""; const fb = fallbackFor(t);
@@ -1324,7 +1344,8 @@ window.CompanionModelsPage = (() => {
     s.notice = s.bad ? "部分模型提供方未通过测试，请核对结果。" : "所选任务涉及的模型提供方均已通过测试。"; render(); }
   function quickConfig(s) { const providers = s.status?.providers || [];
     const opts = id => `<option value="">跟随分组默认</option>${providers.map(p => `<option value="${esc(p.id)}" ${s.slotDraft[id] === p.id ? "selected" : ""}>${esc(p.id)}</option>`).join("")}`;
-    const cards = groups.map(([g, entries]) => { const items = entries.filter(([kind]) => !coreReply(taskOf(s, kind))); const kinds = items.map(([kind]) => kind);
+    const cards = taskGroups(s).filter(([, entries]) => entries.some(([kind]) => !coreReply(taskOf(s, kind))))
+      .map(([g, entries]) => { const items = entries.filter(([kind]) => !coreReply(taskOf(s, kind))); const kinds = items.map(([kind]) => kind);
       const cur = kinds.map(k => { const t = taskOf(s, k), d = s.drafts.get(k); return t && d ? providerFor(t, d) : null; }).filter(Boolean);
       const same = cur.length && cur.every(v => v === cur[0]) ? cur[0] : "";
       const own = kinds.filter(k => { const d = s.drafts.get(k); return d && fields.some(name => !d.inherited[name]); }).length;
@@ -1357,7 +1378,7 @@ window.CompanionModelsPage = (() => {
       </article>`; }).join("");
     const core = snapshot(s).find(coreReply);
     return `<div class="model-subpane">${core ? '<p class="model-note">普通对话由 AstrBot 当前会话管理；下方快速指派只覆盖插件模型任务。对话附加提示在精确配置中编辑。</p>' : ""}<div class="model-qgrid">${cards}</div></div>`; }
-  async function applySlot(s, slotId) { const gp = groups.find(([g]) => g === slotId); if (!gp) return; const providerId = s.slotDraft[slotId]; if (!providerId) return;
+  async function applySlot(s, slotId) { const gp = taskGroups(s).find(([g]) => g === slotId); if (!gp) return; const providerId = s.slotDraft[slotId]; if (!providerId) return;
     const kinds = [];
     for (const [kind] of gp[1]) { const task = taskOf(s, kind), draft = s.drafts.get(kind); if (!task || coreReply(task) || !draft || draft.pending || draft.stale) continue;
       if (!task.capabilities.every(cap => s.status.providers.find(p => p.id === providerId)?.capabilities.includes(cap))) continue;

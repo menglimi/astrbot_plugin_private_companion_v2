@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 from astrbot.core.agent.message import Message, TextPart, dump_messages_with_checkpoints
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
-from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
 from astrbot_host.core_reply_perception import (
     inject_core_reply_perception_context,
     inject_core_reply_perception_policy,
@@ -98,7 +98,7 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
         await inject_core_reply_perception_context(event, request, native_context=native_context)
         payload = perception_payload(request)
 
-        self.assertIn("自然地陪伴和交流", request.system_prompt)
+        self.assertIn("若包含角色当前状态", request.system_prompt)
         self.assertNotIn("只在自然时顺带提起时间", request.system_prompt)
         self.assertNotIn("chat-route", request.system_prompt)
         self.assertNotIn("qwen-chat-alias", request.system_prompt)
@@ -138,6 +138,7 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
             event = Event()
             event.extra["selected_provider"] = route
             turn = prepared(route=route, guidance="只在适合时提到" + route)
+            turn["stable_prompt_instruction"] = "固定角色档案与表达规则"
             turn["perception_instructions"] = ("按本轮时区接话：" + route,)
             turn["perception_context"] = json.dumps({"current_local_time": {"period": route}},
                                                     ensure_ascii=False)
@@ -150,6 +151,7 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
 
             inject_core_reply_perception_policy(event, request)
             inject_core_reply_perception_policy(event, request)
+            inject_core_reply_prompt(event, request)
             await inject_core_reply_perception_context(event, request, native_context=native_context)
             await inject_core_reply_perception_context(event, request, native_context=native_context)
             prompts.append(request.system_prompt)
@@ -159,13 +161,14 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.system_prompt.count("【陪伴感知与自然表达】"), 1)
 
         self.assertEqual(prompts[0], prompts[1])
+        self.assertIn("固定角色档案与表达规则", prompts[0])
         self.assertNotEqual(payloads[0]["environment"]["chat_route"],
                             payloads[1]["environment"]["chat_route"])
         self.assertNotEqual(payloads[0]["conversation"], payloads[1]["conversation"])
         self.assertNotEqual(payloads[0]["expression_guidance"], payloads[1]["expression_guidance"])
         self.assertNotEqual(payloads[0]["companion_background"], payloads[1]["companion_background"])
 
-    async def test_disabled_fields_do_not_read_provider_or_add_context(self):
+    async def test_disabled_fields_keep_the_stable_policy_without_dynamic_context(self):
         event = Event()
         event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": {
             "context": NS(scope=NS(platform="qq-main")),
@@ -179,7 +182,8 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
         inject_core_reply_perception_policy(event, request)
         await inject_core_reply_perception_context(event, request, native_context=native_context)
 
-        self.assertEqual(request.system_prompt, "AstrBot 人格")
+        self.assertIn("【陪伴感知与自然表达】", request.system_prompt)
+        self.assertTrue(request.system_prompt.startswith("AstrBot 人格"))
         self.assertEqual(request.extra_user_content_parts, [])
         native_context.get_provider_by_id.assert_not_called()
         native_context.get_using_provider_async.assert_not_awaited()
@@ -199,7 +203,7 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
         inject_core_reply_perception_policy(event, request)
         await inject_core_reply_perception_context(event, request)
 
-        self.assertIn("感知背景是帮助理解当下的参考", request.system_prompt)
+        self.assertIn("感知背景帮助理解当下", request.system_prompt)
         self.assertEqual(perception_payload(request)["conversation"]["current_local_time"]["period"], "晚上")
 
     async def test_unavailable_route_and_undeclared_modalities_are_not_guessed(self):

@@ -34,11 +34,11 @@
 /* === 表达页 redesign · 2026-10-07 ===
    这里保留原有入口与工作台合同，只把页面层级改成设计稿的「导航 / 编辑 / 预览」结构。
    颜色全部取自 tokens.css，避免表达页脱离小屋主题；字段仍由 workbench-page.js 渲染。 */
-.expression-page{--expression-panel:var(--t-surface);--expression-panel-soft:var(--t-surface-soft);--expression-wash:color-mix(in srgb,var(--t-accent-quiet) 48%,var(--t-surface));max-width:1500px;margin:0 auto;padding:var(--sp-2) clamp(var(--sp-3),2vw,var(--sp-6)) var(--sp-8);gap:var(--sp-4)}
+.expression-page{--expression-panel:var(--t-surface);--expression-panel-soft:var(--t-surface-soft);--expression-wash:color-mix(in srgb,var(--t-accent-quiet) 48%,var(--t-surface));max-width:1500px;margin:0 auto;padding:var(--sp-2) clamp(var(--sp-3),2vw,var(--sp-6)) var(--sp-8);gap:var(--sp-4);container-name:expression-modules;container-type:inline-size}
 .expression-page-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-5);padding:var(--sp-2) 0 0}.expression-page-heading h1{margin:0}
 .expression-page-heading-copy{min-width:0}.expression-kicker{margin:0 0 var(--sp-1);color:var(--t-accent-ink);font:600 var(--fs-micro)/1.4 var(--numeric-font);letter-spacing:.12em;text-transform:uppercase}.expression-page-heading h1{margin:0;color:var(--t-text-strong);font-size:clamp(calc(var(--fs-display) * 8 / 9),2.4vw,calc(var(--fs-hero) * 17 / 18));line-height:1.2;letter-spacing:-.02em}.expression-page-heading-copy>p:last-child{margin:var(--sp-2) 0 0;max-width:72ch;color:var(--t-text-soft);font-size:var(--fs-body);line-height:1.75}.expression-scope-badge{display:inline-flex;align-items:center;gap:var(--sp-2);flex:none;margin-top:var(--sp-2);padding:var(--sp-2) var(--sp-3);border:1px solid var(--t-line-firm);border-radius:var(--r-pill);background:var(--t-surface);color:var(--t-text-soft);font-size:var(--fs-tiny);white-space:nowrap}.expression-scope-badge i{width:7px;height:7px;border-radius:50%;background:var(--t-accent);box-shadow:0 0 0 3px var(--t-accent-quiet)}
 .expression-module-nav{position:static;display:flex;align-items:stretch;gap:var(--sp-1);padding:var(--sp-1);border:1px solid var(--t-line);border-radius:var(--r-md);background:color-mix(in srgb,var(--t-surface) 94%,transparent);box-shadow:var(--t-shadow);overflow:auto;scrollbar-width:thin}.expression-module-nav button{justify-content:flex-start;flex:1 0 130px;min-height:42px;border:1px solid transparent;border-radius:var(--r-sm);font-size:var(--fs-tiny);font-weight:600}.expression-module-nav button[aria-selected="true"]{border-color:color-mix(in srgb,var(--t-accent) 28%,var(--t-line));background:var(--t-accent-quiet);box-shadow:0 1px 2px color-mix(in srgb,var(--t-accent) 12%,transparent)}.expression-module-nav button svg{color:var(--t-accent)}
-.expression-module-panels{min-width:0;background:transparent}.expression-module-panel>.console-section{margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}.expression-module-panel>.console-section>.console-section-head{padding:0 0 var(--sp-4);border-bottom:1px solid var(--t-line)}.expression-module-panel>.console-section>.console-section-head h2{font-size:var(--fs-head);letter-spacing:-.01em}.expression-module-panel>.console-section>.console-section-body{padding:var(--sp-4) 0 0}.expression-module-panel[hidden]{display:none}
+.expression-module-panels{min-width:0;background:transparent;container-name:expression-modules;container-type:inline-size}.expression-module-panel>.console-section{margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}.expression-module-panel>.console-section>.console-section-head{padding:0 0 var(--sp-4);border-bottom:1px solid var(--t-line)}.expression-module-panel>.console-section>.console-section-head h2{font-size:var(--fs-head);letter-spacing:-.01em}.expression-module-panel>.console-section>.console-section-body{padding:var(--sp-4) 0 0}.expression-module-panel[hidden]{display:none}
 .expression-text-workspace,.expression-voice-workspace,.expression-platform-workspace,.expression-reaction-workspace,.expression-group-workspace{min-width:0}.expression-text-workspace>[data-go],.expression-platform-workspace>[data-go],.expression-text-workspace>.expression-route-button,.expression-platform-workspace>.expression-route-button{margin-top:var(--sp-4)}
 
 /* 文字 / 语音页：左侧工作台与右侧预览保持同一滚动上下文。 */
@@ -110,3 +110,24 @@
 @media(max-width:360px){#replyWorkspace:not(.expression-platform-focus):not(.expression-voice-focus) .wb-section-nav-head{align-items:flex-start;flex-direction:column;gap:var(--sp-1)}#replyWorkspace:not(.expression-platform-focus):not(.expression-voice-focus) .wb-section-nav-note{text-align:left}}
 @media(max-width:760px){#replyWorkspace.expression-voice-focus{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:760px){.expression-module-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}.expression-module-nav button{flex:none;min-width:0;min-height:44px;white-space:normal}.expression-module-nav button span{min-width:0;overflow-wrap:anywhere}}
+@container expression-modules (max-width:760px) {
+  .expression-module-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}
+  .expression-module-nav button{flex:none;min-width:0;min-height:44px;white-space:normal}
+  .expression-module-nav button span{min-width:0;overflow-wrap:anywhere}
+  #replyWorkspace{grid-template-columns:minmax(0,1fr)}
+  .reply-preview{position:static;max-height:none;overflow:visible}
+  .reply-preview-state-grid,.reply-preview-summary{grid-template-columns:minmax(0,1fr)}
+  .expression-platform-workspace{grid-template-columns:minmax(0,1fr)}
+  .expression-platform-workspace>#pokePolicyWorkspace,
+  .expression-platform-workspace>.expression-route-button,
+  .expression-platform-workspace>[data-go]{grid-column:1;grid-row:auto}
+  .expression-module-panels .wb-section-layout{grid-template-columns:minmax(0,1fr);gap:var(--sp-3)}
+  .expression-module-panels .wb-section-sidebar{position:static;top:auto;max-height:none;overflow:visible}
+  #replyWorkspace.expression-platform-focus .wb-section-layout{grid-template-columns:minmax(0,1fr);gap:0}
+  #replyWorkspace.expression-platform-focus .wb-section-sidebar{display:none}
+  .expression-module-panels .wb-section-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}
+  .expression-module-panels .wb-section-tab{width:auto;min-width:0;min-height:50px}
+  .expression-reaction-workspace .semantic-flags,
+  .expression-reaction-workspace .semantic-providers{grid-template-columns:minmax(0,1fr)}
+  .expression-reaction-workspace .semantic-list{grid-template-columns:repeat(auto-fill,minmax(min(160px,100%),1fr))}
+}

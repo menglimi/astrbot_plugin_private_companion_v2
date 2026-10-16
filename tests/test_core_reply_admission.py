@@ -154,13 +154,16 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
             owner.write(target, fields, changes={GROUP + "." + key: value for key, value in changes.items()},
                 reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
 
-        configure(style_prompt="把新鲜发现兴冲冲地说给熟人听。", enable_humanized_expression=True,
+        configure(prompt_style_mode="guided", style_prompt="把新鲜发现兴冲冲地说给熟人听。",
+            enable_humanized_expression=True,
             humanized_expression_prompt="留一点接话的余地，别机械地汇报。",
             content_cleanup_enabled=True, content_cleanup_words='["旧正文清理规则"]')
         self.app.reply_settings.capture = Mock(side_effect=AssertionError("core expression must not validate old delivery settings"))
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-expression-on"))).unwrap()
         self.assertIn("把新鲜发现兴冲冲地说给熟人听。", prepared["stable_prompt_instruction"])
         self.assertIn("留一点接话的余地，别机械地汇报。", prepared["stable_prompt_instruction"])
+        self.assertIn("沿用当前人格与关系，结合本轮语境自然回应", prepared["stable_prompt_instruction"])
+        self.assertNotIn("日常聊天先回应对方此刻最想说的一点", prepared["stable_prompt_instruction"])
         self.assertIn("expression_preferences", prepared["context_sections"])
         self.assertNotIn("旧正文清理规则", prepared["stable_prompt_instruction"])
         self.assertEqual(prepared["presentation_settings"]["content_cleanup_words"], '["旧正文清理规则"]')
@@ -171,6 +174,12 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
         self.assertIn("把新鲜发现兴冲冲地说给熟人听。", prepared["stable_prompt_instruction"])
         self.assertNotIn("留一点接话的余地，别机械地汇报。", prepared["stable_prompt_instruction"])
         self.assertNotIn("日常表达要求", prepared["stable_prompt_instruction"])
+
+        configure(prompt_style_mode="free")
+        prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-style-free"))).unwrap()
+        self.assertIn("把新鲜发现兴冲冲地说给熟人听。", prepared["stable_prompt_instruction"])
+        self.assertNotIn("沿用当前人格与关系，结合本轮语境自然回应", prepared["stable_prompt_instruction"])
+        self.assertNotIn("日常聊天先回应对方此刻最想说的一点", prepared["stable_prompt_instruction"])
 
         configure(style_prompt="")
         prepared = (await self.controller.prepare_core_reply(self.event(identifier="core-expression-off"))).unwrap()

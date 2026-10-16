@@ -24,6 +24,7 @@ from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.conversation.content.authoring_tasks import authoring_profiles
 from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
 from companion_v2.conversation.messages import REPLY_KIND
+from companion_v2.conversation.pokes import poke_reply_profile
 from companion_v2.conversation.participation import group_participation_settings
 from companion_v2.conversation.reply_settings import expression_prompt_sections
 from companion_v2.conversation.media.review_service import image_review_profile
@@ -36,7 +37,7 @@ from companion_v2.conversation.voice_reply import VoiceReplyDelivery
 from companion_v2.execution.models import Lane, ProviderBinding, TaskContext, TaskError, digest, require, stamp
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import AudienceRef, ScopeKind, ScopeRef
-from companion_v2.identity_policy.models import AuthenticatedHostPrincipal
+from companion_v2.identity_policy.models import AuthenticatedHostPrincipal, AuthorizationTier
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.identity_policy.personas import RuntimeIdentity
 from companion_v2.model_gateway.models import ModelTaskProfile
@@ -55,7 +56,7 @@ from companion_v2.expression.review import expression_review_profile
 from .multi_authority import HOST_ID
 from .model_settings import conversation_provider_resolver
 from .group_settings import GroupTarget
-from .group_admission import group_trigger_facts
+from .group_admission import group_trigger_facts, mentioned_account_ids
 from .voice import NativeVoiceReply
 
 
@@ -365,6 +366,7 @@ class MultiHostSession:
                     fallback_on_refusal=common.fallback_on_refusal,
                     max_output_tokens=common.max_output_tokens, capabilities=("text", "tools"),
                     prompt_sections=expression_prompt_sections()),
+                    poke_reply_profile(common.provider_id, max_output_tokens=min(128, common.max_output_tokens)),
                     contact_profile(common.provider_id, max_output_tokens=common.max_output_tokens),
                     persona_judge_profile(common.provider_id, max_output_tokens=common.max_output_tokens),
                     reflection_profile(common.provider_id, max_output_tokens=common.max_output_tokens),
@@ -808,7 +810,17 @@ class MultiHostSession:
                                                    if common_settings.voice_reply_enabled else None)
                     if configured_voice_policy is not None:
                         candidate = voice_policy_for_turn(configured_voice_policy, captured.text)
-                        if eligible(candidate, input_text=captured.text, kind=channel, batch_id=turn_id):
+                        primary_mention = self._core_user_mention_matches(
+                            event, context, candidate, captured.text, captured.at)
+                        if eligible(candidate, input_text=captured.text, kind=channel, batch_id=turn_id,
+                                     primary_mention=primary_mention):
+                            if primary_mention:
+                                mention_prompt = "主要用户的已认证账号在本轮原生消息中被提及，且正文命中定向语音词。"
+                                extra_prompt = "\n".join(part for part in (
+                                    candidate.extra_prompt.strip(), mention_prompt,
+                                    candidate.primary_mention_prompt.strip()) if part)
+                                candidate = replace(candidate, trigger_mode="adaptive", cooldown_seconds=0,
+                                                    extra_prompt=extra_prompt)
                             voice_policy = candidate
                 from .fish_audio import provider_direction
                 voice_direction = await provider_direction(self.bridge.context, voice_policy, event.unified_msg_origin)
@@ -856,6 +868,31 @@ class MultiHostSession:
                 logger.error("[CompanionV2] 核心回复准入准备失败 target=%s error_type=%s",
                              target.target_id, type(error).__name__)
                 return Outcome.failed("host_core_reply_prepare_failed", "core reply admission could not be prepared")
+
+    def _core_user_mention_matches(self, event, context, policy, text, at):
+        words = policy.primary_mention_words()
+        if not words or policy.primary_mention_probability <= 0:
+            return False
+        compact = text.casefold()
+        if not any(word in compact for word in words):
+            return False
+        scope = context.scope
+        for account_id in mentioned_account_ids(event):
+            principal = AuthenticatedHostPrincipal(scope.installation_id, HOST_ID, scope.platform,
+                account_id, scope.bot_id, scope.account_id)
+            try:
+                resolved = self.authority.identities.resolve_authenticated(principal, observed_at=at)
+                if not resolved.is_success:
+                    continue
+                subject = resolved.unwrap().subject
+                tier = self.runtime.read_one(
+                    "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
+                    (subject.kind.value, subject.subject_id))
+                if tier is not None and tier["tier"] == AuthorizationTier.CORE.value:
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def authorize_core_reply(self, event, target, prepared):
         """Re-capture the live route and permission immediately before core send."""

@@ -154,22 +154,27 @@ def prepare_core_reply_event(
                     raise
                 state["send_attempts"] += 1
                 notify_delivery("started")
+                from .core_reply_behavior import observe_core_behavior_delivery
+                observe_core_behavior_delivery(event, part, "started")
                 try:
                     result = await state["_original_send"](wire, *args, **kwargs)
                 except BaseException:
                     state["send_unknown"] += 1
                     notify_delivery("unknown")
+                    observe_core_behavior_delivery(event, part, "unknown")
                     raise
                 if result is False:
                     release_pending_voice_claim(event)
                     state["send_failed"] += 1
                     notify_delivery("failed")
+                    observe_core_behavior_delivery(event, part, "failed")
                     raise TaskError("core_reply_platform_unavailable", "the platform did not accept this reply")
                 state["send_returns"] += 1
                 from astrbot.core.message.components import Record
                 if any(isinstance(component, Record) for component in getattr(part, "chain", ())):
                     commit_pending_voice_claim(event)
                 notify_delivery("returned")
+                observe_core_behavior_delivery(event, part, "returned")
                 notify_sent(sent_core_text(part))
                 try:
                     from .core_reply_reaction_delivery import observe_core_reaction_returned

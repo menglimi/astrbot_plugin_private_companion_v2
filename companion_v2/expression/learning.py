@@ -127,18 +127,10 @@ def laya_intent_matches(applicability, decision):
         compatible = compatible | {"play", "tease", "intimacy", "casual"}
     return target in compatible
 
-INSTRUCTION = (
-    "只观察表达形式，例如句长、标点、常用措辞、直接程度和排版。"
-    "不要从少量样本推断身份、性格、情绪、健康、关系或稳定偏好。"
-    "区分明确反馈与偶然写法；证据不足时留空，不要把一次表达概括成长期习惯。"
-    "每项候选都引用输入中给出的 evidence_handle。这里只提出供后续审核的候选，不宣布已学习或已保存。"
-    "为每条候选填写 applicability：channels 从 private/group/proactive/qzone/tts 中选择，"
-    "relationship_stages 从 stranger/familiar/close/any 中选择，emotion_gates 从 normal/positive/low/guarded/any 中选择，"
-    "intent 从 acknowledgement/question/request/help/comfort/play/tease/intimacy/boundary/emotion/casual/proactive/any 中选择，"
-    "keywords 最多 8 个简短情境词。来源频道必须包含在 channels 中；其他条件证据不足时填写 any 或空关键词，不能猜测身份、关系阶段或情绪。"
-    "这些字段表达使用条件，不是事实声明；条件缺失或不确定时不要把规则当作匹配。"
-    "只输出符合给定 JSON Schema 的 JSON，不输出推理过程。"
-)
+INSTRUCTION = """只观察可借鉴的表达形式：句长、节奏、标点、措辞、直接程度和排版。区分明确反馈与偶然写法，不从少量样本推断身份、性格、情绪、健康、关系或稳定偏好；证据不足就不提候选，一次说法不概括为长期习惯。
+每项引用输入中的真实 evidence_handle，写清可复用形式及使用条件；这里只提出待审核候选，不宣称已学习或保存。
+填写 applicability：channels 选 private/group/proactive/qzone/tts，必须包含来源频道；relationship_stages 选 stranger/familiar/close/any，emotion_gates 选 normal/positive/low/guarded/any，intent 选 acknowledgement/question/request/help/comfort/play/tease/intimacy/boundary/emotion/casual/proactive/any，keywords 最多 8 个简短情境词。其他条件依据不足时用 any 或空关键词，不猜身份、关系或心情。条件是建议的使用范围，不是事实声明，应用时缺失不等于匹配。
+仅输出符合给定 JSON Schema 的 JSON，不附推理过程。"""
 
 MODE_INSTRUCTIONS = {
     "light": "轻量学习：只提炼跨情境通用的句长、节奏、标点和排版习惯，最多提出3条。不要提取场景短语或口头禅。",

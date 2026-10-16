@@ -79,15 +79,19 @@ class RealityHostDelivery:
         application.notify()
         return {**result, "source_id": reference.source_id, "platform_confirmed": False}
 
-    async def location(self, user_id):
-        """Submit a changed, authorized place to V2's ordinary contact worker."""
+    async def location_candidate(self, user_id, *, diagnostic_origin=None, test_id=None):
+        """Build the production location opportunity, optionally for a one-shot diagnostic."""
         from companion_v2.proactive.contact_models import ContactIntent
         from companion_v2.proactive.models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
 
+        diagnostic = diagnostic_origin is not None
+        if diagnostic != (isinstance(test_id, str) and bool(test_id.strip())):
+            raise TaskError("proactive_test_confirmation_required", "location diagnostics require their test receipt")
         original = self.contexts.target(user_id)
         _session, application, context, runtime = original
-        application.contact_schedule.bind_context(context)
-        application.notify()
+        if not diagnostic:
+            application.contact_schedule.bind_context(context)
+            application.notify()
         catalog = application.external.catalog_for(context) if application.external is not None else ()
         if "reality.snapshot.read" not in {tool.action for tool in catalog}:
             return {"accepted": False, "reason": "reality_location_not_authorized"}
@@ -98,16 +102,19 @@ class RealityHostDelivery:
         if not observed.get("available") or not location.get("available"):
             return {"accepted": False, "reason": "reality_location_unavailable"}
         preferences = require(application.proactive.preferences.read(context, observed_at=application.now()))
-        if preferences.reason("environment"):
+        if diagnostic:
+            preferences = application.contact_schedule._diagnostic_preferences(preferences)
+        elif preferences.reason("environment"):
             return {"accepted": False, "reason": preferences.reason("environment")}
         place = location.get("place") if isinstance(location.get("place"), dict) else {}
-        label = str(place.get("name") if place.get("matched") else location.get("label") or "").strip()[:120]
+        label = str((place.get("name") if place.get("matched") else None)
+                    or place.get("area_label") or location.get("label") or "").strip()[:120]
         if not label:
             return {"accepted": False, "reason": "reality_location_label_unavailable"}
         fingerprint = digest([label, bool(place.get("matched"))])
         key = "reality.location.last:" + context.key
         prior = application.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (key,))
-        if prior is not None and prior["value"] == fingerprint:
+        if not diagnostic and prior is not None and prior["value"] == fingerprint:
             return {"accepted": False, "reason": "reality_location_unchanged"}
         background = await self.contexts.realtime(user_id, purpose="手机前台上报位置变化")
         self.contexts.recheck(original, user_id)
@@ -129,12 +136,37 @@ class RealityHostDelivery:
         opportunity = Opportunity("reality-location-" + digest([context.key, reference.source_id]),
             context.scope, at, at + timedelta(minutes=5))
         thought = Thought("reality-location-thought-" + digest(reference), opportunity,
-            ThoughtKind.CONVERSATION, "手机前台更新了一条地点信息，判断是否值得自然提起；没有合适的话就继续陪伴，不机械汇报位置。",
+            ThoughtKind.CONVERSATION, "手机陪伴终端本次上报了一条经授权的当前地点标签，判断是否值得自然提起；不把地点变化解释成用户行为、情绪或安全状态，没有合适的话就继续陪伴。",
             EvidenceSnapshot(context.scope, at, (reference,)), 1.0)
-        with application.runtime.transaction() as connection:
-            connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, fingerprint))
-        result = await application.proactive.contact(context, opportunity, (ContactIntent("environment", thought),),
-            role_instruction=background["prompt"], selection_seed=opportunity.opportunity_id)
+        if not diagnostic:
+            with application.runtime.transaction() as connection:
+                connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, fingerprint))
+        candidate = {"accepted": True, "opportunity": opportunity,
+            "intents": (ContactIntent("environment", thought),), "role_instruction": background["prompt"],
+            "route": {"id": "reality_location_event", "label": "手机陪伴终端地点来源",
+                      "variant": "mobile_location"},
+            "stages": [{"stage": "mobile_location_fetch", "state": "passed"}]}
+        if diagnostic:
+            candidate["diagnostic_origin"] = {**diagnostic_origin,
+                "reality_location_event": {"test_id": test_id,
+                    "captured_at": location.get("captured_at"), "source_id": reference.source_id,
+                    "place_fingerprint": fingerprint}}
+        else:
+            candidate["application"] = application
+            candidate["context"] = context
+        return candidate
+
+    async def location_diagnostic_candidate(self, user_id, *, test_id, diagnostic_origin):
+        return await self.location_candidate(user_id, diagnostic_origin=diagnostic_origin, test_id=test_id)
+
+    async def location(self, user_id):
+        """Submit a changed, authorized place to V2's ordinary contact worker."""
+        candidate = await self.location_candidate(user_id)
+        if not candidate.get("accepted"):
+            return candidate
+        application, context = candidate.pop("application"), candidate.pop("context")
+        result = await application.proactive.contact(context, candidate["opportunity"], candidate["intents"],
+            role_instruction=candidate["role_instruction"], selection_seed=candidate["opportunity"].opportunity_id)
         return {"accepted": result.is_success,
                 "reason": None if result.is_success else result.failure.code}

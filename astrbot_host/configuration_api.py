@@ -92,9 +92,50 @@ class ConfigurationWebAPI:
             self.sections = {name: SECTIONS[name] for name in names}
 
     def routes(self):
-        return [(PREFIX, self.status, ["GET"], "Read allowed configuration sections"),
+        routes = [(PREFIX, self.status, ["GET"], "Read allowed configuration sections"),
                 (PREFIX + "/configure", self.configure, ["POST"],
                  "Save one allowed section with its own edit token")]
+        if "group_participation" in self.sections:
+            routes.extend([(PREFIX + "/behavior", self.behavior_status, ["GET"], "Read role-owned group habits"),
+                           (PREFIX + "/behavior/command", self.behavior_command, ["POST"], "Review one learned group habit")])
+        return routes
+
+    async def _run_behavior(self, *, command=False):
+        from companion_v2.conversation.behavior.management import BehaviorManagement
+        from .web_api import outcome_response
+        try:
+            username = request.username
+            if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
+            if request.query:
+                raise TaskError("group_behavior_command_invalid", "unexpected behavior query")
+            data = None
+            if command:
+                raw = await request.body()
+                if len(raw) > 4096:
+                    raise ValueError("behavior command is too large")
+                data = _document(raw, expected={"group_key", "habit_id", "enabled", "revision"})
+            async with self.controller._control_lock:
+                controller = self.controller
+                if controller._terminated:
+                    raise TaskError("staging_host_terminated", "plugin is stopped")
+                session = controller.session or controller.last_session
+                if session is None or controller.runtime is None:
+                    raise TaskError("staging_not_initialized", "load the V2 profile first")
+                operator = dashboard_operator(controller.runtime, username, at=controller.now())
+                manager = BehaviorManagement(session.application, session.profile.target)
+                payload = manager.command(operator, data) if command else manager.status(operator)
+                return outcome_response(Outcome.success(payload))
+        except (TaskError, ConfigurationError) as error:
+            return outcome_response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            return outcome_response(Outcome.failed("group_behavior_command_invalid", "invalid behavior request"))
+
+    async def behavior_status(self):
+        return await self._run_behavior()
+
+    async def behavior_command(self):
+        return await self._run_behavior(command=True)
 
     async def _run(self, action):
         from .web_api import outcome_response

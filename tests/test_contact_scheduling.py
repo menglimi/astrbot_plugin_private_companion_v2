@@ -28,7 +28,8 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
             context, "news", at=at, test_id="attempt-synthetic-news")
 
         self.assertEqual(candidate["intents"][0].purpose, "news")
-        self.assertIn("合成测试事件", candidate["intents"][0].thought.summary)
+        self.assertTrue(candidate["intents"][0].thought.summary.startswith("本轮联系情境："))
+        self.assertEqual(candidate["route"]["label"], "合成测试事件")
         self.assertEqual(candidate["intents"][0].thought.evidence.sources, ())
         self.assertEqual(candidate["route"]["id"], "synthetic_event")
         self.assertEqual(app.runtime.read_one(
@@ -338,72 +339,99 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         third = (await self.contact(app, self.opportunity("third"))).unwrap().task
         await self.delivery_state(app, third.task_id, "delivered")
 
-    async def test_relationship_contact_allowance_spans_private_windows_and_unknown_receipts(self):
+    async def test_delivery_allowance_is_per_window_even_for_the_same_relationship(self):
         app = await self.enabled()
         first_context = self.contact_context()
         second_context = self.other_window_context()
         from companion_v2.proactive.configuration import target_for
-        relationship = target_for(first_context).chain()[2]
-        self.settings(app, {"enabled": True, "max_relationship_contacts_24h": 1}, target=relationship).unwrap()
+        self.settings(app, {"enabled": True, "max_contacts_24h": 1}, target=target_for(first_context)).unwrap()
+        self.settings(app, {"enabled": True, "max_contacts_24h": 1}, target=target_for(second_context)).unwrap()
 
         async def unknown(envelope):
             return self.receipt(envelope, "unknown")
         self.send_behavior = unknown
         first = (await self.contact(app, context=first_context)).unwrap().task
         await self.delivery_state(app, first.task_id, "unknown")
-        blocked = await self.contact(app, self.opportunity("other-window-contact", scope=second_context.scope),
-                                     context=second_context)
-        self.assertEqual(blocked.failure.code, "contact_relationship_delivery_budget")
+        delivery_usage = app.proactive.budget.delivery_usage(first_context, self.preferences(app), self.clock.now())
+        self.assertEqual(delivery_usage["session"]["used"], 1)
+        self.assertEqual(delivery_usage["session"]["actual"], 0)
+        self.assertEqual(delivery_usage["session"]["delivered"], 0)
+        self.assertEqual(delivery_usage["session"]["reserved"], 1)
+        second = (await self.contact(app, self.opportunity("other-window-contact", scope=second_context.scope),
+                                     context=second_context)).unwrap().task
+        await self.delivery_state(app, second.task_id, "unknown")
+        second_usage = app.proactive.budget.delivery_usage(second_context, self.preferences(app, second_context),
+                                                           self.clock.now())
+        self.assertEqual(second_usage["session"]["used"], 1)
+        self.assertEqual(second_usage["session"]["reserved"], 1)
 
-        outbound = next(item for item in self.sent if item.part_id.startswith("outbound-"))
-        app.record_receipt(self.receipt(outbound, "not_sent")).unwrap()
-        self.send_behavior = None
-        retried = (await self.contact(app, self.opportunity("other-window-contact", scope=second_context.scope),
-                                      context=second_context)).unwrap().task
-        await self.delivery_state(app, retried.task_id, "delivered")
-
-    async def test_relationship_decision_allowance_spans_windows_but_is_separate_from_delivery_allowance(self):
+    async def test_decision_usage_is_per_window_but_does_not_limit_contact_admission(self):
         app = await self.enabled()
         first_context = self.contact_context()
         second_context = self.other_window_context()
         from companion_v2.proactive.configuration import target_for
-        relationship = target_for(first_context).chain()[2]
-        self.settings(app, {"enabled": True, "max_relationship_attempts_24h": 1}, target=relationship).unwrap()
+        self.settings(app, {"enabled": True, "max_contacts_24h": 1}, target=target_for(first_context)).unwrap()
+        self.settings(app, {"enabled": True, "max_contacts_24h": 1}, target=target_for(second_context)).unwrap()
 
         async def skip(envelope):
             return answered('{"decision":"skip","text":""}')
         self.model_behavior = skip
         first = (await self.contact(app, context=first_context)).unwrap().task
         self.assertEqual(first.state, "succeeded")
-        blocked = await self.contact(app, self.opportunity("other-window-attempt", scope=second_context.scope),
-                                     context=second_context)
-        self.assertEqual(blocked.failure.code, "contact_relationship_attempt_budget")
+        decision_usage = app.proactive.budget.attempt_usage(first_context, self.preferences(app), self.clock.now())
+        self.assertEqual(decision_usage["session"]["used"], 1)
+        self.assertNotIn("limit", decision_usage["session"])
+        self.assertNotIn("relationship", decision_usage)
+        repeated = (await self.contact(app, self.opportunity("another-first-window-decision"),
+                                       context=first_context)).unwrap().task
+        self.assertEqual(repeated.state, "succeeded")
+        self.assertEqual(app.proactive.budget.attempt_usage(first_context, self.preferences(app),
+            self.clock.now())["session"]["used"], 2)
+        second = (await self.contact(app, self.opportunity("other-window-attempt", scope=second_context.scope),
+                                     context=second_context)).unwrap().task
+        self.assertEqual(second.state, "succeeded")
+        second_usage = app.proactive.budget.attempt_usage(second_context, self.preferences(app, second_context),
+                                                          self.clock.now())
+        self.assertEqual(second_usage["session"]["used"], 1)
         self.assertEqual(self.sent, [])
 
-    async def test_relationship_budget_fields_cannot_be_overridden_by_a_single_window(self):
+    async def test_delivered_contact_allowance_resets_at_window_local_midnight(self):
         app = await self.enabled()
         from companion_v2.proactive.configuration import target_for
-        window = target_for(self.contact_context())
-        result = self.settings(app, {"max_relationship_contacts_24h": 1}, target=window)
-        self.assertFalse(result.is_success)
+        context = self.contact_context()
+        self.settings(app, {"max_contacts_24h": 1}, target=target_for(context)).unwrap()
 
-    async def test_skips_consume_attempt_allowance_and_rolling_expiry_releases_it(self):
+        first = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, first.task_id, "delivered")
+        usage = app.proactive.budget.delivery_usage(context, self.preferences(app), self.clock.now())
+        self.assertEqual(usage["session"]["delivered"], 1)
+        self.assertEqual(usage["session"]["date"], "2026-09-21")
+
+        self.clock.advance(timedelta(hours=16))
+        usage = app.proactive.budget.delivery_usage(context, self.preferences(app), self.clock.now())
+        self.assertEqual(usage["session"]["used"], 0)
+        self.assertEqual(usage["session"]["date"], "2026-09-22")
+        second = (await self.contact(app, self.opportunity("next-local-day"))).unwrap().task
+        await self.delivery_state(app, second.task_id, "delivered")
+
+    async def test_skips_do_not_consume_daily_contact_allowance(self):
         app = await self.enabled()
-        self.settings(app, {"max_attempts_24h": 1}).unwrap()
+        self.settings(app, {"max_contacts_24h": 1}).unwrap()
         async def skip(envelope):
             return answered('{"decision":"skip","text":""}')
         self.model_behavior = skip
         self.assertEqual((await self.contact(app)).unwrap().task.state, "succeeded")
         usage = app.proactive.budget.attempt_usage(self.contact_context(), self.preferences(app), self.clock.now())
-        self.assertEqual(usage["session"], {"used": 1, "limit": 1, "window_hours": 24})
-        self.assertEqual((await self.contact(app, self.opportunity("next"))).failure.code, "contact_attempt_budget")
-        self.clock.advance(timedelta(hours=24))
-        usage = app.proactive.budget.attempt_usage(self.contact_context(), self.preferences(app), self.clock.now())
-        self.assertEqual(usage["session"]["used"], 0)
-        self.assertEqual((await self.contact(app, self.opportunity("next"))).unwrap().task.state, "succeeded")
-        self.assertEqual(self.sent, [])
+        self.assertEqual((usage["session"]["used"], usage["session"]["date"],
+                          usage["session"]["timezone"]), (1, "2026-09-21", "Asia/Shanghai"))
+        self.model_behavior = None
+        sent = (await self.contact(app, self.opportunity("send-after-skip"))).unwrap().task
+        await self.delivery_state(app, sent.task_id, "delivered")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual((await self.contact(app, self.opportunity("after-contact-cap"))).failure.code,
+                         "contact_delivery_budget")
 
-    async def test_failed_generation_does_not_consume_attempt_allowance(self):
+    async def test_preparation_failure_does_not_count_but_unknown_model_call_does(self):
         from companion_v2.model_gateway.failures import ModelFailure
         from companion_v2.model_gateway.models import Amount, ProviderResponse
         from companion_v2.proactive.configuration import target_for
@@ -411,10 +439,6 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         app = await self.enabled()
         first_context = self.contact_context()
         other_context = self.other_window_context()
-        relationship = target_for(first_context).chain()[2]
-        self.settings(app, {"max_attempts_24h": 1}).unwrap()
-        self.settings(app, {"max_relationship_attempts_24h": 1}, target=relationship).unwrap()
-
         async def not_started(_envelope):
             return ProviderResponse("not_started", usage=Amount(0, 0), receipt_ref="test-not-started",
                                     failure=ModelFailure.PREPARATION)
@@ -424,7 +448,6 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(failed.state, "failed")
         usage = app.proactive.budget.attempt_usage(first_context, self.preferences(app), self.clock.now())
         self.assertEqual(usage["session"]["used"], 0)
-        self.assertEqual(usage["relationship"]["used"], 0)
 
         async def unknown(_envelope):
             return ProviderResponse("unknown", failure=ModelFailure.TRANSPORT)
@@ -435,8 +458,7 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         calls = app.runtime.read_all("SELECT state FROM model_calls WHERE task_id = ?", (failed.task_id,))
         self.assertEqual([call["state"] for call in calls], ["unknown"])
         usage = app.proactive.budget.attempt_usage(first_context, self.preferences(app), self.clock.now())
-        self.assertEqual(usage["session"]["used"], 0)
-        self.assertEqual(usage["relationship"]["used"], 0)
+        self.assertEqual(usage["session"]["used"], 1)
 
         async def skip(_envelope):
             return answered('{"decision":"skip","text":""}')
@@ -444,18 +466,22 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.model_behavior = skip
         decided = (await self.contact(app, self.opportunity("successful-skip"), context=first_context)).unwrap().task
         self.assertEqual(decided.state, "succeeded")
-        blocked = await self.contact(app, self.opportunity("other-window", scope=other_context.scope),
-                                     context=other_context)
-        self.assertEqual(blocked.failure.code, "contact_relationship_attempt_budget")
+        usage = app.proactive.budget.attempt_usage(first_context, self.preferences(app), self.clock.now())
+        self.assertEqual(usage["session"]["used"], 2)
+        independent = (await self.contact(app, self.opportunity("other-window", scope=other_context.scope),
+                                          context=other_context)).unwrap().task
+        self.assertEqual(independent.state, "succeeded")
+        other_usage = app.proactive.budget.attempt_usage(other_context, self.preferences(app, other_context),
+                                                         self.clock.now())
+        self.assertEqual(other_usage["session"]["used"], 1)
 
     async def test_numeric_controls_inherit_and_zero_budget_blocks_without_model_usage(self):
         app = await self.enabled()
-        from companion_v2.proactive.configuration import target_for
-        relationship = target_for(self.contact_context()).chain()[2]
-        self.settings(app, {"interval_seconds": 120, "max_contacts_24h": 0}, target=relationship).unwrap()
+        self.settings(app, {"interval_seconds": 120, "max_contacts_24h": 0}).unwrap()
         self.assertEqual(self.preferences(app).values["interval_seconds"], 120)
         self.assertEqual((await self.contact(app)).failure.code, "contact_delivery_budget")
-        for key, value in (("interval_seconds", 59), ("idle_seconds", -1), ("max_contacts_24h", True), ("max_attempts_24h", 1001)):
+        for key, value in (("interval_seconds", 59), ("idle_seconds", -1), ("max_contacts_24h", True),
+                           ("max_attempts_24h", 1001), ("proactive_persona_judge_daily_limit", 12)):
             self.assertFalse(self.settings(app, {key: value}).is_success)
         self.assertEqual(self.called, [])
 

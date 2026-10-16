@@ -1025,7 +1025,7 @@
 .ct-material-kinds button:focus-visible{outline:2px solid var(--t-focus);outline-offset:2px}
 .ct-material-kinds b{min-width:1.4em;color:var(--t-text-faint);font-variant-numeric:tabular-nums;font-weight:600;text-align:center}
 .ct-material-tools{
-  display:grid;grid-template-columns:minmax(220px,1fr) minmax(150px,220px) auto auto;
+  display:grid;grid-template-columns:minmax(145px,180px) minmax(150px,220px) minmax(220px,1fr) minmax(150px,220px) auto auto;
   align-items:end;gap:var(--sp-3);padding-bottom:var(--sp-3);border-bottom:1px solid var(--t-line)
 }
 .ct-material-tools label{display:grid;gap:var(--sp-1);min-width:0}

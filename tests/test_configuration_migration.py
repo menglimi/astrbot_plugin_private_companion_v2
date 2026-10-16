@@ -69,9 +69,9 @@ class RuleTableTests(unittest.TestCase):
     def test_generated_table_covers_the_audited_registry_mappings(self):
         rules = configuration_rules()
 
-        self.assertEqual(len(rules), 346)
-        self.assertEqual(sum(item["confidence"] == "high" for item in rules), 280)
-        self.assertEqual(sum(item["confidence"] == "medium" for item in rules), 66)
+        self.assertEqual(len(rules), 347)
+        self.assertEqual(sum(item["confidence"] == "high" for item in rules), 282)
+        self.assertEqual(sum(item["confidence"] == "medium" for item in rules), 65)
         self.assertEqual(len({item["source"] for item in rules}), len(rules))
 
         expected = {row["v1_key"] for row in self._ledger_rows()
@@ -84,10 +84,28 @@ class RuleTableTests(unittest.TestCase):
             "legacy_compat_config.segmented_proactive_at_strategy",
         }
         self.assertEqual({item["source"] for item in rules}, expected - specialized
-                         - {"voice_action_config.tts_message_scope"})
+                         - {"voice_action_config.tts_message_scope", "basic_config.owner_exclusive_proactive_limit"})
         self.assertEqual({item["source"] for item in configuration_exclusions()}, {
             "emotion_relationship_config.enable_smart_silence",
+            "basic_config.owner_exclusive_proactive_limit",
             "voice_action_config.tts_message_scope",
+        })
+
+    def test_group_topic_thread_settings_migrate_to_the_group_window(self):
+        group = "conversation.group_participation"
+        fields = FieldRegistry(version="configuration-migration.group-topics", fields=(
+            FieldDefinition(group + ".enable_group_topic_threads", group, group,
+                            ValueKind.BOOLEAN, True),
+            FieldDefinition(group + ".group_topic_thread_max", group, group,
+                            ValueKind.INTEGER, 12, minimum=3, maximum=40),
+        ))
+        sources = {"group_slang_topic_config": {"enable_group_topic_threads": False},
+                   "relay_bridge_config": {"max_group_topic_threads": 8}}
+        result = convert_configuration(sources, registry=fields, rules=configuration_rules())
+
+        self.assertEqual(result.changes, {
+            group + ".enable_group_topic_threads": False,
+            group + ".group_topic_thread_max": 8,
         })
 
     def test_audit_inventory_covers_every_ledger_source_once(self):
@@ -107,6 +125,14 @@ class RuleTableTests(unittest.TestCase):
 
         headers = by_source["photo_action_config.external_image_api_custom_headers"]
         self.assertEqual(headers["verdict"], "not-migrated-by-design")
+
+    def test_removed_relationship_proactive_limit_is_deliberately_not_migrated(self):
+        source = "basic_config.owner_exclusive_proactive_limit"
+        self.assertNotIn(source, {item["source"] for item in configuration_rules()})
+        exclusion = next(item for item in configuration_exclusions() if item["source"] == source)
+        self.assertIn("关系级额度", exclusion["reason"])
+        audit = next(item for item in configuration_audit_sources() if item["source"] == source)
+        self.assertEqual((audit["target"], audit["verdict"]), ("", "not-migrated-by-design"))
 
     def test_new_image_and_mood_fields_have_audited_targets(self):
         by_source = {item["source"]: item for item in configuration_rules()}

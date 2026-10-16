@@ -85,6 +85,9 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         target = NS(key="target", target_id="target")
         observed = []
+        # Baseline pipeline cases preserve their body; cleanup cases opt in below.
+        if presentation is None:
+            presentation = {"content_cleanup_enabled": False}
         prepared = {
             "context": object(), "instruction": "V2 人格资料", "prompt_instruction": "自然分段",
             "target_id": "target", "channel": "private", "event_id": "core-pipeline-1",

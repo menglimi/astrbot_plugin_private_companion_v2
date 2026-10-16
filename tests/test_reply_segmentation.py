@@ -33,10 +33,10 @@ class ReplySegmentationTests(unittest.TestCase):
         for policy in (SegmentationPolicy(), replace(self.policy, llm_controlled=False)):
             self.assertEqual(policy.parts(f"甲\n{MARKER}\n乙"), ("甲\n乙",))
 
-    def test_rule_only_prompt_guides_coherence_without_model_boundary_protocol(self):
+    def test_rule_only_prompt_injects_nothing(self):
         policy = replace(self.policy, llm_controlled=False,
                          prompt="只在需要时用 {{ split_marker }}。")
-        self.assertIn("回应与理由保持连贯", policy.instruction)
+        self.assertEqual(policy.instruction, "")
         self.assertNotIn(MARKER, policy.instruction)
         self.assertNotIn("split_marker", policy.instruction)
         self.assertEqual(replace(policy, enabled=False).instruction, "")
@@ -111,17 +111,28 @@ class ReplySegmentationTests(unittest.TestCase):
                          ("嗯。\n我刚才去买咖啡了。", "哈哈！\n还有点小蛋糕。"))
         self.assertEqual("".join(merged), marked.replace(f"\n{MARKER}\n", "\n"))
 
-    def test_adjacent_punctuation_is_one_boundary_and_short_commas_stay_with_reply(self):
+    def test_adjacent_punctuation_and_commas_respect_the_configured_minimum(self):
         policy = replace(self.policy, llm_controlled=False, threshold=500,
                          split_words=json.dumps(["。", "？", "！", "?", ".", "!", "，"], ensure_ascii=False),
                          min_segment_chars=5, max_segments=5)
         source = "笨蛋比折大人，大半夜的突然说什么呢...？真那么想看的话，真就只能看一眼哦？"
         parts = policy.parts(source)
         self.assertEqual(tuple(part.strip() for part in parts), (
-            "笨蛋比折大人，大半夜的突然说什么呢...？",
-            "真那么想看的话，真就只能看一眼哦？"))
+            "笨蛋比折大人，", "大半夜的突然说什么呢...？",
+            "真那么想看的话，", "真就只能看一眼哦？"))
         self.assertEqual("".join(parts), source)
         self.assertFalse(any(part.lstrip().startswith(("？", "！", "。")) for part in parts[1:]))
+        self.assertEqual(replace(policy, min_segment_chars=10).parts(source), (
+            "笨蛋比折大人，大半夜的突然说什么呢...？",
+            "真那么想看的话，真就只能看一眼哦？"))
+
+    def test_short_interjection_merges_but_configured_comma_splits_the_reply(self):
+        policy = SegmentationPolicy(split_words=json.dumps(["，", "…", "."], ensure_ascii=False),
+                                    min_segment_chars=5)
+        source = "哼，才不笨呢，比折大人才是大笨蛋…"
+        self.assertEqual(policy.parts(source), ("哼，才不笨呢，", "比折大人才是大笨蛋…"))
+        self.assertEqual(replace(policy, min_segment_chars=10).parts(source), (source,))
+        self.assertEqual(replace(policy, min_segment_chars=1).parts("1,000.50"), ("1,000.50",))
 
     def test_explicit_boundary_before_and_after_markdown_without_blank_lines(self):
         for block in ("```python\nprint('x。')\n```", "> 引用。\n> 后续。", "- 第一项\n- 第二项"):
@@ -132,10 +143,9 @@ class ReplySegmentationTests(unittest.TestCase):
         policy = replace(self.policy, prompt="只在需要时用 {{ split_marker }}。")
         self.assertIn(f"只在需要时用 {MARKER}。", policy.instruction)
         self.assertNotIn("{{", policy.instruction)
-        self.assertIn("各自读得通", self.policy.instruction)
-        self.assertIn("称呼要和所在的完整句子放在一起", self.policy.instruction)
-        self.assertIn("简短不等于只说几个字或一句就结束", self.policy.instruction)
-        self.assertIn("不能借此删改、概括或重排原文", self.policy.instruction)
+        self.assertNotIn("消息正文组织", self.policy.instruction)
+        self.assertNotIn("称呼要和所在的完整句子放在一起", self.policy.instruction)
+        self.assertIn("不要借此删改、概括或重排原文", self.policy.instruction)
         self.assertIn("代码、引用、列表、表格、链接", self.policy.instruction)
         for changes in ({"enabled": 1}, {"max_segments": True}, {"max_segments": 65},
                         {"threshold": 0}, {"rule_mode": "unknown"}, {"prompt": "x" * 4001}):

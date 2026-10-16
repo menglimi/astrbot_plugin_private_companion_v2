@@ -2,6 +2,8 @@
   display: grid;
   gap: var(--sp-3);
   min-width: 0;
+  container-name: host-options;
+  container-type: inline-size;
   margin-top: var(--sp-4);
   padding-top: var(--sp-4);
   border-top: 1px solid var(--t-line);
@@ -71,6 +73,13 @@
 .host-options-replies textarea:focus-visible { outline: 2px solid var(--t-focus); outline-offset: 2px; }
 .host-options-panel [hidden] { display: none !important; }
 @media (max-width: 680px) {
+  .host-options-row,
+  .host-options-replies { grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); }
+  .host-options-control { width: 100%; }
+  .host-options-footer { align-items: stretch; }
+  .host-options-footer .button { width: 100%; }
+}
+@container host-options (max-width: 560px) {
   .host-options-row,
   .host-options-replies { grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); }
   .host-options-control { width: 100%; }

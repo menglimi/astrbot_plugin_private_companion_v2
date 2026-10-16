@@ -168,11 +168,11 @@ function harness({ persons, groups = [], group_networks = [], group_access, auth
     parent: {postMessage: (message, origin) => navigations.push({message, origin})},
     AstrBotPluginPage: {
       ready: () => Promise.resolve({ pluginName: "astrbot_plugin_private_companion_v2" }),
-      apiGet: (route, params) => new Promise((resolve, reject) => {
-        requests.push({ method: "GET", route, params, resolve, reject });
+      apiGet: (route, params, requestOptions) => new Promise((resolve, reject) => {
+        requests.push({ method: "GET", route, params, requestOptions, resolve, reject });
       }),
-      apiPost: (route, body) => new Promise((resolve, reject) => {
-        requests.push({ method: "POST", route, body, resolve, reject });
+      apiPost: (route, body, requestOptions) => new Promise((resolve, reject) => {
+        requests.push({ method: "POST", route, body, requestOptions, resolve, reject });
       }),
     },
     document,
@@ -743,11 +743,10 @@ test("联系偏好显示该私聊的自动调度原因与下一步建议", async
   assert.doesNotMatch(flat(diagnostic), /automatic_contact_disabled/);
 });
 
-test("私聊联系页提供未回应降频、尝试上限和恢复继承", async () => {
+test("私聊联系页提供每日实际联系上限、未回应降频和恢复继承", async () => {
   const fields = {
     enabled: {kind: "boolean"}, automatic_enabled: {kind: "boolean"}, quiet_enabled: {kind: "boolean"},
     max_contacts_24h: {kind: "integer", minimum: 0, maximum: 100},
-    max_attempts_24h: {kind: "integer", minimum: 0, maximum: 1000},
     interval_seconds: {kind: "integer", minimum: 60, maximum: 604800},
     idle_seconds: {kind: "integer", minimum: 0, maximum: 86400},
     unanswered_slowdown_start: {kind: "integer", minimum: 1, maximum: 10},
@@ -757,7 +756,7 @@ test("私聊联系页提供未回应降频、尝试上限和恢复继承", async
     note: {kind: "text"}, style_prompt: {kind: "text", maximum_chars: 4000},
   };
   const settings = {enabled: true, automatic_enabled: true, quiet_enabled: false,
-    max_contacts_24h: 5, max_attempts_24h: 9, interval_seconds: 3600, idle_seconds: 900,
+    max_contacts_24h: 5, interval_seconds: 3600, idle_seconds: 900,
     unanswered_slowdown_start: 2, unanswered_pause_after: 5, unanswered_max_interval_multiplier: 3.5,
     quiet_start: "22:00", quiet_end: "08:00", quiet_timezone: "Asia/Shanghai", pause_until: "", note: "", style_prompt: ""};
   const purposeGroups = [
@@ -773,9 +772,9 @@ test("私聊联系页提供未回应降频、尝试上限和恢复继承", async
     settings[name + ".weight"] = 1;
     settings[name + ".pause_until"] = "";
   }
-  const inherited = {...settings, max_attempts_24h: 12, unanswered_slowdown_start: 1,
+  const inherited = {...settings, unanswered_slowdown_start: 1,
     unanswered_pause_after: 0, unanswered_max_interval_multiplier: 2.2};
-  const unanswered = ["max_attempts_24h", "unanswered_slowdown_start", "unanswered_pause_after",
+  const unanswered = ["unanswered_slowdown_start", "unanswered_pause_after",
     "unanswered_max_interval_multiplier"];
   const provenance = Object.fromEntries(Object.keys(settings).map(name => [name,
     {layer: unanswered.includes(name) ? "window" : "installation", explicit: unanswered.includes(name)}]));
@@ -794,21 +793,21 @@ test("私聊联系页提供未回应降频、尝试上限和恢复继承", async
           {layer: "installation", explicit: false}]))}}}};
     }});
   const detail = await open(h, "阿澈", "联系偏好");
-  const attempts = findInput(detail, "24 小时尝试上限");
+  const contacts = findInput(detail, "每日实际联系上限");
   const slowdown = findInput(detail, "开始降频的未回应次数");
   const pause = findInput(detail, "暂停联系的未回应次数（0 表示不暂停）");
   const pauseUntil = findInput(detail, "临时暂停到（本地时间）");
   const multiplier = findInput(detail, "降频后的最大间隔倍数");
   const note = findInput(detail, "联系补充偏好");
-  assert.ok(attempts && slowdown && pause && pauseUntil && multiplier && note);
+  assert.ok(contacts && slowdown && pause && pauseUntil && multiplier && note);
   for (const [name] of purposeGroups.flat()) {
     assert.ok(inputByName(detail, name + ".enabled"), `${name} 的联系开关应在用户页提供`);
     assert.ok(inputByName(detail, name + ".weight"), `${name} 的联系权重应在用户页提供`);
     assert.ok(inputByName(detail, name + ".pause_until"), `${name} 的临时暂缓应在用户页提供`);
   }
-  assert.equal(attempts.type, "number");
-  assert.equal(attempts.min, 0);
-  assert.equal(attempts.max, 1000);
+  assert.equal(contacts.type, "number");
+  assert.equal(contacts.min, 0);
+  assert.equal(contacts.max, 100);
   assert.equal(slowdown.min, 1);
   assert.equal(slowdown.max, 10);
   assert.equal(pause.min, 0);
@@ -836,20 +835,20 @@ test("私聊联系页提供未回应降频、尝试上限和恢复继承", async
   assert.ok(cancelReset, "待保存的恢复操作应可撤销");
   cancelReset.handlers.click();
   findControl(h.element("person-detail"), "恢复继承").handlers.click();
-  assert.equal(findInput(h.element("person-detail"), "24 小时尝试上限").value, 9);
+  assert.equal(findInput(h.element("person-detail"), "每日实际联系上限").value, 5);
   assert.match(flat(h.element("person-detail")), /保存后恢复继承/);
   findControl(h.element("person-detail"), "保存资料").handlers.click();
   await h.send(request => request.method === "POST");
 
   assert.equal(saved.route, "acquaintance/settings");
   assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.contact.changes)), {
-    unanswered_slowdown_start: 3, unanswered_pause_after: 0,
+    unanswered_pause_after: 0,
     unanswered_max_interval_multiplier: 4, pause_until: new Date(pauseUntil.value).toISOString(),
     note: "尽量避开工作时间联系", "news.enabled": false, "news.weight": 1.5,
     "news.pause_until": new Date(newsPause.value).toISOString(),
   });
-  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.contact.reset_to_inherit)), ["max_attempts_24h"]);
-  assert.equal(findInput(h.element("person-detail"), "24 小时尝试上限").value, 12);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.sections.contact.reset_to_inherit)), ["unanswered_slowdown_start"]);
+  assert.equal(findInput(h.element("person-detail"), "开始降频的未回应次数").value, 1);
 });
 
 test("私聊回复默认继承角色，字段可即时展开并单独覆盖或恢复", async () => {
@@ -893,6 +892,163 @@ test("私聊回复默认继承角色，字段可即时展开并单独覆盖或�
   assert.deepEqual(JSON.parse(JSON.stringify(written.body.sections.reply.changes)),
     {streaming: true, streaming_mode: "incremental"});
   assert.deepEqual(JSON.parse(JSON.stringify(written.body.sections.reply.reset_to_inherit)), ["style_prompt"]);
+});
+
+test("私聊回复配置读取失败时显示未确认状态并禁用保存", async () => {
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])},
+    memberSettings: {"subject-1": {status: "error", data: {code: "simulated_read_failure"}}}});
+  const detail = await open(h, "阿澈", "回复微调");
+  assert.match(flat(detail), /成员配置读取失败/);
+  assert.match(flat(detail), /重新读取/);
+  assert.doesNotMatch(flat(detail), /草稿已保留/);
+  const save = findControl(detail, "保存回复设置");
+  assert.ok(save?.disabled, "配置未读取成功前不能提交窗口覆盖");
+  assert.match(flat(findAll(detail, "member-savebar")[0]), /配置读取失败，未确认同步/);
+});
+
+test("保存桥接超时会自动重放同一幂等请求并确认结果", async () => {
+  const fields = {style_prompt: {kind: "text", maximum_chars: 4000}};
+  const reply = {edit_token: "reply-edit-1", fields, settings: {style_prompt: "初始表达"},
+    inherited_settings: {style_prompt: "角色默认"},
+    provenance: {style_prompt: {layer: "window", explicit: true}}};
+  const memberSettings = {"subject-1": {sections: {reply}}};
+  let posts = 0;
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])}, memberSettings,
+    post: request => {
+      posts++;
+      if (posts === 1) throw Object.assign(new Error("network timeout"), {code: "bridge_timeout"});
+      return {sections: {reply: {...reply, edit_token: "reply-edit-3",
+        settings: {...reply.settings, ...request.body.sections.reply.changes}}}};
+    }});
+  const detail = await open(h, "阿澈", "回复微调");
+  assert.equal(h.requests.find(request => request.method === "GET" && request.route === "acquaintance/settings")
+    ?.requestOptions?.timeoutMs, 60000, "成员设置读请求也使用同一较宽时限");
+  const input = findInput(detail, "表达风格补充");
+  input.value = "这次要保存的表达";
+  input.handlers.input();
+  findControl(h.element("person-detail"), "保存回复设置").handlers.click();
+  await h.send(request => request.method === "POST");
+  const first = h.requests.find(request => request.method === "POST");
+  assert.equal(first.requestOptions.timeoutMs, 60000, "成员设置写请求使用较宽的桥接时限");
+  await h.settle();
+  const attempts = h.requests.filter(request => request.method === "POST");
+  assert.equal(attempts.length, 2, "桥接超时后页面自动进行一次安全恢复");
+  assert.match(flat(h.element("person-detail")), /正在核对保存结果/);
+  assert.deepEqual(JSON.parse(JSON.stringify(attempts[1].body)), JSON.parse(JSON.stringify(first.body)));
+  assert.equal(attempts[1].body.operation_key, first.body.operation_key,
+    "自动恢复必须复用服务端幂等操作编号");
+  await h.send(request => request.method === "POST" && request !== first);
+  assert.equal(attempts.length, 2);
+  assert.match(flat(h.element("person-detail")), /私聊回复设置已保存/);
+  assert.equal(posts, 2);
+});
+
+test("自动核对仍超时后保留原操作，服务端确认拒绝时不重发", async () => {
+  const fields = {style_prompt: {kind: "text", maximum_chars: 4000}};
+  const reply = {edit_token: "reply-edit-1", fields, settings: {style_prompt: "初始表达"},
+    inherited_settings: {style_prompt: "角色默认"},
+    provenance: {style_prompt: {layer: "window", explicit: true}}};
+  const memberSettings = {"subject-1": {sections: {reply}}};
+  let posts = 0;
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])}, memberSettings,
+    post: () => {posts++; throw Object.assign(new Error("network timeout"), {code: "bridge_timeout"});}});
+  const detail = await open(h, "阿澈", "回复微调");
+  const input = findInput(detail, "表达风格补充");
+  input.value = "待核对内容";
+  input.handlers.input();
+  findControl(detail, "保存回复设置").handlers.click();
+  await h.send(request => request.method === "POST");
+  await h.send(request => request.method === "POST");
+  assert.equal(posts, 2, "最多自动恢复一次");
+  assert.match(flat(h.element("person-detail")), /保存结果仍未确认/);
+  assert.ok(findControl(h.element("person-detail"), "核对并重试保存"));
+  assert.equal(findInput(h.element("person-detail"), "表达风格补充").disabled, true);
+
+  const rejected = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])}, memberSettings,
+    post: () => Object.assign(new Error("invalid setting"), {code: "invalid_configuration_value", confirmed: true})});
+  const rejectedDetail = await open(rejected, "阿澈", "回复微调");
+  const rejectedInput = findInput(rejectedDetail, "表达风格补充");
+  rejectedInput.value = "被拒绝的内容";
+  rejectedInput.handlers.input();
+  findControl(rejectedDetail, "保存回复设置").handlers.click();
+  await rejected.send(request => request.method === "POST");
+  assert.equal(rejected.requests.filter(request => request.method === "POST").length, 1,
+    "服务端明确拒绝时不能进入自动重放");
+  assert.equal(findInput(rejected.element("person-detail"), "表达风格补充").disabled, false,
+    "服务端明确拒绝后草稿恢复可编辑");
+});
+
+test("服务端无法恢复操作回执时保留待核对请求", async () => {
+  const fields = {style_prompt: {kind: "text", maximum_chars: 4000}};
+  const reply = {edit_token: "reply-edit-1", fields, settings: {style_prompt: "初始表达"},
+    inherited_settings: {style_prompt: "角色默认"},
+    provenance: {style_prompt: {layer: "window", explicit: true}}};
+  let posts = 0;
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])},
+    memberSettings: {"subject-1": {sections: {reply}}},
+    post: () => {
+      posts++;
+      return posts === 1 ? Promise.reject(Object.assign(new Error("timeout"), {code: "bridge_timeout"}))
+        : {status: "error", data: {code: "configuration_operation_incomplete"}};
+    }});
+  const detail = await open(h, "阿澈", "回复微调");
+  const input = findInput(detail, "表达风格补充");
+  input.value = "需要核对的内容";
+  input.handlers.input();
+  findControl(detail, "保存回复设置").handlers.click();
+  await h.send(request => request.method === "POST");
+  await h.send(request => request.method === "POST");
+  assert.equal(posts, 2);
+  assert.match(flat(h.element("person-detail")), /仍在恢复原保存回执/);
+  assert.ok(findControl(h.element("person-detail"), "核对并重试保存"));
+  assert.equal(findInput(h.element("person-detail"), "表达风格补充").disabled, true,
+    "未知写入状态不能被误判为确定拒绝");
+});
+
+test("核对读取失败会保留待确认请求，明确服务端拒绝后解除字段锁定", async () => {
+  const fields = {style_prompt: {kind: "text", maximum_chars: 4000}};
+  const reply = {edit_token: "reply-edit-1", fields, settings: {style_prompt: "初始表达"},
+    inherited_settings: {style_prompt: "角色默认"}, provenance: {style_prompt: {layer: "window", explicit: true}}};
+  const memberSettings = {"subject-1": {sections: {reply}}};
+  let posts = 0;
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])}, memberSettings,
+    post: () => {
+      posts++;
+      if (posts === 1) throw Object.assign(new Error("network timeout"), {code: "simulated_timeout"});
+      return {status: "error", data: {code: "simulated_rejection"}};
+    }});
+  const detail = await open(h, "阿澈", "回复微调");
+  const input = findInput(detail, "表达风格补充");
+  input.value = "待确认内容";
+  input.handlers.input();
+  findControl(detail, "保存回复设置").handlers.click();
+  await h.send(request => request.method === "POST");
+  assert.equal(posts, 1);
+
+  memberSettings["subject-1"] = {status: "error", data: {code: "simulated_read_failure"}};
+  findControl(h.element("person-detail"), "核对并重试保存").handlers.click();
+  await h.send(request => request.method === "GET"
+    && (request.route === authorization || request.route === "acquaintance/settings"));
+  assert.equal(posts, 1, "配置未读成功时不应重发写请求");
+  assert.ok(findControl(h.element("person-detail"), "核对并重试保存"), "待核对请求必须保留");
+  assert.equal(findInput(h.element("person-detail"), "表达风格补充"), null,
+    "读取失败时编辑区保持隐藏，避免展示未经核对的配置");
+
+  memberSettings["subject-1"] = {sections: {reply: {...reply, edit_token: "reply-edit-2"}}};
+  findControl(h.element("person-detail"), "核对并重试保存").handlers.click();
+  await h.send(request => request.method === "GET"
+    && (request.route === authorization || request.route === "acquaintance/settings"));
+  await h.send(request => request.method === "POST" && posts === 1);
+  assert.equal(posts, 2);
+  assert.equal(findInput(h.element("person-detail"), "表达风格补充").disabled, false,
+    "明确拒绝后本地草稿仍在，但字段应恢复可编辑");
+  assert.ok(findControl(h.element("person-detail"), "保存回复设置"));
 });
 
 test("熟人卡只管理互动记忆，人工关系资料独立呈现", async () => {

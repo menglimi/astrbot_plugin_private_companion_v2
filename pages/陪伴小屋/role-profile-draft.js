@@ -63,7 +63,7 @@ window.CompanionRoleProfileDraft = (() => {
     target.dataset.state = bad ? "error" : "ready";
   }
   function apiError(error) {
-    return errorText[error?.code] || errorText[error?.message] || "本次操作没有完成，草稿已保留，请重新读取后重试。";
+    return errorText[error?.code] || errorText[error?.message] || "本次操作没有完成，请核对当前状态后重试。";
   }
   function operationKey() {
     return window.crypto?.randomUUID?.() || "role-profile-draft-" + Date.now() + "-" + Math.random().toString(36).slice(2);

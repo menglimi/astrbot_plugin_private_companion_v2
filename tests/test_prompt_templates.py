@@ -93,9 +93,11 @@ class PromptTemplateTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_catalog_shows_complete_fixed_templates_without_private_messages(self):
         sections = self.task()["prompt_sections"]
+        self.assertNotIn("coherence", {section["key"] for section in sections})
+        self.assertNotIn("消息正文组织", str(sections))
         self.assertEqual({section["key"] for section in sections if section["editable"]},
                          {"expression", "news_sharing", "length", "news_length", "style"})
         self.assertEqual(self.section("business")["prompt"], INSTRUCTION)
-        self.assertIn("来源、日期和原文链接保留", self.section("news_sharing")["prompt"])
+        self.assertIn("准确来源、原日期和链接留到对方追问时再给", self.section("news_sharing")["prompt"])
         self.assertNotIn("角色自己的设定", str(sections))
         self.assertNotIn("用户先前说过", str(sections))

@@ -25,6 +25,9 @@ from companion_v2.storage.runtime import StorageRuntime
 ONE_PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0N8AAAAASUVORK5CYII="
 )
+SECOND_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXmEAAAAASUVORK5CYII="
+)
 
 
 class LegacyDataMigrationTests(unittest.TestCase):
@@ -122,6 +125,10 @@ class LegacyDataMigrationTests(unittest.TestCase):
         asset_directory.mkdir()
         (reference_directory / "portrait.png").write_bytes(ONE_PIXEL_PNG)
         (asset_directory / "shared.png").write_bytes(ONE_PIXEL_PNG)
+        (asset_directory / "private.png").write_bytes(SECOND_PIXEL_PNG)
+        (asset_directory / "route-restricted.png").write_bytes(SECOND_PIXEL_PNG)
+        (asset_directory / "generation-disabled.png").write_bytes(SECOND_PIXEL_PNG)
+        (asset_directory / "malformed-acl.png").write_bytes(SECOND_PIXEL_PNG)
         self.write_profile({
             "photo_reference_assets": [
                 {"id": "role-wide", "scope": "relation_role", "path": "photo_reference_assets/shared.png",
@@ -130,6 +137,25 @@ class LegacyDataMigrationTests(unittest.TestCase):
                 {"id": "restricted", "scope": "relation_role", "path": "photo_reference_assets/shared.png",
                  "image_access": {"subject_ref": None, "allow_generation": True,
                      "readers": ["owner"], "audiences": ["*"], "routes": ["*"]}},
+                {"id": "private-user", "scope": "relation_user", "path": "photo_reference_assets/private.png",
+                 "image_access": {"subject_ref": None, "allow_generation": True,
+                     "readers": ["person:legacy-user"], "audiences": ["private:legacy-account"],
+                     "routes": ["*"]}},
+                {"id": "private-route-restricted", "scope": "relation_user",
+                 "path": "photo_reference_assets/route-restricted.png",
+                 "image_access": {"subject_ref": None, "allow_generation": True,
+                     "readers": ["person:legacy-user"], "audiences": ["private:legacy-account"],
+                     "routes": ["private:legacy-account"]}},
+                {"id": "private-generation-disabled", "scope": "relation_user",
+                 "path": "photo_reference_assets/generation-disabled.png",
+                 "image_access": {"subject_ref": None, "allow_generation": False,
+                     "readers": ["person:legacy-user"], "audiences": ["private:legacy-account"],
+                     "routes": ["*"]}},
+                {"id": "private-malformed-acl", "scope": "relation_user",
+                 "path": "photo_reference_assets/malformed-acl.png",
+                 "image_access": {"subject_ref": None, "allow_generation": True,
+                     "readers": "person:legacy-user", "audiences": ["private:legacy-account"],
+                     "routes": ["*"]}},
             ],
         })
         configuration = {
@@ -150,8 +176,10 @@ class LegacyDataMigrationTests(unittest.TestCase):
         plan = build_data_plan(self.root, v1_configuration=configuration)
         preview = plan.document(reference_slots_available=24, wardrobe_slots_available=24)
 
-        self.assertEqual(len(plan.reference_images), 1)
-        self.assertEqual(preview["reference_images"]["batch_count"], 1)
+        self.assertEqual(len(plan.reference_images), 2)
+        self.assertEqual(preview["reference_images"]["batch_count"], 2)
+        self.assertEqual({item.source_key for item in plan.reference_images},
+                         {"catalog:portrait", "asset:private-user"})
         self.assertEqual(preview["wardrobe_items"]["batch_count"], 3)
         self.assertEqual(preview["wardrobe_items"]["image_count"], 1)
         self.assertEqual(preview["wardrobe_items"]["image_skipped_count"], 1)
@@ -159,6 +187,8 @@ class LegacyDataMigrationTests(unittest.TestCase):
                       {item["reason"] for item in preview["reference_images"]["rejected"]})
         self.assertIn("image_access_not_role_wide",
                       {item["reason"] for item in preview["reference_images"]["rejected"]})
+        self.assertGreaterEqual(sum(item["reason"] == "image_access_not_role_wide"
+                                    for item in preview["reference_images"]["rejected"]), 4)
         self.assertNotIn("asset:role-wide",
                          {item.get("source_id") for item in preview["reference_images"]["rejected"]})
         self.assertEqual({item.name for item in plan.wardrobe_items}, {"红围巾", "白裙", "手套"})

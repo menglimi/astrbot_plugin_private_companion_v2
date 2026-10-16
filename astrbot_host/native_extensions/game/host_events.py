@@ -9,6 +9,8 @@ from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 from companion_v2.execution.models import TaskContext, encode
 from companion_v2.foundation.refs import ScopeKind
 
+from ..request_context import set_turn_context
+
 
 class GameHostEvents:
     def __init__(self, runtime, current):
@@ -39,7 +41,8 @@ class GameHostEvents:
 
     def request(self, event, req):
         runtime = self.runtime
-        if not runtime.private_qq_game_context_enabled:
+        set_turn_context(req, "game")
+        if not self.current() or not runtime.private_qq_game_context_enabled:
             return
         private = getattr(event, "is_private_chat", None)
         if callable(private) and not private():
@@ -48,10 +51,6 @@ class GameHostEvents:
         sender = str(sender_getter() or "").strip() if callable(sender_getter) else ""
         session_id = str(getattr(event, "unified_msg_origin", "") or "")
         if not sender or not session_id:
-            return
-        current = str(getattr(req, "system_prompt", "") or "")
-        marker = "<game_companion_private_context>"
-        if marker in current:
             return
         lines = [runtime._private_qq_room_state(room)
                  for room in runtime.manager.for_session(session_id)
@@ -68,8 +67,7 @@ class GameHostEvents:
             lines.append("当前角色与当前私聊的原生网页/聊天共用对局实况：" +
                          json.dumps(facts, ensure_ascii=False, separators=(",", ":")))
         if lines:
-            req.system_prompt = (current + "\n\n" + "\n".join([
-                marker,
+            set_turn_context(req, "game", "\n".join([
                 "以下是当前私聊用户与当前角色的游戏只读实况。player 是当前用户，bot 是你这个当前角色。"
                 "已结束的 status 与真实 outcome 优先于历史中尚未开局、还在邀请或轮到谁的旧描述。"
                 "用户给出简短回应时，也可结合最近对局自然承接；不需要特定词或再次询问输赢才理解实况，"
@@ -79,5 +77,4 @@ class GameHostEvents:
                 *lines,
                 "具体游戏操作通过已授权工具或 WebUI 完成；以实际操作结果为准，"
                 "只读状态本身不代表本轮执行过落子、投降、悔棋或改变房间。",
-                "</game_companion_private_context>",
-            ])).strip()
+            ]))

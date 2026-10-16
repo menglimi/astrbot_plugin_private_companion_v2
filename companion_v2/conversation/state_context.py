@@ -42,7 +42,7 @@ class ConversationStateContext:
             state = None
             if settings.get("enabled"):
                 try:
-                    state = self.service.read(context, at=at)
+                    state = self.service.read(context, at=at, injection=True)
                 except TaskError:
                     state = None
             if state is None or state["state"] == "disabled":
@@ -121,14 +121,14 @@ class ConversationStateContext:
             state = self.service.read_revision(context, snapshot["revision"],
                 captured_at=datetime.fromisoformat(snapshot["captured_at"]), observed_at=at,
                 storage=snapshot.get("storage", "window"), sleep_reference=snapshot.get("sleep"),
-                include_sleep=snapshot.get("projection_version") == 3)
+                include_sleep=snapshot.get("projection_version") == 3, injection=True)
             activities = ({"items": [], "partial": False, "state": "unavailable"} if snapshot["activity_unavailable"] else
                 self.service.activity_context(context, references=snapshot["activities"], partial=snapshot["activity_partial"]))
         else:
             if self.service.records.storage(context) != snapshot.get("storage", "window"):
                 raise TaskError("role_state_changed", "role body storage changed after capture")
             state = self.service.read(context, at=at, cycle_at=(datetime.fromisoformat(snapshot["captured_at"])
-                if snapshot.get("projection_version") in (2, 3) else None))
+                if snapshot.get("projection_version") in (2, 3) else None), injection=True)
             activities = self.service.activity_context(context)
         if state.get("revision") != snapshot["revision"] or digest(state) != snapshot["hash"] or digest(activities) != snapshot["activity_hash"]:
             raise TaskError("role_state_changed", "original role state or actual activity changed")

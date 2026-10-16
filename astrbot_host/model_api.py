@@ -30,6 +30,7 @@ from .native_extensions.images import IMAGE_ACTIONS
 from .reply_api import ReplyWebAPI
 from .service_balance import configured_balance_port, display_amount
 from .token_sources import read_token_sources
+from .host_token_usage import read_astrbot_token_usage
 from .voice import _read_audio
 from .fish_audio import MODEL_OPTIONS as FISH_AUDIO_MODEL_OPTIONS
 
@@ -406,10 +407,13 @@ class ModelWebAPI:
             if action == "maintenance" and result.is_success:
                 payload = dict(result.unwrap())
                 payload["external_token_sources"] = read_token_sources(self.controller)
+                payload["external_token_sources"]["main"] = await read_astrbot_token_usage(self.controller)
                 memory_source = payload["external_token_sources"].get("memory")
                 if isinstance(memory_source, dict):
                     memory_source["linkage"] = await read_external_memory_summary(
                         self.controller, _session.profile.target)
+                async with self.controller._control_lock:
+                    self._authorized(layer=layer)
                 result = Outcome.success(payload)
             return self._response(result)
         except TaskError as error:
@@ -562,8 +566,6 @@ class ModelWebAPI:
                 self._authorized()
                 service = self._laya_service()
                 service.save(data["revision"], data["changes"])
-                from .laya_client import start_laya_warmup
-                start_laya_warmup(service.store)
                 return self._response(Outcome.success(service.status()))
         except TaskError as error:
             return self._response(Outcome.failed(error.code, str(error)))
@@ -792,12 +794,17 @@ class ModelWebAPI:
             owners = [item for item in declarations if item.descriptor.tool.action == action]
             owner = owners[0] if len(owners) == 1 else None
             current = bool(owner and registry.current_declaration(owner.host_tool_id) == owner)
+            readiness = (registry.declaration_readiness(owner.host_tool_id)
+                         if owner and callable(getattr(registry, "declaration_readiness", None))
+                         else "ready" if current else "stale")
             registered = bool(owner and external and external.providers.get(action)
                               and external.providers[action].descriptor == owner.descriptor)
             if not enabled[action]:
                 diagnostic = "image_action_disabled"
             elif not owner:
                 diagnostic = issue_code or module.get("error_code") or "native_image_declaration_missing"
+            elif readiness == "unsupported":
+                diagnostic = "native_image_operation_unavailable"
             elif not current:
                 diagnostic = "native_declaration_stale"
             elif not registered:
@@ -810,7 +817,8 @@ class ModelWebAPI:
                          "loaded": bool(owner), "current": current, "registered": registered,
                          "diagnostic_code": diagnostic,
                          "state": "disabled" if not enabled[action] else
-                                  "ready" if current and registered else "unavailable"})
+                                  "ready" if current and registered else
+                                  "unsupported" if readiness == "unsupported" else "unavailable"})
         module = {**module, "issue_code": issue_code,
                   "declared_actions": sum(item.descriptor.package.extension_id == "image"
                                            for item in declarations)}

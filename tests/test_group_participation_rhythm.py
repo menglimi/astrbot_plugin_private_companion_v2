@@ -22,8 +22,9 @@ from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.conversation.group_interjection import (ACKNOWLEDGED_STEP, IGNORED_STEP, INTERJECTION,
                                                           REPEAT_FOLLOW, REPEAT_INTERRUPT, WEIGHT_MAX,
                                                           WEIGHT_MIN, WEIGHT_START)
-from companion_v2.conversation.group_observation import (PREFIX, fold_mood, joke_guard, moment_candidates,
-                                                          moment_portrait)
+from companion_v2.conversation.group_observation import (PREFIX, TOPIC_KIND, fold_mood, fold_topic_threads,
+                                                          joke_guard, moment_candidates, moment_portrait,
+                                                          topic_signature, topic_signatures_similar)
 from companion_v2.conversation.group_timing import RepeatPolicy, clean_group_text, repeat_burst, repeat_signature
 from companion_v2.conversation.participation import (CONFIG_GROUP, CONFIG_LIMITS, GroupParticipation,
                                                      GroupParticipationConfigurationOwner,
@@ -384,6 +385,56 @@ class InterjectionTests(GroupRhythmFixture):
         self.participation._record(group_context(PRIVATE), "batch-private", replied=True)
         self.assertEqual(self.participation.catalog_for(group_context(PRIVATE)), ())
         self.assertNotIn("batch-private", json.dumps(self.metadata()))
+
+
+class TopicThreadTests(GroupRhythmFixture):
+    def test_signatures_ignore_media_and_merge_related_chinese_topic_lines(self):
+        self.assertEqual(topic_signature("[图片 1]"), "")
+        self.assertEqual(topic_signature("嗯？"), "")
+        self.assertTrue(topic_signatures_similar(
+            topic_signature("今天想聊下烤肉配什么酱"), topic_signature("烤肉配的蘸料我喜欢花生酱")))
+        self.assertFalse(topic_signatures_similar(
+            topic_signature("烤肉配什么酱"), topic_signature("周末准备去看电影")))
+        self.assertFalse(topic_signatures_similar(
+            topic_signature("我今天想看电影"), topic_signature("我今天想买衣服")))
+
+    def test_threads_expire_dedupe_and_derive_participants_without_storing_ids(self):
+        first_at = TURN - timedelta(minutes=2)
+        second_at = TURN - timedelta(minutes=1)
+        bot_at = TURN - timedelta(seconds=30)
+        items = (
+            {"kind": "member", "speaker_id": "member-a", "received_at": first_at.isoformat(),
+             "text": "今天想聊下烤肉配什么酱"},
+            {"kind": "member", "speaker_id": "member-b", "received_at": second_at.isoformat(),
+             "text": "烤肉配的蘸料我喜欢花生酱"},
+            {"kind": "bot", "speaker_id": "", "received_at": bot_at.isoformat(), "text": "花生酱也不错"},
+        )
+        record, facts = fold_topic_threads(None, items, TURN)
+
+        self.assertEqual(len(record["threads"]), 1)
+        self.assertEqual(record["threads"][0]["message_count"], 2)
+        self.assertEqual(facts[0]["participant_count"], 2)
+        self.assertTrue(facts[0]["bot_joined"])
+        self.assertNotIn("member-a", json.dumps(record))
+        self.assertNotIn("member-b", json.dumps(record))
+
+        repeated, _ = fold_topic_threads(record, items, TURN + timedelta(seconds=1))
+        self.assertEqual(repeated["threads"][0]["message_count"], 2)
+        expired, expired_facts = fold_topic_threads(repeated, (), TURN + timedelta(minutes=91))
+        self.assertEqual(expired["threads"], [])
+        self.assertEqual(expired_facts, ())
+
+    def test_topic_lines_are_window_scoped_prompt_material_and_can_be_disabled(self):
+        prior = member("今天想聊下烤肉配什么酱", "201", TURN - timedelta(minutes=1))
+        turn = self.turn(["烤肉配的蘸料我喜欢花生酱"], recent=(prior,))
+        self.assertIn("本群近 90 分钟的话题线索", turn["hints"])
+        self.assertIn("烤肉", turn["hints"])
+        self.assertEqual(turn["observation"][TOPIC_KIND]["threads"][0]["message_count"], 2)
+
+        self.configure(enable_group_topic_threads=False)
+        disabled = self.turn(["烤肉配的蘸料我喜欢花生酱"], recent=(prior,), batch="batch-topic-off")
+        self.assertNotIn("本群近 90 分钟的话题线索", disabled["hints"])
+        self.assertNotIn(TOPIC_KIND, disabled["observation"])
 
 
 if __name__ == "__main__":

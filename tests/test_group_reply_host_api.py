@@ -11,12 +11,13 @@ from astrbot.api.web import PluginRequest, bind_request_context
 from starlette.requests import Request
 
 from astrbot_host.management_identity import dashboard_operator
-from companion_v2.execution.models import digest
+from companion_v2.execution.models import TaskContext, digest
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.configuration.owners import SparseConfigurationOwner
-from companion_v2.conversation.participation import ACTION
+from companion_v2.conversation.participation import (ACTION, CONFIG_GROUP as PARTICIPATION_GROUP,
+    group_participation_settings)
 from companion_v2.expression.configuration import GROUP_SCOPE_GROUP
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from tests.group_host_support import GroupFixture, group_config
@@ -186,6 +187,79 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.window_personas["qq-main:GroupMessage:300"] = "original"
         self.assertEqual((await self.request())["data"]["settings"]["group_air_guard_max_bot_replies"], 5)
         self.assertEqual((await self.request(query="session_id=201_300"))["data"]["settings"]["group_air_guard_max_bot_replies"], 7)
+
+    async def test_interjection_preferences_are_saved_to_the_current_group_window(self):
+        await self.start_host()
+        initial = await self.request("/participation")
+        self.assertEqual(initial["status"], "ok", initial)
+        self.assertEqual(initial["data"]["scope"], "window")
+        self.assertEqual(set(initial["data"]["settings"]), {
+            "enable_group_interjection", "group_interject_min_interval_minutes",
+            "group_interject_max_daily", "enable_group_interjection_feedback",
+            "group_interject_feedback_window_seconds"})
+        self.assertEqual(initial["data"]["fields"]["enable_group_interjection"]["write_layer"], "window")
+        self.assertEqual(initial["data"]["fields"]["enable_group_interjection"]["editable_layers"], ["window"])
+
+        changed = await self.request("/participation/configure", data={
+            "operation_key": "group-a-interjection",
+            "edit_token": initial["data"]["edit_token"],
+            "changes": {"enable_group_interjection": True,
+                        "group_interject_min_interval_minutes": 45,
+                        "group_interject_max_daily": 4,
+                        "enable_group_interjection_feedback": False,
+                        "group_interject_feedback_window_seconds": 900},
+        })
+        self.assertEqual(changed["status"], "ok", changed)
+        self.assertTrue(changed["data"]["status"]["settings"]["enable_group_interjection"])
+        self.assertEqual(changed["data"]["status"]["provenance"]["enable_group_interjection"]["layer"], "window")
+
+        for target in ("group-b", "group-c"):
+            isolated = await self.request("/participation", target=target)
+            self.assertEqual(isolated["status"], "ok", isolated)
+            self.assertFalse(isolated["data"]["settings"]["enable_group_interjection"])
+            self.assertEqual(isolated["data"]["settings"]["group_interject_min_interval_minutes"], 180)
+
+        other_field = await self.request("/participation/configure", data={
+            "operation_key": "not-an-interjection-field",
+            "edit_token": changed["data"]["status"]["edit_token"],
+            "changes": {"enable_group_repeat_follow": False},
+        })
+        self.assertEqual(other_field["data"]["code"], "group_participation_configuration_invalid")
+
+        batch_id = await self.receive_group(target="group-a")
+        context = TaskContext.restore(json.loads(
+            self.controller.session.application.messages.batch(batch_id)["context_json"]))
+        effective = group_participation_settings(self.controller.runtime, context)
+        self.assertTrue(effective["enable_group_interjection"])
+        self.assertEqual(effective["group_interject_min_interval_minutes"], 45)
+
+        selected = self.controller.settings.target("group-a")
+        bridge = self.controller.session.bridge.groups
+        account = bridge.accounts[(selected.platform_id, selected.account_id)]
+        _, role, _ = await bridge._role(account, selected.group_id)
+        role_target = ConfigTarget(self.controller.runtime.installation_id, ConfigLayer.ROLE,
+                                   role, bot_id=selected.bot_id)
+        operator = dashboard_operator(self.controller.runtime, "admin", at=self.controller.now())
+        defaults = self.controller.session.application.configuration.read(
+            operator, target=role_target, group_id=PARTICIPATION_GROUP, observed_at=self.controller.now())
+        self.assertTrue(defaults.is_success, defaults.failure)
+        self.assertFalse(defaults.unwrap().values[PARTICIPATION_GROUP + ".enable_group_interjection"])
+
+        stale_reset = await self.request("/participation/configure", data={
+            "operation_key": "group-a-interjection-reset",
+            "edit_token": changed["data"]["status"]["edit_token"],
+            "changes": {}, "reset_to_inherit": ["enable_group_interjection"],
+        })
+        self.assertEqual(stale_reset["data"]["code"], "configuration_revision_conflict")
+        current = await self.request("/participation")
+        reset = await self.request("/participation/configure", data={
+            "operation_key": "group-a-interjection-reset-refreshed",
+            "edit_token": current["data"]["edit_token"],
+            "changes": {}, "reset_to_inherit": ["enable_group_interjection"],
+        })
+        self.assertEqual(reset["status"], "ok", reset)
+        self.assertFalse(reset["data"]["status"]["settings"]["enable_group_interjection"])
+        self.assertFalse(reset["data"]["status"]["provenance"]["enable_group_interjection"]["explicit"])
 
     async def test_group_override_can_be_reset_to_role_inheritance(self):
         await self.start_host()

@@ -45,6 +45,10 @@ def controller(**services):
     return NS(native_extensions=registry), services
 
 
+def context_text(request):
+    return "\n".join(part.text for part in request.extra_user_content_parts)
+
+
 class LocalLive(Live2DMixin, SoullinkMixin, SubtitleMixin):
     def __init__(self):
         self.config = {"l2d_hotkeys": [{"tag": "开心", "hotkey_id": "fixture", "description": "笑一下"}],
@@ -57,6 +61,7 @@ class LocalLive(Live2DMixin, SoullinkMixin, SubtitleMixin):
         self._push_subtitle = AsyncMock()
         self._check_and_reconnect = AsyncMock(side_effect=AssertionError("request must not reconnect"))
         self._build_bili_live_auxiliary_context = AsyncMock(side_effect=AssertionError("no legacy context read"))
+        self.events = ["观众：今天的声音好可爱"]
 
     def _inject_vts_command_fallback_instruction(self, event, req):
         req.system_prompt += ""
@@ -77,7 +82,7 @@ class LocalLive(Live2DMixin, SoullinkMixin, SubtitleMixin):
         return True
 
     def _recent_bili_events(self, **kwargs):
-        return ["观众：今天的声音好可爱"]
+        return self.events
 
     def _format_bili_events(self, events):
         return "\n".join(events)
@@ -141,7 +146,8 @@ class NativeHostEventTests(unittest.IsolatedAsyncioTestCase):
         host, _ = controller(live=runtime)
         req = ProviderRequest(system_prompt=None)
         prepare_native_host_request(host, HostEvent(), req)
-        self.assertIn("今天的声音好可爱", req.system_prompt)
+        self.assertIn("今天的声音好可爱", context_text(req))
+        self.assertNotIn("今天的声音好可爱", req.system_prompt)
         self.assertIn("开心", req.system_prompt)
         runtime._check_and_reconnect.assert_not_awaited()
         runtime._build_bili_live_auxiliary_context.assert_not_awaited()
@@ -154,7 +160,7 @@ class NativeHostEventTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("astrbot_host.native_extensions.host_events", level="WARNING"):
             prepare_native_host_request(host, HostEvent(), req)
         self.assertIn("AstrBot 基础人格", req.system_prompt)
-        self.assertIn("今天的声音好可爱", req.system_prompt)
+        self.assertIn("今天的声音好可爱", context_text(req))
 
     async def test_soullink_without_controls_preserves_multimodal_component_order(self):
         runtime = LocalLive()
@@ -231,17 +237,24 @@ class NativeHostEventTests(unittest.IsolatedAsyncioTestCase):
         host, _ = controller(game=runtime)
         req = ProviderRequest(system_prompt="AstrBot 基础人格")
         prepare_native_host_request(host, HostEvent(), req)
-        self.assertIn("提问 3 次", req.system_prompt)
-        self.assertNotIn(own.game.puzzle.solution, req.system_prompt)
-        self.assertNotIn(own.messages[0]["content"], req.system_prompt)
-        self.assertEqual(req.system_prompt.count("当前私聊房间"), 1)
-        prepared = req.system_prompt
+        self.assertEqual(req.system_prompt, "AstrBot 基础人格")
+        self.assertIn("提问 3 次", context_text(req))
+        self.assertNotIn(own.game.puzzle.solution, context_text(req))
+        self.assertNotIn(own.messages[0]["content"], context_text(req))
+        self.assertEqual(context_text(req).count("当前私聊房间"), 1)
+        prepared = context_text(req)
         prepare_native_host_request(host, HostEvent(), req)
-        self.assertEqual(req.system_prompt, prepared)
+        self.assertEqual(context_text(req), prepared)
+        own.game.question_count = 4
+        prepare_native_host_request(host, HostEvent(), req)
+        self.assertIn("提问 4 次", context_text(req))
+        self.assertNotIn("提问 3 次", context_text(req))
+        self.assertEqual(req.system_prompt, "AstrBot 基础人格")
         for event in (HostEvent(sender="999"), HostEvent(private=False)):
             req = ProviderRequest(system_prompt="原提示")
             prepare_native_host_request(host, event, req)
             self.assertEqual(req.system_prompt, "原提示")
+            self.assertFalse(req.extra_user_content_parts)
 
     async def test_game_recent_result_expires_and_does_not_cross_users(self):
         runtime = LocalGame([])
@@ -250,10 +263,12 @@ class NativeHostEventTests(unittest.IsolatedAsyncioTestCase):
         req = ProviderRequest(system_prompt="原提示")
         prepare_native_host_request(host, HostEvent(), req)
         self.assertEqual(req.system_prompt, "原提示")
+        self.assertFalse(req.extra_user_content_parts)
         self.assertFalse(runtime._recent_private_game_results)
         runtime._recent_private_game_results["bot:private:200"] = NS(user_qq="300", expires_at=0, summary="其他玩家结果")
         prepare_native_host_request(host, HostEvent(), req)
         self.assertEqual(req.system_prompt, "原提示")
+        self.assertFalse(req.extra_user_content_parts)
 
     async def test_reality_guidance_requires_a_current_private_request_and_a_real_v2_tool(self):
         runtime = NS(_safe_event_is_private=lambda event: event.is_private_chat(),
@@ -270,13 +285,17 @@ class NativeHostEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(req.system_prompt, "原提示")
         req = ProviderRequest(system_prompt="原提示", func_tool=NS(tools=[camera]))
         prepare_native_host_request(host, HostEvent(text="看看摄像头，我在吃什么"), req)
-        self.assertIn(camera.name, req.system_prompt)
-        self.assertIn("final_response_instruction", req.system_prompt)
-        self.assertNotIn("pc_reality_touch_camera_snapshot", req.system_prompt)
-        self.assertNotIn("一句", req.system_prompt)
-        original = req.system_prompt
+        self.assertIn(camera.name, context_text(req))
+        self.assertIn("final_response_instruction", context_text(req))
+        self.assertNotIn("pc_reality_touch_camera_snapshot", context_text(req))
+        self.assertNotIn("一句", context_text(req))
+        self.assertEqual(req.system_prompt, "原提示")
+        original = context_text(req)
         prepare_native_host_request(host, HostEvent(text="看看摄像头，我在吃什么"), req)
-        self.assertEqual(req.system_prompt, original)
+        self.assertEqual(context_text(req), original)
+        prepare_native_host_request(host, HostEvent(text="今天好累"), req)
+        self.assertFalse(req.extra_user_content_parts)
+        self.assertEqual(req.system_prompt, "原提示")
 
 
 if __name__ == "__main__":

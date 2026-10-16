@@ -13,10 +13,10 @@ NOW = datetime(2026, 9, 27, 10, tzinfo=timezone.utc)
 
 
 class GroupParticipationHintTests(unittest.TestCase):
-    def hints(self, recent=(), batches=None, settings=None, materials=(), sender="200", images=()):
+    def hints(self, recent=(), batches=None, settings=None, materials=(), sender="200", images=(), native=False):
         request = NS(event=NS(received_at=NOW), context=NS(materials=materials), images=images)
         context = NS(actor=NS(principal=NS(native_account_id=sender)))
-        return group_hints(request, context, settings or {}, recent, batches or {})
+        return group_hints(request, context, settings or {}, recent, batches or {}, native=native)
 
     def test_segmented_reply_is_one_round_and_future_receipts_do_not_count(self):
         recent = [dict(type="confirmed_group_reply", part_id=part, delivered_at=at.isoformat())
@@ -53,12 +53,37 @@ class GroupParticipationHintTests(unittest.TestCase):
         self.assertNotIn("群唤醒参考", self.hints(settings={"group_wakeup_enabled": False}))
 
     def test_group_image_is_only_a_prompt_hint_for_current_authorized_images(self):
-        settings = {"group_wakeup_image_enabled": True, "group_wakeup_image_weight": 0.35}
+        settings = {"group_wakeup_image_enabled": True, "group_wakeup_image_weight": 0.35,
+                    "group_wakeup_bot_name": "小星", "group_wakeup_direct_words": '["星星"]',
+                    "group_wakeup_primary_member_ids": '["200"]',
+                    "group_wakeup_owner_direct_words": '["小星同学"]'}
         self.assertNotIn("图片中与你明确兴趣", self.hints(settings=settings))
         hint = self.hints(settings=settings, images=(object(),))
         self.assertIn("图片中与你明确兴趣", hint)
         self.assertIn("参考权重 35%", hint)
         self.assertIn("不要求接话", hint)
+        self.assertIn('["星星", "小星"]', hint)
+        self.assertIn('["小星同学"]', hint)
+        self.assertIn("表情包优先理解其情绪和表达", hint)
+        self.assertNotIn("图片中与你明确兴趣", self.hints(settings=settings, native=True))
+
+    def test_dense_group_replies_prompt_a_configured_cooldown_for_weak_candidates(self):
+        recent = [dict(type="native_group_reply", turn_id=str(index),
+                       returned_at=(NOW - timedelta(seconds=seconds)).isoformat())
+                  for index, seconds in enumerate((30, 20, 10))]
+        settings = {"group_air_guard_window_seconds": 60,
+                    "group_air_guard_max_bot_replies": 3,
+                    "group_air_guard_cooldown_seconds": 150}
+        hint = self.hints(recent, settings=settings, native=True)
+        self.assertIn("最近 60 秒内达到 3 轮 Bot 回复", hint)
+        self.assertIn("距该轮密集接话结束约 140 秒仍在 150 秒收口期内", hint)
+        self.assertIn("明确 @、清楚直呼角色", hint)
+        self.assertIn("成员明确把实质问题交给你时仍结合语境回应", hint)
+
+        expired = [dict(type="native_group_reply", turn_id=str(index),
+                        returned_at=(NOW - timedelta(seconds=seconds)).isoformat())
+                   for index, seconds in enumerate((180, 170, 160))]
+        self.assertNotIn("群聊高频收口参考", self.hints(expired, settings=settings, native=True))
 
     def test_media_labels_and_thread_metadata_are_not_group_interest_evidence(self):
         hint = self.hints()

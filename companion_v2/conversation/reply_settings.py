@@ -31,10 +31,12 @@ RULES_FIELD = GROUP + ".rules_enabled"
 IMAGE_POSITIONS = frozenset(("after_text", "before_text"))
 VOICE_FIELDS = tuple(key for key in asdict(VoiceReplyPolicy())
                      if key not in ("private_probability", "group_probability"))
-GROUP_AIR_DEFAULTS = {"group_air_guard_enabled": True, "group_air_guard_window_seconds": 180,
-                      "group_air_guard_max_bot_replies": 3, "group_air_guard_polite_loop_limit": 2}
+GROUP_AIR_DEFAULTS = {"group_air_guard_enabled": True, "group_air_guard_window_seconds": 60,
+                      "group_air_guard_max_bot_replies": 3, "group_air_guard_cooldown_seconds": 150,
+                      "group_air_guard_polite_loop_limit": 2}
 GROUP_AIR_LIMITS = {"group_air_guard_window_seconds": (30, 1800),
                     "group_air_guard_max_bot_replies": (1, 20),
+                    "group_air_guard_cooldown_seconds": (0, 1800),
                     "group_air_guard_polite_loop_limit": (1, 10)}
 GROUP_WAKEUP_LEGACY_FIELDS = frozenset(("group_wakeup_enabled", "group_wakeup_direct_words",
                                         "group_wakeup_context_words", "group_wakeup_interest_keywords",
@@ -342,7 +344,8 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
                    "private_image_provider_failure_cooldown_seconds": (0, 3600)})
     return tuple(FieldDefinition(GROUP + "." + name, GROUP, GROUP,
         ValueKind.WEIGHT if name == "part_gap_log_base" else
-        ValueKind.PROBABILITY if name in ("voice_probability", "group_wakeup_interest_probability") else
+        ValueKind.PROBABILITY if name in ("voice_probability", "voice_primary_mention_probability",
+                                          "group_wakeup_interest_probability") else
         {bool: ValueKind.BOOLEAN, int: ValueKind.INTEGER, float: ValueKind.PROBABILITY, str: ValueKind.TEXT}[type(value)], value,
         layers=CONFIGURATION_LAYERS, owner_id=OWNER,
         **(dict(zip(("minimum", "maximum"), limits[name])) if name in limits else {}),

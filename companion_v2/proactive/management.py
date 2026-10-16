@@ -7,13 +7,12 @@ from companion_v2.identity_policy.models import AuthorizationTier, GrantState
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.identity_policy.grants import PERSON_PERMISSION_GRANT_PREFIX
 
-from .configuration import GROUP, PURPOSES, RELATIONSHIP_BUDGET_FIELDS, target_for
+from .configuration import GROUP, PURPOSES, target_for
 from .preferences import ContactPreferences
 from .service import CONTACT_KIND
 
 
 GRANT_PREFIX = "proactive-managed:"
-READONLY_FIELDS = tuple(sorted(key.removeprefix(GROUP + ".") for key in RELATIONSHIP_BUDGET_FIELDS))
 
 
 class ContactManagement:
@@ -56,7 +55,7 @@ class ContactManagement:
         return {"settings": settings, "edit_token": snapshot.edit_token,
             "effective": {"allowed": allowed, "reason": reason,
                 "automatic_allowed": automatic_reason is None, "automatic_reason": automatic_reason,
-                "model_registered": registered, "readonly_fields": list(READONLY_FIELDS)},
+                "model_registered": registered, "readonly_fields": []},
             "purposes": purposes, "host_state": self.app.state}
 
     @outcome
@@ -147,8 +146,6 @@ class ContactManagement:
             fields = {field.field_id.removeprefix(GROUP + ".") for field in self.app.configuration.registry.group(GROUP)}
             if set(data["changes"]) - fields:
                 raise TaskError("contact_configuration_invalid", "contact settings contain unknown fields")
-            if set(data["changes"]).intersection(READONLY_FIELDS):
-                raise TaskError("contact_relationship_budget_scope", "relationship-wide allowances are read-only in this window")
             operation_id = "contact-config:" + digest([operator.subject, self.context.key, data["operation_key"]])
             receipt = require(self.app.configuration.patch(operator, target=target_for(self.context), group_id=GROUP,
                 operation=OperationRef(operation_id, GROUP, self.context.scope, VersionRef(operation_id, 1), operation_id),

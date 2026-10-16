@@ -246,3 +246,54 @@ class ProactiveMaterialPoolTests(unittest.TestCase):
         other = read_material_pool(schedule, other_context, observed_at=NOW, settings={})
         self.assertFalse(any(item["category"] == "主动消息" for item in other["items"]))
         database.close()
+
+    def test_daily_traces_include_local_day_boundaries_and_model_skips(self):
+        database = sqlite3.connect(":memory:")
+        database.row_factory = sqlite3.Row
+        database.executescript("""
+            CREATE TABLE proactive_contacts(contact_id TEXT, origin_key TEXT, record_json TEXT,
+                body TEXT, payload_hash TEXT, created_at TEXT);
+            CREATE TABLE background_deliveries(owner TEXT, origin_key TEXT, request_json TEXT,
+                payload_hash TEXT, state TEXT, receipt_ref TEXT, delivered_at TEXT);
+        """)
+        documents = (
+            ("before", {"decision": "send", "purpose": "chat", "thought_summary": "前一天"},
+             "昨天的消息", "2026-10-06T15:59:59.999999+00:00"),
+            ("at-start", {"decision": "send", "purpose": "chat", "thought_summary": "当天起点"},
+             "当天起点消息", "2026-10-06T16:00:00+00:00"),
+            ("skip", {"decision": "skip", "purpose": "chat", "thought_summary": "早上问候",
+                      "skip_reason": "model_decision", "model_skip_reason": "no_natural_opening"},
+             "", "2026-10-07T07:00:00+00:00"),
+            ("at-end", {"decision": "send", "purpose": "chat", "thought_summary": "下一天"},
+             "下一天消息", "2026-10-07T16:00:00+00:00"),
+        )
+        for contact_id, document, body, created_at in documents:
+            database.execute("INSERT INTO proactive_contacts VALUES (?, ?, ?, ?, ?, ?)", (
+                contact_id, "private-c", json.dumps(document), body, contact_id + "-hash", created_at))
+
+        class Runtime:
+            @contextmanager
+            def read_only_snapshot(self):
+                yield database
+
+        context = NS(key="private-c", scope=NS(kind=ScopeKind.PRIVATE, key="private-c"),
+                     audience=NS(recipients=("recipient-c",)), actor=object())
+        schedule = NS(contacts=NS(history=NS(interaction=Mock(return_value=None))), runtime=Runtime())
+        start = datetime(2026, 10, 6, 16, tzinfo=timezone.utc)
+        end = datetime(2026, 10, 7, 16, tzinfo=timezone.utc)
+
+        result = read_proactive_contact_traces(schedule, ((context, "user-c", "澄溪"),),
+            observed_at=NOW, created_at_start=start, created_at_end=end)
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["total_count"], 2)
+        self.assertEqual({item["title"] for item in result["items"]}, {"当天起点", "早上问候"})
+        skipped = next(item for item in result["items"] if item["title"] == "早上问候")
+        self.assertEqual(skipped["usage"]["status"], "not_sent")
+        self.assertEqual(skipped["usage"]["total_parts"], 0)
+        self.assertEqual(skipped["detail"], "")
+        self.assertEqual(skipped["skip_reason"], "model_decision")
+        self.assertEqual(skipped["model_skip_reason"], "no_natural_opening")
+        self.assertEqual(len({item["trace_window_id"] for item in result["items"]}), 1)
+        self.assertNotIn("private-c", result["items"][0]["trace_window_id"])
+        database.close()

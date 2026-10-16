@@ -37,6 +37,40 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
             changes={PRESENTATION_GROUP + "." + key: value for key, value in changes.items()},
             operation=self.operation(context.scope, owner=PRESENTATION_GROUP), observed_at=self.clock.now())
 
+    async def test_skip_is_counted_but_does_not_consume_the_daily_contact_allowance(self):
+        app = await self.enabled()
+        self.settings(app, {"max_contacts_24h": 1}).unwrap()
+
+        async def skip(_envelope):
+            return answered('{"decision":"skip","text":"","skip_reason":"repetitive"}')
+
+        self.model_behavior = skip
+        skipped = (await self.contact(app, self.opportunity("skip-does-not-send"))).unwrap().task
+        skipped_observation = app.proactive.observe(self.contact_context(), skipped.task_id).unwrap()
+        self.assertTrue(skipped_observation["skipped"])
+        self.assertEqual(skipped_observation["stage_metrics"]["model"]["provider_calls"], 1)
+        self.assertEqual(skipped_observation["stage_metrics"]["delivery"]["expected_parts"], 0)
+
+        usage = app.proactive.budget.usage_summary(self.contact_context(), self.preferences(app), self.clock.now())
+        self.assertEqual(usage["decisions"]["session"]["used"], 1)
+        self.assertEqual((usage["decisions"]["session"]["calls"], usage["decisions"]["session"]["pending"]), (1, 0))
+        self.assertEqual(usage["deliveries"]["session"]["used"], 0)
+        self.assertEqual(usage["deliveries"]["session"]["delivered"], 0)
+        self.assertEqual(usage["model"]["session"]["calls"], 1)
+
+        self.model_behavior = None
+        sent = (await self.contact(app, self.opportunity("after-model-skip"))).unwrap().task
+        await self.delivery_state(app, sent.task_id, "delivered")
+        sent_observation = app.proactive.observe(self.contact_context(), sent.task_id).unwrap()
+        self.assertEqual(sent_observation["stage_metrics"]["delivery"]["delivered_parts"], 1)
+
+        usage = app.proactive.budget.usage_summary(self.contact_context(), self.preferences(app), self.clock.now())
+        self.assertEqual(usage["decisions"]["session"]["used"], 2)
+        self.assertEqual(usage["deliveries"]["session"]["used"], 1)
+        self.assertEqual(usage["deliveries"]["session"]["occupied"], 1)
+        self.assertEqual(usage["deliveries"]["session"]["delivered"], 1)
+        self.assertEqual(usage["model"]["session"]["calls"], 2)
+
     async def test_proactive_contact_uses_saved_segmentation_and_delivers_ordered_parts(self):
         app = await self.enabled()
         self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
@@ -607,9 +641,9 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(task.state, "succeeded")
         self.assertEqual((self.called, self.sent), ([], []))
 
-    async def test_failed_contact_tasks_release_decision_allowance(self):
+    async def test_model_decision_calls_are_counted_without_a_separate_hard_limit(self):
         app = await self.enabled()
-        self.settings(app, {"max_attempts_24h": 1}).unwrap()
+        self.settings(app, {"max_contacts_24h": 1}).unwrap()
 
         async def skip(_envelope):
             return answered('{"decision":"skip","text":""}')
@@ -619,17 +653,21 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.state, "succeeded")
         preferences = self.preferences(app)
         usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
-        self.assertEqual((usage["session"]["used"], usage["relationship"]["used"]), (1, 1))
-        with self.assertRaises(TaskError) as exhausted:
-            app.proactive.budget.attempts(self.contact_context(), preferences, self.clock.now())
-        self.assertEqual(exhausted.exception.code, "contact_attempt_budget")
+        self.assertEqual(usage["session"]["used"], 1)
+        self.assertNotIn("relationship", usage)
+        self.assertNotIn("limit", usage["session"])
+
+        self.model_behavior = None
+        sent = (await self.contact(app, self.opportunity("after-counted-skip"))).unwrap().task
+        await self.delivery_state(app, sent.task_id, "delivered")
+        self.assertEqual(len(self.sent), 1)
 
         for state in ("failed", "cancelled", "expired", "dead_letter"):
             with app.runtime.transaction() as connection:
                 connection.execute("UPDATE execution_tasks SET state = ? WHERE task_id = ?", (state, task.task_id))
             usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
-            self.assertEqual((usage["session"]["used"], usage["relationship"]["used"]), (0, 0), state)
-            app.proactive.budget.attempts(self.contact_context(), preferences, self.clock.now())
+            self.assertEqual(usage["session"]["used"], 2, state)
+            self.assertNotIn("relationship", usage)
 
     async def test_administrator_diagnostic_surfaces_local_model_budget_deferral(self):
         app = await self.enabled(budget=BudgetPolicy(*(Amount(1, 100_000) for _ in range(5))))
@@ -639,9 +677,26 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.failure.code, "model_budget_exhausted")
         self.assertEqual((self.called, self.sent), ([], []))
 
+    async def test_local_laya_events_are_not_provider_cost_or_contact_quota_usage(self):
+        app = await self.enabled()
+        context = self.contact_context()
+        preferences = self.preferences(app)
+        with app.runtime.transaction() as connection:
+            connection.execute("""INSERT INTO laya_decision_events
+                (event_id, origin_key, batch_id, source, status, mode, elapsed_ms,
+                 enabled_fields_json, observed_at)
+                VALUES (?, ?, ?, 'conversation', 'ok', 'local', 8, '{}', ?)""",
+                ("a" * 32, context.key, "local-laya-test", self.clock.now().isoformat()))
+
+        usage = app.proactive.budget.usage_summary(context, preferences, self.clock.now())
+        self.assertEqual(usage["model"]["session"]["calls"], 0)
+        self.assertIsNone(usage["model"]["session"]["cost_microusd"])
+        self.assertEqual(usage["decisions"]["session"]["used"], 0)
+        self.assertEqual(usage["deliveries"]["session"]["used"], 0)
+
     async def test_administrator_delivery_tests_bypass_contact_windows_and_do_not_consume_daily_limits(self):
         app = await self.enabled()
-        self.settings(app, {"max_attempts_24h": 0, "max_contacts_24h": 0,
+        self.settings(app, {"max_contacts_24h": 0,
             "pause_until": (NOW + timedelta(hours=1)).isoformat(), "quiet_enabled": True,
             "quiet_start": "00:00", "quiet_end": "00:00"}).unwrap()
 
@@ -655,20 +710,21 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(app.proactive._duplicate(self.contact_context(), self.sent[0].text, preferences,
             self.clock.now(), purpose="chat", contact_id="test-probe", administrator_test=True))
         usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
-        self.assertEqual(usage["session"], {"used": 0, "limit": 0, "window_hours": 24})
-        self.assertEqual(usage["relationship"]["used"], 0)
+        self.assertEqual((usage["session"]["used"], usage["session"]["date"],
+                          usage["session"]["timezone"]), (0, "2026-09-21", "Asia/Shanghai"))
+        self.assertNotIn("relationship", usage)
         self.assertEqual(preferences.reason("chat"), "proactive_paused")
 
-        self.settings(app, {"max_attempts_24h": 1, "max_contacts_24h": 1}).unwrap()
+        self.settings(app, {"max_contacts_24h": 1}).unwrap()
         ordinary = await self.contact(app, self.opportunity("ordinary-during-pause"))
         self.assertEqual(ordinary.failure.code, "no_feasible_thought")
 
         self.settings(app, {"pause_until": "", "quiet_enabled": False}).unwrap()
         preferences = self.preferences(app)
-        app.proactive.budget.attempts(self.contact_context(), preferences, self.clock.now())
         app.proactive.budget.contacts(self.contact_context(), preferences, self.clock.now())
         usage = app.proactive.budget.attempt_usage(self.contact_context(), preferences, self.clock.now())
-        self.assertEqual(usage["session"], {"used": 0, "limit": 1, "window_hours": 24})
+        self.assertEqual((usage["session"]["used"], usage["session"]["date"],
+                          usage["session"]["timezone"]), (0, "2026-09-21", "Asia/Shanghai"))
 
     async def test_administrator_delivery_test_omits_history_memory_and_repeat_guidance(self):
         app = await self.enabled()

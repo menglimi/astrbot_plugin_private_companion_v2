@@ -52,8 +52,11 @@ class StateManagement:
             effective = {}
             for option, actions in PERMISSIONS.items():
                 try:
-                    for action in actions:
-                        self.app.role_state.access.check(self.context, action)
+                    if option == "enabled":
+                        self.app.role_state.access.check_injection(self.context)
+                    else:
+                        for action in actions:
+                            self.app.role_state.access.check(self.context, action)
                     effective[option] = {"allowed": bool(settings[option]), "reason": None}
                 except TaskError as error:
                     effective[option] = {"allowed": False, "reason": error.code}

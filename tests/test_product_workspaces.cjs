@@ -328,6 +328,21 @@ test("workspace request timeout reaches the host request boundary", async () => 
   await pending;
 });
 
+test("workspace transport failures log only the sanitized route and timing", async () => {
+  const h = await harness(null, [], {captureWarnings: true,
+    postFailure: Object.assign(new Error("timed out"), {code: "bridge_timeout"})});
+  h.product.mountWorkspace();
+  await h.request(h.identity, "POST", "acquaintance/settings", "settings-timeout", 60000);
+  await new Promise(resolve => setImmediate(resolve));
+  const response = h.identity.messages.find(message => message.requestId === "settings-timeout");
+  assert.equal(response?.code, "bridge_timeout");
+  const warning = h.warnings.find(([label]) => label === "[CompanionV2] Workspace request failed");
+  assert.ok(warning);
+  assert.equal(warning[1].endpoint, "acquaintance/settings");
+  assert.equal(warning[1].timeout_ms, 60000);
+  assert.doesNotMatch(JSON.stringify(warning), /subject|participant|operation_key/);
+});
+
 test("target labels prefer resolved names and retain native identifiers", async () => {
   const h = await harness();
   assert.equal(h.product.targetLabel({scope_kind: "private", participant_id: "200", display_name: "朋友备注"}),

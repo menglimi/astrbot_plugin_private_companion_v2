@@ -121,11 +121,15 @@ class NativeImageRoutingTests(unittest.TestCase):
         self.assertIsNotNone(self.registry.current_declaration("native:" + PLUGIN_ID + ":image.generate"))
         self.assertIsNone(self.registry.current_declaration("native:" + PLUGIN_ID + ":image.edit"))
         self.assertIsNone(self.registry.current_declaration("native:" + PLUGIN_ID + ":image.mask_edit"))
+        self.assertEqual(self.registry.declaration_readiness("native:" + PLUGIN_ID + ":image.mask_edit"),
+                         "unsupported")
 
         self.save_online("openai")
         self.assertEqual(self.api.companion_v2_native().owner.backend.operations, ("generate", "edit"))
         self.assertIsNotNone(self.registry.current_declaration("native:" + PLUGIN_ID + ":image.edit"))
         self.assertIsNone(self.registry.current_declaration("native:" + PLUGIN_ID + ":image.mask_edit"))
+        self.assertEqual(self.registry.declaration_readiness("native:" + PLUGIN_ID + ":image.mask_edit"),
+                         "unsupported")
 
     def test_sd_webui_enables_masked_edit_after_a_real_endpoint_is_configured(self):
         current = self.api.output_configuration()

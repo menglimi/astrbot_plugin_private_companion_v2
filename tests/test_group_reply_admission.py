@@ -10,12 +10,16 @@ from unittest.mock import patch
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.configuration.owners import SparseConfigurationOwner
+from companion_v2.identity_policy.models import AuthorizationTier
+from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.conversation.participation import CONFIG_GROUP, GroupParticipationConfigurationOwner, configuration_fields
 from companion_v2.conversation.reply_settings import (GROUP as REPLY_GROUP, ReplyConfigurationOwner, target_for,
     configuration_fields as reply_fields)
 from companion_v2.conversation.reset import ConversationWindow, reset_window
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, activate_core_reply_delivery_guard
 from astrbot.core.agent.message import Message, ToolCall
+from astrbot.core.message.components import Plain
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot_host.core_reply_tools import native_tool_name
 from astrbot_host.core_reply_tracking import (
     finish_core_reply_tracking, mark_core_reply_inflight, prepare_core_reply_tracking,
@@ -92,7 +96,7 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                     reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
         return context
 
-    async def test_cleanup_preferences_follow_role_without_promoting_segmentation(self):
+    async def test_cleanup_role_defaults_preserve_explicit_group_overrides(self):
         context = (await self.controller.observe_group_early(self.group_event(identifier="reply-role-scope"))).unwrap()
         target = target_for(context)
         other_scope = dc_replace(target.scope, native_scope_id="other-group",
@@ -113,16 +117,24 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
             local_owner.write(window, fields, changes=values, reset=(), expected_revision=snapshot.revision,
                               observed_at=self.clock.now())
 
-        snapshot = reply_owner.read(target, fields)
-        reply_owner.write(target, fields, changes={cleanup_enabled: True, cleanup_words: '["，"]'},
+        role_target = target_for(context, ConfigLayer.ROLE)
+        snapshot = reply_owner.read(role_target, fields)
+        reply_owner.write(role_target, fields, changes={cleanup_enabled: True, cleanup_words: '["，"]'},
                           reset=(), expected_revision=snapshot.revision, observed_at=self.clock.now())
         shared = reply_owner.read(other_target, fields)
 
-        self.assertTrue(shared.fields[cleanup_enabled].value)
-        self.assertEqual(shared.fields[cleanup_words].value, '["，"]')
-        self.assertEqual(shared.fields[cleanup_enabled].source.layer, ConfigLayer.ROLE)
+        self.assertFalse(shared.fields[cleanup_enabled].value)
+        self.assertEqual(shared.fields[cleanup_words].value, '["。"]')
+        self.assertEqual(shared.fields[cleanup_enabled].source.layer, ConfigLayer.WINDOW)
         self.assertEqual(shared.fields[split_words].value, '["？"]')
         self.assertEqual(shared.fields[split_words].source.layer, ConfigLayer.WINDOW)
+        unconfigured = dc_replace(target, scope=dc_replace(target.scope, native_scope_id="third-group",
+                                   conversation_id="third-window", session_id="third-window"))
+        inherited = reply_owner.read(unconfigured, fields)
+        self.assertTrue(inherited.fields[cleanup_enabled].value)
+        self.assertEqual(inherited.fields[cleanup_words].value, '["，"]')
+        self.assertEqual(inherited.fields[cleanup_enabled].source.layer, ConfigLayer.ROLE)
+        self.assertFalse(inherited.fields[split_words].explicit)
 
     def configure_participation(self, context, **changes):
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
@@ -147,7 +159,7 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                                      group_interject_min_interval_minutes=33)
         event = self.event("core-effective-hints", "这也太离谱了")
         prepared = await self.core_turn(event)
-        prompt = event.core_request.system_prompt
+        prompt = "\n".join(part.text for part in event.core_request.extra_user_content_parts)
         self.assertIn("group_participation", prepared["context_sections"])
         for text in ("求助强度参考 95/100", "兴趣话题自主接话宜低频", "参考强度约 1%",
                      "自主插话参考额度剩余 0/0", "最小间隔参考 33 分钟", "本轮没有明确 @"):
@@ -197,10 +209,12 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.clock.advance(timedelta(seconds=1))
         second = self.event("core-autonomous-2", "小星你觉得呢", sender="201")
         await self.core_turn(second)
-        self.assertIn("自主插话参考额度剩余 1/2", second.core_request.system_prompt)
-        self.assertIn("最小间隔参考 33 分钟", second.core_request.system_prompt)
-        self.assertIn("宿主发送调用已返回", second.core_request.system_prompt)
-        self.assertNotIn("已确认 Bot 回复", second.core_request.system_prompt)
+        reference = "\n".join(part.text for part in second.core_request.extra_user_content_parts)
+        self.assertIn("自主插话参考额度剩余 1/2", reference)
+        self.assertIn("最小间隔参考 33 分钟", reference)
+        self.assertIn("宿主发送调用已返回", reference)
+        self.assertNotIn("已确认 Bot 回复", reference)
+        self.assertNotIn("自主插话参考额度剩余", second.core_request.system_prompt)
         self.clock.advance(timedelta(seconds=1))
         window = ConversationWindow.from_scope(prepared["context"].scope)
         reset_window(self.app.runtime, window, reset_id="core-participation-reset", at=self.clock.now())
@@ -208,7 +222,7 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.clock.advance(timedelta(seconds=1))
         third = self.event("core-autonomous-3", "小星再看看", sender="201")
         await self.core_turn(third)
-        self.assertIn("自主插话参考额度剩余 2/2", third.core_request.system_prompt)
+        self.assertIn("自主插话参考额度剩余 2/2", "\n".join(part.text for part in third.core_request.extra_user_content_parts))
         self.assert_no_v2_generation()
 
     async def test_unmatched_messages_keep_observation_without_intake_logs_batches_or_model_calls(self):
@@ -273,6 +287,34 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         await self.configure(group_wakeup_enabled=False)
         self.assertFalse((await self.candidate(self.event("wake-off", "小星来看看")))["admitted"])
         self.assertTrue((await self.candidate(self.event("at-when-off", "来看看", mention=True)))["admitted"])
+
+    async def test_core_user_mention_keyword_boosts_voice_without_trusting_other_mentions(self):
+        await self.configure(voice_enabled=True, voice_trigger_mode="request", voice_trigger_keywords="朗读",
+            voice_probability=0, voice_cooldown_seconds=300,
+            voice_primary_mention_keywords="专属语音词", voice_primary_mention_probability=1,
+            voice_primary_mention_prompt="语气更亲近一些。")
+        target = self.controller.settings.target("group-a")
+        core = self.controller.authority.ensure_actor(target, "201")
+        policy = ObjectAccessPolicy(self.app.runtime)
+        policy.set_tier(core.subject, AuthorizationTier.CORE,
+            expected_revision=policy.revision, observed_at=self.clock.now())
+
+        ordinary = self.event("ordinary-mention-voice", "专属语音词")
+        ordinary.message_obj.message.insert(0, NS(type="At", qq="100"))
+        ordinary.message_obj.message.insert(0, NS(type="At", qq="202"))
+        await self.core_turn(ordinary)
+        ordinary_prepared = ordinary.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]
+        self.assertIsNone(ordinary_prepared["voice_reply_policy"])
+
+        directed = self.event("core-mention-voice", "专属语音词")
+        directed.message_obj.message.insert(0, NS(type="At", qq="100"))
+        directed.message_obj.message.insert(0, NS(type="At", qq="201"))
+        await self.core_turn(directed)
+        directed_prepared = directed.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]
+        voice = directed_prepared["voice_reply_policy"]
+        self.assertEqual(voice.trigger_mode, "adaptive")
+        self.assertEqual(voice.cooldown_seconds, 0)
+        self.assertIn("语气更亲近一些。", voice.instruction)
 
     async def test_non_mention_core_reply_logs_reason_and_send_return_without_platform_confirmation(self):
         await self.configure(group_wakeup_bot_name="小星")
@@ -408,9 +450,18 @@ class GroupReplyAdmissionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_streaming_core_reply_finishes_without_a_decorating_or_after_sent_hook(self):
         event = self.event("stream", "说一句", mention=True)
+
+        async def native_stream(generator, *args, **kwargs):
+            async for chunk in generator:
+                await event.send(chunk)
+
+        async def chunks():
+            yield MessageChain(chain=[Plain("核心流式回复")])
+
+        event.send_streaming = native_stream
         prepared = await self.core_turn(event, result_type="STREAMING_RESULT")
         self.assertFalse(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["delivery_guard_active"])
-        await event.send_streaming("native-stream", False)
+        await event.send_streaming(chunks(), False)
         await self.flush_tracking()
         saved = self.admission.recorded_core_reply(prepared["context"], prepared["event_id"])
         self.assertEqual(saved["state"], "completed")

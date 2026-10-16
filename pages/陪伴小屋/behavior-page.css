@@ -1,0 +1,36 @@
+.behavior-learning-workspace{margin-top:var(--sp-5);min-width:0}
+.behavior-learning-head,.behavior-habit-heading,.behavior-habit-footer{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--sp-3)}
+.behavior-learning-head{align-items:center;flex-wrap:wrap;margin-bottom:var(--sp-4)}
+.behavior-learning-head h2{margin:0;color:var(--t-text-strong);font-size:var(--fs-title)}
+.behavior-learning-head p{margin:var(--sp-1) 0 0;color:var(--t-text-soft);font-size:var(--fs-body)}
+.behavior-learning-head p span{margin:0 var(--sp-2);color:var(--t-text-faint)}
+.behavior-learning-tools{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+.behavior-learning-workspace .button{background:var(--t-surface);border-color:var(--t-line);color:var(--t-text-strong)}
+.behavior-learning-workspace .button:hover:not(:disabled){background:var(--t-surface-soft);border-color:var(--t-line-firm)}
+.behavior-learning-tools select{min-height:38px;max-width:220px;border:1px solid var(--t-line);border-radius:var(--r-xs);padding:0 var(--sp-3);background:var(--t-surface);color:var(--t-text-strong);font:inherit}
+.behavior-habits{display:grid;gap:var(--sp-3)}
+.behavior-habit{padding:var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-sm,8px);background:var(--t-surface);min-width:0}
+.behavior-habit h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-body);overflow-wrap:anywhere}
+.behavior-habit-meta{display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-3);margin-top:var(--sp-2);color:var(--t-text-soft);font-size:var(--fs-tiny)}
+.behavior-state{flex:none;padding:var(--sp-1) var(--sp-2);border-radius:var(--r-xs);background:var(--t-surface-soft);color:var(--t-accent-ink);font-size:var(--fs-tiny)}
+.behavior-habit.is-paused .behavior-state{color:var(--t-text-faint)}
+.behavior-habit-content{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3) var(--sp-5);margin:var(--sp-4) 0}
+.behavior-habit-content>div:last-child{grid-column:1/-1}
+.behavior-habit-content dt{font-size:var(--fs-tiny);color:var(--t-text-soft);margin-bottom:var(--sp-1)}
+.behavior-habit-content dd{margin:0;color:var(--t-text-strong);font-size:var(--fs-body);line-height:1.7;overflow-wrap:anywhere;white-space:pre-wrap}
+.behavior-feedback{display:flex;flex-wrap:wrap;gap:var(--sp-2);padding:var(--sp-2) 0 var(--sp-3);font-size:var(--fs-tiny);color:var(--t-text-soft);overflow-wrap:anywhere}
+.behavior-habit-footer{border-top:1px solid var(--t-line);padding-top:var(--sp-3)}
+.behavior-habit-footer details{flex:1;min-width:0;color:var(--t-text-soft);font-size:var(--fs-body)}
+.behavior-habit-footer summary{cursor:pointer;min-height:36px;align-content:center;line-height:1.6}
+.behavior-habit-footer summary span{margin-left:var(--sp-2);font-size:var(--fs-tiny);color:var(--t-text-faint)}
+.behavior-habit-footer blockquote{margin:var(--sp-3) 0;padding-left:var(--sp-3);border-left:2px solid var(--t-line);overflow-wrap:anywhere}
+.behavior-habit-footer blockquote p,.behavior-last-attempt p{margin:0 0 var(--sp-1);white-space:pre-wrap}
+.behavior-habit-footer cite{font-style:normal;color:var(--t-text-faint);font-size:var(--fs-tiny)}
+.behavior-last-attempt{display:grid;gap:var(--sp-1);margin-top:var(--sp-3);overflow-wrap:anywhere}
+.behavior-last-attempt strong{font-weight:550;color:var(--t-text-strong)}
+.behavior-empty{padding:var(--sp-6);text-align:center;border:1px dashed var(--t-line);border-radius:var(--r-sm,8px);color:var(--t-text-soft)}
+.behavior-notice{padding:var(--sp-3);background:var(--t-surface-soft);color:var(--t-text-strong);border-radius:var(--r-xs);font-size:var(--fs-body)}
+.behavior-notice.is-error{color:var(--t-danger,var(--t-text-strong))}
+.behavior-learning-workspace :focus-visible{outline:2px solid var(--t-focus);outline-offset:3px}
+.behavior-sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+@media(max-width:760px){.behavior-habit{padding:var(--sp-3)}.behavior-habit-content{grid-template-columns:minmax(0,1fr)}.behavior-learning-tools{width:100%}.behavior-learning-tools label{flex:1}.behavior-learning-tools select{width:100%;max-width:none}.behavior-empty{padding:var(--sp-5) var(--sp-3)}}

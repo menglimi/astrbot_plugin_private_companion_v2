@@ -9,7 +9,7 @@ import re
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import MessageChain
 
-from companion_v2.conversation.segmentation import COHERENCE_PROMPT, SegmentationPolicy, part_gap_seconds
+from companion_v2.conversation.segmentation import SegmentationPolicy, part_gap_seconds
 from companion_v2.conversation.segment_control import LLM_SEGMENT_MARKER, controlled_parts
 from companion_v2.conversation.stream_segments import TextSegmentStream
 from .core_reply import CORE_REPLY_CONTEXT_EXTRA, is_core_reply_stream, sent_core_text
@@ -49,13 +49,11 @@ def segmentation_instruction(event, request=None):
         return ""
     prepared = core.get("prepared") or {}
     if not policy.llm_controlled:
-        audience = "群聊" if prepared.get("channel") == "group" else "私聊"
-        return COHERENCE_PROMPT + f"本轮由程序按当前规则整理{audience}分段，直接生成连贯正文。"
+        return ""
     prompt = re.sub(r"\{\{\s*split_marker\s*\}\}", lambda _: LLM_SEGMENT_MARKER,
                     policy.prompt or (NATIVE_PROMPT if prepared.get("channel") == "group" else PRIVATE_PROMPT),
                     flags=re.I)
-    audience = "群聊" if prepared.get("channel") == "group" else "私聊"
-    return COHERENCE_PROMPT + prompt + f" 本轮最多 {policy.max_segments} 条{audience}消息，代码、列表、引用和表格保持完整。"
+    return prompt
 
 
 def _parts(policy, text):

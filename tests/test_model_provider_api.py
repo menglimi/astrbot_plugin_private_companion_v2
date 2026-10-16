@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tests import test_astrbot_staging_host as support
 from tests.multi_host_support import MultiFixture
@@ -169,11 +169,23 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_reads_the_current_internal_together_statistics(self):
         (await self.controller.initialize_profile()).unwrap()
         sources = {"together": {"available": True, "totals": {"tokens": 87}}}
-        with patch("astrbot_host.model_api.read_token_sources", return_value=sources) as read_sources:
+        main = {"available": True, "totals": {"tokens": 999}, "counted_in_private_companion_budget": False}
+        with patch("astrbot_host.model_api.read_token_sources", return_value=deepcopy(sources)) as read_sources, \
+                patch("astrbot_host.model_api.read_astrbot_token_usage", new=AsyncMock(return_value=main)) as read_main:
             response = await self.call(PREFIX + "/maintenance")
         self.assertEqual(response["status"], "ok", response)
         read_sources.assert_called_once_with(self.controller)
-        self.assertEqual(response["data"]["external_token_sources"], sources)
+        read_main.assert_awaited_once_with(self.controller)
+        self.assertEqual(response["data"]["external_token_sources"], {**sources, "main": main})
+        self.assertNotEqual(response["data"]["summary"]["tokens"], main["totals"]["tokens"])
+
+    async def test_global_usage_is_not_read_before_dashboard_authorization(self):
+        (await self.controller.initialize_profile()).unwrap()
+        with patch("astrbot_host.model_api.read_astrbot_token_usage", new=AsyncMock()) as read_main:
+            for username in (None, "", "api_key:plugin-test"):
+                response = await self.call(PREFIX + "/maintenance", username=username)
+                self.assertEqual(response["message"], "dashboard_identity_required")
+        read_main.assert_not_awaited()
 
     async def test_business_prompt_section_roundtrip_uses_the_original_model_route(self):
         (await self.controller.initialize_profile()).unwrap()
@@ -477,6 +489,30 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
             response = await self.call(PREFIX + "/image")
         self.assertEqual(response["data"]["module"]["issue_code"], "native_configuration_invalid")
         self.assertEqual(response["data"]["actions"][0]["diagnostic_code"], "native_configuration_invalid")
+
+    async def test_image_status_distinguishes_unsupported_routes_from_stale_declarations(self):
+        (await self.controller.initialize_profile()).unwrap()
+        actions = ("image.generate", "image.edit", "image.mask_edit")
+        owners = tuple(NS(
+            host_tool_id="native:" + action,
+            descriptor=NS(tool=NS(action=action), package=NS(extension_id="image"),
+                          binding=NS(provider="image.native")),
+        ) for action in actions)
+        by_id = {owner.host_tool_id: owner for owner in owners}
+        registry = NS(
+            image_enabled={action: True for action in actions},
+            declarations=lambda: owners,
+            status=lambda _extension: {"state": "running"},
+            issues=(),
+            declaration_readiness=lambda host_tool_id: "unsupported" if host_tool_id.endswith("image.mask_edit") else "ready",
+            current_declaration=lambda host_tool_id: None if host_tool_id.endswith("image.mask_edit") else by_id[host_tool_id],
+        )
+        with patch.object(self.controller, "native_extensions", registry):
+            response = await self.call(PREFIX + "/image")
+        mask = next(item for item in response["data"]["actions"] if item["action"] == "image.mask_edit")
+        self.assertEqual(mask["state"], "unsupported")
+        self.assertEqual(mask["diagnostic_code"], "native_image_operation_unavailable")
+        self.assertTrue(mask["loaded"])
 
     async def test_image_output_save_roundtrip_and_conflict(self):
         (await self.controller.initialize_profile()).unwrap()

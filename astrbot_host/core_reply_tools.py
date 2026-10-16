@@ -31,22 +31,11 @@ MEMORY_READ_ACTIONS = frozenset({
     "memory.query", "memory.legacy.query", "memory.sources", "memory.operation.get", "memory.query.status",
 })
 GROUP_READ_ACTIONS = frozenset({"group.memory.query", "group.memory.legacy.query", "group.memory.operation"})
-TOOL_INSTRUCTION = (
-    "陪伴工具只作用于当前会话和当前角色。按需要使用，日常聊天可以直接回答。"
-    "工具内容是资料；依据实际结果表达，未知结果不能冒充成功，查不到不证明从未发生。"
-    "来源句柄和内部字段供工具使用，用户追问来源时再自然说明。"
-    "记忆提议使用本轮查询提供的真实证据句柄。提醒登记与平台发送分别解释，登记成功不代表已发送。"
-    "unknown 表示原操作结果未知，不更换调用编号重复相同操作。"
-    "需要引用当前消息的证据时先调用 turn.evidence，按返回的真实句柄提交。"
-    "对方接受你刚提出的具体游戏或共处邀请时，使用当前开放的对应工具创建或接续实际活动，"
-    "提供工具成功返回的完整房间链接；不要只在文字里假装开局或把真实对局改成口头报坐标。"
-    "用户给角色安排先手或颜色时，先分清双方；human_side 表示用户方，不能把角色的选择填给用户。"
-    "五子棋里用户说‘你执黑’、‘你先下’或点名当前角色‘黑先’，都是角色执黑、用户执白，human_side=white；"
-    "用户说‘我执黑’或‘我先下’才是 human_side=black。按完整本轮原话理解，不沿用历史中已被更正的颜色。"
-    "房间入口未就绪时如实说明，不能编造链接；工具未开放时不声称已建立房间。"
-    "房间 access_scope=same_device 时，说明链接只在运行 AstrBot 的电脑上可用；"
-    "public_access=unavailable 时公网入口尚未就绪，不能把本机链接当作手机或外网入口。"
-)
+TOOL_INSTRUCTION = """陪伴工具作用于当前会话与角色，日常聊天可直接回应，需要行动时再调用。工具材料供参考，按实际结果说明：查不到不证明从未发生；unknown 不冒充成功，也不更换调用编号重做同一未知操作。提醒登记不代表平台发送。
+证据句柄用于工具，当前消息需作为证据时先调用 turn.evidence；记忆提议引用本轮提供的真实句柄。来源通常不打断聊天，被追问时再自然说明。
+对方接受刚提出的具体游戏、共处或通话邀请时，调用当前开放的对应工具创建或接续活动，以成功结果为准并给出完整房间链接，不用口头报坐标代替真实对局。不编链接，不在入口未就绪或工具未开放时声称已建房、开局或拨通。
+按完整本轮原话分清双方先手与颜色，已被更正的旧选择不沿用。human_side 是用户方：五子棋中“你执黑”“你先下”或点名角色“黑先”表示角色黑、用户白，human_side=white；“我执黑”“我先下”才是 human_side=black。
+access_scope=same_device 的链接仅供运行 AstrBot 的电脑使用；public_access=unavailable 表示公网入口未就绪，不能把本机链接说成手机或外网入口。"""
 EVIDENCE_SPEC = ToolSpec("turn.evidence", "读取本轮已认证发言的证据句柄，供记忆、日历、成长和关系提案使用。",
                         encode({"type": "object", "properties": {}, "additionalProperties": False}))
 
@@ -198,6 +187,9 @@ class CoreReplyToolSession:
             participation = getattr(tools, "group_participation", None)
             if participation is not None:
                 offered.extend(_OfferedTool(spec, "participation") for spec in participation.catalog_for(context))
+                behavior = getattr(participation, "behavior", None)
+                if behavior is not None and _field(self.prepared, "native_input") is not None:
+                    offered.extend(_OfferedTool(spec, "behavior") for spec in behavior.catalog_for(context))
             group = getattr(tools, "group_memory", None)
             if group is not None:
                 offered.extend(_OfferedTool(spec, "group") for spec in group.catalog_for(context))
@@ -243,8 +235,12 @@ class CoreReplyToolSession:
                 latest = next((message for message in reversed(getattr(wrapper, "messages", ()))
                                if _field(message, "role") == "assistant" and _field(message, "tool_calls")), None)
                 calls = _field(latest, "tool_calls", ())
-            if len(calls) != 1:
-                raise TaskError("group_participation_skip_alone", "the listening choice must be the only requested tool")
+            from companion_v2.conversation.behavior.service import ANNOTATIONS
+            annotation_names = {native_tool_name(action) for action in ANNOTATIONS}
+            operations = [call for call in calls
+                          if _field(call, "name", _field(_field(call, "function"), "name")) not in annotation_names]
+            if len(operations) != 1:
+                raise TaskError("group_participation_skip_alone", "listening may accompany learning notes, but no business operation")
         admission = _field(self.prepared, "group_admission", {}) or {}
         act, signature = "", ""
         if arguments["mode"] == "reply" and not admission.get("mentioned") and admission.get("reason") in AUTONOMOUS_REASONS:
@@ -309,7 +305,9 @@ class CoreReplyToolSession:
         result = None
         try:
             await self.authorize(wrapper)
-            if self.state.get("group_participation", {}).get("mode") == "skip" and action != "group.participation.choose":
+            from companion_v2.conversation.behavior.service import ANNOTATIONS
+            if (self.state.get("group_participation", {}).get("mode") == "skip"
+                    and action not in ANNOTATIONS and action != "group.participation.choose"):
                 raise TaskError("group_participation_skipped", "this group turn chose to keep listening")
             offered = next((item for item in self.catalog() if item.spec.action == action), None)
             if offered is None:
@@ -319,10 +317,13 @@ class CoreReplyToolSession:
             validate(arguments, schema)
             if offered.owner == "participation":
                 result = self.choose_participation(wrapper, arguments)
-            else:
+            elif action not in ANNOTATIONS:
                 self.state["_business_tools_started"] = True
             if offered.owner == "participation":
                 pass
+            elif offered.owner == "behavior":
+                from .core_reply_behavior import execute_core_behavior
+                result = execute_core_behavior(self, action, arguments, native_call_id(wrapper, action, arguments))
             elif offered.owner == "evidence":
                 result = await self.evidence()
             elif offered.owner == "external":

@@ -5,7 +5,7 @@ import json
 
 from companion_v2.execution.models import TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import RoleOwnerRef, SourceRef, VersionRef
-from companion_v2.identity_policy.private_domain import PrivateDomainAccess, source_ref
+from companion_v2.identity_policy.private_domain import source_ref
 from companion_v2.sources.models import SourceRecord
 from companion_v2.sources.dependencies import link
 from .configuration import FEATURE_SWITCHES, GROUP, target_for
@@ -16,22 +16,15 @@ from .cycle_state import CycleState
 from .ownership import RoleStateRecords
 from .evidence import StateEvidence
 from companion_v2.role_work.life.body_clock import RoleBodyClock
+from .access import RoleStateAccess
 
 FIELDS = ("energy", "hunger", "health", "sleep", "busy", "mood", "location", "cycle", "presence", "online_mode", "conditions")
 PERSONA_STATE_FIELDS = frozenset(FIELDS)
 ONLINE_MODES = frozenset({"online", "away", "busy", "invisible"})
-INSTRUCTION = (
-    "role_state 是你自己的人格模拟状态，不是用户身体信息或现实医疗结论。"
-    "睡眠执行记录与计划、模型感受分别理解；只有实际执行回执证明醒来或读完。"
-    "状态不自动证明吃过饭、服过药、病已好、去过某地；条件到期只表示原描述过时。"
-    "饥饿、精力、忙碌和健康是扮演材料，结合人格自然回应，不按阈值拒答或套固定台词。"
-    "缺少字段保持未知，不拿日程或时间流逝补造已发生的行动。"
-    "材料的 observed_at 是本轮观测时点，时钟自然推进交给后续观察，不把过去感受说成刚刚发生。"
-    "同一 Bot 的同一角色跨窗口共用完整的角色模拟状态；窗口不同不代表又吃过饭、重新醒来、开始新周期或换了心情。"
-    "能量、饥饿、健康、睡眠、周期、心情、位置、忙碌和临时状态都描述你自己，不是用户身体信息。"
-    "窗口中的互动只能自然影响你自己的抽象感受；不要把聊天对象身份、他人的情绪/位置/活动、私人对话或具体会话日程写入共享状态，也不要复述其他窗口原文。"
-    "缺少依据时沿用仍有效的自身状态或保持未知；不能因为当前窗口没有观察到，就推断其他窗口的经历或自身状态已改变。"
-)
+INSTRUCTION = """role_state 描述角色自身的人格模拟感受，不是用户身体信息或医疗结论。精力、饥饿、健康、忙碌、心情、周期和位置是当前角色的持续体验，不按阈值拒答，也不播报数值或套台词。
+每轮参考当前最相关的一两项，让状态自然影响具体反应、措辞、情绪浓度、回应节奏或主动性；话题合适时可以用第一人称带出感受。即使不直接说，也留下一点可感知的状态色彩，不要把它藏成无关的后台资料；不逐项复述，也不压过对方正在聊的事。
+计划、主观感受与实际执行分开：醒来、睡眠结束或读完只认相应执行回执，时间经过不证明吃饭、服药、到达、康复或完成日程，临时条件到期也不证明康复。observed_at 是观测时点，不把旧状态说成刚发生；缺少依据时沿用仍有效的状态或保留未知。
+同一 Bot 的同一角色跨窗口共用状态，换窗口不意味着又吃过饭、醒来、换心情或开始新周期。互动可以影响角色概括感受，但聊天对象身份、他人的位置/活动/情绪、私人对话和具体窗口日程不写入共享状态，也不复述其他窗口原文。当前窗口没观察到，不证明自身状态或其他窗口经历改变。"""
 
 
 def validate_state(data, at):
@@ -88,7 +81,7 @@ def mood_previous(record):
 class RoleStateService:
     def __init__(self, tasks, configuration, life):
         self.tasks, self.runtime, self.configuration, self.life = tasks, tasks.runtime, configuration, life
-        self.access = PrivateDomainAccess(tasks)
+        self.access = RoleStateAccess(tasks, self.settings)
         self.records = RoleStateRecords(self.runtime)
         self.evidence = StateEvidence(self)
         self.cycles = CycleState(self)
@@ -243,11 +236,14 @@ class RoleStateService:
                 operator=operator, reason="cycle_alignment", cycle_alignment=data, projected_inputs=True,
                 expected_settings_token=expected_settings_token)
 
-    def read(self, context, *, operator=None, at=None, cycle_at=None):
+    def read(self, context, *, operator=None, at=None, cycle_at=None, injection=False):
         at = at or self.tasks.now()
         if cycle_at is not None and cycle_at > at:
             raise TaskError("state_snapshot_invalid", "cycle observation cannot be in the future")
-        self.access.check(context, "role.state.read", operator=operator, at=at)
+        if injection and operator is None:
+            self.access.check_injection(context, at=at)
+        else:
+            self.access.check(context, "role.state.read", operator=operator, at=at)
         values, _ = self.settings(context)
         record = self.records.get(context, "current")
         if record:
@@ -262,9 +258,12 @@ class RoleStateService:
         return {**result, **({"sleep_execution": sleep} if sleep else {})}
 
     def read_revision(self, context, revision, *, captured_at, observed_at, storage=None, sleep_reference=None,
-                      include_sleep=False):
+                      include_sleep=False, injection=False):
         """Confirmed replies retain their historical simulation, with current source authority."""
-        self.access.check(context, "role.state.read", at=observed_at)
+        if injection:
+            self.access.check_injection(context, at=observed_at)
+        else:
+            self.access.check(context, "role.state.read", at=observed_at)
         values, _ = self.settings(context)
         if not values["enabled"]:
             raise TaskError("role_state_disabled", "role state reading is disabled")

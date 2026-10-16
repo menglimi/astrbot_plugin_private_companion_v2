@@ -67,7 +67,7 @@ from ..references.configuration import (GROUP as REFERENCE_GROUP, OWNER as REFER
     configuration_fields as reference_fields)
 from ..references.wardrobe import (GROUP as WARDROBE_GROUP, OWNER as WARDROBE_OWNER,
     configuration_fields as wardrobe_fields)
-from ..proactive.configuration import (GROUP as CONTACT_GROUP, RELATIONSHIP_BUDGET_FIELDS,
+from ..proactive.configuration import (GROUP as CONTACT_GROUP, WINDOW_QUOTA_FIELDS,
     configuration_fields as contact_fields)
 from ..conversation.content.authoring_service import (GROUP as AUTHORING_GROUP,
     configuration_fields as authoring_fields)
@@ -718,12 +718,11 @@ class ProactiveContactManagement(GroupEditor):
     error_prefix = "proactive_contact"
 
     def _field_contract(self):
-        """Publish the two relationship allowances without their window node."""
+        """Publish daily quota overrides on windows, never on relationship scope."""
         contract = super()._field_contract()
-        prefix = self.group + "."
-        for field_id in RELATIONSHIP_BUDGET_FIELDS:
-            entry = contract.get(field_id.removeprefix(prefix))
+        for name in WINDOW_QUOTA_FIELDS:
+            entry = contract.get(name)
             if entry is not None:
                 entry["editable_layers"] = [layer for layer in entry["editable_layers"]
-                                            if layer != ConfigLayer.WINDOW.value]
+                                            if layer != ConfigLayer.RELATIONSHIP.value]
         return contract

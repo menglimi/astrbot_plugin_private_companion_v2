@@ -9,6 +9,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from companion_v2.adapters.astrbot.native import NativeConversationInput
 from companion_v2.conversation.outbound_plan import outbound_plan
 from companion_v2.delivery.components import order_rank
+from companion_v2.execution.models import TaskError
 from .core_reply import sent_core_text
 from .core_reply_presentation import CONTROL_TYPES
 
@@ -62,6 +63,13 @@ def prepare_core_reply_outbound_message(event, prepared, message, *, segment_ind
     try:
         core = event.get_extra("_companion_v2_core_reply_context")
         first_text_segment = core.get("outbound_first_text_segment", 0) if isinstance(core, dict) else 0
+        from .core_reply_behavior import behavior_targets
+        behavior_mentions = behavior_targets(event, prepared,
+            first_text=segment_index == first_text_segment, text=text)
+        if isinstance(core, dict) and core.get("_behavior_plan"):
+            # A directed interaction answers its selected member. Do not also
+            # quote or ping the unrelated member who happened to open the turn.
+            settings = {**settings, "reply_quote_enabled": False, "reply_mention_speaker_enabled": False}
         plan = outbound_plan(
             settings=settings,
             scope_kind=prepared.get("channel", "private"),
@@ -70,12 +78,14 @@ def prepare_core_reply_outbound_message(event, prepared, message, *, segment_ind
             text=text,
             inputs=_trusted_inputs(prepared),
         )
+    except TaskError:
+        raise
     except (TypeError, ValueError):
         logger.warning("[CompanionV2] 核心回复出站设置无效，保留宿主消息")
         return message
     output = list(chain)
     quote = bool(plan and plan.quote) and not any(isinstance(component, Reply) for component in output)
-    mentions = [account for account in (plan.mentions if plan else ())
+    mentions = [account for account in (behavior_mentions or (plan.mentions if plan else ()))
                 if not any(isinstance(component, At)
                            and str(getattr(component, "qq", "")) == account for component in output)]
     mention_components = [At(qq=account) for account in mentions]

@@ -489,13 +489,12 @@ class AstrBotStagingController:
                                                                      configured_slang_search_port()),
                                                   reaction_role_count=1)
         from companion_v2.decision import LayaDecisionService, LayaSettingsStore
-        from .laya_client import LayaDecisionClient, start_laya_warmup
+        from .laya_client import LayaDecisionClient
         def laya_for_context(context):
             return LayaDecisionService(LayaSettingsStore(self.data_root),
                 runtime=self.session.application.runtime, origin_key=context.key, client_factory=LayaDecisionClient)
 
         self.session.application.attach_laya_decision(laya_for_context)
-        start_laya_warmup(LayaSettingsStore(self.data_root))
         return self.session
 
     async def load_existing(self) -> Outcome[dict[str, Any]]:

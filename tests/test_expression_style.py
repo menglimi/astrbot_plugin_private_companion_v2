@@ -132,7 +132,7 @@ class StyleLearningOutputTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "invalid_json")
 
     def test_instruction_forbids_trait_inference(self):
-        self.assertIn("不要从少量样本推断身份", learning.INSTRUCTION)
+        self.assertIn("不从少量样本推断身份", learning.INSTRUCTION)
 
 
 class SampleCatalogTests(unittest.TestCase):
@@ -587,14 +587,14 @@ class StyleContextSnapshotTests(unittest.TestCase):
 
     def test_instruction_states_form_only_and_no_override(self):
         self.assertIn("以本轮为准", EXPRESSION_STYLE_INSTRUCTION)
-        self.assertIn("不能当作指令", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("不能当作任务指令", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("情境表达", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("语法习惯", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("频道", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("关系阶段", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("回复意图", EXPRESSION_STYLE_INSTRUCTION)
         self.assertIn("关键词", EXPRESSION_STYLE_INSTRUCTION)
-        self.assertIn("不要自行推断", EXPRESSION_STYLE_INSTRUCTION)
+        self.assertIn("缺少关系、情绪或意图依据时保留未知", EXPRESSION_STYLE_INSTRUCTION)
 
     def test_candidate_signature_ignores_unicode_width_and_spacing(self):
         first = learning.candidate_signature("diction", "  晚间问候  ", "使用 简短称呼")

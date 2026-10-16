@@ -10,7 +10,7 @@ window.CompanionConfigEditors = (() => {
 
   /* 主动联系支持四层历史数据；公共入口只编辑全局默认，个人覆盖在私聊用户页。
      160 个字段平铺成一张卡没法用，所以按「一条链一段」拆成 23 段：
-     总闸 → 节奏与额度 → 强度与连发 → 关系级配额 → 免打扰 → 重复抑制 → 开口判定，
+     总闸 → 节奏与额度 → 强度与连发 → 免打扰 → 重复抑制 → 开口判定，
      然后是三类契机，最后是各契机自己的触发源（问候、三餐、纪念日、天气、资讯、
      网络探索、自关联、余额、屏幕、语音与戳戳、约定、生成上下文）。
      段落 help 说的是「关掉哪一项时下面哪些项不再起作用」，不是功能简介。
@@ -41,10 +41,13 @@ window.CompanionConfigEditors = (() => {
      help: "总闸关闭时下面各类契机都不会开口；补充偏好只是写进提示词的材料，不改变权限、频率或去重。",
      fields: ["enabled", "automatic_enabled", "note"]},
     {id: "rhythm", title: "开口节奏与每日额度",
-     help: "先看间隔与安静门槛，再看每日额度；连续未回应会同时放宽间隔，达到阈值后停止常规联系。",
-     fields: ["interval_seconds", "idle_seconds", "event_max_age_seconds", "max_contacts_24h",
-              "max_attempts_24h", "unanswered_slowdown_start", "unanswered_pause_after",
+     help: "每日实际联系额度按当前私聊窗口统计，并在免打扰时区的本地午夜刷新。模型调用单独统计，不占用联系额度；模型跳过不计实际联系，待回执发送暂时占用联系额度。",
+     fields: ["interval_seconds", "idle_seconds", "max_contacts_24h",
+              "unanswered_slowdown_start", "unanswered_pause_after",
               "unanswered_max_interval_multiplier"]},
+    {id: "freshness", title: "素材与关系线索时效",
+     help: "只约束角色活动、日记、近期私聊素材和旧式关系线索的新鲜度；主动跟进与未完话头不受这项时效限制，日程、天气和预警按来源自己的有效时间处理。",
+     fields: ["event_max_age_seconds"]},
     {id: "intensity", title: "强度档位与连发",
      help: "档位只缩放间隔与安静门槛、给一个长度提示，不放宽任何额度、权限或投递规则；连发只接着一条普通话题继续。",
      fields: ["proactive_intensity_preset", "proactive_intensity_body_chars", "enable_proactive_burst",
@@ -52,9 +55,6 @@ window.CompanionConfigEditors = (() => {
               "proactive_burst_gap_max_seconds", "proactive_hour_activity_enabled",
               "proactive_hour_activity_curve", "proactive_closing_grace_minutes",
               "proactive_closing_contacts_threshold", "proactive_share_probability"]},
-    {id: "relationship_budget", title: "关系级每日配额",
-     help: "同一用户与角色的所有会话合计，个人上限在私聊用户页调整。",
-     fields: ["max_relationship_contacts_24h", "max_relationship_attempts_24h"]},
     {id: "quiet", title: "免打扰与临时暂停",
      help: "全局暂停与个人暂停取较晚的结束时间；已登记的日程继续执行。",
      fields: ["quiet_enabled", "quiet_start", "quiet_end", "quiet_timezone", "pause_until"]},
@@ -67,7 +67,7 @@ window.CompanionConfigEditors = (() => {
      help: "两道判定都在草稿写好之后：先看置信度门槛，再由模型复核是否符合人格；任何一道不通过都只丢弃这条草稿，不产生消息。",
      fields: ["silence_min_confidence", "silence_feedback_penalty",
               "enable_llm_proactive_persona_judge", "proactive_persona_judge_threshold",
-              "proactive_persona_judge_cache_minutes", "proactive_persona_judge_daily_limit",
+              "proactive_persona_judge_cache_minutes",
               "proactive_persona_judge_exempt_purposes"]},
     {id: "bond", title: "契机：情感与陪伴",
      help: "每一类都可以单独关闭、调权重、临时暂缓；权重只在多个合适话题之间做选择，不改变频率、额度或权限。",
@@ -76,7 +76,7 @@ window.CompanionConfigEditors = (() => {
      help: "问候、接回旧话题、共同活动、约定与饭点：这些契机依赖日程与已登记的约定，权重同样只在候选之间做选择。",
      fields: purposeFields("daily")},
     {id: "followup", title: "接回旧话题时机",
-     help: "只在上一条主动消息已确认送达、之后没有新输入且原话仍有效时接回；等待时间与冷却都从已送达的记录计算。",
+     help: "只在上一条主动消息已确认送达、之后没有新输入且原话仍有效时接回；等待时间从已送达的记录计算，开放后只保留一个调度窗口。",
      fields: ["contact_followup_after_minutes", "contact_followup_cooldown_minutes"]},
     {id: "share", title: "契机：分享与外部",
      help: "分享自己的生活与作品、外部资讯、环境变化与屏幕观察：外部来源还要各自打开下面触发源里的总闸，这里只决定这一类契机是否参与。",
@@ -525,7 +525,7 @@ window.CompanionConfigEditors = (() => {
         group_application_enabled: "群聊应用规则",
         sample_review_enabled: "审核原始样本",
         style_review_enabled: "发送前表达复核",
-        group_daily_batch_limit: "全局群聊每日学习批次",
+        group_daily_batch_limit: "角色群聊每日学习批次",
         group_new_messages: "群聊新增消息门槛",
       },
       helps: {},
@@ -564,7 +564,7 @@ window.CompanionConfigEditors = (() => {
                                               3: "优先安排相关活动"}},
       order: ["enabled", "custom_skills", "schedule_influence_strength"],
       sections: [
-        {id: "shared", title: "全局技能领域",
+        {id: "shared", title: "角色技能领域",
          fields: ["enabled", "custom_skills", "schedule_influence_strength"]},
       ],
     },
@@ -1021,9 +1021,11 @@ window.CompanionConfigEditors = (() => {
     },
     group_participation: {
       title: "群聊参与",
-      note: "决定角色在群里怎么旁听、何时接话，以及复读跟读的尺度。三项都不会自己发起对话——仍然要有一条群消息打开这一轮。",
+      note: "决定角色在群里怎么旁听、何时接话，以及复读跟读的尺度。话题线只为当前群聊回复提供参考，不会单独唤醒或主动发言。",
       labels: {
         enable_group_social_context: "启用群聊氛围参考",
+        enable_group_topic_threads: "跟踪群聊话题线",
+        group_topic_thread_max: "最多保留的话题线",
         enable_group_mood_detection: "识别群聊氛围",
         enable_group_roleplay_strength: "判断扮演强度",
         enable_group_moments: "记录本群名场面",
@@ -1045,9 +1047,15 @@ window.CompanionConfigEditors = (() => {
         group_repeat_interrupt_image_path: "打断复读时发的图片",
         group_repeat_window_seconds: "统计重复的时间窗（秒）",
         group_context_max_age_hours: "群聊历史回看时长（小时）",
+        enable_group_behavior_learning: "学习群聊互动习惯",
+        enable_group_behavior_imitation: "允许自然参与互动",
+        enable_group_behavior_feedback: "学习互动对象的反馈",
+        group_behavior_guidance: "互动偏好与边界",
       },
       helps: {
         enable_group_social_context: "关闭时下面五项氛围参考都不起作用，角色只按对话本身理解群聊。",
+        enable_group_topic_threads: "按群和角色记录近 90 分钟活跃话题、消息数及 Bot 是否已接话；参与人数只从本轮授权可见窗口估算，不保存成员身份。",
+        group_topic_thread_max: "3 到 40 条；超出时保留最近活跃的话题。话题在 90 分钟没有新消息后过期，示例只保留短句。",
         enable_group_mood_detection: "按可见的近句估计氛围倾向；只是参考，不代表任何成员的态度或性格。",
         enable_group_roleplay_strength: "在氛围基础上判断该玩闹还是该收敛，只影响表达幅度。",
         enable_group_moments: "记住群里反复出现的梗，供接梗时参考；不会写成成员的性格或事实。",
@@ -1069,7 +1077,8 @@ window.CompanionConfigEditors = (() => {
         group_repeat_window_seconds: "在这段时间内的重复才计入次数；调大更容易触发。",
         group_context_max_age_hours: "只把这段时间内已验证的群友发言和已送达回复纳入历史；更早内容不会参与本轮上下文。",
       },
-      order: ["enable_group_social_context", "enable_group_mood_detection",
+      order: ["enable_group_topic_threads", "group_topic_thread_max",
+              "enable_group_social_context", "enable_group_mood_detection",
               "enable_group_roleplay_strength", "enable_group_moments",
               "enable_group_moment_portrait", "enable_group_joke_guard",
               "enable_group_persona_denoise",
@@ -1080,10 +1089,16 @@ window.CompanionConfigEditors = (() => {
               "group_repeat_trigger_threshold", "group_repeat_follow_probability",
               "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step",
               "group_repeat_interrupt_text", "group_repeat_interrupt_image_path", "group_repeat_window_seconds",
-              "group_context_max_age_hours"],
+              "group_context_max_age_hours", "enable_group_behavior_learning", "enable_group_behavior_imitation",
+              "enable_group_behavior_feedback", "group_behavior_guidance"],
       /* 三条链各自独立：氛围参考有一层总闸，插话与跟读各有自己的总闸与预算。
          不分组的话，关掉总闸后调下面的数字会毫无反应，看着像坏了。 */
       sections: [
+        {id: "behavior", title: "行为模仿", help: "",
+         fields: ["enable_group_behavior_learning", "enable_group_behavior_imitation",
+                  "enable_group_behavior_feedback", "group_behavior_guidance"]},
+        {id: "topics", title: "群聊话题线", help: "",
+         fields: ["enable_group_topic_threads", "group_topic_thread_max"]},
         {id: "atmosphere", title: "群聊氛围参考", help: "",
          fields: ["enable_group_social_context", "enable_group_mood_detection",
                   "enable_group_roleplay_strength", "enable_group_moments",
@@ -1118,9 +1133,8 @@ window.CompanionConfigEditors = (() => {
         note: "补充联系偏好",
         interval_seconds: "两次联系至少间隔（秒）",
         idle_seconds: "对话结束后至少等候（秒）",
-        event_max_age_seconds: "生活事件可接续时长（秒）",
-        max_contacts_24h: "每个会话 24 小时内最多联系（次）",
-        max_attempts_24h: "每个会话 24 小时内最多尝试（次）",
+        event_max_age_seconds: "近况素材与关系线索有效时长（秒）",
+        max_contacts_24h: "每个私聊窗口每日最多实际联系（条）",
         unanswered_slowdown_start: "连续未回应几次后开始放慢",
         unanswered_pause_after: "连续未回应几次后暂停（0 表示不暂停）",
         unanswered_max_interval_multiplier: "放慢后的最大间隔倍数",
@@ -1135,8 +1149,6 @@ window.CompanionConfigEditors = (() => {
         proactive_closing_grace_minutes: "一轮结束后的静默时长（分钟）",
         proactive_closing_contacts_threshold: "连续联系几条后进入静默",
         proactive_share_probability: "分享自己生活与作品的概率（%）",
-        max_relationship_contacts_24h: "同一关系 24 小时内最多联系（次）",
-        max_relationship_attempts_24h: "同一关系 24 小时内最多尝试（次）",
         quiet_enabled: "启用免打扰时段",
         quiet_start: "免打扰开始",
         quiet_end: "免打扰结束",
@@ -1155,7 +1167,6 @@ window.CompanionConfigEditors = (() => {
         enable_llm_proactive_persona_judge: "草稿发出前做人格复核",
         proactive_persona_judge_threshold: "复核通过分阈值",
         proactive_persona_judge_cache_minutes: "复核结果缓存时长（分钟）",
-        proactive_persona_judge_daily_limit: "每日复核次数上限",
         proactive_persona_judge_exempt_purposes: "免复核的契机",
         ...purposeLabels("enabled", "允许这类联系"),
         ...purposeLabels("weight", "相对权重"),
@@ -1243,9 +1254,8 @@ window.CompanionConfigEditors = (() => {
         note: "写成自己的话，作为联系偏好写进提示词；不改变权限、频率或去重。",
         interval_seconds: "两次主动开口之间的最短间隔；连续未回应的次数越多，实际间隔按下面的倍数放大。",
         idle_seconds: "对方说完话后的这段安静时间里不会开口，避免刚聊完就又被找上。",
-        event_max_age_seconds: "生活事件与日记素材超过这段时间就不再作为开口理由；提醒与预警有自己的时效。",
-        max_contacts_24h: "上限就是上限：达到后当天不再开口，即使还有合适的话题。",
-        max_attempts_24h: "尝试包含被判定为「沉默」而没有发出的机会，所以尝试数总是大于等于联系数。",
+        event_max_age_seconds: "角色活动、日记、近期私聊材料和旧式关系线索只在这段时间内有效；不限制主动跟进或未完话头，也不覆盖日程、天气和预警来源的有效期。",
+        max_contacts_24h: "按当前私聊窗口免打扰时区的本地自然日统计已确认发送的联系。待回执发送暂时占用，明确未发送、失败或取消后释放；模型跳过不计入实际联系。",
         unanswered_slowdown_start: "从这里开始，每多一次未回应就多放慢一档。",
         unanswered_pause_after: "连续未回应达到该次数后停止常规联系，直到对方再次开口；0 表示不暂停。",
         unanswered_max_interval_multiplier: "放慢的上限倍数，避免间隔无限增长。",
@@ -1260,8 +1270,6 @@ window.CompanionConfigEditors = (() => {
         proactive_closing_grace_minutes: "连续联系达到下面的条数后，安静这段时间再恢复普通机会；0 表示不进入收尾静默。",
         proactive_closing_contacts_threshold: "一轮连续联系达到该条数即进入收尾静默。",
         proactive_share_probability: "只作用于「分享自己的生活」与「作品与阅读」两类契机；提醒与预警不受影响，100 表示每次都发。",
-        max_relationship_contacts_24h: "同一用户与角色的所有会话合计。",
-        max_relationship_attempts_24h: "同一用户与角色的所有尝试合计，包含判定为沉默的尝试。",
         quiet_enabled: "免打扰时段内不会开口，这是全局时段，不区分契机。",
         quiet_start: "24 小时制，形如 23:00；与结束时间相同表示全天免打扰。",
         quiet_end: "可以早于开始时间，表示跨午夜。",
@@ -1280,7 +1288,6 @@ window.CompanionConfigEditors = (() => {
         enable_llm_proactive_persona_judge: "草稿写完后先由模型复核是否符合人格；复核不通过就丢弃这条草稿。",
         proactive_persona_judge_threshold: "复核分低于该阈值即不通过。",
         proactive_persona_judge_cache_minutes: "相同草稿在这段时间内复用复核结论，避免反复调用模型。",
-        proactive_persona_judge_daily_limit: "每天最多复核多少次，超出后按未复核处理。",
         proactive_persona_judge_exempt_purposes: "逗号分隔的契机名，可填 affection、care、play、repair、chat、greeting、life、creation、news、followup、invitation、reminder、environment、meal、screen。",
         ...Object.fromEntries(CONTACT_PURPOSES.map(([, name]) =>
           [name + ".pause_until", "留空取消该契机的全局暂停；个人暂停仍生效。时间需带时区。"])),
@@ -1597,7 +1604,6 @@ window.CompanionConfigEditors = (() => {
     proactive_contact_scope_invalid: "当前对象的联系状态不可用，请选择已建立私聊的用户。",
     proactive_contact_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     proactive_contact_configuration_invalid: "请核对主动联系设置：数值需在各自范围内，枚举项需在下拉选项内。",
-    contact_relationship_budget_scope: "关系级配额（同一关系 24 小时内的联系与尝试上限）按安装 / 角色 / 关系层设置，不能按会话保存。",
     configuration_relationship_required: "主动联系偏好需要一个已绑定的角色和这个会话的真人关系；请先完成对象与角色的绑定。",
     invalid_contact_preference: "主动联系设置有字段不合法：时刻用 HH:MM，问候窗口用 HH:MM-HH:MM，时区用 IANA 名称，暂停时间点用带时区的 ISO 时间，活跃曲线写满 24 个数字，清单只能填允许的名字，重要日期要是 JSON 数组。",
     proactive_contact_clock_invalid: "请填写二十四小时制的时刻，形如 23:00 或 07:45。",
@@ -1626,9 +1632,13 @@ window.CompanionConfigEditors = (() => {
    * 一次抛错会让**整条面板挂载链**中断：这一页的配置分区没有，后面所有
    * 工作区也全都不会挂上。用户看到的就是「这些页面完全无法使用」。
    * 读不到就返回 null，由调用方渲染等待态，而不是把整页一起带走。 */
-  function endpointFor(product, override = "") {
+  function endpointFor(product, override = "", kinds = []) {
+    const installationKinds = new Set(["proactive.contact", "reaction", "budget"]);
+    if (Array.isArray(kinds) && kinds.some(kind => installationKinds.has(kind))) {
+      return kinds.every(kind => installationKinds.has(kind)) ? PREFIX + "config" : null;
+    }
     if (override) return typeof override === "string" && override.startsWith(PREFIX)
-      && override.endsWith("/config") ? override : null;
+      && (override.endsWith("/config") || override.endsWith("/reply/participation")) ? override : null;
     if (!product || typeof product.role !== "function") return null;
     const fromManifest = product.role()?.config_api;
     if (typeof fromManifest === "string" && fromManifest.startsWith(PREFIX)) return fromManifest;
@@ -1643,8 +1653,8 @@ window.CompanionConfigEditors = (() => {
      草稿互不共享，与后端「每分区独立 edit_token」的生效范围保持一致。 */
   function create(kinds, rootProvider, views = {}, endpointOverride = "") {
     const product = window.CompanionProduct;
-    const endpoint = endpointFor(product, endpointOverride);
     const names = (kinds || []).filter(kind => Object.hasOwn(spec, kind));
+    const endpoint = endpointFor(product, endpointOverride, names);
     if (!names.length || !endpoint) return null;
     if (!window.CompanionWorkbench?.create) return null;
     let rolePeople = [];
@@ -1675,7 +1685,7 @@ window.CompanionConfigEditors = (() => {
           sections, order:sections.flatMap(section => section.fields || [])};
       }
       if (view) {
-        for (const key of ["title", "note", "scopeNote", "navigationLimit", "segmentedChoices", "onStatus", "presentation", "sectionTabPrefix", "initialSection"]) {
+        for (const key of ["title", "note", "scopeNote", "navigationLimit", "segmentedChoices", "onStatus", "presentation", "sectionTabPrefix", "initialSection", "query", "requestSection", "savePath", "resetKey"]) {
           if (Object.hasOwn(view, key)) current = {...current, [key]:view[key]};
         }
         for (const key of ["labels", "helps", "rows", "inputs", "catalogs"]) {
@@ -1686,7 +1696,7 @@ window.CompanionConfigEditors = (() => {
       group: kind,
       /* 配置总线复用一条 /config/configure 路由，必须在写请求中带分区名；
          其他工作台走各自的路径，不应收到这个额外字段。 */
-      requestSection: kind,
+      requestSection: Object.hasOwn(current, "requestSection") ? current.requestSection : kind,
       title: current.title,
       note: current.note ?? "",
       labels: current.labels,
@@ -1716,7 +1726,9 @@ window.CompanionConfigEditors = (() => {
       onStatus: current.onStatus || null,
       endpoint,
       /* 每分区各读一次：后端按 sections 过滤，避免一个分区解析失败牵连另一个。 */
-      query: {sections: kind},
+      query: Object.hasOwn(current, "query") ? current.query : {sections: kind},
+      savePath: current.savePath || "/configure",
+      resetKey: current.resetKey || null,
       mount: () => {
         const root = rootProvider();
         return root ? root.querySelector(`[data-config-host="${kind}"]`) : null;

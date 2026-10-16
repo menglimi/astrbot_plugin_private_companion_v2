@@ -1,6 +1,6 @@
 {
   "schema": "companion.native-capability-baseline.v1",
-  "package_version": "2.1.25",
+  "package_version": "2.1.35",
   "artifact_hashes": {
     "content": "ead01e8303b847db0fab6619508b12ad5d7c99d464aec6d5f8a49db63c365440",
     "game": "2edf3e690d37f75d2880ef1802adab74b985782b6e1f1f03a01b0ba7fd44aeef",

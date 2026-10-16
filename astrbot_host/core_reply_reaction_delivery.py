@@ -92,23 +92,29 @@ def observe_core_reaction_response(event, response):
                 part.text = extract_reply_intent(part.text)[0]
 
 
-async def prepare_core_reaction_message(event, message, *, authorize):
+async def prepare_core_reaction_message(event, message, *, authorize, segment_index=0, segment_count=1):
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     reaction = core.get("_reaction_reply") if isinstance(core, dict) else None
     if not reaction or not reaction.get("enabled") or not reaction.get("intent"):
         return message
     if reaction.get("attempted") or core.get("_reaction_media", {}).get("offers"):
         return message
-    chain = getattr(message, "chain", ())
-    if any(isinstance(part, Image) for part in chain):
-        reaction["attempted"] = True
-        reaction["reason"] = "existing_image"
-        return message
-    reaction["attempted"] = True
     semantic, context, turn_id = reaction["semantic"], reaction["context"], reaction["turn_id"]
     try:
-        await authorize()
         settings = semantic.store.settings()
+        segment_index = max(0, int(segment_index))
+        segment_count = max(segment_index + 1, int(segment_count))
+        mode = settings["reactions_delivery_mode"]
+        if ((mode == "separate_after" and segment_index < segment_count - 1)
+                or (mode != "separate_after" and segment_index > 0)):
+            return message
+        chain = getattr(message, "chain", ())
+        if any(isinstance(part, Image) for part in chain):
+            reaction["attempted"] = True
+            reaction["reason"] = "existing_image"
+            return message
+        reaction["attempted"] = True
+        await authorize()
         # Retrieval can include remote embedding, reranking and visual review.
         # A timeout drops the optional attachment and preserves the primary reply.
         kwargs = {"review_reply": True} if reaction.get("review_reply") else {}

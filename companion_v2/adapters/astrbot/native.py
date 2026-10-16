@@ -365,77 +365,63 @@ class NativePrivateBridge:
         """Resolve the V2 override or AstrBot's active persona through a trusted mapping."""
         manager = self.context.conversation_manager
         cid = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
-        override = None
-        window_snapshot_used = False
-        if self.session_persona_override_lookup is not None:
-            override = await bounded_native_lookup(
-                self.session_persona_override_lookup(umo), operation="session_settings")
-        if override is not None:
-            if (type(override) is not str or not override.strip() or len(override) > 120
-                    or any(ord(char) < 32 for char in override)):
-                raise TaskError("host_persona_invalid", "the V2 window persona override is invalid")
-            selected = override
+        projected_ids = tuple(persona_id for bot_id, persona_id in self.personas if bot_id == account.bot_id)
+        if not projected_ids:
+            raise TaskError("host_persona_unmapped", "this Bot has no V2 persona mapping")
+
+        snapshot = None
+        if self.persona_window_snapshot_lookup is not None:
+            snapshot = self.persona_window_snapshot_lookup(umo, account.self_id)
+            if inspect.isawaitable(snapshot):
+                snapshot = await bounded_native_lookup(snapshot, operation="persona_snapshot", report_slow=False)
+        snapshot_persona = (snapshot.get("persona_id") if isinstance(snapshot, dict)
+            and snapshot.get("bot_id") == account.bot_id and snapshot.get("persona_id") in projected_ids else None)
+        window_snapshot_used = snapshot_persona is not None
+        if window_snapshot_used:
+            # The installed window mapping survives /reset and persona edits. Its
+            # current V2 role comes from the active manifest, not a stale snapshot field.
+            selected = snapshot_persona
         else:
-            projected_ids = tuple(persona_id for bot_id, persona_id in self.personas if bot_id == account.bot_id)
-            if len(projected_ids) == 1:
+            override = None
+            if self.session_persona_override_lookup is not None:
+                override = await bounded_native_lookup(
+                    self.session_persona_override_lookup(umo), operation="session_settings")
+            if override is not None:
+                if (type(override) is not str or not override.strip() or len(override) > 120
+                        or any(ord(char) < 32 for char in override)):
+                    raise TaskError("host_persona_invalid", "the V2 window persona override is invalid")
+                selected = override
+            elif len(projected_ids) == 1:
                 selected = projected_ids[0]
-            elif projected_ids:
-                configured_fallback = None
-                if self.persona_window_snapshot_lookup is not None:
-                    snapshot = self.persona_window_snapshot_lookup(umo, account.self_id)
-                    if inspect.isawaitable(snapshot):
-                        snapshot = await bounded_native_lookup(snapshot, operation="persona_snapshot", report_slow=False)
-                    if (isinstance(snapshot, dict)
-                            and snapshot.get("selection_source") == "configured"):
-                        configured_fallback = snapshot
-                    if isinstance(snapshot, dict) and snapshot.get("conversation_id") == cid:
-                        selected = snapshot.get("persona_id")
-                        snapshot_role_id = snapshot.get("role_id")
-                        projection = self.personas.get((account.bot_id, selected))
-                        if projection is None or projection.role.subject_id != snapshot_role_id:
-                            raise TaskError("host_persona_window_unbound", "refresh the window persona snapshot")
-                        window_snapshot_used = True
-                    else:
-                        snapshot = None
-                if self.persona_window_snapshot_lookup is None or snapshot is None:
-                    if self.persona_snapshot_lookup is not None:
-                        conversation_persona_id = await bounded_native_lookup(
-                            self.persona_snapshot_lookup(self.context, umo, cid),
-                            operation="persona", report_slow=False)
-                    elif cid is not None:
-                        conversation = await bounded_native_lookup(
-                            manager.get_conversation(umo, cid, create_if_not_exists=False), operation="conversation")
-                        if conversation is None:
-                            raise TaskError("host_conversation_missing", "selected host conversation is unavailable")
-                        conversation_persona_id = getattr(conversation, "persona_id", None)
-                    else:
-                        conversation_persona_id = None
-                    if conversation_persona_id is not None and type(conversation_persona_id) is not str:
-                        raise TaskError("host_persona_invalid", "selected host conversation has an invalid persona")
-                    lookup = self.persona_selection_lookup
-                    if lookup is not None:
-                        resolved = lookup(self.context, umo, conversation_persona_id)
-                        selected = (await bounded_native_lookup(resolved, operation="persona")
-                                    if inspect.isawaitable(resolved) else resolved)
-                    else:
-                        selected = conversation_persona_id
-                        if selected != "[%None]" and not selected:
-                            selected = configured_default_persona_id(self.context, umo)
-                if selected not in projected_ids:
-                    if configured_fallback is not None:
-                        fallback_id = configured_fallback.get("persona_id")
-                        fallback_role_id = configured_fallback.get("role_id")
-                        fallback_projection = self.personas.get((account.bot_id, fallback_id))
-                        if (fallback_projection is not None
-                                and fallback_projection.role.subject_id == fallback_role_id):
-                            selected = fallback_id
-                if selected not in projected_ids:
-                    raise TaskError(
-                        "host_persona_window_unbound",
-                        "AstrBot's selected persona is not mapped to this V2 Bot; choose a mapped persona for this window",
-                    )
             else:
-                raise TaskError("host_persona_unmapped", "this Bot has no V2 persona mapping")
+                if self.persona_snapshot_lookup is not None:
+                    conversation_persona_id = await bounded_native_lookup(
+                        self.persona_snapshot_lookup(self.context, umo, cid),
+                        operation="persona", report_slow=False)
+                elif cid is not None:
+                    conversation = await bounded_native_lookup(
+                        manager.get_conversation(umo, cid, create_if_not_exists=False), operation="conversation")
+                    if conversation is None:
+                        raise TaskError("host_conversation_missing", "selected host conversation is unavailable")
+                    conversation_persona_id = getattr(conversation, "persona_id", None)
+                else:
+                    conversation_persona_id = None
+                if conversation_persona_id is not None and type(conversation_persona_id) is not str:
+                    raise TaskError("host_persona_invalid", "selected host conversation has an invalid persona")
+                lookup = self.persona_selection_lookup
+                if lookup is not None:
+                    resolved = lookup(self.context, umo, conversation_persona_id)
+                    selected = (await bounded_native_lookup(resolved, operation="persona")
+                                if inspect.isawaitable(resolved) else resolved)
+                else:
+                    selected = conversation_persona_id
+                    if selected != "[%None]" and not selected:
+                        selected = configured_default_persona_id(self.context, umo)
+            if selected not in projected_ids:
+                raise TaskError(
+                    "host_persona_window_unbound",
+                    "AstrBot's selected persona is not mapped to this V2 Bot; refresh the window snapshot",
+                )
 
         if selected == "[%None]":
             persona = None

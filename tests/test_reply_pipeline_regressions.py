@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from companion_v2.conversation.reply_preparation import prepare_reply
 from companion_v2.conversation.reply_settings import configuration_fields
-from companion_v2.conversation.segmentation import SegmentationPolicy, COHERENCE_PROMPT
+from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.conversation.text_processing import ReplyTextPolicy
 from tests.test_host_application import HostFixture
 from tests.test_role_tool_loop import answered
@@ -84,7 +84,7 @@ class ReplyPresetTests(unittest.TestCase):
 
 
 class ReplyDispatchOrderTests(HostFixture, unittest.IsolatedAsyncioTestCase):
-    async def test_rule_split_short_reply_sends_trimmed_text_and_injects_coherence(self):
+    async def test_rule_split_short_reply_sends_trimmed_text_without_format_prompt(self):
         async def model(envelope):
             return answered("哦？被拆穿了就骂我笨蛋…烛雨大人好过分呢。\n才不生气，反正我说的是真的嘛。")
 
@@ -108,8 +108,8 @@ class ReplyDispatchOrderTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         stored = app.runtime.read_all(
             "SELECT text FROM conversation_parts WHERE batch_id = ? ORDER BY sequence", (batch,))
         self.assertEqual([part["text"] for part in stored], [envelope.text for envelope in self.sent])
-        self.assertIn(COHERENCE_PROMPT, self.called[0].original.instruction)
-        self.assertIn("日常短消息正文内部不插入空行", self.called[0].original.instruction)
+        self.assertNotIn("消息正文组织", self.called[0].original.instruction)
+        self.assertNotIn("日常短消息正文内部不插入空行", self.called[0].original.instruction)
 
     async def test_new_foreground_work_starts_before_periodic_maintenance(self):
         host = await self.start()

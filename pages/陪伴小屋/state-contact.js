@@ -4,9 +4,8 @@ window.CompanionStateContact = (() => {
     enabled:{label:"允许主动联系",type:"boolean"},automatic_enabled:{label:"启用后台自动联系",type:"boolean"},
     idle_seconds:{label:"对话结束后至少等候（秒）",type:"number",min:0,max:86400},
     interval_seconds:{label:"两次联系至少间隔（秒）",type:"number",min:60,max:604800},
-    max_contacts_24h:{label:"24 小时内最多联系（次）",type:"number",min:0,max:100},
-    max_attempts_24h:{label:"24 小时内最多尝试（次）",type:"number",min:0,max:1000},
-    event_max_age_seconds:{label:"生活事件可接续时长（秒）",type:"number",min:60,max:86400},
+    max_contacts_24h:{label:"本窗口每日最多实际联系（条）",type:"number",min:0,max:100},
+    event_max_age_seconds:{label:"近况素材有效时长（秒）",type:"number",min:60,max:86400},
     quiet_enabled:{label:"启用免打扰时段",type:"boolean"},quiet_start:{label:"免打扰开始",type:"time"},
     quiet_end:{label:"免打扰结束",type:"time"},quiet_timezone:{label:"免打扰时区",type:"timezone"},
     pause_until:{label:"暂缓全部联系至（本地时间）",type:"datetime"},note:{label:"补充联系偏好",type:"textarea"},
@@ -99,8 +98,10 @@ window.CompanionStateContact = (() => {
   function form(draft,e) {
     const values=draft.values;
     return `<p class="state-edit-help">当前会话与角色 · 保存不触发发送</p>
-      <h4 class="state-form-section">联系节奏</h4><div class="state-edit-fields">${["enabled","automatic_enabled","idle_seconds","interval_seconds","max_contacts_24h","max_attempts_24h","event_max_age_seconds"].map(name=>field(name,values,e)).join("")}</div>
-      <p class="state-edit-help">3600 秒 = 1 小时</p>
+      <h4 class="state-form-section">联系节奏</h4><div class="state-edit-fields">${["enabled","automatic_enabled","idle_seconds","interval_seconds","max_contacts_24h"].map(name=>field(name,values,e)).join("")}</div>
+      <p class="state-edit-help">模型调用单独统计，不占每日联系额度；模型跳过不计实际联系。待回执发送暂时预占名额，明确未发送后释放。3600 秒 = 1 小时</p>
+      <h4 class="state-form-section">近况素材时效</h4><div class="state-edit-fields">${field("event_max_age_seconds",values,e)}</div>
+      <p class="state-edit-help">只限制生活记录、日记和近期私聊材料的新鲜度；不限制主动跟进或未完话头，日程、天气与预警使用各自来源的有效时间。</p>
       <h4 class="state-form-section">行为规划与沉默</h4><div class="state-edit-fields">${["silence_min_confidence","silence_feedback_penalty"].map(name=>field(name,values,e)).join("")}</div>
       <p class="state-edit-help">门槛：0 不限制，1 仅完全确定时开口。</p>
       <h4 class="state-form-section">免打扰与临时暂停</h4><div class="state-edit-fields">${["quiet_enabled","quiet_start","quiet_end","quiet_timezone","pause_until"].map(name=>field(name,values,e)).join("")}</div>
@@ -146,8 +147,7 @@ window.CompanionStateContact = (() => {
     candidate_queued:["候选已进入后台执行","若没有发出，请查看任务执行和投递回执诊断。"],
     contact_model_unregistered:["主动联系模型任务尚未登记","检查模型路由配置并重启插件。"],
     background_capacity_exhausted:["后台执行槽位暂时占满","等待现有后台任务结束后会继续评估。"],
-    contact_attempt_budget:["此私聊的主动尝试额度已用完","等待滚动 24 小时额度释放，或调整本窗口的主动尝试上限。"],
-    contact_relationship_attempt_budget:["这段关系的主动尝试额度已用完","等待关系级滚动额度释放，或检查角色的关系级联系上限。"],
+    contact_attempt_budget:["旧版本的模型调用次数上限已触发","当前版本已取消该独立上限，请查看窗口每日实际联系额度。"],
     delivery_history_unavailable:["当前私聊历史无法完成核验","检查 AstrBot 会话历史是否可读取后再重新评估。"],
     contact_conversation_changed:["原私聊已变化，旧候选被安全取消","等待当前私聊完成后重新评估。"],
     scheduler_heartbeat_missing:["尚未收到主动调度心跳","确认插件已启动且主动联系模型已登记。"],
@@ -180,15 +180,13 @@ window.CompanionStateContact = (() => {
     const settings=value.settings,effective=value.effective||{};
     const allowance=effective.allowed===true?"当前授权通过":effective.allowed===false?reason(effective.reason):"当前授权尚未提供";
     const automatic=effective.automatic_allowed===true?"自动联系条件已满足":effective.automatic_allowed===false?reason(effective.automatic_reason):"自动联系条件尚未提供";
-    const relation=Number.isInteger(settings.max_relationship_contacts_24h)&&Number.isInteger(settings.max_relationship_attempts_24h)
-      ?`<p class="state-edit-help">同一关系共享上限：24 小时内最多联系 ${e(settings.max_relationship_contacts_24h)} 次、尝试 ${e(settings.max_relationship_attempts_24h)} 次。此处只读，由关系或角色层统一管理。</p>`:"";
     return `<header><h3>主动联系偏好</h3></header>
       <dl class="state-maintenance-summary"><div><dt>联系开关</dt><dd>${settings.enabled?"允许主动联系":"主动联系已关闭"} · ${settings.automatic_enabled?"后台自动联系已开启":"后台自动联系已关闭"}</dd></div>
       <div><dt>当前条件</dt><dd>${e(allowance)} · ${e(automatic)}</dd></div>
-      <div><dt>联系间隔与额度</dt><dd>至少间隔 ${e(settings.interval_seconds)} 秒 · 24 小时最多 ${e(settings.max_contacts_24h)} 次</dd></div>
+      <div><dt>联系间隔与每日额度</dt><dd>至少间隔 ${e(settings.interval_seconds)} 秒 · 本窗口每日最多联系 ${e(settings.max_contacts_24h)} 条</dd></div>
       <div><dt>行为规划与沉默</dt><dd>开口门槛 ${e(settings.silence_min_confidence)} · 沉默降权 ${e(settings.silence_feedback_penalty)}</dd></div>
       <div><dt>免打扰</dt><dd>${settings.quiet_enabled?`${e(settings.quiet_start)}–${e(settings.quiet_end)} · ${e(settings.quiet_timezone)}`:"未启用"}</dd></div>
-      <div><dt>暂停截止（本地时间）</dt><dd>${e(when(settings.pause_until))}</dd></div><div><dt>运行与模型</dt><dd>${e(({running:"运行中",new:"角色正在准备",stopped:"插件已停止",closed:"已关闭",faulted:"运行异常"})[value.host_state]||"运行状态待核对")} · ${effective.model_registered===true?"联系模型已登记":effective.model_registered===false?"联系模型尚未就绪":"模型状态待核对"}</dd></div></dl>${relation}
+      <div><dt>暂停截止（本地时间）</dt><dd>${e(when(settings.pause_until))}</dd></div><div><dt>运行与模型</dt><dd>${e(({running:"运行中",new:"角色正在准备",stopped:"插件已停止",closed:"已关闭",faulted:"运行异常"})[value.host_state]||"运行状态待核对")} · ${effective.model_registered===true?"联系模型已登记":effective.model_registered===false?"联系模型尚未就绪":"模型状态待核对"}</dd></div></dl>
       <details class="state-receipt-reference" data-receipt="contact-purposes"><summary id="state-contact-purpose-summary">查看各类联系的当前条件</summary><ul class="state-contact-status">${purposes(value).map(([key,item])=>`<li><strong>${e(item.label)}</strong><span>${item.allowed===true?"当前允许":item.allowed===false?e(reason(item.reason)):"条件待核对"} · 权重 ${e(settings[key+".weight"])}</span></li>`).join("")}</ul></details>${scheduleMarkup(value,e)}`;
   }
   return {fields,purposes,label,validField,supported,normalized,form,summary};

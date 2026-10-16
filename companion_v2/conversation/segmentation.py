@@ -15,8 +15,6 @@ from .text_processing import literal_ranges
 DEFAULT_SPLIT_WORDS = ("。", "？", "！", "~", "～", "?", ".", "!", ";", "；", "……", "）", "“", "…")
 DEFAULT_RULE_REGEX = r"(?<=[。！？!?…~～])\s*|\n+"
 PART_GAP_MODES = frozenset(("fixed", "random", "log"))
-_SOFT_COMMA_CHARS = frozenset((",", "，"))
-_SOFT_COMMA_MIN_CHARS = 10
 
 
 def part_gap_seconds(settings, text, seed):
@@ -149,26 +147,12 @@ def _word_boundaries(text, words, protected):
     return boundaries
 
 
-COHERENCE_PROMPT = (
-    "消息正文组织（只影响表达与排版，不改变角色、事实、来源和本轮任务）："
-    "先把同一个意思自然说完整，紧接的回应与理由保持连贯；简短不等于只说几个字或一句就结束。"
-    "对轻松、亲昵或分享式消息，可以像熟人一样自然接住情绪并多回应一点；称呼要和所在的完整句子放在一起。不要为制造聊天感，"
-    "把一次接话写成一串反问、称呼、否认和重复解释。称呼和语气词随语境使用，不必每句都补。"
-    "标点按语义使用，不为凑消息条数额外添加标点、换行或短句；连续标点（例如 ...？、？！）属于同一处停顿，不要在连续标点之间拆段。分段上限不是需要达到的目标。"
-    "日常短消息正文内部不插入空行，每条正文首尾不填充空行；换行只用于实际内容格式或已配置的分段边界，"
-    "不用空白制造停顿。代码、列表、引用和表格保持原有格式。"
-)
-
-
 DEFAULT_PROMPT = (
-    "你可以自行决定将本轮回复作为多条消息发送：熟悉的日常聊天可按自然停顿拆成简短、各自读得通的气泡，"
-    "一两句通常就够；不要把一句话、称呼与回应、因果解释或紧密相连的步骤拆散。"
-    "完整回应之后的自然追问可以另发一条；模型指定的边界无需凑够规则分段的最短字数。连续标点（例如 ...？、？！）保持在同一条消息里，不要让消息以孤立标点开头。每条正文首尾不要填充空行。"
-    "长文、教程、代码、引用、列表、表格、链接和带格式的内容尽量保持完整，只有清楚的主题转折才考虑分段。"
-    "每个消息边界只用完整标记 {{split_marker}}，在 text 字符串内单独占一行；"
-    "标记只表达消息边界，不是正文，也不能借此删改、概括或重排原文。不要加引号，不要放进代码、引用、列表或链接。"
-    "JSON 内换行仍需正确转义。普通换行和空行本身不是模型指定的消息边界；仅在确有必要时使用标记。"
-    "claims 中使用各段正文原句，不包含分段标记。"
+    "按内容自然决定是否拆成多条消息。日常聊天可在完整意思说完后的停顿处分段，让每条气泡独立读得通；"
+    "不要拆开一句话、称呼与回应、因果解释或紧密相连的步骤。长文、教程、代码、引用、列表、表格、链接和格式化内容保持完整，主题确实转折时再分段。"
+    "完整回应后的自然追问可另发一条；不必凑固定条数或达到规则分段的最短字数。连续标点（如 ...？、？！）留在同一条，避免气泡以孤立标点开头。每条正文首尾不填空行。"
+    "每个模型指定的边界使用完整标记 {{split_marker}}，在 text 字符串内单独占一行。它只表示消息边界，不属于正文；不要借此删改、概括或重排原文，也不要放进引文、代码、列表或链接。"
+    "普通换行和空行不代表模型指定边界；确有需要时才用标记。JSON 字符串中的换行正确转义。claims 使用各段正文原句，不含标记。"
 )
 
 @dataclass(frozen=True)
@@ -222,13 +206,14 @@ class SegmentationPolicy:
 
     @property
     def instruction(self):
+        """Only model-controlled boundaries need a generation protocol."""
         if not self.enabled:
             return ""
         if not self.llm_controlled:
-            return COHERENCE_PROMPT + "本轮由程序按当前规则分段，直接生成连贯正文即可。"
+            return ""
         prompt = re.sub(r"\{\{\s*split_marker\s*\}\}", lambda _: LLM_SEGMENT_MARKER,
                         self.prompt or DEFAULT_PROMPT, flags=re.IGNORECASE)
-        return COHERENCE_PROMPT + "\n" + prompt + f"\n分段标记为 {LLM_SEGMENT_MARKER}；本轮建议最多 {self.max_segments} 条，保持语意连贯。"
+        return prompt
 
     def parts(self, text):
         if not isinstance(text, str) or not text.strip() or len(text) > 65536:
@@ -327,8 +312,6 @@ class SegmentationPolicy:
                 continue
             visible_length = sum(not char.isspace() for char in text[start:end])
             if (visible_length < self.min_segment_chars
-                    or (text[end - 1] in _SOFT_COMMA_CHARS
-                        and visible_length < max(_SOFT_COMMA_MIN_CHARS, self.min_segment_chars * 2))
                     or len(text[end:].strip()) < self.min_segment_chars):
                 continue
             parts.append(text[start:end])

@@ -24,6 +24,7 @@ from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.conversation.reply_settings import expression_prompt_sections
 from companion_v2.conversation.voice_reply import VoiceReplyDelivery
 from companion_v2.conversation.messages import REPLY_ACTION, REPLY_KIND
+from companion_v2.conversation.pokes import poke_reply_profile
 from companion_v2.execution.models import Lane, ProviderBinding, SupervisorLimits, TaskContext, TaskError, digest, require
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.outcome import Outcome
@@ -276,7 +277,9 @@ class AstrBotStagingSession:
             prompt_sections=expression_prompt_sections())
         self.writing_profiles = writing_profiles(profile.provider_id, max_output_tokens=profile.max_output_tokens)
         self.reading_profile = reading_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens)
-        profiles = (self.model_profile, contact_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
+        profiles = (self.model_profile, poke_reply_profile(profile.provider_id,
+                    max_output_tokens=min(128, profile.max_output_tokens)),
+                    contact_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
                     persona_judge_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
                     reflection_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),
                     state_profile(profile.provider_id, max_output_tokens=profile.max_output_tokens),

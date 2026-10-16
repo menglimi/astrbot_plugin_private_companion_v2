@@ -381,7 +381,7 @@ class TwitchMixin:
             return False
         system_prompt = str(
             self.config.get("twitch_auto_reply_system_prompt")
-            or "你是正在直播中的虚拟主播助手。请根据观众最近的弹幕自然回应，语气像实时聊天，不要逐条复读。"
+            or "延续当前选定的人格和直播身份，结合最近的 Twitch 弹幕自然接话。使用观众主要使用的语言，优先回应具体问题或有意思的反馈；不逐条复读，也不必每条都回应。不要声称已在 Twitch 聊天室发言。"
         )
         persona_prompt = await live_private_persona_prompt(self, session_id)
         if persona_prompt:

@@ -61,7 +61,8 @@ class CoreReplyReactionDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestC
             self.semantic.reactions.import_image(self.semantic.ensure_reaction_catalog(context), self.original,
                 {"name": "挥手", "description": "友好挥手", "intents": "回应问候"})
         async def prepare_send(current, message, authorize, index, count):
-            return await prepare_core_reaction_message(event, message, authorize=authorize)
+            return await prepare_core_reaction_message(event, message, authorize=authorize,
+                                                       segment_index=index, segment_count=count)
         prepare_core_reply_event(event, prepared,
             authorize=lambda current: self.controller.authorize_core_reply(event, current),
             prepare_send=prepare_send, media_submit=lambda work: self.queued.append(work) or True)
@@ -95,6 +96,25 @@ class CoreReplyReactionDeliveryTests(MultiFixture, unittest.IsolatedAsyncioTestC
             self.assertEqual(db.execute("SELECT COUNT(*) FROM reaction_deliveries").fetchone()[0], 1)
         self.assertEqual(self.app.runtime.read_one("SELECT COUNT(*) n FROM conversation_batches", ())["n"], 0)
         self.assertEqual(self.native.provider.client.state.calls, [])
+
+    async def test_separate_after_reaction_waits_for_the_last_reply_segment(self):
+        from astrbot_host.core_reply_media_delivery import native_reply_messages
+
+        event, _ = await self.prepare()
+        core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        prepare_send = core["prepare_send"]
+        segments = ("第一句。", "第二句。", "第三句。")
+        output = []
+        for index, text in enumerate(segments):
+            message = MessageChain(chain=[Plain(text)])
+            prepared = await prepare_send(core["prepared"], message, self._allow,
+                                          index, len(segments))
+            output.extend(native_reply_messages(event, prepared))
+
+        self.assertEqual([item.get_plain_text() for item in output[:-1]], list(segments))
+        self.assertIsInstance(output[-1].chain[0], Image)
+        self.assertEqual(len(output), len(segments) + 1)
+        self.assertEqual(core["_reaction_reply"]["reason"], "prepared")
 
     async def test_before_and_same_message_delivery_modes_keep_caption_once(self):
         for mode in ("separate_before", "same_message"):

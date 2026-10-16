@@ -11,7 +11,7 @@ from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.conversation.pokes import PokePolicy
 from companion_v2.foundation.clock import DeterministicClock
 from tests.group_host_support import GroupFixture, group_config
-from tests.native_adapter_support import FakeEvent, FakeProvider, FakeReverseApi
+from tests.native_adapter_support import FakeEvent, FakeProvider, FakeReverseApi, completion, final_text
 from tests.recall_host_support import recall_notice, sdk_environment
 from tests.test_management_access import NOW
 
@@ -30,38 +30,48 @@ def poke_notice(original, *, target=None, time=None):
 
 class PokePolicyTests(unittest.TestCase):
     def test_defaults_and_invalid_configuration(self):
-        self.assertFalse(PokePolicy.parse(None).enabled)
+        policy = PokePolicy.parse(None)
+        self.assertFalse(policy.enabled)
+        self.assertEqual(policy.back_times, 1)
+        self.assertFalse(policy.model_reply_enabled)
+        self.assertEqual(policy.model_reply_probability, 0.3)
+        self.assertFalse(policy.use_model_reply("default-event"))
         with self.assertRaises(ValueError):
             PokePolicy.parse({"enabled": True, "replies": []})
         with self.assertRaises(ValueError):
             PokePolicy.parse({"trigger_probability": 2})
         with self.assertRaises(ValueError):
             PokePolicy.parse({"back_probability": True})
+        with self.assertRaises(ValueError):
+            PokePolicy.parse({"back_times": 0})
+        with self.assertRaises(ValueError):
+            PokePolicy.parse({"back_times": 6})
 
 
 class MultiHostPokeTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
-    def configure(self, *, private="preview", group="preview", back=0.0, trigger=1.0):
+    def configure(self, *, private="preview", group="preview", back=0.0, back_times=1, trigger=1.0,
+                  model_reply=False, model_probability=0.3):
         config = group_config(delivery_mode=private, group_delivery_mode=group)
         config["poke"] = {"enabled": True, "trigger_probability": trigger,
-                          "replies": ["在呢。"], "back_probability": back}
+                          "replies": ["在呢。"], "back_probability": back, "back_times": back_times,
+                          "model_reply_enabled": model_reply, "model_reply_probability": model_probability}
         self.controller = self.make_controller(config)
         return config
 
-    async def test_private_target_needs_its_own_grant_and_survives_restart(self):
+    async def test_private_target_poke_ignores_legacy_grants_and_survives_restart(self):
         config = self.configure(private="onebot_private", back=1.0)
         await self.start_host()
         notice = poke_notice(self.event(identifier="701"))
         api = self.native.platform.client._api._wsr_api
-        blocked = await self.controller.receive_notice(notice)
-        self.assertEqual(blocked.failure.code, "host_delivery_unauthorized")
-        self.assertEqual(api.calls, [])
-        (await self.controller.authorize_delivery("first")).unwrap()
-        self.assertEqual((await self.controller.receive_notice(notice)).unwrap()["state"], "replayed")
+        result = (await self.controller.receive_notice(notice)).unwrap()
+        self.assertEqual((result["state"], result["poke_back"]), ("delivered", True))
+        self.assertEqual([action for action, _ in api.calls], ["send_private_msg", "friend_poke"])
 
         next_notice = poke_notice(self.event(identifier="702"), time=int(NOW.timestamp()) + 1)
         result = (await self.controller.receive_notice(next_notice)).unwrap()
         self.assertEqual((result["state"], result["poke_back"]), ("delivered", True))
-        self.assertEqual([action for action, _ in api.calls], ["send_private_msg", "friend_poke"])
+        self.assertEqual([action for action, _ in api.calls],
+                         ["send_private_msg", "friend_poke", "send_private_msg", "friend_poke"])
         self.assertEqual(api.calls[0][1]["user_id"], 200)
         self.assertEqual(api.calls[1][1]["user_id"], 200)
 
@@ -70,31 +80,97 @@ class MultiHostPokeTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         (await self.controller.load_existing()).unwrap()
         (await self.controller.start()).unwrap()
         self.assertEqual((await self.controller.receive_notice(next_notice)).unwrap()["state"], "replayed")
-        self.assertEqual(len(api.calls), 2)
+        self.assertEqual(len(api.calls), 4)
 
-    async def test_group_poke_uses_group_grant_and_rejects_wrong_target(self):
-        self.configure(group="onebot_group", back=1.0)
+    async def test_group_poke_uses_configured_route_without_legacy_grants(self):
+        self.configure(group="onebot_group", back=1.0, model_reply=True, model_probability=1.0)
         await self.start_host()
+        async def model_behavior(payload, tools):
+            return completion(final_text("群里的戳戳收到啦。"))
+
+        self.native.provider.client.state.behavior = model_behavior
         original = self.group_event(identifier="701", sender="201", unique=True)
         notice = poke_notice(original)
         api = self.native.platform.client._api._wsr_api
-        self.assertEqual((await self.controller.receive_notice(notice)).failure.code,
-                         "host_group_delivery_unauthorized")
-        (await self.controller.authorize_group_delivery("group-a")).unwrap()
-        valid = poke_notice(original, time=int(NOW.timestamp()) + 1)
-        result = (await self.controller.receive_notice(valid)).unwrap()
+        result = (await self.controller.receive_notice(notice)).unwrap()
         self.assertEqual((result["state"], result["poke_back"]), ("delivered", True))
+        self.assertEqual(result["response_kind"], "model")
         self.assertEqual([action for action, _ in api.calls], ["send_group_msg", "group_poke"])
         self.assertEqual((api.calls[0][1]["group_id"], api.calls[1][1]["user_id"]), (300, 201))
+        self.assertEqual(api.calls[0][1]["message"], [{"type": "text", "data": {"text": "群里的戳戳收到啦。"}}])
 
         other_group = poke_notice(self.group_event("group-b", identifier="702"),
                                   time=int(NOW.timestamp()) + 2)
-        self.assertEqual((await self.controller.receive_notice(other_group)).failure.code,
-                         "host_group_delivery_unauthorized")
+        other_result = (await self.controller.receive_notice(other_group)).unwrap()
+        self.assertEqual((other_result["state"], other_result["poke_back"]), ("delivered", True))
+        self.assertEqual([action for action, _ in api.calls],
+                         ["send_group_msg", "group_poke", "send_group_msg", "group_poke"])
         wrong_target = poke_notice(self.group_event(identifier="703"), target=999,
                                    time=int(NOW.timestamp()) + 3)
         self.assertIsNone(await self.controller.receive_notice(wrong_target))
-        self.assertEqual(len(api.calls), 2)
+        self.assertEqual(len(api.calls), 4)
+
+    async def test_back_count_repeats_the_native_poke_action(self):
+        self.configure(private="onebot_private", back=1.0, back_times=3)
+        await self.start_host()
+        result = (await self.controller.receive_notice(poke_notice(self.event(identifier="701")))).unwrap()
+        api = self.native.platform.client._api._wsr_api
+
+        self.assertEqual((result["poke_back"], result["poke_back_count"]), (True, 3))
+        self.assertEqual([action for action, _ in api.calls], ["send_private_msg", "friend_poke",
+                         "friend_poke", "friend_poke"])
+
+    async def test_model_poke_reply_uses_supervised_prompt_without_creating_a_user_turn(self):
+        self.configure(private="onebot_private", model_reply=True, model_probability=1.0)
+        await self.start_host()
+
+        calls = 0
+
+        async def model_behavior(payload, tools):
+            nonlocal calls
+            calls += 1
+            return completion(final_text("模型即兴：我被你发现啦。" if calls == 1 else "超长" * 121))
+
+        self.native.provider.client.state.behavior = model_behavior
+        app = self.controller.session.application
+        before = app.runtime.read_one("SELECT COUNT(*) AS count FROM conversation_batches", ())['count']
+        result = (await self.controller.receive_notice(poke_notice(self.event(identifier="701")))).unwrap()
+        after = app.runtime.read_one("SELECT COUNT(*) AS count FROM conversation_batches", ())['count']
+        api = self.native.platform.client._api._wsr_api
+
+        self.assertEqual(result["response_kind"], "model")
+        self.assertEqual(api.calls[0][1]["message"], [{"type": "text", "data": {"text": "模型即兴：我被你发现啦。"}}])
+        self.assertEqual(before, after)
+        fallback = (await self.controller.receive_notice(poke_notice(
+            self.event(identifier="702"), time=int(NOW.timestamp()) + 1))).unwrap()
+        self.assertEqual(fallback["response_kind"], "preset")
+        self.assertEqual(api.calls[1][1]["message"], [{"type": "text", "data": {"text": "在呢。"}}])
+        self.assertEqual(len(self.native.provider.client.state.calls), 2)
+
+    async def test_lost_ack_during_repeated_poke_is_unknown_and_not_replayed(self):
+        self.configure(private="onebot_private", back=1.0, back_times=3)
+        await self.start_host()
+        api = self.native.platform.client._api._wsr_api
+        original_call = api.call_action
+        poke_calls = 0
+
+        async def lose_second_poke_ack(action, **params):
+            nonlocal poke_calls
+            result = await original_call(action, **params)
+            if action == "friend_poke":
+                poke_calls += 1
+                if poke_calls == 2:
+                    raise TimeoutError("lost repeated poke acknowledgement")
+            return result
+
+        api.call_action = lose_second_poke_ack
+        notice = poke_notice(self.event(identifier="701"))
+        result = (await self.controller.receive_notice(notice)).unwrap()
+        self.assertEqual((result["state"], result["poke_back"], result["poke_back_count"]),
+                         ("delivered", "unknown", 1))
+        call_count = len(api.calls)
+        self.assertEqual((await self.controller.receive_notice(notice)).unwrap()["state"], "replayed")
+        self.assertEqual(len(api.calls), call_count)
 
     async def test_self_poke_and_unconfigured_sender_are_ignored(self):
         self.configure(private="onebot_private")
@@ -131,7 +207,7 @@ class MultiHostPokeTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         result = (await self.controller.receive_notice(next_notice)).unwrap()
         self.assertEqual((result["message_id"], result["poke_back"]), ("-701", True))
 
-    async def test_revocation_after_text_blocks_poke_back(self):
+    async def test_legacy_delivery_revocation_does_not_cancel_poke_back(self):
         self.configure(private="onebot_private", back=1.0)
         await self.start_host()
         (await self.controller.authorize_delivery("first")).unwrap()
@@ -146,8 +222,8 @@ class MultiHostPokeTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
 
         api.call_action = revoke_after_text
         result = (await self.controller.receive_notice(poke_notice(self.event(identifier="701")))).unwrap()
-        self.assertEqual((result["state"], result["poke_back"]), ("delivered", False))
-        self.assertEqual([action for action, _ in api.calls], ["send_private_msg"])
+        self.assertEqual((result["state"], result["poke_back"]), ("delivered", True))
+        self.assertEqual([action for action, _ in api.calls], ["send_private_msg", "friend_poke"])
 
     async def test_probability_skip_is_durable(self):
         self.configure(private="onebot_private", trigger=0.0)
@@ -173,7 +249,7 @@ class StagingPokeTests(unittest.IsolatedAsyncioTestCase):
             native_types=self.types, now=self.clock.now)
         self.addAsyncCleanup(self.controller.terminate)
 
-    async def test_single_target_poke_obeys_delivery_grant(self):
+    async def test_single_target_poke_ignores_legacy_delivery_grant_expiry(self):
         (await self.controller.initialize_profile()).unwrap()
         (await self.controller.authorize_delivery()).unwrap()
         (await self.controller.start()).unwrap()
@@ -183,8 +259,9 @@ class StagingPokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native.platform.client._api._wsr_api.calls[0][0], "send_private_msg")
         self.clock.advance(timedelta(minutes=16))
         expired = poke_notice(FakeEvent(self.native, event_id="702"), time=int(self.clock.now().timestamp()))
-        self.assertIsNotNone((await self.controller.receive_notice(expired)).failure)
-        self.assertEqual(len(self.native.platform.client._api._wsr_api.calls), 1)
+        result = (await self.controller.receive_notice(expired)).unwrap()
+        self.assertEqual(result["state"], "delivered")
+        self.assertEqual(len(self.native.platform.client._api._wsr_api.calls), 2)
 
 
 if __name__ == "__main__":

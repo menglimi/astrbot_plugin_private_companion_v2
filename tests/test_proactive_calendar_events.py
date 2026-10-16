@@ -23,7 +23,7 @@ class CalendarContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestC
         manager = StateManagement(self.app, self.origin)
         before = manager.status(self.core).unwrap()
         manager.command(self.core, dict(action="configure", operation_key="enable-calendar",
-            edit_token=before["edit_token"], changes={"calendar_enabled": True})).unwrap()
+            role_edit_token=before["role_edit_token"], changes={"calendar_enabled": True})).unwrap()
         self.settings(self.app, {"chat.enabled": False, **settings}).unwrap()
         self.assertIsInstance(self.app.contact_schedule.calendar_events, CalendarContactEvents)
 
@@ -59,6 +59,18 @@ class CalendarContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(json.loads(self.contacts(self.app)[0]["record_json"])["purpose"], "reminder")
         self.app.contact_schedule.advance()
         self.assertEqual(len(self.contact_calls()), 1)
+
+    async def test_accepted_reminder_keeps_its_time_when_activity_curve_holds_shares(self):
+        await self.setup_contacts(quiet_enabled=False, proactive_hour_activity_enabled=True,
+            quiet_timezone="UTC", proactive_hour_activity_curve=",".join(["0.05"] + ["1.00"] * 23))
+        self.commitment()
+        self.accept()
+        with patch("companion_v2.proactive.rhythm.sample", return_value=0.5):
+            self.advance(self.app, 60)
+            await self.automatic_delivery(self.app)
+        saved = json.loads(self.contacts(self.app)[0]["record_json"])
+        self.assertEqual(saved["purpose"], "reminder")
+        self.assertIn("calendar_event", saved["automatic_origin"])
 
     async def test_proposal_role_plan_and_explicit_reminder_do_not_generate_another_contact(self):
         await self.setup_contacts()

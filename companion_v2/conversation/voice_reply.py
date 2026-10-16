@@ -119,6 +119,9 @@ class VoiceReplyPolicy:
     max_speech_chars: int = 1800
     timeout_seconds: int = 30
     trigger_keywords: str = ""
+    primary_mention_keywords: str = ""
+    primary_mention_probability: float = 0.8
+    primary_mention_prompt: str = ""
     provider_id: str = ""
     zh_provider_id: str = ""
     ja_provider_id: str = ""
@@ -135,50 +138,55 @@ class VoiceReplyPolicy:
                    (self.foreign_text_mode, {"original", "translation", "bilingual"}))
         if any(value not in options for value, options in choices):
             raise ValueError("voice reply mode is unsupported")
-        for value in (self.probability, self.private_probability, self.group_probability):
+        for value in (self.probability, self.private_probability, self.group_probability,
+                      self.primary_mention_probability):
             if type(value) not in (int, float) or not math.isfinite(value) or not -1 <= value <= 1:
                 raise ValueError("voice reply probability must be between zero and one, or -1 for inheritance")
-        if not 0 <= self.probability <= 1:
+        if not 0 <= self.probability <= 1 or not 0 <= self.primary_mention_probability <= 1:
             raise ValueError("voice reply probability must be between zero and one")
         for value, low, high in ((self.cooldown_seconds, 0, 86400),
                                  (self.max_speech_chars, 1, 10000), (self.timeout_seconds, 1, 120)):
             if type(value) is not int or not low <= value <= high:
                 raise ValueError("voice reply limit is invalid")
-        for value, limit in ((self.trigger_keywords, 2000), (self.provider_id, 128),
+        for value, limit in ((self.trigger_keywords, 2000), (self.primary_mention_keywords, 2000),
+                             (self.primary_mention_prompt, 2000), (self.provider_id, 128),
                              (self.zh_provider_id, 128), (self.ja_provider_id, 128),
                              (self.en_provider_id, 128), (self.extra_prompt, 2000)):
             if not isinstance(value, str) or len(value) > limit:
                 raise ValueError("voice reply text setting is invalid")
+        words = tuple(word.strip() for word in re.split(r"[,，;；\n]+", self.primary_mention_keywords)
+                      if word.strip())
+        if len(words) > 80 or any(len(word) > 80 for word in words):
+            raise ValueError("primary mention voice keywords are invalid")
 
     @property
     def instruction(self):
         if self.generation_mode != "model_tag" and self.trigger_mode != "adaptive":
             return ""
-        prompt = "仅将实际朗读的原文包在 <pc_tts> 与 </pc_tts> 中；标签内不放分段标记、代码、链接或图片说明。"
+        prompt = "只有实际要朗读的原文放在 <pc_tts> 与 </pc_tts> 之间；标签内不放分段标记、代码、链接或图片说明。"
         if self.trigger_mode == "request":
-            prompt = "用户本轮已提出语音请求，用语音标签承载实际说给对方听的完整回应。" + prompt
+            prompt = "用户本轮请求语音时，用语音标签承载实际说给对方听的完整回应。" + prompt
         elif self.trigger_mode == "always":
-            prompt = "本轮采用语音回复，普通聊天短句也用语音标签承载完整的口语回应，无需等用户再次要求语音。" + prompt
+            prompt = "本轮采用语音回复，普通短句也将完整口语回应放进语音标签，不必等用户重复请求。" + prompt
         else:
-            prompt = "本轮按语境选择语音，把适合亲口说的短句写入语音标签；没有适合朗读的内容时直接写普通正文。" + prompt
+            prompt = "本轮按语境决定是否使用语音；适合口述的内容写入语音标签，没有合适内容时直接写普通正文。" + prompt
         prompt += (
-            "语音标签是程序消费的内部呈现格式，不向用户解释标签，也不把标签当作代码展示。"
-            "代码、链接等适合阅读的内容放在标签外，正常口语回应仍按本轮语音方式呈现。"
-            "对方本轮明确要求只用文字时，尊重这次要求。"
+            "标签由程序消费，不向用户解释或当作代码展示。代码、链接等适合阅读的内容留在标签外；"
+            "本轮明确要求只用文字时，尊重这次要求。"
         )
-        prompt += f"每个朗读片段尽量在 {self.max_speech_chars} 字内，长内容在自然语意停顿处分为多个语音标签。"
+        prompt += f"每段朗读控制在 {self.max_speech_chars} 字以内；较长内容按自然语意停顿分成多个语音标签。"
         if self.language != "zh":
             label = "日语" if self.language == "ja" else "英语"
-            prompt += f"语音标签内用自然{label}，完整表达标签承载的意思。"
+            prompt += f"标签内用自然{label}完整表达该段意思，语气贴合当前对话。"
             if self.foreign_text_mode == "translation":
-                prompt += "每个语音标签后紧接与该片段完整对应的自然中文译文，不加标题、不省略关键信息；译文作为可见文字。"
+                prompt += "每个语音标签后紧接与该段完整对应的自然中文译文，不加标题或省略关键信息；译文作为可见文字。"
                 if self.trigger_mode in {"always", "request"}:
                     prompt += "中文聊天正文都对应相邻的朗读片段，不在译文后另加没有朗读的口语回应；代码和链接可单独保留。"
                 example = ("<pc_tts>おやすみ。ゆっくり休んでね。</pc_tts>晚安，好好休息呀。"
                            if self.language == "ja" else "<pc_tts>Good night. Rest well.</pc_tts>晚安，好好休息呀。")
-                prompt += "格式示例：" + example + " 示例只说明格式，实际内容和语气按当前对话生成。"
+                prompt += "格式示例：" + example + " 示例仅说明格式，内容和语气按当前对话生成。"
             elif self.foreign_text_mode == "bilingual":
-                prompt += "每个语音标签后紧接完整自然中文译文，不加标题；可见文字保留外语原文和中文译文。"
+                prompt += "每个标签后附完整、自然的中文译文，不加标题；可见文字保留外语原文与译文。"
             else:
                 prompt += "标签外保留自然显示文字即可，不必翻译；不要重复朗读原文。"
         if self.extra_prompt.strip():
@@ -194,6 +202,10 @@ class VoiceReplyPolicy:
 
     def keywords(self):
         return tuple(word.strip().casefold() for word in re.split(r"[,，;；\n]+", self.trigger_keywords)
+                     if word.strip())
+
+    def primary_mention_words(self):
+        return tuple(word.strip().casefold() for word in re.split(r"[,，;；\n]+", self.primary_mention_keywords)
                      if word.strip())
 
 
@@ -274,12 +286,14 @@ def planned_speech(text, parts, spans, policy):
     return tuple(speech for speech, _ in speech_decisions(text, parts, spans, policy))
 
 
-def eligible(policy, *, input_text, kind, batch_id):
-    if policy.trigger_mode == "request":
+def eligible(policy, *, input_text, kind, batch_id, primary_mention=False):
+    primary_trigger = (primary_mention and policy.primary_mention_probability > 0
+        and any(word in input_text.casefold() for word in policy.primary_mention_words()))
+    if policy.trigger_mode == "request" and not primary_trigger:
         keywords = policy.keywords() or ("语音", "说给我听", "念给我听", "读给我听", "voice", "tts")
         if not any(word in input_text.casefold() for word in keywords):
             return False
-    chance = policy.chance(kind)
+    chance = max(policy.chance(kind), policy.primary_mention_probability) if primary_trigger else policy.chance(kind)
     return chance >= 1 or chance > 0 and int(digest(batch_id)[:12], 16) / 0xFFFFFFFFFFFF < chance
 
 

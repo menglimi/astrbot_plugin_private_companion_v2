@@ -39,3 +39,22 @@ def group_trigger_facts(event, account_id):
             "native_wakeup": getattr(event, "is_at_or_wake_command", False) is True,
             "mentions_others": mentions_others, "reply_ids": tuple(dict.fromkeys(replies)),
             "mentions_all": mentions_all, "quoted_bot": quoted_bot, "has_image": has_image}
+
+
+def mentioned_account_ids(event):
+    """Read @ targets from the authenticated native component chain."""
+    message = getattr(getattr(event, "message_obj", None), "message", ())
+    found = []
+    for part in message or ():
+        if isinstance(part, Mapping):
+            kind, data = part.get("type"), part.get("data", {})
+            target = data.get("qq") if isinstance(data, Mapping) else None
+        else:
+            kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
+            target = getattr(part, "qq", None)
+        if kind not in ("at", "At") or target is None:
+            continue
+        value = str(target)
+        if value.isascii() and value.isdecimal():
+            found.append(value)
+    return tuple(dict.fromkeys(found))

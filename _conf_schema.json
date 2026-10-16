@@ -279,7 +279,7 @@
         "description": "任务提示",
         "hint": "当前 AstrBot 人格提示仍由宿主读取并单独校验；这里补充本次回复任务的约束。",
         "type": "text",
-        "default": "保持当前 AstrBot 人格，只根据本轮输入和有依据的材料回复。"
+          "default": "沿用当前 AstrBot 人格，先回应本轮真正的问题或话题。自然、具体地说清意思；只使用本轮输入和有依据的材料，不补造事实。按任务需要调整长短与格式，闲聊不复述、不写客服式收尾。"
       },
       "fallback_provider_id": {
         "description": "回复任务的回退 Provider",
@@ -541,6 +541,23 @@
         "default": "",
         "hint": "逗号或换行分隔；留空使用内置语音请求词。"
       },
+      "primary_mention_keywords": {
+        "description": "核心用户提及语音词",
+        "type": "text",
+        "default": "",
+        "hint": "只在原生 @ 目标属于经验证的核心用户时检查；逗号或换行分隔。"
+      },
+      "primary_mention_probability": {
+        "description": "核心用户提及语音概率",
+        "type": "float",
+        "default": 0.8,
+        "hint": "与窗口基础语音概率取较高值；命中后绕过本轮冷却。"
+      },
+      "primary_mention_prompt": {
+        "description": "核心用户提及语音提示",
+        "type": "text",
+        "default": ""
+      },
       "provider_id": {
         "description": "指定 TTS Provider ID",
         "type": "string",
@@ -601,6 +618,23 @@
         "description": "反戳概率",
         "type": "float",
         "default": 0.0
+      },
+      "back_times": {
+        "description": "连续回戳次数",
+        "hint": "命中回戳后连续戳回对方几次，范围 1–5；旧配置默认一次。",
+        "type": "int",
+        "default": 1
+      },
+      "model_reply_enabled": {
+        "description": "启用模型即兴回复",
+        "hint": "默认关闭。开启后按配置概率调用戳一戳专用模型任务，失败时回退预设短句。",
+        "type": "bool",
+        "default": false
+      },
+      "model_reply_probability": {
+        "description": "模型即兴回复概率",
+        "type": "float",
+        "default": 0.3
       }
     }
   },

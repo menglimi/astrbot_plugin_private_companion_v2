@@ -1094,30 +1094,26 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
             if _single_line(item, 240)
         )
         acknowledgement_hint = (
-            "可以自然邀请对方醒来后回一句，让系统停止后续提醒，但不要把回应写成命令或施加压力。"
+            "如果符合当前语气，可以轻轻请对方醒来后回一句；不要提系统如何处理回复，也不把回应说成义务。"
             if bool(alarm.get("require_acknowledgement", True))
-            else "不必要求对方回复。"
+            else "无需索要回复。"
         )
         prompt = (
-            "请为一次现实设备上的起床提醒写出此刻真正会对用户说的话。\n"
+            "写一条此刻真正会说出口的叫醒提醒，延续选定人格和你们的关系距离。时间只作语境参考，不必报时；触达次数只帮助避免重复，不要说出次数。\n"
             f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}，周{weekday}\n"
-            f"这是本轮第 {attempt}/{max_attempts} 次触达。\n"
-            f"用户称呼：{name or '没有可靠称呼，直接自然地说“你”'}\n"
-            f"关系状态：{relationship or '没有额外关系资料，保持自然、低压力'}\n"
-            f"用户设置的叫醒偏好或补充要求：{preference or '无，由你根据人格和语境自然发挥'}\n"
-            f"本轮此前已经说过的话：\n{previous_text or '无，这是第一次触达'}\n"
-            f"最近对话：\n{history[-2400:] or '没有可用的最近对话，不要自行编造昨晚或今天的经历'}\n\n"
-            "只输出最终说出口的一到两句短话，不要标题、引号、Markdown、括号动作、TTS 标签或解释。"
-            "目标是自然地把对方叫醒，措辞应每天有变化，并贴合人格和关系距离；设置内容只提供意图和事实，"
-            "需要融入当下重新表达，不要逐字复读。后续触达要换一种说法，可以比前一次更明确一点，但仍保持温和。"
-            "可以有温度、惦记或一点生活感，但不要像通知、客服或健康打卡。"
+            f"本轮触达序号：{attempt}/{max_attempts}\n"
+            f"用户称呼：{name or '没有可靠称呼时直接自然地说“你”'}\n"
+            f"关系资料：{relationship or '没有额外资料，保持自然、低压力'}\n"
+            f"用户的叫醒偏好：{preference or '无，由你按人格和语境发挥'}\n"
+            f"本轮此前已说的话：\n{previous_text or '无'}\n"
+            f"最近对话：\n{history[-2400:] or '无可用对话；不要补写昨晚或今天的经历'}\n\n"
+            "用一两句短话，亲切、自然、有生活感，像熟悉的人轻声提醒；可结合偏好，但换成符合当下语气的说法，不照抄设置或上一条。重复触达时换个角度，让提醒更清楚即可，不逐渐施压。"
+            "避免通知、客服、打卡口吻。只输出正文，不要标题、引号、Markdown、动作旁白、TTS 标签或解释。"
             f"{acknowledgement_hint}"
-            "不要声称看见、监听或确认了用户正在睡觉或已经醒来，不编造天气、日程和昨晚发生的事；"
-            "不要命令、训斥、内疚施压，也不要制造紧迫恐慌。"
+            "不要声称看见、监听或确认对方正在睡觉或已经醒来，不补造天气、日程或昨晚经历；语气不命令、不训斥、不制造内疚或紧迫感。"
         )
         system_prompt = (
-            "你正在延续下面的人格，以这个人本来的口吻说一句真实、克制的叫醒话。"
-            "人格是表达依据，不要复述或解释人格设定。\n\n"
+            "延续下面选定的人格，用原本的口吻自然地提醒对方起床。人格只作为表达依据，不复述或讲解设定。\n\n"
             + (persona[:6000] if persona else "保持自然、有生活感的陪伴者口吻。")
         )
         provider_id = None
@@ -1320,10 +1316,9 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
         if not callable(llm_call) or len(compact) > 120:
             return "other", 0
         prompt = (
-            "判断下面这句用户消息是否是在回应刚刚的起床提醒。只输出一个结果："
-            "awake、snooze、stop 或 other。awake=明确已经醒来或起床；"
-            "snooze=明确还没醒、想稍后再叫；stop=只取消今天这轮提醒；"
-            "other=普通聊天、含糊表达或无法确定。宁可输出 other，不要把普通聊天误判为控制指令。\n"
+            "根据语义判断这条消息是否回应刚才的起床提醒，只输出 awake、snooze、stop、other 之一。"
+            "awake 表示明确说已醒或已起床；snooze 表示明确想稍后再提醒；stop 表示只取消今天这轮；"
+            "普通聊天或意图不清楚时选 other，不把寒暄当成控制请求。\n"
             f"用户消息：{_single_line(text, 240)}"
         )
         try:

@@ -9,16 +9,19 @@ const ROOT = path.join(__dirname, "..");
 const PAGE = path.join(ROOT, "pages", "陪伴小屋");
 const HOST = "astrbot_plugin_private_companion_v2";
 
-test("学习工作台按六页导航并加载每个真实数据模块", () => {
+test("学习工作台按导航加载每个真实数据模块", () => {
   const app = fs.readFileSync(path.join(PAGE, "app.js"), "utf8");
   const html = fs.readFileSync(path.join(PAGE, "index.html"), "utf8");
   const review = fs.readFileSync(path.join(PAGE, "self-review-page.js"), "utf8");
   const learningReview = fs.readFileSync(path.join(PAGE, "learning-review-page.js"), "utf8");
   const overview = fs.readFileSync(path.join(PAGE, "learning-overview.js"), "utf8");
-  for (const section of ["overview", "strategy", "review", "chain", "expression", "semantic", "reflection"]) {
+  for (const section of ["overview", "strategy", "review", "chain", "expression", "behavior", "semantic", "reflection"]) {
     assert.match(app, new RegExp(`\\['${section}',`));
   }
   assert.match(app, /id="selfReviewWorkspace"/);
+  assert.match(app, /id="behaviorLearningWorkspace"/);
+  assert.match(html, /behavior-page\.js/);
+  assert.match(app, /sectionIds:\['behavior'\]/);
   assert.match(app, /CompanionSelfReviewPage\?\.mount\(selfReviewHost,\{sources:reviewSources,state:'active'\}\)/);
   const rendererStart = app.indexOf('function renderLearningPage(){');
   const rendererEnd = app.indexOf('/* 2026-09-30 接回：', rendererStart);

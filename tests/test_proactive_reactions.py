@@ -3,7 +3,7 @@
 from dataclasses import replace
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.delivery.media import ImageDeliveryEnvelope, image_manifest
@@ -14,7 +14,7 @@ from tests.test_semantic_integration import SemanticPort, animation, picture
 
 
 class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
-    async def enabled_reactions(self, *, proactive=True):
+    async def enabled_reactions(self, *, proactive=True, return_host=False):
         self.sender = replace(self.sender, supports_images=True)
         host = self.host()
         self.semantic = host.application.attach_semantics(SemanticPort())
@@ -36,7 +36,7 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
                      IMAGE_OUTPUT_GROUP + ".proactive_max_daily": 1},
             operation=self.operation(target.authorization_scope, owner=IMAGE_OUTPUT_GROUP),
             observed_at=self.clock.now()).unwrap()
-        return app
+        return (app, host) if return_host else app
 
     def import_reaction(self, image=None, *, label="安慰"):
         context = self.contact_context()
@@ -82,6 +82,56 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(contact["payload_hash"], row["payload_hash"])
         self.assertEqual(app.background_history.recent(self.contact_context()).unwrap()[0]["text"], "我在这里。")
         self.assertEqual(app.record_receipt(self.receipt(envelope)).unwrap(), "delivered")
+        self.assertEqual(self.uses(), 1)
+
+    async def test_confirmed_image_diagnostic_delivers_original_when_daily_auto_images_are_off(self):
+        app = await self.enabled_reactions(proactive=False)
+        context = self.contact_context()
+        self.settings(app, {"enabled": True, "automatic_enabled": False}).unwrap()
+        self.semantic.store.configure({"reactions_proactive_enabled": False,
+                                       "reactions_trigger_probability": 0.0,
+                                       "reactions_cooldown_seconds": 3600}, 1)
+        from companion_v2.conversation.media.output_settings import GROUP as IMAGE_OUTPUT_GROUP
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE, context.role_binding.role,
+                              bot_id=context.scope.bot_id)
+        snapshot = app.configuration.read(self.core, target=target, group_id=IMAGE_OUTPUT_GROUP,
+                                          observed_at=self.clock.now()).unwrap()
+        app.configuration.patch(self.core, target=target, group_id=IMAGE_OUTPUT_GROUP,
+            expected_edit_token=snapshot.edit_token,
+            changes={IMAGE_OUTPUT_GROUP + ".proactive_probability": 0.0,
+                     IMAGE_OUTPUT_GROUP + ".proactive_max_daily": 0},
+            operation=self.operation(target.authorization_scope, owner=IMAGE_OUTPUT_GROUP),
+            observed_at=self.clock.now()).unwrap()
+        original = picture()
+        diagnostic_intent = "适合轻松、友好、自然日常互动的表情图片；不适合严肃、悲伤、冲突或边界语境。"
+        item = self.import_reaction(original, label=diagnostic_intent)
+        opportunity = self.opportunity("image-diagnostic")
+        source = self.source(app, "image-diagnostic-source")
+        intent = self.intent(opportunity, purpose="chat", sources=(source,))
+        diagnostic_origin = {"_diagnostic": {"route_id": "conversation_scheduler", "purpose": "chat",
+            "batch_id": "diagnostic-batch", "event_key": "diagnostic-event", "event_hash": "event-hash",
+            "role_hash": "role-hash"}}
+        app.contact_schedule.validate_diagnostic_origin = Mock()
+        async def send_image_diagnostic(_envelope):
+            return answered(json.dumps({
+                "decision": "send", "text": "刚想找你说件轻松的小事。"}, ensure_ascii=False))
+        self.model_behavior = send_image_diagnostic
+        result = await app.proactive.contact(context, opportunity, (intent,),
+            role_instruction="这是原角色人格，保持自然。", selection_seed="image-diagnostic",
+            administrator_test=True, diagnostic_source_backed=True,
+            diagnostic_origin=diagnostic_origin,
+            diagnostic_image_intent=diagnostic_intent)
+        self.assertIsNone(result.failure, result.failure)
+        task = result.unwrap().task
+        await self.delivery_state(app, task.task_id, "delivered")
+        observation = app.proactive.observe(context, task.task_id).unwrap()
+        self.assertEqual(observation["stage_metrics"]["image_attachment"],
+                         {"state": "passed", "attached": True})
+        self.assertEqual(len(self.sent), 1)
+        self.assertIsInstance(self.sent[0], ImageDeliveryEnvelope)
+        self.assertEqual(self.sent[0].images[0].descriptor.content_hash, item["id"])
+        self.assertEqual(self.sent[0].images[0].data_base64,
+                         __import__("base64").b64encode(original.content).decode("ascii"))
         self.assertEqual(self.uses(), 1)
 
     async def test_animated_original_is_sent_as_gif(self):

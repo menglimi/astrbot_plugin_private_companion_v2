@@ -78,7 +78,8 @@ function section(kind, changes = {}, token = TOKEN('a')) {
    否则夹具给出与后端不一致的合同，就测不出「页面按后端下发的范围校验」这件事。 */
 const NEW_KINDS = {
   'expression.learning': {
-    group: 'expression.learning', scope: 'installation', layers: ['installation'],
+    group: 'expression.learning', scope: 'role', layers: ['installation', 'role'],
+    editableLayers: ['installation', 'role', 'window'],
     settings: {scan_interval_minutes: 1440, group_scan_interval_minutes: 180, group_daily_batch_limit: 6},
     fields: {scan_interval_minutes: ['integer', 5, 10080],
       group_scan_interval_minutes: ['integer', 5, 10080], group_daily_batch_limit: ['integer', 1, 50]},
@@ -116,8 +117,9 @@ const NEW_KINDS = {
   },
   'role.growth.skills': {
     group: 'role.growth.skills',
-    scope: 'installation',
-    layers: ['installation'],
+    scope: 'role',
+    layers: ['installation', 'role'],
+    editableLayers: ['role'],
     settings: {enabled: true, custom_skills: '[]', schedule_influence_strength: 0},
     fields: {enabled: ['boolean'], custom_skills: ['text'], schedule_influence_strength: ['integer', 0, 3]},
   },
@@ -223,7 +225,8 @@ const NEW_KINDS = {
   },
   group_participation: {
     group: 'conversation.group_participation',
-    settings: {enable_group_social_context: false, enable_group_mood_detection: false,
+    settings: {enable_group_social_context: false, enable_group_topic_threads: true, group_topic_thread_max: 12,
+      enable_group_mood_detection: false,
       enable_group_roleplay_strength: false, enable_group_moments: false,
       enable_group_moment_portrait: false, enable_group_joke_guard: false,
       enable_group_persona_denoise: true, enable_group_interjection: false,
@@ -232,9 +235,13 @@ const NEW_KINDS = {
       enable_group_repeat_follow: true, group_repeat_count_distinct_users_only: false,
       group_repeat_trigger_threshold: 4, group_repeat_follow_probability: 0.18,
       group_repeat_interrupt_probability: 0.1, group_repeat_interrupt_probability_step: 0.12,
-      group_repeat_interrupt_text: '禁止复读', group_repeat_interrupt_image_path: '', group_repeat_window_seconds: 120},
+      group_repeat_interrupt_text: '禁止复读', group_repeat_interrupt_image_path: '', group_repeat_window_seconds: 120,
+      group_context_max_age_hours: 12,
+      enable_group_behavior_learning:true, enable_group_behavior_imitation:true,
+      enable_group_behavior_feedback:true, group_behavior_guidance:''},
     /* 概率字段注册成 probability（0–1 的小数），与 role.growth 的整数档位不同。 */
-    fields: {enable_group_social_context: ['boolean'], enable_group_mood_detection: ['boolean'],
+    fields: {enable_group_social_context: ['boolean'], enable_group_topic_threads: ['boolean'],
+      group_topic_thread_max: ['integer', 3, 40], enable_group_mood_detection: ['boolean'],
       enable_group_roleplay_strength: ['boolean'], enable_group_moments: ['boolean'],
       enable_group_moment_portrait: ['boolean'], enable_group_joke_guard: ['boolean'],
       enable_group_persona_denoise: ['boolean'], enable_group_interjection: ['boolean'],
@@ -248,7 +255,9 @@ const NEW_KINDS = {
       group_repeat_interrupt_probability: ['probability', 0, 1],
       group_repeat_interrupt_probability_step: ['probability', 0, 1],
       group_repeat_interrupt_text: ['text'], group_repeat_interrupt_image_path: ['text'],
-      group_repeat_window_seconds: ['integer', 10, 600]},
+      group_repeat_window_seconds: ['integer', 10, 600], group_context_max_age_hours: ['integer', 1, 168],
+      enable_group_behavior_learning:['boolean'],
+      enable_group_behavior_imitation:['boolean'], enable_group_behavior_feedback:['boolean'],group_behavior_guidance:['text']},
   },
 };
 
@@ -257,11 +266,10 @@ function newSection(kind, changes = {}, token = TOKEN('a')) {
   const settings = {...spec.settings, ...changes};
   /* Groups with an explicit role scope must not inherit the window fallback. */
   const layers = spec.layers || ['installation', 'role', 'window'];
+  const editableLayers = spec.editableLayers || layers;
   const scope = spec.scope || 'window';
   const fields = Object.fromEntries(Object.entries(spec.fields).map(([name, [type, low, high]]) => {
-    /* editable 覆盖某几个字段的可写层：主动联系偏好的两个关系级额度在窗口层写不进去，
-       后端下发的契约里就没有窗口节点，夹具必须照抄，否则测不出层轨的锁定态。 */
-    const editable = (spec.editable || {})[name] || layers;
+    const editable = (spec.editable || {})[name] || editableLayers;
     const entry = {kind: type, default: spec.settings[name], apply_mode: 'immediate',
       editable_layers: editable};
     if (low !== undefined) Object.assign(entry, {minimum: low, maximum: high});
@@ -274,6 +282,18 @@ function newSection(kind, changes = {}, token = TOKEN('a')) {
     provenance: Object.fromEntries(Object.keys(settings).map(name =>
       [name, {layer: layers[0], explicit: true, revision: 1}])),
     fields, section: kind,
+  };
+}
+
+function groupInterjectionStatus(changes = {}, token = TOKEN('a')) {
+  const value = newSection('group_participation', changes, token);
+  const names = ['enable_group_interjection', 'group_interject_min_interval_minutes',
+    'group_interject_max_daily', 'enable_group_interjection_feedback',
+    'group_interject_feedback_window_seconds'];
+  return {...value,
+    settings: Object.fromEntries(names.map(name => [name, value.settings[name]])),
+    fields: Object.fromEntries(names.map(name => [name, value.fields[name]])),
+    provenance: Object.fromEntries(names.map(name => [name, value.provenance[name]])),
   };
 }
 
@@ -319,7 +339,8 @@ function harness(kinds = ['quota', 'image_review'], views = {}, endpointOverride
     removeEventListener(name, listener) { windowListeners.get(name)?.delete(listener); },
     dispatchEvent(event) { for (const listener of windowListeners.get(event.type) || []) listener(event); },
     CompanionProduct: {
-      hosted: () => true, role: () => ({role_id: 'role-a', reply_api: PREFIX + 'reply'}),
+      hosted: () => true, role: () => ({role_id: 'role-a', reply_api: PREFIX + 'reply',
+        config_api: options.configApi}),
       roleTarget: () => ({bot_id: 'bot-a'}),
       acquaintanceDirectory: options.people ? async () => ({persons: options.people}) : undefined,
       identity: () => ({installation_id: 'inst', operator_id: 'admin'}),
@@ -355,7 +376,7 @@ function harness(kinds = ['quota', 'image_review'], views = {}, endpointOverride
 /* Mounts the sections and answers each one's own read, in the same order app.js
    drives it: restore → paint → read. The workbench ignores a read that arrives
    while one is already in flight, so a section still issues exactly one request. */
-async function loaded(harnessed, kinds = ['quota', 'image_review']) {
+async function loaded(harnessed, kinds = ['quota', 'image_review'], requestOverrides = {}) {
   harnessed.editors.restore();
   harnessed.editors.paint();
   for (const kind of Object.keys(harnessed.painted)) harnessed.painted[kind] = '';
@@ -363,10 +384,11 @@ async function loaded(harnessed, kinds = ['quota', 'image_review']) {
   await drains();
   kinds.forEach((kind, index) => {
     const request = harnessed.requests[index];
+    const expected = requestOverrides[kind] || {};
     assert.equal(request.method, 'GET');
-    assert.equal(request.route, 'config');
-    assert.deepEqual(plain(request.body), {sections: kind});
-    request.resolve(payload(kind));
+    assert.equal(request.route, expected.route || 'config');
+    assert.deepEqual(plain(request.body), Object.hasOwn(expected, 'body') ? expected.body : {sections: kind});
+    request.resolve(Object.hasOwn(expected, 'response') ? expected.response : payload(kind));
   });
   await drains();
   return harnessed.editors.state.instances;
@@ -398,8 +420,8 @@ test('the settings search catalogue exposes field metadata without reading confi
   const {window} = harness(['proactive.contact', 'knowledge']);
   const entries = plain(window.CompanionConfigEditors.searchEntries());
   const contact = entries.filter(item => item.group === 'proactive.contact');
-  assert.equal(contact.length, 164);
-  assert.equal(new Set(contact.map(item => item.field)).size, 164);
+  assert.equal(contact.length, 160);
+  assert.equal(new Set(contact.map(item => item.field)).size, 160);
   assert.ok(contact.some(item => item.field === 'balance_awareness_enabled'
     && item.label === '允许因余额变化联系' && item.sectionTitle === '余额感知'));
   assert.ok(entries.some(item => item.group === 'knowledge' && item.section === 'members'
@@ -412,10 +434,17 @@ test('weather cooldown belongs to the weather section with the other V1 weather 
   const sections = window.CompanionConfigEditors.spec['proactive.contact'].sections;
   const weather = sections.find(item => item.id === 'weather');
   const dedup = sections.find(item => item.id === 'dedup');
+  const freshness = sections.find(item => item.id === 'freshness');
+  const rhythm = sections.find(item => item.id === 'rhythm');
   assert.ok(weather.fields.includes('dedup_weather_window_minutes'));
   assert.ok(weather.fields.includes('weather_sample_minutes'));
   assert.ok(weather.fields.includes('official_alert_poll_minutes'));
   assert.ok(!dedup.fields.includes('dedup_weather_window_minutes'));
+  assert.equal(freshness.fields.join(','), 'event_max_age_seconds');
+  assert.ok(!rhythm.fields.includes('event_max_age_seconds'));
+  assert.match(freshness.title, /素材与关系线索时效/);
+  assert.match(freshness.help, /角色活动、日记、近期私聊素材和旧式关系线索/);
+  assert.match(freshness.help, /主动跟进与未完话头不受这项时效限制/);
   const grouped = sections.flatMap(item => item.fields);
   assert.equal(grouped.length, new Set(grouped).size, 'each contact field belongs to exactly one section');
 });
@@ -800,15 +829,84 @@ test('the endpoint falls back to the reply route family when the manifest has no
   assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct), PREFIX + 'x/config');
   assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct,
     PREFIX + 'targets/profile-b/roles/role-b/config'), PREFIX + 'targets/profile-b/roles/role-b/config');
+  assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct,
+    PREFIX + 'targets/group-a/roles/role-a/reply/participation'),
+    PREFIX + 'targets/group-a/roles/role-a/reply/participation');
   assert.equal(window.CompanionConfigEditors.endpointFor(window.CompanionProduct, '/other/config'), null);
 });
 
-test('learning policies are global and scoped selectors only filter records', () => {
+test('the group interjection editor uses its target route without a section query or discriminator', async () => {
+  const endpoint = PREFIX + 'targets/group-a/roles/role-a/reply/participation';
+  const harnessed = harness(['group_participation'], {group_participation:{
+    sectionIds:['interjection'], title:'本群主动插话', scopeNote:'当前群聊',
+    query:null, requestSection:null, resetKey:'reset_to_inherit',
+  }}, endpoint);
+  const [instance] = await loaded(harnessed, ['group_participation'], {
+    group_participation:{route:'targets/group-a/roles/role-a/reply/participation', body:null,
+      response:groupInterjectionStatus()},
+  });
+  assert.equal(harnessed.requests[0].route, 'targets/group-a/roles/role-a/reply/participation');
+  assert.equal(harnessed.requests[0].body, null);
+  assert.equal(instance.state.container.resettable, true);
+  assert.deepEqual(plain(instance.state.container.groups.map(group => group.id)), ['interjection']);
+  assert.deepEqual(plain(instance.state.container.groups[0].fields), [
+    'enable_group_interjection', 'group_interject_min_interval_minutes', 'group_interject_max_daily',
+    'enable_group_interjection_feedback', 'group_interject_feedback_window_seconds']);
+
+  const saving = instance.saveField('enable_group_interjection', true);
+  await drains();
+  assert.equal(harnessed.requests[1].route,
+    'targets/group-a/roles/role-a/reply/participation/configure');
+  assert.equal(harnessed.requests[1].body.section, undefined);
+  assert.deepEqual(plain(harnessed.requests[1].body.changes), {enable_group_interjection: true});
+  const refreshed = newSection('group_participation', {enable_group_interjection: true}, TOKEN('b'));
+  refreshed.settings = Object.fromEntries(Object.entries(refreshed.settings).filter(([name]) =>
+    ['enable_group_interjection', 'group_interject_min_interval_minutes', 'group_interject_max_daily',
+      'enable_group_interjection_feedback', 'group_interject_feedback_window_seconds'].includes(name)));
+  refreshed.fields = Object.fromEntries(Object.entries(refreshed.fields).filter(([name]) => name in refreshed.settings));
+  refreshed.provenance = Object.fromEntries(Object.entries(refreshed.provenance).filter(([name]) => name in refreshed.settings));
+  harnessed.requests[1].resolve({result:{operation_id:'group-interjection-save',replayed:false},status:refreshed});
+  assert.equal((await saving).state, 'saved');
+});
+
+test('installation-wide contact preferences never use the selected target config route', async () => {
+  const targetEndpoint = PREFIX + 'targets/window-a/roles/role-a/config';
+  const harnessed = harness(['proactive.contact'], {}, '', {configApi: targetEndpoint});
+  harnessed.editors.paint();
+  harnessed.editors.read();
+  await drains();
+
+  assert.equal(harnessed.requests[0].method, 'GET');
+  assert.equal(harnessed.requests[0].route, 'config');
+  assert.deepEqual(plain(harnessed.requests[0].body), {sections: 'proactive.contact'});
+  harnessed.requests[0].resolve(payload('proactive.contact'));
+  await drains();
+  const [instance] = harnessed.editors.state.instances;
+  assert.equal(instance.state.status.scope, 'installation');
+  assert.deepEqual(plain(instance.state.status.layers), ['installation']);
+
+  instance.state.draft.screen_glance_enabled = true;
+  const saving = instance.save(false);
+  await drains();
+  assert.equal(harnessed.requests[1].method, 'POST');
+  assert.equal(harnessed.requests[1].route, 'config/configure');
+  assert.deepEqual(plain(harnessed.requests[1].body), {
+    section: 'proactive.contact', operation_key: 'config-key', edit_token: TOKEN('a'),
+    changes: {screen_glance_enabled: true},
+  });
+  harnessed.requests[1].resolve({result: {operation_id: 'contact-save', replayed: false},
+    status: newSection('proactive.contact', {screen_glance_enabled: true}, TOKEN('b'))});
+  await saving;
+  await drains();
+  harnessed.editors.stop();
+});
+
+test('learning policies are role-scoped and selectors only filter records', () => {
   const start = app.indexOf('function renderLearningPage(){');
   const end = app.indexOf('/* 2026-09-30 接回：', start);
   assert.ok(start >= 0 && end > start, 'the active learning page renderer must exist');
   const page = app.slice(start, end);
-  assert.match(page, /\['strategy','全局策略'\]/);
+  assert.match(page, /\['strategy','角色策略'\]/);
   assert.match(page, /configEditors\('growthConfigWorkspace',\['role\.growth\.skills'\]/);
   assert.match(page, /configEditors\('expressionLearningConfigWorkspace',\['expression\.learning'\]/);
   assert.doesNotMatch(page, /strategyRole|learningRoleControls\('strategy'|roleConfigApiFor\(strategy/);
@@ -820,23 +918,26 @@ test('learning policies are global and scoped selectors only filter records', ()
   assert.match(page, /learningRoleControls\(scopeKey,'筛选记录',scopeControls\)/);
 });
 
-test('global learning policy editors use the shared config route', async () => {
-  const harnessed = harness(['role.growth.skills']);
+test('role learning policies use the selected role config route', async () => {
+  const targetEndpoint = PREFIX + 'targets/window-a/roles/role-a/config';
+  const harnessed = harness(['role.growth.skills'], {}, '', {configApi: targetEndpoint});
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
   await drains();
   assert.equal(harnessed.requests.length, 1);
-  assert.equal(harnessed.requests[0].route, 'config');
+  assert.equal(harnessed.requests[0].route, targetEndpoint.slice(PREFIX.length));
   harnessed.requests[0].resolve(payload('role.growth.skills'));
   await drains();
 });
 
 /* ==== 2026-09-28 新接入的四个分区 ==== */
 
-test('new sections use their registered scope and read their own group under the shared route', async () => {
-  const kinds = Object.keys(NEW_KINDS);
-  const harnessed = harness(kinds);
+test('target-owned sections use their registered scope and role route', async () => {
+  const installationKinds = new Set(['proactive.contact', 'reaction', 'budget']);
+  const kinds = Object.keys(NEW_KINDS).filter(kind => !installationKinds.has(kind));
+  const targetEndpoint = PREFIX + 'targets/window-a/roles/role-a/config';
+  const harnessed = harness(kinds, {}, '', {configApi: targetEndpoint});
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
@@ -844,7 +945,7 @@ test('new sections use their registered scope and read their own group under the
   assert.equal(harnessed.requests.length, kinds.length);
   kinds.forEach((kind, index) => {
     assert.equal(harnessed.requests[index].method, 'GET');
-    assert.equal(harnessed.requests[index].route, 'config');
+    assert.equal(harnessed.requests[index].route, targetEndpoint.slice(PREFIX.length));
     assert.deepEqual(plain(harnessed.requests[index].body), {sections: kind});
     harnessed.requests[index].resolve(payload(kind));
   });
@@ -861,11 +962,13 @@ test('new sections use their registered scope and read their own group under the
 });
 
 test('reaction retrieval settings render as installation-wide and do not use window draft keys', async () => {
-  const harnessed = harness(['reaction']);
+  const targetEndpoint = PREFIX + 'targets/window-a/roles/role-a/config';
+  const harnessed = harness(['reaction'], {}, '', {configApi: targetEndpoint});
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
   await drains();
+  assert.equal(harnessed.requests[0].route, 'config');
   harnessed.requests[0].resolve(payload('reaction'));
   await drains();
   const painted = harnessed.painted.reaction;
@@ -1249,22 +1352,25 @@ test('the reference section keeps the daily outfit switch independent', async ()
   assert.deepEqual(rendered.sort(), plain(Object.keys(NEW_KINDS['photo.reference'].settings)).sort());
 });
 
-test('the skill group is installation-wide and has no role or window override', async () => {
-  const harnessed = harness(['role.growth.skills']);
+test('the skill group is role-shared and has no window override', async () => {
+  const targetEndpoint = PREFIX + 'targets/window-a/roles/role-a/config';
+  const harnessed = harness(['role.growth.skills'], {}, '', {configApi: targetEndpoint});
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
   await drains();
+  assert.equal(harnessed.requests[0].route, targetEndpoint.slice(PREFIX.length));
   harnessed.requests[0].resolve(payload('role.growth.skills'));
   await drains();
   const painted = harnessed.painted['role.growth.skills'];
   assert.ok(painted, 'the skills section must paint into its own host, keys: '
     + JSON.stringify(Object.keys(harnessed.painted)));
-  /* Installation-wide policy must not expose role or window layers. */
-  assert.match(painted, /插件安装全局/, 'scope label was: '
+  /* This policy is shared by the selected role and writable at its role layer. */
+  assert.match(painted, /安装与角色/, 'scope label was: '
     + (/<span class="wb-scope">([^<]*)</.exec(painted) || [])[1]);
   assert.match(painted, /<h3>技能领域<\/h3>/);
-  assert.doesNotMatch(painted, /当前会话可覆盖|data-layer="window"|data-layer="role"/);
+  assert.match(painted, /data-layer="role"/);
+  assert.doesNotMatch(painted, /当前会话可覆盖|data-layer="window"/);
   assert.doesNotMatch(painted, /scope_key|binding_revision|operation_id/);
   /* 两个字段都不能在分组里弄丢。 */
   const container = harnessed.editors.state.instances[0].state.container;
@@ -1273,7 +1379,8 @@ test('the skill group is installation-wide and has no role or window override', 
 });
 
 test('expression learning exposes separate private and group cadence with a shared group budget', async () => {
-  const harnessed = harness(['expression.learning']);
+  const targetEndpoint = PREFIX + 'targets/window-a/roles/role-a/config';
+  const harnessed = harness(['expression.learning'], {}, '', {configApi: targetEndpoint});
   harnessed.editors.restore();
   harnessed.editors.paint();
   harnessed.editors.read();
@@ -1283,8 +1390,8 @@ test('expression learning exposes separate private and group cadence with a shar
   const painted = harnessed.painted['expression.learning'];
   assert.match(painted, /私聊学习扫描间隔/);
   assert.match(painted, /群聊学习扫描间隔/);
-  assert.match(painted, /全局群聊每日学习批次/);
-  assert.match(painted, /插件安装全局/);
+  assert.match(painted, /角色群聊每日学习批次/);
+  assert.match(painted, /安装与角色/);
   const rendered = plain(harnessed.editors.state.instances[0].state.container.groups
     .flatMap(group => group.fields)).sort();
   assert.deepEqual(rendered, Object.keys(NEW_KINDS['expression.learning'].settings).sort());
@@ -1319,8 +1426,10 @@ test('the group participation section splits the three independent chains', asyn
   harnessed.requests[0].resolve(payload('group_participation'));
   await drains();
   const painted = harnessed.painted.group_participation;
-  for (const id of ['atmosphere', 'joke_guard', 'denoise', 'interjection', 'repeat'])
+  for (const id of ['topics', 'atmosphere', 'joke_guard', 'denoise', 'interjection', 'repeat'])
     assert.match(painted, new RegExp(`data-wb-group="${id}"`), id);
+  assert.match(painted, /跟踪群聊话题线/);
+  assert.match(painted, /不保存成员身份/);
   assert.match(painted, /玩笑护栏/);
   assert.doesNotMatch(painted, /关闭这一项时，下面五项都不起作用|关闭总闸时下面四项不起作用|关闭总闸时下面七项都不起作用/);
   /* 分组不能把没提到的字段弄丢，打断图也必须进入复读设置区。 */
@@ -1334,14 +1443,28 @@ test('the group participation section splits the three independent chains', asyn
 
 test('group participation fields can be filtered by page without duplicating the shared contract', async () => {
   const decisionView = harness(['group_participation'], {group_participation:{
-    sectionIds:['atmosphere', 'joke_guard', 'interjection', 'repeat'], navigationLimit:0,
+    sectionIds:['topics', 'atmosphere', 'joke_guard', 'repeat', 'history'], navigationLimit:0,
   }});
   const [decision] = await loaded(decisionView, ['group_participation']);
   const decisionFields = plain(decision.state.container.groups.flatMap(group => group.fields));
   assert.deepEqual(plain(decision.state.container.groups.map(group => group.id)),
-    ['atmosphere', 'joke_guard', 'interjection', 'repeat']);
+    ['topics', 'atmosphere', 'joke_guard', 'repeat', 'history']);
+  assert.ok(decisionFields.includes('enable_group_topic_threads'));
+  assert.ok(decisionFields.includes('group_topic_thread_max'));
   assert.deepEqual(decisionFields.includes('enable_group_joke_guard'), true);
   assert.equal(decisionFields.includes('enable_group_persona_denoise'), false);
+  assert.equal(decisionFields.includes('enable_group_interjection'), false);
+
+  const interjectionView = harness(['group_participation'], {group_participation:{
+    sectionIds:['interjection'], title:'本群主动插话', query:null, requestSection:null,
+    resetKey:'reset_to_inherit',
+  }}, PREFIX + 'targets/group-a/roles/role-a/reply/participation');
+  const [interjection] = await loaded(interjectionView, ['group_participation'], {
+    group_participation:{route:'targets/group-a/roles/role-a/reply/participation', body:null,
+      response:groupInterjectionStatus()},
+  });
+  const interjectionFields = plain(interjection.state.container.groups.flatMap(group => group.fields));
+  assert.deepEqual(plain(interjection.state.container.groups.map(group => group.id)), ['interjection']);
 
   const expressionView = harness(['group_participation'], {group_participation:{
     sectionIds:['denoise'], title:'群聊表达去噪', note:'只影响群聊回复的表达腔调。',
@@ -1352,7 +1475,12 @@ test('group participation fields can be filtered by page without duplicating the
   assert.deepEqual(expressionFields, ['enable_group_persona_denoise']);
   assert.equal(expression.state.container.title, '群聊表达去噪');
 
-  const exposed = [...decisionFields, ...expressionFields];
+  const behaviorView=harness(['group_participation'],{group_participation:{sectionIds:['behavior'],title:'行为模仿策略',note:''}});
+  const [behavior]=await loaded(behaviorView,['group_participation']);
+  const behaviorFields=plain(behavior.state.container.groups.flatMap(group=>group.fields));
+  assert.deepEqual(plain(behavior.state.container.groups.map(group=>group.id)),['behavior']);
+  assert.ok(behaviorFields.includes('enable_group_behavior_imitation'));
+  const exposed = [...decisionFields, ...interjectionFields, ...expressionFields, ...behaviorFields];
   assert.equal(exposed.length, new Set(exposed).size);
   assert.deepEqual([...exposed].sort(),
     plain(Object.keys(NEW_KINDS.group_participation.settings)).sort());
@@ -1412,14 +1540,14 @@ test('a group participation refusal is translated instead of shown raw', async (
   assert.match(markup, /打断语只能是一行/);
 });
 
-/* ==== 主动联系偏好（proactive.contact）：164 项、四层、24 段 ====
+/* ==== 主动联系偏好（proactive.contact）：160 项、四层、23 段 ====
  *
  * 这一组此前四个触点全缺（编辑器 / SECTIONS / spec / 挂载点），158 项里 92 项
  * 在任何页面上都点不到。字段名与类型按注册表抄成独立的一份：页面与它逐项对齐
  * 才算「没有字段被丢掉」，而页面与**注册表**的对齐由
  * tools/audit_page_config_coverage.py 的 MODULES 表保证。
  *
- * 数量本身就是断言：42 boolean / 56 integer / 46 text / 17 weight / 3 probability。
+ * 数量本身就是断言：42 boolean / 54 integer / 46 text / 17 weight / 3 probability。
  */
 const CONTACT_KINDS = {
   boolean: [
@@ -1445,13 +1573,12 @@ const CONTACT_KINDS = {
     "dedup_weather_window_minutes", "event_max_age_seconds", "external_event_self_link_cooldown_hours",
     "generation_history_limit", "greeting_idle_minutes", "history_max_chars", "idle_seconds",
     "important_date_lookahead_days", "insomnia_night_daily_limit", "interval_seconds",
-    "max_attempts_24h", "max_contacts_24h", "max_relationship_attempts_24h",
-    "max_relationship_contacts_24h", "meal_care_followup_minutes", "news_check_interval_minutes",
+    "max_contacts_24h", "meal_care_followup_minutes", "news_check_interval_minutes",
     "news_hot_result_count", "official_alert_poll_minutes", "poke_action_cooldown_minutes",
     "poke_action_daily_limit", "proactive_burst_gap_max_seconds", "proactive_burst_gap_min_seconds",
     "proactive_burst_max_messages", "proactive_closing_contacts_threshold",
     "proactive_closing_grace_minutes", "proactive_intensity_body_chars",
-    "proactive_persona_judge_cache_minutes", "proactive_persona_judge_daily_limit",
+    "proactive_persona_judge_cache_minutes",
     "proactive_persona_judge_threshold", "proactive_share_probability", "screen_glance_cooldown_minutes",
     "screen_glance_daily_limit", "screen_glance_followup_after_minutes",
     "screen_glance_followup_cooldown_minutes", "screen_glance_goodnight_delay_minutes",
@@ -1513,15 +1640,14 @@ for (const [kind, names] of Object.entries(CONTACT_KINDS)) {
   }
 }
 const CONTACT_LAYERS = ['installation', 'role', 'relationship', 'window'];
-const CONTACT_RELATIONSHIP_BUDGET = ['max_relationship_contacts_24h', 'max_relationship_attempts_24h'];
+const CONTACT_WINDOW_QUOTA = ['max_contacts_24h'];
 NEW_KINDS['proactive.contact'] = {
-  group: 'proactive.contact', layers: CONTACT_LAYERS, scope: 'window',
+  group: 'proactive.contact', layers: ['installation'], editableLayers: CONTACT_LAYERS, scope: 'installation',
   settings: CONTACT_SETTINGS, fields: CONTACT_FIELDS,
-  /* 后端下发的契约里这两个字段没有窗口节点：按窗口写入会被所有者拒绝。 */
-  editable: Object.fromEntries(CONTACT_RELATIONSHIP_BUDGET.map(name =>
-    [name, CONTACT_LAYERS.filter(layer => layer !== 'window')])),
+  editable: Object.fromEntries(CONTACT_WINDOW_QUOTA.map(name =>
+    [name, CONTACT_LAYERS.filter(layer => layer !== 'relationship')])),
 };
-const CONTACT_SECTIONS = ['master', 'rhythm', 'intensity', 'relationship_budget', 'quiet', 'dedup',
+const CONTACT_SECTIONS = ['master', 'rhythm', 'freshness', 'intensity', 'quiet', 'dedup',
   'judgement', 'bond', 'daily', 'followup', 'share', 'greeting', 'meal', 'date', 'weather', 'news', 'web',
   'selflink', 'balance', 'screen', 'action', 'appointment', 'context', 'prompts'];
 
@@ -1576,7 +1702,7 @@ test('inherited contact values render once and show the old value only after a d
 });
 
 test('a legacy pending revision conflict restores its draft without replaying the rejected write', async () => {
-  const key = `companion-workbench.v1:${JSON.stringify(['inst', 'admin', 'scope-a', 'proactive.contact'])}`;
+  const key = `companion-workbench.v1:${JSON.stringify(['inst', 'admin', 'installation', 'proactive.contact'])}`;
   const store = new Map([[key, JSON.stringify({operation_key: 'old-conflict', edit_token: TOKEN('b'),
     changes: {screen_glance_daily_limit: 2}, reset_to_inherit: [],
     pending_reason: '配置已经更新。草稿已保留，读取新版本后再核对。'})]]);
@@ -1606,15 +1732,15 @@ test('a legacy pending revision conflict restores its draft without replaying th
   await drains();
 });
 
-test('the contact section renders all 164 fields exactly once', async () => {
+test('the contact section renders all 160 fields exactly once', async () => {
   const harnessed = await contactLoaded();
   const painted = harnessed.painted['proactive.contact'];
   assert.ok(painted, '主动联系偏好必须画进自己的挂载点');
   const container = harnessed.editors.state.instances[0].state.container;
   const rendered = plain(container.groups.flatMap(group => group.fields));
   const expected = plain(Object.keys(CONTACT_FIELDS));
-  assert.equal(rendered.length, 164, '164 项一个都不能少');
-  assert.equal(new Set(rendered).size, 164, '同一个字段不能出现在两段里');
+  assert.equal(rendered.length, 160, '160 项一个都不能少');
+  assert.equal(new Set(rendered).size, 160, '同一个字段不能出现在两段里');
   assert.deepEqual(rendered.slice().sort(), expected.slice().sort());
   assert.deepEqual(plain(container.order).slice().sort(), expected.slice().sort());
   /* 24 段全部画出来，段落 id 是测试能定位依赖说明的锚点。 */
@@ -1625,10 +1751,18 @@ test('the contact section renders all 164 fields exactly once', async () => {
   assert.equal(container.fields.contact_followup_after_minutes.maximum, 1440);
   assert.equal(container.fields.contact_followup_cooldown_minutes.minimum, 30);
   assert.equal(container.fields.contact_followup_cooldown_minutes.maximum, 2880);
-  /* 四层链要画全：安装 · 角色 · 关系 · 窗口；关系层是这个组独有的。 */
-  assert.deepEqual(plain(container.layers), CONTACT_LAYERS);
-  assert.match(painted, /<b>关系<\/b>/);
-  assert.match(painted, /<b>窗口<\/b>/);
+  /* 公开编辑器只写安装级全局值；角色与关系的用户细调在各自页面维护。 */
+  assert.deepEqual(plain(container.layers), ['installation']);
+  assert.deepEqual(plain(harnessed.editors.state.instances[0].state.status.fields.interval_seconds.editable_layers),
+    CONTACT_LAYERS);
+  assert.ok(plain(harnessed.editors.state.instances[0].state.status.fields.max_contacts_24h.editable_layers).includes('window'));
+  assert.equal(Object.hasOwn(container.fields, 'max_attempts_24h'), false);
+  assert.equal(Object.hasOwn(container.fields, 'proactive_persona_judge_daily_limit'), false);
+  assert.equal(Object.hasOwn(container.fields, 'max_relationship_contacts_24h'), false);
+  assert.equal(Object.hasOwn(container.fields, 'max_relationship_attempts_24h'), false);
+  assert.ok(!plain(harnessed.editors.state.instances[0].state.status.fields.max_contacts_24h.editable_layers)
+    .includes('relationship'));
+  assert.doesNotMatch(painted, /data-layer="relationship"|data-layer="window"/);
 });
 
 test('the contact card clearly identifies global defaults and personal overrides', async () => {
@@ -1636,8 +1770,9 @@ test('the contact card clearly identifies global defaults and personal overrides
   const painted = harnessed.painted['proactive.contact'];
   assert.match(painted, /<span class="wb-scope">全局默认设置/);
   assert.match(painted, /全局默认；个人偏好在私聊用户页调整/);
-  assert.match(painted, /每个会话 24 小时内最多联系/);
-  assert.match(fieldRow(painted, 'max_relationship_contacts_24h'), /同一用户与角色的所有会话合计/);
+  assert.match(painted, /每个私聊窗口每日最多实际联系/);
+  assert.doesNotMatch(painted, /max_attempts_24h|每日最多主动模型调用|proactive_persona_judge_daily_limit/);
+  assert.doesNotMatch(painted, /关系级 24 小时上限|max_relationship_/);
   assert.doesNotMatch(painted, /默认写在窗口层|本会话可覆盖|当前生效值来自窗口/);
   /* 公共入口说明全局暂停，个人暂停仍由私聊用户设置控制。 */
   assert.match(painted, /全局暂停与个人暂停取较晚的结束时间/);
@@ -1677,19 +1812,13 @@ test('the contact audit blocks malformed shapes before any request', async () =>
   assert.equal(posts(), before + 1);
 });
 
-test('a relationship-budget refusal is translated instead of shown raw', async () => {
+test('window daily quotas are editable and relationship-level quota fields are absent', async () => {
   const harnessed = await contactLoaded();
   const [instance] = harnessed.editors.state.instances;
-  instance.state.draft.max_relationship_contacts_24h = 12;
-  const saving = instance.save(false);
-  await drains();
-  /* 桥只转发信封的 message，所以机器码就是在这里出现的。 */
-  harnessed.requests[1].resolve({status: 'error', data: {code: 'contact_relationship_budget_scope'}});
-  await saving;
-  await drains();
-  assert.equal(instance.state.bad, true);
-  assert.match(instance.state.notice, /不能按会话保存/);
-  assert.doesNotMatch(instance.state.notice, /contact_relationship_budget_scope/);
+  assert.equal(instance.state.status.settings.max_relationship_contacts_24h, undefined);
+  assert.equal(instance.state.status.settings.max_relationship_attempts_24h, undefined);
+  assert.ok(instance.state.status.fields.max_contacts_24h.editable_layers.includes('window'));
+  assert.equal(Object.hasOwn(instance.state.status.fields, 'max_attempts_24h'), false);
 });
 
 test('the role dossier maps profile fields onto the purpose-built controls', () => {

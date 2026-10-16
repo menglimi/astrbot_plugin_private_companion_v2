@@ -6,6 +6,7 @@ import json
 import asyncio
 import logging
 from datetime import datetime, timezone
+from time import perf_counter
 
 from astrbot.api.web import request
 
@@ -667,8 +668,11 @@ class AcquaintanceWebAPI:
 
     async def _member_settings(self, *, write=False):
         from .web_api import outcome_response
+        started_at = perf_counter()
+        lock_acquired_at = None
         try:
             async with self.controller._control_lock:
+                lock_acquired_at = perf_counter()
                 _, operator = await self._operator()
                 if write:
                     command = await self._command(expected={"operation_key", "subject_id", "route", "sections"})
@@ -688,6 +692,12 @@ class AcquaintanceWebAPI:
             return outcome_response(Outcome.failed(error.code, str(error)))
         except (ValueError, TypeError, UnicodeError, RecursionError):
             return outcome_response(Outcome.failed("private_member_command_invalid", "invalid private member settings"))
+        finally:
+            elapsed_ms = round((perf_counter() - started_at) * 1000)
+            if elapsed_ms >= 1000:
+                lock_wait_ms = round(((lock_acquired_at or perf_counter()) - started_at) * 1000)
+                logger.warning("[CompanionV2] 私聊成员配置请求耗时 operation=%s elapsed_ms=%d lock_wait_ms=%d",
+                               "write" if write else "read", elapsed_ms, lock_wait_ms)
 
     async def member_settings(self):
         return await self._member_settings()

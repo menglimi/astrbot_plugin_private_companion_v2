@@ -14,14 +14,14 @@ function fixture(){
     life:"分享自己的生活",creation:"作品与阅读",news:"外部资讯",followup:"接回旧话题",invitation:"共同活动邀请",reminder:"约定与提醒",environment:"环境与状态变化"};
   return {settings:{},state:{},calendar:{items:[]},contact:{settings:{enabled:false,automatic_enabled:false,pause_until:"",note:"",
     quiet_enabled:false,quiet_start:"23:00",quiet_end:"07:00",quiet_timezone:"Asia/Shanghai",idle_seconds:900,interval_seconds:3600,
-    event_max_age_seconds:3600,max_contacts_24h:3,max_attempts_24h:12,max_relationship_contacts_24h:9,max_relationship_attempts_24h:36,
+    event_max_age_seconds:3600,max_contacts_24h:3,
     silence_min_confidence:0.66,silence_feedback_penalty:0.2,
     weather_checkin_enabled:false,weather_checkin_time:"08:30",weather_sample_minutes:60,weather_change_enabled:false,
     dedup_weather_window_minutes:1080,official_weather_alert_enabled:false,official_alert_poll_minutes:5,official_alert_min_severity:"",
     ...Object.fromEntries(Object.keys(labels).flatMap(key=>[[key+".enabled",true],[key+".weight",1],[key+".pause_until",""]]))},
     edit_token:"contact-original",purposes:Object.fromEntries(Object.entries(labels).map(([key,label])=>[key,{label,allowed:false,reason:"proactive_disabled"}])),
     host_state:"running",effective:{allowed:false,reason:"proactive_disabled",automatic_allowed:false,automatic_reason:"contact_automatic_disabled",
-      model_registered:true,readonly_fields:["max_relationship_contacts_24h","max_relationship_attempts_24h"]}}};
+      model_registered:true,readonly_fields:[]}}};
 }
 function harness({storage=new Map(),status=fixture(),api,refresh}={}){
   const context=vm.createContext({window:{},structuredClone,Intl,Date,crypto:{randomUUID},
@@ -44,7 +44,7 @@ function harness({storage=new Map(),status=fixture(),api,refresh}={}){
 }
 
 test("contact form uses backend purpose directory and writes one minimal guarded command",async()=>{
-  const h=harness();assert.match(h.markup(),/同一关系共享上限/);h.click("contact");
+  const h=harness();assert.doesNotMatch(h.markup(),/关系共享上限/);assert.match(h.markup(),/每日额度/);h.click("contact");
   const markup=h.markup();assert.equal((markup.match(/class="state-contact-purpose"/g)||[]).length,13);
   assert.doesNotMatch(markup,/data-state-field="max_relationship_/);
   h.input("enabled",true);h.input("automatic_enabled",true);h.input("interval_seconds","7200");
@@ -54,6 +54,18 @@ test("contact form uses backend purpose directory and writes one minimal guarded
   assert.equal(h.posts[0].body.action,"contact.configure");assert.equal(h.posts[0].body.edit_token,"contact-original");
   assert.deepEqual(h.posts[0].body.changes,{enabled:true,automatic_enabled:true,interval_seconds:7200,note:"忙时少打扰，休息时可以分享见闻。",
     "chat.enabled":false,"life.weight":2.5});assert.equal(h.refreshes,1);
+});
+
+test("contact settings separate freshness from cadence in the editor form",()=>{
+  const h=harness();
+  const markup=h.contact.form({values:h.status.contact.settings,
+    purposes:Object.entries(h.status.contact.purposes)},value=>String(value));
+  const rhythmStart=markup.indexOf('<h4 class="state-form-section">联系节奏</h4>');
+  const freshnessStart=markup.indexOf('<h4 class="state-form-section">近况素材时效</h4>');
+  const eventField=markup.indexOf('data-state-field="event_max_age_seconds"');
+  assert.ok(rhythmStart>=0&&freshnessStart>rhythmStart&&eventField>freshnessStart);
+  assert.doesNotMatch(markup.slice(rhythmStart,freshnessStart),/event_max_age_seconds/);
+  assert.match(markup,/不限制主动跟进或未完话头/);
 });
 
 test("private contact status explains the most recent automatic scheduler gate",()=>{
@@ -85,7 +97,7 @@ test("silence planning fields render as bounded numbers and save like any other 
 test("invalid frequency, weight, timezone, quiet time, and prompt never dispatch",async()=>{
   const h=harness();h.click("contact");
   const invalid=[["idle_seconds","-1","900"],["interval_seconds","59","3600"],["max_contacts_24h","101","3"],
-    ["max_attempts_24h","1001","12"],["event_max_age_seconds","86401","3600"],
+    ["event_max_age_seconds","86401","3600"],
     ["life.weight","0","1"],["life.weight","0.0000001","1"],["life.weight","","1"],
     ["quiet_timezone","Not/AZone","Asia/Shanghai"],["quiet_start","24:00","23:00"],["quiet_end","7:00","07:00"],
     ["pause_until","not-a-date",""],["note","文".repeat(8193),""]];

@@ -109,13 +109,17 @@ class RealityHostGlueTests(unittest.IsolatedAsyncioTestCase):
 
         async def change(scope, role):
             persona = await guard(scope, role)
-            self.native.selections["qq-main"] = "second"
+            # The installed window mapping owns persona selection; changing
+            # AstrBot's global default alone does not switch this V2 window.
+            umo = self.api._reality_context.origin(self.context)
+            conversation_id = await self.native.conversation_manager.get_curr_conversation_id(umo)
+            self.controller.session_topology.update_persona_selection_snapshot(
+                umo, "100", "bot-a", "second", "role-b", conversation_id)
             return persona
 
         with patch.object(self.registry, "persona_guard", side_effect=change):
             with self.assertRaises(TaskError):
                 await self.api.get_realtime_context("200")
-        self.native.selections["qq-main"] = "original"
 
     async def test_real_chat_is_sent_once_and_history_is_not_a_core_reply_receipt(self):
         before = self.counts()
@@ -210,6 +214,9 @@ class RealityHostGlueTests(unittest.IsolatedAsyncioTestCase):
         req = ProviderRequest(system_prompt="原人格")
         owner.request(event, req)
         await self.drain()
+        self.assertEqual(req.system_prompt, "原人格")
+        self.assertIn(req.func_tool.tools[-1].name,
+                      "\n".join(part.text for part in req.extra_user_content_parts))
         return event, owner, req.func_tool.tools[-1], NS(context=NS(event=event))
 
     async def test_private_command_uses_received_confirmation_and_preserves_core_reply(self):
@@ -692,6 +699,34 @@ class RealityHostGlueTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(source.payload)
         self.assertEqual(payload["place"], "家")
         self.assertIn("不是用户行为", payload["meaning"])
+
+    async def test_location_diagnostic_uses_area_label_without_consuming_production_dedup(self):
+        self.allow_snapshot()
+        mobile = {"available": True, "location": {"available": True, "captured_at": 123,
+            "latitude": 30, "longitude": 120, "label": "", "place": {"matched": False,
+                "name": "", "area_label": "西湖区"}}}
+        self.runtime.mobile_context = Mock(return_value=mobile)
+        diagnostic = {"_diagnostic": {"route_id": "reality_location_event", "purpose": "environment",
+            "batch_id": "confirmed-batch", "event_key": "confirmed-event", "event_hash": "confirmed-hash",
+            "role_hash": "confirmed-role"}}
+        key = "reality.location.last:" + self.context.key
+        before = self.app.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (key,))
+
+        candidate = await self.api.mobile_location_diagnostic_candidate(
+            "200", test_id="location-test-1", diagnostic_origin=diagnostic)
+
+        self.assertTrue(candidate["accepted"], candidate)
+        self.assertEqual(candidate["route"], {"id": "reality_location_event",
+            "label": "手机陪伴终端地点来源", "variant": "mobile_location"})
+        self.assertEqual(candidate["stages"], [{"stage": "mobile_location_fetch", "state": "passed"}])
+        self.assertEqual(candidate["diagnostic_origin"]["reality_location_event"]["test_id"],
+                         "location-test-1")
+        source = require(self.app.proactive.sources.read(candidate["intents"][0].thought.evidence.sources[0],
+            resolved=self.context.actor, capability="text", observed_at=support.NOW,
+            authorizer=self.app.tasks.identity))
+        self.assertEqual(json.loads(source.payload)["place"], "西湖区")
+        after = self.app.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (key,))
+        self.assertEqual(after, before, "a test must not consume production location-change deduplication")
 
     async def test_audio_consent_revoked_during_tts_cannot_play(self):
         async def revoke(context, text, **kwargs):

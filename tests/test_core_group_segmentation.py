@@ -15,6 +15,7 @@ from astrbot_host.core_reply_segmentation import (
 from astrbot_host.core_reply_perception import inject_core_reply_perception_context
 from companion_v2.conversation.segment_control import LLM_SEGMENT_MARKER as MARKER
 from companion_v2.conversation.segmentation import SegmentationPolicy
+from companion_v2.conversation.text_processing import ReplyTextPolicy
 from companion_v2.foundation.outcome import Outcome
 from tests.test_astrbot_core_reply import FakeEvent
 
@@ -180,16 +181,52 @@ class CoreGroupSegmentationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([part.get_plain_text() for part in parts], [FIRST, SECOND])
         self.assertEqual(chain.chain, [quote, mention, Plain(FIRST), Plain(SECOND), image])
 
-    def test_group_rule_boundaries_keep_short_comma_clauses_and_ellipsis_together(self):
+    def test_group_rule_boundaries_respect_configured_commas_and_keep_ellipsis_together(self):
         policy = SegmentationPolicy(
             split_words=json.dumps(["。", "？", "！", "?", ".", "!", "，"], ensure_ascii=False),
             min_segment_chars=5, max_segments=5)
         source = "笨蛋比折大人，大半夜的突然说什么呢...？真那么想看的话，真就只能看一眼哦？"
         parts = split_message(MessageChain(chain=[Plain(source)]), policy)
         self.assertEqual([part.get_plain_text() for part in parts], [
-            "笨蛋比折大人，大半夜的突然说什么呢...？",
-            "真那么想看的话，真就只能看一眼哦？",
+            "笨蛋比折大人，", "大半夜的突然说什么呢...？",
+            "真那么想看的话，", "真就只能看一眼哦？",
         ])
+
+    async def test_rule_segmentation_and_cleanup_do_not_instruct_the_model(self):
+        presentation = ReplyTextPolicy(content_cleanup_enabled=True,
+            content_cleanup_words='["，", "。"]', content_replacement_enabled=True,
+            content_replacements='[{"from":"你好","to":"嗨"}]')
+        for channel in ("private", "group"):
+            for enabled in (True, False):
+                with self.subTest(channel=channel, enabled=enabled):
+                    event = self.prepare(channel=channel, policy=SegmentationPolicy(enabled=enabled,
+                        prompt="自定义模型分段仅在开启时使用 {{split_marker}}"))
+                    prepared = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]
+                    prepared["stable_prompt_instruction"] = presentation.instruction
+                    prepared["presentation_settings"] = asdict(presentation)
+                    request = NS(system_prompt="原人格", extra_user_content_parts=[])
+                    inject_core_reply_prompt(event, request)
+                    await inject_core_reply_perception_context(event, request)
+                    self.assertEqual(request.system_prompt, "原人格")
+                    payload = json.loads(request.extra_user_content_parts[0].text.split("\n", 1)[1]
+                                         .removesuffix("\n</companion_v2_context>"))
+                    self.assertEqual(payload["companion_background"], "背景")
+                    self.assertNotIn("reply_format_guidance", payload)
+                    for text in ("消息正文组织", "正文呈现偏好", "清理词", "替换", "自定义模型分段", MARKER):
+                        self.assertNotIn(text, request.system_prompt + str(payload))
+
+    async def test_model_segmentation_keeps_custom_protocol_out_of_system_prompt(self):
+        for channel in ("private", "group"):
+            with self.subTest(channel=channel):
+                event = self.prepare(channel=channel, policy=SegmentationPolicy(llm_controlled=True,
+                    prompt="用 {{ split_marker }} 标记自然的消息边界。"))
+                request = NS(system_prompt="原人格", extra_user_content_parts=[])
+                inject_core_reply_prompt(event, request)
+                await inject_core_reply_perception_context(event, request)
+                self.assertEqual(request.system_prompt, "原人格")
+                payload = json.loads(request.extra_user_content_parts[0].text.split("\n", 1)[1]
+                                     .removesuffix("\n</companion_v2_context>"))
+                self.assertEqual(payload["reply_format_guidance"], f"用 {MARKER} 标记自然的消息边界。")
 
     async def test_native_group_turn_context_uses_free_text_segmentation_instructions(self):
         event = self.prepare(policy=SegmentationPolicy(llm_controlled=True))

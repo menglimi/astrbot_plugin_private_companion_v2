@@ -1,5 +1,7 @@
 # 12 · 主动与联系（`manage/contact`）
 
+> **归档设计说明：** 本文中的关系级额度和模型尝试上限已于 2026-10-16 退役，不能作为当前页面或配置合同。当前唯一主动次数上限是每个私聊窗口每日实际联系数；参见[当前自动联系合同](../CORE_AUTOMATIC_CONTACT_AND_HISTORY_SLICE.md)。
+
 代码位置：`renderContactPage`（`pages/陪伴小屋/app.js`）；主动联系工作台挂载 `contactPreferencesWorkspace`，开口闸门状态挂载 `contactWorkspace`，下方统一挂载 `replyGateConfigWorkspace`（`busy_gate` 的 reply/contact 分段与 `role.life` 的 rest/backlog 分段）；联系节奏仍由 `CompanionStatePage` 的 contact 段提供。
 
 ## 一、页面功能

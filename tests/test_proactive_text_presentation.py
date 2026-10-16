@@ -37,7 +37,7 @@ class ProactiveTextPresentationTests(ContactFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(document["decision"], "send")
         self.assertEqual(document["presentation_settings"]["content_cleanup_mode"], "words")
         self.assertEqual(document["presentation_settings"]["content_replacements"], changes["content_replacements"])
-        self.assertIn("正文呈现偏好", self.called[0].original.instruction)
+        self.assertNotIn("正文呈现偏好", self.called[0].original.instruction)
         self.assertEqual((await self.contact(app)).unwrap().task.task_id, task.task_id)
         self.assertEqual((len(self.called), len(self.sent)), (1, 1))
 

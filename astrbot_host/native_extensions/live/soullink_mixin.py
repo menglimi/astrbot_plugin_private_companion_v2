@@ -858,24 +858,24 @@ class SoullinkMixin:
         return await self._start_soullink_runtime()
 
     def _inject_soullink_prompt_instruction(self, req: Any) -> None:
+        from ..request_context import set_system_instruction
+
         if not self._is_soullink_enabled() or not bool(
             self.config.get("soullink_prompt_intent_enabled", True)
         ):
+            set_system_instruction(req, "soullink")
             return
         style = self._soullink_runtime_options()["style"]
         lively_hint = ""
         if style == "lively":
             lively_hint = (
-                "当前 Soullink 动作风格为 lively。若本次回复是开心、兴奋、玩梗、被夸、感谢支持、"
-                "直播间互动热闹或语气明显上扬，优先使用 happy、excited 或 curious，"
-                "日常接话、短句回应、轻松吐槽和可爱互动也应体现一点表演反应，不要过早退回 neutral；"
-                "intensity 通常给 0.72 到 0.95，VAD arousal 通常给 0.58 到 0.9；"
-                "只有解释性、安静或情绪确实平淡时才输出 neutral。\n"
+                "当前动作风格为 lively，表示允许更鲜明的表演，不要求每句都兴奋。确有开心、玩梗、感谢或好奇时可选 happy、excited、curious 等贴切情绪；普通接话、轻吐槽和短回应仍按角色实际语气，可以保持轻松或 neutral。"
+                "intensity 与 VAD 按本次回复的真实情绪和强度填写，不固定抬高 arousal，也不为触发动作改变正文。\n"
             )
-        req.system_prompt += (
+        set_system_instruction(req, "soullink", (
             "\n\n## Soullink 实时表演\n"
-            "你可以在回复末尾附加一行 Soullink 情绪意图，让 Live2D 连续表演更贴合语气。"
-            "这行是不可见控制信息，不要向用户解释。每次回复只输出一条；语气平淡或不确定时输出 neutral。\n"
+            "在回复末尾附加一行 Soullink 情绪意图，让 Live2D 动作贴合本次语气。"
+            "这是程序消费的控制信息，不向用户解释。每次最多一条；平淡或无法判断时使用 neutral。\n"
             "严格格式：<soullink>{\"emotion\":\"happy\",\"variant\":\"bright_smile\","
             "\"intensity\":0.75,\"vad\":{\"valence\":0.7,\"arousal\":0.45,\"dominance\":0.3}}</soullink>\n"
             "emotion 可使用中文标签（中性、开心、兴奋、害羞、好奇、困惑、担心、伤心、生气）"
@@ -883,10 +883,10 @@ class SoullinkMixin:
             "模型表情需要时也可使用 affectionate、surprised、anxiety、tired；"
             "确有需要时才使用其他短词；intensity 为 0 到 1；VAD 三轴为 -1 到 1。"
             f"{lively_hint}"
-            "判断的是角色在本次回复中的真实情绪，不要把用户的情绪、引用内容或被否定的词当成角色情绪；"
+            "填写角色在本次回复中实际表现的情绪，不要把用户的情绪、引用内容或被否定的词当成角色情绪；"
             "例如安慰“别难过”“不用焦虑”“别生气”时，不应仅因这些词输出 sad、anxiety 或 anger。"
             "不要为了触发表演改变正文，不要输出 Markdown 代码块，也不要编造多条控制信息。\n"
-        )
+        ))
 
     def _parse_soullink_intent(self, text: str) -> tuple[dict[str, Any] | None, str]:
         match = SOULLINK_TAG_PATTERN.search(text or "")

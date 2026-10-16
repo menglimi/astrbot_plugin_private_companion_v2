@@ -187,7 +187,7 @@ astrbot_plugin_private_companion_v2/
 
 [主动联系偏好与执行](CORE_PROACTIVE_CONTACT_SLICE.md)归 `proactive/`：配置字段与暂停解析在 `configuration.py`，当前联系判断在 `preferences.py`，输入合同与提示词分别在 `contact_models.py`、`prompts.py`，共享任务/模型及投递消费者在 `service.py`。公共 `ConfigTarget` 新增关系地址，旧地址保持兼容；v20 迁移仍归 `storage/`，不增加页面或根级业务文件。
 
-[自动联系与后台历史接续](CORE_AUTOMATIC_CONTACT_AND_HISTORY_SLICE.md)将私聊机会调度和窗口/关系级联系额度分别放在 `proactive/scheduling.py`、`proactive/budget.py`；关系额度按安装、Bot、角色和受信任的人聚合，联系预算检查与持久任务入队在同一事务。公共历史回执投影放在 `delivery/history.py`，正文读取仍由主动/提醒 owner 提供。普通对话与主动生成保存原投递引用并重新授权读取，宿主共用原唤醒与停机链；保持 v20 schema，复用既有任务、配置和回执正本。完整额度合同见[关系级额度切片](CORE_RELATIONSHIP_CONTACT_BUDGET_SLICE.md)。
+[自动联系与后台历史接续](CORE_AUTOMATIC_CONTACT_AND_HISTORY_SLICE.md)记录私聊机会调度和预算演进，当前联系预算由 `proactive/budget.py` 按私聊窗口统计：模型调用次数与确认发送次数分开计，每个窗口按免打扰时区的本地日刷新；待确认投递暂占联系容量，可信回执确认未发送后释放。跨窗口关系额度已退役，历史记录见[旧关系级额度切片](CORE_RELATIONSHIP_CONTACT_BUDGET_SLICE.md)。公共历史回执投影放在 `delivery/history.py`，正文读取仍由主动/提醒 owner 提供。普通对话与主动生成保存原投递引用并重新授权读取，宿主共用原唤醒与停机链；保持 v20 schema，复用既有任务、配置和回执正本。
 
 自动联系的可信事件来源按原件 owner 分开：`proactive/events.py` 消费已完成阅读/睡眠活动回执，`proactive/journal_events.py` 消费私聊日记/梦境的提交回执。两者各自管理扫描节奏和来源复核，分别由 `tests/test_proactive_activity_events.py` 与 `tests/test_proactive_journal_events.py` 验证。
 

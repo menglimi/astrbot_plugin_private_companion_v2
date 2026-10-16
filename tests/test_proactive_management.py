@@ -9,7 +9,7 @@ from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from companion_v2.identity_policy.models import GrantState
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.proactive.configuration import GROUP, PURPOSES, target_for
-from companion_v2.proactive.management import ContactManagement, GRANT_PREFIX, READONLY_FIELDS
+from companion_v2.proactive.management import ContactManagement, GRANT_PREFIX
 from tests.proactive_support import ContactFixture
 from tests.test_management_access import INSTALLATION, SCOPE
 
@@ -41,7 +41,7 @@ class ContactManagementTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["settings"]["event_max_age_seconds"], 3600)
         self.assertFalse(status["effective"]["allowed"])
         self.assertEqual(status["effective"]["reason"], "proactive_disabled")
-        self.assertEqual(set(status["effective"]["readonly_fields"]), set(READONLY_FIELDS))
+        self.assertEqual(status["effective"]["readonly_fields"], [])
         # 断言与注册表实际项数一致，而不是写死一个数字：purpose 会随功能增加，
         # 写死数字会让「加了一类契机」看起来像「状态接口坏了」。
         self.assertEqual(len(status["purposes"]), len(PURPOSES))
@@ -101,14 +101,14 @@ class ContactManagementTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changed.failure.code, "idempotency_key_conflict")
         self.assertTrue(self.manager.status(self.core).unwrap()["settings"]["enabled"])
 
-    async def test_stale_edit_and_readonly_relationship_limits_do_not_issue_grants(self):
+    async def test_stale_edit_and_removed_relationship_limits_do_not_issue_grants(self):
         await self.setup_manager()
         stale = self.request({"enabled": True}, "stale")
         self.manager.configure(self.core, self.request({"note": "先安静一点"}, "note")).unwrap()
         self.assertEqual(self.manager.configure(self.core, stale).failure.code, "configuration_revision_conflict")
-        for field in READONLY_FIELDS:
+        for field in ("max_relationship_contacts_24h", "max_relationship_attempts_24h"):
             result = self.manager.configure(self.core, self.request({field: 1}, field))
-            self.assertEqual(result.failure.code, "contact_relationship_budget_scope")
+            self.assertEqual(result.failure.code, "contact_configuration_invalid")
         self.assertEqual(self.grants(), ())
 
     async def test_invalid_patch_rolls_back_configuration_and_grant(self):

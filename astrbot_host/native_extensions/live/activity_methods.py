@@ -1658,10 +1658,13 @@ class LiveActivityMethods:
 
     def _inject_vts_command_fallback_instruction(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         """避免 VTS 命令未路由时，模型编造跨平台操作指引。"""
+        from ..request_context import set_turn_context
+
+        set_turn_context(req, 'vts_auth')
         message = re.sub('\\s+', ' ', str(getattr(event, 'message_str', '') or '')).strip()
         if not re.fullmatch('/?vts_auth', message, flags=re.IGNORECASE):
             return
-        req.system_prompt += '\n\n## VTS 授权入口\nVTube Studio 授权在陪伴小屋的直播与表演设置中进行。用户询问连接或授权时，告诉用户打开该设置并点击连接或申请授权；只有实际操作回执才能证明成功。\n'
+        set_turn_context(req, 'vts_auth', '## VTS 授权入口\nVTube Studio 授权在陪伴小屋的直播与表演设置中进行。用户询问连接或授权时，告诉用户打开该设置并点击连接或申请授权；只有实际操作回执才能证明成功。')
 
     async def _load_token(self) -> Optional[str]:
         """从框架 KV 存储加载 Token"""

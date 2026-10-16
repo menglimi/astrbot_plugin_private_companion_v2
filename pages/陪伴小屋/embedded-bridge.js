@@ -56,7 +56,8 @@
     const requested=options?.timeoutMs;
     const timeoutMs=Number.isInteger(requested)&&requested>=1000
       ?Math.min(requested,MAX_REQUEST_TIMEOUT_MS):DEFAULT_REQUEST_TIMEOUT_MS;
-    const timer=setTimeout(()=>{pending.delete(requestId);reject(new Error("未收到执行结果，请核对后重试本次操作。"));},timeoutMs+1000);
+    const timer=setTimeout(()=>{pending.delete(requestId);reject(Object.assign(
+      new Error("未收到执行结果，请核对后重试本次操作。"),{code:"bridge_timeout",confirmed:false}));},timeoutMs+1000);
     pending.set(requestId,{resolve,reject,timer});send({kind:"request",requestId,method,path,body,timeoutMs});
   });}
   window.AstrBotPluginPage={ready:()=>ready,getContext:()=>context,

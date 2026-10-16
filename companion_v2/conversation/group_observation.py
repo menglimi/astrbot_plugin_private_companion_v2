@@ -1,4 +1,4 @@
-"""Bounded group observation material: mood, moments, joke boundary, denoise.
+"""Bounded group observation material: topics, mood, moments, joke boundary, denoise.
 
 V1 kept a per-group observation subsystem (``group_observation.py``,
 ``group_mood.py``, ``group_moments.py``, ``joke_boundary.py``,
@@ -10,10 +10,9 @@ records it as reference material for the group prompt:
 * records belong to the group's own memory owner and live on the shared
   ``runtime_metadata`` table, so this slice adds no table and no schema version;
 * a record never stores a member identifier, never claims anything about a
-  member, and never produces an action against a member. V1's per-member joke
-  sensitivity profile is deliberately not migrated: the guard is re-derived for
-  the current visible window instead, and the moment record keeps the text
-  without attribution.
+  member, and never produces an action against a member. Topic participation
+  counts are derived from the current visible window; V1's per-member joke
+  sensitivity profile is deliberately not migrated.
 
 The module owns no model call, no clock, no send path and no read privilege of
 its own; prompt wording lives in ``participation_prompts``.
@@ -26,7 +25,7 @@ import json
 import re
 
 from companion_v2.execution.models import digest
-from .group_timing import clean_group_text, repeat_signature
+from .group_timing import ADDRESS_MARKER, clean_group_text, repeat_signature
 
 
 PREFIX = "conversation.group_observation.v1"
@@ -34,6 +33,7 @@ VERSION = "conversation.group_observation.v1"
 MOOD_KIND = "mood"
 MOMENTS_KIND = "moments"
 JOKE_KIND = "joke_guard"
+TOPIC_KIND = "topics"
 
 # Material budgets, in the same spirit as the group context window: bounded
 # enough that one turn cannot grow the prompt or the record without limit.
@@ -42,6 +42,12 @@ MAX_MOMENTS = 8
 MAX_MOMENT_CHARS = 120
 MAX_MOMENT_PROMPT_ITEMS = 3
 MAX_DETAIL_MOODS = 2
+MAX_TOPIC_THREADS = 40
+MAX_TOPIC_PROMPT_ITEMS = 5
+MAX_TOPIC_EXAMPLES = 3
+MAX_TOPIC_TITLE_CHARS = 40
+MAX_TOPIC_EXAMPLE_CHARS = 80
+TOPIC_TTL_SECONDS = 90 * 60
 MOMENT_TTL_SECONDS = 7 * 24 * 3600
 MOMENT_BURST_SECONDS = 30
 MOMENT_BURST_SPEAKERS = 3
@@ -467,6 +473,156 @@ def project_strength(mood_facts_value):
             "label": next(label for _, name, label in STRENGTH_BANDS if name == band)}
 
 
+def topic_signature(text):
+    """Build V1-style Chinese topic anchors from one admitted, bounded line."""
+    value = " ".join(clean_group_text(text).replace(ADDRESS_MARKER, " ").split())[:160]
+    address_prefix = re.compile(
+        r"^(?:[嗯唔哦噢诶欸啊呀哎嘿嗨]+[。！？!?…~～，,\s]*)?"
+        r"(?:[\w\u4e00-\u9fffぁ-んァ-ヶー]{1,10}(?:大人|老师|主人|哥哥|姐姐|同学|宝宝|宝贝)"
+        r"[，,、：:\s~～…]*|(?!(?:今天|现在|刚才|刚刚|这会儿|早上|中午|晚上|外面|天气|最近|等下|待会)[，,、：:])"
+        r"[\w\u4e00-\u9fffぁ-んァ-ヶー]{1,3}[，,、：:]\s*)"
+    )
+    value = address_prefix.sub("", value, count=1).strip() or value
+    tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{3,}", value)
+    stopwords = {"刚才", "现在", "今天", "这个", "那个", "一下", "一点", "有点", "还是",
+        "没有", "已经", "时候", "用户", "对方", "主动", "消息", "这会儿", "内容", "第一",
+        "时间", "看到", "喜欢", "希望", "继续", "话题", "换个", "说过", "讲过", "提过",
+        "聊过", "发过", "前面", "之前", "刚刚", "群聊", "群里", "本群",
+        "我今", "我今天", "天想", "今天想", "我想", "你想", "我觉", "我觉得", "觉得",
+        "我感", "我感觉", "感觉", "我喜", "我喜欢", "我说", "你说", "他说", "然后", "所以",
+        "就是", "真的", "其实", "可能", "应该", "可以", "怎么", "什么", "最近"}
+    anchors = []
+
+    def add(anchor):
+        if (len(anchor) < 2 or anchor in stopwords
+                or re.fullmatch(r"[了啦呀呢嘛吗吧啊哦噢诶嗯]+", anchor)
+                or re.fullmatch(r"[年月日点分秒上下左右前后早晚中午今晚昨今明]+", anchor)):
+            return
+        if anchor not in anchors and len(anchors) < 64:
+            anchors.append(anchor)
+
+    for token in tokens:
+        if re.fullmatch(r"[A-Za-z0-9_]{3,}", token):
+            add(token.lower())
+            continue
+        cleaned = re.sub(r"(的时候|时候|一下|一点|了|啦|呀|呢|嘛|吗|吧|啊|哦|噢|诶|嗯)$", "", token)
+        add(cleaned)
+        if len(cleaned) >= 3:
+            for size in (2, 3):
+                for index in range(len(cleaned) - size + 1):
+                    add(cleaned[index:index + size])
+    return "|".join(anchors)
+
+
+def topic_signatures_similar(left, right):
+    """Use bounded anchor overlap so short follow-ups stay on their thread."""
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_set, right_set = set(left.split("|")), set(right.split("|"))
+    shared = left_set & right_set
+    for phrase in shared:
+        if (len(phrase) == 3 and re.fullmatch(r"[\u4e00-\u9fff]{3}", phrase)
+                and phrase[:2] in shared and phrase[1:] in shared):
+            return True
+    common = len(shared)
+    smaller = min(len(left_set), len(right_set))
+    if smaller <= 2:
+        return common >= 1
+    overlap = common / smaller
+    return ((common >= 2 and overlap >= 0.5) or (common >= 3 and overlap >= 0.3)
+            or (common >= 4 and overlap >= 0.18) or common >= 6)
+
+
+def fold_topic_threads(existing, items, at, *, max_threads=12):
+    """Fold active topic lines without retaining member identities."""
+    if type(max_threads) is not int or not 1 <= max_threads <= MAX_TOPIC_THREADS:
+        raise ValueError("topic thread limit is invalid")
+    prior = existing if type(existing) is dict and existing.get("version") == VERSION else {}
+    threads = {}
+    prior_threads = prior.get("threads")
+    for item in prior_threads if type(prior_threads) in (list, tuple) else ():
+        if type(item) is not dict:
+            continue
+        signature = str(item.get("signature") or "")[:4096]
+        title = " ".join(clean_group_text(item.get("title")).split())[:MAX_TOPIC_TITLE_CHARS]
+        started, last = parse_moment(item.get("started_at")), parse_moment(item.get("last_at"))
+        if not signature or not title or started is None or last is None:
+            continue
+        age = (at - last).total_seconds()
+        if age < 0 or age > TOPIC_TTL_SECONDS:
+            continue
+        thread_id = str(item.get("thread_id") or digest(signature))[:80]
+        raw_examples = item.get("examples")
+        examples = ([" ".join(clean_group_text(value).split())[:MAX_TOPIC_EXAMPLE_CHARS]
+                     for value in raw_examples if type(value) is str and clean_group_text(value)]
+                    if type(raw_examples) in (list, tuple) else [])
+        raw_count = item.get("message_count")
+        threads[thread_id] = {"thread_id": thread_id, "signature": signature, "title": title,
+            "started_at": started.isoformat(), "last_at": last.isoformat(),
+            "message_count": max(0, raw_count) if type(raw_count) is int else 0,
+            "bot_joined": item.get("bot_joined") is True,
+            "examples": list(dict.fromkeys(examples))[-MAX_TOPIC_EXAMPLES:]}
+    raw_processed = prior.get("processed_keys")
+    processed = ([str(key)[:128] for key in raw_processed][-MAX_PROCESSED_KEYS:]
+                 if type(raw_processed) in (list, tuple) else [])
+    seen = set(processed)
+    participants = {}
+    active_member = None
+    active_member_at = None
+    ordered = []
+    for index, item in enumerate(items):
+        if type(item) is dict and item.get("kind") in ("member", "bot"):
+            when = parse_moment(item.get("received_at"))
+            if when is not None:
+                ordered.append((when, index, item))
+    for when, _, item in sorted(ordered, key=lambda entry: (entry[0], entry[1])):
+        if when > at or (at - when).total_seconds() > TOPIC_TTL_SECONDS:
+            continue
+        if item["kind"] == "bot":
+            if active_member is not None and active_member_at is not None and when >= active_member_at:
+                active_member["bot_joined"] = True
+            continue
+        text = clean_group_text(item.get("text"))
+        signature = topic_signature(text)
+        if not signature:
+            continue
+        thread = next((value for value in threads.values()
+                       if topic_signatures_similar(signature, value["signature"])), None)
+        if thread is None:
+            thread_id = digest(signature)
+            thread = {"thread_id": thread_id, "signature": signature,
+                "title": " ".join(text.split())[:MAX_TOPIC_TITLE_CHARS],
+                "started_at": when.isoformat(), "last_at": when.isoformat(),
+                "message_count": 0, "bot_joined": False, "examples": []}
+            threads[thread_id] = thread
+        active_member, active_member_at = thread, when
+        speaker = str(item.get("speaker_id") or "")
+        if speaker:
+            participants.setdefault(thread["thread_id"], set()).add(speaker)
+        key = str(item.get("dedupe_key") or item_key(item))
+        if key in seen:
+            continue
+        seen.add(key)
+        processed.append(key)
+        thread["message_count"] += 1
+        if when > parse_moment(thread["last_at"]):
+            thread["last_at"] = when.isoformat()
+        example = " ".join(text.split())[:MAX_TOPIC_EXAMPLE_CHARS]
+        if example and (not thread["examples"] or thread["examples"][-1] != example):
+            thread["examples"].append(example)
+            thread["examples"] = thread["examples"][-MAX_TOPIC_EXAMPLES:]
+    active = sorted(threads.values(), key=lambda item: item["last_at"], reverse=True)[:max_threads]
+    record = {"version": VERSION, "threads": active, "processed_keys": processed[-MAX_PROCESSED_KEYS:],
+              "updated_at": at.isoformat()}
+    facts = tuple({"title": item["title"], "message_count": item["message_count"],
+                   "participant_count": len(participants.get(item["thread_id"], ())),
+                   "bot_joined": item["bot_joined"], "examples": tuple(item["examples"][-2:])}
+                  for item in active)
+    return record, facts
+
+
 def observe(store, *, owner, settings, items, at, current_speaker=""):
     """Compute this turn's bounded observation facts and the records to fold.
 
@@ -474,6 +630,10 @@ def observe(store, *, owner, settings, items, at, current_speaker=""):
     actually decides something, so an unfinished turn leaves no observation.
     """
     facts, records = {}, {}
+    if settings["enable_group_topic_threads"]:
+        record, facts["topic_threads"] = fold_topic_threads(
+            store.read(owner, TOPIC_KIND), items, at, max_threads=settings["group_topic_thread_max"])
+        records[TOPIC_KIND] = record
     if settings["enable_group_social_context"]:
         if settings["enable_group_mood_detection"]:
             record = fold_mood(store.read(owner, MOOD_KIND), items, at)

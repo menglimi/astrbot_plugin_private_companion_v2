@@ -29,8 +29,7 @@ PURPOSES = MappingProxyType({
     "screen": "已授权屏幕观察",
 })
 LAYERS = (ConfigLayer.INSTALLATION, ConfigLayer.ROLE, ConfigLayer.RELATIONSHIP, ConfigLayer.WINDOW)
-RELATIONSHIP_BUDGET_FIELDS = frozenset((GROUP + ".max_relationship_contacts_24h",
-                                       GROUP + ".max_relationship_attempts_24h"))
+WINDOW_QUOTA_FIELDS = frozenset({"max_contacts_24h"})
 DEDUP_POLICIES = frozenset({"semantic", "event_anchor", "event_revision", "conversation_anchor",
                            "daily_slot", "content_fingerprint", "life_event"})
 # T38: the V1 hourly activity curve, one weight per local hour. A wrong length
@@ -279,7 +278,9 @@ def configuration_fields():
     return fields + (ContactField(GROUP + ".automatic_enabled", GROUP, GROUP, ValueKind.BOOLEAN,
         False, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP),) + tuple(
         ContactField(GROUP + "." + name, GROUP, GROUP, ValueKind.INTEGER, default,
-            minimum=minimum, maximum=maximum, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP)
+            minimum=minimum, maximum=maximum,
+            layers=LAYERS,
+            apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP)
         for name, default, minimum, maximum in (
             ("interval_seconds", 3600, 60, 604800), ("idle_seconds", 900, 0, 86400),
             ("unanswered_slowdown_start", 1, 1, 10), ("unanswered_pause_after", 0, 0, 50),
@@ -288,7 +289,7 @@ def configuration_fields():
             ("dedup_weather_window_minutes", 1080, 0, 2880),
             ("dedup_min_shared_tokens", 1, 1, 4),
             ("event_max_age_seconds", 3600, 60, 86400),
-            ("max_contacts_24h", 3, 0, 100), ("max_attempts_24h", 12, 0, 1000),
+            ("max_contacts_24h", 3, 0, 100),
             ("balance_check_interval_minutes", 60, 5, 1440),
             ("news_check_interval_minutes", 180, 15, 1440),
             ("web_exploration_min_interval_hours", 8, 1, 168),
@@ -336,13 +337,10 @@ def configuration_fields():
             ("appointment_lag_minutes", 0, 0, 180),
             ("appointment_pre_silence_minutes", 20, 0, 240),
             ("proactive_persona_judge_threshold", 62, 0, 100),
-            ("proactive_persona_judge_cache_minutes", 180, 0, 720),
-            ("proactive_persona_judge_daily_limit", 12, 0, 100))) + tuple(
+            ("proactive_persona_judge_cache_minutes", 180, 0, 720))) + tuple(
         ContactField(GROUP + "." + name, GROUP, GROUP, ValueKind.INTEGER, default,
             minimum=minimum, maximum=maximum, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP)
         for name, default, minimum, maximum in (
-            ("max_relationship_contacts_24h", 9, 0, 1000),
-            ("max_relationship_attempts_24h", 36, 0, 10000),
             ("generation_history_limit", 8, 0, 8),
             ("history_max_chars", 8192, 0, 8192),
             ("official_alert_poll_minutes", 5, 1, 1440),
@@ -378,10 +376,17 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
     owner_id = GROUP
 
     @staticmethod
-    def _relationship_budget_layer(target, changes):
-        if target.layer is ConfigLayer.WINDOW and RELATIONSHIP_BUDGET_FIELDS.intersection(changes):
-            raise ConfigurationError("contact_relationship_budget_scope",
-                "relationship-wide allowances must be configured at installation, role or relationship scope")
+    def _effective_fields(fields):
+        return tuple(replace(field, layers=tuple(layer for layer in field.layers
+            if layer is not ConfigLayer.RELATIONSHIP)) if
+            field.field_id.removeprefix(GROUP + ".") in WINDOW_QUOTA_FIELDS else field for field in fields)
+
+    @staticmethod
+    def _validate_quota_target(target, keys):
+        changed = {key.removeprefix(GROUP + ".") for key in keys}
+        if target.layer is ConfigLayer.RELATIONSHIP and changed & WINDOW_QUOTA_FIELDS:
+            raise ConfigurationError("configuration_scope_not_supported",
+                                     "daily contact quotas are configured per private window")
 
     @staticmethod
     def _target(target):
@@ -422,6 +427,7 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
         return result
 
     def read(self, target, fields):
+        fields = self._effective_fields(fields)
         self._target(target)
         current = super().read(target, fields)
         shared = global_contact_snapshot(self.runtime, target, fields)
@@ -478,7 +484,7 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
             old_public_revisions=public_revisions))
 
     def preview_set(self, target, fields, *, changes):
-        self._relationship_budget_layer(target, changes)
+        self._validate_quota_target(target, changes)
         result = super().preview_set(target, fields, changes=changes)
         try:
             NewsSource.read({key.removeprefix(GROUP + "."): item.value for key, item in result.items()})
@@ -487,6 +493,6 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
         return self._pauses(target, fields, result, changes=changes)
 
     def write(self, target, fields, *, changes, reset, expected_revision, observed_at):
-        self._relationship_budget_layer(target, changes)
+        self._validate_quota_target(target, (*changes, *reset))
         return super().write(target, fields, changes=changes, reset=reset,
             expected_revision=expected_revision, observed_at=observed_at)

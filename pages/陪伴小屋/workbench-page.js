@@ -102,7 +102,6 @@ window.CompanionWorkbench = (() => {
     proactive_contact_scope_invalid: "当前对象的联系状态不可用，请选择已建立私聊的用户。",
     proactive_contact_target_changed: "当前对象或角色绑定已变化，请重新读取。",
     proactive_contact_configuration_invalid: "请核对主动联系设置：数值需在各自范围内，枚举项需在下拉选项内。",
-    contact_relationship_budget_scope: "关系级配额（同一关系 24 小时内的联系与尝试上限）按安装 / 角色 / 关系层设置，不能按会话保存。",
     configuration_relationship_required: "主动联系偏好需要一个已绑定的角色和这个会话的真人关系；请先完成对象与角色的绑定。",
     invalid_contact_preference: "主动联系设置有字段不合法：时刻用 HH:MM，问候窗口用 HH:MM-HH:MM，时区用 IANA 名称，暂停时间点用带时区的 ISO 时间，活跃曲线写满 24 个数字，清单只能填允许的名字，重要日期要是 JSON 数组。",
     proactive_contact_clock_invalid: "请填写二十四小时制的时刻，形如 23:00 或 07:45。",

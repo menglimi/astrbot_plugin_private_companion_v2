@@ -6,7 +6,7 @@ current persona; interrupted model work is never silently replayed.
 
 import asyncio
 from dataclasses import asdict, replace
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import re
@@ -40,7 +40,7 @@ from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
 from .configuration import GROUP
-from .budget import DIAGNOSTIC_TASK_PREFIX, ContactBudget
+from .budget import DIAGNOSTIC_TASK_PREFIX, ContactBudget, local_day_start
 from .contact_models import ContactIntent, ContactJob
 from .inspirations import ProactiveInspirations
 from .persona_judge import (KIND as JUDGE_KIND, PersonaJudge, JudgeVerdict, exempt_purposes, judge_output,
@@ -97,19 +97,6 @@ def single_line(text, limit):
     contact never reads a newline or a task marker aloud.
     """
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
-
-
-def local_day_start(at, timezone_name):
-    """The first instant of the relationship's local day, expressed in UTC.
-
-    ``proactive_contacts`` only stores UTC instants. The relationship's own
-    configured timezone is the one clock its quiet hours already use, so the
-    daily poke allowance resets at that local midnight without another table,
-    counter or migration.
-    """
-    zone = ZoneInfo(timezone_name)
-    local = normalize_utc(at, field="contact expression time").astimezone(zone)
-    return datetime.combine(local.date(), time.min, tzinfo=zone).astimezone(timezone.utc)
 
 
 def _segmentation_policy(settings):
@@ -220,16 +207,18 @@ class ProactiveContacts:
             logger.warning("V2 proactive expression rules unavailable: %s", type(error).__name__)
             return ()
 
-    def _reaction_available(self, context, contact_id):
+    def _reaction_available(self, context, contact_id, *, diagnostic=False):
         if self.semantics is None:
             return False
-        return self.semantics.proactive_reaction_available(context, contact_id)
+        return self.semantics.proactive_reaction_available(context, contact_id, diagnostic=diagnostic)
 
     def _proactive_image_available(self, context, job, preferences, at):
         from companion_v2.conversation.media.output_settings import effective_settings
         settings = effective_settings(self.runtime, context)
         probability = settings["proactive_probability"]
         limit = settings["proactive_max_daily"]
+        if job.diagnostic_image_intent is not None:
+            return True
         if probability <= 0 or limit == 0:
             return False
         if limit > 0:
@@ -432,12 +421,17 @@ class ProactiveContacts:
 
     async def contact(self, context, opportunity, intents, *, role_instruction, selection_seed,
                       automatic_origin=None, administrator_test=False, diagnostic_source_backed=False,
-                      diagnostic_origin=None):
+                      diagnostic_origin=None, diagnostic_image_intent=None):
         """Trusted producer API; no model may fabricate its cause, identity or persona."""
         if type(administrator_test) is not bool:
             raise ValueError("administrator_test must be an explicit boolean")
         if type(diagnostic_source_backed) is not bool:
             raise ValueError("diagnostic_source_backed must be an explicit boolean")
+        if (diagnostic_image_intent is not None and
+                (type(diagnostic_image_intent) is not str or not diagnostic_image_intent.strip()
+                 or len(diagnostic_image_intent) > 2000 or not administrator_test
+                 or not diagnostic_source_backed or diagnostic_origin is None)):
+            raise ValueError("forced image output requires a source-backed administrator diagnostic")
         synthetic_origin = (type(diagnostic_origin) is dict
                             and type(diagnostic_origin.get("_diagnostic")) is dict
                             and diagnostic_origin["_diagnostic"].get("route_id") == "synthetic_event")
@@ -465,6 +459,8 @@ class ProactiveContacts:
         inputs = [context.key, opportunity, intents, role_instruction, selection_seed]
         request_hash = digest(inputs + ([automatic_origin] if automatic_origin is not None else [])
                               + ([diagnostic_origin] if diagnostic_origin is not None else [])
+                              + (["diagnostic-image", diagnostic_image_intent]
+                                 if diagnostic_image_intent is not None else [])
                               + (["administrator_test"] if administrator_test else []))
         try:
             self.require_running()
@@ -480,9 +476,8 @@ class ProactiveContacts:
             invocation = None
             registered = False
             try:
-                # Keep quota checks and durable task admission in one SQLite
-                # write transaction so another worker cannot reserve the same
-                # relationship allowance from a different private window.
+                # Keep per-window quota checks and task admission atomic so
+                # concurrent opportunities cannot reserve the same allowance.
                 with self.runtime.transaction():
                     require(self.tasks.authorize_context(context, action=GROUP, observed_at=self.tasks.now()))
                     prior = self.runtime.read_one("SELECT task_id FROM execution_tasks WHERE task_id = ?", (task_id,))
@@ -500,7 +495,6 @@ class ProactiveContacts:
                     if preferences.snapshot.resolution_token != initial_preferences.snapshot.resolution_token:
                         raise TaskError("contact_preferences_changed", "contact policy changed before task admission")
                     if not administrator_test:
-                        self.budget.attempts(context, preferences, at)
                         self.budget.contacts(context, preferences, at)
                     if automatic_origin is not None and automatic_origin.get("role_hash") != digest(role_instruction):
                         raise TaskError("contact_persona_changed", "automatic contact must keep its original role instruction")
@@ -549,7 +543,8 @@ class ProactiveContacts:
                         preferences.snapshot.resolution_token, tuple(record.content_hash for record in records),
                         selection.feasible_count, selection.weight_used, history, interaction, automatic_origin,
                         administrator_test=administrator_test,
-                        diagnostic_source_backed=diagnostic_source_backed, diagnostic_origin=diagnostic_origin)
+                        diagnostic_source_backed=diagnostic_source_backed, diagnostic_origin=diagnostic_origin,
+                        diagnostic_image_intent=diagnostic_image_intent)
                     presentation = ReplySettings(self.configuration).capture(context, at)["settings"]
                     job = replace(job, presentation_settings={key: presentation[key] for key in TEXT_DEFAULTS},
                                   segmentation_settings={key: presentation[key]
@@ -603,8 +598,6 @@ class ProactiveContacts:
         preferences = self._policy(job.context, job.intent.purpose, at, token=job.preference_token,
                                    contact_id="contact-" + digest(spec.task_id),
                                    administrator_test=job.administrator_test)
-        if not job.administrator_test:
-            self.budget.attempts(job.context, preferences, at, exclude_task_id=spec.task_id)
         self._records(job.context, job.intent.thought.evidence.sources, at, hashes=job.source_hashes)
         self._continuity(job.context, job.history, job.interaction, job.automatic_origin, at,
                          last_reply=job.last_reply, dialogue_history=job.dialogue_history,
@@ -620,9 +613,13 @@ class ProactiveContacts:
         source_origin = job.automatic_origin or job.diagnostic_origin
         contact_id = "contact-" + digest(run.task.task_id)
         try:
-            reactions_available = self._reaction_available(job.context, contact_id)
+            reactions_available = self._reaction_available(job.context, contact_id,
+                diagnostic=job.diagnostic_image_intent is not None)
         except Exception:
             reactions_available = False
+        if job.diagnostic_image_intent is not None and not reactions_available:
+            raise TaskError("proactive_diagnostic_image_unavailable",
+                            "the authorized reaction image path is disabled or paused for this contact")
         try:
             voice_available = self._voice_available(job.context, preferences, at)
             poke_available = self._poke_available(job.context, preferences, at)
@@ -699,6 +696,8 @@ class ProactiveContacts:
                 raise TaskError("contact_official_alert_invalid", "official alert attribution source is unavailable")
             alert_material = json.loads(alert_records[0].payload) if alert_records else None
             body, reaction_intent = contact_output(completion.draft.text, official_alert=alert_material)
+            if body is not None and job.diagnostic_image_intent is not None:
+                reaction_intent = job.diagnostic_image_intent
             if body is not None:
                 body = strip_voice_markup(strip_internal_expression_protocol(body))
             decision_data = json.loads(completion.draft.text)
@@ -799,10 +798,14 @@ class ProactiveContacts:
             if (body is not None and reaction_intent and reactions_available and judge_task is None
                     and self._proactive_image_available(job.context, job, preferences, self.tasks.now())):
                 try:
-                    if self._reaction_available(job.context, contact_id):
+                    if self._reaction_available(job.context, contact_id,
+                            diagnostic=job.diagnostic_image_intent is not None):
                         offered = await self.semantics.reactions.select_for_contact(job.context, reaction_intent)
                 except (TaskError, ValueError, OSError):
                     offered = None
+            if body is not None and job.diagnostic_image_intent is not None and offered is None:
+                raise TaskError("proactive_diagnostic_image_unavailable",
+                                "no authorized reaction image matched the diagnostic intent")
             run.validate()
             operation = OperationRef("save-" + contact_id, GROUP, job.context.scope, VersionRef(contact_id, 1), contact_id)
             document = {"decision": "skip" if body is None else
@@ -810,6 +813,7 @@ class ProactiveContacts:
                 "purpose": job.intent.purpose, "preference_token": job.preference_token,
                 "sources": job.intent.thought.evidence.sources, "source_hashes": job.source_hashes,
                 "administrator_test": job.administrator_test,
+                "diagnostic_image": job.diagnostic_image_intent is not None,
                 "opened_at": job.intent.thought.opportunity.opened_at, "expires_at": job.intent.thought.opportunity.expires_at,
                 "thought_id": job.intent.thought.thought_id, "feasible_count": job.feasible_count,
                 "thought_summary": job.intent.thought.summary,
@@ -845,7 +849,8 @@ class ProactiveContacts:
                 reaction = None
                 if offered is not None:
                     try:
-                        if self._reaction_available(job.context, contact_id):
+                        if self._reaction_available(job.context, contact_id,
+                                diagnostic=job.diagnostic_image_intent is not None):
                             with self.runtime.transaction():
                                 issued_at = self.tasks.now()
                                 image = self.semantics.reactions.contact_image(job.context, contact_id, offered, issued_at,
@@ -854,6 +859,9 @@ class ProactiveContacts:
                                             "manifest": image_manifest(image)}
                     except (TaskError, ValueError, OSError):
                         reaction = None
+                if job.diagnostic_image_intent is not None and reaction is None:
+                    raise TaskError("proactive_diagnostic_image_unavailable",
+                                    "the authorized image changed or could not be sealed for delivery")
                 voice, poke = self._expression_plans(job.context, preferences, body, decision_data, self.tasks.now())
                 payload_hash = manifest_hash(body or "", (reaction["manifest"],) if reaction else ())
                 part_documents = []
@@ -1051,10 +1059,6 @@ class ProactiveContacts:
         if JUDGE_KIND not in self.gateway.router.profiles:
             return PersonaJudge.denied(signature, "judge_profile_unavailable",
                 reason="主动人格判定模型档未注册，本次不发送"), None
-        day_start = local_day_start(at, values["quiet_timezone"])
-        if self.persona_judge.decided_today(job.context, day_start) >= values["proactive_persona_judge_daily_limit"]:
-            return PersonaJudge.denied(signature, "judge_daily_limit",
-                reason="主动人格判定达到当日调用上限，本次不发送"), None
         deadline = min(job.intent.thought.opportunity.expires_at, at + timedelta(seconds=JUDGE_TIMEOUT_SECONDS))
         if deadline <= at:
             return PersonaJudge.denied(signature, "judge_window_closed",
@@ -1240,7 +1244,8 @@ class ProactiveContacts:
             if not final_part or (voice is None and poke is None):
                 return part_text
             return DeliveryContent(part_text, (), voice=voice, poke=poke)
-        if not self._reaction_available(request.context, row["contact_id"]):
+        if not self._reaction_available(request.context, row["contact_id"],
+                diagnostic=data.get("diagnostic_image") is True):
             raise TaskError("reaction_unavailable", "selected proactive reaction is no longer allowed")
         image = self.semantics.reactions.contact_image(request.context, row["contact_id"], reaction,
             datetime.fromisoformat(reaction["issued_at"]), evidence=tuple(source_from_document(ref) for ref in data["sources"]))
@@ -1380,6 +1385,35 @@ class ProactiveContacts:
                 delivery_state = "failed"
             else:
                 delivery_state = "cancelled"
+            model_task_ids = [task_id]
+            judge_task_id = judge.get("task_id")
+            if isinstance(judge_task_id, str) and judge_task_id and judge_task_id not in model_task_ids:
+                model_task_ids.append(judge_task_id)
+            placeholders = ",".join("?" for _ in model_task_ids)
+            model_rows = self.runtime.read_all(f"""SELECT state, actual_tokens, actual_cost,
+                    reserved_tokens, reserved_cost, latency_ms FROM model_calls
+                WHERE task_id IN ({placeholders})""", tuple(model_task_ids))
+            provider_calls = sum(row["state"] in ("dispatched", "generated", "unknown", "discarded")
+                                 for row in model_rows)
+            confirmed_calls = sum(row["actual_tokens"] is not None for row in model_rows)
+            latency_values = [row["latency_ms"] for row in model_rows if row["latency_ms"] is not None]
+            model_metrics = {"provider_calls": provider_calls,
+                "pending_reservations": sum(row["state"] == "reserved" for row in model_rows),
+                "unknown_calls": sum(row["state"] == "unknown" for row in model_rows),
+                "confirmed_calls": confirmed_calls,
+                "tokens": sum(row["actual_tokens"] or 0 for row in model_rows),
+                "cost_microusd": (sum(row["actual_cost"] or 0 for row in model_rows)
+                    if any(row["actual_cost"] is not None for row in model_rows) else None),
+                "held_tokens": sum(row["reserved_tokens"] for row in model_rows
+                    if row["actual_tokens"] is None and row["state"] in ("reserved", "dispatched", "unknown")),
+                "held_cost_microusd": sum(row["reserved_cost"] for row in model_rows
+                    if row["actual_cost"] is None and row["state"] in ("reserved", "dispatched", "unknown")),
+                "avg_latency_ms": round(sum(latency_values) / len(latency_values)) if latency_values else None}
+            delivery_metrics = {"expected_parts": expected_parts, "created_parts": len(deliveries),
+                "delivered_parts": sum(state == "delivered" for state in states),
+                "pending_parts": sum(state == "pending" for state in states),
+                "unresolved_parts": sum(state in ("dispatched", "accepted", "unknown") for state in states),
+                "failed_parts": sum(state in ("failed", "cancelled", "expired", "dead_letter") for state in states)}
             return {"task_id": task_id, "revision": task.revision, "generation": task.state,
                 "skipped": data.get("decision") == "skip", "skip_reason": skip_reason,
                 "model_skip_reason": data.get("model_skip_reason"), "dedup_reason": data.get("dedup_reason"),
@@ -1393,7 +1427,14 @@ class ProactiveContacts:
                 "receipt_ref": delivery["receipt_ref"] if delivery else None,
                 "delivery_parts": [{"sequence": DeliveryRequest.restore(item["request_json"]).sequence,
                     "delivery_id": item["delivery_id"], "state": item["state"],
-                    "receipt_ref": item["receipt_ref"]} for item in deliveries]}
+                    "receipt_ref": item["receipt_ref"]} for item in deliveries],
+                "stage_metrics": {"model": model_metrics,
+                    "persona_review": {"state": judge.get("state", "not_required"),
+                        "allowed": judge.get("allowed")},
+                    "image_attachment": {"state": "passed" if data.get("reaction") else
+                                         "failed" if data.get("diagnostic_image") else "not_required",
+                                         "attached": bool(data.get("reaction"))},
+                    "delivery": delivery_metrics}}
 
     @outcome
     def cancel(self, context, task_id, *, expected_revision):

@@ -134,7 +134,7 @@
 | --- | --- | --- | --- |
 | 10 | **文档 C 的 C3-2 前提不成立**：它以「V2 没有『主用户』概念」为理由建议销号 `auto_voice` 4 项 | `conversation/media/quota.py:33` 有 `"private_owner": "primary user private chat"`、`:81` `return "private_owner" if row["tier"] == "core"` —— V2 **有**核心档/主用户概念 | 账本 4 行仍 `owed`；请重判这 4 项，别按"无此概念"销号 |
 | 11 | **`meal_care_followup_minutes` 口径存疑**（文档 B 判"功能缺口"、账本判 renamed-equivalent） | 代码只把它当**槽宽**用：`proactive/meal_events.py:13` `WINDOW=45min`、`:27` 改读配置、`:52-70` 只按槽选一次；V1 的"未回应后补问一次"路径未见实现 | 要么补实现，要么把账本改回 owed 并在文档写明"只迁了槽宽" |
-| 12 | **C2-1 不应整组勾完** | 组内 `enable_p5_structured_reference_assets` 账本仍 `owed`；同类：`group_slang_topic` 的 `enable_group_topic_threads`（群话题线）**无 V2 实现**，却被并进"联网链已落地"一句 | 回写时把这两条单独留出 |
+| 12 | **C2-1 不应整组勾完** | `enable_p5_structured_reference_assets` 仍 `owed`；群话题线现已由 V2 按群与角色记录有界摘要并接入配置页，不能再作为“无 V2 实现”的例子；黑话联网释义仍是独立欠项 | 只把话题线从缺口例子中移除，P5 与黑话联网释义仍单独留出 |
 | 13 | **C2-4 的表述过宽**：文档写"V2 没有按任务类型指派该维度" | V2 有 per-task provider 面（15 个 `model.<task>` 组各 8 字段全 covered，含 `provider`）；缺的只是 V1 的三个辅助档（DETAIL_ENHANCEMENT / HISTORY_SUMMARY / DAILY_REVIEW，已判 not-migrated-by-design） | 表述收窄为"缺那三个辅助任务档" |
 | 14 | **T45/T51 与文档 C §四.4 的落差** | `component_order`（`reply_settings.py:78`）与 `reply_quote_*` 4 项（`:78-83`）在 CSV 仍 `missing`（没有页面控件），而文档 C 把这两组算作"落地 + 页面" | 要么补控件，要么改文档口径 |
 

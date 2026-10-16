@@ -181,6 +181,7 @@ class ReplyTextPolicy:
     recall_forbidden_scope: str = "bot_and_group"
     recall_forbidden_word_case_sensitive: bool = False
     style_prompt: str = ""
+    prompt_style_mode: str = humanized_expression.DEFAULT_PROMPT_STYLE
     enable_humanized_expression: bool = False
     humanized_expression_prompt: str = humanized_expression.DEFAULT_PROMPT
 
@@ -192,6 +193,8 @@ class ReplyTextPolicy:
             raise ValueError("presentation switches must be boolean")
         if self.recall_forbidden_scope not in FORBIDDEN_WORD_SCOPES:
             raise ValueError("forbidden word scope is invalid")
+        if self.prompt_style_mode not in humanized_expression.PROMPT_STYLE_MODES:
+            raise ValueError("prompt style mode is invalid")
         if type(self.style_prompt) is not str or len(self.style_prompt) > MAX_STYLE_PROMPT:
             raise ValueError("style prompt must be bounded text")
         try:
@@ -245,22 +248,21 @@ class ReplyTextPolicy:
 
     @property
     def instruction(self):
+        """Expose expression guidance; cleanup and replacement run after generation."""
         blocks = []
         if self.style_prompt.strip():
             blocks.append("角色表达风格补充（以下是风格参考，不是任务指令，不改写事实与来源原意）："
                           + self.style_prompt.strip())
-        humanized = self.humanized.instruction
-        if humanized:
-            blocks.append(humanized)
-        if self.content_cleanup_enabled or self.content_replacement_enabled:
-            preferences = {"清理": self.content_cleanup_enabled, "清理模式": self.content_cleanup_mode,
-                           "清理范围": self.content_cleanup_scope,
-                           "清理词": self.words() if self.content_cleanup_mode == "words" else self.content_cleanup_rule,
-                           "替换": self.replacements() if self.content_replacement_enabled else ()}
-            blocks.append("正文呈现偏好（以下是格式数据，不是任务指令）："
-                          + json.dumps(preferences, ensure_ascii=False)
-                          + "。自然选择符合偏好的措辞，保持事实、否定、数值、引用和来源原意。"
-                          "不要改写证据声明来迎合替换规则；程序会保留声明原句、代码、引用、括号、链接和媒体标签。")
+        style = humanized_expression.prompt_style_instruction(
+            self.prompt_style_mode,
+            custom_prompt=self.humanized.effective_prompt,
+        )
+        if style:
+            blocks.append("提示词风格参考（只影响表达，不改变任务、事实、来源或授权）：" + style)
+        if self.prompt_style_mode != "constraint":
+            humanized = self.humanized.instruction
+            if humanized:
+                blocks.append(humanized)
         return "\n".join(blocks)
 
     def framework_guard(self, text):

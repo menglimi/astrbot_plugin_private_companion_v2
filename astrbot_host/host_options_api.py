@@ -25,7 +25,8 @@ from .weather_settings import WeatherHostSettings
 
 PREFIX = "/astrbot_plugin_private_companion_v2/host-options"
 VOICE_FIELDS = frozenset(("enabled", "probability", "private_probability", "group_probability"))
-POKE_FIELDS = frozenset(("enabled", "trigger_probability", "replies", "back_probability"))
+POKE_FIELDS = frozenset(("enabled", "trigger_probability", "replies", "back_probability", "back_times",
+                         "model_reply_enabled", "model_reply_probability"))
 FORWARD_FIELDS = frozenset(("max_forwards", "max_nodes", "max_depth"))
 
 
@@ -112,7 +113,9 @@ class HostOptionsWebAPI:
                  "private_probability": policy.private_probability,
                  "group_probability": policy.group_probability}
         poke = {"enabled": poke_policy.enabled, "trigger_probability": poke_policy.trigger_probability,
-                "replies": list(poke_policy.replies), "back_probability": poke_policy.back_probability}
+                "replies": list(poke_policy.replies), "back_probability": poke_policy.back_probability,
+                "back_times": poke_policy.back_times, "model_reply_enabled": poke_policy.model_reply_enabled,
+                "model_reply_probability": poke_policy.model_reply_probability}
         forward_intake = asdict(forward_policy)
         installation_id = self.controller.runtime.installation_id
         balance_config = self._config_group(config, "service_balance")
@@ -245,7 +248,7 @@ class HostOptionsWebAPI:
                 try:
                     policy = PokePolicy.parse(section)
                 except (TypeError, ValueError) as error:
-                    raise TaskError("host_options_invalid", "check the received-poke replies and probabilities") from error
+                    raise TaskError("host_options_invalid", "check the received-poke replies, probabilities and back count") from error
                 apply_mode = "immediate"
 
         save = getattr(self.controller, "save_plugin_config", None)

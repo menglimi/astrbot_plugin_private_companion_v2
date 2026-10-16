@@ -30,7 +30,6 @@ window.CompanionStateEditor = (() => {
     invalid_contact_preference:"请核对免打扰时段、时区、暂停时间和联系偏好。",
     contact_configuration_invalid:"请核对当前对象的联系设置，刷新后再保存。",
     invalid_configuration_value:"请核对设置的类型与范围。",invalid_weight:"联系权重必须大于 0。",invalid_precision:"联系权重最多保留 6 位小数。",
-    contact_relationship_budget_scope:"关系共享额度需在关系或角色层统一修改，当前会话只能查看。",
     state_view_stale:"角色或权限已变化，请读取当前版本后核对。",calendar_closed:"日程已取消或不存在。",
     planning_weather_location_required:"请先在本页填写角色天气地点，再启用天气感知。",
     planning_annual_calendars_invalid:"请核对年度日历的数据格式、日期范围与年份。",

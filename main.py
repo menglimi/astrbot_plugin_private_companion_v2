@@ -633,7 +633,9 @@ class PrivateCompanionV2StagingPlugin(Star):
             from .astrbot_host.core_reply_reaction_delivery import prepare_core_reaction_message
             from .astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
             session = getattr(self.staging, "session", None)
-            message = await prepare_core_reaction_message(event, message, authorize=authorize)
+            message = await prepare_core_reaction_message(
+                event, message, authorize=authorize,
+                segment_index=segment_index, segment_count=segment_count)
             message = await prepare_core_reply_voice_message(
                 event, current, message,
                 renderer=getattr(session, "voice", None),

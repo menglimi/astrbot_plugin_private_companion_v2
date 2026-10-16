@@ -21,7 +21,7 @@ from companion_v2.identity_policy.models import AuthenticatedHostPrincipal, Reso
 from companion_v2.product import PRODUCT_VERSION
 from tests.test_game_native_web import request
 from tests.test_game_native_xiangqi import FakeEngine
-from tests.test_native_host_events import HostEvent
+from tests.test_native_host_events import HostEvent, context_text
 
 
 def chat_context(*, user="200", role="xingyuan", conversation="current", bot="bot-a"):
@@ -87,11 +87,12 @@ class NativeGameContextTests(unittest.IsolatedAsyncioTestCase):
         before = self.provider.store.path.read_bytes()
         req = self.prompt()
         self.assertEqual(req.prompt, "呜")
-        self.assertIn(game_id, req.system_prompt)
-        self.assertIn("当前角色获胜、当前用户落败", req.system_prompt)
-        self.assertIn('"user_side":"白棋"', req.system_prompt)
-        self.assertIn('"role_side":"黑棋"', req.system_prompt)
-        self.assertIn('"status":"finished"', req.system_prompt)
+        self.assertEqual(req.system_prompt, "星缘的原人格")
+        self.assertIn(game_id, context_text(req))
+        self.assertIn("当前角色获胜、当前用户落败", context_text(req))
+        self.assertIn('"user_side":"白棋"', context_text(req))
+        self.assertIn('"role_side":"黑棋"', context_text(req))
+        self.assertIn('"status":"finished"', context_text(req))
         self.assertEqual(before, self.provider.store.path.read_bytes())
         self.catalog.assert_called_once_with(self.context)
 
@@ -109,13 +110,27 @@ class NativeGameContextTests(unittest.IsolatedAsyncioTestCase):
         rebound = replace(self.context, actor=replace(self.context.actor, policy_revision=2))
         self.assertEqual(self.snapshot(context=rebound)[0]["game_id"], game_id)
         self.available.clear()
-        self.assertEqual(self.prompt().system_prompt, "星缘的原人格")
+        req = self.prompt()
+        self.assertEqual(req.system_prompt, "星缘的原人格")
+        self.assertFalse(req.extra_user_content_parts)
         self.available.add(games.GOMOKU_MOVE)  # Move permission alone cannot grant a context read.
-        self.assertEqual(self.prompt().system_prompt, "星缘的原人格")
+        self.assertFalse(self.prompt().extra_user_content_parts)
         self.available.add(games.GOMOKU_READ)
-        self.assertIn(game_id, self.prompt().system_prompt)
+        req = self.prompt()
+        self.assertIn(game_id, context_text(req))
+        self.assertIn('"move_count":3', context_text(req))
+        event = HostEvent()
+        event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": {"context": self.context}}
+        self.available.clear()
+        self.owner.request(event, req)
+        self.assertFalse(req.extra_user_content_parts)
+        self.available.add(games.GOMOKU_READ)
+        self.owner.request(event, req)
+        self.assertIn(game_id, context_text(req))
         self.current = False
-        self.assertEqual(self.prompt().system_prompt, "星缘的原人格")
+        self.owner.request(event, req)
+        self.assertFalse(req.extra_user_content_parts)
+        self.assertEqual(req.system_prompt, "星缘的原人格")
 
     async def test_all_seven_game_types_use_public_context_without_hidden_material_or_engine_io(self):
         actions = {"tictactoe": games.CREATE, "gomoku": games.GOMOKU_CREATE, "pig_dice": games.PIG_CREATE,
@@ -172,7 +187,9 @@ class NativeGameContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_group_or_another_sender_cannot_receive_private_game_facts(self):
         await self.finished_gomoku()
         for event in (HostEvent(sender="300"), HostEvent(private=False)):
-            self.assertEqual(self.prompt(event=event).system_prompt, "星缘的原人格")
+            req = self.prompt(event=event)
+            self.assertEqual(req.system_prompt, "星缘的原人格")
+            self.assertFalse(req.extra_user_content_parts)
 
 
 if __name__ == "__main__":

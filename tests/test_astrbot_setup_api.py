@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from tests.test_astrbot_staging_host import WebContext, host_config
 from tests.native_adapter_support import FakeEvent, FakeProvider, FakeReverseApi, completion
@@ -98,7 +98,7 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
                      role_binding=NS(role=NS(subject_id="core-role")))
         task = NS(task_id="diagnostic-task", state="succeeded", reason=None)
         route = {"id": "weather_event", "label": "天气观测生产器", "variant": "weather"}
-        candidate = {"opportunity": object(), "intents": (NS(purpose="environment",
+        candidate = {"accepted": True, "opportunity": object(), "intents": (NS(purpose="environment",
             thought=NS(summary="角色配置地点的当前天气观测：晴，18℃。")),),
             "role_instruction": "role instructions", "route": route,
             "stages": [{"stage": "weather_fetch", "state": "passed", "detail": "真实天气接口观测"}], "diagnostic_origin": {
@@ -125,7 +125,9 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
             def status(self, _operator):
-                return Outcome.success({"purposes": {"environment": {"allowed": True, "reason": None}}})
+                return Outcome.success({"purposes": {
+                    "environment": {"allowed": True, "reason": None},
+                    "chat": {"allowed": True, "reason": None}}})
 
         payload = json.dumps({"purpose": "environment", "confirm_delivery": True}).encode("utf-8")
         request = NS(username="administrator", query={}, body=AsyncMock(return_value=payload))
@@ -178,6 +180,88 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((skipped["state"], skipped["skip_reason"], skipped["model_skip_reason"]),
                          ("skipped", "model_decision", "no_natural_opening"))
         self.assertIn({"stage": "model_generation", "state": "passed"}, skipped["stages"])
+
+        image_candidate = {"accepted": True, "opportunity": object(), "intents": (NS(purpose="chat",
+            thought=NS(summary="自然的聊天开场。")),), "role_instruction": "role instructions",
+            "route": {"id": "conversation_scheduler", "label": "真实私聊来源"}, "stages": [],
+            "diagnostic_origin": {"_diagnostic": {"route_id": "conversation_scheduler", "purpose": "chat",
+                "batch_id": "batch-2", "event_key": "event-2", "event_hash": "hash-2", "role_hash": "role-1"}}}
+        app.contact_schedule.diagnostic_candidate.return_value = image_candidate
+        app.proactive.observe = lambda _context, _task_id: Outcome.success({"skipped": False,
+            "delivery": "delivered", "judge": "allowed", "judge_allowed": True, "judge_reason": None,
+            "receipt_ref": "receipt-2", "stage_metrics": {
+                "image_attachment": {"state": "passed", "attached": True}}})
+        request.body.return_value = json.dumps({"purpose": "chat", "confirm_delivery": True,
+            "diagnostic_image": True}).encode("utf-8")
+        with patch("astrbot_host.setup_api.request", request), \
+             patch("astrbot_host.setup_api.ContactManagement", ContactManager), \
+             patch("astrbot_host.setup_api.dashboard_operator", return_value=object()):
+            image_response = await api.proactive_diagnostic()
+        image_result = image_response["data"]
+        self.assertEqual((image_result["state"], image_result["delivery_state"]), ("passed", "delivered"))
+        self.assertIn({"stage": "image_attachment", "state": "passed"}, image_result["stages"])
+        self.assertTrue(app.proactive.contact.await_args.kwargs["diagnostic_image_intent"])
+
+    async def test_proactive_diagnostic_routes_mobile_location_to_reality_producer(self):
+        context = NS(scope=NS(kind=ScopeKind.PRIVATE, native_scope_id="200"))
+        task = NS(task_id="mobile-location-diagnostic", state="succeeded", reason=None)
+        receipt = {"_diagnostic": {"route_id": "reality_location_event", "purpose": "environment",
+            "batch_id": "batch-1", "event_key": "event-1", "event_hash": "hash-1", "role_hash": "role-1"}}
+        candidate = {"accepted": True, "opportunity": object(), "intents": (NS(purpose="environment",
+            thought=NS(summary="手机陪伴终端本次上报的地点。")),), "role_instruction": "role instructions",
+            "route": {"id": "reality_location_event", "label": "手机陪伴终端地点来源",
+                      "variant": "mobile_location"}, "stages": [
+                {"stage": "mobile_location_fetch", "state": "passed"}],
+            "diagnostic_origin": {**receipt, "reality_location_event": {"test_id": "attempt-1",
+                "captured_at": 123, "source_id": "reality-location-1", "place_fingerprint": "place-1"}}}
+        app = NS(state="running", now=lambda: NOW,
+            contact_schedule=NS(diagnostic_candidate=AsyncMock(),
+                diagnostic_receipt=Mock(return_value=(object(), object(), object(), receipt))),
+            proactive=NS(contact=AsyncMock(return_value=Outcome.success(NS(task=task))),
+                observe=lambda _context, _task_id: Outcome.success({"skipped": False, "delivery": "delivered",
+                    "judge": "allowed", "judge_allowed": True, "judge_reason": None,
+                    "receipt_ref": "receipt-1", "stage_metrics": {}})),
+            tasks=NS(read=lambda _context, _task_id: Outcome.success(task)))
+        session = NS(application=app)
+        native_api = NS(mobile_location_diagnostic_candidate=AsyncMock(return_value=candidate))
+        reality = NS(v2_api=Mock(return_value=native_api))
+        controller = NS(session=session, last_session=None, runtime=object(), now=lambda: NOW,
+            start=AsyncMock(return_value=Outcome.success({})),
+            native_extensions=NS(active_service=Mock(return_value=reality)))
+        api = SetupWebAPI.__new__(SetupWebAPI)
+        api.controller = controller
+        api._test_lock = asyncio.Lock()
+        api._proactive_diagnostic_target = AsyncMock(return_value=object())
+        api._proactive_diagnostic_context = AsyncMock(return_value=(session, context, "role instructions"))
+        api._binding = lambda: {"bound": True, "pending": False}
+        api._diagnostic_usage_summary = lambda _session, _context: {}
+
+        class ContactManager:
+            def __init__(self, _app, _context):
+                pass
+
+            def status(self, _operator):
+                return Outcome.success({"purposes": {"environment": {"allowed": True, "reason": None}}})
+
+        payload = json.dumps({"purpose": "environment", "confirm_delivery": True,
+                              "synthetic_event": False, "variant": "mobile_location"}).encode("utf-8")
+        request = NS(username="administrator", query={}, body=AsyncMock(return_value=payload))
+        with patch("astrbot_host.setup_api.request", request), \
+             patch("astrbot_host.setup_api.ContactManagement", ContactManager), \
+             patch("astrbot_host.setup_api.dashboard_operator", return_value=object()):
+            response = await api.proactive_diagnostic()
+
+        result = response["data"]
+        self.assertEqual((result.get("state"), result.get("route"), result.get("delivery_state")),
+            ("passed", candidate["route"], "delivered"), result)
+        controller.native_extensions.active_service.assert_called_once_with("reality")
+        app.contact_schedule.diagnostic_receipt.assert_called_once_with(
+            context, "environment", "reality_location_event", NOW)
+        native_api.mobile_location_diagnostic_candidate.assert_awaited_once_with(
+            "200", test_id=result["attempt_id"], diagnostic_origin=receipt)
+        app.contact_schedule.diagnostic_candidate.assert_not_awaited()
+        self.assertEqual(app.proactive.contact.await_args.kwargs["diagnostic_origin"],
+                         candidate["diagnostic_origin"])
 
     async def test_proactive_diagnostic_uses_synthetic_candidate_and_real_delivery_pipeline(self):
         context = NS(scope=NS(kind=ScopeKind.PRIVATE))

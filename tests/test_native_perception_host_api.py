@@ -13,8 +13,9 @@ from tests import test_astrbot_staging_host as support
 from astrbot.api.web import PluginRequest, bind_request_context
 from starlette.requests import Request
 
-from astrbot_host.native_perception_api import PREFIX
+from astrbot_host.native_perception_api import NativePerceptionWebAPI, PREFIX
 from astrbot_host.management_identity import dashboard_operator
+from companion_v2.foundation.refs import ScopeKind
 from companion_v2.role_work.state.management import StateManagement
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.conversation.perception_settings import (PerceptionConfigurationOwner,
@@ -53,6 +54,26 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
     def command(section, token, changes, key):
         return {"section": section, "command": {"operation_key": key,
                 "edit_token": token, "changes": changes}}
+
+    def test_trace_contexts_include_all_private_windows_with_a_private_selection(self):
+        selected = NS(key="private-a:role-a", scope=NS(kind=ScopeKind.PRIVATE),
+            actor=NS(subject=NS(subject_id="user-a")), role_binding=NS(role=NS(subject_id="role-a")))
+        other = NS(key="private-b:role-b", scope=NS(kind=ScopeKind.PRIVATE))
+        host = NS(authority=NS(context=lambda target_id, role_id:
+            selected if target_id == "target-a" else other), web_api=NS(target_inventory=lambda: [
+                {"scope_kind": "private", "target_id": "target-a", "participant_id": "user-a",
+                 "roles": [{"role_id": "role-a", "role_name": "澄溪"}]},
+                {"scope_kind": "private", "target_id": "target-b", "participant_id": "user-b",
+                 "roles": [{"role_id": "role-b", "role_name": "小溪"}]},
+                {"scope_kind": "group", "target_id": "group-c", "roles": [{"role_id": "role-c"}]},
+            ]))
+
+        contexts, unavailable = NativePerceptionWebAPI._trace_contexts(
+            NS(controller=host), NS(profile=NS(target=selected)))
+
+        self.assertEqual(unavailable, 0)
+        self.assertEqual([row[0].key for row in contexts], ["private-a:role-a", "private-b:role-b"])
+        self.assertEqual([(row[1], row[2]) for row in contexts], [("user-a", "澄溪"), ("user-b", "小溪")])
 
     async def test_model_environment_news_and_stale_token(self):
         self.assertEqual((await self.call())["data"]["code"], "staging_not_initialized")
@@ -162,6 +183,8 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
                              "dashboard_identity_required")
         self.assertEqual((await self.call(query=b"target_id=another"))["data"]["code"],
                          "perception_request_invalid")
+        self.assertEqual((await self.call(route=PREFIX + "/materials",
+            query=b"day=2026-10-07"))["data"]["code"], "perception_request_invalid")
         forbidden = self.command("environment", "obsolete-token", {"enabled":True}, "forbidden-1")
         self.assertEqual((await self.call(body=forbidden))["data"]["code"], "perception_request_invalid")
         self.assertTrue((await self.call())["data"]["model"]["settings"]["calendar_enabled"])
@@ -191,7 +214,8 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
                     with patch("astrbot_host.native_perception_api.ContactManagement.status",
                                side_effect=AssertionError("global materials must not require private settings")):
                         with patch("astrbot_host.native_perception_api.logger.exception") as log_error:
-                            response = await self.call(route=PREFIX + "/materials")
+                            response = await self.call(route=PREFIX + "/materials",
+                                query=b"day=2026-10-07&timezone=Asia%2FShanghai")
 
         self.assertEqual(response["status"], "ok", response)
         self.assertEqual([row["scope"] for row in response["data"]["items"]], ["window", "role"])
@@ -203,6 +227,10 @@ class NativePerceptionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["data"]["trace_state"], "ready")
         maintain.assert_called_once()
         trace_reader.assert_called_once()
+        self.assertEqual(trace_reader.call_args.kwargs["created_at_start"],
+                         support.NOW.replace(year=2026, month=10, day=6, hour=16, minute=0, second=0, microsecond=0))
+        self.assertEqual(trace_reader.call_args.kwargs["created_at_end"],
+                         support.NOW.replace(year=2026, month=10, day=7, hour=16, minute=0, second=0, microsecond=0))
         log_error.assert_called_once()
         settings = reader.call_args.args[0]
         self.assertIn("news_source_kind", settings)

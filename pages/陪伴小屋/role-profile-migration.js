@@ -8,24 +8,103 @@ window.CompanionRoleProfileMigration = (() => {
   const state = {plan: null, personaId: "", busy: false, pending: null, pendingPersisted: false};
 
   function markup() {
-    return '<dialog class="role-profile-draft-dialog role-profile-migration-dialog" id="roleProfileMigrationDialog" aria-labelledby="roleProfileMigrationTitle">' +
-      '<div class="role-profile-draft-shell"><header class="role-profile-draft-head">' +
-      '<div><span>PERSONA → ROLE CANON</span><h2 id="roleProfileMigrationTitle">迁入已有设定</h2></div>' +
+    return '<dialog class="role-profile-draft-dialog role-profile-migration-dialog" id="roleProfileMigrationDialog" aria-labelledby="roleProfileMigrationTitle" aria-describedby="roleProfileMigrationDescription">' +
+      '<div class="role-profile-draft-shell" aria-busy="false"><header class="role-profile-draft-head">' +
+      '<div><span>V1 → ROLE PROFILE</span><h2 id="roleProfileMigrationTitle">迁入已有设定</h2><p id="roleProfileMigrationDescription">把可识别的旧设定写入当前角色档案；只填空白字段，不覆盖已有内容。</p></div>' +
       '<button class="icon-button" type="button" data-role-profile-migration-close aria-label="关闭" title="关闭"><i data-lucide="x" aria-hidden="true"></i></button></header>' +
+      '<section class="role-profile-migration-context" aria-label="迁移范围与策略">' +
+      '<div class="role-profile-migration-context-item"><span>来源</span><strong data-role-profile-migration-source>待读取</strong><small data-role-profile-migration-source-kind>V1 世界知识或当前 AstrBot 人格</small></div>' +
+      '<div class="role-profile-migration-context-item"><span>目标</span><strong data-role-profile-migration-target>当前角色档案</strong><small>与当前私聊角色绑定</small></div>' +
+      '<div class="role-profile-migration-context-item is-policy"><span>写入策略</span><strong>只填空白项</strong><small>已有内容保持不变</small></div></section>' +
       '<p class="role-profile-migration-notice" data-role-profile-migration-notice role="status" aria-live="polite">读取 V1 世界知识中的角色设定；没有可用来源时读取当前 AstrBot 人格。</p>' +
-      '<section class="role-profile-migration-output" data-role-profile-migration-output hidden>' +
+      '<section class="role-profile-migration-output" data-role-profile-migration-output hidden aria-live="polite">' +
+      '<div class="role-profile-migration-output-head"><div><span>迁入预览</span><h3>写入前核对</h3></div><strong data-role-profile-migration-summary>—</strong></div>' +
+      '<div class="role-profile-migration-source" data-role-profile-migration-source-panel><span class="role-profile-migration-source-mark" aria-hidden="true"><i data-lucide="file-input"></i></span><div><strong data-role-profile-migration-source-detail>来源待读取</strong><small data-role-profile-migration-source-meta>只展示安全可识别的角色字段</small></div></div>' +
       '<div class="role-profile-migration-counts" data-role-profile-migration-counts></div>' +
-      '<div class="role-profile-migration-fields" data-role-profile-migration-fields></div></section>' +
+      '<div class="role-profile-migration-fields-head"><div><span>待写入字段</span><small>确认后只会写入当前为空的字段</small></div></div>' +
+      '<div class="role-profile-migration-fields" data-role-profile-migration-fields></div>' +
+      '<p class="role-profile-migration-exclusions" data-role-profile-migration-exclusions hidden></p></section>' +
       '<footer class="role-profile-draft-actions"><span data-role-profile-migration-footer></span><div>' +
       '<button class="button small" type="button" data-role-profile-migration-close>取消</button>' +
       '<button class="button small primary" type="button" data-role-profile-migration-apply disabled>确认迁入空白项</button></div></footer></div></dialog>';
   }
 
-  function notice(text, bad = false) {
+  function notice(text, stateName = "ready") {
     const node = $("[data-role-profile-migration-notice]");
     if (!node) return;
+    if (typeof stateName === "boolean") stateName = stateName ? "error" : "ready";
     node.textContent = text;
-    node.dataset.state = bad ? "error" : "ready";
+    node.dataset.state = stateName;
+  }
+
+  function setText(selector, text) {
+    const node = $(selector);
+    if (node) node.textContent = text;
+    return node;
+  }
+
+  function refreshIcons() {
+    window.lucide?.createIcons?.({attrs: {"aria-hidden": "true"}});
+  }
+
+  function setBusy(value) {
+    state.busy = value;
+    const shell = $(".role-profile-migration-dialog .role-profile-draft-shell");
+    const apply = $("[data-role-profile-migration-apply]");
+    if (shell?.setAttribute) shell.setAttribute("aria-busy", value ? "true" : "false");
+    if (value && apply) {
+      apply.disabled = true;
+      apply.textContent = "正在处理…";
+    }
+    if (apply?.setAttribute) apply.setAttribute("aria-busy", value ? "true" : "false");
+  }
+
+  function formatCount(value) {
+    const count = Number(value || 0);
+    return Number.isFinite(count) && count >= 0 ? String(Math.floor(count)) : "0";
+  }
+
+  function formatChars(value) {
+    const count = Number(value || 0);
+    if (!Number.isFinite(count) || count <= 0) return "字符数未提供";
+    return new Intl.NumberFormat("zh-CN").format(Math.floor(count)) + " 字符";
+  }
+
+  function sourceKindLabel(kind) {
+    return kind === "v1_world_knowledge" ? "V1 世界知识" : kind === "astrbot_persona" ? "AstrBot 人格" : "角色设定来源";
+  }
+
+  function resetContext() {
+    setText("[data-role-profile-migration-source]", "待读取");
+    setText("[data-role-profile-migration-source-kind]", "V1 世界知识或当前 AstrBot 人格");
+    setText("[data-role-profile-migration-target]", "当前角色档案");
+    setText("[data-role-profile-migration-source-detail]", "来源待读取");
+    setText("[data-role-profile-migration-source-meta]", "只展示安全可识别的角色字段");
+    setText("[data-role-profile-migration-summary]", "—");
+    setText("[data-role-profile-migration-footer]", "只填空白项 · 已有内容不会被覆盖");
+    const exclusions = $("[data-role-profile-migration-exclusions]");
+    if (exclusions) { exclusions.hidden = true; exclusions.textContent = ""; }
+  }
+
+  function renderSource(plan) {
+    const source = plan?.source || {};
+    const name = source.name || sourceKindLabel(source.kind);
+    const kind = sourceKindLabel(source.kind);
+    setText("[data-role-profile-migration-source]", name);
+    setText("[data-role-profile-migration-source-kind]", kind + " · " + formatChars(source.source_chars));
+    setText("[data-role-profile-migration-source-detail]", name);
+    setText("[data-role-profile-migration-source-meta]", kind + " · 角色区块 " + formatChars(source.block_chars));
+  }
+
+  function renderExclusions(plan) {
+    const node = $("[data-role-profile-migration-exclusions]");
+    if (!node) return;
+    const counts = plan?.counts || {};
+    const notes = [];
+    if (Number(counts.over_limit || 0)) notes.push(formatCount(counts.over_limit) + " 项超过字段长度，已排除");
+    if (Number(counts.excluded_relationship_sections || 0)) notes.push(formatCount(counts.excluded_relationship_sections) + " 段用户关系内容未迁入");
+    node.hidden = !notes.length;
+    node.textContent = notes.length ? "已排除：" + notes.join("；") + "。" : "";
   }
 
   function storageKey() {
@@ -58,7 +137,7 @@ window.CompanionRoleProfileMigration = (() => {
     if (apply) apply.textContent = "核对迁入结果";
     notice(state.pendingPersisted
       ? "迁入结果尚未确认，点击“核对迁入结果”会沿用同一请求。"
-      : "迁入结果尚未确认；当前页面仍保留原请求，可以继续核对。若刷新页面后再打开，请重新试算；已迁入的字段会显示为已有内容。", true);
+      : "迁入结果尚未确认；当前页面仍保留原请求，可以继续核对。若刷新页面后再打开，请重新试算；已迁入的字段会显示为已有内容。", "error");
   }
 
   function apiParts() {
@@ -75,28 +154,40 @@ window.CompanionRoleProfileMigration = (() => {
     const list = $("[data-role-profile-migration-fields]");
     const apply = $("[data-role-profile-migration-apply]");
     const entries = Object.entries(plan?.changes || {});
-    $("[data-role-profile-migration-counts]").innerHTML =
-      '<strong>' + Number(counts.to_import || 0) + '</strong><span>项待迁入</span>' +
-      '<strong>' + Number(counts.preserved_existing || 0) + '</strong><span>项已有内容保留</span>' +
-      '<strong>' + Number(counts.already_matches || 0) + '</strong><span>项内容相同</span>' +
-      (Number(counts.over_limit) ? '<strong>' + Number(counts.over_limit) + '</strong><span>项超出字段长度</span>' : '') +
-      (Number(counts.excluded_relationship_sections) ? '<strong>' + Number(counts.excluded_relationship_sections) + '</strong><span>段用户关系已排除</span>' : '');
-    list.innerHTML = entries.length ? entries.map(([field, value]) =>
-      '<article class="role-profile-migration-field"><strong>' + escapeHTML(labels[field] || field) + '</strong><p>' +
-      escapeHTML(value) + '</p></article>').join("") : '<p class="role-profile-migration-empty">没有需要迁入的空白字段。</p>';
-    output.hidden = false;
-    apply.disabled = !entries.length || state.busy;
-    $("[data-role-profile-migration-footer]").textContent = plan?.source?.name
-      ? '来源：' + plan.source.name : '';
+    const stats = [
+      ["待迁入", counts.to_import, "primary", "确认后写入"],
+      ["已有内容", counts.preserved_existing, "muted", "保持不变"],
+      ["内容相同", counts.already_matches, "ok", "无需重复写入"],
+      ["超出长度", counts.over_limit, "warn", "已排除"],
+      ["关系段排除", counts.excluded_relationship_sections, "warn", "不属于角色档案"],
+    ];
+    const countsNode = $("[data-role-profile-migration-counts]");
+    if (countsNode) countsNode.innerHTML = stats.map(([label, value, tone, help]) =>
+      '<div class="role-profile-migration-stat is-' + tone + '"><strong>' + formatCount(value) + '</strong><span>' + label + '</span><small>' + help + '</small></div>').join("");
+    if (list) list.innerHTML = entries.length ? entries.map(([field, value]) =>
+      '<article class="role-profile-migration-field"><div class="role-profile-migration-field-head"><span>角色字段</span><strong>' + escapeHTML(labels[field] || field) + '</strong><em>待写入</em></div><p>' +
+      escapeHTML(value) + '</p><small>仅在该字段为空时写入</small></article>').join("") : '<p class="role-profile-migration-empty">没有需要迁入的空白字段；已有内容已保留。</p>';
+    renderSource(plan);
+    renderExclusions(plan);
+    setText("[data-role-profile-migration-summary]", entries.length ? formatCount(entries.length) + " 项待写入" : "无需写入");
+    setText("[data-role-profile-migration-footer]", entries.length
+      ? "只填空白项 · 已有内容不会被覆盖"
+      : "没有空白项可写入 · 已有内容不会被覆盖");
+    if (output) output.hidden = false;
+    if (apply) {
+      apply.disabled = !entries.length || state.busy;
+      apply.textContent = "确认迁入空白项";
+    }
+    refreshIcons();
   }
 
   async function callApply(pending) {
     if (state.busy || !pending) return;
     const product = window.CompanionProduct;
-    state.busy = true;
+    setBusy(true);
     const apply = $("[data-role-profile-migration-apply]");
-    if (apply) apply.disabled = true;
     try {
+      notice("正在确认迁入请求；页面不会重复提交同一操作…", "loading");
       const response = await product.request("POST", pending.endpoint, pending.body);
       const result = response?.result ?? response;
       if (typeof result?.operation_id !== "string" || typeof result?.replayed !== "boolean") {
@@ -105,21 +196,28 @@ window.CompanionRoleProfileMigration = (() => {
       }
       clearPending();
       document.dispatchEvent(new Event("companion:role-profile-updated"));
-      notice((result.replayed ? "已确认原迁入" : "已迁入") + " " + Number(result.imported_count || 0) + " 项角色档案。");
+      notice((result.replayed ? "已确认原迁入" : "已迁入") + " " + formatCount(result.imported_count) + " 项角色档案。", "success");
       state.plan = null;
-      $("[data-role-profile-migration-output]").hidden = true;
+      setText("[data-role-profile-migration-summary]", "迁入完成");
+      setText("[data-role-profile-migration-footer]", "已写入 " + formatCount(result.imported_count) + " 项 · 现有内容未覆盖");
+      if (apply) apply.textContent = "已完成";
     } catch (error) {
       if (error?.confirmed === true) {
         clearPending();
         state.plan = null;
         $("[data-role-profile-migration-output]").hidden = true;
-        notice(error?.reason || error?.message || "迁入请求已被确认拒绝，请重新试算。", true);
+        notice(error?.reason || error?.message || "迁入请求已被确认拒绝，请重新试算。", "error");
       } else {
         unknownResultNotice();
       }
     } finally {
       state.busy = false;
-      if (apply) apply.disabled = state.pending ? false : !state.plan || !Object.keys(state.plan.changes || {}).length;
+      if (apply) {
+        apply.disabled = state.pending ? false : !state.plan || !Object.keys(state.plan.changes || {}).length;
+        if (apply.setAttribute) apply.setAttribute("aria-busy", "false");
+      }
+      const shell = $(".role-profile-migration-dialog .role-profile-draft-shell");
+      if (shell?.setAttribute) shell.setAttribute("aria-busy", "false");
     }
   }
 
@@ -132,21 +230,28 @@ window.CompanionRoleProfileMigration = (() => {
     state.pending = memoryPending || readPending();
     state.pendingPersisted = memoryPending ? state.pendingPersisted : !!state.pending;
     const initialScope = window.CompanionProduct?.scopeKey?.() || "";
-    $("[data-role-profile-migration-output]").hidden = true;
-    $("[data-role-profile-migration-apply]").disabled = true;
+    const output = $("[data-role-profile-migration-output]");
+    const apply = $("[data-role-profile-migration-apply]");
+    if (output) output.hidden = true;
+    if (apply) { apply.disabled = true; apply.textContent = "确认迁入空白项"; }
+    resetContext();
     if (!dialog.open) dialog.showModal();
-    window.lucide?.createIcons({attrs: {"aria-hidden": "true"}});
+    refreshIcons();
     if (state.pending) {
-      notice("上次迁入结果尚未确认，可以安全核对。", true);
-      $("[data-role-profile-migration-footer]").textContent = "沿用原迁入请求";
-      const button = $("[data-role-profile-migration-apply]");
-      button.textContent = "核对迁入结果";
-      button.disabled = false;
+      setText("[data-role-profile-migration-source]", "上次未确认的请求");
+      setText("[data-role-profile-migration-source-kind]", "沿用原请求 · 不会新建迁入");
+      setText("[data-role-profile-migration-source-detail]", "原迁入请求仍在等待确认");
+      setText("[data-role-profile-migration-source-meta]", "核对结果后才会清除待确认记录");
+      setText("[data-role-profile-migration-summary]", "待核对");
+      notice("上次迁入结果尚未确认，可以安全核对。", "error");
+      setText("[data-role-profile-migration-footer]", "沿用原迁入请求");
+      if (apply) { apply.textContent = "核对迁入结果"; apply.disabled = false; }
       return;
     }
+    setBusy(true);
     try {
       const {product, bridge, base} = apiParts();
-      notice("正在读取当前人格与角色档案…");
+      notice("正在读取当前人格与角色档案…", "loading");
       const current = product.unwrap(await bridge.apiGet(base, {limit: 1}));
       state.personaId = current?.persona?.persona_id || "";
       if (!state.personaId) throw new Error("当前没有可读取的 AstrBot 人格。");
@@ -154,12 +259,23 @@ window.CompanionRoleProfileMigration = (() => {
       if (initialScope !== product.scopeKey?.()) throw new Error("角色已切换，请重新打开迁入窗口。");
       state.plan = plan;
       renderPlan(plan);
-      notice("已按明确字段生成迁入计划；用户资料和世界观不参与，现有角色档案不会被覆盖。");
-      const button = $("[data-role-profile-migration-apply]");
-      button.textContent = "确认迁入空白项";
-      button.disabled = !Object.keys(plan.changes || {}).length;
+      const changeCount = Object.keys(plan.changes || {}).length;
+      notice(changeCount
+        ? "已生成迁入预览；用户资料和世界观不参与，现有角色档案不会被覆盖。"
+        : "当前没有可迁入的空白字段；用户资料和世界观不参与，现有角色档案保持不变。", "ready");
     } catch (error) {
-      notice(error?.reason || error?.message || "无法读取当前角色设定。", true);
+      state.plan = null;
+      if (output) output.hidden = true;
+      if (apply) apply.textContent = "确认迁入空白项";
+      notice(error?.reason || error?.message || "无法读取当前角色设定。", "error");
+    } finally {
+      state.busy = false;
+      if (apply) {
+        apply.disabled = !state.plan || !Object.keys(state.plan.changes || {}).length;
+        if (apply.setAttribute) apply.setAttribute("aria-busy", "false");
+      }
+      const shell = $(".role-profile-migration-dialog .role-profile-draft-shell");
+      if (shell?.setAttribute) shell.setAttribute("aria-busy", "false");
     }
   }
 

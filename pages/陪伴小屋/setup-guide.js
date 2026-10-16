@@ -647,7 +647,7 @@ window.CompanionSetup = (() => {
             ${destination.include_journals && journalCount ? `<label><input type="checkbox" data-setup-legacy-batch-option="confirm-journals" data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${destination.confirm_persona_mapping ? "checked" : ""} ${busy ? "disabled" : ""}><span>确认将该 V1 人格资料归入所选角色</span></label>` : ""}
             <label><input type="checkbox" data-setup-legacy-batch-option="reference-images" data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${destination.include_reference_images ? "checked" : ""} ${!Number(references.batch_count) || busy ? "disabled" : ""}><span>参考图库 ${Number(references.batch_count) || 0} 张</span></label>
             <label><input type="checkbox" data-setup-legacy-batch-option="wardrobe-items" data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${destination.include_wardrobe_items ? "checked" : ""} ${!Number(wardrobe.batch_count) || busy ? "disabled" : ""}><span>衣柜 ${Number(wardrobe.batch_count) || 0} 件（图片 ${Number(wardrobe.image_count) || 0} 张）</span></label>
-            ${(destination.include_reference_images && Number(references.batch_count) || destination.include_wardrobe_items && Number(wardrobe.batch_count)) ? `<label><input type="checkbox" data-setup-legacy-batch-option="confirm-reference-persona" data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${destination.confirm_reference_persona_mapping ? "checked" : ""} ${busy ? "disabled" : ""}><span>确认将该人格参考图与衣柜归入此角色</span></label>` : ""}
+            ${(destination.include_reference_images && Number(references.batch_count) || destination.include_wardrobe_items && Number(wardrobe.batch_count)) ? `<label><input type="checkbox" data-setup-legacy-batch-option="confirm-reference-persona" data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${destination.confirm_reference_persona_mapping ? "checked" : ""} ${busy ? "disabled" : ""}><span>确认图片归入此角色图库并随角色使用</span></label>` : ""}
             ${resultLine ? `<p>${escape(resultLine)}</p>` : ""}
           </div>` : destination.status === "stale" ? `<p class="setup-legacy-persona-note">V1 来源清单在试算期间发生变化，请重新试算全部映射。</p>` : ""}
         </div>`;
@@ -731,10 +731,38 @@ window.CompanionSetup = (() => {
     return Array.isArray(plan?.scope_status) ? plan.scope_status : [];
   }
 
+  function legacyMigrationHeader(ready = false) {
+    return `<header class="setup-migration-header"><div><p class="setup-kicker">迁移设置</p><h3>从 V1 安全迁入 V2</h3><p>${ready ? "目标已选定；先检查与试算，再确认写入。" : "V1 文件只读；先选来源、写入目标和配置范围。"}</p></div><span class="setup-migration-badge">V1 只读</span></header>`;
+  }
+
+  function legacyTargetHint(target, role) {
+    if (!target) return "先选择 V2 会话对象；人格列表会随目标刷新。";
+    if (!role) return `已选会话对象：${legacyTargetLabel(target)}；继续选择 V2 人格。`;
+    const roleIndex = Array.isArray(target.roles) ? target.roles.findIndex(item => item.role_id === role.role_id) : -1;
+    return `当前写入目标：${legacyTargetLabel(target)} · ${legacyRoleLabel(role, roleIndex < 0 ? 0 : roleIndex)}`;
+  }
+
+  function legacyConfigScopeMarkup() {
+    return `<fieldset class="setup-migration-scope-choice" aria-describedby="setup-migration-scope-note">
+      <legend>迁移配置范围</legend>
+      <label class="setup-migration-scope-option"><input type="radio" name="legacy-configuration-scope" data-setup-legacy="configuration-scope" value="proactive" ${legacyConfigScope === "proactive" ? "checked" : ""}><span><strong>主动消息与天气基础设置</strong><small>适合先恢复主动联系相关配置，改动范围较小。</small></span></label>
+      <label class="setup-migration-scope-option"><input type="radio" name="legacy-configuration-scope" data-setup-legacy="configuration-scope" value="all" ${legacyConfigScope === "all" ? "checked" : ""}><span><strong>全部可迁移配置</strong><small>迁移已确认有转换规则的 V1 设置，V2 已有明确设置会保留。</small></span></label>
+      <p id="setup-migration-scope-note" class="setup-legacy-scope-note">写入前会显示具体字段和差异；V1 文件保持不变。</p>
+    </fieldset>`;
+  }
+
+  function legacyDataChoiceMarkup(key, label, {checked = false, disabled = false, detail = ""} = {}) {
+    return `<label class="setup-legacy-data-choice${disabled ? " is-disabled" : ""}"><input type="checkbox" data-setup-legacy="${escape(key)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}><span><strong>${escape(label)}</strong>${detail ? `<small>${escape(detail)}</small>` : ""}</span></label>`;
+  }
+
+  function legacyConfirmMarkup(key, label, checked, disabled = false) {
+    return `<label class="setup-legacy-confirm"><input type="checkbox" data-setup-legacy="${escape(key)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}><span>${escape(label)}</span></label>`;
+  }
+
   function legacyScopePanel() {
     const choices = legacyChoices();
     return `<section class="setup-stage setup-legacy setup-legacy-scope-only">
-      <header class="setup-migration-header"><div><p class="setup-kicker">V1 DATA</p><h3>V1 数据迁移</h3><p>选择来源、写入目标和配置范围。</p></div><span class="setup-migration-badge">V1 只读</span></header>
+      ${legacyMigrationHeader()}
       <div class="setup-migration-context">
         <section class="setup-migration-step"><span class="setup-migration-step-index">01</span><div><h4>迁移来源</h4>
           <label class="setup-legacy-path"><span>V1 数据目录（可选）</span><input type="text" inputmode="text" autocomplete="off" spellcheck="false" data-setup-legacy="root" value="${escape(legacyRootDraft)}" placeholder="留空时自动查找"></label>
@@ -742,18 +770,16 @@ window.CompanionSetup = (() => {
         </div></section>
         <section class="setup-migration-step"><span class="setup-migration-step-index">02</span><div><h4>V2 写入目标</h4>
           <div class="setup-legacy-scope">
-            <label><span>会话对象</span><select data-setup-legacy="target"><option value="">选择目标</option>${choices.targets.map(item => `<option value="${escape(item.target_id)}" ${legacyTargetId === item.target_id ? "selected" : ""}>${escape(legacyTargetLabel(item))} · ${escape(legacyAccountLabel(item))}</option>`).join("")}</select></label>
-            <label><span>人格</span><select data-setup-legacy="role" ${legacyTargetId ? "" : "disabled"}><option value="">选择人格</option>${choices.roles.map((item,index) => `<option value="${escape(item.role_id)}" ${legacyRoleId === item.role_id ? "selected" : ""}>${escape(legacyRoleLabel(item,index))}</option>`).join("")}</select></label>
+            <label><span>会话对象（私聊 / 群聊）</span><select data-setup-legacy="target"><option value="">选择 V2 目标</option>${choices.targets.map(item => `<option value="${escape(item.target_id)}" ${legacyTargetId === item.target_id ? "selected" : ""}>${escape(legacyTargetLabel(item))} · ${escape(legacyAccountLabel(item))}</option>`).join("")}</select></label>
+            <label><span>人格（角色）</span><select data-setup-legacy="role" ${legacyTargetId ? "" : "disabled"}><option value="">选择 V2 人格</option>${choices.roles.map((item,index) => `<option value="${escape(item.role_id)}" ${legacyRoleId === item.role_id ? "selected" : ""}>${escape(legacyRoleLabel(item,index))}</option>`).join("")}</select></label>
           </div>
+          <p class="setup-migration-step-note">${legacyTargetHint(choices.target, choices.role)}</p>
         </div></section>
         <section class="setup-migration-step"><span class="setup-migration-step-index">03</span><div><h4>配置范围</h4>
-          <label class="setup-legacy-path"><span>迁移配置</span><select data-setup-legacy="configuration-scope">
-            <option value="proactive" ${legacyConfigScope === "proactive" ? "selected" : ""}>主动消息与天气基础设置</option>
-            <option value="all" ${legacyConfigScope === "all" ? "selected" : ""}>全部可迁移配置</option>
-          </select></label>
+          ${legacyConfigScopeMarkup()}
         </div></section>
       </div>
-      <p class="setup-migration-prompt">选择 V2 目标和人格后，可检查配置并试算资料导入。</p>
+      <div class="setup-migration-next-step"><strong>下一步</strong><span>选好 V2 目标和人格后，页面会启用“检查 V1 配置”和“试算资料”操作。</span></div>
     </section>`;
   }
 
@@ -856,7 +882,7 @@ window.CompanionSetup = (() => {
       catalog_hash_mismatch: "目录哈希与文件不一致", asset_count_limit: "超过单次扫描条数",
       remote_url_not_downloaded: "远程图片 URL 不会在迁移时下载",
       identity_scope_unmapped: "素材绑定了具体用户或群，无法映射为角色级授权",
-      image_access_not_role_wide: "素材授权范围不是角色级公开授权",
+      image_access_not_role_wide: "授权范围不满足角色图库迁移条件",
       reference_disabled: "V1 中已停用的参考图不恢复", image_changed_after_preview: "试算后源图发生变化，请重新试算",
       entry_invalid: "世界书条目格式无法识别", entry_content_missing: "条目没有可导入正文",
       entry_too_large: "条目正文超过单条限制", member_scope_missing: "成员条目没有账号范围",
@@ -864,8 +890,31 @@ window.CompanionSetup = (() => {
       group_scope_invalid: "群范围无法识别", unsupported_scoped_template: "此模板的范围语义未映射",
       worldbook_batch_bytes_limit: "超过世界书单批容量", worldbook_count_limit: "超过单次扫描条数",
       member_profile_preferred_or_deleted: "使用成员档案中的最新关系资料；已删除的节点保持删除"};
+    const confirmations = [];
+    if (legacyMemoryOwnerIds.size || legacyMemoryGroupMappings.size) {
+      confirmations.push(legacyConfirmMarkup("confirm-memory-mapping",
+        "确认所选旧私聊与群身份属于对应 V2 目标；群历史只映射到同号群，不新增或扩大读取权限",
+        legacyConfirmMemoryMapping, !legacyImportMemoryDatabase));
+    }
+    if ((legacyImportGroupNetwork && selectedNetworkGroup
+      || legacyImportWorldbook && worldbookSummary.requires_id_confirmation)) {
+      confirmations.push(legacyConfirmMarkup("confirm-member-ids",
+        "确认 V1 与当前 V2 目标使用相同的平台身份，成员账号 ID 一致；所选群范围映射到当前 V2 群",
+        legacyConfirmMemberIds));
+    }
+    if (legacyImportJournals && legacyDataPlan?.target_private_available) {
+      confirmations.push(legacyConfirmMarkup("confirm-persona-mapping",
+        `确认将 ${selectedPersona?.label || "主角色（companions.json）"} 的私人日记与梦境归入当前 V2 目标和人格`,
+        legacyConfirmPersonaMapping));
+    }
+    if (referencesReady || wardrobeReady) {
+      confirmations.push(legacyConfirmMarkup("confirm-reference-persona-mapping",
+        `确认将 ${selectedPersona?.label || "主角色（companions.json）"} 的参考图与衣柜归入当前 V2 角色图库，图片随角色使用，不按 V1 私聊用户区分；图片不可用时仍保留衣物文字资料`,
+        legacyConfirmReferencePersonaMapping));
+    }
+    const confirmationsMarkup = confirmations.length ? `<fieldset class="setup-legacy-confirmations"><legend>写入前确认</legend><p>只有与当前 V2 目标明确对应的资料才会写入；未确认的内容继续保留在隔离归档中。</p>${confirmations.join("")}</fieldset>` : "";
     return `<section class="setup-stage setup-legacy">
-      <header class="setup-migration-header"><div><p class="setup-kicker">V1 DATA</p><h3>V1 数据迁移</h3><p>先检查与试算，再确认写入。</p></div><span class="setup-migration-badge">V1 只读</span></header>
+      ${legacyMigrationHeader(true)}
       <div class="setup-migration-context">
         <section class="setup-migration-step"><span class="setup-migration-step-index">01</span><div><h4>迁移来源</h4>
           <label class="setup-legacy-path"><span>V1 数据目录（可选）</span><input type="text" inputmode="text" autocomplete="off" spellcheck="false" data-setup-legacy="root" value="${escape(legacyRootDraft)}" placeholder="留空时自动查找"></label>
@@ -873,16 +922,13 @@ window.CompanionSetup = (() => {
         </div></section>
         <section class="setup-migration-step"><span class="setup-migration-step-index">02</span><div><h4>V2 写入目标</h4>
           <div class="setup-legacy-scope">
-            <label><span>会话对象</span><select data-setup-legacy="target"><option value="">选择目标</option>${targets.map(item => `<option value="${escape(item.target_id)}" ${legacyTargetId === item.target_id ? "selected" : ""}>${escape(legacyTargetLabel(item))} · ${escape(legacyAccountLabel(item))}</option>`).join("")}</select></label>
-            <label><span>人格</span><select data-setup-legacy="role" ${legacyTargetId ? "" : "disabled"}><option value="">选择人格</option>${roles.map((item,index) => `<option value="${escape(item.role_id)}" ${legacyRoleId === item.role_id ? "selected" : ""}>${escape(legacyRoleLabel(item,index))}</option>`).join("")}</select></label>
+            <label><span>会话对象（私聊 / 群聊）</span><select data-setup-legacy="target"><option value="">选择 V2 目标</option>${targets.map(item => `<option value="${escape(item.target_id)}" ${legacyTargetId === item.target_id ? "selected" : ""}>${escape(legacyTargetLabel(item))} · ${escape(legacyAccountLabel(item))}</option>`).join("")}</select></label>
+            <label><span>人格（角色）</span><select data-setup-legacy="role" ${legacyTargetId ? "" : "disabled"}><option value="">选择 V2 人格</option>${roles.map((item,index) => `<option value="${escape(item.role_id)}" ${legacyRoleId === item.role_id ? "selected" : ""}>${escape(legacyRoleLabel(item,index))}</option>`).join("")}</select></label>
           </div>
+          <p class="setup-migration-step-note">${legacyTargetHint(selection.target, selection.role)}</p>
         </div></section>
         <section class="setup-migration-step"><span class="setup-migration-step-index">03</span><div><h4>配置范围</h4>
-          <label class="setup-legacy-path"><span>迁移配置</span><select data-setup-legacy="configuration-scope">
-            <option value="proactive" ${legacyConfigScope === "proactive" ? "selected" : ""}>主动消息与天气基础设置</option>
-            <option value="all" ${legacyConfigScope === "all" ? "selected" : ""}>全部可迁移配置</option>
-          </select></label>
-          <p class="setup-legacy-scope-note">V2 已有明确设置会保留。</p>
+          ${legacyConfigScopeMarkup()}
         </div></section>
       </div>
       <div class="setup-migration-review">
@@ -910,8 +956,8 @@ window.CompanionSetup = (() => {
         ${legacyDataErrorMarkup()}
         ${legacyDataResult ? `<p class="setup-recorded">已导入表情 ${Number(legacyDataResult.reaction_created) || 0} 张，重复 ${Number(legacyDataResult.reaction_duplicates) || 0} 张；尚有 ${Number(legacyDataResult.reaction_remaining) || 0} 张待分批处理。日记与梦境导入 ${Number(legacyDataResult.journal_created) || 0} 条，尚有 ${Number(legacyDataResult.journal_remaining) || 0} 条待分批处理。${legacyDataResult.reference_images ? `参考图库新增 ${Number(legacyDataResult.reference_images.reference_created) || 0} 张，衣柜新增 ${Number(legacyDataResult.reference_images.wardrobe_created) || 0} 件；待继续 ${Number(legacyDataResult.reference_images.reference_remaining) || 0} 张参考图、${Number(legacyDataResult.reference_images.wardrobe_remaining) || 0} 件衣物${Number(legacyDataResult.reference_images.wardrobe_images_skipped) ? `，${Number(legacyDataResult.reference_images.wardrobe_images_skipped)} 件衣物保留文字但未关联图片` : ""}。` : ""}${legacyDataResult.group_network ? `群成员互动图新增 ${Number(legacyDataResult.group_network.members_added) || 0} 位成员、${Number(legacyDataResult.group_network.edges_added) || 0} 条互动边${legacyDataResult.group_network.duplicate ? "（此前已导入）" : ""}。` : ""}${legacyDataResult.memory_archive ? `独立记忆库快照保留 ${Number(legacyDataResult.memory_archive.record_count) || 0} 条记录 / ${Number(legacyDataResult.memory_archive.file_count) || 0} 个文件${legacyDataResult.memory_archive.source_complete === false ? `（部分归档，${Number(legacyDataResult.memory_archive.source_issues?.length) || 0} 项未纳入）` : ""}${legacyDataResult.memory_archive.already_present ? "（已存在，未重复归档）" : ""}。` : ""}${legacyDataResult.memory_materials ? `V2 私聊历史已导入 ${Number(legacyDataResult.memory_materials.imported?.memories) || 0} 条记忆、${Number(legacyDataResult.memory_materials.imported?.timeline) || 0} 条时间线${legacyDataResult.memory_materials.already_present ? "（已存在，未重复导入）" : legacyDataResult.memory_materials.state === "archive_only" ? "（仅归档，未选择身份映射）" : ""}。` : ""}${legacyDataResult.archive ? `原始资料归档 ${Number(legacyDataResult.archive.file_count) || 0} 个文件 / ${Math.ceil((Number(legacyDataResult.archive.total_bytes) || 0) / 1048576)} MB${legacyDataResult.archive.complete === false ? `（归档不完整，排除 ${Number(legacyDataResult.archive.excluded_count) || 0} 项）` : ""}${legacyDataResult.archive.already_present ? "（已存在，未重复复制）" : ""}。` : ""}${legacyDataResult.errors?.length ? `另有 ${legacyDataResult.errors.length} 项未能导入，原因已记录。` : ""}</p>` : ""}
         ${legacyDataResult?.worldbook ? `<p class="setup-recorded">世界书：普通条目 ${Number(legacyDataResult.worldbook.entries_imported) || 0} 条，学习关系网节点 ${Number(legacyDataResult.worldbook.members_imported) || 0} 个，群范围条目 ${Number(legacyDataResult.worldbook.group_entries_imported) || 0} 条。${Number(legacyDataResult.worldbook.member_ids_unconfirmed) ? `有 ${Number(legacyDataResult.worldbook.member_ids_unconfirmed)} 条成员范围内容未导入，因为未确认账号映射。` : ""}${Number(legacyDataResult.worldbook.group_entries_unmapped) ? `另有 ${Number(legacyDataResult.worldbook.group_entries_unmapped)} 条其他群范围内容需选择对应群后单独导入。` : ""}</p>` : ""}
-        ${legacyDataPlan ? `<div class="setup-legacy-plan">
-          <p>表情素材：${Number(reactionSummary.ready) || 0} 张待导入，已存在 ${Number(reactionSummary.already_present) || 0} 张；本批 ${Number(reactionSummary.batch_count) || 0} 张 / ${Math.ceil((Number(reactionSummary.batch_bytes) || 0) / 1048576)} MB${Number(reactionSummary.remaining_after_batch) ? `，后续还需 ${Number(reactionSummary.remaining_after_batch)} 张` : ""}。</p>
+        ${legacyDataPlan ? `<div class="setup-legacy-plan setup-legacy-data-plan" aria-live="polite">
+          <p class="setup-legacy-plan-lead"><strong>本次资料试算</strong><span>表情素材 ${Number(reactionSummary.ready) || 0} 张待导入，已存在 ${Number(reactionSummary.already_present) || 0} 张；本批 ${Number(reactionSummary.batch_count) || 0} 张 / ${Math.ceil((Number(reactionSummary.batch_bytes) || 0) / 1048576)} MB${Number(reactionSummary.remaining_after_batch) ? `，后续还需 ${Number(reactionSummary.remaining_after_batch)} 张` : ""}。</span></p>
           <p>日记与梦境：${Number(journalSummary.ready) || 0} 条待导入，${Number(journalSummary.already_present) || 0} 个日期已有 V2 记录会保留；本批 ${Number(journalSummary.batch_count) || 0} 条 / ${Math.ceil((Number(journalSummary.batch_bytes) || 0) / 1024)} KB${Number(journalSummary.remaining_after_batch) ? `，后续还需 ${Number(journalSummary.remaining_after_batch)} 条` : ""}。预览只显示日期和大小，不显示正文。</p>
           ${journalSummary.samples?.length ? `<p>本批日期：${journalSummary.samples.slice(0, 12).map(item => `${escape(item.date)}（${escape(item.kind === "dream" ? "梦境" : "日记")}，${Number(item.size) || 0} 字节）`).join("、")}</p>` : ""}
           ${journalSummary.conflicts?.length ? `<p>已有日期：${journalSummary.conflicts.slice(0, 12).map(item => `${escape(item.date)}（${escape(item.kind === "dream" ? "梦境" : "日记")}，${item.imported ? "此前由迁移导入" : `V2 已有 ${escape(item.state)} 记录，保留不覆盖`}）`).join("、")}</p>` : ""}
@@ -931,21 +977,27 @@ window.CompanionSetup = (() => {
           ${legacyDataPlan.warnings?.map(item => `<p>${escape(item)}</p>`).join("") || ""}
         </div>` : ""}
         <div class="setup-legacy-data-controls">
+          <div class="setup-legacy-data-controls-head"><strong>选择资料来源</strong><span>先选 V1 人格；群资料还需要选择 V1 群记录。</span></div>
           <label class="setup-legacy-path"><span>V1 人格档案</span><select data-setup-legacy="data-persona" ${personaOptions.length ? "" : "disabled"}><option value="">主角色（companions.json）</option>${personaOptions.filter(item => item.persona_id).map(item => `<option value="${escape(item.persona_id)}" ${legacyDataPersonaId === item.persona_id ? "selected" : ""} ${item.state === "ready" ? "" : "disabled"}>${escape(item.label)}${item.state === "ready" ? "" : " · 不可读取"}</option>`).join("")}</select></label>
           ${selectedPersona ? `<p class="setup-legacy-scope-note">日记、梦境和群成员互动图来自 ${escape(selectedPersona.label)}；不同 V1 人格不会混在一起。</p>` : ""}
           <label class="setup-legacy-path"><span>V1 群记录 / 范围</span><select data-setup-legacy="data-group" ${groupOptions.length ? "" : "disabled"}><option value="">不选择群</option>${groupOptions.map(item => `<option value="${escape(item.source_group_id)}" ${legacyDataGroupId === item.source_group_id ? "selected" : ""}>群 ${escape(item.source_group_id)} · ${Number(item.member_count) || 0} 位成员 / ${Number(item.edge_count) || 0} 条边 / ${Number(item.worldbook_entry_count) || 0} 条知识条目</option>`).join("")}</select></label>
           ${selectedGroup ? `<p class="setup-legacy-scope-note">${selectedNetworkGroup ? `群成员互动图将从 V1 群 ${escape(selectedGroup.source_group_id)} 映射到当前 V2 群 ${escape(legacyDataPlan.target_group_id || "（当前目标不是群）")}，含 ${Number(selectedGroup.member_count) || 0} 位成员和 ${Number(selectedGroup.edge_count) || 0} 条互动边。${Number(selectedGroup.omitted_member_count) || Number(selectedGroup.omitted_edge_count) ? `另有 ${Number(selectedGroup.omitted_member_count) || 0} 位成员、${Number(selectedGroup.omitted_edge_count) || 0} 条互动边超过 V2 上限，不会导入。` : ""}${Number(selectedGroup.rejected_member_count) || Number(selectedGroup.rejected_edge_count) ? `无法识别 ${Number(selectedGroup.rejected_member_count) || 0} 位成员、${Number(selectedGroup.rejected_edge_count) || 0} 条互动边。` : ""}` : ""}${selectedWorldbookGroup ? `所选 V1 群还有 ${Number(selectedWorldbookGroup.entry_count) || 0} 条群范围知识条目。` : ""}</p>` : ""}
         </div>
-        <div class="setup-legacy-data-checks">
-          <label><input type="checkbox" data-setup-legacy="import-reactions" ${legacyImportReactions ? "checked" : ""}><span>导入表情素材</span></label>
-          <label><input type="checkbox" data-setup-legacy="import-group-network" ${legacyImportGroupNetwork ? "checked" : ""} ${selectedNetworkGroup && legacyDataPlan?.group_target_available ? "" : "disabled"}><span>导入所选群成员互动图</span></label>
-          <label><input type="checkbox" data-setup-legacy="import-worldbook" ${legacyImportWorldbook ? "checked" : ""} ${worldbookImportableCount ? "" : "disabled"}><span>导入世界书条目</span></label>
-          <label><input type="checkbox" data-setup-legacy="import-journals" ${legacyImportJournals ? "checked" : ""} ${legacyDataPlan?.target_private_available ? "" : "disabled"}><span>导入该人格的日记与梦境</span></label>
-          <label><input type="checkbox" data-setup-legacy="import-reference-images" ${legacyImportReferenceImages ? "checked" : ""} ${Number(referenceSummary.batch_count) > 0 && legacyDataPlan?.target_private_available ? "" : "disabled"}><span>导入参考图库 ${Number(referenceSummary.batch_count) || 0} 张</span></label>
-          <label><input type="checkbox" data-setup-legacy="import-wardrobe-items" ${legacyImportWardrobeItems ? "checked" : ""} ${Number(wardrobeSummary.batch_count) > 0 && legacyDataPlan?.target_private_available ? "" : "disabled"}><span>导入衣柜 ${Number(wardrobeSummary.batch_count) || 0} 件（图片 ${Number(wardrobeSummary.image_count) || 0} 张）</span></label>
-          <label><input type="checkbox" data-setup-legacy="import-memory-database" ${legacyImportMemoryDatabase ? "checked" : ""} ${memoryArchiveAvailable ? "" : "disabled"}><span>归档独立记忆库并迁入已映射的历史资料（${legacyDataPlan ? `${Number(memoryDatabase.record_count) || 0} 条 / ${Math.ceil((Number(memoryDatabase.total_bytes) || 0) / 1048576)} MB` : "试算后显示规模"}）</span></label>
-          <label><input type="checkbox" data-setup-legacy="import-archive" ${legacyImportArchive ? "checked" : ""} ${sourceArchiveAvailable ? "" : "disabled"}><span>${legacyDataPlan?.archive?.state === "incomplete" ? "尽可能归档可读的原始资料" : "完整保留其余原始资料"}（${Math.ceil((Number(legacyDataPlan?.archive?.total_bytes) || 0) / 1048576)} MB）</span></label>
-        </div>
+        <fieldset class="setup-legacy-option-groups">
+          <legend>导入与保留范围</legend>
+          <section class="setup-legacy-option-group"><header><strong>直接导入 V2</strong><span>会写入当前已选目标；重复内容按来源标识去重。</span></header><div class="setup-legacy-data-checks">
+            ${legacyDataChoiceMarkup("import-reactions", "表情素材", {checked: legacyImportReactions, detail: "导入角色级表情素材。"})}
+            ${legacyDataChoiceMarkup("import-group-network", "所选群成员互动图", {checked: legacyImportGroupNetwork, disabled: !(selectedNetworkGroup && legacyDataPlan?.group_target_available), detail: "需要 V1 群记录和 V2 群目标。"})}
+            ${legacyDataChoiceMarkup("import-worldbook", "世界书条目", {checked: legacyImportWorldbook, disabled: !worldbookImportableCount, detail: "人物、关系和群范围知识按可映射范围导入。"})}
+            ${legacyDataChoiceMarkup("import-journals", "该人格的日记与梦境", {checked: legacyImportJournals, disabled: !legacyDataPlan?.target_private_available, detail: "只写入当前 V2 私聊目标。"})}
+            ${legacyDataChoiceMarkup("import-reference-images", `参考图库 ${Number(referenceSummary.batch_count) || 0} 张`, {checked: legacyImportReferenceImages, disabled: !(Number(referenceSummary.batch_count) > 0 && legacyDataPlan?.target_private_available), detail: "迁入当前角色图库并随角色使用；复核源文件哈希，不下载远程 URL。"})}
+            ${legacyDataChoiceMarkup("import-wardrobe-items", `衣柜 ${Number(wardrobeSummary.batch_count) || 0} 件（图片 ${Number(wardrobeSummary.image_count) || 0} 张）`, {checked: legacyImportWardrobeItems, disabled: !(Number(wardrobeSummary.batch_count) > 0 && legacyDataPlan?.target_private_available), detail: "图片不可用时保留衣物文字资料。"})}
+          </div></section>
+          <section class="setup-legacy-option-group"><header><strong>素材与原始资料保留</strong><span>保留在隔离归档，方便复核；不会直接提供给对话或旧任务执行。</span></header><div class="setup-legacy-data-checks">
+            ${legacyDataChoiceMarkup("import-memory-database", `独立记忆库（${legacyDataPlan ? `${Number(memoryDatabase.record_count) || 0} 条 / ${Math.ceil((Number(memoryDatabase.total_bytes) || 0) / 1048576)} MB` : "试算后显示规模"}）`, {checked: legacyImportMemoryDatabase, disabled: !memoryArchiveAvailable, detail: "仅迁入通过身份映射和治理检查的历史资料。"})}
+            ${legacyDataChoiceMarkup("import-archive", `${legacyDataPlan?.archive?.state === "incomplete" ? "尽可能归档可读的原始资料" : "完整保留其余原始资料"}（${Math.ceil((Number(legacyDataPlan?.archive?.total_bytes) || 0) / 1048576)} MB）`, {checked: legacyImportArchive, disabled: !sourceArchiveAvailable, detail: "无法安全读取的项目会在清单中标记。"})}
+          </div></section>
+        </fieldset>
         ${privateMemoryOwners.length ? `<details class="setup-legacy-values"><summary>旧私聊身份映射（${legacyMemoryOwnerIds.size} / ${privateMemoryOwners.length}）</summary><p>仅迁入已映射的合规私聊历史；其余保留在隔离归档。</p><ul>${privateMemoryOwners.map(item => {
           const source = item.source || {};
           const label = `${source.platform || "未知平台"} · ${source.bot_id || "未知机器人"} · ${source.persona_id || "未知人格"} · ${source.session_id || "未知会话"} · ${source.actor_id || "未知用户"}`;
@@ -968,16 +1020,13 @@ window.CompanionSetup = (() => {
             return `<option value="${escape(value)}" ${value === selectedValue ? "selected" : ""}>${escape(option.label)}</option>`;
           }).join("")}</select><small>${Number(item.memories) || 0} 条记忆 / ${Number(item.timeline) || 0} 条时间线</small></label></li>`;
         }).join("")}</ul></details>` : ""}
-        ${legacyMemoryOwnerIds.size || legacyMemoryGroupMappings.size ? `<label class="setup-legacy-confirm"><input type="checkbox" data-setup-legacy="confirm-memory-mapping" ${legacyConfirmMemoryMapping ? "checked" : ""} ${legacyImportMemoryDatabase ? "" : "disabled"}><span>确认所选旧私聊与群身份属于对应 V2 目标；群历史只映射到同号群，不新增或扩大读取权限</span></label>` : ""}
         ${legacyDataPlan && legacyMemoryPlanDirty ? `<p class="setup-legacy-scope-note">身份选择已更改；请重新试算后再执行导入。</p>` : ""}
-        ${(legacyImportGroupNetwork && selectedNetworkGroup || legacyImportWorldbook && worldbookSummary.requires_id_confirmation) ? `<label class="setup-legacy-confirm"><input type="checkbox" data-setup-legacy="confirm-member-ids" ${legacyConfirmMemberIds ? "checked" : ""}><span>确认 V1 与当前 V2 目标使用相同的平台身份，成员账号 ID 一致；所选群范围映射到当前 V2 群</span></label>` : ""}
-        ${legacyImportJournals && legacyDataPlan?.target_private_available ? `<label class="setup-legacy-confirm"><input type="checkbox" data-setup-legacy="confirm-persona-mapping" ${legacyConfirmPersonaMapping ? "checked" : ""}><span>确认将 ${escape(selectedPersona?.label || "主角色（companions.json）")} 的私人日记与梦境归入当前 V2 目标和人格</span></label>` : ""}
-        ${(referencesReady || wardrobeReady) ? `<label class="setup-legacy-confirm"><input type="checkbox" data-setup-legacy="confirm-reference-persona-mapping" ${legacyConfirmReferencePersonaMapping ? "checked" : ""}><span>确认将 ${escape(selectedPersona?.label || "主角色（companions.json）")} 的参考图与衣柜归入当前 V2 私聊角色；图片不可用时仍保留衣物文字资料</span></label>` : ""}
+        ${confirmationsMarkup}
         ${legacyDataPlan && !legacyDataPlan.group_target_available && selectedGroup ? `<p class="setup-legacy-scope-note">当前 V2 目标不是群会话；切换到对应群目标后才能导入群成员互动图。</p>` : ""}
         ${legacyDataPlan && !legacyDataPlan.target_private_available ? `<p class="setup-legacy-scope-note">日记与梦境只能导入到私聊目标，请切换到当前角色的 V2 私聊目标。</p>` : ""}
         <div class="setup-actions">
-          ${legacyButton("legacy-data-plan", legacyDataPlan ? "重新试算数据" : "试算 V1 人物资料", {primary: !legacyDataPlan, disabled: !selection.api})}
-          ${legacyDataPlan && canApplyData ? legacyButton("legacy-data-apply", legacyDataResult ? "继续导入下一批" : "导入所选数据", {primary: true}) : ""}
+          ${legacyButton("legacy-data-plan", legacyDataPlan ? "重新试算所选资料" : "试算所选资料", {primary: !legacyDataPlan, disabled: !selection.api})}
+          ${legacyDataPlan && canApplyData ? legacyButton("legacy-data-apply", legacyDataResult ? "继续导入下一批" : "导入所选资料", {primary: true}) : ""}
         </div>
       </div>
       ${legacyDataPlan ? renderLegacyPersonaBatch(personaOptions) : ""}

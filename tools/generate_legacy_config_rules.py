@@ -31,6 +31,8 @@ PLUGIN_REVIEWED_OWED = {
     "forward_message_config.forward_message_max_messages": "integer",
 }
 RULE_EXCLUSIONS = {
+    "basic_config.owner_exclusive_proactive_limit":
+        "V2 已取消跨私聊窗口的关系级额度；每日决策调用与实际联系上限由各私聊窗口分别配置，不自动迁移旧关系额度。",
     "voice_action_config.tts_message_scope":
         "旧版该枚举控制主动正文是否进入回复 TTS 链；V2 主动语音使用独立授权策略，不能据此改写 proactive.contact.voice_action_enabled。",
     "emotion_relationship_config.enable_smart_silence":
@@ -192,12 +194,16 @@ def generate() -> int:
                     "not-applicable": "该设置不适用于当前迁移目标。",
                 }.get(verdict, "没有经过核实的 V2 配置落点，暂不自动迁移。")
             target = row.get("resolved_target", "").strip()
+            verdict = row.get("verified_verdict", "").strip()
+            if source in RULE_EXCLUSIONS:
+                target = ""
+                verdict = "not-migrated-by-design"
             audit_sources.append({
                 "source": source,
                 "source_type": row.get("v1_type", "").strip(),
                 "resolved_kind": row.get("resolved_kind", "").strip(),
                 "target": target,
-                "verdict": row.get("verified_verdict", "").strip(),
+                "verdict": verdict,
                 "confidence": row.get("verified_confidence", "").strip(),
                 "summary": landing[:600],
             })

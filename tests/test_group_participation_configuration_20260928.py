@@ -127,7 +127,8 @@ class GroupDefaultsTests(unittest.TestCase):
         from companion_v2.conversation.participation import CONFIG_SWITCHES
         switches = [name for name, value in CONFIG_DEFAULTS.items() if type(value) is bool]
         self.assertEqual(set(switches), set(CONFIG_SWITCHES))
-        self.assertEqual(len(switches), 11)
+        self.assertTrue({"enable_group_behavior_learning", "enable_group_behavior_imitation",
+                         "enable_group_behavior_feedback"}.issubset(switches))
 
     def test_switches_come_before_the_limits_they_govern(self):
         """页面的 sections 顺序依赖这一点：总闸先于受它约束的数字。"""

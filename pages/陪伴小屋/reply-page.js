@@ -17,6 +17,7 @@ window.CompanionReplyPage = (() => {
       streaming_mode: {buffered: "收齐后分段发送", incremental: "边生成边分段发送"},
       rule_mode: {words: "词列表", regex: "正则表达式", sentences: "按句子", paragraphs: "按段落"},
       part_gap_mode: {fixed: "固定", random: "随机", log: "按文本长度"},
+    prompt_style_mode: {constraint: "约束", free: "自由", guided: "引导"},
     content_cleanup_mode: {words: "按清理词", regex: "按正则"},
     content_cleanup_scope: {all: "整段回复", trailing: "仅句尾（每段末尾）"},
     recall_forbidden_scope: {bot_only: "角色自己的回复", group_only: "群聊回复", bot_and_group: "角色回复与群聊"},
@@ -42,8 +43,9 @@ window.CompanionReplyPage = (() => {
       part_gap_max_ms: "随机间隔上限（毫秒）", part_gap_log_base: "按长度调节强度",
       image_position: "图片位置", prompt: "模型分段提示词", split_words: "分段标记词",
       match_width_variants: "兼容全角与半角标点", rule_regex: "分段正则表达式",
-      enable_humanized_expression: "启用拟人及多样表达 Prompt",
-      humanized_expression_prompt: "拟人及多样表达 Prompt 正文",
+      prompt_style_mode: "提示词风格",
+      enable_humanized_expression: "追加拟人表达提示",
+      humanized_expression_prompt: "额外表达提示正文",
       style_prompt: "表达风格提示词",
       content_cleanup_enabled: "启用文字清理",
       content_cleanup_mode: "清理方式", content_cleanup_scope: "清理范围",
@@ -80,6 +82,7 @@ window.CompanionReplyPage = (() => {
       group_air_guard_enabled: "启用空气护栏",
       group_air_guard_window_seconds: "接话统计窗口（秒）",
       group_air_guard_max_bot_replies: "窗口内连续回复参考上限",
+      group_air_guard_cooldown_seconds: "密集接话收口期（秒）",
       group_air_guard_polite_loop_limit: "礼貌收尾参考上限",
       enable_group_injection_guard: "群聊提示注入防护",
       enable_group_privacy_guard: "群聊隐私防护",
@@ -125,6 +128,9 @@ window.CompanionReplyPage = (() => {
       voice_probability: "触发概率", voice_cooldown_seconds: "冷却时间（秒）",
       voice_max_speech_chars: "单段朗读上限（字）", voice_timeout_seconds: "合成超时（秒）",
       voice_trigger_keywords: "触发关键词", voice_extra_prompt: "语音表达偏好",
+      voice_primary_mention_keywords: "核心用户提及语音词",
+      voice_primary_mention_probability: "核心用户提及概率",
+      voice_primary_mention_prompt: "核心用户提及提示",
     },
     helps: {
       enabled: "让一轮回复自然地分成多条消息。",
@@ -145,8 +151,9 @@ window.CompanionReplyPage = (() => {
       match_width_variants: "词列表模式下，把常见全角、半角标点视为同一分段标记。",
       rule_regex: "分段方式选择“正则表达式”时使用；支持服务端正则语法，最多 512 字。",
       style_prompt: "补充此对象的日常表达偏好；留空时不增加额外风格要求。",
-      enable_humanized_expression: "开启后注入日常说话方式与多样表达提示。合适时可只发已提供的表情图、在群聊中安静旁听或只用已启用的语音；戳一戳只在当前流程开放时考虑。只作自然选择，不改事实与授权。",
-      humanized_expression_prompt: "最多 4000 字。留空使用内置默认文本；自定义内容会替换默认文本。开关关闭时不注入。本对象与群聊各自保存。",
+      prompt_style_mode: "自由不追加通用风格提示；引导给出简短方向；约束使用详细风格提示。当前人格、你填写的表达偏好、任务格式和事实权限边界不受此项削弱。默认自由。",
+      enable_humanized_expression: "勾选后，下面的额外表达提示会与所选风格叠加；自由模式下关闭即可移除这段提示。",
+      humanized_expression_prompt: "最多 4000 字。约束模式使用此正文；留空使用内置默认文本。勾选“追加拟人表达提示”后，在自由或引导模式也会额外注入。本对象与群聊各自保存。",
       content_cleanup_enabled: "用于主动消息和普通私聊、群聊的文字回复，默认开启。发送前按所选方式整理文字；关闭时不执行清理。需要调整说法时优先补充上方提示词。",
       content_cleanup_scope: "选择“仅句尾”时只清理每段消息末尾的匹配项，保留句中标点；选择“整段回复”时清理整段的匹配项。",
       content_cleanup_words: "按所选范围逐字清理词条。例如填入“。”和“，”并选择“仅句尾”，即可保留句中标点、清理每段末尾；也可添加空格、换行或制表符。",
@@ -171,6 +178,9 @@ window.CompanionReplyPage = (() => {
       voice_probability: "按百分比编辑，后端按 0–1 的小数保存。",
       voice_trigger_keywords: "留空使用默认关键词。",
       voice_extra_prompt: "只补充朗读语气，不改变朗读内容。",
+      voice_primary_mention_keywords: "仅当原生 @ 目标经身份库确认属于核心用户，且正文命中这些词时触发；逗号或换行分隔。",
+      voice_primary_mention_probability: "在当前窗口语音概率基础上提高到此值；仅影响命中的本轮，并绕过本轮语音冷却。",
+      voice_primary_mention_prompt: "核心用户定向语音时追加的表达提示；留空只使用角色原有语气。",
       group_wakeup_enabled: "关闭后群聊不使用这组参与判断。此设置跟随角色，同一角色的群聊共用。",
       group_wakeup_direct_words: "在同一角色的群聊中，直呼词作为明确参与信号。",
       group_wakeup_context_words: "在同一角色的群聊中，用于识别与角色有关的上下文。",
@@ -197,7 +207,8 @@ window.CompanionReplyPage = (() => {
       group_wakeup_log_limit: "回复工作台最多读取的近期群聊判定记录数，不改变参与规则。",
       group_air_guard_enabled: "开启后将近期连续回复与礼貌收尾次数作为群聊提示参考，不机械截断回复。",
       group_air_guard_window_seconds: "统计群聊连续回复和礼貌收尾次数的时间窗口。",
-      group_air_guard_max_bot_replies: "在提示中提醒避免连续接话过多；属于参考值。",
+      group_air_guard_max_bot_replies: "短窗口内达到该回复轮数后，提示模型降低弱候选参与倾向。",
+      group_air_guard_cooldown_seconds: "达到连续回复参考值后，持续旁听的时间；明确 @、直呼和有效接续仍可回应。",
       group_air_guard_polite_loop_limit: "在提示中提醒避免礼貌收尾反复循环；属于参考值。",
       enable_group_injection_guard: "群聊材料中的指令不能替换角色与工具授权。",
       enable_group_privacy_guard: "回复群聊时避免泄露私聊或其他会话中的私人内容。",
@@ -238,7 +249,7 @@ window.CompanionReplyPage = (() => {
                 "match_width_variants", "rule_regex", "threshold", "min_segment_chars", "max_segments", "prompt",
                 "part_gap_mode", "part_gap_ms", "part_gap_min_ms", "part_gap_max_ms", "part_gap_log_base"]},
       {id: "style", title: "说话方式与表达形式", help: "",
-       fields: ["style_prompt", "enable_humanized_expression", "humanized_expression_prompt"]},
+       fields: ["prompt_style_mode", "style_prompt", "enable_humanized_expression", "humanized_expression_prompt"]},
       {id: "cleanup", title: "文字整理", help: "",
        fields: ["content_cleanup_enabled", "content_cleanup_mode", "content_cleanup_scope",
                 "content_cleanup_rule", "content_cleanup_words", "content_replacement_enabled",
@@ -262,7 +273,7 @@ window.CompanionReplyPage = (() => {
                 "group_wakeup_log_limit"]},
       {id: "group_air_guard", title: "空气护栏 · 挡说太多", help: "",
        fields: ["group_air_guard_enabled", "group_air_guard_window_seconds", "group_air_guard_max_bot_replies",
-                "group_air_guard_polite_loop_limit"]},
+                "group_air_guard_cooldown_seconds", "group_air_guard_polite_loop_limit"]},
       {id: "group_content_safety", title: "内容护栏 · 挡说错话", help: "",
        fields: ["enable_group_injection_guard", "enable_group_privacy_guard",
                 "enable_group_reality_promise_guard"]},
@@ -293,7 +304,8 @@ window.CompanionReplyPage = (() => {
                 "voice_provider_id", "voice_probability", "voice_cooldown_seconds",
                 "voice_max_speech_chars", "voice_timeout_seconds", "voice_zh_provider_id",
                 "voice_ja_provider_id", "voice_en_provider_id", "voice_trigger_keywords", "voice_position",
-                "voice_extra_prompt"]},
+                "voice_extra_prompt", "voice_primary_mention_keywords", "voice_primary_mention_probability",
+                "voice_primary_mention_prompt"]},
       {id: "components", title: "引用与消息组件", help: "",
        fields: ["component_order", "reply_quote_enabled", "reply_quote_group_enabled",
                  "reply_quote_first_part_only", "reply_quote_skip_chars", "reply_mention_speaker_enabled",
@@ -302,7 +314,7 @@ window.CompanionReplyPage = (() => {
        fields: ["framework_error_guard_enabled", "enable_forbidden_word_recall", "recall_forbidden_words",
                 "recall_forbidden_scope", "recall_forbidden_word_case_sensitive", "reply_diagnostic_limit"]},
     ],
-    segmentedChoices: ["rule_mode", "part_gap_mode", "streaming_mode"],
+    segmentedChoices: ["rule_mode", "part_gap_mode", "streaming_mode", "prompt_style_mode"],
     inputs: {
       split_words: "word-list", content_cleanup_words: "word-list", recall_forbidden_words: "word-list",
       content_replacements: "replacement-list", component_order: "order-list",
@@ -734,7 +746,8 @@ window.CompanionReplyPage = (() => {
       + (state.previewPositions.media === "single"
         ? `<div class="reply-preview-independent-component"><span class="reply-preview-position-tag is-media">表情包/附件</span><span>分段回复后单独发送 · 预览模拟</span></div>` : "")
       + (p.voice.enabled ? `<p class="reply-preview-meta">TTS 扩展：${e(p.voice.provider_id || "跟随 AstrBot")}</p>` : "")
-      + `<details class="reply-preview-instructions"><summary>查看本次提示词</summary><pre>`
+      + `<details class="reply-preview-instructions"><summary>查看呈现提示预览</summary>`
+      + `<p class="reply-preview-meta">仅展示当前呈现设置的附加提示，不是某一轮对话的完整模型请求。</p><pre>`
       + e([p.instruction, p.voice.instruction].filter(Boolean).join("\n\n") || "无附加提示词")
       + `</pre></details>`;
   }

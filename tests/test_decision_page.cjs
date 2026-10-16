@@ -8,11 +8,26 @@ const pageRoot = path.resolve(__dirname, "../pages/陪伴小屋");
 const source = fs.readFileSync(path.join(pageRoot, "decision-page.js"), "utf8");
 
 function harness() {
-  const root = {innerHTML:"",dataset:{},querySelector(){return null;},querySelectorAll(){return [];},
+  const panels = new Map(["overview", "response", "tempo", "safety", "group"]
+    .map(view => [view, {dataset:{decisionPanel:view}, innerHTML:"", hidden:false}]));
+  const groupEditor = {state:{draft:{enable_group_topic_threads:true,group_topic_thread_max:12,
+    enable_group_social_context:true,enable_group_mood_detection:true,enable_group_roleplay_strength:true,
+    enable_group_moments:true,enable_group_moment_portrait:true,enable_group_interjection:false,
+    enable_group_repeat_follow:true,group_repeat_trigger_threshold:3,group_repeat_follow_probability:0.5}},
+    visibleGroups:[],setVisibleGroups(groups){this.visibleGroups=groups;}};
+  const current = {textContent:""};
+  const root = {innerHTML:"",dataset:{},querySelector(selector){
+    if(selector==="#groupParticipationConfigWorkspace")return {companionConfigEditor:groupEditor};
+    if(selector==='[data-decision-current]')return current;
+    const panel=selector.match(/^\[data-decision-panel="([^"]+)"\]$/);
+    return panel?panels.get(panel[1])||null:null;
+  },querySelectorAll(selector){
+    return selector==="[data-decision-panel]"?[...panels.values()]:[];
+  },
     addEventListener(){},removeEventListener(){}};
   const window = {lucide:{createIcons(){}}};
   vm.runInNewContext(source, {window});
-  return {page:window.CompanionDecisionPage,root};
+  return {page:window.CompanionDecisionPage,root,panels,groupEditor};
 }
 
 test("decision page owns group participation and does not duplicate other domains", () => {
@@ -31,6 +46,18 @@ test("decision page owns group participation and does not duplicate other domain
   view.page.unmount();
 });
 
+test("group participation exposes topic thread settings and their bounded behavior", () => {
+  const view = harness();
+  view.page.mount(view.root, {groupSettingsMarkup:'<section id="groupParticipationConfigWorkspace"></section>'});
+  view.page.setView("group");
+
+  assert.deepEqual(Array.from(view.groupEditor.visibleGroups), ["topics", "atmosphere", "repeat"]);
+  assert.match(view.panels.get("group").innerHTML, /群聊话题线/);
+  assert.match(view.panels.get("group").innerHTML, /最多保留 12 条 · 90 分钟无更新后失效/);
+  assert.match(view.panels.get("overview").innerHTML, /群聊话题线/);
+  view.page.unmount();
+});
+
 test("narrow decision navigation scrolls tabs without covering the status", () => {
   const css = fs.readFileSync(path.join(pageRoot, "decision-page.css"), "utf8");
   assert.match(css, /\.decision-tab-list\{[^}]*overflow-x:auto/s);
@@ -41,11 +68,16 @@ test("narrow decision navigation scrolls tabs without covering the status", () =
 test("the perception overview stays on perception while decision settings remain target-aware", () => {
   const app = fs.readFileSync(path.join(pageRoot, "app.js"), "utf8");
   assert.match(app, /CompanionDecisionPage\?\.mount\(decisionHost,\{groupSettingsMarkup:renderDecisionOriginal\(\)\}\)/);
-  assert.match(app, /function renderDecisionOriginal\(\)\{\s*if\(typeof product\.role\(\)\?\.reply_api!=='string'\)return pageNeedsTarget\('群聊参与'\)/);
+  assert.match(app, /function renderDecisionOriginal\(\)\{[\s\S]*?pageNeedsTarget\('群聊参与'\)/);
   assert.match(app, /function renderDecisionOriginal\(\)[\s\S]*?configEditors\('groupParticipationConfigWorkspace',\['group_participation'\],'群聊参与'\)/);
+  assert.match(app, /const endpoint=role\.reply_api\+'\/participation'/);
+  assert.match(app, /id="groupInterjectionConfigWorkspace"[\s\S]*?data-config-api="\$\{escapeHTML\(endpoint\)\}"/);
   assert.match(app, /if\(replyHost\)[\s\S]*?view:'expression',section:replyPane[\s\S]*?else if\(decisionReplyHost\)[\s\S]*?view:'decision',[\s\S]*?updateReplyStatus\?\.\(status\)[\s\S]*?else if\(contextImageHost\)[\s\S]*?view:'perception'/);
   assert.match(app, /id="contextImageWorkspace"/);
-  assert.match(app, /sectionIds:\['atmosphere','joke_guard','interjection','repeat','history'\]/);
+  assert.match(app, /sectionIds:\['topics','atmosphere','joke_guard','repeat','history'\]/);
+  assert.match(app, /sectionIds:\['interjection'\][\s\S]*?requestSection:null[\s\S]*?resetKey:'reset_to_inherit'/);
+  assert.match(source, /data-decision-group-only/);
+  assert.match(source, /groupInterjectionConfigWorkspace/);
   assert.match(app, /sectionIds:\['denoise'\],title:'群聊表达去噪'/);
   assert.match(app, /decision:'群聊中判断何时回应、如何参与并守住边界。'/);
   assert.match(app, /function renderPerceptionOriginal\(\)[\s\S]*?id="perceptionOverviewWorkspace"/);

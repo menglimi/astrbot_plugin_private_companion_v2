@@ -115,19 +115,21 @@ class ContactRhythm:
     body_chars = staticmethod(body_chars)
 
     # ---- hourly activity curve ------------------------------------------
-    def hour_allows(self, context, preferences, opened_at):
+    def hour_allows(self, context, preferences, opened_at, *, observed_at=None):
         """Voluntary opportunity weighting by the relationship's local hour.
 
         The curve is opt-in: an unconfigured deployment keeps the exact slot grid
         it had, and an enabled curve only removes slots that fall in the
-        relationship's quiet local hours. The draw is seeded by the sealed slot,
-        so the same opportunity never flaps between ticks or after a restart.
+        relationship's less active local hours. The draw is seeded by the sealed
+        slot, so polling never re-rolls it. Event producers may use the current
+        observation's hour while sharing that stable slot: a long interval must
+        not apply yesterday's afternoon weight to a news item found overnight.
         """
         if not preferences.values["proactive_hour_activity_enabled"]:
             return True
         weights = hour_activity_curve(preferences.values["proactive_hour_activity_curve"])
         zone = ZoneInfo(preferences.values["quiet_timezone"])
-        weight = weights[opened_at.astimezone(zone).hour]
+        weight = weights[(observed_at or opened_at).astimezone(zone).hour]
         share = min(1.0, weight / max(weights))
         return sample([context.key, "hour-activity", stamp(opened_at)]) < share
 

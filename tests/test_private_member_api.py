@@ -253,7 +253,7 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(inherited["provenance"]["enabled"]["explicit"])
         self.assertEqual(inherited["provenance"]["enabled"]["layer"], "installation")
         saved = await self.configure({"contact": {"enabled": False, "interval_seconds": 1200,
-            "max_contacts_24h": 5, "max_attempts_24h": 8, "unanswered_slowdown_start": 2,
+            "max_contacts_24h": 5, "unanswered_slowdown_start": 2,
             "unanswered_pause_after": 5, "unanswered_max_interval_multiplier": 3.5,
             "note": "尽量避开工作时间联系", "news.enabled": False, "news.weight": 1.5,
             "news.pause_until": "2026-10-21T18:00:00+00:00"}},
@@ -292,12 +292,11 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(after["provenance"]["enabled"]["explicit"])
         self.assertEqual(after["provenance"]["enabled"]["layer"], "window")
         reset = await self.configure({"contact": {}}, key="reset-personal-contact",
-            resets={"contact": ["max_attempts_24h", "unanswered_slowdown_start", "unanswered_pause_after",
+            resets={"contact": ["unanswered_slowdown_start", "unanswered_pause_after",
                                  "unanswered_max_interval_multiplier", "note", "news.enabled", "news.weight",
                                  "news.pause_until"]})
         self.assertEqual(reset["status"], "ok", reset)
         restored = (await self.settings())["contact"]
-        self.assertEqual(restored["settings"]["max_attempts_24h"], 12)
         self.assertEqual(restored["settings"]["unanswered_slowdown_start"], 1)
         self.assertEqual(restored["settings"]["unanswered_pause_after"], 0)
         self.assertEqual(restored["settings"]["unanswered_max_interval_multiplier"], 2.2)
@@ -372,7 +371,7 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored["settings"]["style_prompt"], "保持角色一贯的轻松语气")
         self.assertFalse(restored["provenance"]["style_prompt"]["explicit"])
 
-    async def test_legacy_relationship_contact_settings_remain_compatible_but_new_saves_are_window_scoped(self):
+    async def test_legacy_relationship_preferences_remain_compatible_but_contact_quota_is_window_scoped(self):
         config = multi_config()
         config["multi_host"]["targets"].append({"target_id": "third", "platform_id": "qq-main",
             "account_id": "100", "bot_id": "bot-a", "participant_id": "201"})
@@ -388,7 +387,7 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                 return relationship_target_for(self.context)
 
         changes = {"contact": {
-            "enabled": False, "automatic_enabled": False, "max_contacts_24h": 5,
+            "enabled": False, "automatic_enabled": False,
             "note": "这一位用户的单独偏好", "pause_until": (self.clock.now() + timedelta(hours=1)).isoformat(),
             "important_dates": '[{"calendar":"gregorian","month":3,"day":8,"label":"个人日期"}]',
         }}
@@ -403,6 +402,11 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay["data"]["results"]["contact"]["replayed"])
         self.assertEqual(replay["data"]["results"]["contact"]["operation_id"], legacy_operation)
         self.assertEqual(app.runtime.read_one("SELECT COUNT(*) AS n FROM configuration_changes", ())["n"], count)
+        with patch.dict("companion_v2.relationships.private_management.EDITORS", {"contact": OldRelationshipContact}):
+            quota_write = await self.configure({"contact": {"max_contacts_24h": 5}},
+                                                key="relationship-contact-quota", snapshots=await self.settings())
+        self.assertEqual(quota_write["status"], "error", quota_write)
+        self.assertEqual(quota_write["data"]["code"], "configuration_scope_not_supported")
         public = ProactiveContactManagement(app, context)
         public_before = public.status(operator).unwrap()
         self.assertIsNone(public_before["provenance"]["enabled"]["layer"])
@@ -414,7 +418,7 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before["scope"], "window")
         self.assertFalse(before["settings"]["enabled"])
         self.assertEqual(before["settings"]["note"], "这一位用户的单独偏好")
-        self.assertEqual(before["settings"]["max_contacts_24h"], 5)
+        self.assertEqual(before["settings"]["max_contacts_24h"], 3)
         self.assertEqual(before["provenance"]["enabled"]["layer"], "relationship")
         self.assertFalse(before["provenance"]["enabled"]["explicit"])
         for person in (self.person("second"), self.person("third"),
@@ -444,7 +448,7 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(after["enabled"])
         self.assertEqual(after["note"], before["settings"]["note"])
         self.assertEqual(after["important_dates"], before["settings"]["important_dates"])
-        self.assertEqual(after["max_contacts_24h"], 5)
+        self.assertEqual(after["max_contacts_24h"], 3)
         self.assertEqual(after["pause_until"], before["settings"]["pause_until"])
         original = self.controller.runtime.read_one(
             "SELECT result_json FROM configuration_changes WHERE operation_id = ?", (legacy_operation,))

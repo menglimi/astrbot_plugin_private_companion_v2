@@ -130,6 +130,46 @@ function harness() {
   return {page: window.CompanionModelsPage, requests, root, store, audioBlobs, revokedAudioUrls};
 }
 
+test('registered review, media and authoring tasks have searchable Chinese names in every model view', async () => {
+  const h = harness(), node = h.root(), data = status();
+  const labels = {
+    'proactive.judge': '主动联系复核',
+    'image_review': '图片审核',
+    'conversation.context_image_caption': '图片摘要',
+    'content.authoring.draft': '内容起草',
+    'conversation.image_narration': '当前图片转述',
+    'conversation.video_narration': '原生视频转述',
+  };
+  data.tasks = Object.keys(labels).map(kind => task(kind, 'primary', ['text'], 'background'));
+  data.tasks.push(task('future.optional_task', 'primary'));
+  h.page.mount(node);
+  h.requests[0].resolve(data);
+  await flush();
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
+  node.click('[data-model-cm]', {modelCm: 'precise'});
+  for (const [kind, label] of Object.entries(labels)) {
+    const card = node.innerHTML.split(`data-fncard="${kind}"`)[1].split('</article>')[0];
+    assert.ok(card.includes(`<b>${label}</b>`), kind);
+    assert.ok(card.includes(`aria-label="选择 ${label}"`), kind);
+    assert.ok(card.includes(kind), 'retain internal task keys for diagnosis');
+  }
+  node.input('[data-model-search]', {value: '主动联系复核'});
+  assert.match(node.innerHTML, /data-fncard="proactive.judge"/);
+  assert.doesNotMatch(node.innerHTML, /data-fncard="image_review"/);
+  node.input('[data-model-search]', {value: ''});
+  node.click('[data-model-sub]', {modelSub: 'map'});
+  for (const [kind, label] of Object.entries(labels)) {
+    assert.ok(node.innerHTML.includes(`data-model-open="${kind}" aria-label="编辑 ${label}"`), kind);
+  }
+  assert.match(node.innerHTML, /data-model-open="future.optional_task"/);
+  node.click('[data-model-sub]', {modelSub: 'cfg'});
+  node.click('[data-model-cm]', {modelCm: 'quick'});
+  for (const label of Object.values(labels)) assert.ok(node.innerHTML.includes(label), label);
+  assert.doesNotMatch(node.innerHTML, /日程规划|角色状态/,
+    'quick configuration covers registered tasks rather than unavailable placeholders');
+  h.page.unmount();
+});
+
 test('core reply uses AstrBot routing and saves only its effective extra prompt', async () => {
   const h = harness(), node = h.root(), data = status();
   const core = data.tasks[0];
@@ -572,11 +612,20 @@ test('image page separates generation and editing model queues and saves paramet
   assert.ok(get, 'image tab should trigger a GET to model/image');
   const image = {actions: [
     {action: 'image.generate', enabled: true, owner: 'image-plugin', provider_id: 'native-image', loaded: true, current: true, registered: true, state: 'ready'},
-    {action: 'image.edit', enabled: true, owner: '', provider_id: '', loaded: false, current: false, registered: false, state: 'unavailable'},
-    {action: 'image.mask_edit', enabled: true, owner: 'image-plugin', provider_id: 'native-image', loaded: true, current: true, registered: true, state: 'ready'},
-  ], enabled: {'image.generate': true, 'image.edit': true, 'image.mask_edit': true}, authorization: 'checked_for_each_invocation'};
+    {action: 'image.edit', enabled: true, owner: 'image-plugin', provider_id: 'native-image', loaded: true, current: true, registered: true, state: 'ready'},
+    {action: 'image.mask_edit', enabled: true, owner: 'image-plugin', provider_id: 'native-image', loaded: true, current: false, registered: false, state: 'unsupported', diagnostic_code: 'native_image_operation_unavailable'},
+  ], enabled: {'image.generate': true, 'image.edit': true, 'image.mask_edit': true}, authorization: 'checked_for_each_invocation',
+    module: {state: 'running'}};
   get.resolve(image);
   await flush();
+  node.click('[data-img-view]', {imgView: 'edit'});
+  assert.match(node.innerHTML, /当前队列未提供/);
+  assert.match(node.innerHTML, /当前生图模型队列未提供此操作/);
+  assert.doesNotMatch(node.innerHTML, /Image 模块运行中：/);
+  assert.doesNotMatch(node.innerHTML, /Image 能力声明已失效/);
+  const maskRow = node.innerHTML.split('<strong>蒙版局部改图</strong>')[1].split('</li>')[0];
+  assert.doesNotMatch(maskRow, /声明一致|已注册/);
+  node.click('[data-img-view]', {imgView: 'generate'});
 
   const configRequest = requests.find(r => r.method === 'GET' && r.route.endsWith('/image/output'));
   assert.ok(configRequest, 'the model page reads the configuration used by the image backend');
@@ -650,7 +699,7 @@ test('image page separates generation and editing model queues and saves paramet
   assert.equal(maskCheck.values.action, 'image.mask_edit');
   maskCheck.resolve({...image.actions[2], check: 'registration_only'});
   await flush();
-  assert.match(node.innerHTML, /蒙版局部改图已注册，可由后续真实任务调用/);
+  assert.match(node.innerHTML, /蒙版局部改图未就绪：当前生图模型队列未提供此操作/);
   node.change('[data-img-toggle]', {imgToggle: 'image.edit', checked: false});
   node.change('[data-img-toggle]', {imgToggle: 'image.mask_edit', checked: false});
   node.click('[data-img-save]');

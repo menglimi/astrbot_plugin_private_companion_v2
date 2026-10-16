@@ -28,6 +28,15 @@ class VoicePolicyTests(unittest.TestCase):
         request = VoiceReplyPolicy(trigger_mode="request", trigger_keywords="朗读, read aloud")
         self.assertTrue(eligible(request, input_text="请朗读这句话", kind="private", batch_id="a"))
         self.assertFalse(eligible(request, input_text="普通聊天", kind="private", batch_id="a"))
+        targeted = VoiceReplyPolicy(trigger_mode="request", trigger_keywords="朗读",
+            primary_mention_keywords="专属词\n定向短语，ONLY ME", primary_mention_probability=1)
+        self.assertEqual(targeted.primary_mention_words(), ("专属词", "定向短语", "only me"))
+        self.assertTrue(eligible(targeted, input_text="请回复专属词", kind="group", batch_id="a",
+                                 primary_mention=True))
+        self.assertFalse(eligible(targeted, input_text="普通聊天", kind="group", batch_id="a",
+                                  primary_mention=True))
+        self.assertFalse(eligible(replace(targeted, primary_mention_probability=0),
+            input_text="专属词", kind="group", batch_id="a", primary_mention=True))
         probability = VoiceReplyPolicy(probability=0, group_probability=1)
         self.assertFalse(eligible(probability, input_text="", kind="private", batch_id="a"))
         self.assertTrue(eligible(probability, input_text="", kind="group", batch_id="a"))
@@ -79,7 +88,7 @@ class VoicePolicyTests(unittest.TestCase):
             self.assertIn("完整", policy.instruction)
             self.assertNotIn("没有合适内容就不用标签", policy.instruction)
             self.assertNotIn("可选语音", capability_instruction(policy))
-        self.assertIn("没有适合朗读", VoiceReplyPolicy(trigger_mode="adaptive").instruction)
+        self.assertIn("按语境决定是否使用语音", VoiceReplyPolicy(trigger_mode="adaptive").instruction)
 
     def test_v1_voice_tags_keep_foreign_speech_and_chinese_translation(self):
         policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")

@@ -183,7 +183,6 @@ class PersonaJudgeTests(JudgeFixture, unittest.IsolatedAsyncioTestCase):
         for name, default in (("enable_llm_proactive_persona_judge", False),
                               ("proactive_persona_judge_threshold", 62),
                               ("proactive_persona_judge_cache_minutes", 180),
-                              ("proactive_persona_judge_daily_limit", 12),
                               ("proactive_persona_judge_exempt_purposes", "")):
             self.assertEqual(fields[GROUP + "." + name].default, default, name)
         self.assertEqual(persona_judge_profile("primary").group, "model.proactive.judge")
@@ -305,11 +304,15 @@ class JudgeCacheTests(JudgeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.judge_calls, [])
         await self.delivery_state(app, self.contacts(app)[0]["task_id"], "delivered")
 
-    async def test_zero_daily_limit_withholds_every_judged_contact(self):
-        host = await self.judged_host(proactive_persona_judge_daily_limit=0)
+    async def test_judge_runs_without_a_separate_daily_call_limit(self):
+        host = await self.judged_host()
         app = host.application
-        await self.until(lambda: len(self.contacts(app)) == 1)
-        record = self.records(app)[0]
-        self.assertEqual((record["decision"], record["judge"]["failure"]), ("skip", "judge_daily_limit"))
-        self.assertEqual(self.judge_calls, [])
-        self.assertEqual(len(self.sent), 1)
+        record = await self.judged(app)
+        self.assertEqual((record["decision"], record["judge"]["decision"], record["judge"]["allowed"]),
+                         ("send", "send", True))
+        self.assertEqual(len(self.judge_calls), 1)
+        self.assertEqual(len(self.sent), 2)
+
+    async def test_judge_settings_have_no_daily_cap_field(self):
+        fields = {field.field_id for field in configuration_fields()}
+        self.assertNotIn(GROUP + ".proactive_persona_judge_daily_limit", fields)

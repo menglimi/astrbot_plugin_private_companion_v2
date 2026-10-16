@@ -1,6 +1,7 @@
 """Native passive text uses the same presentation rules as V2 tasks."""
 
 from dataclasses import asdict
+import json
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, Mock
@@ -11,7 +12,9 @@ from astrbot_host.core_reply import (
     CORE_REPLY_CONTEXT_EXTRA, activate_core_reply_delivery_guard, prepare_core_reply_event,
 )
 from astrbot_host.core_reply_presentation import capture_core_reply_tool_names
-from astrbot_host.core_reply_segmentation import prepare_core_reply_segmentation
+from astrbot_host.core_reply_segmentation import (
+    prepare_core_reply_segmentation, prepare_core_reply_streaming_boundary,
+)
 from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
@@ -133,6 +136,42 @@ class CoreReplyPresentationTests(unittest.IsolatedAsyncioTestCase):
         activate_core_reply_delivery_guard(event)
         await event.send("aabb")
         self.assertEqual(self.texts(event), ["ab"])
+
+    async def test_private_and_group_split_configured_commas_before_all_cleanup(self):
+        settings = {**CLEANUP, "content_cleanup_scope": "all"}
+        policy = SegmentationPolicy(split_words=json.dumps(["，", "…"], ensure_ascii=False),
+                                    min_segment_chars=5)
+        for channel in ("private", "group"):
+            with self.subTest(channel=channel):
+                event = self.prepare(settings, channel=channel, segmentation=policy)
+                activate_core_reply_delivery_guard(event)
+                await event.send(MessageChain(chain=[Plain("哼，才不笨呢，比折大人才是大笨蛋…")]))
+                self.assertEqual(self.texts(event), ["哼才不笨呢", "比折大人才是大笨蛋…"])
+                self.assertEqual(self.authorize.await_count, 2)
+
+    async def test_private_stream_preferences_use_complete_body_before_comma_cleanup(self):
+        settings = {**CLEANUP, "content_cleanup_scope": "all"}
+        for mode in ("buffered", "incremental"):
+            with self.subTest(mode=mode):
+                event = self.prepare(settings, channel="private",
+                    segmentation=SegmentationPolicy(streaming_mode=mode, min_segment_chars=5,
+                        split_words=json.dumps(["，", "…"], ensure_ascii=False)))
+                event.set_extra("enable_streaming", True)
+                prepare_core_reply_streaming_boundary(event)
+                self.assertIs(event.get_extra("enable_streaming"), False)
+                activate_core_reply_delivery_guard(event)
+                await event.send(MessageChain(chain=[Plain("哼，才不笨呢，比折大人才是大笨蛋…")]))
+                self.assertEqual(self.texts(event), ["哼才不笨呢", "比折大人才是大笨蛋…"])
+
+    async def test_group_streamed_comma_boundaries_survive_all_cleanup(self):
+        settings = {**CLEANUP, "content_cleanup_scope": "all"}
+        for mode in ("buffered", "incremental"):
+            with self.subTest(mode=mode):
+                event = self.prepare(settings, channel="group", stream=True,
+                    segmentation=SegmentationPolicy(streaming_mode=mode, min_segment_chars=5,
+                        split_words=json.dumps(["，", "…"], ensure_ascii=False)))
+                await event.send_streaming(self.chunks("哼，才不", "笨呢，比折大人", "才是大笨蛋…"))
+                self.assertEqual(self.texts(event), ["哼才不笨呢", "比折大人才是大笨蛋…"])
 
     async def test_framework_dump_is_replaced_at_the_native_send_boundary(self):
         event = self.prepare()

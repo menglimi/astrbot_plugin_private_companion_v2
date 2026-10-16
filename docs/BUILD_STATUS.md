@@ -1,6 +1,32 @@
 # Companion V2 Build Status
 
+## 最新候选构建（2026-10-17）
+
+2.1.35（V1 群话题线补齐）：群聊回复现在可读取按群与角色归属的 90 分钟话题摘要，记录消息数与 Bot 接话状态；参与人数只从本轮授权可见窗口推导，成员标识不进入记录。中文相似话题归并与通用寒暄误合并均有回归覆盖；「陪伴小屋」群参与设置新增话题开关与 3–40 条保留上限，话题线已从当前缺口对照和路线图中移出，联网释义仍待产品决策。最终候选包位于 `D:\codex\visualizations\2026\10\17\private-companion-v2-v1-topic-thread-final\`，SHA-256 见同目录 `SHA256SUMS.txt`。最终包哈希/CRC/语法、唯一公开页、单 Star 与七项原生拓展合同通过；解包包内话题、群配置及窗口重置 **19/19**，配置页合同 **75/75**，迁移验收 **75 项**通过；AstrBot 启停及 4 条路由注销通过，模型与平台调用均为 0。
+
+2.1.35（V1 私聊参考图随角色迁移）：将 `relation_user` 解释为 V1 读取 ACL；通过人格映射确认后，ACL 结构有效、生图许可开启且路由允许通用使用的图片进入 V2 角色图库。关闭生图、畸形 ACL 或路由受限的素材仍跳过。源码迁移单测 **13/13**、设置页合同 **27/27**、合成 V1→V2 角色图库宿主导入 **1/1** 通过；新交付包解包后复测同样通过，页面同步检查无差异，ZIP CRC 检查通过。交付目录：`C:/Users/99505/.astrbot/data/release-packages/v1-reference-role-2.1.35-20261016/`，包哈希见同目录 `SHA256SUMS.txt`。未读取、写入或迁移真实 V1 用户数据；未启动 Laya、未调用模型或平台。宿主自检仍报告 AstrBot `audioop` 弃用、可选 `mijiaAPI` 缺失及测试期间 SQLite 慢操作提示，相关用例均通过。
+
+2.1.34（核心回复提示词编排与缓存前缀稳定）：固定感知与角色体验规则每轮保留在 system 前缀；人格、表达偏好和角色档案作为稳定提示，时间、状态、关系、记忆、Provider 路由及参与提示作为本轮临时 user context。归档包哈希/CRC、1512 个 Python 文件语法、单一注册与公开页合同检查通过；解包包内核心感知、媒体提示、角色状态和原生请求缓存定向测试 18 项通过。包位于 `C:/Users/99505/.astrbot/data/release-packages/prompt-cache-prefix-2.1.34-20261016/astrbot_plugin_private_companion_v2-2.1.34.zip`，SHA-256 见同目录 `SHA256SUMS.txt`。未调用真实模型或平台，未启动 Laya，未运行全量套件或宿主生命周期检查。
+
+2.1.33（群聊角色状态注入）：开启状态模拟时，普通群聊回复加入当前角色状态投影；仅在当前群聊 `conversation.reply` 授权有效、受众匹配且状态开关开启时读取，关闭时不注入。成员私聊来源正文不会进入群聊模型材料。AstrBot 自带 Python 下，最终包的群聊/私聊 Provider 组装、授权边界及状态快照定向测试 16 项通过；归档文件哈希/清单/语法与唯一公开页合同检查通过（2235 文件、1512 个 Python 文件）。SHA-256 见同目录 `SHA256SUMS.txt`；包位于 `C:/Users/99505/.astrbot/data/release-packages/role-state-injection-group-2.1.33-20261016/astrbot_plugin_private_companion_v2-2.1.33.zip`。未调用真实模型或平台，也未启动 Laya；未运行全量套件。
+
+2.1.32（成员配置保存结果恢复）：成员配置请求等待 60 秒后若仍无回执，页面使用同一操作编号自动重放一次；后端幂等回执可确认已保存或继续执行。自动恢复仍未确认时保留原草稿和请求，服务端确定拒绝则恢复编辑；操作回执暂不可恢复时不清除待确认状态。成员页源码 39 项、解包包内成员页与桥接 42 项通过；AstrBot 自带 Python 下成员 API 24 项通过。解包哈希/语法、73 项迁移验收及隔离宿主启停和 4 条路由注销通过，模型及平台调用均为 0。候选包位于 `C:/Users/99505/.astrbot/release-staging/member-save-recovery-20261016/astrbot_plugin_private_companion_v2-2.1.32.zip`，SHA-256 见同目录 `SHA256SUMS.txt`；本轮未运行全量测试或重载在线插件。
+
+2.1.31（主动联系额度拆分与诊断可见性）：把 24 小时模型判断次数与投递额度分开统计；模型完成后选择 skip 仍计入判断数但不占投递额度，失败、过期、取消和死信不计，处理中及未知结果临时预留；Token、费用和延迟单独取模型用量账本。提示词仅把同一具体事项、事实或未解决邀约视作重复，不因宽泛主题相同而跳过。主动测试结果分别展示本轮模型/分段投递阶段数据及本会话、关系级滚动 24 小时使用量。新包位于 `C:/Users/99505/.astrbot/release-staging/codex-proactive-optimization-20261016/astrbot_plugin_private_companion_v2-2.1.31.zip`，包哈希见同目录 `release-manifest.json` 与 `SHA256SUMS.txt`。解包包哈希/CRC/语法、唯一公开页、73 项迁移验收和隔离宿主启停/4 条路由注销通过；解包主动联系、提示词、宿主 API 定向测试 113 项通过，联系页/配置页合同 150 项通过，模型和平台调用均为 0。未向 QQ 发送消息，也未重载 AstrBot。验收目录：`C:/Users/99505/.astrbot/release-staging/codex-proactive-optimization-20261016-verified/astrbot_plugin_private_companion_v2`。现役安装配置中的关系级模型判断上限仍为显式保存的 6 次，本次没有改写用户数据；skip 不再占投递额度，但仍有模型判断成本。
+
+2.1.31（回复提示词风格档位）：在「回复表达与投递 → 说话方式」增加「自由、引导、约束」选择，默认自由。自由模式不追加通用表达要求，仍保留人格与用户明确填写的表达偏好；引导模式只加简短方向；约束模式使用详细提示，并可用自定义正文覆盖。设置按角色共享默认与当前窗口覆盖，作用于 AstrBot 私聊/群聊核心回复及共用回复策略的插件路径；事实、身份、权限、工具调用和输出协议继续由对应逻辑负责。候选包位于 `C:/Users/99505/.astrbot/release-candidates/prompt-style-mode-2.1.31-20261016/astrbot_plugin_private_companion_v2-2.1.31.zip`，SHA-256 见同目录 `SHA256SUMS.txt`。解包包 2233 项内容哈希/1510 个 Python 文件语法及唯一公开页检查通过；AstrBot 自带 Python 下回复页 34 项、提示词/核心注入/版本基线 34 项、迁移验收 73 项通过；宿主启动、停机及 4 条路由注销通过，模型与平台调用为 0。未运行 515 项全量套件。验收目录：`C:/Users/99505/.astrbot/validation/prompt-style-mode-2.1.31-20261016-r3/astrbot_plugin_private_companion_v2`。
+
+2.1.30（全量提示词打磨）：统一梳理对话、主动联系、媒体、群聊、直播、游戏、记忆、日记与角色工具提示，减少重复和过时约束；明确导入的称呼指导、自我复盘和表达参考属于任务资料，不得覆盖当前任务、身份或权限；补齐群聊称呼指导注入，并减少机械复述、总结和重复措辞。原有输出协议、事实边界、身份授权及缓存约束保留。最终候选包位于 `C:/Users/99505/.astrbot/release-candidates/prompt-polish-2.1.30-final2-20261016/astrbot_plugin_private_companion_v2-2.1.30.zip`，SHA-256：`aae478b8e1145917129f2c630f0cdc090b9de1ff8e362396b0e62d26a43d2cda`。包内 360 项定向回归、73 项迁移验收、哈希/语法检查及 AstrBot 宿主启动、停机和 4 条路由注销均通过；本轮模型与平台调用为 0。515 模块全量套件曾运行约 48 分钟，因 SQLite 初始化耗时中断，未得到全量结果，不计为通过。解包验收目录：`C:/Users/99505/.astrbot/validation/prompt-polish-2.1.30-final2-20261016/astrbot_plugin_private_companion_v2`；定向测试日志：`C:/Users/99505/.astrbot/temp/prompt-polish-final2-2.1.30-20261016-unittest.log`。
+
 ## 当前正式口径（2026-10-15）
+
+2.1.29（群聊行为学习与模仿）：通过主回复链学习群内真实互动、准备定向原生 @ 并评估对象实际反馈，增加「学习与成长 → 行为模仿」及角色默认设置。数据按角色、账号与群隔离，不依赖成员原生会话窗口；未被点名时仍由模型先选择参与。当前消息驱动，不新增无人发言时的定时广播。交付与验证证据保存至 `D:/codex/artifacts/companion-v2-behavior-20261015`，实现和验收边界见 `GROUP_BEHAVIOR_20261015.md`。
+
+2.1.28（回复趋势图与模型任务中文名称）：每日时长图适配卡片高度与窄屏，使用主题实色、条纹区分核心和历史测量，提供键盘可访问的每日读数。模型页各视图统一覆盖已注册任务并显示中文名称。交付包、解包定向回归及页面检查证据保存在 `D:/codex/artifacts/companion-v2-ui-polish-20261015`；范围与测量边界见 `REPLY_TREND_MODEL_LABELS_20261015.md`，最终结果以该目录验收记录为准。
+
+2.1.27（原生能力缓存前缀修复）：游戏、直播和现实触及的当轮事实使用真实 SDK 临时消息，固定表演指令幂等更新；趋势图不再将缓存回执未知归为未命中。真实链路抽查与验证边界见 `NATIVE_CACHE_PREFIX_ACCEPTANCE_20261015.md`；本版交付清单、解包验收、定向回归和正式重载结果统一保存在 `D:/codex/artifacts/companion-v2-cache-prefix-20261015`，以该目录最终记录为准。
+
+2.1.26（AstrBot 全部会话 Token）：治理与维护接入宿主核心回复持久化统计，历史累计、逐日、Provider 和最近回复不再显示固定「未接入」。管理员只读查询与 V2 角色预算分开，未知用量、缓存命中率和费用不推断。正式数据只读对照、解包包内定向测试与宿主启停结果位于 `D:/codex/artifacts/companion-v2-host-token-20261015`；接线边界见 `ASTRBOT_GLOBAL_TOKEN_USAGE_20261015.md`，最终包哈希以该目录交付清单为准。
 
 2.1.23（集成主链媒体生成修复）：区分始终语音、应请求语音与语境选择，在请求插件完成后的原生 Agent 消息中落实本轮呈现；兼容 V1 语音标签，模型漏写表情意图时使用完整可见回复进行图库检索。当前 Embedding 接口明确限制每批 10 条，已支持自适应拆批；复制库验证当前角色 119 张表情建立索引，并返回哈希一致的 GIF 原件。视觉接口实测超时，沿用已有降级选图并记录审核不可用，不计为审核通过。真实语音合成、最终包内回归、宿主启停及运行重载结果统一保存在 `D:/codex/artifacts/companion-v2-media-authoring-20261015`；方法与边界见 `CORE_REPLY_MEDIA_AUTHORING_ACCEPTANCE_20261015.md`，包哈希以该目录的最终构建清单为准。
 

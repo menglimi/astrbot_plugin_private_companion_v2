@@ -36,10 +36,14 @@ class HostOptionsSchemaTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))
         voice = schema["voice_reply"]["items"]
+        poke = schema["poke"]["items"]
 
         self.assertTrue(all(voice[name]["invisible"] for name in (
             "enabled", "probability", "private_probability", "group_probability")))
         self.assertTrue(schema["poke"]["invisible"])
+        self.assertEqual(poke["back_times"]["default"], 1)
+        self.assertFalse(poke["model_reply_enabled"]["default"])
+        self.assertEqual(poke["model_reply_probability"]["default"], 0.3)
         self.assertTrue(schema["multi_host"]["items"]["group_delivery_mode"]["invisible"])
         self.assertTrue(schema["service_balance"]["invisible"])
         self.assertTrue(schema["service_balance"]["items"]["api_key"]["invisible"])
@@ -135,13 +139,17 @@ class HostOptionsWebAPITests(unittest.IsolatedAsyncioTestCase):
         current = await self.snapshot()
         response = await self.call("poke", {
             "edit_token": current["edit_tokens"]["poke"],
-            "changes": {"enabled": True, "trigger_probability": 0.4, "replies": ["我在"]},
+            "changes": {"enabled": True, "trigger_probability": 0.4, "replies": ["我在"], "back_times": 3,
+                        "model_reply_enabled": True, "model_reply_probability": 0.7},
         })
 
         self.assertEqual(response["status"], "ok", response)
         self.assertEqual(response["data"]["apply_mode"], "immediate")
         self.assertTrue(self.controller.poke_policy.enabled)
         self.assertEqual(self.controller.poke_policy.trigger_probability, 0.4)
+        self.assertEqual(self.controller.poke_policy.back_times, 3)
+        self.assertTrue(self.controller.poke_policy.model_reply_enabled)
+        self.assertEqual(self.controller.poke_policy.model_reply_probability, 0.7)
         self.assertEqual(self.controller.poke_policy.replies, ("我在",))
         self.assertEqual(self.refreshed, 0)
 
@@ -265,9 +273,12 @@ class HostOptionsWebAPITests(unittest.IsolatedAsyncioTestCase):
                                            "changes": {"probability": 0.5}}, query={"probability": "1"})
         invalid = await self.call("poke", {"edit_token": current["edit_tokens"]["poke"],
                                             "changes": {"trigger_probability": 1.5}})
+        invalid_back_count = await self.call("poke", {"edit_token": current["edit_tokens"]["poke"],
+                                                        "changes": {"back_times": 6}})
 
         self.assertEqual(query["message"], "host_options_request_invalid")
         self.assertEqual(invalid["message"], "host_options_invalid")
+        self.assertEqual(invalid_back_count["message"], "host_options_invalid")
         self.assertEqual(self.saved, [])
 
     async def test_forward_intake_limits_persist_and_apply_to_the_live_bridge(self):

@@ -253,7 +253,8 @@ def _thought_origin(data):
     return "主动分享"
 
 
-def _contact_history(schedule, context, *, interaction=None, observed_at=None):
+def _contact_history(schedule, context, *, interaction=None, observed_at=None,
+                    created_at_start=None, created_at_end=None):
     runtime = getattr(schedule, "runtime", None)
     snapshot = getattr(runtime, "read_only_snapshot", None)
     origin_key = getattr(context, "key", None)
@@ -262,12 +263,23 @@ def _contact_history(schedule, context, *, interaction=None, observed_at=None):
     if not callable(snapshot):
         return [], 0
 
+    conditions = ["origin_key = ?", "(body != '' OR (json_valid(record_json) AND "
+        "json_extract(record_json, '$.decision') = 'skip'))"]
+    parameters = [origin_key]
+    if created_at_start is not None:
+        conditions.append("created_at >= ?")
+        parameters.append(created_at_start.isoformat(timespec="seconds"))
+    if created_at_end is not None:
+        conditions.append("created_at < ?")
+        parameters.append(created_at_end.isoformat(timespec="seconds"))
+    where = " AND ".join(conditions)
+    limit = "" if created_at_start is not None and created_at_end is not None else " LIMIT 128"
     with snapshot() as connection:
-        total = connection.execute("""SELECT COUNT(*) FROM proactive_contacts
-            WHERE origin_key = ? AND body != ''""", (origin_key,)).fetchone()[0]
-        contacts = connection.execute("""SELECT contact_id, record_json, body, payload_hash, created_at
-            FROM proactive_contacts WHERE origin_key = ? AND body != ''
-            ORDER BY created_at DESC, contact_id DESC LIMIT 128""", (origin_key,)).fetchall()
+        total = connection.execute(f"SELECT COUNT(*) FROM proactive_contacts WHERE {where}",
+                                   parameters).fetchone()[0]
+        contacts = connection.execute(f"""SELECT contact_id, record_json, body, payload_hash, created_at
+            FROM proactive_contacts WHERE {where}
+            ORDER BY created_at DESC, contact_id DESC{limit}""", parameters).fetchall()
         if not contacts:
             return [], total
         contact_ids = tuple(row["contact_id"] for row in contacts)
@@ -297,8 +309,12 @@ def _contact_history(schedule, context, *, interaction=None, observed_at=None):
             continue
         if not isinstance(data, dict):
             continue
+        if not row["body"] and data.get("decision") != "skip":
+            continue
         parts = data.get("parts")
-        if not isinstance(parts, list) or not parts:
+        if data.get("decision") == "skip" and not row["body"]:
+            parts = []
+        elif not isinstance(parts, list) or not parts:
             parts = [{"text": row["body"], "payload_hash": row["payload_hash"]}]
         if len(parts) > 64:
             continue
@@ -330,7 +346,7 @@ def _contact_history(schedule, context, *, interaction=None, observed_at=None):
                             "text": _text(part.get("text"), 360)})
 
         delivered_count = len(records)
-        if delivered_count == len(parts):
+        if parts and delivered_count == len(parts):
             status = "delivered"
         elif delivered_count:
             status = "partial"
@@ -358,17 +374,22 @@ def _contact_history(schedule, context, *, interaction=None, observed_at=None):
             "thought_origin": _thought_origin(data)}
         if delivered_count == len(parts) and used_at is not None and observed_at is not None:
             usage["followup_observation"] = _response_observation(interaction, used_at, observed_at)
+        skip_reason = data.get("skip_reason")
+        model_skip_reason = data.get("model_skip_reason")
         items.append({"id": digest([CONTACT_OWNER, row["contact_id"]])[:20],
             "category": "未发送的念头" if status == "not_sent" else "主动消息",
             "purpose": _text(purpose_label, 80),
             "title": summary or "主动联系记录", "detail": _text(row["body"], 2000),
+            "skip_reason": _text(skip_reason, 48) if isinstance(skip_reason, str) else "",
+            "model_skip_reason": _text(model_skip_reason, 48) if isinstance(model_skip_reason, str) else "",
             "note": "", "source": "主动念头记录" if status == "not_sent" else "主动消息记录",
             "captured_at": created_at,
             "expires_at": None, "usage": usage})
     return items, total
 
 
-def read_proactive_contact_traces(schedule, contexts, *, observed_at):
+def read_proactive_contact_traces(schedule, contexts, *, observed_at,
+                                  created_at_start=None, created_at_end=None):
     """Project pre-dispatch contact drafts and their original delivery receipts."""
     items, total, contexts_read = [], 0, 0
     history = getattr(getattr(schedule, "contacts", None), "history", None)
@@ -382,17 +403,21 @@ def read_proactive_contact_traces(schedule, contexts, *, observed_at):
                 interaction = reader(context, observed_at, action=CONTACT_OWNER)
             except (TaskError, KeyError, TypeError, ValueError, UnicodeError, OSError, AttributeError):
                 interaction = None
-        rows, count = _contact_history(schedule, context, interaction=interaction, observed_at=observed_at)
+        rows, count = _contact_history(schedule, context, interaction=interaction, observed_at=observed_at,
+            created_at_start=created_at_start, created_at_end=created_at_end)
         contexts_read += 1
         total += count
         for item in rows:
             item["scope"] = "window"
+            item["trace_window_id"] = digest([getattr(context, "key", "")])[:24]
             item["trace_target"] = str(target_label or "私聊目标")[:120]
             item["trace_role"] = str(role_label or "角色")[:80]
             items.append(item)
     items.sort(key=lambda item: (item["captured_at"], item["id"]), reverse=True)
-    return {"observed_at": observed_at.isoformat(), "items": items[:128],
-            "count": len(items[:128]), "total_count": total, "contexts_read": contexts_read}
+    bounded = created_at_start is not None and created_at_end is not None
+    projected = items if bounded else items[:128]
+    return {"observed_at": observed_at.isoformat(), "items": projected,
+            "count": len(projected), "total_count": total, "contexts_read": contexts_read}
 
 
 def read_material_pool(schedule, context, *, observed_at, settings):

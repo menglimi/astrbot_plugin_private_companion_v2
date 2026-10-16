@@ -108,7 +108,7 @@ def source_current(runtime, reference):
 def _clear_group_observations(connection, window):
     from companion_v2.identity_policy.personas import ConversationRoute
     from companion_v2.memory.group.access import group_owner_key
-    from .group_observation import GroupPresenceStore, MOOD_KIND, MOMENTS_KIND, JOKE_KIND
+    from .group_observation import GroupPresenceStore, MOOD_KIND, MOMENTS_KIND, JOKE_KIND, TOPIC_KIND
 
     where, values = window.sql("context_json", "$.audience.scope")
     roles = {row[0] for row in connection.execute("""SELECT DISTINCT
@@ -132,7 +132,7 @@ def _clear_group_observations(connection, window):
         role = SubjectRef(window.installation_id, SubjectKind.BOT, role_id)
         owner = group_owner_key(window.installation_id, window.platform, window.bot_id, window.account_id,
                                 window.native_scope_id, window.session_id, role)
-        for kind in (MOOD_KIND, MOMENTS_KIND, JOKE_KIND):
+        for kind in (MOOD_KIND, MOMENTS_KIND, JOKE_KIND, TOPIC_KIND):
             connection.execute("DELETE FROM runtime_metadata WHERE key = ?", (GroupPresenceStore.key(owner, kind),))
 
 

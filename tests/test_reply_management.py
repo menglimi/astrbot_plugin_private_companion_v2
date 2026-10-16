@@ -343,11 +343,13 @@ class ReplyManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
 
         window_manager = ReplyManagement(self.app, self.context)
         status = window_manager.status(self.core).unwrap()
+        window_override = window_manager.configure(self.core, self.request(status,
+            {"group_wakeup_enabled": True}, "window-wakeup-before-reset")).unwrap()["status"]
         operation_id = "reply-settings:role-change-and-reset"
         receipt = self.app.configuration.patch(self.core, target=window_manager.target, group_id=GROUP,
             operation=OperationRef(operation_id, OWNER, window_manager.target.authorization_scope,
                 VersionRef(operation_id, 1), operation_id),
-            expected_edit_token=status["edit_token"],
+            expected_edit_token=window_override["edit_token"],
             changes={GROUP + ".group_wakeup_direct_words": '["星星"]'},
             reset_to_inherit=(GROUP + ".group_wakeup_enabled",), observed_at=self.app.now()).unwrap()
 
@@ -410,7 +412,7 @@ class ReplyManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tuple(envelope.text for envelope in self.sent[sent_before:]), preview["parts"])
         captured = json.loads(self.app.messages.batch(batch)["contributions_json"])["reply_settings"]["settings"]
         self.assertEqual(captured["content_replacements"], changes["content_replacements"])
-        self.assertIn("正文呈现偏好", self.called[-1].original.instruction)
+        self.assertNotIn("正文呈现偏好", self.called[-1].original.instruction)
 
     async def test_invalid_preview_is_rejected_without_model_or_storage_changes(self):
         status = self.manager.status(self.core).unwrap()
@@ -450,9 +452,13 @@ class ReplyManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         status = self.manager.status(self.core).unwrap()
         self.assertFalse(status["settings"]["voice_enabled"])
         change = {"voice_enabled": True, "voice_trigger_mode": "request", "voice_language": "en",
-                  "voice_en_provider_id": "english-tts", "voice_probability": 0.4}
+                  "voice_en_provider_id": "english-tts", "voice_probability": 0.4,
+                  "voice_primary_mention_keywords": "专属词\n只对我",
+                  "voice_primary_mention_probability": 0.95,
+                  "voice_primary_mention_prompt": "语气更亲近一些。"}
         saved = self.manager.configure(self.core, self.request(status, change, "voice-enable")).unwrap()
         self.assertEqual(saved["status"]["settings"]["voice_en_provider_id"], "english-tts")
+        self.assertEqual({key: saved["status"]["settings"][key] for key in change}, change)
         self.assertTrue(self.manager.configure(self.core, self.request(status, change, "voice-enable")).unwrap()["replayed"])
         batch = self.host.receive(self.event("voice-settings-next")).unwrap()
         self.advance(self.app)
@@ -460,10 +466,16 @@ class ReplyManagementTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         captured = json.loads(self.app.messages.batch(batch)["contributions_json"])["reply_settings"]
         self.assertEqual(captured["settings"]["voice_probability"], 0.4)
         self.assertEqual(captured["settings"]["voice_language"], "en")
+        self.assertEqual(captured["settings"]["voice_primary_mention_keywords"], "专属词\n只对我")
+        self.assertEqual(captured["settings"]["voice_primary_mention_probability"], 0.95)
+        self.assertEqual(captured["settings"]["voice_primary_mention_prompt"], "语气更亲近一些。")
         current = saved["status"]
         self.assertEqual(self.manager.configure(self.core, self.request(current,
             {"voice_timeout_seconds": 0}, "invalid-voice")).failure.code, "invalid_configuration_value")
         self.assertEqual(self.manager.status(self.core).unwrap()["edit_token"], current["edit_token"])
+        self.assertEqual(self.manager.configure(self.core, self.request(current,
+            {"voice_primary_mention_probability": 1.01}, "invalid-primary-voice-probability")).failure.code,
+            "invalid_probability")
 
     async def test_explicit_turn_language_uses_matching_tts_provider_without_changing_saved_language(self):
         status = self.manager.status(self.core).unwrap()

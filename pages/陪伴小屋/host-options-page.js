@@ -121,6 +121,18 @@ window.CompanionHostOptionsPage = (() => {
           <small>平台支持时，决定回复后是否再戳回去。</small></div>
           <label class="host-options-percent"><input type="number" name="back_probability" min="0" max="100" step="1"
             inputmode="numeric" data-wb-field="back_probability" value="${percent(value.back_probability)}"><span>%</span></label></div>
+        <div class="host-options-row"><div class="host-options-copy"><strong>连续回戳次数</strong>
+          <small>命中回戳后连续戳回对方的次数。</small></div>
+          <input class="host-options-number" type="number" name="back_times" min="1" max="5" step="1"
+            inputmode="numeric" data-wb-field="back_times" value="${value.back_times}"></div>
+        <div class="host-options-row"><div class="host-options-copy"><strong>模型即兴回复</strong>
+          <small>开启后由戳一戳专用模型生成短回复，生成失败时使用预设短句。</small></div>
+          <label class="host-options-switch"><input type="checkbox" name="model_reply_enabled" data-wb-field="model_reply_enabled" ${value.model_reply_enabled ? "checked" : ""}>
+            <span>${value.model_reply_enabled ? "已开启" : "已关闭"}</span></label></div>
+        <div class="host-options-row"><div class="host-options-copy"><strong>模型回复概率</strong>
+          <small>在已决定回应的戳一戳中，命中后使用模型生成。</small></div>
+          <label class="host-options-percent"><input type="number" name="model_reply_probability" min="0" max="100" step="1"
+            inputmode="numeric" data-wb-field="model_reply_probability" value="${percent(value.model_reply_probability)}"><span>%</span></label></div>
         <label class="host-options-replies"><span><strong>可选回复</strong><small>每行一句，1–20 句；每句最多 120 字。</small></span>
           <textarea name="replies" rows="4" maxlength="2500" data-wb-field="replies">${replies}</textarea></label>
         <footer class="host-options-footer">${messageMarkup("poke")}
@@ -217,9 +229,15 @@ window.CompanionHostOptionsPage = (() => {
         const replies = String(formElement(form, "replies")?.value || "").split(/\r?\n/).map(item => item.trim()).filter(Boolean);
         if (replies.length < 1 || replies.length > 20 || replies.some(item => item.length > 120))
           throw new Error("请填写 1 到 20 句回复，每句不超过 120 字。");
+        const backTimesRaw = String(formElement(form, "back_times")?.value ?? "");
+        const backTimes = Number(backTimesRaw);
+        if (!Number.isInteger(backTimes) || backTimes < 1 || backTimes > 5)
+          throw new Error("连续回戳次数请输入 1 到 5 之间的整数。");
         changes = {enabled: !!formElement(form, "enabled")?.checked,
           trigger_probability: fraction(form, "trigger_probability"),
-          back_probability: fraction(form, "back_probability"), replies};
+          back_probability: fraction(form, "back_probability"), back_times: backTimes,
+          model_reply_enabled: !!formElement(form, "model_reply_enabled")?.checked,
+          model_reply_probability: fraction(form, "model_reply_probability"), replies};
       } else {
         changes = {};
         const labels = {max_forwards: "每条消息中的转发数", max_nodes: "每条转发的节点数", max_depth: "嵌套深度"};
@@ -317,6 +335,9 @@ window.CompanionHostOptionsPage = (() => {
       ["enabled", "回应收到的戳一戳", "收到戳一戳", ["戳一戳", "戳戳"]],
       ["trigger_probability", "回复概率", "收到戳一戳", ["回应概率", "戳一戳"]],
       ["back_probability", "回戳概率", "收到戳一戳", ["戳一戳"]],
+      ["back_times", "连续回戳次数", "收到戳一戳", ["连戳", "回戳次数"]],
+      ["model_reply_enabled", "模型即兴回复", "收到戳一戳", ["模型", "即兴回复"]],
+      ["model_reply_probability", "模型回复概率", "收到戳一戳", ["模型", "即兴回复"]],
       ["replies", "可选回复", "收到戳一戳", ["戳戳文案", "预设短句"]],
     ].map(([field, label, sectionTitle, aliases]) => ({group: "poke", groupTitle: "平台动作",
       field, label, help: "", section: "received", sectionTitle, sectionCount: 1, aliases}));

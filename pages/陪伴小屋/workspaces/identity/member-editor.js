@@ -1,6 +1,8 @@
 "use strict";
 (() => {
   const ROOT = "acquaintance";
+  const MEMBER_SETTINGS_TIMEOUT_MS = 60000;
+  const AMBIGUOUS_SAVE_CODES = new Set(["configuration_operation_incomplete"]);
   const keyOf = person => JSON.stringify([person.subject_id, person.platform, person.bot_id, person.account_id, person.role_id]);
   const routeKey = person => JSON.stringify([person.platform, person.bot_id, person.account_id, person.role_id]);
   const routeOf = person => Object.fromEntries(["platform", "bot_id", "account_id", "role_id"].map(key => [key, person[key]]));
@@ -141,7 +143,8 @@
     acquaintance_person_unknown: "此成员还没有熟人记录，暂时不能设置面板备注。",
     person_nickname_revision_conflict: "成员记录已有更新，请重新读取后保存备注。",
     invalid_configuration_value: "请核对字段长度和数值范围。", relationship_profile_configuration_invalid: "请核对资料长度，总字数不超过 3000。",
-    reply_configuration_invalid: "请核对回复设置的取值范围。"};
+    reply_configuration_invalid: "请核对回复设置的取值范围。",
+    configuration_operation_incomplete: "服务端仍在恢复原保存回执；可安全重试同一操作，不会重复写入。"};
   const element = (tag, text, className) => {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -182,17 +185,19 @@
     const envelope = ["ok", "error"].includes(response?.status) && response?.data !== undefined ? response
       : ["ok", "error"].includes(response?.data?.status) && response?.data?.data !== undefined ? response.data : null;
     if (envelope?.status === "error") throw Object.assign(new Error(envelope.reason || envelope.message),
-      {code: envelope.data?.code || envelope.message || envelope.error?.code});
+      {code: envelope.data?.code || envelope.message || envelope.error?.code, confirmedRejection: true});
     const data = envelope ? envelope.data : response;
     if (!data || typeof data !== "object") throw new Error("invalid_response");
     return data;
   }
-  function errorText(error) { return failureLabels[error?.code] || "操作未完成，草稿已保留，请重新读取后重试。"; }
+  function errorText(error, fallback = "操作未完成，请核对当前状态后重试。") {
+    return failureLabels[error?.code] || fallback;
+  }
   function stateFor(person) {
     const key = keyOf(person);
     if (!states.has(key)) states.set(key, {pane: "access", drafts: {}, sections: {}, authorization: null, resetToRole: new Set(),
       contactResetToInherit: new Set(),
-      settingsError: "", authError: "", loading: false, loaded: false, busy: false, dirty: new Set(),
+      settingsError: "", authError: "", loading: false, loaded: false, busy: false, reconciling: false, dirty: new Set(),
       nickname: person.admin_nickname || "", tier: person.identity_tier || "standard", message: "", failed: false});
     return states.get(key);
   }
@@ -218,8 +223,8 @@
     state.settingsError = state.authError = "";
     redraw(state);
     const results = await Promise.allSettled([
-      services.bridge.apiGet(ROOT + "/authorization", parameters(person)),
-      services.bridge.apiGet(ROOT + "/settings", parameters(person)),
+      services.bridge.apiGet(ROOT + "/authorization", parameters(person), {timeoutMs: MEMBER_SETTINGS_TIMEOUT_MS}),
+      services.bridge.apiGet(ROOT + "/settings", parameters(person), {timeoutMs: MEMBER_SETTINGS_TIMEOUT_MS}),
     ]);
     const [auth, settings] = results;
     try {
@@ -227,11 +232,18 @@
       state.authorization = unwrap(auth.value);
       state.tier = state.authorization.identity_tier || "standard";
       services.onChanged?.(person, {identity_tier: state.tier});
-    } catch (error) { state.authError = errorText(error); state.authorization = null; }
+    } catch (error) {
+      state.authError = errorText(error, "权限读取失败，请重新读取以核对状态。");
+      state.authorization = null;
+    }
     try {
       if (settings.status === "rejected") throw settings.reason;
       adoptSettings(state, unwrap(settings.value), preserve);
-    } catch (error) { state.settingsError = errorText(error); }
+    } catch (error) {
+      const draftNote = state.dirty.size ? "未保存草稿仍保留；" : "";
+      state.settingsError = errorText(error,
+        `成员配置读取失败。${draftNote}当前无法确认已保存值，请重新读取。`);
+    }
     state.loading = false;
     redraw(state);
   }
@@ -310,6 +322,7 @@
     "content_cleanup_mode", "content_replacement_enabled", "reply_quote_enabled", "voice_enabled",
     "enable_private_image_self_recognition", "video_understanding_enabled", "file_understanding_enabled"]);
   function updateDraft(state, section, field, value) {
+    if (state.pendingSave) return;
     const focusedName = section === "reply" && replyVisibilityFields.has(field)
       ? document.activeElement?.name : "";
     state.drafts[section] ||= {};
@@ -351,7 +364,7 @@
     const input = element(rows ? "textarea" : options ? "select" : "input");
     input.name = name;
     input.setAttribute("aria-label", label);
-    input.disabled = state.busy || state.loading || !state.sections[section] || !!state.settingsError;
+    input.disabled = state.busy || state.loading || !!state.settingsError || !!state.pendingSave || !state.sections[section];
     if (boolean) { input.type = "checkbox"; input.checked = value; input.setAttribute("role", "switch"); }
     else if (options) {
       for (const [optionValue, text] of Object.entries(options)) {
@@ -381,9 +394,11 @@
   }
   function retry(state, person, message) {
     const row = element("div", undefined, "member-load-error");
-    const button = element("button", "重新读取", "secondary");
+    const uncertainSave = Boolean(state.pendingSave);
+    const button = element("button", uncertainSave ? "核对并重试保存" : "重新读取", "secondary");
     button.type = "button"; button.disabled = state.loading || state.busy;
-    button.addEventListener("click", () => load(person));
+    button.addEventListener("click", () => uncertainSave
+      ? verifyAndRetrySave(person, state) : load(person));
     row.append(element("p", message), button);
     return row;
   }
@@ -477,8 +492,9 @@
     if (!provenance?.explicit) return element("span", undefined, "member-reset-placeholder");
     const button = element("button", "恢复角色默认", "member-reset-field");
     button.type = "button";
-    button.disabled = state.busy || state.loading || !!state.settingsError;
+    button.disabled = state.busy || state.loading || !!state.settingsError || !!state.pendingSave;
     button.addEventListener("click", () => {
+      if (state.pendingSave) return;
       state.drafts[section][name] = state.sections[section].inherited_settings[name];
       state.resetToRole.add(name);
       state.dirty.add(section + "." + name);
@@ -708,7 +724,7 @@
       .filter(item => item.explicit || item.layer === "relationship").length;
     pane.append(overview("联系偏好", overrides ? `仅对这位用户生效 · ${overrides} 项单独设置` : "跟随全局设置", [
       ["主动计划", onOff(contact.enabled), contact.enabled ? "ok" : "muted"],
-      ["24 小时上限", contact.max_contacts_24h != null ? contact.max_contacts_24h + " 次" : "跟随全局"],
+      ["每日实际联系上限", contact.max_contacts_24h != null ? contact.max_contacts_24h + " 条" : "跟随全局"],
       ["最小间隔", contact.interval_seconds != null ? Math.round(contact.interval_seconds / 60) + " 分钟" : "跟随全局"],
     ]));
     pane.append(contactScheduleDiagnostic(state));
@@ -720,8 +736,8 @@
     switchesBlock.body.append(switches);
     const rhythmBlock = block("联系节奏与时段", "数值按这位成员单独生效");
     const grid = element("div", undefined, "member-fields");
-    for (const [name, label, suffix] of [["max_contacts_24h", "24 小时联系上限", "次"],
-      ["max_attempts_24h", "24 小时尝试上限", "次"], ["interval_seconds", "最小联系间隔", "秒"],
+    for (const [name, label, suffix] of [["max_contacts_24h", "每日实际联系上限", "条"],
+      ["interval_seconds", "最小联系间隔", "秒"],
       ["idle_seconds", "空闲后联系", "秒"], ["unanswered_slowdown_start", "开始降频的未回应次数", "次"],
       ["unanswered_pause_after", "暂停联系的未回应次数（0 表示不暂停）", "次"],
       ["unanswered_max_interval_multiplier", "降频后的最大间隔倍数", "倍"],
@@ -777,9 +793,10 @@
     if (explicit) {
       const reset = element("button", pendingReset ? "取消恢复" : "恢复继承", "member-contact-reset");
       reset.type = "button";
-      reset.disabled = state.busy || state.loading || !!state.settingsError;
+      reset.disabled = state.busy || state.loading || !!state.settingsError || !!state.pendingSave;
       reset.setAttribute("aria-label", pendingReset ? `取消恢复${label}的继承值` : `恢复${label}的继承值`);
       reset.addEventListener("click", () => {
+        if (state.pendingSave) return;
         const token = "contact." + name;
         if (pendingReset) {
           state.contactResetToInherit.delete(name);
@@ -824,8 +841,7 @@
     candidate_queued: ["候选已进入后台执行", "若没有发出，请查看任务执行和投递回执诊断。"],
     contact_model_unregistered: ["主动联系模型任务尚未登记", "检查模型路由配置并重启插件。"],
     background_capacity_exhausted: ["后台执行槽位暂时占满", "等待现有后台任务结束后会继续评估。"],
-    contact_attempt_budget: ["此私聊的主动尝试额度已用完", "等待滚动 24 小时额度释放，或调整本窗口的主动尝试上限。"],
-    contact_relationship_attempt_budget: ["这段关系的主动尝试额度已用完", "等待关系级滚动额度释放，或检查角色的关系级联系上限。"],
+    contact_attempt_budget: ["旧版本的模型调用次数上限已触发", "当前版本已取消该独立上限，请查看窗口每日实际联系额度。"],
     delivery_history_unavailable: ["当前私聊历史无法完成核验", "检查 AstrBot 会话历史是否可读取后再重新评估。"],
     contact_conversation_changed: ["原私聊已变化，旧候选被安全取消", "等待当前私聊完成后重新评估。"],
     scheduler_heartbeat_missing: ["尚未收到主动调度心跳", "确认插件已启动且主动联系模型已登记。"],
@@ -928,14 +944,26 @@
   }
   function savebar(state) {
     const bar = element("footer", undefined, "member-savebar");
-    const text = state.busy ? "正在保存…" : state.dirty.size ? `${state.dirty.size} 项未保存` : "资料已同步";
+    const text = state.busy ? state.reconciling ? "正在核对保存结果…" : "正在保存…" : state.pendingSave && state.loading
+      ? "正在核对保存状态…" : state.pendingSave ? "保存结果待核对，草稿已锁定"
+      : state.settingsError
+      ? state.dirty.size ? `${state.dirty.size} 项草稿待核对` : "配置读取失败，未确认同步"
+      : state.dirty.size ? `${state.dirty.size} 项未保存` : "资料已同步";
     bar.append(element("span", text, "member-draft-state"));
     const cancel = element("button", "撤销修改", "secondary"); cancel.type = "button";
-    cancel.disabled = !state.dirty.size || state.busy;
-    cancel.addEventListener("click", () => {adoptSettings(state, {sections: state.sections}, false); state.pendingSave = null; redraw(state);});
-    const save = element("button", state.busy ? "保存中" : state.pane === "reply" ? "保存回复设置" : "保存资料", "member-primary"); save.type = "button";
-    save.disabled = !state.dirty.size || state.busy || state.loading || !!state.settingsError;
-    save.addEventListener("click", () => saveSettings(activePerson(), state));
+    cancel.disabled = !state.dirty.size || state.busy || !!state.pendingSave;
+    cancel.addEventListener("click", () => {
+      if (state.pendingSave) return;
+      adoptSettings(state, {sections: state.sections}, false); state.pendingSave = null; redraw(state);
+    });
+    const save = element("button", state.pendingSave
+      ? state.busy || state.loading ? "正在核对…" : "核对并重试保存"
+      : state.busy ? "保存中" : state.pane === "reply" ? "保存回复设置" : "保存资料", "member-primary"); save.type = "button";
+    save.disabled = state.pendingSave
+      ? state.busy || state.loading
+      : !state.dirty.size || state.busy || state.loading || !!state.settingsError;
+    save.addEventListener("click", () => state.pendingSave
+      ? verifyAndRetrySave(activePerson(), state) : saveSettings(activePerson(), state));
     bar.append(cancel, save);
     return bar;
   }
@@ -954,9 +982,10 @@
     if (provenance.explicit) {
       const reset = element("button", state.resetToRole.has(name) ? "将随保存恢复角色默认" : "恢复角色默认", "member-reply-reset");
       reset.type = "button";
-      reset.disabled = state.busy || state.loading || !!state.settingsError;
+      reset.disabled = state.busy || state.loading || !!state.settingsError || !!state.pendingSave;
       reset.setAttribute("aria-label", `恢复${label}的角色默认值`);
       reset.addEventListener("click", () => {
+        if (state.pendingSave) return;
         state.drafts.reply[name] = inherited;
         state.resetToRole.add(name);
         state.dirty.add("reply." + name);
@@ -1067,7 +1096,7 @@
         selector.append(option);
       });
       selector.value = activeRoute() ? JSON.stringify(activeRoute()) : "";
-      selector.disabled = state.busy || state.loading;
+      selector.disabled = state.busy || state.loading || !!state.pendingSave;
       selector.addEventListener("change", event => {
         const value = event?.target?.value ?? selector.value;
         const next = routes.find(route => JSON.stringify(route) === value) || null;
@@ -1171,7 +1200,7 @@
       body.append(contactPane(state));
     }
     panel.append(body);
-    if (canConfigure && (state.pane === "contact" || state.pane === "reply"
+    if (canConfigure && (state.pendingSave || state.pane === "contact" || state.pane === "reply"
         || state.pane === "relationship" && !isCore
         || [...state.dirty].some(token => token.startsWith("person.") || token.startsWith("person_learning.")))) {
       panel.append(savebar(state));
@@ -1193,20 +1222,62 @@
         sections[section].reset_to_inherit.push(field);
       } else sections[section].changes[field] = state.drafts[section][field];
     }
-    const fingerprint = JSON.stringify(sections);
-    if (state.pendingSave?.fingerprint !== fingerprint) state.pendingSave = {fingerprint, key: operation()};
-    const services = current.services;
-    state.busy = true; redraw(state);
-    try {
-      const result = unwrap(await services.bridge.apiPost(ROOT + "/settings", {subject_id: person.subject_id,
-        route: routeOf(person), operation_key: state.pendingSave.key, sections}));
-      adoptSettings(state, result, false); state.pendingSave = null;
-      notify(state, state.pane === "reply" ? "私聊回复设置已保存。" : "成员资料已保存。");
-    } catch (error) {
-      notify(state, errorText(error), true);
-      if (error.code === "configuration_revision_conflict") {state.pendingSave = null; await load(person);}
+    const changesOnly = Object.fromEntries(Object.entries(sections).map(([name, section]) => [name,
+      {changes: section.changes, ...(section.reset_to_inherit ? {reset_to_inherit: section.reset_to_inherit} : {})}]));
+    const fingerprint = JSON.stringify({subject_id: person.subject_id, route: routeOf(person), sections: changesOnly});
+    if (state.pendingSave?.fingerprint !== fingerprint) {
+      state.pendingSave = {fingerprint, request: {
+        subject_id: person.subject_id, route: routeOf(person), operation_key: operation(),
+        sections: JSON.parse(JSON.stringify(sections)),
+      }};
     }
-    state.busy = false; redraw(state);
+    await transmitPendingSave(person, state);
+  }
+  async function transmitPendingSave(person, state) {
+    if (state.busy || !state.pendingSave) return;
+    const services = current.services;
+    state.busy = true;
+    let recoveryAttempted = state.pendingSave.autoRecoveryAttempted === true;
+    try {
+      while (true) {
+        state.reconciling = recoveryAttempted;
+        redraw(state);
+        try {
+          const result = unwrap(await services.bridge.apiPost(ROOT + "/settings", state.pendingSave.request,
+            {timeoutMs: MEMBER_SETTINGS_TIMEOUT_MS}));
+          adoptSettings(state, result, false); state.pendingSave = null;
+          notify(state, state.pane === "reply" ? "私聊回复设置已保存。" : "成员资料已保存。");
+          break;
+        } catch (error) {
+          const confirmedRejection = error.confirmedRejection || error.confirmed === true;
+          const ambiguous = !confirmedRejection || AMBIGUOUS_SAVE_CODES.has(error.code);
+          const canRecoverAutomatically = error.code === "bridge_timeout" || AMBIGUOUS_SAVE_CODES.has(error.code);
+          if (!ambiguous) {
+            state.pendingSave = null;
+            notify(state, errorText(error, "服务端已拒绝本次保存，草稿仍保留，可修改后重试。"), true);
+          } else if (!recoveryAttempted && canRecoverAutomatically) {
+            recoveryAttempted = true;
+            state.pendingSave.autoRecoveryAttempted = true;
+            state.reconciling = true;
+            notify(state, "保存回执未收到，正在用同一操作编号安全核对…", true);
+            continue;
+          } else notify(state, errorText(error,
+            "保存结果仍未确认，草稿已锁定。可继续核对并重试原操作。"), true);
+          if (error.code === "configuration_revision_conflict") {state.pendingSave = null; await load(person);}
+          break;
+        }
+      }
+    } finally {
+      state.busy = false;
+      state.reconciling = false;
+      redraw(state);
+    }
+  }
+  async function verifyAndRetrySave(person, state) {
+    if (state.busy || state.loading || !state.pendingSave) return;
+    await load(person);
+    if (state.settingsError || !state.pendingSave || !state.dirty.size) return;
+    await transmitPendingSave(person, state);
   }
   async function configureAuthorization(person, state, item, enabled) {
     if (state.busy) return;

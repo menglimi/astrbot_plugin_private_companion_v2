@@ -26,7 +26,7 @@ from .events import ActivityContactEvents
 from .greetings import GreetingContactEvents
 from .journal_events import JournalContactEvents
 from .meal_events import MealContactEvents
-from .rhythm import ContactRhythm
+from .rhythm import SLOT_WINDOW, ContactRhythm
 from .weather_events import WeatherContactEvents
 from .weather_change_events import WeatherChangeContactEvents
 from .official_alert_events import OfficialAlertContactEvents
@@ -360,7 +360,6 @@ class ContactSchedule:
             raise TaskError("delivery_history_unavailable", "automatic contact requires confirmed communication history")
         interaction = self.contacts.history.interaction(context, at, action=GROUP)
         unanswered = interaction["contacts_since_last_input"]
-        self.contacts.budget.attempts(context, preferences, at)
         self.contacts.budget.contacts(context, preferences, at)
         last_contact = self.rhythm.last_contact(context)
         # A burst continuation is timed from its own round, not from the ordinary
@@ -370,6 +369,12 @@ class ContactSchedule:
         burst = self.rhythm.burst_slot(context, preferences, at, interaction=interaction,
                                        last_contact=last_contact)
         base_interval = timedelta(seconds=self.rhythm.base_interval_seconds(preferences))
+        interval = timedelta(seconds=self.rhythm.interval_seconds(preferences, unanswered=unanswered))
+        opened = first + ((at - first) // interval) * interval
+        # All discretionary openings share the stable conversation slot. News
+        # polling can mint a fresh opportunity on every tick; using that timestamp
+        # would keep re-rolling the curve until even a sleeping hour admits it.
+        hour_allowed = self.rhythm.hour_allows(context, preferences, opened, observed_at=at)
         if self.calendar_events is not None:
             candidate, more = self.calendar_events.select(context, preferences, at)
             if candidate is not None:
@@ -389,7 +394,7 @@ class ContactSchedule:
             intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
                 context.scope, at, (event.source,)))) for intent in intents)
             return context, opportunity, intents, batch["role_instruction"], {**origin, "greeting_event": marker}
-        if self.events is not None:
+        if hour_allowed and self.events is not None:
             candidate, more = self.events.select(context, preferences, at)
             candidate = self._share_candidate(context, preferences, candidate)
             if candidate is not None:
@@ -400,7 +405,7 @@ class ContactSchedule:
             if more:
                 self._note_window(context, row, at, "sources", "pending", "activity_source_pending")
                 return None
-        if self.journal_events is not None:
+        if hour_allowed and self.journal_events is not None:
             candidate, more = self.journal_events.select(context, preferences, at)
             candidate = self._share_candidate(context, preferences, candidate)
             if candidate is not None:
@@ -411,19 +416,19 @@ class ContactSchedule:
             if more:
                 self._note_window(context, row, at, "sources", "pending", "journal_source_pending")
                 return None
-        candidate = self.screen_events.select(context, preferences, at)
+        candidate = self.screen_events.select(context, preferences, at) if hour_allowed else None
         if candidate is not None:
             opportunity, intents, marker = candidate
             intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
                 context.scope, at, (event.source, *intent.thought.evidence.sources)))) for intent in intents)
             return context, opportunity, intents, batch["role_instruction"], {**origin, "screen_event": marker}
-        candidate = self.date_events.select(context, preferences, at)
+        candidate = self.date_events.select(context, preferences, at) if hour_allowed else None
         if candidate is not None:
             opportunity, intents, marker = candidate
             intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
                 context.scope, at, (event.source,)))) for intent in intents)
             return context, opportunity, intents, batch["role_instruction"], {**origin, "date_event": marker}
-        candidate = self.meal_events.select(context, preferences, at)
+        candidate = self.meal_events.select(context, preferences, at) if hour_allowed else None
         if candidate is not None:
             opportunity, intents, marker = candidate
             intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
@@ -434,29 +439,29 @@ class ContactSchedule:
             if candidate is not None:
                 opportunity, marker = candidate
                 return context, opportunity, (), batch["role_instruction"], {**origin, "official_alert_pending": marker}
-        candidate = self.balance_events.select(context, preferences, at)
+        candidate = self.balance_events.select(context, preferences, at) if hour_allowed else None
         if candidate is not None:
             opportunity, marker = candidate
             return context, opportunity, (), batch["role_instruction"], {**origin, "balance_pending": marker}
-        candidate = self.news_events.select(context, preferences, at)
+        candidate = self.news_events.select(context, preferences, at) if hour_allowed else None
         if candidate is not None:
             opportunity, marker = candidate
             return context, opportunity, (), batch["role_instruction"], {**origin, "news_pending": marker}
-        if self.weather_events is not None:
+        if hour_allowed and self.weather_events is not None:
             candidate = self.weather_events.select(context, preferences, at)
             if candidate is not None:
                 opportunity, marker = candidate
                 return context, opportunity, (), batch["role_instruction"], {**origin, "weather_pending": marker}
-        if self.weather_change_events is not None:
+        if hour_allowed and self.weather_change_events is not None:
             candidate = self.weather_change_events.select(context, preferences, at)
             if candidate is not None:
                 opportunity, marker = candidate
                 return context, opportunity, (), batch["role_instruction"], {**origin, "weather_change_pending": marker}
-        candidate = self._followup_candidate(context, event, interaction, preferences, at)
+        candidate = self._followup_candidate(context, event, interaction, preferences, at) if hour_allowed else None
         if candidate is not None:
             opportunity, intents, marker = candidate
             return context, opportunity, intents, batch["role_instruction"], {**origin, "followup_event": marker}
-        candidate = self._open_loop_candidate(context, event, preferences, at)
+        candidate = self._open_loop_candidate(context, event, preferences, at) if hour_allowed else None
         if candidate is not None:
             opportunity, intents, marker = candidate
             return context, opportunity, intents, batch["role_instruction"], {**origin, "open_loop_event": marker}
@@ -472,7 +477,7 @@ class ContactSchedule:
         if closing_hold is not None:
             self._note_window(context, row, at, "rhythm", "skipped", "closing_silence", next_at=closing_hold)
             return None
-        if burst is not None and not chat_reason:
+        if burst is not None and not chat_reason and hour_allowed:
             opportunity = Opportunity("burst-" + digest([context.key, stamp(burst.opened_at), burst.index]),
                 context.scope, burst.opened_at, burst.expires_at)
             task_id = self.contacts.task_id(context, opportunity)
@@ -486,18 +491,16 @@ class ContactSchedule:
                 EvidenceSnapshot(context.scope, at, (event.source,)), 1.0)
             return (context, opportunity, (ContactIntent("chat", thought),), batch["role_instruction"],
                     {**origin, "burst_event": burst.document()})
-        interval = timedelta(seconds=self.rhythm.interval_seconds(preferences, unanswered=unanswered))
         if self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
                 AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - interval))):
             self._note_window(context, row, at, "rhythm", "skipped", "recent_attempt_cooldown")
             return None
-        opened = first + ((at - first) // interval) * interval
         expires = opened + min(interval, timedelta(minutes=5))
         if at >= expires:
             self._note_window(context, row, at, "rhythm", "skipped", "outside_contact_slot",
                               purpose="chat", next_at=opened + interval)
             return None
-        if not self.rhythm.hour_allows(context, preferences, opened):
+        if not hour_allowed:
             self._note_window(context, row, at, "rhythm", "skipped", "activity_curve_skipped",
                               purpose="chat", next_at=opened + interval)
             return None
@@ -563,6 +566,25 @@ class ContactSchedule:
     def _diagnostic_route(route_id, label, variant=None):
         return {"id": route_id, "label": label, "variant": variant or route_id}
 
+    def diagnostic_receipt(self, context, purpose, route_id, at):
+        """Bind a one-shot diagnostic to the latest completed private conversation and persona."""
+        if purpose not in PURPOSES or context.scope.kind.value != "private":
+            raise TaskError("setup_private_window_required", "diagnostics require the confirmed private window")
+        latest = self.latest_conversation(context)
+        if latest is None:
+            raise TaskError("contact_diagnostic_source_required", "a completed private conversation is required")
+        keys = latest.keys() if hasattr(latest, "keys") else ()
+        batch_id = latest["batch_id"] if "batch_id" in keys else latest.get("turn_id")
+        if not isinstance(batch_id, str) or not batch_id:
+            raise TaskError("contact_diagnostic_source_required", "the latest private conversation has no stable identity")
+        origin, batch, event = self._origin(context, batch_id, at)
+        receipt = {"_diagnostic": {"route_id": route_id, "purpose": purpose,
+            "batch_id": origin.get("batch_id") or batch_id,
+            "event_key": origin.get("event_key") or event.scoped_key,
+            "event_hash": origin.get("event_hash") or event.input_hash,
+            "role_hash": origin.get("role_hash") or digest(batch["role_instruction"])}}
+        return latest, batch, event, receipt
+
     async def diagnostic_candidate(self, context, purpose, *, at=None, variant=None, test_id=None):
         """Select one current candidate through its real producer.
 
@@ -580,10 +602,8 @@ class ContactSchedule:
         at = at or self.tasks.now()
         test_id = test_id or "diagnostic-" + digest([context.key, purpose, stamp(at)])
         source_stages = []
-        row = self.latest_conversation(context)
-        if row is None:
-            raise TaskError("contact_diagnostic_source_required", "the selected purpose has no completed conversation source")
-        origin, batch, event = self._origin(context, row["batch_id"], at)
+        row, batch, event, receipt = self.diagnostic_receipt(
+            context, purpose, "conversation_scheduler", at)
         preferences = require(self.contacts.preferences.read(context, observed_at=at))
         preferences = self._diagnostic_preferences(preferences)
 
@@ -612,10 +632,7 @@ class ContactSchedule:
                     sources.insert(0, event.source)
                 enriched.append(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
                     context.scope, at, tuple(sources)))))
-            diagnostic_origin = {"_diagnostic": {
-                "route_id": route["id"], "purpose": purpose, "batch_id": row["batch_id"],
-                "event_key": event.scoped_key, "event_hash": event.input_hash,
-                "role_hash": digest(batch["role_instruction"])}}
+            diagnostic_origin = {"_diagnostic": {**receipt["_diagnostic"], "route_id": route["id"]}}
             if route["id"] != "conversation_scheduler":
                 diagnostic_origin[route["id"]] = marker
             return {"opportunity": opportunity, "intents": tuple(enriched),
@@ -776,7 +793,7 @@ class ContactSchedule:
             "open_loop_event": {"followup"},
             "official_alert_event": {"environment"}, "balance_event": {"environment"},
             "news_event": {"news", "environment"}, "weather_event": {"environment"},
-            "weather_change_event": {"environment"},
+            "weather_change_event": {"environment"}, "reality_location_event": {"environment"},
         }
         route_id = receipt["route_id"]
         if (route_id not in route_purposes or receipt["purpose"] not in route_purposes[route_id]
@@ -791,6 +808,17 @@ class ContactSchedule:
                     or not isinstance(marker.get("test_id"), str)
                     or not isinstance(marker.get("scenario_hash"), str)):
                 raise TaskError("contact_diagnostic_source_changed", "synthetic test marker is invalid")
+        elif route_id == "reality_location_event":
+            marker = origin.get(route_id)
+            if (type(marker) is not dict
+                    or set(marker) != {"test_id", "captured_at", "source_id", "place_fingerprint"}
+                    or not isinstance(marker.get("test_id"), str) or not marker["test_id"]
+                    or type(marker.get("captured_at")) not in (int, float)
+                    or not isinstance(marker.get("source_id"), str)
+                    or not marker["source_id"].startswith("reality-location-")
+                    or not isinstance(marker.get("place_fingerprint"), str)
+                    or not marker["place_fingerprint"]):
+                raise TaskError("contact_diagnostic_source_changed", "mobile location diagnostic receipt is invalid")
         _, batch, event = self._origin(context, receipt["batch_id"], at)
         if (event.scoped_key != receipt["event_key"] or event.input_hash != receipt["event_hash"]
                 or digest(batch["role_instruction"]) != receipt["role_hash"]):
@@ -837,7 +865,7 @@ class ContactSchedule:
             return None
         if not history or history[0]["owner"] != "proactive.contact":
             return None
-        expires = opened + timedelta(seconds=preferences.values["event_max_age_seconds"])
+        expires = opened + SLOT_WINDOW
         if at >= expires:
             return None
         opportunity = Opportunity("followup-" + digest([context.key, row["contact_id"]]),
@@ -876,7 +904,7 @@ class ContactSchedule:
                 or datetime.fromisoformat(interaction["last_input_at"]) > delivered):
             raise TaskError("contact_followup_superseded", "a new user input superseded the original follow-up")
         opened = delivered + timedelta(minutes=preferences.values["contact_followup_after_minutes"])
-        expires = opened + timedelta(seconds=preferences.values["event_max_age_seconds"])
+        expires = opened + SLOT_WINDOW
         if (marker != {"contact_id": row["contact_id"], "delivery_id": row["delivery_id"],
                 "delivered_at": row["delivered_at"], "purpose": saved.get("purpose"), "expires_at": stamp(expires)}
                 or saved.get("purpose") in (None, "screen", "followup") or at < opened or at >= expires):
@@ -909,8 +937,9 @@ class ContactSchedule:
                     continue
                 if due is not None:
                     opened = max(opened, due)
-            expires = min(memo.expires_at, opened + timedelta(
-                seconds=preferences.values["event_max_age_seconds"])) if memo.expires_at is not None else opened
+            expires = memo.expires_at
+            if expires is None:
+                continue
             if at < opened or at >= expires:
                 continue
             opportunity = Opportunity("open-loop-followup-" + digest([context.key, memo.memo_id]),
@@ -946,10 +975,9 @@ class ContactSchedule:
             due = memo.schedule.at(memo.sequence)
             if due is not None:
                 opened = max(opened, due)
-        expires = min(memo.expires_at, opened + timedelta(
-            seconds=preferences.values["event_max_age_seconds"])) if memo.expires_at is not None else opened
+        expires = memo.expires_at
         if (memo.purpose != "open_loop" or memo.state != "active" or memo.expired(at)
-                or memo.revision != marker["memo_revision"] or memo.followup_count != 1
+                or expires is None or memo.revision != marker["memo_revision"] or memo.followup_count != 1
                 or marker["opened_at"] != stamp(opened) or marker["expires_at"] != stamp(expires)
                 or at < opened or at >= expires):
             raise TaskError("contact_open_loop_expired", "the original open-loop opportunity has expired")

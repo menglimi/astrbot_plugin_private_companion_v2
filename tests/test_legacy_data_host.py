@@ -162,6 +162,77 @@ class LegacyJournalMigrationHostTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await controller.terminate()
 
+    async def test_private_acl_reference_imports_into_the_selected_role_gallery(self):
+        source = TemporaryDirectory(prefix="companion-v2-legacy-reference-v1-")
+        target = TemporaryDirectory(prefix="companion-v2-legacy-reference-v2-")
+        self.addCleanup(source.cleanup)
+        self.addCleanup(target.cleanup)
+        v1_root = Path(source.name)
+        image_directory = v1_root / "photo_reference_assets"
+        image_directory.mkdir()
+        from io import BytesIO
+        from PIL import Image
+        payload = BytesIO()
+        Image.new("RGB", (12, 12), (180, 36, 92)).save(payload, format="PNG")
+        image_bytes = payload.getvalue()
+        (image_directory / "portrait.png").write_bytes(image_bytes)
+        (v1_root / "companions.json").write_text(json.dumps({
+            "photo_reference_assets": [{
+                "id": "private-portrait",
+                "scope": "relation_user",
+                "path": "photo_reference_assets/portrait.png",
+                "title": "角色形象",
+                "image_access": {
+                    "subject_ref": None,
+                    "allow_generation": True,
+                    "readers": ["person:legacy-user"],
+                    "audiences": ["private:legacy-account"],
+                    "routes": ["*"],
+                },
+            }],
+        }, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        migration = LegacyMigration(v1_root=v1_root, v1_configuration={})
+        native = MultiNativeContext()
+        native_types = NativeAdapterTypes("4.27.2", FakeEvent, FakeProvider, SimpleNamespace,
+            SimpleNamespace, FakeReverseApi)
+        clock = DeterministicClock.at(NOW)
+        controller = AstrBotMultiController(native, multi_config(), Path(target.name) / "data",
+            native_types=native_types, now=clock.now)
+        try:
+            (await controller.initialize_profile()).unwrap()
+            (await controller.start()).unwrap()
+            context = controller.session.authority.context("first", "role-a")
+            session = SimpleNamespace(profile=SimpleNamespace(target=context),
+                                      application=controller.session.application)
+            api = LegacyMigrationWebAPI.__new__(LegacyMigrationWebAPI)
+            api.controller = SimpleNamespace(runtime=controller.runtime, now=clock.now,
+                                             data_root=Path(target.name) / "data")
+            preview = api._data_plan(migration, v1_root, session,
+                reference_slots_available=24, reference_bytes_available=24 * 20 * 1024 * 1024,
+                wardrobe_slots_available=24).unwrap()
+            self.assertEqual(preview["reference_images"]["batch_count"], 1)
+            from astrbot_host.management_identity import dashboard_operator
+            api._operator = lambda: dashboard_operator(
+                controller.runtime, "migration-test-admin", at=clock.now())
+
+            imported = api._data_apply_sync(migration, v1_root, session,
+                plan_token=preview["plan_token"], source_group_id="", source_persona_id="",
+                import_reactions=False, import_group_network=False, confirm_member_ids=False,
+                import_journals=False, confirm_persona_mapping=False, import_worldbook=False,
+                import_reference_images=True, confirm_reference_persona_mapping=True)
+
+            self.assertTrue(imported.is_success, imported.failure if not imported.is_success else "")
+            receipt = imported.unwrap()["reference_images"]
+            self.assertEqual((receipt["reference_created"], receipt["reference_remaining"]), (1, 0))
+            application = controller.session.application
+            owner = application.references.owner(context)
+            repository = application.references.assets
+            assets = repository.list(owner)
+            self.assertEqual([(asset.label, repository.get_payload(owner, asset.asset_id))
+                              for asset in assets], [("角色形象", image_bytes)])
+        finally:
+            await controller.terminate()
+
     async def test_memory_database_snapshot_uses_data_apply_and_survives_host_restart(self):
         source = TemporaryDirectory(prefix="companion-v2-legacy-memory-v1-")
         target = TemporaryDirectory(prefix="companion-v2-legacy-memory-v2-")

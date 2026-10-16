@@ -48,3 +48,4 @@ class ContactJob:
     diagnostic_origin: dict | None = None
     expression_style: dict | None = None
     dialogue_history: dict | None = None
+    diagnostic_image_intent: str | None = None

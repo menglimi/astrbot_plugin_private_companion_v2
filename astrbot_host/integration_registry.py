@@ -257,6 +257,10 @@ class UnifiedCompanionExtensionAPI:
     async def notify_mobile_location_update(self, user_id):
         return await self._reality_delivery.location(user_id)
 
+    async def mobile_location_diagnostic_candidate(self, user_id, *, test_id, diagnostic_origin):
+        return await self._reality_delivery.location_diagnostic_candidate(user_id,
+            test_id=test_id, diagnostic_origin=diagnostic_origin)
+
     def mobile_target_context(self, user_id):
         return self._mobile_together._target_context(user_id)
 
