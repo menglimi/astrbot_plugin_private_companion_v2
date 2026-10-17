@@ -127,6 +127,8 @@ class CoreReplyRoleStateTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("角色当前状态", prompt.context_instruction)
                 self.assertIn("精力很低", prompt.context_instruction)
                 self.assertIn("可感知的状态色彩", prompt.context_instruction)
+                self.assertIn("我昨晚没休息好，今天有点困", prompt.context_instruction)
+                self.assertIn("只有当前对话或明确相关的历史表明用户本人披露了同一件状况", prompt.context_instruction)
                 if scope_kind is ScopeKind.GROUP:
                     self.assertIn("group_speaker", prompt.sections)
 
@@ -155,6 +157,8 @@ class CoreReplyRoleStateTests(unittest.IsolatedAsyncioTestCase):
                 await inject_core_reply_perception_context(event, request)
 
                 self.assertIn("让它作为持续的人物体验自然影响", request.system_prompt)
+                self.assertIn("不要把角色的经历改写成用户的经历", request.system_prompt)
+                self.assertIn("不要仅凭角色自己的状态追问用户", request.system_prompt)
                 self.assertEqual(len(request.extra_user_content_parts), 1)
                 self.assertTrue(request.extra_user_content_parts[0]._no_save)
                 payload_text = request.extra_user_content_parts[0].text

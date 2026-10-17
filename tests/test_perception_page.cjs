@@ -86,9 +86,10 @@ function harness({providers} = {}) {
         requests.push(entry);
         const target = responses[payload.provider]?.settings;
         if (target && payload.updates) {
-          Object.assign(target.values, payload.updates);
+          const section = target[payload.section] || target.values;
+          Object.assign(section, payload.updates);
           for (const key of Object.keys(payload.updates)) {
-            if (target.fields[key]?.sensitive) target.values[key] = '已设置';
+            if (target.fields?.[key]?.sensitive) target.values[key] = '已设置';
           }
         }
         queueMicrotask(() => resolve({status: 'ok', data: {provider: payload.provider,
@@ -125,6 +126,7 @@ function rootStub(ids = ['screen', 'reality']) {
     /* 根节点没有内容，这里给它一个只写不读的空位，页面写进来也当没有。 */
     innerHTML: '',
     addEventListener(type, handler) { handlers[type] = handler; },
+    dispatch(type, event) { handlers[type]?.(event); },
     querySelector(selector) {
       const match = /\[data-perception-provider="([^"]+)"\]/.exec(selector);
       const node = match ? nodes.get(match[1]) : null;
@@ -184,6 +186,35 @@ test('Reality settings render in their own configuration sections', async () => 
   }
   assert.match(markup, /保存本组/);
   assert.equal(root.html('screen'), '');
+});
+
+test('saving a Reality field submits only the changed value to the perception route', async () => {
+  const harnessed = harness();
+  const root = rootStub();
+  harnessed.page.mount(root);
+  await drains();
+
+  const input = {dataset:{perceptionField:'camera_enabled'}, type:'checkbox', checked:true};
+  const status = {textContent:''};
+  const button = {disabled:false};
+  const form = {
+    dataset:{perceptionForm:'reality', perceptionSection:'camera', perceptionGroup:'camera'},
+    reportValidity:() => true,
+    querySelectorAll:() => [input],
+    querySelector(selector) {
+      return selector === '[role=status]' ? status : button;
+    },
+  };
+
+  root.dispatch('submit', {target:{closest:() => form}, preventDefault() {}});
+  await drains();
+
+  assert.equal(harnessed.requests.length, 1);
+  assert.equal(harnessed.requests[0].route, 'perception');
+  assert.equal(JSON.stringify(harnessed.requests[0].payload), JSON.stringify({
+    provider:'reality', section:'camera', updates:{camera_enabled:true},
+  }));
+  harnessed.page.unmount();
 });
 
 test('Reality secrets and legacy Screen values never enter the markup', async () => {

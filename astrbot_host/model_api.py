@@ -19,6 +19,7 @@ from companion_v2.decision.store import LayaSettingsError
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.model_gateway.management import ModelManagement
+from companion_v2.proactive.search_settings import SearchSettingsError, SearchSettingsStore
 
 from .management_identity import dashboard_operator
 from .core_reply_configuration import CORE_MANAGED_FIELDS, project_core_reply_configuration
@@ -302,6 +303,8 @@ class ModelWebAPI:
             (PREFIX + "/test", self.test, ["POST"], "Probe one registered text provider"),
             (PREFIX + "/laya", self.laya_status, ["GET"], "Read optional Laya decision model configuration"),
             (PREFIX + "/laya/save", self.laya_save, ["POST"], "Save optional Laya decision model configuration"),
+            (PREFIX + "/search", self.search_status, ["GET"], "Read the DeepSeek search Provider binding"),
+            (PREFIX + "/search/save", self.search_save, ["POST"], "Save the DeepSeek search Provider binding"),
             (PREFIX + "/laya/logs", self.laya_logs, ["GET"], "Read recent Laya decision events"),
             (PREFIX + "/laya/test", self.laya_test, ["POST"], "Test the Laya decision model connection"),
             (PREFIX + "/laya/decide", self.laya_decide, ["POST"], "Call Laya for one semantic decision"),
@@ -541,6 +544,48 @@ class ModelWebAPI:
         origin_key = getattr(target, "key", None)
         return LayaDecisionService(LayaSettingsStore(root),
                                    runtime=runtime, origin_key=origin_key, client_factory=LayaDecisionClient)
+
+    def _search_settings_store(self):
+        return SearchSettingsStore(Path(getattr(self.controller, "data_root", Path.cwd())))
+
+    def _search_status(self):
+        from .news import deepseek_provider_catalog
+        values = self._search_settings_store().read()
+        providers = deepseek_provider_catalog(self.controller.context)
+        selected = values["deepseek_provider_id"]
+        return {**values, "providers": providers,
+                "provider_available": not selected or any(item["id"] == selected for item in providers),
+                "configuration_scope": "global"}
+
+    async def search_status(self):
+        try:
+            async with self.controller._control_lock:
+                self._authorized()
+                status = self._search_status()
+            return self._response(Outcome.success(status))
+        except TaskError as error:
+            return self._response(Outcome.failed(error.code, str(error)))
+        except SearchSettingsError as error:
+            return self._response(Outcome.failed(error.code, str(error)))
+        except (OSError, ValueError):
+            return self._response(Outcome.failed("search_config_unavailable", "无法读取搜索服务配置"))
+
+    async def search_save(self):
+        try:
+            data = _document(await request.body(), {"revision", "changes"}, limit=8192)
+            if type(data["changes"]) is not dict:
+                raise ValueError("invalid search changes")
+            async with self.controller._control_lock:
+                self._authorized()
+                self._search_settings_store().update(data["revision"], data["changes"])
+                status = self._search_status()
+            return self._response(Outcome.success(status))
+        except TaskError as error:
+            return self._response(Outcome.failed(error.code, str(error)))
+        except SearchSettingsError as error:
+            return self._response(Outcome.failed(error.code, str(error)))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+            return self._response(Outcome.failed("search_config_invalid", "搜索服务配置字段无效"))
 
     @staticmethod
     def _laya_error(error):
@@ -1284,14 +1329,32 @@ class ModelWebAPI:
         session = self.controller.session or self.controller.last_session
         if registry is None or session is None:
             return False
-        declarations = [entry[0] for entry in registry._entries.values()
-            if entry[0].descriptor.package.extension_id == "image"]
-        external = session.application.external
-        return bool(declarations and external is not None and all(
-            registry.current_declaration(item.host_tool_id) == item
-            and external.providers.get(item.descriptor.tool.action) is not None
-            and external.providers[item.descriptor.tool.action].descriptor == item.descriptor
-            for item in declarations))
+        declarations = [item for item in registry.declarations()
+                        if item.descriptor.package.extension_id == "image"]
+        application = getattr(session, "application", None)
+        external = getattr(application, "external", None)
+        if not declarations or external is None:
+            return False
+
+        readiness = getattr(registry, "declaration_readiness", None)
+        current_declaration = getattr(registry, "current_declaration", None)
+        registered_actions = 0
+        for item in declarations:
+            action = item.descriptor.tool.action
+            if action not in IMAGE_ACTIONS:
+                continue
+            state = readiness(item.host_tool_id) if callable(readiness) else "ready"
+            if state in {"disabled", "unsupported"}:
+                continue
+            if state != "ready":
+                return False
+            if callable(current_declaration) and current_declaration(item.host_tool_id) != item:
+                return False
+            provider = external.providers.get(action)
+            if provider is None or provider.descriptor != item.descriptor:
+                return False
+            registered_actions += 1
+        return registered_actions > 0
 
     async def image_output(self):
         try:
@@ -1313,7 +1376,14 @@ class ModelWebAPI:
         try:
             async with self.controller._control_lock:
                 self._authorized()
-            return self._response(await self.controller.reconnect_native())
+            result = await self.controller.reconnect_native()
+            if result.failure is not None:
+                return self._response(result)
+            data = result.unwrap()
+            async with self.controller._control_lock:
+                self._authorized()
+                data["host_registered"] = self._image_host_registered()
+            return self._response(Outcome.success(data))
         except TaskError as error:
             return self._response(Outcome.failed(error.code, str(error)))
         except Exception:

@@ -4206,42 +4206,153 @@ function replySearchLocation(entry){
     expressionModule:entry.section==='voice'?'expression-voice':''};
 }
 let visibleSearchResults=[];
+let activeSearchResultIndex=0;
+let searchScope='all';
+const SEARCH_RESULT_LIMIT=50;
+function normalizeSearchText(text){return String(text??'').normalize('NFKC').toLocaleLowerCase();}
+function searchTerms(query){return normalizeSearchText(query).trim().split(/[\s,，;；、\/|]+/).filter(Boolean);}
 function searchableConfigEntries(){
   const editors=window.CompanionConfigEditors?.searchEntries?.()||[];
   const replies=window.CompanionReplyPage?.searchEntries?.()||[];
   const hostOptions=window.CompanionHostOptionsPage?.searchEntries?.()||[];
+  const seen=new Set();
   return [...editors,...replies,...hostOptions].map(entry=>{
     const location=entry.group==='conversation.presentation'
       ?replySearchLocation(entry)
       :configSearchLocation(entry);
-    return location?{kind:'setting',entry,location}:null;
+    if(!location)return null;
+    const key=JSON.stringify([entry.group,entry.section,entry.field]);
+    if(seen.has(key))return null;
+    seen.add(key);
+    return {kind:'setting',entry,location};
   }).filter(Boolean);
 }
-function searchMatches(text,query){
-  const content=String(text||'').normalize('NFKC').toLocaleLowerCase();
-  return query.split(/\s+/).filter(Boolean).every(term=>content.includes(term));
+function textSearchScore(value,term,weights){
+  const text=normalizeSearchText(value);
+  if(!text)return 0;
+  if(text===term)return weights[0];
+  if(text.startsWith(term))return weights[1];
+  if(text.includes(term))return weights[2];
+  return 0;
+}
+function settingSearchScore(entry,terms,query){
+  const aliases=Array.isArray(entry.aliases)?entry.aliases:[];
+  const fields=[
+    [entry.label,[120,94,72]],
+    [entry.field,[84,68,50]],
+    [entry.sectionTitle,[62,48,36]],
+    [entry.groupTitle,[54,42,30]],
+    [entry.help,[22,18,14]],
+  ];
+  let score=0;
+  for(const term of terms){
+    let best=0;
+    for(const [value,weights] of fields)best=Math.max(best,textSearchScore(value,term,weights));
+    for(const alias of aliases)best=Math.max(best,textSearchScore(alias,term,[82,62,46]));
+    if(!best)return -1;
+    score+=best;
+  }
+  if(normalizeSearchText(entry.label)===query)score+=32;
+  return score;
+}
+function pageSearchScore(data,terms,query){
+  const [title,description]=data;
+  let score=0;
+  for(const term of terms){
+    const best=Math.max(textSearchScore(title,term,[112,86,62]),textSearchScore(description,term,[24,19,15]));
+    if(!best)return -1;
+    score+=best;
+  }
+  if(normalizeSearchText(title)===query)score+=28;
+  return score;
+}
+function rankedSearchResults(query){
+  const terms=searchTerms(query);
+  const normalized=normalizeSearchText(query).trim();
+  if(!terms.length)return searchIndex.map((data,order)=>({kind:'page',data,score:0,order}));
+  const pages=searchIndex.map((data,order)=>({kind:'page',data,score:pageSearchScore(data,terms,normalized),order}))
+    .filter(result=>result.score>0);
+  const settings=searchableConfigEntries().map((result,order)=>({...result,
+    score:settingSearchScore(result.entry,terms,normalized),order})).filter(result=>result.score>0);
+  return [...pages,...settings].sort((left,right)=>right.score-left.score
+    ||(left.kind===right.kind?left.order-right.order:left.kind==='setting'?-1:1));
+}
+function updateSearchSelection(){
+  const options=$('#searchResults')?.querySelectorAll?.('[data-search-result]')||[];
+  options.forEach((option,index)=>option.setAttribute?.('aria-selected',String(index===activeSearchResultIndex)));
+  const active=activeSearchResultIndex>=0?options[activeSearchResultIndex]:null;
+  const input=$('#globalSearch');
+  input?.setAttribute?.('aria-activedescendant',active?.id||'');
+  active?.scrollIntoView?.({block:'nearest'});
+}
+function moveSearchSelection(direction){
+  if(!visibleSearchResults.length)return false;
+  activeSearchResultIndex=(activeSearchResultIndex+direction+visibleSearchResults.length)%visibleSearchResults.length;
+  updateSearchSelection();
+  return true;
+}
+function activateSearchSelection(){
+  if(activeSearchResultIndex<0||activeSearchResultIndex>=visibleSearchResults.length)return false;
+  const options=$('#searchResults')?.querySelectorAll?.('[data-search-result]')||[];
+  options[activeSearchResultIndex]?.click?.();
+  return true;
+}
+function handleGlobalSearchKeydown(event){
+  if(event.isComposing||event.keyCode===229)return;
+  if(event.key==='Escape'){
+    event.preventDefault();$('#searchDialog')?.close?.();return;
+  }
+  if(event.key==='ArrowDown'||event.key==='ArrowUp'){
+    event.preventDefault();moveSearchSelection(event.key==='ArrowDown'?1:-1);return;
+  }
+  if(event.key==='Enter'){
+    event.preventDefault();activateSearchSelection();
+  }
+}
+function setSearchScope(scope){
+  if(!['all','settings','pages'].includes(scope))return false;
+  searchScope=scope;activeSearchResultIndex=0;renderSearch();return true;
 }
 function renderSearch(){
-  const query=$('#globalSearch').value.trim().normalize('NFKC').toLocaleLowerCase();
-  const pages=searchIndex.map(data=>({kind:'page',data}));
-  const settings=query?searchableConfigEntries():[];
-  const matches=[...pages.filter(({data})=>searchMatches(data.slice(0,2).join(' '),query)),
-    ...settings.filter(({entry})=>searchMatches([entry.label,entry.field,entry.groupTitle,entry.sectionTitle,
-      entry.help,...(entry.aliases||[])].join(' '),query))];
-  visibleSearchResults=matches.slice(0,50);
+  const query=normalizeSearchText($('#globalSearch')?.value||'').trim();
+  const terms=searchTerms(query);
+  const allMatches=rankedSearchResults(query);
+  const counts={all:allMatches.length,
+    settings:allMatches.filter(result=>result.kind==='setting').length,
+    pages:allMatches.filter(result=>result.kind==='page').length};
+  const matches=allMatches.filter(result=>searchScope==='all'
+    ||(searchScope==='settings'?result.kind==='setting':result.kind==='page'));
+  visibleSearchResults=matches.slice(0,SEARCH_RESULT_LIMIT);
+  activeSearchResultIndex=visibleSearchResults.length?0:-1;
+  document.querySelectorAll?.('[data-search-filter]').forEach(button=>{
+    const selected=button.dataset.searchFilter===searchScope;
+    button.setAttribute('aria-pressed',String(selected));
+    const count=button.querySelector?.('[data-search-filter-count]');
+    if(count)count.textContent=terms.length?String(counts[button.dataset.searchFilter]||0):'';
+  });
+  const searchCount=$('#searchCount');
+  if(searchCount)searchCount.textContent=!terms.length
+    ?(searchScope==='settings'?'输入关键词查找配置项':`${matches.length} 个页面入口`)
+    :matches.length>SEARCH_RESULT_LIMIT?`显示前 ${SEARCH_RESULT_LIMIT} 项，共 ${matches.length} 项`:`${matches.length} 项结果`;
+  const clearButton=$('[data-clear-search]');
+  if(clearButton)clearButton.hidden=!query;
   const resultMarkup=visibleSearchResults.map((result,index)=>{
+    const selected=index===activeSearchResultIndex;
     if(result.kind==='setting'){
       const {entry,location}=result;
       const pageLabels={identity:'关系网','identity-people':'用户','identity-groups':'群聊','identity-access':'访问规则','identity-feelings':'关系与情感',contact:'主动联系',expression:'表达',governance:'自我',diary:'日记与生活',output:'产出',models:'模型与连接',perception:'感知',decision:'决策',action:'行动',learning:'学习与成长'};
-      const context=[pageLabels[location.tab]||location.tab,
+      const context=['配置项',pageLabels[location.tab]||location.tab,
         entry.sectionTitle,entry.field].filter(Boolean).join(' · ');
-      return `<button class="search-result" data-search-result="${index}">${I('sliders-horizontal')}<span><strong>${escapeHTML(entry.label)}</strong><small>${escapeHTML(context)}</small></span></button>`;
+      return `<button id="search-option-${index}" class="search-result" type="button" role="option" aria-selected="${selected}" data-search-result="${index}">${I('sliders-horizontal')}<span><strong>${escapeHTML(entry.label)}</strong><small>${escapeHTML(context)}</small></span></button>`;
     }
     const [title,description,icon]=result.data;
-    return `<button class="search-result" data-search-result="${index}">${I(icon)}<span><strong>${escapeHTML(title)}</strong><small>${escapeHTML(description)}</small></span></button>`;
+    return `<button id="search-option-${index}" class="search-result" type="button" role="option" aria-selected="${selected}" data-search-result="${index}">${I(icon)}<span><strong>${escapeHTML(title)}</strong><small>${escapeHTML(`页面 · ${description}`)}</small></span></button>`;
   }).join('');
-  const overflow=matches.length>visibleSearchResults.length?'<p class="search-hint">结果较多，请继续输入缩小范围。</p>':'';
-  $('#searchResults').innerHTML=resultMarkup?resultMarkup+overflow:'<div class="search-empty">没有找到相关内容，试试字段名、分区名或功能名称。</div>';
+  const emptyMessage=searchScope==='settings'&&!terms.length
+    ?'输入设置名称、用途或字段键查找配置项。'
+    :terms.length?'没有找到匹配内容，试试设置名、用途或字段键。':'没有可显示的页面入口。';
+  $('#searchResults').innerHTML=resultMarkup?resultMarkup:`<div class="search-empty">${escapeHTML(emptyMessage)}</div>`;
+  updateSearchSelection();
   icons();
 }
 const tokenTaskSettings={
@@ -4359,7 +4470,7 @@ function openTokenTaskSettings(kind){
   });
   return true;
 }
-function openSearch(){if($('#detailDialog').open)closeDetail();$('#globalSearch').value='';renderSearch();$('#searchDialog').showModal();$('#globalSearch').focus();}
+function openSearch(){if($('#detailDialog').open)closeDetail();searchScope='all';$('#globalSearch').value='';renderSearch();$('#searchDialog').showModal();$('#globalSearch').focus();}
 document.addEventListener('click',event=>{
   const el=event.target.closest('button,a');if(!el)return;
   if(el.hasAttribute('data-profile-avatar-remove')){
@@ -4473,6 +4584,8 @@ document.addEventListener('click',event=>{
   if(el.dataset.closeNavigation!==undefined){$('#navigationDialog').close();return;}
   if(el.dataset.navRoute){$('#navigationDialog').close();navigate(el.dataset.navRoute,el.dataset.navTab);return;}
   if(el.dataset.closeDetail!==undefined){closeDetail();return;}
+  if(el.dataset.searchFilter){setSearchScope(el.dataset.searchFilter);return;}
+  if(el.dataset.clearSearch!==undefined){$('#globalSearch').value='';renderSearch();$('#globalSearch').focus();return;}
   if(el.dataset.closeSearch!==undefined){$('#searchDialog').close();return;}
   if(el.dataset.homeSection){goHomeSection(el.dataset.homeSection);return;}
   if(el.dataset.furniture){openFurniture(el.dataset.furniture);return;}
@@ -4626,7 +4739,7 @@ $('#stageScene')?.addEventListener('keydown',event=>{
    硬取一个不存在的节点会在启动时抛错，整个页面脚本都不再执行。 */
 $('#resetButton')?.addEventListener('click',()=>showDetail('reset'));
 $('#globalSearch').addEventListener('input',renderSearch);
-$('#globalSearch').addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();$('#searchDialog').close();}else if(event.key==='Enter'){$('.search-result')?.click();event.preventDefault();}});
+$('#globalSearch').addEventListener('keydown',handleGlobalSearchKeydown);
 document.addEventListener('keydown',event=>{
   if(handleRoomEditorKey(event))return;
   const selfTab=event.target.closest?.('[role="tab"][data-self-pane]');

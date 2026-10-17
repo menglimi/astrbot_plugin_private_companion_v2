@@ -52,6 +52,8 @@ def registered_groups():
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     groups = registered_groups()
     by_id = {}
     for group, path in groups:

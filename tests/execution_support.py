@@ -34,9 +34,15 @@ def remove_v62(connection):
 
 
 def remove_v63(connection):
+    remove_v64(connection)
     connection.execute("DROP INDEX IF EXISTS agenda_open_loop_activity_followup_idx")
     connection.execute('DROP TABLE IF EXISTS "agenda_open_loop_activity"')
     connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v62-to-v63'")
+
+
+def remove_v64(connection):
+    connection.execute('DROP TABLE IF EXISTS "proactive_prompt_snapshots"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v63-to-v64'")
 
 
 def remove_v60(connection):

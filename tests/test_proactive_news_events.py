@@ -7,14 +7,17 @@ import json
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from astrbot_host.news import (DEFAULT_AI_NEWS_FEED_LABEL, DEFAULT_AI_NEWS_FEED_URL,
-                               NewsJsonPort, NewsRssPort, configured_news_port)
+                               DeepSeekSearchNewsPort, NewsJsonPort, NewsRssPort, configured_news_port,
+                               WebSearchNewsPort, configured_search_port, deepseek_api_key)
 from astrbot_host.news_parsing import parse_rss_news
 from companion_v2.proactive.external_materials import parse_news_response
 from companion_v2.proactive.news_events import SOURCE_OWNER
+from companion_v2.proactive.news_sources import NewsFetchError
 from companion_v2.proactive.diagnostic_models import DiagnosticSourceError
 from companion_v2.proactive.inspirations import SNAPSHOT_KEY
 from companion_v2.conversation.messages import source_from_document
@@ -201,6 +204,40 @@ class NewsContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase)
         self.settings(app, {"news_share_enabled": False}).unwrap()
         self.assertFalse(app.proactive.sources.validate_reference_for_audience(
             material.source, recipient=context.actor.subject, observed_at=self.clock.now()).is_success)
+
+    async def test_search_fetch_enriches_only_the_selected_article_and_keeps_fallback(self):
+        class SearchPort(NewsPort):
+            kind = "search"
+
+            def __init__(self, clock, batches):
+                super().__init__(clock, batches)
+                self.fetch_urls = []
+                self.fail_fetch = False
+
+            async def fetch_article(self, url):
+                self.fetch_urls.append(url)
+                if self.fail_fetch:
+                    raise RuntimeError("fetch unavailable")
+                return {"title": "网页核验标题", "content": "抓取到的正文摘录。"}
+
+        port = SearchPort(self.clock, [[self.article("deepseek-result")]])
+        app, context = await self.setup_news(port)
+        self.settings(app, {purpose + ".enabled": False for purpose in
+                            ("affection", "care", "play", "repair", "invitation")}).unwrap()
+        self.advance(app, 60)
+        app.contact_schedule.advance()
+        await self.automatic_delivery(app)
+
+        self.assertEqual(port.fetch_urls, ["https://news.example/deepseek-result"])
+        saved = json.loads(self.contacts(app)[0]["record_json"])
+        self.assertEqual(saved["news_provenance"]["title"], "网页核验标题")
+        self.assertIn("抓取到的正文摘录", saved["news_provenance"]["summary"])
+
+        original = {"title": "搜索标题", "summary": "搜索摘要", "source": "示例媒体",
+                    "url": "https://news.example/fallback", "published_at": self.clock.now().isoformat()}
+        port.fail_fetch = True
+        result = await app.contact_schedule.news_events._enrich_selected_article(port, original)
+        self.assertEqual(result, original)
 
     async def test_confirmed_diagnostic_keeps_news_origin_prompt_and_program_attribution(self):
         port = NewsPort(self.clock, [[self.article()]])
@@ -789,6 +826,194 @@ class NewsAdapterTests(unittest.TestCase):
         self.assertEqual(item.summary, "OpenAI 发布新模型与工具。")
         self.assertEqual(item.published_at.isoformat(), "2026-10-02T02:01:50+00:00")
         self.assertEqual(item.category, "人工智能")
+
+
+class DeepSeekNewsAdapterTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def session_factory(responses, calls):
+        class Content:
+            def __init__(self, value):
+                self.value = value
+
+            async def iter_chunked(self, size):
+                yield self.value
+
+        class Response:
+            def __init__(self, payload, status=200):
+                self.status = status
+                self.raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.content_length = len(self.raw)
+                self.content = Content(self.raw)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self, **kwargs):
+                self.response = responses.pop(0)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def post(self, url, **kwargs):
+                calls.append((url, kwargs))
+                payload, status = self.response if isinstance(self.response, tuple) else (self.response, 200)
+                return Response(payload, status)
+
+            def get(self, url, **kwargs):
+                calls.append((url, kwargs))
+                payload, status = self.response if isinstance(self.response, tuple) else (self.response, 200)
+                return Response(payload, status)
+
+        return Session
+
+    async def test_deepseek_search_and_fetch_use_bounded_post_requests(self):
+        responses = [
+            {"status": "succeeded", "results": [{"title": "搜索标题", "url": "https://news.example/story",
+                "site_name": "示例媒体", "date": "2026-10-17", "snippet": "搜索摘要"}]},
+            {"status": "succeeded", "results": [{"title": "抓取标题", "content": "网页正文\n更多内容"}]},
+        ]
+        calls = []
+        port = DeepSeekSearchNewsPort(api_key="fixture-secret", query="词" * 150,
+                                      result_count=80)
+        with patch("astrbot_host.news.aiohttp.ClientSession",
+                   side_effect=self.session_factory(responses, calls)):
+            batch = await port.fetch()
+            article = await port.fetch_article("https://news.example/story?utm_source=feed")
+
+        self.assertEqual(len(batch.items), 1)
+        self.assertEqual(batch.items[0].source, "示例媒体")
+        self.assertEqual(batch.items[0].summary, "搜索摘要")
+        self.assertEqual(batch.items[0].published_at.isoformat(), "2026-10-17T00:00:00+00:00")
+        self.assertEqual(article, {"title": "抓取标题", "content": "网页正文\n更多内容"})
+        self.assertEqual(calls[0][0], "https://api.deepseek.com/v1/tools/search")
+        self.assertEqual(calls[0][1]["json"], {"query": "词" * 128, "count": 50,
+                                                "need_content": False})
+        self.assertEqual(calls[0][1]["headers"]["Authorization"], "Bearer fixture-secret")
+        self.assertEqual(calls[1][0], "https://api.deepseek.com/v1/tools/fetch")
+        self.assertEqual(calls[1][1]["json"], {"url": "https://news.example/story"})
+
+    async def test_fetch_rejects_local_and_credentialed_urls_without_network_access(self):
+        calls = []
+        port = DeepSeekSearchNewsPort(api_key="fixture-secret", query="检索词")
+        with patch("astrbot_host.news.aiohttp.ClientSession",
+                   side_effect=self.session_factory([], calls)):
+            for url in ("http://127.0.0.1/private", "https://user:pass@news.example/story",
+                        "http://localhost/story", "https://example.internal/story"):
+                with self.assertRaises(NewsFetchError):
+                    await port.fetch_article(url)
+        self.assertEqual(calls, [])
+
+    async def test_legacy_custom_get_search_endpoint_still_returns_normalized_results(self):
+        responses = [{"results": [{"title": "旧端点结果", "url": "https://news.example/legacy",
+            "source": "示例媒体", "summary": "旧端点摘要", "published_at": "2026-10-17T03:00:00Z"}]}]
+        calls = []
+        port = WebSearchNewsPort(url="https://search.example/api", query="科技", result_count=1)
+        with patch("astrbot_host.news.aiohttp.ClientSession",
+                   side_effect=self.session_factory(responses, calls)):
+            batch = await port.fetch()
+        self.assertEqual(batch.items[0].title, "旧端点结果")
+        self.assertEqual(batch.issues, ())
+        self.assertEqual(calls[0][0], "https://search.example/api?q=%E7%A7%91%E6%8A%80&count=1")
+
+    async def test_router_uses_only_a_verified_deepseek_provider_key(self):
+        with patch.dict("os.environ", {"COMPANION_V2_DEEPSEEK_API_KEY": "", "DEEPSEEK_API_KEY": ""}):
+            provider = SimpleNamespace(provider_config={"api_base": "https://api.deepseek.com/v1"},
+                                       get_current_key=lambda: "provider-secret")
+            context = SimpleNamespace(get_using_provider=lambda *args: provider,
+                                      get_all_providers=lambda: [provider])
+            self.assertEqual(deepseek_api_key(context), "provider-secret")
+            router = configured_news_port({"news": {"source_kind": "host"}}, context=context)
+            port = router.for_settings({"news_source_kind": "search", "web_exploration_interests": "科技"})
+            self.assertIsInstance(port, DeepSeekSearchNewsPort)
+            from astrbot_host.semantic_models import NativeSlangSearch, configured_slang_search_port
+            slang_port = configured_slang_search_port(context)
+            self.assertIsInstance(slang_port, NativeSlangSearch)
+            calls = []
+            responses = [{"status": "succeeded", "results": [{"title": "群词参考", "url": "https://news.example/term",
+                "site_name": "参考站", "snippet": "外部释义"}]}]
+            with patch("astrbot_host.news.aiohttp.ClientSession",
+                       side_effect=self.session_factory(responses, calls)):
+                results = await slang_port.search("群内词", 3)
+            self.assertEqual(results[0]["title"], "群词参考")
+            self.assertEqual(calls[0][1]["json"]["need_content"], False)
+
+            unrelated = SimpleNamespace(provider_config={"api_base": "https://proxy.example/v1"},
+                                        get_current_key=lambda: "must-not-forward")
+            other_context = SimpleNamespace(get_all_providers=lambda: [unrelated])
+            self.assertEqual(deepseek_api_key(other_context), "")
+
+    async def test_search_provider_binding_uses_exact_provider_and_fails_closed_when_missing(self):
+        provider_a = SimpleNamespace(id="deepseek_a", provider_config={"api_base": "https://api.deepseek.com/v1"},
+                                     get_current_key=lambda: "provider-a-secret")
+        provider_b = SimpleNamespace(id="deepseek_b", provider_config={"api_base": "https://api.deepseek.com/v1"},
+                                     get_current_key=lambda: "provider-b-secret")
+        context = SimpleNamespace(get_all_providers=lambda: [provider_a, provider_b],
+            get_using_provider=lambda *args: provider_a,
+            get_config=lambda **kwargs: {"provider_settings": {"web_search": True,
+                "websearch_provider": "tavily", "websearch_tavily_key": ["fallback-secret"]}})
+        with patch.dict("os.environ", {"COMPANION_V2_DEEPSEEK_API_KEY": "environment-secret",
+                                        "DEEPSEEK_API_KEY": ""}):
+            port = configured_search_port(context, query="科技", deepseek_provider_id="deepseek_b")
+            self.assertIsInstance(port, DeepSeekSearchNewsPort)
+            self.assertEqual(port.api_key, "provider-b-secret")
+            self.assertEqual(deepseek_api_key(context, provider_id="missing"), "")
+            missing = configured_search_port(context, query="科技", deepseek_provider_id="missing")
+            self.assertIsNone(missing)
+
+        router = configured_news_port({"news": {"source_kind": "host"}}, context=context,
+                                      deepseek_provider_resolver=lambda: "deepseek_b")
+        bound = router.for_settings({"news_source_kind": "search", "web_exploration_interests": "科技"})
+        self.assertEqual(bound.api_key, "provider-b-secret")
+        from astrbot_host.semantic_models import configured_slang_search_port
+        slang = configured_slang_search_port(context, deepseek_provider_resolver=lambda: "deepseek_b")
+        self.assertIsNotNone(slang)
+        self.assertEqual(slang.deepseek_provider_resolver(), "deepseek_b")
+
+    async def test_v1_astrbot_search_provider_remains_a_fallback(self):
+        from astrbot.core.tools import web_search_tools
+
+        context = SimpleNamespace(get_config=lambda **kwargs: {"provider_settings": {
+            "web_search": True, "websearch_provider": "tavily", "websearch_tavily_key": ["fixture-key"]}})
+        port = configured_search_port(context, query="科技", result_count=2)
+        self.assertEqual(port.provider, "tavily")
+        with patch.object(web_search_tools, "_tavily_search", new=AsyncMock(return_value=[{
+                "title": "Tavily 结果", "url": "https://news.example/tavily", "snippet": "摘要",
+                "published_date": "2026-10-17T03:00:00Z"}])) as search:
+            batch = await port.fetch()
+        search.assert_awaited_once()
+        self.assertEqual(batch.items[0].title, "Tavily 结果")
+        self.assertEqual(batch.items[0].published_at.isoformat(), "2026-10-17T03:00:00+00:00")
+
+    async def test_exa_and_anonymous_anysearch_providers_are_supported(self):
+        from astrbot.core.tools import web_search_tools
+
+        async def run(provider, provider_settings, method, expected_payload):
+            context = SimpleNamespace(get_config=lambda **kwargs: {"provider_settings": {
+                "web_search": True, "websearch_provider": provider, **provider_settings}})
+            port = configured_search_port(context, query="科技", result_count=12, topic="general")
+            self.assertIsNotNone(port)
+            search = AsyncMock(return_value=[SimpleNamespace(title="参考结果", url="https://news.example/ref",
+                                                               snippet="相关摘要")])
+            with patch.object(web_search_tools, method, new=search):
+                batch = await port.fetch()
+            search.assert_awaited_once()
+            self.assertEqual(search.await_args.args[1], expected_payload)
+            self.assertEqual(batch.items[0].title, "参考结果")
+
+        await run("exa", {"websearch_exa_key": ["exa-fixture-key"]}, "_exa_search", {
+            "query": "科技", "numResults": 12, "type": "auto",
+            "contents": {"text": {"maxCharacters": 500}},
+        })
+        await run("anysearch", {}, "_anysearch_search", {
+            "query": "科技", "max_results": 10, "format": "json",
+        })
 
 
 class NewsStorageTests(unittest.TestCase):

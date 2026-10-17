@@ -74,6 +74,9 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         envelope = self.sent[0]
         self.assertIsInstance(envelope, ImageDeliveryEnvelope)
         self.assertIn("reaction_intent", self.called[0].original.instruction)
+        self.assertIn("主动检查图库表情", self.called[0].original.instruction)
+        self.assertIn("不需要等用户明确要求图片", self.called[0].original.instruction)
+        self.assertIn("惊喜又开心地回应对方", self.called[0].original.instruction)
         self.assertEqual(envelope.images[0].descriptor.content_hash, item["id"])
         self.assertEqual(envelope.images[0].data_base64, __import__("base64").b64encode(original.content).decode("ascii"))
         contact = self.runtime.read_one("SELECT * FROM proactive_contacts WHERE task_id=?", (task.task_id,))

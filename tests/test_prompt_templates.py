@@ -31,11 +31,11 @@ class PromptTemplateTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
                 "changes": {} if reset else {"prompt": prompt}, "reset": ["prompt"] if reset else []}
         return self.manager.configure(operator or self.core, data)
 
-    def composed(self, purpose="chat"):
+    def composed(self, purpose="chat", *, dialogue=(), automatic_origin=None):
         opportunity = self.opportunity()
         job = SimpleNamespace(intent=self.intent(opportunity, purpose=purpose), context=self.context,
-            automatic_origin=None, interaction=None, role_instruction="角色自己的设定")
-        return request_for(job, (), self.preferences(self.app), ())
+            automatic_origin=automatic_origin, interaction=None, role_instruction="角色自己的设定")
+        return request_for(job, (), self.preferences(self.app), (), dialogue=dialogue)
 
     async def test_edit_replaces_business_template_and_reaches_the_provider(self):
         original = self.section("expression")["prompt"]
@@ -60,6 +60,19 @@ class PromptTemplateTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("遇到新鲜事后自然分享亮点", chat)
         self.assertIn("无需压成一句", chat)
         self.assertNotIn("一句话能说完就只说一句", chat + news)
+
+    async def test_recent_meal_answer_and_unanswered_contact_are_explicit_continuity_cues(self):
+        now = self.clock.now()
+        dialogue = ({"role": "user", "text": "吃了啦", "received_at": now.isoformat()},)
+        request = self.composed("meal", dialogue=dialogue, automatic_origin={"meal_event": {"kind": "noon"}})
+        self.assertIn("同一餐次不要再次询问是否吃饭", request.instruction)
+        self.assertIn("最近一条角色主动消息之后用户还没有新发言", request.instruction)
+        self.assertIn("角色自己的小幅状态变化通常留在内部连续性中，不逐条播报", request.instruction)
+        self.assertIn("历史材料有限或未显示答案，不证明对方还没吃", request.instruction)
+        recent = [material for material in request.context.materials
+                  if material.purpose == "recent_private_dialogue"]
+        self.assertEqual(len(recent), 1)
+        self.assertIn("吃了啦", recent[0].payload)
 
     async def test_relationship_inheritance_reset_and_window_isolation(self):
         target = ConfigTarget(self.context.scope.installation_id, ConfigLayer.RELATIONSHIP,

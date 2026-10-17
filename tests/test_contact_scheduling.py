@@ -414,6 +414,19 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         second = (await self.contact(app, self.opportunity("next-local-day"))).unwrap().task
         await self.delivery_state(app, second.task_id, "delivered")
 
+    async def test_rhythm_snapshot_counts_only_confirmed_contacts(self):
+        app = await self.enabled()
+        context = self.contact_context()
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, "delivered")
+        self.clock.advance(timedelta(minutes=40))
+
+        rhythm = app.proactive.budget.rhythm_snapshot(context, self.preferences(app), self.clock.now())
+
+        self.assertEqual(rhythm["delivered_today"], 1)
+        self.assertEqual(rhythm["delivered_last_4_hours"], 1)
+        self.assertEqual(rhythm["minutes_since_last_delivery"], 40)
+
     async def test_skips_do_not_consume_daily_contact_allowance(self):
         app = await self.enabled()
         self.settings(app, {"max_contacts_24h": 1}).unwrap()
@@ -468,6 +481,7 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(decided.state, "succeeded")
         usage = app.proactive.budget.attempt_usage(first_context, self.preferences(app), self.clock.now())
         self.assertEqual(usage["session"]["used"], 2)
+        self.settings(app, {"enabled": True}, target=target_for(other_context)).unwrap()
         independent = (await self.contact(app, self.opportunity("other-window", scope=other_context.scope),
                                           context=other_context)).unwrap().task
         self.assertEqual(independent.state, "succeeded")

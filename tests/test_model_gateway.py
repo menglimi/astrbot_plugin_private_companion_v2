@@ -99,6 +99,40 @@ class ModelFixture(ExecutionFixture):
 
 
 class ModelGatewayTests(ModelFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_proactive_prompt_archive_keeps_only_the_latest_ten_model_wires(self):
+        ceiling = Amount(100_000, 1_000_000)
+        self.ledger = BudgetLedger(self.runtime, BudgetPolicy(ceiling, ceiling, ceiling, ceiling, ceiling))
+        self.gateway = LocalModelGateway(self.router, self.ledger, self.tasks)
+
+        async def archive(envelope):
+            snapshot = [
+                {"role": "system", "content": "active prompt"},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {
+                    "url": "data:image/png;base64,private-image"}}]},
+            ]
+            self.assertIsNotNone(envelope.record_prompt_snapshot)
+            envelope.record_prompt_snapshot(snapshot)
+            return ProviderResponse("generated", ModelDraft("private draft", ()), Amount(15, 40), "receipt-primary")
+
+        self.responses["primary"] = archive
+        request = replace(self.request(), output_format="proactive_contact")
+        task_ids = []
+        for index in range(11):
+            run = self.model_run(f"proactive-prompt-{index}")
+            task_ids.append(run.task.task_id)
+            completion = await self.gateway.generate(run, request)
+            self.tasks.finish(run.claim, TaskResult("succeeded", result_ref=completion.call_id)).unwrap()
+
+        rows = self.runtime.read_all("""SELECT task_id, prompt_hash, messages_json
+            FROM proactive_prompt_snapshots ORDER BY snapshot_id""", ())
+        self.assertEqual(len(rows), 10)
+        self.assertNotIn(task_ids[0], {row["task_id"] for row in rows})
+        self.assertEqual(rows[-1]["task_id"], task_ids[-1])
+        saved = json.loads(rows[-1]["messages_json"])
+        self.assertEqual(saved[0]["content"], "active prompt")
+        self.assertEqual(saved[1]["content"][0]["image_url"]["url"], "[inline image payload omitted]")
+        self.assertEqual(rows[-1]["prompt_hash"], digest(saved))
+
     async def test_fully_filtered_catalog_keeps_reasons_without_requiring_tool_capabilities(self):
         run = self.model_run()
         request = self.request()

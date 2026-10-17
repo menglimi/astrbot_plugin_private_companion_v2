@@ -24,6 +24,29 @@ from .response_diagnostics import checked_response_diagnostics
 
 
 logger = getLogger(__name__)
+PROACTIVE_PROMPT_SNAPSHOT_LIMIT = 10
+
+
+def _redact_prompt_media(value):
+    if isinstance(value, list):
+        return [_redact_prompt_media(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, item in value.items():
+        if key == "image_url" and isinstance(item, dict):
+            image = dict(item)
+            if isinstance(image.get("url"), str) and image["url"].startswith("data:"):
+                image["url"] = "[inline image payload omitted]"
+            result[key] = _redact_prompt_media(image)
+        elif key in ("input_audio", "video_data") and isinstance(item, dict):
+            media = dict(item)
+            if "data" in media:
+                media["data"] = f"[{key} payload omitted]"
+            result[key] = _redact_prompt_media(media)
+        else:
+            result[key] = _redact_prompt_media(item)
+    return result
 
 
 class LocalModelGateway:
@@ -116,11 +139,24 @@ class LocalModelGateway:
                 prefix_committed = prefix_committed or committed
                 return committed
 
+            def record_prompt_snapshot(messages):
+                if envelope.original.output_format != "proactive_contact":
+                    return
+                try:
+                    self._record_proactive_prompt_snapshot(
+                        run.task.task_id, call_id, provider.binding.provider,
+                        envelope.model_override or provider.model, messages)
+                except Exception as error:
+                    logger.debug("[CompanionV2] proactive prompt snapshot failed task=%s call=%s error_type=%s",
+                                 run.task.task_id, call_id, type(error).__name__, exc_info=True)
+
             started = perf_counter()
             try:
                 response = await asyncio.wait_for(
                     provider.generate(replace(provider_envelope, before_dispatch=before_dispatch,
                                               record_cache_signature=record_cache_signature,
+                                              record_prompt_snapshot=(record_prompt_snapshot
+                                                  if envelope.original.output_format == "proactive_contact" else None),
                                               on_reply_prefix=publish_prefix if on_reply_prefix is not None else None,
                                               reply_prefix_ready=reply_prefix_ready)),
                     timeout=plan.audit["timeout_seconds"])
@@ -217,6 +253,21 @@ class LocalModelGateway:
                 raise TaskError("model_usage_unknown", "provider processing is unknown; no fallback was dispatched")
         raise TaskError("model_not_started", "configured providers confirmed they did not process the request")
 
+    def _record_proactive_prompt_snapshot(self, task_id, call_id, provider_id, model_name, messages):
+        snapshot = _redact_prompt_media(messages)
+        with self.runtime.transaction() as connection:
+            connection.execute("""INSERT INTO proactive_prompt_snapshots
+                (task_id, call_id, provider_id, model_name, prompt_hash, messages_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(call_id) DO UPDATE SET provider_id=excluded.provider_id,
+                    model_name=excluded.model_name, prompt_hash=excluded.prompt_hash,
+                    messages_json=excluded.messages_json, created_at=excluded.created_at""",
+                (task_id, call_id, provider_id, model_name, digest(snapshot), encode(snapshot), stamp(self.tasks.now())))
+            connection.execute("""DELETE FROM proactive_prompt_snapshots
+                WHERE snapshot_id NOT IN (
+                    SELECT snapshot_id FROM proactive_prompt_snapshots
+                    ORDER BY snapshot_id DESC LIMIT ?
+                )""", (PROACTIVE_PROMPT_SNAPSHOT_LIMIT,))
     @outcome
     def observe(self, context: TaskContext, task_id: str) -> dict:
         with self.runtime.read_snapshot():

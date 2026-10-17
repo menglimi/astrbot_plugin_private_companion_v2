@@ -303,6 +303,7 @@ test('V1 is not inspected until a target and persona are selected', async () => 
   assert.match(page.html, /先选来源、写入目标和配置范围/);
   assert.match(page.html, /setup-migration-context/);
   assert.match(page.html, /V1 只读/);
+  assert.match(page.html, /Reality 摄像头与音频/);
   assert.equal(page.calls.some(item => item.route === 'legacy'), false);
   assert.equal(page.calls.some(item => item.route === route), false);
   page.change('', 't-first', {setupLegacy: 'target'});
@@ -315,6 +316,12 @@ test('V1 is not inspected until a target and persona are selected', async () => 
   assert.deepEqual(JSON.parse(JSON.stringify(scan.body)),
     {configuration_scope: 'all'});
   assert.deepEqual(JSON.parse(JSON.stringify(scan.options)), {timeoutMs: 300000});
+  page.change('', 'reality', {setupLegacy: 'configuration-scope'});
+  page.click('legacy-scan');
+  await settle();
+  const realityScan = page.calls.filter(item => item.route === route).at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(realityScan.body)),
+    {configuration_scope: 'reality'});
   assert.match(page.html, /可转换/);
   assert.match(page.html, /可导入数据/);
   assert.match(page.html, /按边界跳过/);

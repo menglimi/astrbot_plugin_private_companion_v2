@@ -59,7 +59,7 @@ def _verify_v2_contracts(core: Path) -> dict[str, object]:
         expected_handlers = frozenset({"v2.private-config-converter",
             "v2.role-journal-importer", "v2.role-journal-and-worldbook-importer",
             "v2.group-relationship-importer", "v2.reaction-asset-importer",
-            "v2.memory-snapshot-archive"})
+            "v2.memory-snapshot-archive", "v2.reality-config-migrator"})
         if HANDLERS != expected_handlers:
             raise ValueError("legacy handler inventory changed unexpectedly")
         if not callable(build_data_plan) or not callable(map_legacy_worldbook):

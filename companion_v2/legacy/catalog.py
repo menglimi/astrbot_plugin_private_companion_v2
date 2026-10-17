@@ -277,15 +277,30 @@ LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
             acceptance_scope=("RG-03", "RG-05", "RG-08", "RG-12"),
         ),
         LegacyCatalogEntry(
+            source_id="reality.configuration",
+            source_plugin_id="astrbot_plugin_reality_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="reality_companion.configuration",
+            source_paths=("host-config:astrbot_plugin_reality_companion",),
+            format_signature="reality-companion-config.json.v1",
+            action=CatalogAction.CONVERTED,
+            handler_id="v2.reality-config-migrator",
+            acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-07", "RG-12"),
+        ),
+        LegacyCatalogEntry(
             source_id="reality.device_and_observations",
             source_plugin_id="astrbot_plugin_reality_companion",
             source_version=V1_SUPPORTED_VERSION,
             owner="reality_companion.device_and_observation",
-            source_paths=("reality_companion.json", "device-side-material"),
-            format_signature="reality-state-and-device-contract.v1",
-            action=CatalogAction.RETAINED_EXTERNAL,
-            handler_id="v2.reality-owner-adapter",
+            source_paths=("plugin-data:astrbot_plugin_reality_companion/reality_companion.json",),
+            format_signature="reality-companion-state.json.v1",
+            action=CatalogAction.DOCUMENTED_SKIP,
+            handler_id="documented-skip.reality-private-state",
             acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-07", "RG-12"),
+            disposition_reason=(
+                "V1 的用户授权属于旧运行上下文；闹钟、观察记录、播放历史与设备路由不复制，"
+                "以免形成过期授权、重复提醒或指向错误设备。V1 文件保持只读。"
+            ),
         ),
         LegacyCatalogEntry(
             source_id="extensions.session_and_media",

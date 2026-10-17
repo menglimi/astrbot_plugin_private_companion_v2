@@ -62,35 +62,40 @@ def _slang_search_results(batch, limit):
     return results
 
 
-def configured_slang_search_port():
-    """Build the reference search port from host environment, or return None when unset.
+def configured_slang_search_port(context=None, *, deepseek_provider_resolver=None):
+    """Build the reference search port from explicit, DeepSeek, or AstrBot settings.
 
-    Credentials stay in host environment variables exactly like the news source, so no
-    secret is ever written into V2 configuration. A missing endpoint is not an error:
-    the whole chain silently degrades to "no external reference".
+    Credentials stay in host settings and are never written into V2 configuration. Missing
+    search configuration quietly degrades to "no external reference".
     """
     values = {name: os.environ.get(name, "") for name in SLANG_SEARCH_ENV}
     url = values[SLANG_SEARCH_ENV[0]].strip()
-    if not url:
-        return None
-    return NativeSlangSearch(url, values[SLANG_SEARCH_ENV[1]], values[SLANG_SEARCH_ENV[2]] or "Authorization",
-                             values[SLANG_SEARCH_ENV[3]] or "Bearer")
+    if url:
+        return NativeSlangSearch(url, values[SLANG_SEARCH_ENV[1]], values[SLANG_SEARCH_ENV[2]] or "Authorization",
+                                 values[SLANG_SEARCH_ENV[3]] or "Bearer", host_context=context)
+    from .news import astrbot_web_search_available, deepseek_api_key
+    selected_provider = ""
+    if callable(deepseek_provider_resolver):
+        try:
+            selected_provider = deepseek_provider_resolver()
+        except Exception:
+            selected_provider = "invalid-search-provider-selection"
+    if (deepseek_provider_resolver is not None or selected_provider or deepseek_api_key(context)
+            or astrbot_web_search_available(context)):
+        return NativeSlangSearch(host_context=context, deepseek_provider_resolver=deepseek_provider_resolver)
+    return None
 
 
 class NativeSlangSearch:
-    """Optional external reference search for group vocabulary; off unless an endpoint exists.
+    """Optional external reference search that never overwrites an in-group usage."""
 
-    Reuses the news JSON search port rather than adding another HTTP client, but builds one
-    port per query because `WebSearchNewsPort` fixes its query at construction and folds it
-    into the port fingerprint. Results are reference evidence only and must never overwrite
-    an in-group usage.
-    """
-
-    def __init__(self, url, api_key="", auth_header="Authorization", auth_scheme="Bearer"):
-        if type(url) is not str or not url.strip():
-            raise ValueError("slang search needs an endpoint")
-        self.url, self.api_key = url.strip(), api_key
+    def __init__(self, url="", api_key="", auth_header="Authorization", auth_scheme="Bearer", *,
+                 host_context=None, deepseek_provider_resolver=None):
+        if type(url) is not str:
+            raise ValueError("slang search endpoint is invalid")
+        self.url, self.api_key, self.host_context = url.strip(), api_key, host_context
         self.auth_header, self.auth_scheme = auth_header, auth_scheme
+        self.deepseek_provider_resolver = deepseek_provider_resolver
 
     @property
     def available(self):
@@ -99,11 +104,14 @@ class NativeSlangSearch:
     async def search(self, term, limit):
         if type(term) is not str or not 0 < len(term.strip()) <= 64:
             raise ValueError("slang search needs a bounded term")
-        from .news import WebSearchNewsPort
+        from .news import configured_search_port
         result_count = max(1, min(5, int(limit)))
-        port = WebSearchNewsPort(url=self.url, query=term.strip(), result_count=result_count,
-                                 api_key=self.api_key, auth_header=self.auth_header,
-                                 auth_scheme=self.auth_scheme)
+        port = configured_search_port(self.host_context, query=term.strip(), result_count=result_count,
+            search_url=self.url, auth={"api_key": self.api_key, "auth_header": self.auth_header,
+                                       "auth_scheme": self.auth_scheme}, topic="general",
+            deepseek_provider_resolver=self.deepseek_provider_resolver)
+        if port is None:
+            return []
         batch = await port.fetch()
         return _slang_search_results(batch, result_count)
 

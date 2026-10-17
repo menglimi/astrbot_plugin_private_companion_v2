@@ -3,11 +3,16 @@
 window.CompanionOutputPage=(()=>{
   const BACKENDS={auto:"自动",online_api:"在线 API",comfyui:"ComfyUI",sd_webui:"SD WebUI"};
   const PLATFORMS={auto:"自动识别",openai:"OpenAI 兼容接口",minimax:"MiniMax"};
-  const ERRORS={model_image_output_unavailable:"请更新并加载生图伴侣，以启用 V2 后端配置。",
-    model_image_output_unavailable:"生图伴侣尚未加载。",model_image_output_conflict:"配置已在其他页面更新，请重新读取后核对。",
+  const ERRORS={model_image_output_unavailable:"生图伴侣尚未加载，请更新插件并重新读取状态。",
+    model_image_output_conflict:"配置已在其他页面更新，请重新读取后核对。",
     model_image_output_busy:"正在执行生图任务，请等待当前任务结束后保存。",
     model_image_output_invalid:"配置未保存，请核对地址、端点和数值。",
-    model_image_output_failed:"操作未完成，请重新读取状态。"};
+    model_image_output_failed:"操作未完成，请重新读取状态。",
+    staging_not_initialized:"V2 执行器尚未初始化，请先加载陪伴小屋配置。",
+    staging_session_still_stopping:"V2 当前会话仍在停止，请稍等片刻后再重连。",
+    staging_host_terminated:"V2 执行器已停止，请重新启动插件后再重连。",
+    staging_configuration_invalid:"V2 配置未通过校验，请检查宿主管理中的运行配置。",
+    staging_native_reconnect_failed:"V2 执行器重连失败，请查看 AstrBot 日志中的 CompanionV2 错误后再试。"};
   let root=null,abort=null,ticket=0,scope="",base=null,draft=null,revision="",busy="",notice="",bad=false,hostRegistered=false,expanded=new Set(),tests=new Map(),testKeys=new Map(),observation=null,observationBusy=false,observationError="",sceneEditorOpen=false,sceneDraft=null,sceneError="",sceneSaving=false;
   const product=()=>window.CompanionProduct;
   const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -245,7 +250,9 @@ window.CompanionOutputPage=(()=>{
     try{
       const data=await product().request("POST",endpoint()+"/reconnect",{});
       if(!live(id))return;
-      hostRegistered=Boolean(data.reconnected);notice=hostRegistered?"V2 图片能力已接入当前会话":"V2 会话未能接入图片能力";bad=!hostRegistered;
+      hostRegistered=Boolean(data.reconnected&&data.host_registered);
+      notice=hostRegistered?"V2 图片能力已接入当前会话":data.reconnected?"V2 会话已重连，但当前没有可用的图片操作接入":"V2 会话未能接入图片能力";
+      bad=!hostRegistered;
     }catch(error){if(live(id)){bad=true;notice=ERRORS[error.code]||ERRORS[error.message]||"V2 执行器重连失败，请重新读取状态。";}}
     finally{if(live(id)){busy="";render();}}
   }

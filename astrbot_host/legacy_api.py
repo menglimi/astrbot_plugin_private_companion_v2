@@ -34,6 +34,11 @@ from astrbot.api.web import request
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.legacy.migration import LegacyMigration, MigrationState, plugin_data_path
+from companion_v2.legacy.reality_migration import (
+    REALITY_SETTING_DEFAULTS,
+    reality_setting_value,
+    reality_settings_state_token,
+)
 from companion_v2.legacy.data_migration import (
     build_data_plan,
     MAX_REFERENCE_IMAGE_BYTES,
@@ -68,7 +73,8 @@ from companion_v2.legacy.configuration_migration import (
 from .management_identity import dashboard_operator
 from .identity_derivation import derive_role_id
 from .legacy_config import (V1_HOST_CONFIG_NAME, V1_PLUGIN_DATA_NAME,
-                            read_v1_host_configuration, v1_host_config_path)
+                            V1_REALITY_PLUGIN_DATA_NAME, read_v1_host_configuration,
+                            read_v1_plugin_configuration, v1_host_config_path)
 from .persona_catalog import available_personas
 
 
@@ -84,6 +90,7 @@ _WEATHER_REDACTED_FIELDS = frozenset({
     "weather.api_host", "weather.credential", "api_host", "credential",
 })
 PROACTIVE_CONFIGURATION_SCOPE = "proactive"
+REALITY_CONFIGURATION_SCOPE = "reality"
 _PROACTIVE_CONFIGURATION_FIELDS = frozenset({
     "proactive.contact.*",
     "role.state.planning_weather_enabled",
@@ -168,10 +175,13 @@ class LegacyMigrationWebAPI:
                 continue
             enriched_accounts.append({**account, "persona_roles": persona_roles,
                                       "default_role_id": derive_role_id(account_id, None)})
+        reality_configuration, reality_issue = self._v1_reality_configuration()
         return LegacyMigration(v1_root=root, v1_configuration=self._v1_host_configuration(),
                                configuration_registry=registry,
                                host_accounts=enriched_accounts,
-                               configuration_scope_kind=configuration_scope_kind), root, origin
+                               configuration_scope_kind=configuration_scope_kind,
+                               v1_reality_configuration=reality_configuration,
+                               v1_reality_configuration_issue=reality_issue), root, origin
 
     # ── V1 的宿主配置 ─────────────────────────────────────────────────
     def _v1_host_config_path(self):
@@ -197,6 +207,15 @@ class LegacyMigrationWebAPI:
         except (OSError, ValueError, UnicodeDecodeError):
             return None
         return loaded
+
+    def _v1_reality_configuration(self):
+        try:
+            loaded, _, _ = read_v1_plugin_configuration(
+                getattr(self.controller, "data_root", "."), V1_REALITY_PLUGIN_DATA_NAME,
+            )
+        except (OSError, ValueError, UnicodeDecodeError):
+            return None, "unreadable"
+        return loaded, ""
 
     def _fingerprint(self, root) -> str:
         """V1 目录的指纹：只取顶层条目的「名字 + 大小 + 修改时间」。
@@ -265,7 +284,7 @@ class LegacyMigrationWebAPI:
                 or any(len(query.getlist(key)) != 1 for key in query.keys())):
             return False
         configuration_scope = query.get("configuration_scope", "all")
-        if configuration_scope not in ("all", PROACTIVE_CONFIGURATION_SCOPE):
+        if configuration_scope not in ("all", PROACTIVE_CONFIGURATION_SCOPE, REALITY_CONFIGURATION_SCOPE):
             return False
         return query.get("v1_root"), configuration_scope
 
@@ -285,7 +304,7 @@ class LegacyMigrationWebAPI:
             if root_override is not None and (type(root_override) is not str or not root_override.strip()):
                 raise ValueError()
             configuration_scope = arguments.get("configuration_scope", "all")
-            if configuration_scope not in ("all", PROACTIVE_CONFIGURATION_SCOPE):
+            if configuration_scope not in ("all", PROACTIVE_CONFIGURATION_SCOPE, REALITY_CONFIGURATION_SCOPE):
                 raise ValueError()
         except (ValueError, UnicodeError, RecursionError):
             return outcome_response(Outcome.failed("legacy_request_invalid", "invalid apply request"))
@@ -1483,7 +1502,8 @@ class LegacyMigrationWebAPI:
         service = session.application.configuration
         operator = self._operator()
         for intent in intents:
-            if intent.target_kind in ("plugin_config", "semantic_config", "weather_host_settings"):
+            if intent.target_kind in ("plugin_config", "semantic_config", "weather_host_settings",
+                                      "reality_config"):
                 continue
             target = self._scope_target(session, intent)
             if target is None:
@@ -1518,6 +1538,10 @@ class LegacyMigrationWebAPI:
                 elif intent.target_kind == "semantic_config":
                     written.extend(await self._apply_semantic_intent(
                         intent, session, edit_tokens.get("semantic_config_state", "")))
+                elif intent.target_kind == "reality_config":
+                    written.extend(await self._apply_reality_config_intent(
+                        intent, edit_tokens.get("reality_config_state", ""),
+                        edit_tokens.get("reality_config_fields", ())))
                 else:
                     written.extend(self._apply_intent(
                         intent, session, baseline_snapshots[self._intent_key(intent)]))
@@ -1551,6 +1575,23 @@ class LegacyMigrationWebAPI:
     def _configuration_scoped_plan(plan, configuration_scope):
         if configuration_scope == "all":
             return plan
+        if configuration_scope == REALITY_CONFIGURATION_SCOPE:
+            intents = tuple(intent for intent in plan.intents
+                            if intent.target_kind == "reality_config")
+            differences = tuple(item for item in plan.differences
+                                if str(item.get("field", item.get("field_id", ""))).startswith("reality."))
+            findings = tuple(item for item in plan.findings
+                             if item.source_id in {"reality.configuration", "reality.device_and_observations"})
+            return replace(
+                plan,
+                findings=findings,
+                warnings=(
+                    "本次只迁移 V1 Reality 的摄像头基础参数、默认音量及时区；V2 已有非默认设置会保留。",
+                    "设备索引、授权、视觉提供方、扬声器路由、提醒与历史数据不会从 V1 复制。",
+                ),
+                intents=intents,
+                differences=differences,
+            )
         if configuration_scope != PROACTIVE_CONFIGURATION_SCOPE:
             raise ValueError("unsupported configuration scope")
 
@@ -1689,6 +1730,13 @@ class LegacyMigrationWebAPI:
         scope_status = []
         edit_tokens = {}
         for intent in plan.intents:
+            if intent.target_kind == "reality_config":
+                reality_intent = self._prepare_reality_config_intent(
+                    intent, differences, scope_status, edit_tokens,
+                )
+                if reality_intent is not None:
+                    intents.append(reality_intent)
+                continue
             if intent.target_kind == "plugin_config":
                 weather_intent = self._prepare_weather_host_intent(
                     intent, differences, scope_status, edit_tokens,
@@ -1790,6 +1838,70 @@ class LegacyMigrationWebAPI:
             if changes:
                 intents.append(replace(intent, changes=changes, confidence=confidence, sources=sources))
         return intents, differences, scope_status, edit_tokens
+
+    def _reality_runtime(self):
+        registry = getattr(self.controller, "native_extensions", None)
+        getter = getattr(registry, "service", None)
+        return getter("reality") if callable(getter) else None
+
+    def _prepare_reality_config_intent(self, intent, differences, scope_status, edit_tokens):
+        runtime = self._reality_runtime()
+        config = getattr(runtime, "config", None)
+        apply = getattr(runtime, "_apply_legacy_migrated_settings", None)
+        fields = tuple(sorted(intent.changes))
+        if (runtime is None or not isinstance(config, dict) or not callable(apply)
+                or set(fields) - set(REALITY_SETTING_DEFAULTS)):
+            scope_status.append({"scope": intent.scope, "group_id": intent.group_id,
+                                 "available": False, "reason": "reality_service_unavailable"})
+            differences.extend({"field": f"reality.{field}", "kind": "unavailable",
+                                "explain": "V2 Reality 服务当前不可写；请启动宿主后重新试算。"}
+                               for field in fields)
+            return None
+
+        edit_tokens["reality_config_fields"] = list(fields)
+        edit_tokens["reality_config_state"] = reality_settings_state_token(config, fields)
+        scope_status.append({"scope": intent.scope, "group_id": intent.group_id,
+                             "available": True, "reason": ""})
+        changes = {}
+        confidence = {}
+        sources = {}
+        for field, value in intent.changes.items():
+            default = REALITY_SETTING_DEFAULTS[field]
+            current = reality_setting_value(config, field, default)
+            if current == value:
+                differences.append({"field": f"reality.{field}", "kind": "already_present",
+                                    "before": str(value), "after": str(current),
+                                    "explain": "V2 Reality 设置已有相同值。"})
+                continue
+            if current != default:
+                differences.append({"field": f"reality.{field}", "kind": "preserved_v2",
+                                    "before": str(value), "after": str(current),
+                                    "explain": "V2 Reality 已有非默认设置，为避免覆盖而保留现值。"})
+                continue
+            changes[field] = value
+            if field in intent.confidence:
+                confidence[field] = intent.confidence[field]
+            if field in intent.sources:
+                sources[field] = intent.sources[field]
+        return replace(intent, changes=changes, confidence=confidence, sources=sources) if changes else None
+
+    async def _apply_reality_config_intent(self, intent, expected_state_token, expected_fields):
+        runtime = self._reality_runtime()
+        config = getattr(runtime, "config", None)
+        apply = getattr(runtime, "_apply_legacy_migrated_settings", None)
+        if runtime is None or not isinstance(config, dict) or not callable(apply):
+            raise TaskError("legacy_reality_service_unavailable", "V2 Reality 服务当前不可写")
+        fields = tuple(expected_fields or intent.changes)
+        current_token = reality_settings_state_token(config, fields)
+        if current_token != expected_state_token:
+            raise TaskError("legacy_plan_stale", "V2 Reality 设置在迁移试算后发生变化，请重新试算。")
+        result = apply(dict(intent.changes), expected_state_token, fields)
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, dict) or result.get("saved") is not True:
+            reason = result.get("reason") if isinstance(result, dict) else ""
+            raise TaskError("legacy_reality_apply_failed", str(reason or "V2 Reality 设置未确认保存"))
+        return [f"reality.{field}" for field in intent.changes]
 
     @staticmethod
     def _prepare_semantic_intent(intent, session, differences, scope_status, edit_tokens):
@@ -2304,6 +2416,13 @@ class LegacyMigrationWebAPI:
                     "available": callable(getattr(self.controller, "save_plugin_config", None)),
                     "reason": "" if callable(getattr(self.controller, "save_plugin_config", None))
                     else "plugin_config_save_unavailable"})
+                continue
+            if intent.target_kind == "reality_config":
+                runtime = self._reality_runtime()
+                available = callable(getattr(runtime, "_apply_legacy_migrated_settings", None))
+                status.append({"scope": intent.scope, "group_id": intent.group_id,
+                    "available": available,
+                    "reason": "" if available else "reality_service_unavailable"})
                 continue
             if intent.target_kind == "semantic_config":
                 available = getattr(session.application, "semantics", None) is not None

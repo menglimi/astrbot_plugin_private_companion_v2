@@ -1027,6 +1027,35 @@ test('the routing page does not render a global provider catalog cloud', () => {
   assert.match(source, /备用模型提供方/);
 });
 
+test('search service binds and saves an AstrBot DeepSeek Provider id', async () => {
+  const {page, requests, root} = harness();
+  const node = root();
+  page.mount(node);
+  requests[0].resolve(status());
+  await flush();
+
+  node.click('[data-model-tab]', {modelTab: 'search'});
+  const read = requests.find(item => item.method === 'GET' && item.route === 'model/search');
+  assert.ok(read);
+  read.resolve({deepseek_provider_id: '', revision: 'search-r1', provider_available: true,
+    providers: [{id: 'deepseek_main', name: 'DeepSeek 主账号'}]});
+  await flush();
+  assert.match(node.innerHTML, /DeepSeek 搜索服务/);
+  assert.match(node.innerHTML, /Search \/ Fetch API/);
+
+  node.change('[data-search-provider]', {value: 'deepseek_main'});
+  node.click('[data-search-save]');
+  const save = requests.find(item => item.method === 'POST' && item.route === 'model/search/save');
+  assert.deepEqual(JSON.parse(JSON.stringify(save.values)), {
+    revision: 'search-r1', changes: {deepseek_provider_id: 'deepseek_main'},
+  });
+  save.resolve({deepseek_provider_id: 'deepseek_main', revision: 'search-r2', provider_available: true,
+    providers: [{id: 'deepseek_main', name: 'DeepSeek 主账号'}]});
+  await flush();
+  assert.match(node.innerHTML, /后续搜索立即生效/);
+  page.unmount();
+});
+
 test('Laya page exposes official local install, first-run download, and SystemOne remote setup', async () => {
   const {page, requests, root} = harness();
   const node = root();

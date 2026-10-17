@@ -2042,6 +2042,31 @@ MIGRATION_V62_TO_V63_FINGERPRINT = hashlib.sha256(
     "\n".join(V63_MIGRATION_STATEMENTS).encode("utf-8")
 ).hexdigest()
 
+V64_MIGRATION_STATEMENTS = (
+    """CREATE TABLE proactive_prompt_snapshots (
+        snapshot_id INTEGER PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        call_id TEXT NOT NULL UNIQUE,
+        provider_id TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        prompt_hash TEXT NOT NULL,
+        messages_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(task_id) REFERENCES model_requests(task_id),
+        FOREIGN KEY(call_id) REFERENCES model_calls(call_id)
+    )""",
+)
+V64_REQUIRED_TABLES = V63_REQUIRED_TABLES.union({"proactive_prompt_snapshots"})
+V64_SCHEMA_STATEMENTS = V63_SCHEMA_STATEMENTS + V64_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V64_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V64_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V64 = "companion-v2.storage.v64"
+SCHEMA_VERSION = SCHEMA_VERSION_V64
+MIGRATION_V63_TO_V64_ID = "companion-v2.storage.v63-to-v64"
+MIGRATION_V63_TO_V64_FINGERPRINT = hashlib.sha256(
+    "\n".join(V64_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
 
 def migration_count() -> int:
     """How many ordered migrations a fully upgraded data root records.

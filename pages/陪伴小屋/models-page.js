@@ -67,6 +67,8 @@ window.CompanionModelsPage = (() => {
     laya_transport_failed: "Laya 连接失败，请检查地址、网络和远程服务状态。", laya_http_error: "Laya HTTP 服务返回错误，详细信息见下方。",
     laya_response_invalid: "Laya 返回缺少官方 SystemOne 所需分类。", laya_contract_invalid: "Laya 分类超出插件决策合同，已拒绝采用。",
     laya_rule_skip: "这类事件由程序规则处理，不调用 Laya。", laya_no_decision_fields: "没有启用任何 Laya 决策分类。",
+    search_config_conflict: "搜索配置已变化，请刷新后再保存。", search_config_invalid: "搜索配置无效，请刷新并重新选择 Provider。",
+    search_config_unreadable: "搜索配置文件无法读取。", search_config_unavailable: "无法读取搜索服务配置。",
   };
   /* Real dashboard bridges reject failed requests with the error code carried in
      Error.message; the mocked bridge resolves error envelopes with Error.code. */
@@ -216,6 +218,7 @@ window.CompanionModelsPage = (() => {
     fn: '<path d="M4 6h16M4 12h10M4 18h7"/><circle cx="18" cy="17" r="3"/>',
     voice: '<path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 3 3 3-3 5 5"/>',
+    search: '<circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/>',
     reply: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>',
     memory: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/>',
     life: '<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/>',
@@ -872,6 +875,46 @@ window.CompanionModelsPage = (() => {
     catch (err) { if (!current(ticket, s)) return; l.test = {status: "unknown", code: err.code || err.message, reason: err.reason || ""}; l.bad = true; l.notice = fail(err, "Laya 连接测试未完成。"); }
     finally { l.busy = false; if (current(ticket, s)) render(); } }
   async function layaRefreshQuiet(s, ticket) { try { const [data, history] = await Promise.all([api("GET", path + "/laya"), api("GET", path + "/laya/logs")]); if (current(ticket, s)) { s.laya.data = data; s.laya.draft = layaDraftFrom(data); s.laya.logs = history.events || []; } } catch {} }
+  /* ---------- DeepSeek search binding ---------- */
+  const searchDirty = x => !!x.data && !!x.draft
+    && x.draft.deepseek_provider_id !== x.data.deepseek_provider_id;
+  async function searchRefresh(s) { const x = s.search, ticket = version; if (x.loading || x.busy) return;
+    x.loading = true; x.notice = "正在读取搜索服务配置…"; render();
+    try { const data = await api("GET", path + "/search"); if (!current(ticket, s)) return;
+      if (!searchDirty(x) || x.stale) x.draft = {deepseek_provider_id: data.deepseek_provider_id || ""};
+      x.data = data; x.loaded = true; x.stale = false; x.bad = false;
+      x.notice = data.provider_available ? "已读取 DeepSeek 搜索 Provider。" : "当前选择的 Provider 未加载或已失效；搜索不会自动切换。";
+    } catch (err) { if (!current(ticket, s)) return; x.bad = true; x.notice = fail(err, "无法读取搜索服务配置。"); }
+    finally { x.loading = false; if (current(ticket, s)) render(); } }
+  async function searchSave(s) { const x = s.search; if (x.busy || x.loading || !x.data || x.stale || !searchDirty(x)) return;
+    const ticket = version, changes = {deepseek_provider_id: x.draft.deepseek_provider_id};
+    x.busy = true; x.notice = "正在保存搜索服务配置…"; render();
+    try { const data = await api("POST", path + "/search/save", {revision: x.data.revision, changes}); if (!current(ticket, s)) return;
+      x.data = data; x.draft = {deepseek_provider_id: data.deepseek_provider_id || ""}; x.stale = false; x.bad = false;
+      x.notice = data.provider_available ? "搜索 Provider 已保存，后续搜索立即生效。" : "配置已保存，但 Provider 当前不可用；搜索不会自动切换。";
+    } catch (err) { if (!current(ticket, s)) return; x.bad = true; x.notice = fail(err, "搜索服务配置保存未完成。"); }
+    finally { x.busy = false; if (current(ticket, s)) render(); } }
+  function searchPane(s) { const x = s.search, data = x.data, draft = x.draft || {deepseek_provider_id: ""};
+    const providers = data?.providers || [], selected = draft.deepseek_provider_id || "";
+    const unavailable = selected && !providers.some(item => item.id === selected);
+    return `<div class="model-subpane model-laya-pane">
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">网页搜索与内容抓取</span><h3>DeepSeek 搜索服务</h3><p class="model-note">搜索使用 DeepSeek 官方 Search / Fetch API，不对应聊天模型任务。API 密钥由 AstrBot Provider 管理；V2 只保存 Provider 标识。选择自动时沿用环境变量、当前 DeepSeek Provider 和 AstrBot 网页搜索回退。</p></div><button type="button" class="button small" data-search-refresh ${x.loading || x.busy ? "disabled" : ""}>刷新</button></div>
+        <label class="model-fd"><span class="model-cap">DeepSeek API 凭据来源<em>只列出已加载且配置了 api.deepseek.com 的 Provider</em></span><select data-search-provider ${x.loading || x.busy || !data ? "disabled" : ""}>
+          <option value="" ${selected ? "" : "selected"}>自动选择</option>${providers.map(item => `<option value="${esc(item.id)}" ${selected === item.id ? "selected" : ""}>${esc(item.name)} · ${esc(item.id)}</option>`).join("")}
+          ${unavailable ? `<option value="${esc(selected)}" selected>${esc(selected)} · 当前不可用</option>` : ""}</select></label>
+        ${data && !providers.length ? '<p class="model-note">未发现可用的 DeepSeek Provider。可在 AstrBot 模型提供方中配置官方 API，再刷新此页。</p>' : ""}
+        ${unavailable ? '<div class="model-alert">已选 Provider 当前不可用。请重新加载该 Provider，或改选其他来源。</div>' : ""}
+        <div class="model-editor-actions"><button type="button" class="button primary" data-search-save ${!data || !searchDirty(x) || x.busy || x.loading || x.stale ? "disabled" : ""}>保存搜索配置</button></div>
+        ${x.stale ? '<div class="model-alert">配置已在别处变化，请刷新后核对。</div>' : ""}${x.notice ? `<div class="model-notice${x.bad || unavailable ? " error" : ""}">${esc(x.notice)}</div>` : ""}
+      </div>
+    </div>`; }
+  function searchInput(s, event) { const x = s.search, target = event.target;
+    if (!target.matches("[data-search-provider]") || !x.draft || x.loading || x.busy) return;
+    x.draft.deepseek_provider_id = target.value; x.bad = false; x.notice = "";
+    if (event.type === "change") render(); }
+  function searchClick(s, event) { const target = event.target;
+    if (target.closest("[data-search-refresh]")) { searchRefresh(s); return; }
+    if (target.closest("[data-search-save]")) searchSave(s); }
   async function layaDecide(s) { const l = s.laya; if (l.busy || l.loading || !l.data) return;
     if (layaDirty(l)) { l.bad = true; l.notice = "请先保存当前 Laya 配置，再执行决策预览。"; render(); return; }
     const text = String(l.previewText || "").trim(); if (!text) { l.bad = true; l.notice = "先输入一段测试消息。"; render(); return; }
@@ -1250,6 +1293,7 @@ window.CompanionModelsPage = (() => {
   function tabBar(s) { const tabs = [["fn", "功能模型", ICONS.fn, snapshot(s).length],
       ["voice", "语音模型", ICONS.voice, s.voice.data ? s.voice.data.providers.length : ""],
       ["image", "生图模型", ICONS.image, s.image.data ? s.image.data.actions.length : ""],
+      ["search", "搜索服务", ICONS.search, s.search?.data?.deepseek_provider_id ? "已绑定" : ""],
       ["laya", "Laya 决策", ICONS.decision, s.laya.data ? (s.laya.data.enabled ? "启用" : "") : ""]];
     return `<div class="model-tabs" role="tablist" aria-label="模型配置分类">${tabs.map(([id, label, ic, count]) =>
       `<button type="button" role="tab" data-model-tab="${id}" aria-selected="${s.tab === id}" class="${s.tab === id ? "on" : ""}">${icon(ic)}${label}${count !== "" ? `<span class="c">${count}</span>` : ""}</button>`).join("")}</div>`; }
@@ -1687,7 +1731,7 @@ window.CompanionModelsPage = (() => {
     ruleInput(s, event); }
   function fnPane(s) { const sub = s.sub === "map" ? situationMap(s) : s.sub === "pol" ? replacementPolicy(s) : cfgPane(s);
     return `${topbar(s)}${subtabBar(s)}${sub}`; }
-  function pane(s) { if (s.tab === "voice") return voicePane(s); if (s.tab === "image") return imagePane(s); if (s.tab === "laya") return layaPane(s); return fnPane(s); }
+  function pane(s) { if (s.tab === "voice") return voicePane(s); if (s.tab === "image") return imagePane(s); if (s.tab === "search") return searchPane(s); if (s.tab === "laya") return layaPane(s); return fnPane(s); }
   function drawer(s) { const id = s.drawer; if (!id) return "";
     const provider = s.status?.providers.find(p => p.id === id); if (!provider) return "";
     const tasks = snapshot(s), asMain = tasks.filter(t => providerFor(t, s.drafts.get(t.kind)) === id);
@@ -1706,15 +1750,17 @@ window.CompanionModelsPage = (() => {
   function input(event) { const s = state; if (!s || !root?.isConnected) return;
     if (s.tab === "voice") { voiceInput(s, event); return; }
     if (s.tab === "image") { imageInput(s, event); return; }
+    if (s.tab === "search") { searchInput(s, event); return; }
     if (s.tab === "laya") { layaInput(s, event); return; }
     fnInput(event); }
   function click(event) { const s = state; if (!s || !root?.isConnected) return;
     const tab = event.target.closest("[data-model-tab]");
     if (tab) { const id = tab.dataset.modelTab; if (s.tab !== id) { s.tab = id;
-        if (id === "voice" && !state.voice.loaded) voiceRefresh(s); else if (id === "image" && !state.image.loaded) imageRefresh(s); else if (id === "laya" && !state.laya.loaded) layaRefresh(s);
+        if (id === "voice" && !state.voice.loaded) voiceRefresh(s); else if (id === "image" && !state.image.loaded) imageRefresh(s); else if (id === "search" && !state.search.loaded) searchRefresh(s); else if (id === "laya" && !state.laya.loaded) layaRefresh(s);
         render(); } return; }
     if (s.tab === "voice") { voiceClick(s, event); return; }
     if (s.tab === "image") { imageClick(s, event); return; }
+    if (s.tab === "search") { searchClick(s, event); return; }
     if (s.tab === "laya") { layaClick(s, event); return; }
     fnClick(event); }
   function providerHover(event) {
@@ -1756,11 +1802,12 @@ window.CompanionModelsPage = (() => {
         configLoading: false, configSaving: false, configBad: false, configNotice: "",
       },
       laya: { data: null, draft: null, logs: [], loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" },
+      search: { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" },
       loading: false, busy: false, bad: false, denied: false, notice: "" };
-    state.layer ||= "role"; state.providerTests ||= {}; state.testing ||= new Set(); state.expOpen ||= {}; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.hoverProvider = "";
+    state.layer ||= "role"; state.providerTests ||= {}; state.testing ||= new Set(); state.expOpen ||= {}; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.search ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" }; state.hoverProvider = "";
     states.set(key, state);
     root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); root.addEventListener("pointerover", providerHover); root.addEventListener("pointerout", providerHover); render();
-    if (state.tab && state.tab !== "fn") { if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); else if (state.tab === "laya" && !state.laya.loaded) layaRefresh(state); }
+    if (state.tab && state.tab !== "fn") { if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); else if (state.tab === "search" && !state.search.loaded) searchRefresh(state); else if (state.tab === "laya" && !state.laya.loaded) layaRefresh(state); }
     else { refresh().catch(() => {}); } }
   return { mount, unmount };
 })();

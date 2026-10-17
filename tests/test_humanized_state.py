@@ -43,6 +43,8 @@ class HumanizedBandTests(unittest.TestCase):
         self.assertIn("不必等睡眠回执才允许感受温和好转", PROMPT)
         self.assertIn("好转不宣称已休息", PROMPT)
         self.assertIn("不从清晨、沉默或对话推断已睡足、醒来或休息完成", PROMPT)
+        self.assertIn("用户以“我”陈述的身体、睡眠、饥饿或情绪只属于用户", PROMPT)
+        self.assertIn("不把任一方的状态移到另一方", PROMPT)
 
     def test_body_expression_preferences_are_soft_prompt_data(self):
         block = _expression_preferences({

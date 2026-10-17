@@ -333,6 +333,8 @@
   .model-tabs button{padding:var(--sp-2) var(--sp-1);font-size:var(--fs-body)}
 }
 @media(max-width:520px){
+  .model-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .model-tabs button{min-width:0;white-space:nowrap}
   .model-provider-filter{flex:1 1 160px}
   .model-provider-filter select{max-width:none}
 }

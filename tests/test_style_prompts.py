@@ -1,6 +1,6 @@
 """Per-channel style prompt supplements: presentation, proactive contact, and journal writing."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
 import unittest
@@ -162,7 +162,39 @@ class ProactiveStyleTests(unittest.TestCase):
         self.assertIn("不给回应制造压力，不催促", request.instruction)
         self.assertIn("也可顺势问一个轻问题", request.instruction)
         self.assertIn("不编刚做过的事、共同经历或用户现状", request.instruction)
+        self.assertIn("角色状态摘要", request.instruction)
+        self.assertIn("不因角色自身状态询问用户是否好转", request.instruction)
         self.assertIn("历史用于连续和避重，不是待回复队列", request.instruction)
+
+    def test_daily_allowance_is_a_human_rhythm_signal_not_a_contact_target(self):
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        rhythm = {"local_time": "13:09", "delivered_today": 10, "daily_maximum": 12,
+                  "delivered_last_4_hours": 3, "minutes_since_last_delivery": 20}
+
+        request = request_for(self.contact_job(), (), preferences, rhythm_snapshot=rhythm)
+
+        materials = {item.purpose: json.loads(item.payload) for item in request.context.materials}
+        self.assertEqual(materials["contact_intent"]["rhythm"], rhythm)
+        self.assertIn("不是要完成的目标", request.instruction)
+        self.assertIn("联系偏密时", request.instruction)
+        self.assertIn("紧急时效信息", request.instruction)
+        self.assertIn("联系较少也不意味着需要凑数", request.instruction)
+
+    def test_recent_contact_timing_guides_short_gap_expression(self):
+        preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
+        last_contact = NOW - timedelta(minutes=15)
+        history = ({"owner": CONTACT_GROUP, "delivered_at": last_contact.isoformat(), "text": "刚才的主动消息"},)
+        dialogue = ({"role": "user", "received_at": (NOW - timedelta(minutes=1)).isoformat(), "text": "我还在上课"},)
+
+        request = request_for(self.contact_job(), (), preferences, history, dialogue=dialogue)
+
+        materials = {item.purpose: json.loads(item.payload) for item in request.context.materials}
+        timing = materials["contact_intent"]["recent_timing"]
+        self.assertEqual(timing["minutes_since_latest_assistant_message"], 15)
+        self.assertEqual(timing["minutes_since_latest_message"], 1)
+        self.assertEqual(timing["latest_message_role"], "user")
+        self.assertIn("不要把短间隔说成久别", request.instruction)
+        self.assertIn("短时间内刚联系过时，不用郑重重开场", request.instruction)
 
     def test_administrator_diagnostic_omits_history_and_dedup_for_every_purpose(self):
         values = dict(PREF_VALUES, dedup_enabled=True)
@@ -180,7 +212,8 @@ class ProactiveStyleTests(unittest.TestCase):
                 job.intent.purpose = purpose
                 job.administrator_test = True
                 job.interaction = {"latest_input": "private interaction marker"}
-                request = request_for(job, (), preferences, history, last_reply=last_reply)
+                request = request_for(job, (), preferences, history, last_reply=last_reply,
+                                      rhythm_snapshot={"delivered_today": 10})
                 material_purposes = {item.purpose for item in request.context.materials}
                 material_text = "\n".join(item.payload for item in request.context.materials)
                 self.assertNotIn("communication_state", material_purposes)
@@ -189,6 +222,8 @@ class ProactiveStyleTests(unittest.TestCase):
                 self.assertNotIn("private history marker", material_text)
                 self.assertNotIn("private last reply marker", material_text)
                 self.assertNotIn("private interaction marker", material_text)
+                self.assertNotIn('"rhythm"', material_text)
+                self.assertNotIn("每日上限是保护边界", request.instruction)
                 self.assertNotIn("只用标为 dedup_candidate", request.instruction)
                 self.assertIn("不要把缺少这些材料判为重复", request.instruction)
 

@@ -239,6 +239,9 @@
 .native-management-camera-devices { padding: 0; margin: var(--sp-3) 0; list-style: none; font-size: var(--fs-tiny); line-height: 1.8; }
 .native-management-camera-devices li { padding: var(--sp-2) 0; }
 .native-management-camera-devices span { color: var(--muted); margin-left: var(--sp-2); }
+.native-management-camera-test { margin-top: 1rem; padding-top: .75rem; border-top: 1px solid var(--line); font-size: var(--fs-micro); line-height: 1.8; overflow-wrap: anywhere; }
+.native-management-camera-test p { margin: .5rem 0; color: var(--secondary); }
+.native-management-camera-preview { display: block; width: min(100%, 480px); max-height: 360px; margin-top: .75rem; object-fit: contain; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--t-surface, var(--bg)); }
 .native-management-days { display: flex; flex-wrap: wrap; gap: 0 var(--sp-4); }
 .native-management-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 var(--sp-4); }
 .native-management-reminders { list-style: none; padding: 0; font-size: var(--fs-tiny); }

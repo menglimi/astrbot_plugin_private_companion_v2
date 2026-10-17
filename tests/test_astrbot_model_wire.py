@@ -18,6 +18,13 @@ REPORTED_USAGE = Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_
 
 
 class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_model_wire_records_the_final_prompt_when_a_snapshot_sink_is_attached(self):
+        envelope = await self.envelope()
+        snapshots = []
+        wire = build_wire(replace(envelope, record_prompt_snapshot=snapshots.append))
+
+        self.assertEqual(snapshots, [wire.messages])
+
     async def test_cache_signature_is_recorded_after_final_payload_preparation(self):
         envelope = await self.envelope()
         signatures = []

@@ -1711,7 +1711,7 @@ window.CompanionContactPage = (() => {
         srcToggle("enable_llm_proactive_persona_judge", "开口前先自评", "多一次模型调用，按阈值决定这条要不要发。"),
         srcNumber("proactive_persona_judge_threshold", "自评阈值", "", 0, 100, ""),
         srcNumber("proactive_persona_judge_cache_minutes", "自评缓存", "分钟", 0, 720, ""),
-        srcNumber("generation_history_limit", "带入的历史条数", "条", 0, 8, ""),
+        srcNumber("generation_history_limit", "近期对话轮数", "轮", 0, 8, "同一轮中的分段消息会合并计数。"),
         srcNumber("history_max_chars", "历史字数上限", "字", 0, 8192, ""),
       ]},
       {id:"balance", icon:ICON.purse, title:"余额与其它", hint:"余额只影响说不说、说不说金额；两个阈值是绝对值与百分比双保险。", wide:true, body:[

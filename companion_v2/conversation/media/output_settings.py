@@ -24,7 +24,7 @@ DEFAULT_SCENE_PRESETS = (
 SCENE_MARKER = re.compile(r"\[场景预设[:：]([^\]\r\n]{1,40})\]")
 DEFAULTS = {
     "allow_user_requests": True, "trigger_mode": "tool", "rule_max_daily": 3,
-    "proactive_probability": 0.12, "proactive_max_daily": 1,
+    "proactive_probability": 0.35, "proactive_max_daily": 1,
     "prompt_format": "traditional", "style": "realistic", "style_prompt": "",
     "negative_mode": "safe_default", "negative_prompt": "",
     "text2img_fixed_prompt": "clean composition, environmental storytelling",

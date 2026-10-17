@@ -235,7 +235,8 @@ class ContactSchedule:
                 raise TaskError("contact_conversation_changed", "automatic opportunity requires the latest completed native conversation")
             self.messages.authorize(context, at)
             event = input_event(self.messages, native, at)
-            return {"batch_id": batch_id, "event_key": event.scoped_key, "event_hash": digest(event),
+            return {"batch_id": batch_id, "event_key": event.scoped_key,
+                    "event_hash": digest([event, context.key, native["role_instruction"]]),
                     "role_hash": digest(native["role_instruction"])}, native, event
         if (row is None or row["batch_id"] != batch_id or row["origin_key"] != context.key
                 or row["flow_state"] != "complete" or row["state"] != "ready" or not row["role_instruction"].strip()):
@@ -771,7 +772,8 @@ class ContactSchedule:
         route = self._diagnostic_route("synthetic_event", "合成测试事件", variant or purpose)
         diagnostic_origin = {"_diagnostic": {
             "route_id": "synthetic_event", "purpose": purpose, "batch_id": row["batch_id"],
-            "event_key": event.scoped_key, "event_hash": event.input_hash,
+            "event_key": event.scoped_key,
+            "event_hash": digest([event, context.key, batch["role_instruction"]]),
             "role_hash": digest(batch["role_instruction"])},
             "synthetic_event": {"test_id": test_id, "scenario_hash": digest(scenario)}}
         return {"opportunity": opportunity, "intents": (ContactIntent(purpose, thought),),
@@ -820,7 +822,8 @@ class ContactSchedule:
                     or not marker["place_fingerprint"]):
                 raise TaskError("contact_diagnostic_source_changed", "mobile location diagnostic receipt is invalid")
         _, batch, event = self._origin(context, receipt["batch_id"], at)
-        if (event.scoped_key != receipt["event_key"] or event.input_hash != receipt["event_hash"]
+        if (event.scoped_key != receipt["event_key"]
+                or digest([event, context.key, batch["role_instruction"]]) != receipt["event_hash"]
                 or digest(batch["role_instruction"]) != receipt["role_hash"]):
             raise TaskError("contact_conversation_changed", "diagnostic contact lost its original conversation or persona")
 

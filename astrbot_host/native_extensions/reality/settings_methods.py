@@ -368,3 +368,80 @@ class RealitySettingsMethods:
         except Exception as exc:
             logger.warning('[RealityCompanion] 保存摄像头配置失败: %s', _single_line(exc, 160))
             return False
+
+    def _apply_legacy_migrated_settings(self, changes: dict[str, Any], expected_state_token: str,
+                                        state_fields=None) -> dict[str, Any]:
+        """Save only the portable V1 Reality settings approved by the converter."""
+        from companion_v2.legacy.reality_migration import (
+            REALITY_SETTING_DEFAULTS,
+            reality_settings_state_token,
+        )
+
+        if not isinstance(self.config, dict) or not isinstance(changes, dict) or not changes:
+            return {'saved': False, 'reason': 'reality_config_unavailable'}
+        fields = tuple(sorted(set(state_fields or changes)))
+        if (set(changes) - set(REALITY_SETTING_DEFAULTS)
+                or not fields or set(fields) - set(REALITY_SETTING_DEFAULTS)
+                or set(changes) - set(fields)):
+            return {'saved': False, 'reason': 'reality_migration_field_not_allowed'}
+        if reality_settings_state_token(self.config, fields) != expected_state_token:
+            return {'saved': False, 'reason': 'reality_config_changed'}
+
+        numeric_bounds = {
+            'camera.min_interval_seconds': (10, 3600),
+            'camera.capture_timeout_seconds': (2, 20),
+            'camera.analysis_timeout_seconds': (5, 90),
+            'audio.default_playback_volume': (0, 100),
+        }
+        for field, value in changes.items():
+            if field == 'camera.enabled' and type(value) is not bool:
+                return {'saved': False, 'reason': 'reality_camera_setting_invalid'}
+            if field in numeric_bounds:
+                minimum, maximum = numeric_bounds[field]
+                if type(value) is not int or not minimum <= value <= maximum:
+                    return {'saved': False, 'reason': 'reality_numeric_setting_invalid'}
+            if field == 'timezone' and (not isinstance(value, str) or not value.strip() or len(value) > 80):
+                return {'saved': False, 'reason': 'reality_timezone_invalid'}
+
+        previous_values: dict[str, Any] = {}
+        for field in changes:
+            current: Any = self.config
+            for part in field.split('.'):
+                current = current.get(part) if isinstance(current, dict) else None
+            previous_values[field] = current
+
+        try:
+            for field, value in changes.items():
+                parts = field.split('.')
+                group = self.config
+                for part in parts[:-1]:
+                    nested = group.get(part)
+                    if not isinstance(nested, dict):
+                        nested = {}
+                        group[part] = nested
+                    group = nested
+                group[parts[-1]] = value
+            saver = getattr(self.config, 'save_config', None)
+            if not callable(saver):
+                raise RuntimeError('reality_config_save_unavailable')
+            if saver() is False:
+                raise RuntimeError('reality_config_save_failed')
+        except Exception:
+            for field, value in previous_values.items():
+                parts = field.split('.')
+                group = self.config
+                for part in parts[:-1]:
+                    nested = group.get(part)
+                    if not isinstance(nested, dict):
+                        break
+                    group = nested
+                else:
+                    if value is None:
+                        group.pop(parts[-1], None)
+                    else:
+                        group[parts[-1]] = value
+            raise
+
+        self._sync_runtime_config()
+        self.environment_perception_timezone = self._cfg_str('timezone', 'Asia/Shanghai') or 'Asia/Shanghai'
+        return {'saved': True, 'fields': sorted(changes)}

@@ -746,9 +746,18 @@ window.CompanionSetup = (() => {
     return `<fieldset class="setup-migration-scope-choice" aria-describedby="setup-migration-scope-note">
       <legend>迁移配置范围</legend>
       <label class="setup-migration-scope-option"><input type="radio" name="legacy-configuration-scope" data-setup-legacy="configuration-scope" value="proactive" ${legacyConfigScope === "proactive" ? "checked" : ""}><span><strong>主动消息与天气基础设置</strong><small>适合先恢复主动联系相关配置，改动范围较小。</small></span></label>
+      <label class="setup-migration-scope-option"><input type="radio" name="legacy-configuration-scope" data-setup-legacy="configuration-scope" value="reality" ${legacyConfigScope === "reality" ? "checked" : ""}><span><strong>Reality 摄像头与音频</strong><small>迁移摄像头基础参数、默认音量及时区；设备索引和旧授权需在 V2 重新确认。</small></span></label>
       <label class="setup-migration-scope-option"><input type="radio" name="legacy-configuration-scope" data-setup-legacy="configuration-scope" value="all" ${legacyConfigScope === "all" ? "checked" : ""}><span><strong>全部可迁移配置</strong><small>迁移已确认有转换规则的 V1 设置，V2 已有明确设置会保留。</small></span></label>
       <p id="setup-migration-scope-note" class="setup-legacy-scope-note">写入前会显示具体字段和差异；V1 文件保持不变。</p>
     </fieldset>`;
+  }
+
+  function legacyConfigScopeLabel() {
+    return ({
+      proactive: "主动消息与天气基础设置",
+      reality: "Reality 摄像头与音频",
+      all: "全部可迁移配置",
+    })[legacyConfigScope] || "迁移配置";
   }
 
   function legacyDataChoiceMarkup(key, label, {checked = false, disabled = false, detail = ""} = {}) {
@@ -933,10 +942,10 @@ window.CompanionSetup = (() => {
       </div>
       <div class="setup-migration-review">
       ${legacyError ? `<p class="setup-inline-error">${escape(legacyError)}</p>` : ""}
-      ${legacyResult ? `<p class="setup-recorded">${legacyConfigScope === "proactive" ? "主动消息配置" : "迁移配置"}已写入 ${Number(legacyResult.written_count) || 0} 项 V2 设置。V1 文件保持不变。${legacyResult.restart_required ? "请重启插件使插件级配置生效。" : ""}</p>` : ""}
+      ${legacyResult ? `<p class="setup-recorded">${legacyConfigScopeLabel()}已写入 ${Number(legacyResult.written_count) || 0} 项 V2 设置。V1 文件保持不变。${legacyResult.restart_required ? "请重启插件使插件级配置生效。" : ""}</p>` : ""}
       ${legacyFinding || legacyPlan ? `<p class="setup-legacy-root">V1 位置：${escape(legacyFinding?.v1_root || legacyPlan?.v1_root || "")}</p>
         <ul class="setup-legacy-findings">${findings.map(item => `<li><strong>${escape(legacySources[item.source_id] || "其他旧版资料")}</strong><span>${escape(statuses[item.state] || "状态待核对")}</span><small>${escape(item.detail || "")}</small></li>`).join("")}</ul>` : ""}
-      ${legacyPlan ? `<div class="setup-legacy-plan"><p>本次${legacyConfigScope === "proactive" ? "主动消息与天气基础设置" : "全部可迁移配置"}试算将写入 ${Number(legacyPlan.change_count) || 0} 项。</p>
+      ${legacyPlan ? `<div class="setup-legacy-plan"><p>本次${legacyConfigScopeLabel()}试算将写入 ${Number(legacyPlan.change_count) || 0} 项。</p>
         ${(legacyPlan.warnings || []).map(item => `<p>${escape(item)}</p>`).join("")}
         ${reviewDifferences.map(item => `<p>${escape(item.field)}${item.before !== undefined || item.after !== undefined ? `：${escape(item.before ?? "")} → ${escape(item.after ?? "")}` : ""}。${escape(item.explain || item.summary || "")}</p>`).join("")}
         ${auditDifferences.length ? `<details class="setup-legacy-values setup-legacy-audit"><summary>配置未自动迁移（${auditDifferences.length}）${auditSummary ? ` · ${escape(auditSummary)}` : ""}</summary><ul>${auditDifferences.map(item => `<li><strong>${escape(item.source_key || item.field || "未命名配置")}</strong><small>${escape(auditLabels[item.disposition] || "待核对")}</small><span>${escape(item.explain || item.summary || "没有经过核实的自动转换规则。")}</span></li>`).join("")}</ul></details>` : ""}
@@ -1781,7 +1790,7 @@ window.CompanionSetup = (() => {
       legacyDataError = "";
     }
     if (input?.dataset?.setupLegacy === "configuration-scope") {
-      legacyConfigScope = input.value === "all" ? "all" : "proactive";
+      legacyConfigScope = ["proactive", "reality", "all"].includes(input.value) ? input.value : "proactive";
       legacyFinding = legacyPlan = legacyResult = null;
       legacyError = "";
     }

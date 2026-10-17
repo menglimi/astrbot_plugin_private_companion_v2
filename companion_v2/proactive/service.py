@@ -49,7 +49,8 @@ from .platform_circuit import ProactivePlatformCircuit
 from .news_events import SOURCE_OWNER as NEWS_SOURCE_OWNER, news_provenance
 from .planner import ProactivePlanner
 from .preferences import ProactivePreferences
-from .prompts import contact_output, news_presentation_instruction, prompt_sections, request_for
+from .prompts import (contact_output, history_round_groups, news_presentation_instruction,
+                      prompt_sections, request_for)
 from .official_alert_events import SOURCE_OWNER as OFFICIAL_ALERT_SOURCE_OWNER, attribution_suffix
 
 
@@ -637,7 +638,8 @@ class ProactiveContacts:
             if last_reply is not None:
                 job = replace(job, last_reply=last_reply["reference"])
                 self._pending[run.task.task_id] = job
-            history = self.history.read(job.history, job.context, at, action=GROUP) if job.history is not None else ()
+            history = self.history.read(job.history, job.context, at, action=GROUP,
+                                        round_metadata=True) if job.history is not None else ()
             # Recent dialogue is independent of deduplication: yesterday's
             # answered exchange still closes a topic this afternoon. Dialogue
             # and background sends share the configured item/character budget.
@@ -648,25 +650,28 @@ class ProactiveContacts:
                     max_chars=preferences.values["history_max_chars"],
                     exclude_reply_part_id=(last_reply["reference"].get("part_id", last_reply["reference"].get("observation_id"))
                                            if last_reply is not None else None))
-                dialogue = self.history.conversation.read(dialogue_snapshot, job.context, at)
-                kept = [("dialogue", index, item, item.get("delivered_at", item.get("received_at")))
-                        for index, item in enumerate(dialogue)]
-                kept.extend(("background", index, item, item["delivered_at"])
-                            for index, item in enumerate(history))
-                kept.sort(key=lambda item: (datetime.fromisoformat(item[3]), item[0], item[1]), reverse=True)
-                selected, used = {"dialogue": set(), "background": set()}, 0
-                for kind, index, item, _ in kept:
-                    size = len(json.dumps(item, ensure_ascii=False))
-                    if (sum(map(len, selected.values())) >= preferences.values["generation_history_limit"]
-                            or used + size > preferences.values["history_max_chars"]):
+                dialogue = self.history.conversation.read(dialogue_snapshot, job.context, at,
+                                                          round_metadata=True)
+                kept = tuple({**group, "kind": kind}
+                             for kind, items in (("dialogue", dialogue), ("background", history))
+                             for group in history_round_groups(items))
+                kept = sorted(kept, key=lambda group: (group["latest_at"], group["kind"]), reverse=True)
+                selected, used, rounds_used = {"dialogue": set(), "background": set()}, 0, 0
+                for group in kept:
+                    if rounds_used >= preferences.values["generation_history_limit"]:
+                        break
+                    if used + group["size"] > preferences.values["history_max_chars"]:
                         continue
-                    selected[kind].add(index)
-                    used += size
-                dialogue = tuple(item for index, item in enumerate(dialogue) if index in selected["dialogue"])
+                    selected[group["kind"]].update(group["indices"])
+                    used += group["size"]
+                    rounds_used += 1
+                dialogue = tuple(item for index, item in enumerate(dialogue)
+                                 if index in selected["dialogue"])
                 dialogue_snapshot["references"] = [ref for index, ref in enumerate(dialogue_snapshot["references"])
                                                     if index in selected["dialogue"]]
                 if job.history is not None:
-                    history = tuple(item for index, item in enumerate(history) if index in selected["background"])
+                    history = tuple(item for index, item in enumerate(history)
+                                    if index in selected["background"])
                     history_snapshot = {**job.history, "references": [ref for index, ref in enumerate(job.history["references"])
                                                        if index in selected["background"]]}
                 else:
@@ -680,7 +685,9 @@ class ProactiveContacts:
                 reactions_available=reactions_available,
                 voice_available=voice_available, poke_available=poke_available,
                 memory=() if job.administrator_test else self._memory_materials(job, records),
-                expression=self._expression_materials(job, contact_id))
+                expression=self._expression_materials(job, contact_id),
+                rhythm_snapshot=(None if job.administrator_test else
+                                 self.budget.rhythm_snapshot(job.context, preferences, at)))
             extra_instruction = "\n".join(text for text in
                 (segmentation.instruction, presentation.instruction,
                  news_presentation_instruction(segmentation) if job.intent.purpose == "news"

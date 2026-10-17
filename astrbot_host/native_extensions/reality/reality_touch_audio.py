@@ -30,12 +30,13 @@ class RealityTouchAudioMixin:
 
     @staticmethod
     def _reality_touch_audio_module_error() -> str:
-        try:
-            import sounddevice  # noqa: F401
-            import soundfile  # noqa: F401
-        except Exception as exc:
-            return _single_line(exc, 160) or exc.__class__.__name__
-        return ""
+        unavailable = []
+        for module in ("sounddevice", "soundfile", "numpy"):
+            try:
+                __import__(module)
+            except Exception:
+                unavailable.append(module)
+        return "、".join(unavailable)
 
     def _reality_touch_audio_devices(self) -> dict[str, Any]:
         catalog = self._reality_touch_query_audio_devices()
@@ -56,7 +57,7 @@ class RealityTouchAudioMixin:
             return {
                 "backend_available": False,
                 "backend": "unavailable",
-                "error": "本机播放需要 sounddevice 和 soundfile，请安装 V2 设备依赖后刷新",
+                "error": f"本机音频不可用，无法加载依赖：{module_error}。请安装或更新 V2 插件依赖、重启 AstrBot 后刷新",
                 "devices": [default_row],
             }
         try:
@@ -157,11 +158,15 @@ class RealityTouchAudioMixin:
         catalog = self._reality_touch_audio_devices()
         devices = catalog.get("devices") if isinstance(catalog.get("devices"), list) else []
         selected = next((item for item in devices if item.get("id") == requested), None)
-        if selected is None:
-            raise ValueError("没有找到所选音频输出设备，请刷新设备列表")
-        if requested != self._REALITY_TOUCH_DEFAULT_DEVICE_ID and not catalog.get("backend_available"):
-            raise ValueError("当前音频后端不可用，暂时只能跟随系统默认输出")
         store = self._reality_touch_store()
+        previous_id = _single_line(store.get("audio_output_device_id"), 96)
+        previous_name = _single_line(store.get("audio_output_device_name"), 160)
+        if requested != self._REALITY_TOUCH_DEFAULT_DEVICE_ID and not catalog.get("backend_available") and requested != previous_id:
+            raise ValueError("当前音频后端不可用，只能保留已保存的设备或选择系统默认输出")
+        if selected is None:
+            if catalog.get("backend_available") or requested != previous_id:
+                raise ValueError("没有找到所选音频输出设备，请刷新设备列表")
+            selected = {"id": requested, "name": previous_name or requested}
         store["audio_output_device_id"] = requested
         store["audio_output_device_name"] = _single_line(selected.get("name"), 160)
         if playback_volume is not None:

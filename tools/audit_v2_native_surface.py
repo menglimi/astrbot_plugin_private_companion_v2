@@ -6,6 +6,10 @@ a documentation table can be checked against the real registry instead of prose.
 """
 
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from companion_v2.conversation.media.quota import configuration_fields as quota_fields
 from companion_v2.conversation.media.review import configuration_fields as review_fields
@@ -45,6 +49,8 @@ def build():
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     registry = build()
     print(f"TOTAL_GROUPS\t{len(registry.groups)}")
     print(f"TOTAL_FIELDS\t{len(registry.fields)}")

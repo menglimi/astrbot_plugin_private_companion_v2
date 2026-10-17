@@ -294,6 +294,7 @@ class ModelEnvelope:
     # adapters call it after asynchronous host preparation, just before I/O.
     before_dispatch: Callable[[], object] | None = field(default=None, compare=False, repr=False)
     record_cache_signature: Callable[[CacheSignature], object] | None = field(default=None, compare=False, repr=False)
+    record_prompt_snapshot: Callable[[list[dict]], object] | None = field(default=None, compare=False, repr=False)
     model_override: str = ""
     provider_capabilities: tuple[str, ...] = ()
     on_reply_prefix: Callable[[ModelDraft], Awaitable[bool]] | None = field(default=None, compare=False, repr=False)

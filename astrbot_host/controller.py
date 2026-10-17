@@ -24,6 +24,7 @@ from companion_v2.screen import SCREEN_EXTENSION, SCREEN_PROCESS
 from .integration_registry import IntegrationRegistry
 from companion_v2.model_gateway.routing import CONSUMER
 from companion_v2.storage.runtime import StorageRuntime
+from companion_v2.proactive.search_settings import SearchSettingsStore
 
 from .native import NativeProbe, NativeProbeService, installed_native_types
 from .profile_residency import profile_residency
@@ -459,6 +460,7 @@ class AstrBotStagingController:
             managed_extensions=MANAGED_EXTENSIONS)
         weather_port, weather_alert_port = configured_weather_ports(self.config)
         from .model_settings import conversation_provider_resolver
+        search_provider_resolver = SearchSettingsStore(self.data_root).selected_provider_id
         loaded = self.bootstrap.load(runtime_instance_id="astrbot-staging-" + uuid4().hex,
                                      review_only=review_only,
                                      native_tool_port=self.native_extensions,
@@ -466,7 +468,8 @@ class AstrBotStagingController:
                                      weather_port=weather_port,
                                      weather_alert_port=weather_alert_port,
                                      balance_port=configured_balance_port(self.config),
-                                     news_port=configured_news_port(self.config),
+                                     news_port=configured_news_port(self.config, context=self.context,
+                                         deepseek_provider_resolver=search_provider_resolver),
                                      qzone_transport=self._qzone_transport(),
                                      solar_term_port=configured_solar_term_port(
                                          self.config.get("solar_terms") if isinstance(self.config, dict) else None),
@@ -486,7 +489,8 @@ class AstrBotStagingController:
         self.session.bridge.forward_intake = self.settings.forward_intake
         from .semantic_models import NativeSemanticModels, configured_slang_search_port
         self.session.application.attach_semantics(NativeSemanticModels(self.context, self.settings.provider_id,
-                                                                     configured_slang_search_port()),
+                                                                     configured_slang_search_port(self.context,
+                                                                         deepseek_provider_resolver=search_provider_resolver)),
                                                   reaction_role_count=1)
         from companion_v2.decision import LayaDecisionService, LayaSettingsStore
         from .laya_client import LayaDecisionClient

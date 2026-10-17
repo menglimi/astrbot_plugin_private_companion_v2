@@ -467,6 +467,46 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
             missing = await self.call(model_api.PREFIX + "/image/output")
         self.assertEqual(missing["data"]["code"], "model_image_output_unavailable")
 
+    async def test_image_output_accepts_a_registered_supported_subset(self):
+        (await self.controller.initialize_profile()).unwrap()
+        import astrbot_host.model_api as model_api
+
+        actions = ("image.generate", "image.edit", "image.mask_edit")
+        owners = tuple(NS(
+            host_tool_id="native:" + action,
+            descriptor=NS(tool=NS(action=action), package=NS(extension_id="image")),
+        ) for action in actions)
+        by_id = {owner.host_tool_id: owner for owner in owners}
+        readiness = lambda host_tool_id: "unsupported" if host_tool_id.endswith(("image.edit", "image.mask_edit")) else "ready"
+        registry = NS(
+            declarations=lambda: owners,
+            declaration_readiness=readiness,
+            current_declaration=lambda host_tool_id: by_id[host_tool_id] if readiness(host_tool_id) == "ready" else None,
+        )
+        session = NS(application=NS(external=NS(providers={
+            "image.generate": NS(descriptor=owners[0].descriptor),
+        })))
+        with patch.object(self.controller, "native_extensions", registry), \
+             patch.object(self.controller, "session", session), \
+             patch.object(self.controller, "last_session", None):
+            api = model_api.ModelWebAPI(self.controller)
+            self.assertTrue(api._image_host_registered())
+            session.application.external.providers.clear()
+            self.assertFalse(api._image_host_registered())
+
+    async def test_image_output_reconnect_reports_image_registration_separately(self):
+        (await self.controller.initialize_profile()).unwrap()
+        from companion_v2.foundation.outcome import Outcome
+        import astrbot_host.model_api as model_api
+
+        result = Outcome.success({"reconnected": True, "state": "running", "report": {}})
+        with patch.object(self.controller, "reconnect_native", AsyncMock(return_value=result)), \
+             patch.object(model_api.ModelWebAPI, "_image_host_registered", return_value=False):
+            response = await self.call(model_api.PREFIX + "/image/output/reconnect", payload=b"{}")
+        self.assertEqual(response["status"], "ok", response)
+        self.assertTrue(response["data"]["reconnected"])
+        self.assertFalse(response["data"]["host_registered"])
+
     async def test_image_output_test_rechecks_authority_and_calls_the_saved_endpoint(self):
         (await self.controller.initialize_profile()).unwrap()
         import astrbot_host.model_api as model_api

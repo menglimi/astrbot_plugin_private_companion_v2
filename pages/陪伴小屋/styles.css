@@ -527,3 +527,21 @@ button.summary-record:hover strong,.summary-memory:hover>strong,.summary-note:ho
 .framework-config{margin-top:var(--sp-4)}
 .content-panel>.muted-text{margin-top:var(--sp-4);line-height:1.85}
 @media(max-width:650px){.capability-top{gap:var(--sp-2)}.capability-top small{font-size:var(--fs-micro)}.config-source-note{font-size:var(--fs-tiny)}}
+
+.search-dialog{overflow:hidden;background:var(--t-surface);color:var(--ink);border-color:var(--line)}
+.search-controls{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);padding:var(--sp-2) var(--sp-4);border-bottom:1px solid var(--line)}
+.search-scope{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--t-surface-sunken)}
+.search-scope button{display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-1);min-height:28px;padding:var(--sp-1) var(--sp-3);border:1px solid transparent;border-radius:var(--r-xs);color:var(--secondary);font-size:var(--fs-micro);white-space:nowrap}
+.search-scope button:hover{color:var(--ink);background:var(--t-veil)}
+.search-scope button[aria-pressed=true]{border-color:var(--line);background:var(--t-surface-raised);color:var(--ink);box-shadow:0 1px 3px #0000000a}
+.search-scope [data-search-filter-count]:not(:empty){font-size:var(--fs-micro);color:var(--muted);font-variant-numeric:tabular-nums}
+.search-count{min-width:0;color:var(--muted);font-size:var(--fs-micro);text-align:right}
+.search-result:hover,.search-result:focus-visible{background:var(--t-surface-sunken)}
+.search-result[aria-selected=true]{background:var(--t-accent-quiet);color:var(--ink)}
+.search-result[aria-selected=true]>svg{color:var(--t-accent-ink)}
+.search-result>span{min-width:0}
+.search-result small{display:block;line-height:1.55;overflow-wrap:anywhere}
+.search-empty{display:grid;gap:var(--sp-2);line-height:1.7}
+.search-empty::before{content:"";width:26px;height:1px;margin:0 auto var(--sp-1);background:var(--t-line-firm)}
+.search-hint{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3)}
+@media(max-width:650px){.search-dialog{width:calc(100vw - 24px);max-height:80dvh;margin:7vh auto 0}.search-controls{flex-wrap:wrap;padding:var(--sp-2) var(--sp-3)}.search-scope{max-width:100%}.search-scope button{padding-inline:var(--sp-2)}.search-count{margin-left:auto}.search-results{max-height:58vh}.search-result{gap:var(--sp-3);padding:var(--sp-3) var(--sp-2)}}

@@ -62,6 +62,7 @@ MIGRATED = ("memory-page.css", "learning-page.css", "contact-page.css",
             # 2026-10-10：小屋分区已经使用令牌，补齐名单与天气设置迁移。
             "host-options.css", "learning-hub.css", "perception-subpages.css",
             "state-config.css", "storage-page.css", "understanding-page.css",
+            "behavior-page.css",
             "weather-source.css",
             # 2026-10-11：原生扩展管理面板使用同一套尺度令牌，纳入阈值判定。
             "native-extension-panel.css", "confirmation-dialog.css",

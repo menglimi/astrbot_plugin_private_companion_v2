@@ -225,13 +225,16 @@ def build_wire(envelope, *, model_name=""):
                                                "arguments": exchange.call.arguments_json}}]},
             {"role": "tool", "tool_call_id": exchange.call.call_id, "content": exchange.result_json}))
     messages.append({"role": "system", "content": composition.final_instruction})
-    return ModelWire(messages, tuple(tools), MappingProxyType(aliases), MappingProxyType(evidence), request.output_format,
+    wire = ModelWire(messages, tuple(tools), MappingProxyType(aliases), MappingProxyType(evidence), request.output_format,
                      sum(len(image.rendered_images) for image in request.images)
                          + (0 if request.native_video_input else sum(len(v.frames) for v in request.videos)),
                      MappingProxyType(reply_images),
                      sum(a.descriptor.duration_ms for a in request.audios)
                          + (sum(v.descriptor.duration_ms for v in request.videos) if request.native_video_input else 0),
                      reply_actions)
+    if envelope.record_prompt_snapshot is not None:
+        envelope.record_prompt_snapshot(wire.messages)
+    return wire
 
 
 def decode_response(response, wire):

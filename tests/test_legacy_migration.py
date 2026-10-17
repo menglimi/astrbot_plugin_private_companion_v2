@@ -215,6 +215,79 @@ class ConfigurationDiscoveryTests(LegacyMigrationTestCase):
                          MigrationState.READY.value)
 
 
+class RealityConfigurationMigrationTests(LegacyMigrationTestCase):
+    def v1_reality_configuration(self):
+        return {
+            "camera": {
+                "enabled": True,
+                "index": 700,
+                "min_interval_seconds": 45,
+                "capture_timeout_seconds": 6,
+                "analysis_timeout_seconds": 30,
+                "proactive_curiosity_enabled": True,
+            },
+            "audio": {"default_playback_volume": 42},
+            "timezone": "Asia/Shanghai",
+            "vision_provider_id": "legacy-provider-private",
+            "authorized_user_ids": ["legacy-user-private"],
+            "home": {"access_token": "legacy-home-secret"},
+        }
+
+    def plan(self, configuration=None):
+        planned = LegacyMigration(
+            v1_root=self.root,
+            v1_reality_configuration=configuration or self.v1_reality_configuration(),
+        ).plan()
+        self.assertTrue(planned.is_success, planned.failure)
+        return planned.unwrap()
+
+    def test_reality_configuration_is_a_ready_catalog_source(self):
+        findings = {item.source_id: item for item in self.plan().findings}
+
+        self.assertEqual(findings["reality.configuration"].state, MigrationState.READY.value)
+        self.assertEqual(findings["reality.device_and_observations"].state,
+                         MigrationState.ABSENT.value)
+
+    def test_only_portable_runtime_settings_are_converted_and_private_values_are_redacted(self):
+        plan = self.plan()
+        intent = next(item for item in plan.intents if item.target_kind == "reality_config")
+
+        self.assertEqual(intent.scope, "reality.settings")
+        self.assertEqual(intent.changes, {
+            "camera.enabled": True,
+            "camera.min_interval_seconds": 45,
+            "camera.capture_timeout_seconds": 6,
+            "camera.analysis_timeout_seconds": 30,
+            "audio.default_playback_volume": 42,
+            "timezone": "Asia/Shanghai",
+        })
+        self.assertTrue(any(item["field"] == "reality.camera.index"
+                            and item["kind"] == "device_mapping_required"
+                            for item in plan.differences))
+        document = json.dumps(plan.document(), ensure_ascii=False)
+        for secret in ("legacy-provider-private", "legacy-user-private", "legacy-home-secret"):
+            self.assertNotIn(secret, document)
+
+    def test_reality_runtime_state_is_documented_as_retained_without_import(self):
+        self.write("plugin_data/astrbot_plugin_reality_companion/reality_companion.json",
+                   {"version": 1, "users": {}})
+        finding = {item.source_id: item for item in self.plan().findings}[
+            "reality.device_and_observations"]
+
+        self.assertEqual(finding.state, MigrationState.DOCUMENTED_SKIP.value)
+        self.assertIn("授权", finding.detail)
+
+    def test_reality_source_changes_invalidate_the_migration_context(self):
+        first = LegacyMigration(v1_root=self.root,
+                                v1_reality_configuration=self.v1_reality_configuration())
+        changed = self.v1_reality_configuration()
+        changed["camera"]["min_interval_seconds"] = 60
+        second = LegacyMigration(v1_root=self.root, v1_reality_configuration=changed)
+
+        self.assertNotEqual(first.configuration_context_fingerprint,
+                            second.configuration_context_fingerprint)
+
+
 class ConversionTests(LegacyMigrationTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -395,7 +468,8 @@ class HelperTests(LegacyMigrationTestCase):
                                               "v2.role-journal-and-worldbook-importer",
                                               "v2.group-relationship-importer",
                                               "v2.reaction-asset-importer",
-                                              "v2.memory-snapshot-archive"}))
+                                              "v2.memory-snapshot-archive",
+                                              "v2.reality-config-migrator"}))
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ from companion_v2.legacy.configuration_migration import (
     semantic_configuration_rules,
 )
 from companion_v2.legacy.weather_migration import convert_weather_config
+from companion_v2.legacy.reality_migration import convert_reality_configuration
 
 
 # 目录里 ``source_paths`` 有的写成 ``host-config:<plugin_id>``：那不是文件，
@@ -274,18 +275,25 @@ class LegacyMigration:
     ``plan.intents`` 写库。"""
 
     def __init__(self, *, v1_root: str | Path, v1_configuration=None, configuration_registry=None,
-                 host_accounts=(), configuration_scope_kind=None) -> None:
+                 host_accounts=(), configuration_scope_kind=None,
+                 v1_reality_configuration=None, v1_reality_configuration_issue="") -> None:
         self.v1_root = Path(v1_root)
         # 宿主侧的插件配置（若拿得到）。给了它，「宿主配置段」这一条来源的存在性
         # 就不必依赖数据根里有没有转储——配置本来就在宿主的配置里。
         self.v1_configuration = v1_configuration if isinstance(v1_configuration, dict) else None
+        self.v1_reality_configuration = (
+            v1_reality_configuration if isinstance(v1_reality_configuration, dict) else None
+        )
+        self.v1_reality_configuration_issue = str(v1_reality_configuration_issue or "")[:160]
         self.configuration_registry = configuration_registry
         self.host_accounts = tuple(dict(item) for item in host_accounts if isinstance(item, dict))
         if configuration_scope_kind not in (None, "private", "group"):
             raise ValueError("configuration scope kind must be private or group")
         self.configuration_scope_kind = configuration_scope_kind
         context = json.dumps({"host_accounts": self.host_accounts,
-                              "configuration_scope_kind": configuration_scope_kind},
+                              "configuration_scope_kind": configuration_scope_kind,
+                              "v1_reality_configuration": self.v1_reality_configuration,
+                              "v1_reality_configuration_issue": self.v1_reality_configuration_issue},
                              ensure_ascii=True, sort_keys=True, separators=(",", ":"),
                              default=str)
         self.configuration_context_fingerprint = hashlib.sha256(context.encode("utf-8")).hexdigest()
@@ -314,13 +322,19 @@ class LegacyMigration:
             # ``host-config:<plugin_id>``，没有文件路径，而 V1 的配置转储可能就
             # 摆在数据根里。所以对这类来源要额外看一眼转储存不存在，否则会给
             # 用户报一句「这台机器上没有这份数据」——而它其实就在那儿。
-            if configured and self._configuration() is not None:
+            if configured and self._configuration_for(entry) is not None:
                 state = self._state_for(entry)
                 return SourceFinding(
                     entry.source_id, entry.owner, entry.action.value, state.value,
                     entry.source_paths,
                     "V1 的插件配置以配置转储的形式保存在数据根里。",
                     byte_size=size,
+                )
+            if configured and entry.source_id == "reality.configuration" and self.v1_reality_configuration_issue:
+                return SourceFinding(
+                    entry.source_id, entry.owner, entry.action.value,
+                    MigrationState.UNREADABLE.value, entry.source_paths,
+                    "V1 Reality 配置存在但无法读取；原文件保持不变。",
                 )
             return SourceFinding(
                 entry.source_id, entry.owner, entry.action.value,
@@ -446,6 +460,26 @@ class LegacyMigration:
         且值通过目标字段自己的类型与范围校验。
         """
         warnings: list[str] = []
+
+        if finding.source_id == "reality.configuration":
+            if self.v1_reality_configuration is None:
+                warnings.append("读不到 V1 Reality 配置，本次没有迁移现实触及设置。")
+                return [], [], warnings
+            converted = convert_reality_configuration(self.v1_reality_configuration)
+            warnings.extend(converted.warnings)
+            if not converted.changes:
+                return [], list(converted.differences), warnings
+            fields = sorted(converted.changes)
+            intent = ConfigIntent(
+                scope="reality.settings",
+                group_id="reality",
+                changes=dict(converted.changes),
+                source_id=finding.source_id,
+                confidence={field: "high" for field in fields},
+                sources={field: ("astrbot_plugin_reality_companion_config.json",) for field in fields},
+                target_kind="reality_config",
+            )
+            return [intent], list(converted.differences), warnings
 
         if finding.source_id != "private.host_configuration":
             warnings.append(f"{finding.source_id} 的转换器还没有写，本次不会迁移它。")
@@ -605,13 +639,20 @@ class LegacyMigration:
                 return loaded
         return None
 
+    def _configuration_for(self, entry: LegacyCatalogEntry):
+        if entry.source_id == "reality.configuration":
+            return self.v1_reality_configuration
+        if entry.source_id == "private.host_configuration":
+            return self._configuration()
+        return None
+
 
 # 已经写好的转换器。写在代码里而不是配置里：「哪个转换器实现了」是**代码事实**，
 # 不是运行期状态；放进配置就会出现「配置说有、代码里没有」的假阳性。
 HANDLERS = frozenset({"v2.private-config-converter", "v2.role-journal-importer",
                       "v2.role-journal-and-worldbook-importer",
                       "v2.group-relationship-importer", "v2.reaction-asset-importer",
-                      "v2.memory-snapshot-archive"})
+                      "v2.memory-snapshot-archive", "v2.reality-config-migrator"})
 
 # 转换器产出的键前段（``role.state`` / ``proactive.contact``）**就是** V2 的配置
 # 分组名——``role_work/state/configuration.py`` 的 ``GROUP`` 与

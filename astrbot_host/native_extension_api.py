@@ -105,24 +105,38 @@ class NativeExtensionWebAPI(PerceptionWebAPI):
             else:
                 allowed = {'mihome_start_login', 'mihome_login_status', 'mihome_sync_devices',
                     'mihome_logout', 'mihome_save_mappings', 'mihome_control_power',
-                    'scan_camera', 'consent_camera', 'update_camera_policy', 'update_audio_policy',
+                    'scan_camera', 'test_camera', 'consent_camera', 'update_camera_policy', 'update_audio_policy',
                     'scan_audio', 'select_audio', 'test_audio', 'request_audio_consent',
                     'revoke_audio_consent', 'save', 'disable', 'stop_session', 'test',
                     'cancel_reminder'}
                 if data['action'] not in allowed or 'action' in data['payload']:
                     raise ValueError('unsupported native reality action')
                 current()
-                result = await asyncio.wait_for(service.extension_api.page_action(
-                    {'action': data['action'], **data['payload']}), timeout=45)
-                if type(result) is not dict or not result.get('ok'):
+                timeout = 120 if data['action'] == 'test_camera' else 45
+                page_result = await asyncio.wait_for(service.extension_api.page_action(
+                    {'action': data['action'], **data['payload']}), timeout=timeout)
+                if type(page_result) is not dict or not page_result.get('ok'):
                     raise TaskError('native_reality_action_failed', '操作未完成，请检查现实设备配置与当前授权')
-                result = result.get('result', {})
+                result = page_result.get('result', {})
+                camera_preview = None
+                if data['action'] == 'test_camera':
+                    page_data = page_result.get('data')
+                    candidate = page_data.get('camera_preview') if isinstance(page_data, dict) else None
+                    if (isinstance(candidate, dict) and candidate.get('ephemeral') is True
+                            and candidate.get('user_id') == data['payload'].get('user_id')
+                            and str(candidate.get('data_url') or '').startswith('data:image/jpeg;base64,')):
+                        camera_preview = candidate
+                    if isinstance(result, dict):
+                        result = {key: value for key, value in result.items() if key != 'preview_data_url'}
                 if data['action'] in {'test', 'test_audio'} and result.get('played') is not True:
                     raise TaskError('native_reality_playback_failed', '音频未能播放，请核对输出设备、TTS 与当前用户授权')
                 if data['action'] == 'cancel_reminder' and result.get('cancelled') is not True:
                     raise TaskError('native_reality_reminder_not_cancelled', '提醒未取消，请刷新提醒状态')
             current()
-            return self._ok({**self._snapshot(registry, name, service), 'result': result})
+            response = {**self._snapshot(registry, name, service), 'result': result}
+            if name == 'reality' and data['action'] == 'test_camera' and camera_preview is not None:
+                response['camera_preview'] = camera_preview
+            return self._ok(response)
         except asyncio.TimeoutError:
             return self._error(TaskError('native_management_result_unknown', '结果暂不可确认，请刷新状态后再决定下一步'))
         except (TaskError, ValueError, TypeError) as error:

@@ -127,6 +127,9 @@ class ProactiveVoicePokeTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["poke"], {"count": 1})
         instruction = self.called[0].original.instruction
         self.assertIn("voice_intent", instruction)
+        self.assertIn("不需要等用户明确要求语音", instruction)
+        self.assertIn("不要因为示例通常只写文字", instruction)
+        self.assertIn("早呀，今天想听你讲讲近况", instruction)
         self.assertIn("poke_intent", instruction)
         self.assertIn("不代表", instruction)
         row = app.proactive._delivery_row(task.task_id)

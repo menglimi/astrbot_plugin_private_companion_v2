@@ -105,6 +105,26 @@ class NativeExtensionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused["status"], "error")
         self.assertIsNone(service._user("999", create=False))
 
+    async def test_camera_page_test_returns_only_an_ephemeral_preview(self):
+        service = await self.enable("reality")
+        service._reality_touch_camera_snapshot_for_user = AsyncMock(return_value={
+            "status": "success", "message": "单帧分析完成", "captured": True,
+            "observation": {"summary": "合成画面"}, "preview_data_url": "data:image/jpeg;base64,AA=="})
+
+        response = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+            "action": "test_camera", "payload": {"user_id": "200", "purpose": "拓展页摄像头单帧测试"}})
+
+        self.assertEqual(response["status"], "ok", response)
+        data = response["data"]
+        self.assertTrue(data["result"]["captured"])
+        self.assertNotIn("preview_data_url", data["result"])
+        self.assertEqual(data["camera_preview"]["user_id"], "200")
+        self.assertIsInstance(data["camera_preview"]["captured_at"], int)
+        self.assertEqual(data["camera_preview"]["data_url"], "data:image/jpeg;base64,AA==")
+        self.assertTrue(data["camera_preview"]["ephemeral"])
+        service._reality_touch_camera_snapshot_for_user.assert_awaited_once_with(
+            "200", "拓展页摄像头单帧测试", include_preview=True, source="page_test")
+
     async def test_shutdown_removes_new_routes_and_retained_handlers_reject_requests(self):
         await self.controller.terminate()
         self.assertEqual(self.native.registered_web_apis, [])
@@ -126,6 +146,35 @@ class NativeExtensionAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["data"]["code"], "native_reality_playback_failed")
             else:
                 self.assertTrue(result["data"]["result"]["played"])
+
+    async def test_audio_output_preserves_offline_selection_without_backend_and_survives_reload(self):
+        service = await self.enable("reality")
+        catalog = {"backend_available": False, "backend": "unavailable",
+            "error": "audio dependencies unavailable", "devices": [{
+                "id": "system_default", "name": "跟随系统默认输出", "is_default": True,
+                "max_output_channels": 0, "sample_rate": 0}]}
+        service.data["reality_touch"].update({
+            "audio_output_device_id": "sd:offline-device",
+            "audio_output_device_name": "已保存的 USB 输出",
+            "playback_volume": 35})
+        service._reality_touch_query_audio_devices = lambda: catalog
+
+        result = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+            "action": "select_audio", "payload": {
+                "device_id": "sd:offline-device", "playback_volume": 62}})
+
+        self.assertEqual(result["status"], "ok", result)
+        saved = json.loads(service.data_file.read_text(encoding="utf-8"))
+        self.assertEqual(saved["reality_touch"]["audio_output_device_id"], "sd:offline-device")
+        self.assertEqual(saved["reality_touch"]["audio_output_device_name"], "已保存的 USB 输出")
+        self.assertEqual(saved["reality_touch"]["playback_volume"], 62)
+        service.data = service._load_data()
+        self.assertEqual(service._reality_touch_store()["audio_output_device_id"], "sd:offline-device")
+        self.assertEqual(service._reality_touch_playback_volume(), 62)
+        unknown = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+            "action": "select_audio", "payload": {
+                "device_id": "sd:unknown-device", "playback_volume": 24}})
+        self.assertEqual(unknown["status"], "error")
 
     async def test_failed_reminder_cancel_does_not_report_completion(self):
         service = await self.enable("reality")

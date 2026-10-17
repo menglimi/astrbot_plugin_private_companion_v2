@@ -21,6 +21,7 @@ from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, SubjectKind, SubjectRef
 from .integration_registry import IntegrationRegistry
 from companion_v2.storage.runtime import StorageRuntime
+from companion_v2.proactive.search_settings import SearchSettingsStore
 from .multi_authority import HOST_ID, MANIFEST, MultiAuthority
 from .multi_session import MultiHostSession, persona_conversation
 from .multi_settings import MultiHostSettings
@@ -530,12 +531,14 @@ class AstrBotMultiController:
             image_settings_path=self.data_root / "model_image_routes.json",
             bundled_extensions=bundled_extensions, bundled_issues=bundled_issues,
             managed_extensions=MANAGED_EXTENSIONS)
+        search_provider_resolver = SearchSettingsStore(self.data_root).selected_provider_id
         self.session = MultiHostSession(self.runtime, self.context, settings=self.settings, personas=personas,
             authority=self.authority, native_types=self.native_types, provider_fingerprint=manifest["provider_fingerprint"],
             runtime_instance_id="astrbot-multi-" + uuid4().hex, native_tool_port=self.native_extensions, now=self.now,
             persona_window_snapshot_lookup=self.session_topology.persona_selection_snapshot,
             persona_window_snapshot_update=self.session_topology.update_persona_selection_snapshot,
-            news_port=configured_news_port(self.config),
+            news_port=configured_news_port(self.config, context=self.context,
+                deepseek_provider_resolver=search_provider_resolver),
             balance_port=configured_balance_port(self.config),
             weather_ports=configured_weather_ports(self.config),
             qzone_transport=build_qzone_transport(self.context, data_root=self.data_root),
@@ -547,7 +550,7 @@ class AstrBotMultiController:
         attach_official_knowledge(self.session.application, self.context)
         from .semantic_models import NativeSemanticModels, configured_slang_search_port
         self.session.application.attach_semantics(NativeSemanticModels(self.context, self.settings.common.provider_id,
-                                                                      configured_slang_search_port()),
+            configured_slang_search_port(self.context, deepseek_provider_resolver=search_provider_resolver)),
             reaction_role_count=len({(item.bot_id, item.role_id) for item in self.settings.personas}))
         from companion_v2.decision import LayaDecisionService, LayaSettingsStore
         from .laya_client import LayaDecisionClient

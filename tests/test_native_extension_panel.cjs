@@ -66,6 +66,14 @@ async function harness(name, viewport = {width:1360, height:900}) {
           if (body.action === "update_camera_policy") data.users[0].camera = {...data.users[0].camera, enabled:body.payload.camera_enabled,
             proactive_mode:body.payload.proactive_mode, proactive_max_daily:body.payload.proactive_max_daily};
           if (body.action === "scan_camera") data.camera.devices = [{name:"测试摄像头", index:0}];
+          if (body.action === "test_camera") return structuredClone({...record, result:{status:"success", captured:true,
+            message:"已完成一次单帧完整视觉理解", observation:{summary:"合成测试画面"}},
+            camera_preview:{user_id:body.payload.user_id, captured_at:1, data_url:"data:image/jpeg;base64,AA==", ephemeral:true}});
+          if (body.action === "select_audio") {
+            data.audio_output.selected_device_id = body.payload.device_id;
+            data.audio_output.playback_volume = body.payload.playback_volume;
+          }
+          if (body.action === "test_audio") return structuredClone({...record, result:{played:true}});
           if (body.action === "request_audio_consent") return structuredClone({...record,
             result:{confirmation_required:true, prompt:"请本人在私聊发送：我理解风险并确认授权"}});
           if (body.action === "save") data.users[0].alarm = {...data.users[0].alarm, ...body.payload};
@@ -271,13 +279,25 @@ test("camera confirmation and policy use the actual native action payload", asyn
     await page.locator("[data-native-action-notice]").filter({hasText:"保存摄像头策略已完成"}).waitFor();
     await page.getByRole("button", {name:"扫描摄像头", exact:true}).click();
     await page.getByText("测试摄像头", {exact:false}).waitFor();
+    await page.getByRole("button", {name:"测试摄像头调用", exact:true}).click();
+    await page.locator("[data-native-camera-test]").filter({hasText:"合成测试画面"}).waitFor();
+    assert.equal(await page.locator(".native-management-camera-preview").getAttribute("src"), "data:image/jpeg;base64,AA==");
+    await page.locator("[data-native-audio-details] > summary").click();
+    await page.locator('[data-native-audio-input="output_volume"]').fill("28");
+    await page.getByRole("button", {name:"保存音频输出", exact:true}).click();
+    await page.locator("[data-native-action-notice]").filter({hasText:"保存音频输出已完成"}).waitFor();
+    await page.getByRole("button", {name:"播放设备测试音", exact:true}).click();
+    await page.locator("[data-native-action-notice]").filter({hasText:"播放设备测试音已完成"}).waitFor();
     await page.getByRole("button", {name:"撤销摄像头授权", exact:true}).click();
     await page.locator(".native-management-camera-state").filter({hasText:"尚未确认"}).waitFor();
     const actions = await page.evaluate(() => window.requests.filter(row => row.endpoint === "extensions/action").map(row => row.body));
     assert.deepEqual(actions[0], {extension_id:"reality", action:"consent_camera", payload:{user_id:"42", confirmed:true}});
     assert.deepEqual(actions[1], {extension_id:"reality", action:"update_camera_policy", payload:{user_id:"42", camera_enabled:true, proactive_mode:"ask", proactive_max_daily:2}});
     assert.deepEqual(actions[2], {extension_id:"reality", action:"scan_camera", payload:{}});
-    assert.deepEqual(actions[3].payload, {user_id:"42", confirmed:false});
+    assert.deepEqual(actions[3], {extension_id:"reality", action:"test_camera", payload:{user_id:"42", purpose:"拓展页摄像头单帧测试"}});
+    assert.deepEqual(actions[4], {extension_id:"reality", action:"select_audio", payload:{device_id:"system_default", playback_volume:28}});
+    assert.deepEqual(actions[5], {extension_id:"reality", action:"test_audio", payload:{playback_volume:28}});
+    assert.deepEqual(actions[6].payload, {user_id:"42", confirmed:false});
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   } finally { await page.close(); }
 });

@@ -17,7 +17,7 @@ from companion_v2.foundation.refs import SubjectKind, SubjectRef
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.proactive.configuration import GROUP, target_for
-from companion_v2.proactive.prompts import contact_output
+from companion_v2.proactive.prompts import contact_output, history_round_materials
 from companion_v2.proactive.service import CONTACT_KIND
 from companion_v2.model_gateway.models import Amount, BudgetPolicy
 from companion_v2.adapters.astrbot.model_wire import build_wire
@@ -95,6 +95,35 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.proactive.observe(self.contact_context(), task.task_id).unwrap()["delivery"], "delivered")
         self.assertEqual(app.background_history.interaction(self.contact_context(), self.clock.now())[
             "contacts_since_last_input"], 1)
+
+    async def test_one_history_round_keeps_all_confirmed_proactive_segments(self):
+        app = await self.enabled()
+        self.settings(app, {"generation_history_limit": 1, "dedup_enabled": False}).unwrap()
+        self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+            "rules_enabled": False, "part_gap_ms": 0, **TEXT_DEFAULTS,
+            "content_cleanup_enabled": True, "content_cleanup_words": json.dumps(["\n"], ensure_ascii=False)}).unwrap()
+        marker = "<<PRIVATE_COMPANION_SPLIT>>"
+
+        async def segmented(_envelope):
+            return answered(json.dumps({"decision": "send", "text": f"第一段。\n{marker}\n第二段。"},
+                                       ensure_ascii=False))
+
+        self.model_behavior = segmented
+        first = (await self.contact(app, self.opportunity("segmented-history-source"))).unwrap().task
+        await self.until(lambda: len(self.sent) == 2)
+        await self.delivery_state(app, first.task_id, "delivered")
+
+        captured = app.background_history.capture(self.contact_context(), self.clock.now(),
+            action="proactive.contact", limit=1)
+        self.assertEqual(len(captured["references"]), 2)
+        captured_items = app.background_history.read(captured, self.contact_context(), self.clock.now(),
+            action="proactive.contact", round_metadata=True)
+        self.assertEqual([item["text"] for item in captured_items], ["第一段。", "第二段。"])
+        history = history_round_materials(captured_items)
+        self.assertEqual(len(history), 1)
+        self.assertEqual([part["text"] for part in history[0]["messages"]], ["第一段。", "第二段。"])
+        self.assertEqual(history[0]["message_parts"],
+                         {"received": [1, 2], "expected": 2, "complete": True})
 
     async def test_proactive_split_trims_blank_edges_when_cleanup_is_disabled(self):
         app = await self.enabled()

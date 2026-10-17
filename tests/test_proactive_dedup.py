@@ -45,8 +45,10 @@ class ProactiveDedupTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual((intent["local_date"], intent["local_time"]), ("2026-09-22", "15:09"))
         dialogue = [json.loads(item.payload) for item in request.context.materials
                     if item.purpose == "recent_private_dialogue"]
-        self.assertEqual([(item["role"], item["text"]) for item in dialogue], [
+        self.assertEqual([(item["role"], item["text"])
+                          for item in dialogue[0]["messages"]], [
             ("user", "不理我"), ("assistant", "怎么会不理你呢？昨晚已经回复你了。")])
+        self.assertEqual(len(dialogue), 1)
         self.assertNotIn("last_confirmed_reply", {item.purpose for item in request.context.materials})
         self.assertIn("不要把旧消息当成仍待回复的内容重新接续", request.instruction)
         self.assertIn("不要为了补齐问候而重新接续昨晚已回复的消息", request.instruction)

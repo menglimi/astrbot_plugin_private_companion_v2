@@ -151,3 +151,8 @@ class ReplySegmentationTests(unittest.TestCase):
                         {"threshold": 0}, {"rule_mode": "unknown"}, {"prompt": "x" * 4001}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(policy, **changes)
+
+    def test_default_prompt_keeps_one_connected_reply_together(self):
+        instruction = replace(self.policy, prompt="").instruction
+        self.assertIn("一次完整回应放在一个气泡里", instruction)
+        self.assertIn("不按每个句号逐条发送", instruction)

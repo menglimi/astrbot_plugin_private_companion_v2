@@ -7,6 +7,10 @@ from companion_v2.execution.models import TaskError
 
 
 class ImageOutputSettingsTests(unittest.TestCase):
+    def test_proactive_images_are_occasional_by_default_with_one_daily_cap(self):
+        self.assertEqual(DEFAULTS["proactive_probability"], 0.35)
+        self.assertEqual(DEFAULTS["proactive_max_daily"], 1)
+
     def test_scene_marker_injects_the_selected_role_preset(self):
         values = dict(DEFAULTS)
         result = apply_prompts(

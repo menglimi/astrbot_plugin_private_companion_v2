@@ -7,3 +7,9 @@ cryptography>=42
 lunarcalendar>=0.0.9
 # Bounded execution for administrator-configured presentation cleanup patterns.
 regex>=2024.11.6
+# Local Reality audio device enumeration, decoding, and playback.
+numpy>=1.26
+sounddevice>=0.5
+soundfile>=0.13
+# Local Reality camera capture and JPEG encoding.
+opencv-python-headless>=4.11,<4.12

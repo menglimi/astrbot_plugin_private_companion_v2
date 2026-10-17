@@ -3,10 +3,12 @@
 window.CompanionNativeExtensionManagement = (() => {
   const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const qrSource = value => /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(String(value || "")) ? value : "";
+  const cameraPreviewSource = value => /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(String(value || "")) ? value : "";
   const actionNames = {mihome_start_login:"扫码登录", mihome_login_status:"检查登录状态", mihome_sync_devices:"同步设备", mihome_logout:"退出米家账号",
     scan_camera:"扫描摄像头", consent_camera:"更新摄像头确认", update_camera_policy:"保存摄像头策略", connect:"连接 VTube Studio", request_auth:"请求 VTS 授权", list_hotkeys:"读取热键",
     scan_audio:"扫描音频设备", select_audio:"保存音频输出", test_audio:"播放设备测试音", request_audio_consent:"准备本人音频授权", revoke_audio_consent:"撤销音频授权",
     update_audio_policy:"保存语音策略", save:"保存叫醒安排", disable:"关闭叫醒", stop_session:"停止本次叫醒", test:"试听叫醒", cancel_reminder:"取消提醒"};
+  actionNames.test_camera = "测试摄像头调用";
   const errors = {
     native_extension_inactive:"模块已暂停，请先启用模块再操作。",
     native_management_unavailable:"管理操作尚未就绪，请重新读取状态。",
@@ -34,6 +36,7 @@ window.CompanionNativeExtensionManagement = (() => {
       this.cameraUser = saved?.user || ""; this.cameraDraft = saved?.draft || null;
       this.cameraOpen = saved?.open || false; this.cameraConsent = saved?.consent || false;
       this.audioOpen = saved?.audioOpen || false; this.audioDraft = saved?.audioDraft || null;
+      this.cameraTestResult = saved?.cameraTestResult || null; this.cameraPreview = saved?.cameraPreview || null;
       this.click = event => this.onClick(event);
       this.change = event => this.onChange(event);
       root.addEventListener("click", this.click); root.addEventListener("change", this.change);
@@ -59,6 +62,11 @@ window.CompanionNativeExtensionManagement = (() => {
       if (!this.record.management) {
         this.root.innerHTML = `<section class="native-management"><h4>连接与设备管理</h4><p>管理状态尚未读取。</p><button class="button small" type="button" data-native-management-refresh>重新读取管理状态</button><p data-native-action-notice role="status" aria-live="polite"></p></section>`;
       } else this.root.innerHTML = this.name === "reality" ? this.reality() : this.live();
+      if (this.name === "reality") {
+        const cameraBody = this.root.querySelector("[data-native-camera-details] .native-management-body");
+        if (cameraBody) cameraBody.insertAdjacentHTML("beforeend",
+          `<div class="native-management-actions">${this.button("test_camera")}</div>${this.cameraTestMarkup()}`);
+      }
       this.updateButtons(); this.notice(this.message || "", this.failed);
       this.scheduleRead();
     }
@@ -86,6 +94,14 @@ window.CompanionNativeExtensionManagement = (() => {
       const cameras = Array.isArray(camera.devices) ? camera.devices : [];
       const list = cameras.length ? `<ul class="native-management-camera-devices">${cameras.map(device => `<li>${escape(device.name || device.label || "摄像头")} <span>索引 ${escape(device.index ?? device.camera_index ?? "—")}</span></li>`).join("")}</ul>` : `<p class="native-management-muted">尚未发现摄像头，点击扫描摄像头读取设备目录。</p>`;
       return `<details data-native-camera-details ${this.cameraOpen ? "open" : ""}><summary>摄像头确认与策略 <span>${state}</span></summary><div class="native-management-body"><p class="native-management-muted">${escape(camera.boundary || "按明确任务读取摄像头单帧，画面可能发送给所选视觉模型；默认不保存原图。")}</p><label class="native-management-field">用户 QQ / ID<input type="text" data-native-camera-user list="native-camera-users-${this.options.instance}" value="${escape(this.cameraUser)}" placeholder="选择或填写要管理的用户"><datalist id="native-camera-users-${this.options.instance}">${users.map(row => `<option value="${escape(row.user_id)}">${escape(row.label || row.user_id)}</option>`).join("")}</datalist></label><p class="native-management-camera-state">${escape(user?.label || this.cameraUser || "尚未选择用户")} · ${state}</p><label class="native-management-consent"><input type="checkbox" data-native-camera-consent ${this.cameraConsent ? "checked" : ""}><span>我已了解单帧读取和视觉模型处理方式，确认给此用户授权。</span></label><div class="native-management-actions">${this.button("consent_camera", "确认摄像头授权", "data-native-consent=\"true\" data-native-requires-consent")}${this.button("consent_camera", "撤销摄像头授权", "data-native-consent=\"false\"")}</div><fieldset class="native-management-policy"><legend>此用户的使用策略</legend><label class="native-management-consent"><input type="checkbox" data-native-camera-enabled ${policy.enabled ? "checked" : ""}>允许使用摄像头</label><label class="native-management-field">主动读取方式<select data-native-camera-mode>${modes.map(([value, title]) => `<option value="${value}" ${value === (policy.proactive_mode || "off") ? "selected" : ""}>${title}</option>`).join("")}</select></label><label class="native-management-field">每天主动读取次数<input type="number" data-native-camera-daily min="-1" max="10" step="1" value="${escape(policy.proactive_max_daily ?? -1)}"><small>-1 跟随全局设置，0 关闭主动读取。</small></label>${this.button("update_camera_policy")}</fieldset><div class="native-management-actions">${this.button("scan_camera")}</div>${list}${camera.devices_error ? `<p class="native-management-muted">${escape(camera.devices_error)}</p>` : ""}</div></details>`;
+    }
+    cameraTestMarkup() {
+      const test = this.cameraTestResult;
+      if (!test) return "";
+      const preview = cameraPreviewSource(this.cameraPreview?.data_url);
+      const title = test.status === "error" ? "摄像头测试未完成"
+        : test.status === "observation_uncertain" ? "已读取，识别结果不确定" : "摄像头测试完成";
+      return `<div class="native-management-camera-test" data-native-camera-test role="status" aria-live="polite"><strong>${title}</strong><p>${escape(test.message || "")}</p>${test.summary ? `<p>视觉摘要：${escape(test.summary)}</p>` : ""}${preview ? `<img class="native-management-camera-preview" src="${escape(preview)}" alt="摄像头测试单帧预览" loading="lazy">` : ""}</div>`;
     }
     audio(data) {
       const users = Array.isArray(data.users) ? data.users : [], output = data.audio_output || {};
@@ -158,7 +174,7 @@ window.CompanionNativeExtensionManagement = (() => {
         policy:{proactive_voice_enabled:this.root.querySelector("[data-native-audio-proactive]").checked, playback_volume:value("policy_volume")}, alarm};
       this.publishState();
     }
-    publishState() { this.options.onState?.({user:this.cameraUser, draft:this.cameraDraft, open:this.cameraOpen, consent:this.cameraConsent, audioOpen:this.audioOpen, audioDraft:this.audioDraft}); }
+    publishState() { this.options.onState?.({user:this.cameraUser, draft:this.cameraDraft, open:this.cameraOpen, consent:this.cameraConsent, audioOpen:this.audioOpen, audioDraft:this.audioDraft, cameraTestResult:this.cameraTestResult, cameraPreview:this.cameraPreview}); }
     async read({quiet = false} = {}) {
       if (!this.current() || this.reading) return;
       this.reading = true;
@@ -183,10 +199,20 @@ window.CompanionNativeExtensionManagement = (() => {
       const waiting = action === "request_auth" ? "请在 VTube Studio 弹窗中点“允许”，正在等待授权结果…" : `正在${actionNames[action] || "执行操作"}…`;
       this.notice(waiting);
       try {
-        const record = await window.CompanionProduct.request("POST", "extensions/action", {extension_id:this.name, action, payload}, {timeoutMs:65000});
+        const record = await window.CompanionProduct.request("POST", "extensions/action", {extension_id:this.name, action, payload}, {timeoutMs:action === "test_camera" ? 130000 : 65000});
         if (!this.current()) return;
         if (!record?.management) throw {code:"invalid_response"};
         this.record = record;
+        if (action === "test_camera") {
+          const result = record.result || {}, observation = result.observation || {};
+          this.cameraTestResult = {status:result.captured === true ? result.status || "success" : "error",
+            message:result.message || (result.captured === true ? "已完成摄像头单帧测试。" : "摄像头测试没有取得有效画面。"),
+            summary:observation.summary || observation.purpose_answer || observation.scene_description || ""};
+          const preview = record.camera_preview;
+          this.cameraPreview = result.captured === true && preview?.ephemeral === true
+            && String(preview.user_id) === String(payload.user_id) && cameraPreviewSource(preview.data_url) ? preview : null;
+          this.publishState();
+        }
         if (action === "consent_camera" || action === "update_camera_policy") { this.cameraDraft = null; this.cameraConsent = false; this.publishState(); }
         if (this.audioDraft) {
           if (action === "select_audio") { delete this.audioDraft.device_id; delete this.audioDraft.output_volume; }
@@ -200,10 +226,13 @@ window.CompanionNativeExtensionManagement = (() => {
         if (record.result?.confirmation_required) this.notice(record.result.prompt || "请由本人在私聊中完成音频授权确认。");
         else if (action === "request_auth" && record.management.authenticated !== true) this.notice("授权还未完成。请到 VTube Studio 弹窗中点“允许”，再重新连接核对。", true);
         else if (action === "mihome_start_login") { this.reads = 0; this.notice("登录已发起，请用米家 App 扫码确认。"); this.scheduleRead(); }
+        else if (action === "test_camera") this.notice(this.cameraTestResult.message, this.cameraTestResult.status === "error");
         else this.notice(`${actionNames[action] || "操作"}已完成。`);
       } catch (error) {
         if (this.current()) {
-          this.notice(errors[error?.code] || window.CompanionProduct.errorLabel?.(error?.code) || "操作结果暂未确认，请刷新状态核对后再试。", true);
+          const message = errors[error?.code] || window.CompanionProduct.errorLabel?.(error?.code) || "操作结果暂未确认，请刷新状态核对后再试。";
+          if (action === "test_camera") { this.cameraTestResult = {status:"error", message, summary:""}; this.cameraPreview = null; this.publishState(); }
+          this.notice(message, true);
           await this.read({quiet:true});
         }
       } finally {
@@ -240,6 +269,11 @@ window.CompanionNativeExtensionManagement = (() => {
         return {user_id, camera_enabled:this.root.querySelector("[data-native-camera-enabled]").checked,
           proactive_mode:this.root.querySelector("[data-native-camera-mode]").value, proactive_max_daily};
       }
+      if (action === "test_camera") {
+        const user_id = this.root.querySelector("[data-native-camera-user]").value.trim();
+        if (!user_id) throw new Error("先选择已有 V2 私聊的用户。");
+        return {user_id, purpose:"拓展页摄像头单帧测试"};
+      }
       return {};
     }
     onClick(event) {
@@ -256,6 +290,7 @@ window.CompanionNativeExtensionManagement = (() => {
     onChange(event) {
       if (event.target.hasAttribute?.("data-native-camera-user") || event.target.hasAttribute?.("data-native-audio-user")) {
         this.cameraUser = event.target.value.trim(); this.cameraDraft = null; this.audioDraft = null; this.cameraConsent = false;
+        this.cameraTestResult = null; this.cameraPreview = null;
         if (event.target.hasAttribute("data-native-audio-user")) this.audioOpen = true; else this.cameraOpen = true;
         this.publishState(); this.render();
       } else {

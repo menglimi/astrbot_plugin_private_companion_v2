@@ -308,7 +308,7 @@ test("token usage links open the matching feature configuration", () => {
   h.run("openTokenTaskSettings('conversation.group.review')");
   assert.equal(h.window.location.hash, "#manage/decision");
   assert.equal(decisionViews.at(-1), "group");
-  assert.equal(h.run("tokenTaskSettingsFor('conversation.group.review').workbench.root"), "#groupParticipationConfigWorkspace");
+  assert.equal(h.run("tokenTaskSettingsFor('conversation.group.review').workbench.root"), "#groupInterjectionConfigWorkspace");
   assert.equal(h.run("tokenTaskSettingsFor('conversation.group.review').workbench.field"), "enable_group_interjection");
 
   h.run("openTokenTaskSettings('content.authoring.draft')");
@@ -353,6 +353,47 @@ test("global search includes hidden content destinations and registered setting 
   assert.match(results.innerHTML, /主动联系/);
   input.value = "便签";h.run("renderSearch()");
   assert.match(results.innerHTML, /便签/);
+});
+
+test("global search ranks editable settings and can limit results to settings or pages", () => {
+  const h = harness(), input = {value: "语音"}, results = {innerHTML: ""};
+  h.target("#globalSearch", input);h.target("#searchResults", results);
+  h.window.CompanionConfigEditors = {searchEntries: () => [{group: "voice_reply",
+    groupTitle: "语音默认值", field: "enabled", label: "允许语音回复", section: "defaults",
+    sectionTitle: "全局总开关", sectionCount: 1, aliases: ["TTS"]}]};
+  h.run("renderSearch()");
+  assert.equal(h.run("visibleSearchResults[0].kind"), "setting");
+  assert.match(results.innerHTML, /配置项 · 表达/);
+
+  h.run("setSearchScope('pages')");
+  assert.ok(h.run("visibleSearchResults.length > 0"));
+  assert.equal(h.run("visibleSearchResults.every(result => result.kind === 'page')"), true);
+  h.run("setSearchScope('settings')");
+  assert.equal(h.run("visibleSearchResults.length"), 1);
+  assert.equal(h.run("visibleSearchResults[0].entry.label"), "允许语音回复");
+});
+
+test("global search moves the active result with arrow keys and opens it with Enter", () => {
+  const h = harness(), input = {value: "主动联系", attributes: {}, setAttribute(name, value) {this.attributes[name] = value;}};
+  const options = [0, 1].map(index => ({id: `search-option-${index}`, attributes: {}, clicks: 0,
+    setAttribute(name, value) {this.attributes[name] = value;},
+    scrollIntoView() {this.scrolled = true;}, click() {this.clicks += 1;}}));
+  h.target("#globalSearch", input);
+  h.target("#searchResults", {innerHTML: "", querySelectorAll: () => options});
+  h.window.CompanionConfigEditors = {searchEntries: () => [
+    {group: "proactive.contact", groupTitle: "主动联系偏好", field: "enabled",
+      label: "主动联系开关", section: "general", sectionTitle: "联系节奏", aliases: []},
+    {group: "proactive.contact", groupTitle: "主动联系偏好", field: "cooldown",
+      label: "主动联系冷却时间", section: "general", sectionTitle: "联系节奏", aliases: []},
+  ]};
+  h.run("setSearchScope('settings')");
+  assert.equal(h.run("visibleSearchResults.length"), 2);
+  h.run("handleGlobalSearchKeydown({key:'ArrowDown',preventDefault(){}})");
+  assert.equal(h.run("activeSearchResultIndex"), 1);
+  assert.equal(input.attributes["aria-activedescendant"], "search-option-1");
+  assert.equal(options[1].attributes["aria-selected"], "true");
+  h.run("handleGlobalSearchKeydown({key:'Enter',preventDefault(){}})");
+  assert.equal(options[1].clicks, 1);
 });
 
 test("global search opens a setting section and focuses the matching field", () => {

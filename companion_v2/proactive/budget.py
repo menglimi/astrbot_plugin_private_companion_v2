@@ -1,6 +1,6 @@
 """Window-local contact allowances and projections of actual model usage."""
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from companion_v2.execution.models import TaskError, stamp
@@ -84,6 +84,40 @@ class ContactBudget:
                         ZoneInfo(timezone_name)).date().isoformat(), "timezone": timezone_name}
 
         return {"session": read("c.origin_key = ?", (context.key,), preferences.values["max_contacts_24h"])}
+
+    def rhythm_snapshot(self, context, preferences, at):
+        """Summarize confirmed contact timing for the generation prompt, without message content."""
+        timezone_name = preferences.values["quiet_timezone"]
+        local_at = normalize_utc(at, field="contact rhythm time").astimezone(ZoneInfo(timezone_name))
+        now = stamp(at)
+        day_start = stamp(local_day_start(at, timezone_name))
+        recent_start = stamp(normalize_utc(at, field="contact rhythm time") - timedelta(hours=4))
+        row = self.runtime.read_one("""SELECT
+                COUNT(DISTINCT CASE WHEN d.delivered_at >= ? THEN c.contact_id END) AS delivered_today,
+                COUNT(DISTINCT CASE WHEN d.delivered_at >= ? THEN c.contact_id END) AS delivered_recently
+            FROM proactive_contacts c
+            JOIN background_deliveries d ON json_extract(d.request_json, '$.source_ref') = c.contact_id
+            WHERE c.origin_key = ? AND d.owner = 'proactive.contact' AND d.state = 'delivered'
+                AND d.delivered_at <= ?
+                AND COALESCE(json_extract(c.record_json, '$.administrator_test'), 0) = 0
+                AND d.delivered_at >= ?""",
+            (day_start, recent_start, context.key, now, min(day_start, recent_start)))
+        latest = self.runtime.read_one("""SELECT d.delivered_at FROM proactive_contacts c
+            JOIN background_deliveries d ON json_extract(d.request_json, '$.source_ref') = c.contact_id
+            WHERE c.origin_key = ? AND d.owner = 'proactive.contact' AND d.state = 'delivered'
+                AND d.delivered_at <= ?
+                AND COALESCE(json_extract(c.record_json, '$.administrator_test'), 0) = 0
+            ORDER BY d.delivered_at DESC LIMIT 1""", (context.key, now))
+        elapsed = None
+        if latest is not None:
+            elapsed = max(0, int((normalize_utc(at, field="contact rhythm time")
+                                  - datetime.fromisoformat(latest[0]).astimezone(timezone.utc)
+                                  ).total_seconds() // 60))
+        return {"local_time": local_at.strftime("%H:%M"),
+                "delivered_today": row["delivered_today"],
+                "daily_maximum": preferences.values["max_contacts_24h"],
+                "delivered_last_4_hours": row["delivered_recently"],
+                "minutes_since_last_delivery": elapsed}
 
     def model_usage(self, context, preferences, at):
         """Provider usage for this local day; local Laya decisions have no monetary ledger."""
