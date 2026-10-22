@@ -42,6 +42,60 @@ class UpgradeSourceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 preserved_configuration_path(config)
 
+    def test_later_defaulted_legacy_snapshot_does_not_replace_complete_source(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory)
+            path = config / CONFIG_NAME
+            complete = {
+                "basic_config": {
+                    "target_user_ids": ["123"],
+                    "plugin_specific_persona_id": "persona-a",
+                    "LLM_PROVIDER_ID": "provider-a",
+                },
+                "group_observation_config": {"group_whitelist_ids": ["g1", "g2", "g3"]},
+            }
+            path.write_text(json.dumps(complete), encoding="utf-8")
+            saved = preserve_before_schema(config)
+            source_pointer = json.loads((config / ".private-companion-upgrade" / "source.json")
+                                        .read_text(encoding="utf-8"))
+
+            defaulted = {
+                "basic_config": {
+                    "target_user_ids": [],
+                    "plugin_specific_persona_id": "",
+                    "LLM_PROVIDER_ID": "",
+                },
+                "group_observation_config": {"group_whitelist_ids": []},
+            }
+            path.write_text(json.dumps(defaulted), encoding="utf-8")
+            self.assertEqual(preserve_before_schema(config), saved)
+            self.assertEqual(
+                json.loads((config / ".private-companion-upgrade" / "source.json")
+                           .read_text(encoding="utf-8")),
+                source_pointer,
+            )
+            loaded = json.loads(preserved_configuration_path(config).read_text(encoding="utf-8"))
+            self.assertEqual(loaded, complete)
+            # Keep the rejected later snapshot for diagnosis without pointing
+            # the migration at it.
+            self.assertEqual(len(list((config / ".private-companion-upgrade").glob("*.json"))), 3)
+
+    def test_source_can_advance_when_it_retains_previous_populated_values(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory)
+            path = config / CONFIG_NAME
+            original = {"basic_config": {"target_user_ids": ["123"], "LLM_PROVIDER_ID": "provider-a"}}
+            path.write_text(json.dumps(original), encoding="utf-8")
+            first = preserve_before_schema(config)
+            updated = {
+                "basic_config": {"target_user_ids": ["123"], "LLM_PROVIDER_ID": "provider-b"},
+                "newly_saved_setting": "kept",
+            }
+            path.write_text(json.dumps(updated), encoding="utf-8")
+            second = preserve_before_schema(config)
+            self.assertNotEqual(second, first)
+            self.assertEqual(json.loads(second.read_text(encoding="utf-8")), updated)
+
     def test_new_install_does_not_create_an_upgrade_archive(self):
         with TemporaryDirectory() as directory:
             config = Path(directory)
