@@ -799,7 +799,8 @@ class HostConfigDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(plan["change_count"], 0, "试算要产出可写入的天气设置")
         presentation = next(item for item in plan["intents"]
                             if item["group_id"] == "conversation.presentation")
-        self.assertEqual(presentation["values"]["style_prompt"], "V1 的回复表达配置")
+        self.assertEqual(presentation["values"]["style_prompt"],
+                         {"configured": True, "characters": len("V1 的回复表达配置")})
         self.assertEqual(presentation["confidence"]["style_prompt"], "high")
 
         applied = await caller.call(LEGACY_PREFIX + "/apply",
@@ -815,6 +816,7 @@ class HostConfigDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             "back_probability": 0.4,
             "replies": ["V1 戳一戳回复"],
         })
+
 
     async def test_auto_inheritance_rejects_unreadable_host_config_without_writing(self):
         import astrbot_host.legacy_api as legacy_api
