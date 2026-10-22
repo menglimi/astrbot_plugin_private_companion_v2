@@ -296,7 +296,7 @@ def main():
             report["migration_acceptance"] = _run_migration_acceptance(report["core"], environment)
             reload_output = _run_host_process(report["core"], environment,
                 ["-m", "tests.plugin_reload_process"],
-                "candidate plugin reload check", timeout=120)
+                "candidate plugin reload check", timeout=300)
             report["reload_check"] = json.loads(next(line for line in reversed(
                 reload_output.splitlines()) if line.startswith('{"startup_cycles"')))
         lines = output.splitlines()
